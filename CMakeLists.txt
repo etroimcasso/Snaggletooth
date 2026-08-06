@@ -1,0 +1,63 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(Snaggletooth VERSION 0.0.1 LANGUAGES CXX)
+
+# A build is optimized by default: an empty CMAKE_BUILD_TYPE (CMake's default when nothing
+# supplies one) would produce an unoptimized, unstripped library. Multi-config generators
+# ignore this and select the configuration at build time.
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# On by default when Snaggletooth is the top-level project; off when it is vendored into a
+# parent build (the parent runs its own suite). Override with -DSNAGGLETOOTH_BUILD_TESTS=ON/OFF.
+option(SNAGGLETOOTH_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
+
+add_library(snaggletooth STATIC
+  src/version.cpp
+)
+add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
+
+target_compile_features(snaggletooth PUBLIC cxx_std_20)
+set_target_properties(snaggletooth PROPERTIES CXX_EXTENSIONS OFF)
+target_include_directories(snaggletooth PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+
+# Warnings are errors on Snaggletooth's own targets only — never imposed on a parent build or
+# on fetched dependencies.
+if(MSVC)
+  target_compile_options(snaggletooth PRIVATE /W4 /WX)
+else()
+  target_compile_options(snaggletooth PRIVATE -Wall -Wextra -Werror)
+endif()
+
+if(SNAGGLETOOTH_BUILD_TESTS)
+  enable_testing()
+
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  # Keep GoogleTest on the same CRT as the library on Windows.
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+
+  add_executable(snaggletooth_tests
+    tests/version_test.cpp
+  )
+  target_link_libraries(snaggletooth_tests PRIVATE
+    snaggletooth::snaggletooth
+    GTest::gtest_main
+  )
+  if(MSVC)
+    target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_tests PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  include(GoogleTest)
+  gtest_discover_tests(snaggletooth_tests)
+endif()
