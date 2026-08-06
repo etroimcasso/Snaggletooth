@@ -45,13 +45,25 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
 
+  # Path to the SingleStepTests SPC700 "v1" directory (per-opcode JSON vectors).
+  # When empty, the SPC700 vector tests register but skip with a visible reason.
+  # The vectors are large, machine-generated reference data — never vendored.
+  set(SNAGGLETOOTH_SPC700_VECTORS "" CACHE PATH
+      "Path to the SingleStepTests SPC700 'v1' vector directory")
+
   add_executable(snaggletooth_tests
     tests/version_test.cpp
+    tests/spc700/vector_harness.cpp
+    tests/spc700/harness_test.cpp
+    tests/spc700/algorithm_test.cpp
+    tests/spc700/vector_test.cpp
   )
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth::snaggletooth
     GTest::gtest_main
   )
+  target_compile_definitions(snaggletooth_tests PRIVATE
+    SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}")
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
   else()
