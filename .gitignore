@@ -1,0 +1,16 @@
+# OS noise
+.DS_Store
+
+# Game dumps and ROM-derived content are never committed, anywhere in the tree.
+# .spc song dumps are used as local validation inputs only.
+*.spc
+*.sfc
+*.smc
+*.fig
+
+# Build output
+build/
+
+# Private working docs — local only, never pushed to the public remote.
+docs-internal/
+/CLAUDE.md
