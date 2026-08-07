@@ -32,6 +32,13 @@ struct SampleWindow {
   std::int16_t oldest = 0;
 };
 
+// The volume envelope's phase. Even in a GAIN mode the hardware tracks an
+// Attack/Decay/Sustain phase, but that phantom tracking has no audible effect
+// until a mid-note switch to ADSR mode, so only the ADSR path drives phase
+// transitions here. A voice powers on in Release (envelope 0), matching the
+// post-reset state where FLG holds every voice keyed off.
+enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
+
 // A voice's streaming position through its BRR data. The pitch counter's bits
 // 15-12 are the sample position within the current block, bits 11-4 the
 // Gaussian interpolation index, and the low bits accumulate the fractional
@@ -41,11 +48,22 @@ struct SampleWindow {
 // sample the cursor decodes within its block; 16 means the block is exhausted
 // and the next decode performs the block transition (chaining to the next
 // block, or jumping to the loop address after an end block) before decoding.
+//
+// The envelope fields carry the 11-bit level (0..0x7FF), its phase, the 5-sample
+// post-key-on startup countdown (during which the voice outputs silence and
+// neither the envelope nor the stream advances), and the Bent-Increase reference
+// — the previous envelope operation's value clipped to 11 bits, which the GAIN
+// Bent-Increase mode reads to choose its +32/+8 step (a negative prior value
+// clips high, forcing the +8 branch).
 struct VoiceState {
   std::uint16_t brrAddress = 0;
   std::uint8_t brrSampleIndex = 0;
   std::uint16_t pitchCounter = 0;
   SampleWindow window{};
+  std::uint16_t envelope = 0;
+  EnvPhase phase = EnvPhase::Release;
+  std::uint8_t konDelay = 0;
+  std::uint16_t bentGainRef = 0;
 };
 
 // The S-DSP's state as a value: snapshot by copy, restore by assignment. The
@@ -62,6 +80,22 @@ struct DspState {
   // zero at power-on and is retained across reset (a free-running divider cannot
   // be reset). Nothing consumes its sample ticks yet.
   std::uint16_t sampleDivider = 0;
+
+  // The global counter that gates every envelope/noise rate. It powers on at 0,
+  // decrements once per 32 kHz sample, and wraps to 0x77FF when it would pass
+  // below 0 (the first sample after reset wraps). A rate fires this sample when
+  // (globalCounter + offset[rate]) % period[rate] == 0.
+  std::uint16_t globalCounter = 0;
+
+  // DSP samples elapsed since power-on. Only its parity is load-bearing: the
+  // KON/KOFF poll runs on even-indexed samples (a fixed choice that settles the
+  // hardware's power-on poll-phase race).
+  std::uint32_t sampleIndex = 0;
+
+  // The internal key-on latch (one bit per voice). The KON/KOFF poll loads the
+  // KON register into this latch and keys the corresponding voices on; the latch
+  // is cleared at the following poll (the hardware holds it about two samples).
+  std::uint8_t internalKon = 0;
 
   // The eight voices' streaming state, beside the register file.
   std::array<VoiceState, 8> voices{};
@@ -140,5 +174,47 @@ std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 // window at the pitch counter's current index. Pure over the state — no
 // advance, no memory access.
 [[nodiscard]] std::int16_t interpolatedSample(const DspState& dsp, std::size_t voice) noexcept;
+
+// Advances the global counter one 32 kHz sample: decrement, wrapping to 0x77FF
+// when it would pass below 0.
+[[nodiscard]] std::uint16_t nextGlobalCounter(std::uint16_t counter) noexcept;
+
+// Whether the envelope/noise operation at 5-bit rate `rate` fires at this global
+// counter value: (counter + offset[rate]) % period[rate] == 0. Rate 0 (period
+// Infinite) never fires; rate 31 (period 1) fires every sample.
+[[nodiscard]] bool envelopeRateFires(std::uint16_t counter, std::uint8_t rate) noexcept;
+
+// Advances the DSP's per-sample global state to the next 32 kHz sample: the
+// global counter and the power-on sample index. Called at the end of a sample,
+// after that sample's KON/KOFF poll and per-voice envelope steps — so the first
+// sample after power-on carries index 0 (even) and polls.
+void tickDspSample(DspState& dsp) noexcept;
+
+// Runs the KON/KOFF poll. On even-indexed samples it reads the KON ($4C) and
+// KOFF ($5C) registers: a set KON bit latches internal-KON and keys the voice on
+// (envelope 0, Attack, the 5-sample startup, its ENDX bit cleared, its stream
+// primed), and a set KOFF bit moves the voice to Release. On odd samples it does
+// nothing. Voices keyed on two samples ago clear from the internal-KON latch.
+void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept;
+
+// Keys voice `voice` (0-7) on: envelope to 0 and Attack, the 5-sample startup
+// begun, its ENDX bit cleared, and its BRR stream primed from the start address.
+void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                std::size_t voice) noexcept;
+
+// Keys voice `voice` (0-7) off: the envelope enters Release, decreasing by 8 each
+// sample regardless of the ADSR/GAIN settings. The stream is untouched — BRR
+// decoding never stops for a keyed-off voice.
+void keyOffVoice(DspState& dsp, std::size_t voice) noexcept;
+
+// Advances voice `voice`'s envelope by one 32 kHz sample and writes ENVX ($x8,
+// the level's high 7 bits). During the post-key-on startup the level holds at 0
+// and the countdown decrements. Otherwise one envelope operation is applied,
+// gated by the global counter and shaped by the ADSR/GAIN registers — Attack
+// (+32, or +1024 at attack rate 15) to Decay when the level exceeds 0x7FF, Decay
+// and Sustain as exponential decreases, the four GAIN modes, and Direct Gain.
+// `brrEndMute` (a BRR End+Mute block entered this sample) forces Release and
+// drops the level to 0. Returns the resulting 11-bit level.
+std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMute) noexcept;
 
 }  // namespace snaggletooth
