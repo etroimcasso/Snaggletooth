@@ -75,6 +75,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/dsp/brr_test.cpp
     tests/dsp/dsp_state_test.cpp
     tests/dsp/pitch_gauss_test.cpp
+    tests/dsp/envelope_test.cpp
   )
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth::snaggletooth
