@@ -28,21 +28,24 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 ## Status
 
-The first component — the SPC700 CPU core — is complete: all 256 opcodes, cycle counts matched to
-the documented per-instruction totals, validated per opcode against the SingleStepTests vectors.
-The APU machine that gives it real memory is next. This table is kept honest as components land.
+The SPC700 CPU core and the APU machine that gives it real memory are complete: all 256 opcodes with
+cycle counts matched to the documented per-instruction totals and validated per opcode against the
+SingleStepTests vectors, and the machine's 64KB RAM, register overlay, three timers, and
+communication ports. The S-DSP — the sample-playback engine — is next. This table is kept honest as
+components land.
 
 | Component | Status |
 |---|---|
 | SPC700 CPU core (the audio CPU's instruction set) | complete — 256 opcodes, per-opcode vector-validated |
-| APU machine (64KB RAM, timers, communication ports) | not started |
+| APU machine (64KB RAM, timers, communication ports) | complete — register overlay, 3 timers, comm ports |
 | S-DSP (8-voice sample playback, envelopes, echo, noise) | not started |
 | SPC song-playback harness | not started |
 | Public embedding API | not started |
 | 5A22 CPU, PPU, full system | future — see the roadmap |
 
 See [docs/spc700-cpu.md](docs/spc700-cpu.md) for the CPU core's surface, usage, and how to run the
-vector suite.
+vector suite, and [docs/apu-machine.md](docs/apu-machine.md) for the machine's memory map, timers,
+ports, and stepping.
 
 ## Roadmap
 

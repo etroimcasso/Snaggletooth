@@ -70,6 +70,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/dummy_read_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
+    tests/apu/timer_test.cpp
   )
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth::snaggletooth

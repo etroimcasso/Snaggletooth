@@ -10,10 +10,13 @@
 // side and loads programs directly into RAM (there is no IPL ROM — the machine
 // boots into the seeded post-IPL ready state).
 //
-// The three timers are seeded to their power-on values and their target and
-// output registers obey the overlay, but they do not yet advance: the stage
-// counters, the enable-transition resets, and the cycle-budget run surface land
-// in the next unit. Stepping here runs one CPU instruction over the overlay.
+// The three timers advance on the cycles each instruction delivers. A single
+// free-running stage-1 divider counts machine cycles for all three (T0 and T1
+// tick every 128, T2 every 16); each timer's stage-2 counter increments on its
+// stage-1 ticks while enabled and, on reaching its target, advances a 4-bit
+// stage-3 counter that an overlay read of TnOUT returns and clears. step() runs
+// one instruction and then advances the timers by the cycles it took; run()
+// steps whole instructions against a cycle budget.
 
 #include <array>
 #include <cstdint>
@@ -59,6 +62,13 @@ class Apu {
   [[nodiscard]] const ApuState& state() const noexcept { return state_; }
   void restore(ApuState state);
 
+  // Re-seeds the post-IPL state with the documented reset differences: the timer
+  // outputs clear to 0 (the power-on value is $F), but the targets and the shared
+  // stage-1 divider are retained (the divider cannot be reset), CONTROL and TEST
+  // return to their reset values, the ready bytes are re-posted, zero page is
+  // cleared, and the rest of RAM is left as it was.
+  void reset();
+
   // The host face of the comm ports (index 0-3). writePort sets an input latch
   // the CPU reads; readPort returns an output latch the CPU wrote. Writing one
   // side never disturbs the other.
@@ -80,8 +90,16 @@ class Apu {
   // for). A convenience over restoring a whole state with a changed PC.
   void setPc(std::uint16_t pc);
 
-  // Runs one CPU instruction over the overlay and returns its cycle count.
+  // Runs one CPU instruction over the overlay, advances the timers by the cycles
+  // it took, and returns that count. A halted core still delivers 2 cycles, so
+  // the timers keep ticking while the CPU sits idle.
   std::uint32_t step();
+
+  // Steps whole instructions until at least `budget` cycles have run, returning
+  // the cycles actually run — the last instruction may overshoot, and the caller
+  // carries the remainder. run(0) runs nothing and returns 0. Every instruction
+  // costs at least 2 cycles, so the budget is always reached.
+  std::uint64_t run(std::uint64_t budget);
 
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
@@ -98,6 +116,10 @@ class Apu {
   void busWrite(std::uint16_t address, std::uint8_t value);
   std::uint8_t readRegister(std::uint8_t reg);
   void writeRegister(std::uint8_t reg, std::uint8_t value);
+
+  // Advances the shared stage-1 divider by `cycles` and passes the resulting
+  // stage-1 ticks to each enabled timer's stage-2/stage-3 counters.
+  void advanceTimers(std::uint32_t cycles);
 
   Spc700 cpu_;      // the live CPU state during a step
   ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced at each step

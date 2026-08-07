@@ -1,5 +1,6 @@
 #include "snaggletooth/apu/apu.h"
 
+#include <cstddef>
 #include <utility>
 
 namespace snaggletooth {
@@ -57,7 +58,63 @@ std::uint32_t Apu::step() {
   Bus bus{*this};
   const std::uint32_t cycles = cpu_.step(bus);
   state_.cpu = cpu_.state();  // keep the snapshot coherent with the live CPU
+  // The timers advance after the instruction, so a read the CPU issues
+  // mid-instruction observes the pre-step timer state (instruction-granular).
+  advanceTimers(cycles);
   return cycles;
+}
+
+std::uint64_t Apu::run(std::uint64_t budget) {
+  std::uint64_t consumed = 0;
+  while (consumed < budget) consumed += step();  // every step delivers >= 2 cycles
+  return consumed;
+}
+
+void Apu::advanceTimers(std::uint32_t cycles) {
+  // The divider is a free-running machine-cycle counter. Its wrap at 65536 is a
+  // multiple of both 128 and 16, so the tick phase is preserved across the wrap;
+  // a single step advances it by far less than a full period.
+  const std::uint32_t before = state_.divider;
+  const std::uint32_t after = before + cycles;
+  state_.divider = static_cast<std::uint16_t>(after);
+
+  // A stage-1 tick is a crossing of the timer's base period. T0 and T1 tick on
+  // the same 128-cycle boundaries; T2 ticks on every 16.
+  const std::uint32_t ticks128 = (after / 128u) - (before / 128u);
+  const std::uint32_t ticks16 = (after / 16u) - (before / 16u);
+
+  auto tick = [this](std::size_t index, std::uint32_t stage1Ticks) {
+    const std::uint8_t enable = static_cast<std::uint8_t>(1u << index);
+    if (!(state_.control & enable)) return;  // stage 2 only counts while enabled
+    TimerState& t = state_.timers[index];
+    for (std::uint32_t n = 0; n < stage1Ticks; ++n) {
+      t.stage2 = static_cast<std::uint8_t>(t.stage2 + 1);  // 0-255 wraparound
+      // Post-increment comparator: a target of 0 matches only after 256 counts.
+      if (t.stage2 == t.target) {
+        t.stage3 = static_cast<std::uint8_t>((t.stage3 + 1) & 0x0Fu);  // 4-bit output
+        t.stage2 = 0;
+      }
+    }
+  };
+  tick(0, ticks128);
+  tick(1, ticks128);
+  tick(2, ticks16);
+}
+
+void Apu::reset() {
+  ApuState fresh = powerOnState();
+  // The divider cannot be reset, the targets are retained, and RAM above zero
+  // page keeps its contents; the timer outputs go to 0 rather than the power-on
+  // $F. Everything else returns to its documented reset value via powerOnState.
+  fresh.divider = state_.divider;
+  for (std::size_t i = 0; i < fresh.timers.size(); ++i) {
+    fresh.timers[i].target = state_.timers[i].target;
+    fresh.timers[i].stage3 = 0x00;
+  }
+  for (std::size_t addr = 0x0100; addr < fresh.ram.size(); ++addr)
+    fresh.ram[addr] = state_.ram[addr];
+  state_ = std::move(fresh);
+  cpu_.restore(state_.cpu);
 }
 
 std::uint8_t Apu::busRead(std::uint16_t address) {
@@ -82,8 +139,13 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
       return state_.inputPorts[reg - 0xF4u];
     case 0xF8: case 0xF9:                                   // scratch registers behave as RAM
       return state_.ram[reg];
-    // TnOUT ($FD-$FF) reads resolve to 0 until the stage-3 counters go live in
-    // the next unit; TEST, CONTROL and TnTARGET are write-only and read back 0.
+    case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
+      TimerState& t = state_.timers[reg - 0xFDu];
+      const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
+      t.stage3 = 0;
+      return out;
+    }
+    // TEST, CONTROL and TnTARGET are write-only and read back 0.
     default:
       return 0;
   }
@@ -99,15 +161,25 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
       state_.ram[reg] = value;
       state_.test = value;
       return;
-    case 0xF1:  // CONTROL
+    case 0xF1: {  // CONTROL
+      const std::uint8_t previous = state_.control;
       state_.ram[reg] = value;
       state_.control = value;
       // Bit 4 clears input ports 0/1, bit 5 clears input ports 2/3 — a one-time
-      // zeroing on every write with the bit set, never a 0->1 transition. The
-      // enable bits and their stage resets go live with the timers next unit.
+      // zeroing on every write with the bit set, never a 0->1 transition.
       if (value & 0x10u) { state_.inputPorts[0] = 0; state_.inputPorts[1] = 0; }
       if (value & 0x20u) { state_.inputPorts[2] = 0; state_.inputPorts[3] = 0; }
+      // A timer enable going 0->1 resets that timer's stage-2 and stage-3
+      // counters; the shared stage-1 divider is left running.
+      for (std::size_t i = 0; i < state_.timers.size(); ++i) {
+        const std::uint8_t enable = static_cast<std::uint8_t>(1u << i);
+        if ((value & enable) && !(previous & enable)) {
+          state_.timers[i].stage2 = 0;
+          state_.timers[i].stage3 = 0;
+        }
+      }
       return;
+    }
     case 0xF2:  // DSPADDR
       state_.ram[reg] = value;
       state_.dspAddr = value;
