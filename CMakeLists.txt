@@ -75,6 +75,10 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}")
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
+    # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the
+    # build. It reads a well-known variable name here, so accept the standard CRT
+    # function rather than the _s variant.
+    target_compile_definitions(snaggletooth_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
   else()
     target_compile_options(snaggletooth_tests PRIVATE -Wall -Wextra -Werror)
   endif()
