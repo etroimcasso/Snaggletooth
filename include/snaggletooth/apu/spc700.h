@@ -145,6 +145,58 @@ class Spc700 {
     return result;
   }
 
+  // 16-bit N and Z: N is bit 15 of the word, Z is set when the whole word is
+  // zero. The other flags are untouched.
+  void setNZ16(std::uint16_t v) noexcept {
+    state_.psw = static_cast<std::uint8_t>((state_.psw & ~(kFlagN | kFlagZ)) |
+                                           ((v & 0x8000u) ? kFlagN : 0) |
+                                           (v == 0 ? kFlagZ : 0));
+  }
+
+  // 16-bit add core: two chained byte adds with the carry threaded from the low
+  // byte into the high byte. N/V/H/C are taken from the high-byte add (H is the
+  // nibble carry at bit 11->12, V its signed overflow); Z is the full 16-bit
+  // result. ADDW passes carryIn 0; SUBW passes the ones-complement addend with
+  // carryIn 1, so borrow, half-borrow and overflow all fall out of this one add.
+  std::uint16_t addwCore(std::uint16_t ya, std::uint16_t addend,
+                         unsigned carryIn) noexcept {
+    const unsigned loA = ya & 0xFFu, loB = addend & 0xFFu;
+    const unsigned hiA = (ya >> 8) & 0xFFu, hiB = (addend >> 8) & 0xFFu;
+    const unsigned lo = loA + loB + carryIn;
+    const unsigned hi = hiA + hiB + (lo >> 8);
+    const std::uint16_t result =
+        static_cast<std::uint16_t>(((hi & 0xFFu) << 8) | (lo & 0xFFu));
+    const bool halfCarry = ((hiA & 0x0Fu) + (hiB & 0x0Fu) + (lo >> 8)) > 0x0Fu;
+    const bool overflow = (~(hiA ^ hiB) & (hiA ^ hi) & 0x80u) != 0;
+    std::uint8_t psw = static_cast<std::uint8_t>(
+        state_.psw & ~(kFlagN | kFlagV | kFlagH | kFlagZ | kFlagC));
+    if (result & 0x8000u) psw |= kFlagN;
+    if (overflow) psw |= kFlagV;
+    if (halfCarry) psw |= kFlagH;
+    if (result == 0) psw |= kFlagZ;
+    if (hi > 0xFFu) psw |= kFlagC;
+    state_.psw = psw;
+    return result;
+  }
+  std::uint16_t addwOp(std::uint16_t ya, std::uint16_t word) noexcept {
+    return addwCore(ya, word, 0);
+  }
+  std::uint16_t subwOp(std::uint16_t ya, std::uint16_t word) noexcept {
+    return addwCore(ya, static_cast<std::uint16_t>(~word), 1);
+  }
+
+  // 16-bit compare: N and Z from YA - word and C on no borrow (YA >= word). The
+  // difference is discarded; H and V are untouched.
+  void cmpwOp(std::uint16_t ya, std::uint16_t word) noexcept {
+    const std::uint16_t diff = static_cast<std::uint16_t>(ya - word);
+    std::uint8_t psw =
+        static_cast<std::uint8_t>(state_.psw & ~(kFlagN | kFlagZ | kFlagC));
+    if (diff & 0x8000u) psw |= kFlagN;
+    if (diff == 0) psw |= kFlagZ;
+    if (ya >= word) psw |= kFlagC;
+    state_.psw = psw;
+  }
+
   // Reads the byte at PC and advances it (a program fetch).
   template <ApuBus B>
   std::uint8_t fetch(B& bus) {
@@ -198,6 +250,24 @@ class Spc700 {
     std::uint16_t hi =
         bus.read(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)));
     return static_cast<std::uint16_t>((lo | (hi << 8)) + state_.y);
+  }
+
+  // A 16-bit word in the direct page: the two bytes live at dp and dp+1, and the
+  // high byte's address wraps within the direct page (dp = $FF reads its high
+  // byte from the page base).
+  template <ApuBus B>
+  std::uint16_t readWordDp(B& bus, std::uint8_t d) {
+    std::uint16_t lo = bus.read(static_cast<std::uint16_t>(dpBase() + d));
+    std::uint16_t hi =
+        bus.read(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)));
+    return static_cast<std::uint16_t>(lo | (hi << 8));
+  }
+  template <ApuBus B>
+  void writeWordDp(B& bus, std::uint8_t d, std::uint16_t v) {
+    bus.write(static_cast<std::uint16_t>(dpBase() + d),
+              static_cast<std::uint8_t>(v));
+    bus.write(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)),
+              static_cast<std::uint8_t>(v >> 8));
   }
 
   Spc700State state_{};
@@ -491,6 +561,204 @@ std::uint32_t Spc700::step(B& bus) {
       state_.a = static_cast<std::uint8_t>((state_.a << 4) | (state_.a >> 4));
       setNZ(state_.a);
       return 5;
+
+    // ---- 16-bit word moves (YA is the pair A=low, Y=high; N,Z from the word) ----
+    case 0xBA: {                                                                                  // MOVW YA,dp
+      std::uint16_t w = readWordDp(bus, fetch(bus));
+      state_.a = static_cast<std::uint8_t>(w);
+      state_.y = static_cast<std::uint8_t>(w >> 8);
+      setNZ16(w);
+      return 5;
+    }
+    case 0xDA: {                                                                                  // MOVW dp,YA (no flags)
+      std::uint8_t d = fetch(bus);
+      static_cast<void>(bus.read(static_cast<std::uint16_t>(dpBase() + d)));  // documented dummy read of the low byte
+      writeWordDp(bus, d, static_cast<std::uint16_t>(state_.a | (state_.y << 8)));
+      return 5;
+    }
+
+    // ---- 16-bit word increment / decrement (N,Z from the word) ----
+    case 0x3A: {                                                                                  // INCW dp
+      std::uint8_t d = fetch(bus);
+      std::uint16_t w = static_cast<std::uint16_t>(readWordDp(bus, d) + 1);
+      setNZ16(w);
+      writeWordDp(bus, d, w);
+      return 6;
+    }
+    case 0x1A: {                                                                                  // DECW dp
+      std::uint8_t d = fetch(bus);
+      std::uint16_t w = static_cast<std::uint16_t>(readWordDp(bus, d) - 1);
+      setNZ16(w);
+      writeWordDp(bus, d, w);
+      return 6;
+    }
+
+    // ---- 16-bit word arithmetic (N,V,H,Z,C; H is the carry on the high byte) ----
+    case 0x7A: {                                                                                  // ADDW YA,dp
+      std::uint16_t r = addwOp(static_cast<std::uint16_t>(state_.a | (state_.y << 8)),
+                               readWordDp(bus, fetch(bus)));
+      state_.a = static_cast<std::uint8_t>(r);
+      state_.y = static_cast<std::uint8_t>(r >> 8);
+      return 5;
+    }
+    case 0x9A: {                                                                                  // SUBW YA,dp
+      std::uint16_t r = subwOp(static_cast<std::uint16_t>(state_.a | (state_.y << 8)),
+                               readWordDp(bus, fetch(bus)));
+      state_.a = static_cast<std::uint8_t>(r);
+      state_.y = static_cast<std::uint8_t>(r >> 8);
+      return 5;
+    }
+    case 0x5A:                                                                                    // CMPW YA,dp
+      cmpwOp(static_cast<std::uint16_t>(state_.a | (state_.y << 8)),
+             readWordDp(bus, fetch(bus)));
+      return 4;
+
+    // ---- multiply / divide ----
+    case 0xCF: {                                                                                  // MUL YA (YA = Y*A; N,Z from Y only)
+      std::uint16_t p = static_cast<std::uint16_t>(unsigned{state_.y} * unsigned{state_.a});
+      state_.a = static_cast<std::uint8_t>(p);
+      state_.y = static_cast<std::uint8_t>(p >> 8);
+      setNZ(state_.y);
+      return 9;
+    }
+    case 0x9E: {                                                                                  // DIV YA,X (A = YA/X, Y = YA%X)
+      // The documented 9-iteration restoring division: the 17-bit accumulator
+      // ends as YYYYYYYY V AAAAAAAA, so Y and A are the quotient/remainder and
+      // bit 8 is the overflow flag. N,Z come from A; H is the nibble comparison
+      // X&$F <= Y&$F on the entry values. The result past a quotient of 511 is
+      // hardware garbage the algorithm still reproduces.
+      const unsigned entryX = state_.x, entryY = state_.y;
+      std::uint32_t yva = static_cast<std::uint32_t>((entryY << 8) | state_.a);
+      const std::uint32_t x9 = static_cast<std::uint32_t>(entryX) << 9;
+      for (int i = 0; i < 9; ++i) {
+        yva = ((yva << 1) | ((yva >> 16) & 1u)) & 0x1FFFFu;  // rotate left within 17 bits
+        if (yva >= x9) yva ^= 1u;
+        if (yva & 1u) yva = (yva - x9) & 0x1FFFFu;
+      }
+      state_.a = static_cast<std::uint8_t>(yva & 0xFFu);
+      state_.y = static_cast<std::uint8_t>((yva >> 9) & 0xFFu);
+      std::uint8_t psw = static_cast<std::uint8_t>(
+          state_.psw & ~(kFlagN | kFlagV | kFlagH | kFlagZ));
+      if (state_.a & 0x80u) psw |= kFlagN;
+      if (state_.a == 0) psw |= kFlagZ;
+      if (yva & 0x100u) psw |= kFlagV;
+      if ((entryX & 0x0Fu) <= (entryY & 0x0Fu)) psw |= kFlagH;
+      state_.psw = psw;
+      return 12;
+    }
+
+    // ---- decimal adjust (N,Z,C; H is read but never changed) ----
+    case 0xDF: {                                                                                  // DAA A
+      std::uint16_t a = state_.a;
+      if ((state_.psw & kFlagC) || a > 0x99u) {
+        a += 0x60u;
+        state_.psw = static_cast<std::uint8_t>(state_.psw | kFlagC);
+      }
+      if ((state_.psw & kFlagH) || (state_.a & 0x0Fu) > 0x09u) a += 0x06u;
+      state_.a = static_cast<std::uint8_t>(a);
+      setNZ(state_.a);
+      return 3;
+    }
+    case 0xBE: {                                                                                  // DAS A
+      std::uint16_t a = state_.a;
+      if (!(state_.psw & kFlagC) || a > 0x99u) {
+        a -= 0x60u;
+        state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagC);
+      }
+      if (!(state_.psw & kFlagH) || (state_.a & 0x0Fu) > 0x09u) a -= 0x06u;
+      state_.a = static_cast<std::uint8_t>(a);
+      setNZ(state_.a);
+      return 3;
+    }
+
+    // ---- single-bit set / clear on a direct-page byte (bit in opcode; no flags) ----
+    case 0x02: case 0x22: case 0x42: case 0x62: case 0x82: case 0xA2: case 0xC2: case 0xE2:       // SET1 dp.0..7
+    case 0x12: case 0x32: case 0x52: case 0x72: case 0x92: case 0xB2: case 0xD2: case 0xF2: {     // CLR1 dp.0..7
+      const std::uint8_t mask = static_cast<std::uint8_t>(1u << (opcode >> 5));
+      const std::uint16_t addr = addrDp(bus);
+      const std::uint8_t m = bus.read(addr);
+      bus.write(addr, (opcode & 0x10u) ? static_cast<std::uint8_t>(m & ~mask)
+                                       : static_cast<std::uint8_t>(m | mask));
+      return 4;
+    }
+
+    // ---- test and set/clear bits in an absolute byte (N,Z as for A - memory) ----
+    case 0x0E: {                                                                                  // TSET1 !abs
+      const std::uint16_t addr = addrAbs(bus);
+      const std::uint8_t m = bus.read(addr);
+      setNZ(static_cast<std::uint8_t>(state_.a - m));
+      bus.write(addr, static_cast<std::uint8_t>(m | state_.a));
+      return 6;
+    }
+    case 0x4E: {                                                                                  // TCLR1 !abs
+      const std::uint16_t addr = addrAbs(bus);
+      const std::uint8_t m = bus.read(addr);
+      setNZ(static_cast<std::uint8_t>(state_.a - m));
+      bus.write(addr, static_cast<std::uint8_t>(m & ~state_.a));
+      return 6;
+    }
+
+    // ---- carry-bit logic against one bit of an absolute byte (the 16-bit
+    //      operand carries a 13-bit address in the low bits and the bit index in
+    //      the top 3; only C is affected) ----
+    case 0x4A: {                                                                                  // AND1 C,m.b
+      const std::uint16_t operand = addrAbs(bus);
+      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
+                       (operand >> 13)) & 1u) != 0u;
+      setCarry((state_.psw & kFlagC) && b);
+      return 4;
+    }
+    case 0x6A: {                                                                                  // AND1 C,/m.b
+      const std::uint16_t operand = addrAbs(bus);
+      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
+                       (operand >> 13)) & 1u) != 0u;
+      setCarry((state_.psw & kFlagC) && !b);
+      return 4;
+    }
+    case 0x0A: {                                                                                  // OR1 C,m.b
+      const std::uint16_t operand = addrAbs(bus);
+      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
+                       (operand >> 13)) & 1u) != 0u;
+      setCarry((state_.psw & kFlagC) || b);
+      return 5;
+    }
+    case 0x2A: {                                                                                  // OR1 C,/m.b
+      const std::uint16_t operand = addrAbs(bus);
+      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
+                       (operand >> 13)) & 1u) != 0u;
+      setCarry((state_.psw & kFlagC) || !b);
+      return 5;
+    }
+    case 0x8A: {                                                                                  // EOR1 C,m.b
+      const std::uint16_t operand = addrAbs(bus);
+      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
+                       (operand >> 13)) & 1u) != 0u;
+      setCarry(((state_.psw & kFlagC) != 0) != b);
+      return 5;
+    }
+    case 0xEA: {                                                                                  // NOT1 m.b (no flags)
+      const std::uint16_t operand = addrAbs(bus);
+      const std::uint16_t addr = static_cast<std::uint16_t>(operand & 0x1FFFu);
+      const std::uint8_t mask = static_cast<std::uint8_t>(1u << (operand >> 13));
+      bus.write(addr, static_cast<std::uint8_t>(bus.read(addr) ^ mask));
+      return 5;
+    }
+    case 0xAA: {                                                                                  // MOV1 C,m.b
+      const std::uint16_t operand = addrAbs(bus);
+      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
+                       (operand >> 13)) & 1u) != 0u;
+      setCarry(b);
+      return 4;
+    }
+    case 0xCA: {                                                                                  // MOV1 m.b,C (no flags)
+      const std::uint16_t operand = addrAbs(bus);
+      const std::uint16_t addr = static_cast<std::uint16_t>(operand & 0x1FFFu);
+      const std::uint8_t mask = static_cast<std::uint8_t>(1u << (operand >> 13));
+      const std::uint8_t m = bus.read(addr);
+      bus.write(addr, (state_.psw & kFlagC) ? static_cast<std::uint8_t>(m | mask)
+                                            : static_cast<std::uint8_t>(m & ~mask));
+      return 6;
+    }
 
     default:
       // No opcode outside the MOV and 8-bit ALU families is implemented yet.
