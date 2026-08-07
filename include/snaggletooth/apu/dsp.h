@@ -1,15 +1,18 @@
 #pragma once
 
 // The S-DSP — the sound chip the SPC700 drives through the DSPADDR/DSPDATA
-// registers. This header carries the DSP's state as a value and the pure BRR
-// sample-decode mechanism: turning a 9-byte compressed block into sixteen 15-bit
-// samples, and reading a voice's sample-directory entry.
+// registers. This header carries the DSP's state as a value and the voice
+// sample pipeline's pure mechanisms: BRR sample decode (turning a 9-byte
+// compressed block into sixteen 15-bit samples), the sample-directory read,
+// the per-voice BRR streaming interlock under a pitch counter, and 4-point
+// Gaussian interpolation over the stream's four most recent samples.
 //
-// A BRR block is decoded exactly as the hardware does — the four integer filters,
-// the shift-13..15 anomaly, and the clamp-to-16-then-clip-to-15 sequence whose
-// dirt-effect and lost-sign glitches are behaviors to reproduce, not to sanitize.
-// The voice pipeline that streams these blocks under a pitch counter arrives with
-// the next unit; here the decode is a standalone function over its inputs.
+// A BRR block is decoded exactly as the hardware does — the four integer
+// filters, the shift-13..15 anomaly, and the clamp-to-16-then-clip-to-15
+// sequence whose dirt-effect and lost-sign glitches are behaviors to
+// reproduce, not to sanitize. The same exactness holds for interpolation: the
+// Gaussian table is the hardware's ROM data, and the kernel keeps the
+// hardware's partial overflow handling, documented wrap included.
 
 #include <array>
 #include <cstddef>
@@ -18,12 +21,39 @@
 
 namespace snaggletooth {
 
+// The four most recently decoded samples of a voice's BRR stream — the window
+// the Gaussian kernel interpolates over. The hardware references name the
+// taps new/old/older/oldest; `new` is a C++ keyword, so the newest tap is
+// `newest` here.
+struct SampleWindow {
+  std::int16_t newest = 0;
+  std::int16_t old = 0;
+  std::int16_t older = 0;
+  std::int16_t oldest = 0;
+};
+
+// A voice's streaming position through its BRR data. The pitch counter's bits
+// 15-12 are the sample position within the current block, bits 11-4 the
+// Gaussian interpolation index, and the low bits accumulate the fractional
+// step. The decode cursor runs three samples ahead of the counter's position,
+// so the window's `newest` at position p is stream sample p+3 — the alignment
+// the hardware's decode buffering produces. `brrSampleIndex` is the next
+// sample the cursor decodes within its block; 16 means the block is exhausted
+// and the next decode performs the block transition (chaining to the next
+// block, or jumping to the loop address after an end block) before decoding.
+struct VoiceState {
+  std::uint16_t brrAddress = 0;
+  std::uint8_t brrSampleIndex = 0;
+  std::uint16_t pitchCounter = 0;
+  SampleWindow window{};
+};
+
 // The S-DSP's state as a value: snapshot by copy, restore by assignment. The
-// 128-byte register file the CPU reaches through DSPADDR/DSPDATA lives here (it
-// moved out of ApuState, which keeps only the DSPADDR latch). Indexing or
-// iterating a DspState reaches its register file, so the machine's overlay reads
-// and writes a DSP register as dsp[reg]; the sample clock is a named member
-// beside it.
+// 128-byte register file the CPU reaches through DSPADDR/DSPDATA lives here
+// (ApuState carries only the DSPADDR latch beside it). Indexing or
+// iterating a DspState reaches its register file, so the machine's overlay
+// reads and writes a DSP register as dsp[reg]; the sample clock and the
+// voices' streaming state are named members beside it.
 struct DspState {
   std::array<std::uint8_t, 128> regs{};
 
@@ -32,6 +62,9 @@ struct DspState {
   // zero at power-on and is retained across reset (a free-running divider cannot
   // be reset). Nothing consumes its sample ticks yet.
   std::uint16_t sampleDivider = 0;
+
+  // The eight voices' streaming state, beside the register file.
+  std::array<VoiceState, 8> voices{};
 
   [[nodiscard]] std::uint8_t& operator[](std::size_t reg) noexcept { return regs[reg]; }
   [[nodiscard]] const std::uint8_t& operator[](std::size_t reg) const noexcept {
@@ -75,5 +108,37 @@ struct BrrBlock {
 // the documented overflow glitches emerge exactly.
 [[nodiscard]] BrrBlock decodeBrrBlock(std::span<const std::uint8_t, 9> block,
                                       std::int16_t old, std::int16_t older) noexcept;
+
+// Interpolates a window at an 8-bit index (pitch counter bits 11-4) through
+// the S-DSP's 4-point Gaussian kernel, in the hardware's exact arithmetic.
+// Each tap is (gauss * sample) SAR 10 over the transcribed 512-entry hardware
+// table. The additions of the older and old taps run in 16 bits with no
+// overflow handling — the old tap's addition can wrap, a documented hardware
+// bug the kernel reproduces — while the newest tap's addition saturates to
+// -8000h/+7FFFh. The result is shifted right once, to 15 bits.
+[[nodiscard]] std::int16_t gaussInterpolate(SampleWindow window, std::uint8_t index) noexcept;
+
+// Points voice `voice` (0-7) at its sample's start address — read live from
+// DIR and VxSRCN — and primes the stream: the counter returns to position
+// zero and the first four samples are decoded, so the window holds stream
+// samples 3..0 as newest..oldest. The filter history enters as zeros, so a
+// first block using a filter other than 0 still decodes deterministically.
+// Entering an end block sets the voice's ENDX bit immediately.
+void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                std::size_t voice) noexcept;
+
+// Advances voice `voice` (0-7) by one 32 kHz output sample. The pitch counter
+// gains the voice's 14-bit step (VxPITCHL/H bits 0-13, read live, so a pitch
+// write takes effect on the next step; bits 14-15 are stored but never used),
+// and every sample position the counter passes is decoded through the stream —
+// following block chaining, loop jumps and ENDX on the way. Returns the
+// freshly interpolated 15-bit sample, exactly as interpolatedSample reads it.
+std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                       std::size_t voice) noexcept;
+
+// The voice's current interpolated 15-bit sample: the Gaussian kernel over its
+// window at the pitch counter's current index. Pure over the state — no
+// advance, no memory access.
+[[nodiscard]] std::int16_t interpolatedSample(const DspState& dsp, std::size_t voice) noexcept;
 
 }  // namespace snaggletooth

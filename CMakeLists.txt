@@ -74,6 +74,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/apu/timer_test.cpp
     tests/dsp/brr_test.cpp
     tests/dsp/dsp_state_test.cpp
+    tests/dsp/pitch_gauss_test.cpp
   )
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth::snaggletooth
