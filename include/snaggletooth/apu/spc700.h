@@ -270,6 +270,17 @@ class Spc700 {
               static_cast<std::uint8_t>(v >> 8));
   }
 
+  // A MOV to memory reads its destination before writing it. The value is
+  // discarded, but the access is real: a destination with a read side effect
+  // (a timer output register clears when read) sees it. This is specific to the
+  // MOV-to-memory forms — MOV dp,dp reads its source instead, and the read/
+  // modify/write opcodes already read their operand.
+  template <ApuBus B>
+  void storeByte(B& bus, std::uint16_t addr, std::uint8_t value) {
+    static_cast<void>(bus.read(addr));
+    bus.write(addr, value);
+  }
+
   // The stack lives in page $01, addressed by SP as its low byte. A push writes
   // then post-decrements SP; a pop pre-increments then reads. SP is an 8-bit
   // register, so it wraps within the page.
@@ -346,26 +357,27 @@ std::uint32_t Spc700::step(B& bus) {
     case 0xFB: state_.y = bus.read(addrDpX(bus));  setNZ(state_.y); return 4;                     // MOV Y,dp+X
     case 0xEC: state_.y = bus.read(addrAbs(bus));  setNZ(state_.y); return 4;                     // MOV Y,!abs
 
-    // ---- 8-bit move: register to memory (no flags) ----
-    case 0xC6: bus.write(static_cast<std::uint16_t>(dpBase() + state_.x), state_.a); return 4;    // MOV (X),A
+    // ---- 8-bit move: register to memory (no flags; each reads its
+    //      destination before writing — see storeByte) ----
+    case 0xC6: storeByte(bus, static_cast<std::uint16_t>(dpBase() + state_.x), state_.a); return 4;  // MOV (X),A
     case 0xAF: {                                                                                  // MOV (X)+,A
-      bus.write(static_cast<std::uint16_t>(dpBase() + state_.x), state_.a);
+      storeByte(bus, static_cast<std::uint16_t>(dpBase() + state_.x), state_.a);
       ++state_.x;
       return 4;
     }
-    case 0xC4: bus.write(addrDp(bus),   state_.a); return 4;                                      // MOV dp,A
-    case 0xD4: bus.write(addrDpX(bus),  state_.a); return 5;                                      // MOV dp+X,A
-    case 0xC5: bus.write(addrAbs(bus),  state_.a); return 5;                                      // MOV !abs,A
-    case 0xD5: bus.write(addrAbsX(bus), state_.a); return 6;                                      // MOV !abs+X,A
-    case 0xD6: bus.write(addrAbsY(bus), state_.a); return 6;                                      // MOV !abs+Y,A
-    case 0xC7: bus.write(addrIndX(bus), state_.a); return 7;                                      // MOV [dp+X],A
-    case 0xD7: bus.write(addrIndY(bus), state_.a); return 7;                                      // MOV [dp]+Y,A
-    case 0xD8: bus.write(addrDp(bus),   state_.x); return 4;                                      // MOV dp,X
-    case 0xD9: bus.write(addrDpY(bus),  state_.x); return 5;                                      // MOV dp+Y,X
-    case 0xC9: bus.write(addrAbs(bus),  state_.x); return 5;                                      // MOV !abs,X
-    case 0xCB: bus.write(addrDp(bus),   state_.y); return 4;                                      // MOV dp,Y
-    case 0xDB: bus.write(addrDpX(bus),  state_.y); return 5;                                      // MOV dp+X,Y
-    case 0xCC: bus.write(addrAbs(bus),  state_.y); return 5;                                      // MOV !abs,Y
+    case 0xC4: storeByte(bus, addrDp(bus),   state_.a); return 4;                                 // MOV dp,A
+    case 0xD4: storeByte(bus, addrDpX(bus),  state_.a); return 5;                                 // MOV dp+X,A
+    case 0xC5: storeByte(bus, addrAbs(bus),  state_.a); return 5;                                 // MOV !abs,A
+    case 0xD5: storeByte(bus, addrAbsX(bus), state_.a); return 6;                                 // MOV !abs+X,A
+    case 0xD6: storeByte(bus, addrAbsY(bus), state_.a); return 6;                                 // MOV !abs+Y,A
+    case 0xC7: storeByte(bus, addrIndX(bus), state_.a); return 7;                                 // MOV [dp+X],A
+    case 0xD7: storeByte(bus, addrIndY(bus), state_.a); return 7;                                 // MOV [dp]+Y,A
+    case 0xD8: storeByte(bus, addrDp(bus),   state_.x); return 4;                                 // MOV dp,X
+    case 0xD9: storeByte(bus, addrDpY(bus),  state_.x); return 5;                                 // MOV dp+Y,X
+    case 0xC9: storeByte(bus, addrAbs(bus),  state_.x); return 5;                                 // MOV !abs,X
+    case 0xCB: storeByte(bus, addrDp(bus),   state_.y); return 4;                                 // MOV dp,Y
+    case 0xDB: storeByte(bus, addrDpX(bus),  state_.y); return 5;                                 // MOV dp+X,Y
+    case 0xCC: storeByte(bus, addrAbs(bus),  state_.y); return 5;                                 // MOV !abs,Y
 
     // ---- 8-bit move: register/register and special direct-page moves ----
     case 0x7D: state_.a = state_.x;  setNZ(state_.a); return 2;                                   // MOV A,X
@@ -384,7 +396,7 @@ std::uint32_t Spc700::step(B& bus) {
     case 0x8F: {                                                                                  // MOV dp,#imm (encoded immediate-first: 8F imm dst)
       std::uint8_t imm = fetch(bus);
       std::uint8_t dst = fetch(bus);
-      bus.write(static_cast<std::uint16_t>(dpBase() + dst), imm);
+      storeByte(bus, static_cast<std::uint16_t>(dpBase() + dst), imm);
       return 5;
     }
 

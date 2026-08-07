@@ -67,6 +67,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/harness_test.cpp
     tests/spc700/algorithm_test.cpp
     tests/spc700/vector_test.cpp
+    tests/spc700/dummy_read_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
   )
