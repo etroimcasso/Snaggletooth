@@ -72,8 +72,8 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 
 // The voice's 14-bit pitch step, read live from VxPITCHL/H; the register
 // pair's bits 14-15 are stored but never used. Pitch modulation (PMON) is not
-// implemented yet — it would scale this step by the previous voice's output,
-// and hooks in here when it is.
+// implemented yet: it scales this step by the previous voice's output, and
+// this is where it applies.
 [[nodiscard]] std::uint32_t voicePitch(const DspState& dsp, std::size_t voice) noexcept {
   const std::uint32_t low = dsp[voiceRegister(voice, kVoicePitchLow)];
   const std::uint32_t high = dsp[voiceRegister(voice, kVoicePitchHigh)];

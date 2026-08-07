@@ -50,7 +50,7 @@ struct VoiceState {
 
 // The S-DSP's state as a value: snapshot by copy, restore by assignment. The
 // 128-byte register file the CPU reaches through DSPADDR/DSPDATA lives here
-// (it moved out of ApuState, which keeps only the DSPADDR latch). Indexing or
+// (ApuState carries only the DSPADDR latch beside it). Indexing or
 // iterating a DspState reaches its register file, so the machine's overlay
 // reads and writes a DSP register as dsp[reg]; the sample clock and the
 // voices' streaming state are named members beside it.
