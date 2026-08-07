@@ -130,9 +130,8 @@ def emit_gauss(values, out_path):
         "// formula.\n"
         "//\n"
         "// Regenerate with:\n"
-        "//   python3 tools/parse_dsp_tables.py gauss \\\n"
-        "//       --fullsnes <fullsnes text> --anomie <anomie s-dsp text> \\\n"
-        "//       --out src/generated/gauss_table.inc\n"
+        "//   python3 tools/parse_dsp_tables.py gauss --fullsnes <fullsnes text>"
+        " --anomie <anomie s-dsp text> --out src/generated/gauss_table.inc\n"
     )
     rows = []
     for i in range(0, GAUSS_SIZE, 16):
