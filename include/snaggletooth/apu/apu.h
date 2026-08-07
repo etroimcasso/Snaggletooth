@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <span>
 
+#include "snaggletooth/apu/dsp.h"
 #include "snaggletooth/apu/spc700.h"
 
 namespace snaggletooth {
@@ -41,7 +42,7 @@ struct ApuState {
   std::uint8_t test = 0;
   std::uint8_t control = 0;
   std::uint8_t dspAddr = 0;
-  std::array<std::uint8_t, 128> dsp{};
+  DspState dsp{};
   std::array<std::uint8_t, 4> inputPorts{};   // host -> SPC700 (the CPU reads these at $F4-$F7)
   std::array<std::uint8_t, 4> outputPorts{};  // SPC700 -> host (the CPU writes these at $F4-$F7)
   std::uint16_t divider = 0;                  // shared free-running stage-1 cycle counter
@@ -117,9 +118,17 @@ class Apu {
   std::uint8_t readRegister(std::uint8_t reg);
   void writeRegister(std::uint8_t reg, std::uint8_t value);
 
+  // Writes a DSP register through DSPDATA. Most registers are a RAM-like byte;
+  // ENDX ($7C) is a real register whose bits any write acknowledges (clears).
+  void writeDspRegister(std::uint8_t reg, std::uint8_t value);
+
   // Advances the shared stage-1 divider by `cycles` and passes the resulting
   // stage-1 ticks to each enabled timer's stage-2/stage-3 counters.
   void advanceTimers(std::uint32_t cycles);
+
+  // Advances the DSP's 32-cycle sample divider by `cycles`. It free-runs; the
+  // voice pipeline that consumes its sample ticks arrives with the next unit.
+  void advanceDsp(std::uint32_t cycles);
 
   Spc700 cpu_;      // the live CPU state during a step
   ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced at each step
