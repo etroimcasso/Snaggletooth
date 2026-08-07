@@ -7,6 +7,10 @@ namespace snaggletooth {
 
 namespace {
 
+// ENDX ($7C) is the one DSP register whose write clears the register rather than
+// storing the value: any write acknowledges (clears) all voice end flags.
+constexpr std::uint8_t kDspEndx = 0x7C;
+
 // The seeded post-IPL power-on state: what the machine looks like once the boot
 // ROM has cleared zero page, posted the ready bytes, and handed control over.
 ApuState powerOnState() {
@@ -58,9 +62,11 @@ std::uint32_t Apu::step() {
   Bus bus{*this};
   const std::uint32_t cycles = cpu_.step(bus);
   state_.cpu = cpu_.state();  // keep the snapshot coherent with the live CPU
-  // The timers advance after the instruction, so a read the CPU issues
-  // mid-instruction observes the pre-step timer state (instruction-granular).
+  // The timers and the DSP sample divider advance after the instruction, so a
+  // read the CPU issues mid-instruction observes their pre-step state
+  // (instruction-granular).
   advanceTimers(cycles);
+  advanceDsp(cycles);
   return cycles;
 }
 
@@ -101,12 +107,29 @@ void Apu::advanceTimers(std::uint32_t cycles) {
   tick(2, ticks16);
 }
 
+void Apu::advanceDsp(std::uint32_t cycles) {
+  // One DSP sample every 32 machine cycles (32 kHz). The divider free-runs and
+  // wraps at 65536 — a multiple of 32, so the sample phase survives the wrap. It
+  // is retained across reset(); nothing reads its sample ticks in this unit.
+  state_.dsp.sampleDivider =
+      static_cast<std::uint16_t>(state_.dsp.sampleDivider + cycles);
+}
+
+void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
+  if (reg == kDspEndx) {
+    state_.dsp[kDspEndx] = 0;  // ENDX: any write acknowledges all end flags
+    return;
+  }
+  state_.dsp[reg] = value;
+}
+
 void Apu::reset() {
   ApuState fresh = powerOnState();
   // The divider cannot be reset, the targets are retained, and RAM above zero
   // page keeps its contents; the timer outputs go to 0 rather than the power-on
   // $F. Everything else returns to its documented reset value via powerOnState.
   fresh.divider = state_.divider;
+  fresh.dsp.sampleDivider = state_.dsp.sampleDivider;  // the sample clock free-runs too
   for (std::size_t i = 0; i < fresh.timers.size(); ++i) {
     fresh.timers[i].target = state_.timers[i].target;
     fresh.timers[i].stage3 = 0x00;
@@ -186,7 +209,7 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
       return;
     case 0xF3:  // DSPDATA: writes beyond address $7F are ignored
       state_.ram[reg] = value;
-      if (state_.dspAddr <= 0x7Fu) state_.dsp[state_.dspAddr] = value;
+      if (state_.dspAddr <= 0x7Fu) writeDspRegister(state_.dspAddr, value);
       return;
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:  // output ports: SPC700 -> host
       state_.ram[reg] = value;
