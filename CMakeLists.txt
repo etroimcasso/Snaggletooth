@@ -24,6 +24,7 @@ option(SNAGGLETOOTH_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 
 add_library(snaggletooth STATIC
   src/version.cpp
+  src/apu.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -66,6 +67,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/harness_test.cpp
     tests/spc700/algorithm_test.cpp
     tests/spc700/vector_test.cpp
+    tests/apu/machine_test.cpp
+    tests/apu/port_test.cpp
   )
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth::snaggletooth
