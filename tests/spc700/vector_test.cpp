@@ -85,6 +85,14 @@ class Spc700Vectors : public ::testing::TestWithParam<std::uint8_t> {};
 TEST_P(Spc700Vectors, MatchFinalStateAndCycleCount) {
   const std::uint8_t opcode = GetParam();
   if (vectorsDir().empty()) {
+    // With SNAGGLETOOTH_REQUIRE_VECTORS set, a missing vector set is a failure
+    // rather than a skip — so an environment that means to run the oracle (CI)
+    // can never report green while silently exercising none of it.
+    if (std::getenv("SNAGGLETOOTH_REQUIRE_VECTORS") != nullptr) {
+      FAIL() << "SNAGGLETOOTH_SPC700_VECTORS is empty but SNAGGLETOOTH_REQUIRE_VECTORS "
+                "demands the oracle — configure with -DSNAGGLETOOTH_SPC700_VECTORS "
+                "pointing at the SingleStepTests SPC700 'v1' directory.";
+    }
     GTEST_SKIP() << "SNAGGLETOOTH_SPC700_VECTORS is unset — point it at the "
                     "SingleStepTests SPC700 'v1' directory to run the vectors.";
   }

@@ -1,22 +1,274 @@
 name: CI
 
+# Triggers fire on ci/** only — not main, not pull_request. Finished work reaches
+# main by squash-merge from a ci/<branch> that already ran this pipeline to green;
+# re-running on the post-squash main rebuilds the same source for no new signal.
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches:
+      - 'ci/**'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# The SPC700 oracle vectors (SingleStepTests, ~96 MB of machine-generated JSON)
+# are never committed. Each job clones them once into the runner's home and
+# reuses them warm on later runs. SNAGGLETOOTH_REQUIRE_VECTORS turns an absent
+# vector set into a hard failure, so a green run has provably executed the whole
+# uncapped oracle rather than skipping it — the point of running on every
+# architecture is to prove the interpreter produces identical results on each.
 
 jobs:
-  build-and-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+
+  # ── Linux x64 (beefserve) ───────────────────────────────────────────────────
+  linux-x64:
+    name: Linux x64 (beefserve)
+    runs-on: [self-hosted, Linux, X64, beefserve]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Stage SPC700 vectors
+        run: |
+          set -eo pipefail
+          VECS="$HOME/snaggletooth-spc700-vectors"
+          if [ ! -d "$VECS/v1" ]; then
+            rm -rf "$VECS"
+            git clone --depth 1 https://github.com/SingleStepTests/spc700.git "$VECS"
+          fi
+          echo "SPC700_VECTORS=$VECS/v1" >> "$GITHUB_ENV"
+
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSNAGGLETOOTH_SPC700_VECTORS="$SPC700_VECTORS"
+
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
+
+      - name: Stage build for manual testing
+        run: rm -rf /tmp/snaggletooth-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/snaggletooth-build
+
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        env:
+          SNAGGLETOOTH_REQUIRE_VECTORS: '1'
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-output"
+          ctest --test-dir "$GITHUB_WORKSPACE/build" --output-on-failure \
+            2>&1 | tee "$GITHUB_WORKSPACE/ci-output/linux-x64-results.txt"
+
+      - name: ccache stats
+        run: ccache --show-stats
+        continue-on-error: true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-results
+          path: ci-output/
+
+  # ── Windows x64 (WINDOWS-BVDA56O) ────────────────────────────────────────────
+  windows-x64:
+    name: Windows x64 (WINDOWS-BVDA56O)
+    runs-on: [self-hosted, X64, Windows, windows_x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage SPC700 vectors
+        shell: powershell
+        run: |
+          $VECS = "$($env:USERPROFILE -replace '\\','/')/snaggletooth-spc700-vectors"
+          if (-not (Test-Path "$VECS/v1")) {
+            if (Test-Path $VECS) { Remove-Item $VECS -Recurse -Force }
+            git clone --depth 1 https://github.com/SingleStepTests/spc700.git $VECS
+          }
+          "SPC700_VECTORS=$VECS/v1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure
+        shell: powershell
+        run: |
+          cmake -S $env:GITHUB_WORKSPACE -B C:\snaggletooth-ci-build `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DSNAGGLETOOTH_SPC700_VECTORS="$env:SPC700_VECTORS"
+
+      - name: Build
+        shell: powershell
+        run: cmake --build C:\snaggletooth-ci-build --config Release --parallel
+
+      - name: Test
+        shell: powershell
+        env:
+          SNAGGLETOOTH_REQUIRE_VECTORS: '1'
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
+          $results = "$env:GITHUB_WORKSPACE\ci-output\windows-x64-results.txt"
+          cmd /c "ctest --test-dir C:\snaggletooth-ci-build -C Release --output-on-failure 2>&1" |
+            Tee-Object -FilePath $results
+          # Tee-Object does not update $LASTEXITCODE; propagate the ctest exit code
+          # explicitly so a test failure fails the step instead of reporting green.
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-results
+          path: ci-output/
+
+  # ── macOS ARM64 (ericmacmini) ────────────────────────────────────────────────
+  # The three ARM64 jobs share one physical host (the Mac and its linmac/winmac
+  # VMs), so they are chained with needs: to run one at a time.
+  macos-arm64:
+    name: macOS ARM64 (ericmacmini)
+    runs-on: [self-hosted, macOS, ARM64, ericmacmini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Stage SPC700 vectors
+        run: |
+          set -eo pipefail
+          VECS="$HOME/snaggletooth-spc700-vectors"
+          if [ ! -d "$VECS/v1" ]; then
+            rm -rf "$VECS"
+            git clone --depth 1 https://github.com/SingleStepTests/spc700.git "$VECS"
+          fi
+          echo "SPC700_VECTORS=$VECS/v1" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSNAGGLETOOTH_SPC700_VECTORS="$SPC700_VECTORS"
+
+      - name: Build
+        run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
+
+      - name: Stage build for manual testing
+        run: rm -rf /tmp/snaggletooth-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/snaggletooth-build
+
+      - name: Test
+        env:
+          SNAGGLETOOTH_REQUIRE_VECTORS: '1'
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-output"
+          ctest --test-dir "$GITHUB_WORKSPACE/build" --output-on-failure \
+            2>&1 | tee "$GITHUB_WORKSPACE/ci-output/macos-arm64-results.txt"
+
+      - name: ccache stats
+        run: ccache --show-stats
+        continue-on-error: true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-results
+          path: ci-output/
+
+  # ── Linux ARM64 (linmac-arm64 VM) ────────────────────────────────────────────
+  linux-arm64:
+    name: Linux ARM64 (linmac-arm64)
+    runs-on: [self-hosted, Linux, ARM64, linmac-arm64]
+    needs: macos-arm64
+    if: ${{ always() }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Stage SPC700 vectors
+        run: |
+          set -eo pipefail
+          VECS="$HOME/snaggletooth-spc700-vectors"
+          if [ ! -d "$VECS/v1" ]; then
+            rm -rf "$VECS"
+            git clone --depth 1 https://github.com/SingleStepTests/spc700.git "$VECS"
+          fi
+          echo "SPC700_VECTORS=$VECS/v1" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSNAGGLETOOTH_SPC700_VECTORS="$SPC700_VECTORS"
+
+      - name: Build
+        run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
+
+      - name: Stage build for manual testing
+        run: rm -rf /tmp/snaggletooth-build && cp -R "$GITHUB_WORKSPACE/build" /tmp/snaggletooth-build
+
+      - name: Test
+        env:
+          SNAGGLETOOTH_REQUIRE_VECTORS: '1'
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ci-output"
+          ctest --test-dir "$GITHUB_WORKSPACE/build" --output-on-failure \
+            2>&1 | tee "$GITHUB_WORKSPACE/ci-output/linux-arm64-results.txt"
+
+      - name: ccache stats
+        run: ccache --show-stats
+        continue-on-error: true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-results
+          path: ci-output/
+
+  # ── Windows ARM64 (winmacarm64 VM) ───────────────────────────────────────────
+  windows-arm64:
+    name: Windows ARM64 (WINMACARM64)
+    runs-on: [self-hosted, ARM64, Windows, winmacarm64]
+    needs: linux-arm64
+    if: ${{ always() }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage SPC700 vectors
+        shell: powershell
+        run: |
+          $VECS = "$($env:USERPROFILE -replace '\\','/')/snaggletooth-spc700-vectors"
+          if (-not (Test-Path "$VECS/v1")) {
+            if (Test-Path $VECS) { Remove-Item $VECS -Recurse -Force }
+            git clone --depth 1 https://github.com/SingleStepTests/spc700.git $VECS
+          }
+          "SPC700_VECTORS=$VECS/v1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure
+        shell: powershell
+        run: |
+          cmake -S $env:GITHUB_WORKSPACE -B C:\snaggletooth-ci-build `
+            -G "Visual Studio 17 2022" -A ARM64 `
+            -DSNAGGLETOOTH_SPC700_VECTORS="$env:SPC700_VECTORS"
+
+      - name: Build
+        shell: powershell
+        run: cmake --build C:\snaggletooth-ci-build --config Release --parallel
+
+      - name: Test
+        shell: powershell
+        env:
+          SNAGGLETOOTH_REQUIRE_VECTORS: '1'
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
+          $results = "$env:GITHUB_WORKSPACE\ci-output\windows-arm64-results.txt"
+          cmd /c "ctest --test-dir C:\snaggletooth-ci-build -C Release --output-on-failure 2>&1" |
+            Tee-Object -FilePath $results
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64-results
+          path: ci-output/

@@ -9,6 +9,15 @@ if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYP
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Route compilation through ccache when it is installed, so warm rebuilds on a
+# persistent runner (or a developer's machine) are fast. A no-op when absent.
+if(PROJECT_IS_TOP_LEVEL)
+  find_program(CCACHE_PROGRAM ccache)
+  if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+  endif()
+endif()
+
 # On by default when Snaggletooth is the top-level project; off when it is vendored into a
 # parent build (the parent runs its own suite). Override with -DSNAGGLETOOTH_BUILD_TESTS=ON/OFF.
 option(SNAGGLETOOTH_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
@@ -66,6 +75,10 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}")
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
+    # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the
+    # build. It reads a well-known variable name here, so accept the standard CRT
+    # function rather than the _s variant.
+    target_compile_definitions(snaggletooth_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
   else()
     target_compile_options(snaggletooth_tests PRIVATE -Wall -Wextra -Werror)
   endif()
