@@ -98,6 +98,32 @@ constexpr std::uint8_t kWordBitOpcodes[] = {
     0x4A, 0x6A, 0x0A, 0x2A, 0x8A, 0xEA, 0xAA, 0xCA,
 };
 
+// The 71 control-flow opcodes — the SNESdev table's "branching", "subroutines",
+// "stack", "status flags" and "no-operation and halt" groups. This is the last
+// family: with it the four lists cover every opcode 0x00..0xFF.
+constexpr std::uint8_t kControlOpcodes[] = {
+    // relative branches
+    0x2F, 0xF0, 0xD0, 0xB0, 0x90, 0x70, 0x50, 0x30, 0x10,
+    // branch on a direct-page bit (BBS dp.0..7, then BBC dp.0..7)
+    0x03, 0x23, 0x43, 0x63, 0x83, 0xA3, 0xC3, 0xE3,
+    0x13, 0x33, 0x53, 0x73, 0x93, 0xB3, 0xD3, 0xF3,
+    // compare/decrement and branch
+    0x2E, 0xDE, 0x6E, 0xFE,
+    // jumps
+    0x5F, 0x1F,
+    // subroutine calls and returns
+    0x3F, 0x4F,
+    0x01, 0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71,  // TCALL 0..7
+    0x81, 0x91, 0xA1, 0xB1, 0xC1, 0xD1, 0xE1, 0xF1,  // TCALL 8..15
+    0x6F, 0x7F, 0x0F,
+    // stack push / pop
+    0x2D, 0x4D, 0x6D, 0x0D, 0xAE, 0xCE, 0xEE, 0x8E,
+    // status flags
+    0x60, 0x80, 0xED, 0xE0, 0x20, 0x40, 0xA0, 0xC0,
+    // no-operation and halt
+    0x00, 0xEF, 0xFF,
+};
+
 class Spc700Vectors : public ::testing::TestWithParam<std::uint8_t> {};
 
 // Every case for one opcode: seed the initial state on a zeroed 64KB bus, step
@@ -178,6 +204,14 @@ INSTANTIATE_TEST_SUITE_P(
 
 INSTANTIATE_TEST_SUITE_P(
     WordBit, Spc700Vectors, ::testing::ValuesIn(kWordBitOpcodes),
+    [](const ::testing::TestParamInfo<std::uint8_t>& info) {
+      char label[8];
+      std::snprintf(label, sizeof label, "op%02X", info.param);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    Control, Spc700Vectors, ::testing::ValuesIn(kControlOpcodes),
     [](const ::testing::TestParamInfo<std::uint8_t>& info) {
       char label[8];
       std::snprintf(label, sizeof label, "op%02X", info.param);
