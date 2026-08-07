@@ -13,8 +13,10 @@
 
 namespace {
 
+using snaggletooth::kFlagB;
 using snaggletooth::kFlagC;
 using snaggletooth::kFlagH;
+using snaggletooth::kFlagI;
 using snaggletooth::kFlagN;
 using snaggletooth::kFlagV;
 using snaggletooth::kFlagZ;
@@ -559,6 +561,240 @@ TEST(BitFlags, CarryTakesMemoryBit) {
   const Spc700 cpu = run1(Spc700State{.pc = 0x0200, .psw = 0},
                           {0xAA, 0x00, 0x63}, bus);
   EXPECT_EQ(cpu.state().psw & kFlagC, kFlagC);
+}
+
+// ── Relative branches — the rel byte is a signed displacement from PC ─────────
+// BEQ (F0) with Z set adds the signed offset to the address past the operand:
+// $0210 + 2 + (signed $FB = -5) = $020D.
+TEST(BranchFlow, TakenBranchAddsSignedOffset) {
+  FlatRamBus bus;
+  const Spc700 cpu =
+      run1(Spc700State{.pc = 0x0210, .psw = kFlagZ}, {0xF0, 0xFB}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x020D);
+}
+
+// With the condition false the branch is inert: PC falls through to just past
+// the two-byte instruction, offset ignored.
+TEST(BranchFlow, NotTakenBranchFallsThrough) {
+  FlatRamBus bus;
+  const Spc700 cpu = run1(Spc700State{.pc = 0x0210, .psw = 0}, {0xF0, 0xFB}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x0212);
+}
+
+// BRA (2F) branches whatever the flags say.
+TEST(BranchFlow, BranchAlwaysTakesTheOffset) {
+  FlatRamBus bus;
+  const Spc700 cpu = run1(Spc700State{.pc = 0x0300, .psw = 0}, {0x2F, 0x10}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x0312);
+}
+
+// ── Bit branches — the bit index is opcode bits 5-7; BBS on set, BBC on clear ─
+// BBS2 dp,rel ($43) branches when bit 2 of the dp byte is set. dp $20 = $04.
+TEST(BitBranch, BbsBranchesWhenBitSet) {
+  FlatRamBus bus;
+  bus.ram[0x0020] = 0x04;
+  const Spc700 cpu = run1(Spc700State{.pc = 0x0400}, {0x43, 0x20, 0x08}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x040B);  // 0x0400 + 3 + 0x08
+}
+
+// BBC2 dp,rel ($53) is the clear-bit sibling — it branches when bit 2 is CLEAR
+// (the table's "dp bit=1" note for BBC is a typo). dp $20 = $00.
+TEST(BitBranch, BbcBranchesWhenBitClear) {
+  FlatRamBus bus;
+  bus.ram[0x0020] = 0x00;
+  const Spc700 cpu = run1(Spc700State{.pc = 0x0400}, {0x53, 0x20, 0x08}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x040B);
+}
+
+// ...and BBC does not branch when its bit is set.
+TEST(BitBranch, BbcFallsThroughWhenBitSet) {
+  FlatRamBus bus;
+  bus.ram[0x0020] = 0x04;
+  const Spc700 cpu = run1(Spc700State{.pc = 0x0400}, {0x53, 0x20, 0x08}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x0403);
+}
+
+// ── Loop branches — CBNE and DBNZ compare/decrement but set NO flags ──────────
+// CBNE dp,rel ($2E): A vs dp differ ($10 vs $20), so it branches; and the zero
+// PSW is untouched — a real CMP would have set N and cleared C here.
+TEST(LoopBranch, CbneBranchesWithoutTouchingFlags) {
+  FlatRamBus bus;
+  bus.ram[0x0030] = 0x20;
+  const Spc700 cpu =
+      run1(Spc700State{.pc = 0x0500, .a = 0x10, .psw = 0}, {0x2E, 0x30, 0x04}, bus);
+  EXPECT_EQ(cpu.state().pc, 0x0507);  // 0x0500 + 3 + 0x04
+  EXPECT_EQ(cpu.state().psw, 0u);
+}
+
+// DBNZ Y,rel ($FE) decrements Y and branches while it is non-zero, setting no
+// flags: Y=$01 -> $00 falls through, and Z is NOT raised by the zero result.
+TEST(LoopBranch, DbnzYDecrementsWithoutSettingFlags) {
+  FlatRamBus bus;
+  const Spc700 cpu =
+      run1(Spc700State{.pc = 0x0500, .y = 0x01, .psw = 0}, {0xFE, 0x7F}, bus);
+  EXPECT_EQ(cpu.state().y, 0x00);
+  EXPECT_EQ(cpu.state().pc, 0x0502);
+  EXPECT_EQ(cpu.state().psw & kFlagZ, 0u);
+}
+
+// Y=$02 -> $01 is non-zero, so it branches by the signed offset.
+TEST(LoopBranch, DbnzYBranchesWhileNonzero) {
+  FlatRamBus bus;
+  const Spc700 cpu =
+      run1(Spc700State{.pc = 0x0500, .y = 0x02, .psw = 0}, {0xFE, 0x10}, bus);
+  EXPECT_EQ(cpu.state().y, 0x01);
+  EXPECT_EQ(cpu.state().pc, 0x0512);
+}
+
+// ── Calls and returns — the pushed return address is the NEXT instruction ─────
+// CALL !abs ($3F) pushes $0203 (past the 3-byte call) high-byte-first, so the
+// low byte lands at the lower stack address; RET pops it back exactly.
+TEST(CallReturn, CallPushesNextAddressAndReturnRestoresIt) {
+  FlatRamBus bus;
+  bus.ram[0x0200] = 0x3F;
+  bus.ram[0x0201] = 0x34;
+  bus.ram[0x0202] = 0x12;  // CALL $1234
+  bus.ram[0x1234] = 0x6F;  // RET
+  Spc700 cpu(Spc700State{.pc = 0x0200, .sp = 0xEF});
+  cpu.step(bus);  // CALL
+  EXPECT_EQ(cpu.state().pc, 0x1234);
+  EXPECT_EQ(cpu.state().sp, 0xED);
+  EXPECT_EQ(bus.ram[0x01EF], 0x02);  // return high at the higher address
+  EXPECT_EQ(bus.ram[0x01EE], 0x03);  // return low ($0203) at the lower address
+  cpu.step(bus);  // RET
+  EXPECT_EQ(cpu.state().pc, 0x0203);
+  EXPECT_EQ(cpu.state().sp, 0xEF);
+}
+
+// PCALL up ($4F) calls the high page: target = $FF00 + up. up=$C0 -> $FFC0.
+TEST(CallReturn, PcallTargetsHighPage) {
+  FlatRamBus bus;
+  bus.ram[0x0600] = 0x4F;
+  bus.ram[0x0601] = 0xC0;
+  Spc700 cpu(Spc700State{.pc = 0x0600, .sp = 0xEF});
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().pc, 0xFFC0);
+  EXPECT_EQ(cpu.state().sp, 0xED);
+  EXPECT_EQ(bus.ram[0x01EF], 0x06);
+  EXPECT_EQ(bus.ram[0x01EE], 0x02);  // return low ($0602)
+}
+
+// TCALL n reads its target from the vector table at $FFDE - 2n. TCALL3 ($31)
+// reads $FFD8 (= $FFDE - 6) and jumps to the address stored there.
+TEST(CallReturn, TcallReadsItsVector) {
+  FlatRamBus bus;
+  bus.ram[0x0700] = 0x31;  // TCALL3
+  bus.ram[0xFFD8] = 0x40;  // vector low
+  bus.ram[0xFFD9] = 0x20;  // vector high
+  Spc700 cpu(Spc700State{.pc = 0x0700, .sp = 0xEF});
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().pc, 0x2040);
+  EXPECT_EQ(bus.ram[0x01EF], 0x07);
+  EXPECT_EQ(bus.ram[0x01EE], 0x01);  // return low ($0701)
+}
+
+// BRK ($0F) pushes PC and PSW, sets B, clears I, and vectors through $FFDE. The
+// pushed PSW is the value BEFORE B and I are altered.
+TEST(CallReturn, BrkVectorsAndSetsBreakClearsInterrupt) {
+  FlatRamBus bus;
+  bus.ram[0x0800] = 0x0F;
+  bus.ram[0xFFDE] = 0x00;
+  bus.ram[0xFFDF] = 0x30;  // BRK vector -> $3000
+  Spc700 cpu(Spc700State{.pc = 0x0800, .sp = 0xEF, .psw = kFlagI});
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().pc, 0x3000);
+  EXPECT_EQ(cpu.state().psw & kFlagB, kFlagB);
+  EXPECT_EQ(cpu.state().psw & kFlagI, 0u);
+  EXPECT_EQ(bus.ram[0x01ED], kFlagI);  // pushed PSW, pre-modification
+}
+
+// RETI ($7F) pops the status word first, then the program counter — the inverse
+// of the interrupt push order.
+TEST(CallReturn, RetiRestoresStatusThenProgramCounter) {
+  FlatRamBus bus;
+  bus.ram[0x0900] = 0x7F;
+  bus.ram[0x01ED] = static_cast<std::uint8_t>(kFlagC | kFlagN);
+  bus.ram[0x01EE] = 0x34;
+  bus.ram[0x01EF] = 0x12;
+  Spc700 cpu(Spc700State{.pc = 0x0900, .sp = 0xEC});
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().psw, static_cast<std::uint8_t>(kFlagC | kFlagN));
+  EXPECT_EQ(cpu.state().pc, 0x1234);
+  EXPECT_EQ(cpu.state().sp, 0xEF);
+}
+
+// ── Stack push / pop ─────────────────────────────────────────────────────────
+// PUSH A then POP X round-trips the byte through the stack; POP sets no flags,
+// so a zero popped into X leaves Z clear.
+TEST(StackOps, PushPopRoundTripsAndPopSetsNoFlags) {
+  FlatRamBus bus;
+  bus.ram[0x0A00] = 0x2D;  // PUSH A
+  bus.ram[0x0A01] = 0xCE;  // POP X
+  Spc700 cpu(Spc700State{.pc = 0x0A00, .a = 0x00, .x = 0xFF, .sp = 0xEF, .psw = 0});
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().sp, 0xEE);
+  EXPECT_EQ(bus.ram[0x01EF], 0x00);
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().x, 0x00);
+  EXPECT_EQ(cpu.state().sp, 0xEF);
+  EXPECT_EQ(cpu.state().psw & kFlagZ, 0u);
+}
+
+// POP PSW ($8E) is the one pop that restores flags — the whole status word.
+TEST(StackOps, PopStatusWordRestoresAllFlags) {
+  FlatRamBus bus;
+  bus.ram[0x0A00] = 0x8E;
+  bus.ram[0x01F0] = 0xFF;
+  Spc700 cpu(Spc700State{.pc = 0x0A00, .sp = 0xEF, .psw = 0});
+  cpu.step(bus);
+  EXPECT_EQ(cpu.state().psw, 0xFF);
+  EXPECT_EQ(cpu.state().sp, 0xF0);
+}
+
+// The stack pointer is 8-bit and stays in page $01: a push at SP=$00 writes
+// $0100 and wraps SP to $FF.
+TEST(StackOps, StackWrapsWithinPageOne) {
+  FlatRamBus bus;
+  bus.ram[0x0A00] = 0x2D;  // PUSH A
+  Spc700 cpu(Spc700State{.pc = 0x0A00, .a = 0x7E, .sp = 0x00});
+  cpu.step(bus);
+  EXPECT_EQ(bus.ram[0x0100], 0x7E);
+  EXPECT_EQ(cpu.state().sp, 0xFF);
+}
+
+// ── Status-flag operations ───────────────────────────────────────────────────
+// CLRV ($E0) clears V and, uniquely, H too — the table's "Clears V and H". C is
+// left alone.
+TEST(FlagOps, ClrvClearsOverflowAndHalfCarry) {
+  FlatRamBus bus;
+  const Spc700 cpu = run1(
+      Spc700State{.pc = 0x0B00,
+                  .psw = static_cast<std::uint8_t>(kFlagV | kFlagH | kFlagC)},
+      {0xE0}, bus);
+  EXPECT_EQ(cpu.state().psw & kFlagV, 0u);
+  EXPECT_EQ(cpu.state().psw & kFlagH, 0u);
+  EXPECT_EQ(cpu.state().psw & kFlagC, kFlagC);
+}
+
+// NOTC ($ED) toggles carry either way.
+TEST(FlagOps, NotcTogglesCarry) {
+  FlatRamBus busSet;
+  const Spc700 set = run1(Spc700State{.pc = 0x0B00, .psw = 0}, {0xED}, busSet);
+  EXPECT_EQ(set.state().psw & kFlagC, kFlagC);
+  FlatRamBus busClr;
+  const Spc700 clr = run1(Spc700State{.pc = 0x0B00, .psw = kFlagC}, {0xED}, busClr);
+  EXPECT_EQ(clr.state().psw & kFlagC, 0u);
+}
+
+// EI ($A0) sets the interrupt-enable flag; DI ($C0) clears it. The SPC700's I is
+// enable, not the 6502's disable — the mnemonics flip accordingly.
+TEST(FlagOps, EiSetsInterruptAndDiClears) {
+  FlatRamBus busEi;
+  const Spc700 ei = run1(Spc700State{.pc = 0x0B00, .psw = 0}, {0xA0}, busEi);
+  EXPECT_EQ(ei.state().psw & kFlagI, kFlagI);
+  FlatRamBus busDi;
+  const Spc700 di = run1(Spc700State{.pc = 0x0B00, .psw = kFlagI}, {0xC0}, busDi);
+  EXPECT_EQ(di.state().psw & kFlagI, 0u);
 }
 
 }  // namespace

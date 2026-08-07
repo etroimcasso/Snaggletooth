@@ -270,6 +270,47 @@ class Spc700 {
               static_cast<std::uint8_t>(v >> 8));
   }
 
+  // The stack lives in page $01, addressed by SP as its low byte. A push writes
+  // then post-decrements SP; a pop pre-increments then reads. SP is an 8-bit
+  // register, so it wraps within the page.
+  template <ApuBus B>
+  void push(B& bus, std::uint8_t v) {
+    bus.write(static_cast<std::uint16_t>(0x0100u + state_.sp), v);
+    --state_.sp;
+  }
+  template <ApuBus B>
+  std::uint8_t pop(B& bus) {
+    ++state_.sp;
+    return bus.read(static_cast<std::uint16_t>(0x0100u + state_.sp));
+  }
+  // A 16-bit value on the stack: the high byte is pushed first, so the low byte
+  // lands at the lower address and is the first one popped back.
+  template <ApuBus B>
+  void pushWord(B& bus, std::uint16_t w) {
+    push(bus, static_cast<std::uint8_t>(w >> 8));
+    push(bus, static_cast<std::uint8_t>(w));
+  }
+  template <ApuBus B>
+  std::uint16_t popWord(B& bus) {
+    std::uint16_t lo = pop(bus);
+    std::uint16_t hi = pop(bus);
+    return static_cast<std::uint16_t>(lo | (hi << 8));
+  }
+
+  // Consumes the relative-offset byte and, when the condition holds, adds it to
+  // PC as a signed displacement — PC already points past the whole instruction.
+  // Returns the taken or not-taken cycle count.
+  template <ApuBus B>
+  std::uint32_t branchIf(B& bus, bool taken, std::uint32_t takenCycles,
+                         std::uint32_t notTakenCycles) {
+    const std::int8_t rel = static_cast<std::int8_t>(fetch(bus));
+    if (taken) {
+      state_.pc = static_cast<std::uint16_t>(state_.pc + rel);
+      return takenCycles;
+    }
+    return notTakenCycles;
+  }
+
   Spc700State state_{};
 };
 
@@ -760,10 +801,126 @@ std::uint32_t Spc700::step(B& bus) {
       return 6;
     }
 
+    // ---- conditional and unconditional relative branches (2 cycles, +2 when
+    //      taken; BRA is always taken) ----
+    case 0x2F: return branchIf(bus, true, 4, 4);                                                  // BRA
+    case 0xF0: return branchIf(bus, (state_.psw & kFlagZ) != 0, 4, 2);                            // BEQ
+    case 0xD0: return branchIf(bus, (state_.psw & kFlagZ) == 0, 4, 2);                            // BNE
+    case 0xB0: return branchIf(bus, (state_.psw & kFlagC) != 0, 4, 2);                            // BCS
+    case 0x90: return branchIf(bus, (state_.psw & kFlagC) == 0, 4, 2);                            // BCC
+    case 0x70: return branchIf(bus, (state_.psw & kFlagV) != 0, 4, 2);                            // BVS
+    case 0x50: return branchIf(bus, (state_.psw & kFlagV) == 0, 4, 2);                            // BVC
+    case 0x30: return branchIf(bus, (state_.psw & kFlagN) != 0, 4, 2);                            // BMI
+    case 0x10: return branchIf(bus, (state_.psw & kFlagN) == 0, 4, 2);                            // BPL
+
+    // ---- branch on one direct-page bit: BBS on set / BBC on clear. The bit index
+    //      is in opcode bits 5-7; BBC is the odd high nibble (5/7 cycles) ----
+    case 0x03: case 0x23: case 0x43: case 0x63: case 0x83: case 0xA3: case 0xC3: case 0xE3:       // BBS dp.0..7,rel
+    case 0x13: case 0x33: case 0x53: case 0x73: case 0x93: case 0xB3: case 0xD3: case 0xF3: {     // BBC dp.0..7,rel
+      const std::uint8_t high = static_cast<std::uint8_t>(opcode >> 4);
+      const std::uint8_t bit = static_cast<std::uint8_t>(high >> 1);
+      const bool branchOnSet = (high & 1u) == 0u;  // even high nibble = BBS
+      const std::uint8_t m = bus.read(addrDp(bus));
+      const bool isSet = ((m >> bit) & 1u) != 0u;
+      return branchIf(bus, isSet == branchOnSet, 7, 5);
+    }
+
+    // ---- compare-and-branch / decrement-and-branch. The internal compare or
+    //      decrement leaves PSW untouched — these set no flags ----
+    case 0x2E: return branchIf(bus, state_.a != bus.read(addrDp(bus)),  7, 5);                    // CBNE dp,rel
+    case 0xDE: return branchIf(bus, state_.a != bus.read(addrDpX(bus)), 8, 6);                    // CBNE dp+X,rel
+    case 0x6E: {                                                                                  // DBNZ dp,rel
+      const std::uint16_t addr = addrDp(bus);
+      const std::uint8_t v = static_cast<std::uint8_t>(bus.read(addr) - 1);
+      bus.write(addr, v);
+      return branchIf(bus, v != 0, 7, 5);
+    }
+    case 0xFE: --state_.y; return branchIf(bus, state_.y != 0, 6, 4);                             // DBNZ Y,rel
+
+    // ---- jumps ----
+    case 0x5F: state_.pc = addrAbs(bus); return 3;                                                // JMP !abs
+    case 0x1F: {                                                                                  // JMP [!abs+X]
+      const std::uint16_t ptr = addrAbsX(bus);
+      const std::uint16_t lo = bus.read(ptr);
+      const std::uint16_t hi = bus.read(static_cast<std::uint16_t>(ptr + 1));
+      state_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
+      return 6;
+    }
+
+    // ---- subroutine calls and returns. The pushed return address is the next
+    //      instruction with no 6502-style pre-decrement; RET pops it directly ----
+    case 0x3F: {                                                                                  // CALL !abs
+      const std::uint16_t target = addrAbs(bus);
+      pushWord(bus, state_.pc);
+      state_.pc = target;
+      return 8;
+    }
+    case 0x4F: {                                                                                  // PCALL up (CALL $FF00+up)
+      const std::uint16_t target = static_cast<std::uint16_t>(0xFF00u | fetch(bus));
+      pushWord(bus, state_.pc);
+      state_.pc = target;
+      return 6;
+    }
+    case 0x01: case 0x11: case 0x21: case 0x31: case 0x41: case 0x51: case 0x61: case 0x71:       // TCALL 0..7
+    case 0x81: case 0x91: case 0xA1: case 0xB1: case 0xC1: case 0xD1: case 0xE1: case 0xF1: {     // TCALL 8..15
+      const std::uint8_t n = static_cast<std::uint8_t>(opcode >> 4);
+      const std::uint16_t vec = static_cast<std::uint16_t>(0xFFDEu - 2u * n);
+      pushWord(bus, state_.pc);
+      const std::uint16_t lo = bus.read(vec);
+      const std::uint16_t hi = bus.read(static_cast<std::uint16_t>(vec + 1));
+      state_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
+      return 8;
+    }
+    case 0x6F: state_.pc = popWord(bus); return 5;                                                // RET
+    case 0x7F: {                                                                                  // RETI
+      state_.psw = pop(bus);
+      state_.pc = popWord(bus);
+      return 6;
+    }
+    case 0x0F: {                                                                                  // BRK
+      pushWord(bus, state_.pc);
+      push(bus, state_.psw);
+      state_.psw = static_cast<std::uint8_t>((state_.psw | kFlagB) & ~kFlagI);
+      const std::uint16_t lo = bus.read(static_cast<std::uint16_t>(0xFFDEu));
+      const std::uint16_t hi = bus.read(static_cast<std::uint16_t>(0xFFDFu));
+      state_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
+      return 8;
+    }
+
+    // ---- stack push / pop (POP sets no flags except POP PSW, which restores
+    //      the whole status word) ----
+    case 0x2D: push(bus, state_.a);   return 4;                                                   // PUSH A
+    case 0x4D: push(bus, state_.x);   return 4;                                                   // PUSH X
+    case 0x6D: push(bus, state_.y);   return 4;                                                   // PUSH Y
+    case 0x0D: push(bus, state_.psw); return 4;                                                   // PUSH PSW
+    case 0xAE: state_.a = pop(bus);   return 4;                                                   // POP A
+    case 0xCE: state_.x = pop(bus);   return 4;                                                   // POP X
+    case 0xEE: state_.y = pop(bus);   return 4;                                                   // POP Y
+    case 0x8E: state_.psw = pop(bus); return 4;                                                   // POP PSW
+
+    // ---- status-flag operations ----
+    case 0x60: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagC); return 2;            // CLRC
+    case 0x80: state_.psw = static_cast<std::uint8_t>(state_.psw |  kFlagC); return 2;            // SETC
+    case 0xED: state_.psw = static_cast<std::uint8_t>(state_.psw ^  kFlagC); return 3;            // NOTC
+    case 0xE0: state_.psw = static_cast<std::uint8_t>(state_.psw & ~(kFlagV | kFlagH)); return 2; // CLRV (clears V and H)
+    case 0x20: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagP); return 2;            // CLRP
+    case 0x40: state_.psw = static_cast<std::uint8_t>(state_.psw |  kFlagP); return 2;            // SETP
+    case 0xA0: state_.psw = static_cast<std::uint8_t>(state_.psw |  kFlagI); return 3;            // EI
+    case 0xC0: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagI); return 3;            // DI
+
+    // ---- no-operation and halt. SLEEP and STOP advance PC past the opcode, set
+    //      the run state, and take 7 cycles — the opcode fetch, a dummy read of
+    //      the next byte, then the halt loop's wait/read cycles the oracle
+    //      captures (the SNESdev table's 3/2 are its notional counts). A later
+    //      step on a halted core returns 2 and touches nothing (the guard above). ----
+    case 0x00: return 2;                                                                          // NOP
+    case 0xEF: state_.run = RunState::Sleeping; return 7;                                         // SLEEP
+    case 0xFF: state_.run = RunState::Stopped;  return 7;                                         // STOP
+
     default:
-      // No opcode outside the MOV and 8-bit ALU families is implemented yet.
-      // Returning a zero cycle count with no state change makes an unrouted
-      // opcode fail the vector suite loudly.
+      // Every opcode is now routed; this arm is unreachable. It stays as a loud
+      // failure — zero cycles, no state change — so any future dispatch gap
+      // reddens the vector suite instead of passing silently.
       return 0;
   }
 }
