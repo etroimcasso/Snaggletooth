@@ -77,6 +77,27 @@ constexpr std::uint8_t kAluOpcodes[] = {
     0x9F,
 };
 
+// The 37 opcodes of the 16-bit and single-bit families — the SNESdev table's
+// "16-bit operations" (word moves, INCW/DECW, ADDW/SUBW/CMPW, MUL, DIV), "decimal
+// adjust" (DAA/DAS) and "memory bit operations" (SET1/CLR1, TSET1/TCLR1, the
+// carry-bit AND1/OR1/EOR1/NOT1/MOV1). Same parameterized runner as the lists above.
+constexpr std::uint8_t kWordBitOpcodes[] = {
+    // 16-bit word moves, increment/decrement, arithmetic
+    0xBA, 0xDA, 0x3A, 0x1A, 0x7A, 0x9A, 0x5A,
+    // multiply / divide
+    0xCF, 0x9E,
+    // decimal adjust
+    0xDF, 0xBE,
+    // SET1 dp.0..7 (bit in opcode bits 5-7)
+    0x02, 0x22, 0x42, 0x62, 0x82, 0xA2, 0xC2, 0xE2,
+    // CLR1 dp.0..7
+    0x12, 0x32, 0x52, 0x72, 0x92, 0xB2, 0xD2, 0xF2,
+    // TSET1 / TCLR1
+    0x0E, 0x4E,
+    // carry-bit logic on one bit of an absolute byte
+    0x4A, 0x6A, 0x0A, 0x2A, 0x8A, 0xEA, 0xAA, 0xCA,
+};
+
 class Spc700Vectors : public ::testing::TestWithParam<std::uint8_t> {};
 
 // Every case for one opcode: seed the initial state on a zeroed 64KB bus, step
@@ -149,6 +170,14 @@ INSTANTIATE_TEST_SUITE_P(
 
 INSTANTIATE_TEST_SUITE_P(
     Alu, Spc700Vectors, ::testing::ValuesIn(kAluOpcodes),
+    [](const ::testing::TestParamInfo<std::uint8_t>& info) {
+      char label[8];
+      std::snprintf(label, sizeof label, "op%02X", info.param);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    WordBit, Spc700Vectors, ::testing::ValuesIn(kWordBitOpcodes),
     [](const ::testing::TestParamInfo<std::uint8_t>& info) {
       char label[8];
       std::snprintf(label, sizeof label, "op%02X", info.param);
