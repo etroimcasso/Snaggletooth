@@ -6,11 +6,26 @@ namespace {
 
 // DSP register addresses the voice stream reads and writes. Per-voice
 // registers live at voice*10h plus the per-voice offset.
+constexpr std::uint8_t kDspKon = 0x4C;
+constexpr std::uint8_t kDspKoff = 0x5C;
 constexpr std::uint8_t kDspDir = 0x5D;
 constexpr std::uint8_t kDspEndx = 0x7C;
 constexpr std::uint8_t kVoicePitchLow = 0x02;
 constexpr std::uint8_t kVoicePitchHigh = 0x03;
 constexpr std::uint8_t kVoiceSrcn = 0x04;
+constexpr std::uint8_t kVoiceAdsr1 = 0x05;
+constexpr std::uint8_t kVoiceAdsr2 = 0x06;
+constexpr std::uint8_t kVoiceGain = 0x07;
+constexpr std::uint8_t kVoiceEnvx = 0x08;
+
+// The global counter's power-on / wrap value: it counts down from 0x77FF.
+constexpr std::uint16_t kGlobalCounterReload = 0x77FF;
+
+// The envelope/noise rate tables — parser-generated, cross-checked against the
+// references (see the generated file's header). kEnvelopePeriod[0] == 0 is the
+// 'never' sentinel (rate 0 = Infinite); kEnvelopePeriod[31] == 1 fires every
+// sample. kEnvelopeOffset delays each rate's phase within its period.
+#include "generated/envelope_counter_tables.inc"
 
 [[nodiscard]] std::uint8_t voiceRegister(std::size_t voice, std::uint8_t offset) noexcept {
   return static_cast<std::uint8_t>(voice * 0x10 + offset);
@@ -68,6 +83,23 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
   if (value > 0x7FFF) value = 0x7FFF;
   if (value < -0x8000) value = -0x8000;
   return static_cast<std::int16_t>(((value & 0x7FFF) ^ 0x4000) - 0x4000);
+}
+
+// The exponential envelope decrease shared by Decay, Sustain and GAIN
+// Exp-Decrease: level -= 1, then level -= level >> 8 (the right shift is
+// arithmetic, so the two-step form never drives the level below 0).
+[[nodiscard]] int expDecrease(int level) noexcept {
+  const int stepped = level - 1;
+  return stepped - (stepped >> 8);
+}
+
+// Saturates an envelope value to the unsigned 11-bit range 0..0x7FF (the
+// hardware clamps rather than wraps: a decrease past 0 sticks at 0, an attack
+// past 0x7FF sticks at 0x7FF).
+[[nodiscard]] std::uint16_t clampEnvelope(int level) noexcept {
+  if (level < 0) return 0;
+  if (level > 0x7FF) return 0x7FF;
+  return static_cast<std::uint16_t>(level);
 }
 
 // The voice's 14-bit pitch step, read live from VxPITCHL/H; the register
@@ -195,6 +227,151 @@ std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 std::int16_t interpolatedSample(const DspState& dsp, std::size_t voice) noexcept {
   const VoiceState& v = dsp.voices[voice];
   return gaussInterpolate(v.window, static_cast<std::uint8_t>((v.pitchCounter >> 4) & 0xFF));
+}
+
+std::uint16_t nextGlobalCounter(std::uint16_t counter) noexcept {
+  return counter == 0 ? kGlobalCounterReload : static_cast<std::uint16_t>(counter - 1);
+}
+
+bool envelopeRateFires(std::uint16_t counter, std::uint8_t rate) noexcept {
+  const int period = kEnvelopePeriod[rate & 0x1F];
+  if (period == 0) return false;  // rate 0 (Infinite) never fires
+  const int offset = kEnvelopeOffset[rate & 0x1F];
+  return (counter + offset) % period == 0;
+}
+
+void tickDspSample(DspState& dsp) noexcept {
+  dsp.globalCounter = nextGlobalCounter(dsp.globalCounter);
+  ++dsp.sampleIndex;
+}
+
+void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                std::size_t voice) noexcept {
+  startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
+  VoiceState& v = dsp.voices[voice];
+  v.phase = EnvPhase::Attack;
+  v.konDelay = 5;
+  // Key-on clears this voice's ENDX bit; a same-sample end-block set does not
+  // override the clear, so clearing after the priming decode is correct.
+  dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
+}
+
+void keyOffVoice(DspState& dsp, std::size_t voice) noexcept {
+  dsp.voices[voice].phase = EnvPhase::Release;
+}
+
+void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept {
+  // The poll runs on even-indexed samples counted from power-on — a fixed
+  // choice that settles the hardware's probabilistic power-on poll phase.
+  if (dsp.sampleIndex % 2 != 0) return;
+
+  const std::uint8_t kon = dsp[kDspKon];
+  const std::uint8_t koff = dsp[kDspKoff];
+  for (std::size_t voice = 0; voice < 8; ++voice) {
+    const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
+    if ((koff & bit) != 0) keyOffVoice(dsp, voice);
+    // KON is applied after KOFF, so a voice with both bits set keys on.
+    if ((kon & bit) != 0) keyOnVoice(dsp, ram, voice);
+  }
+  // Load the internal-KON latch; the previous poll's latch (about two samples
+  // old) is replaced here.
+  dsp.internalKon = kon;
+}
+
+std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMute) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  const auto writeEnvx = [&] {
+    dsp[voiceRegister(voice, kVoiceEnvx)] = static_cast<std::uint8_t>(v.envelope >> 4);
+  };
+
+  // Post-key-on startup: five silent samples during which the level holds at 0
+  // (set at key-on) and neither the envelope nor the stream advances.
+  if (v.konDelay > 0) {
+    --v.konDelay;
+    writeEnvx();
+    return v.envelope;
+  }
+
+  // A BRR End+Mute block moves the voice to Release and drops the level to 0
+  // immediately (the documented -0x800 step reaches 0 from any level).
+  if (brrEndMute) {
+    v.phase = EnvPhase::Release;
+    v.envelope = 0;
+    v.bentGainRef = 0;
+    writeEnvx();
+    return 0;
+  }
+
+  const std::uint8_t adsr1 = dsp[voiceRegister(voice, kVoiceAdsr1)];
+  const std::uint8_t adsr2 = dsp[voiceRegister(voice, kVoiceAdsr2)];
+  const std::uint8_t gain = dsp[voiceRegister(voice, kVoiceGain)];
+  const int level = v.envelope;
+
+  int newLevel = level;
+  bool fires = false;
+
+  if (v.phase == EnvPhase::Release) {
+    fires = true;  // Release runs every sample (rate 31)
+    newLevel = level - 8;
+  } else if ((adsr1 & 0x80) != 0) {
+    switch (v.phase) {
+      case EnvPhase::Attack: {
+        const auto rate = static_cast<std::uint8_t>((adsr1 & 0x0F) * 2 + 1);
+        fires = envelopeRateFires(dsp.globalCounter, rate);
+        if (fires) newLevel = level + ((adsr1 & 0x0F) == 0x0F ? 1024 : 32);
+        break;
+      }
+      case EnvPhase::Decay: {
+        const auto rate = static_cast<std::uint8_t>(((adsr1 >> 4) & 0x07) * 2 + 16);
+        fires = envelopeRateFires(dsp.globalCounter, rate);
+        if (fires) newLevel = expDecrease(level);
+        break;
+      }
+      case EnvPhase::Sustain: {
+        fires = envelopeRateFires(dsp.globalCounter, static_cast<std::uint8_t>(adsr2 & 0x1F));
+        if (fires) newLevel = expDecrease(level);
+        break;
+      }
+      case EnvPhase::Release:
+        break;  // handled above
+    }
+  } else if ((gain & 0x80) == 0) {
+    fires = true;  // Direct Gain: a fixed level, no rate
+    newLevel = (gain & 0x7F) << 4;
+  } else {
+    fires = envelopeRateFires(dsp.globalCounter, static_cast<std::uint8_t>(gain & 0x1F));
+    if (fires) {
+      switch ((gain >> 5) & 0x03) {
+        case 0: newLevel = level - 32; break;         // Linear Decrease
+        case 1: newLevel = expDecrease(level); break;  // Exp Decrease
+        case 2: newLevel = level + 32; break;          // Linear Increase
+        default:                                       // Bent Increase
+          newLevel = level + (v.bentGainRef < 0x600 ? 32 : 8);
+          break;
+      }
+    }
+  }
+
+  if (!fires) {
+    writeEnvx();
+    return v.envelope;
+  }
+
+  // The Attack->Decay switch needs the pre-clamp value to exceed 0x7FF (Anomie):
+  // an attack reaching 0x800 clips to 0x7FF and enters Decay. The Bent-Increase
+  // reference is the new value clipped, not clamped, to 11 bits.
+  const bool attackToDecay = (v.phase == EnvPhase::Attack) && (newLevel > 0x7FF);
+  v.bentGainRef = static_cast<std::uint16_t>(newLevel & 0x7FF);
+  v.envelope = clampEnvelope(newLevel);
+
+  // Decay->Sustain when the level's upper 3 bits reach the sustain level.
+  if (v.phase == EnvPhase::Decay) {
+    if ((v.envelope >> 8) == ((adsr2 >> 5) & 0x07)) v.phase = EnvPhase::Sustain;
+  }
+  if (attackToDecay) v.phase = EnvPhase::Decay;
+
+  writeEnvx();
+  return v.envelope;
 }
 
 }  // namespace snaggletooth
