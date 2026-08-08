@@ -4,8 +4,10 @@
 // registers. This header carries the DSP's state as a value and the voice
 // sample pipeline's pure mechanisms: BRR sample decode (turning a 9-byte
 // compressed block into sixteen 15-bit samples), the sample-directory read,
-// the per-voice BRR streaming interlock under a pitch counter, and 4-point
-// Gaussian interpolation over the stream's four most recent samples.
+// the per-voice BRR streaming interlock under a pitch counter, 4-point
+// Gaussian interpolation over the stream's four most recent samples, the volume
+// envelope, and the output stage — envelope application, per-voice volume, and
+// the eight-voice sum into a 32 kHz stereo frame.
 //
 // A BRR block is decoded exactly as the hardware does — the four integer
 // filters, the shift-13..15 anomaly, and the clamp-to-16-then-clip-to-15
@@ -13,6 +15,13 @@
 // reproduce, not to sanitize. The same exactness holds for interpolation: the
 // Gaussian table is the hardware's ROM data, and the kernel keeps the
 // hardware's partial overflow handling, documented wrap included.
+//
+// The output stage is the master volume's predecessor: each voice's
+// interpolated sample is scaled by its 11-bit envelope, then by its signed
+// per-voice left/right volume, and the eight results are summed with a 16-bit
+// clamp after every addition. MVOL, echo and the FLG mute arrive with the DSP's
+// completion, so a frame here is the dry per-voice mix, not the final DAC
+// output.
 
 #include <array>
 #include <cstddef>
@@ -108,6 +117,16 @@ struct DspState {
   [[nodiscard]] auto end() const noexcept { return regs.end(); }
 };
 
+// One 32 kHz stereo output sample. This is the DSP's interim delivery surface:
+// the dry eight-voice mix, before the master volume and echo the DSP's
+// completion adds. The public streaming API replaces or wraps it later.
+struct StereoFrame {
+  std::int16_t left = 0;
+  std::int16_t right = 0;
+
+  [[nodiscard]] bool operator==(const StereoFrame&) const noexcept = default;
+};
+
 // A voice's BRR source, read from the sample directory: the start address used
 // when the voice is keyed on, and the loop address jumped to when a block's end
 // flag is reached.
@@ -189,6 +208,21 @@ std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 // after that sample's KON/KOFF poll and per-voice envelope steps — so the first
 // sample after power-on carries index 0 (even) and polls.
 void tickDspSample(DspState& dsp) noexcept;
+
+// Generates one 32 kHz stereo output sample and advances the whole DSP by it.
+// The order is the hardware's: poll KON/KOFF, then for each of the eight voices
+// stream a sample, step its envelope, and fold its enveloped amplitude into the
+// left/right sum through the per-voice volume, then tick the per-sample state.
+//
+// A voice in its post-key-on startup outputs silence and neither streams nor
+// advances its envelope past the countdown. Otherwise the enveloped amplitude
+// is (interpolated * envelope) >> 11 — the internal -4000h..+3FFFh sample that
+// VxOUTX returns the high byte of and PMON reads. Each channel adds
+// (amplitude * VxVOL) >> 6 (the signed 8-bit volume with the BRR-dropped low
+// bit recovered), and the sum is clamped to signed 16 bits after every
+// addition. The returned frame is the dry mix: no master volume, echo or mute.
+[[nodiscard]] StereoFrame stepDspSample(DspState& dsp,
+                                        std::span<const std::uint8_t, 65536> ram) noexcept;
 
 // Runs the KON/KOFF poll. On even-indexed samples it reads the KON ($4C) and
 // KOFF ($5C) registers: a set KON bit latches internal-KON and keys the voice on

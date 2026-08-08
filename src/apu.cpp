@@ -36,6 +36,7 @@ Apu::Apu(ApuState state) : state_(std::move(state)) { cpu_.restore(state_.cpu); 
 void Apu::restore(ApuState state) {
   state_ = std::move(state);
   cpu_.restore(state_.cpu);
+  frames_.clear();  // pending output belongs to the machine that produced it
 }
 
 void Apu::writePort(std::uint8_t index, std::uint8_t value) {
@@ -110,9 +111,22 @@ void Apu::advanceTimers(std::uint32_t cycles) {
 void Apu::advanceDsp(std::uint32_t cycles) {
   // One DSP sample every 32 machine cycles (32 kHz). The divider free-runs and
   // wraps at 65536 — a multiple of 32, so the sample phase survives the wrap. It
-  // is retained across reset(); nothing reads its sample ticks in this unit.
-  state_.dsp.sampleDivider =
-      static_cast<std::uint16_t>(state_.dsp.sampleDivider + cycles);
+  // is retained across reset().
+  const std::uint32_t before = state_.dsp.sampleDivider;
+  const std::uint32_t after = before + cycles;
+  state_.dsp.sampleDivider = static_cast<std::uint16_t>(after);
+
+  // Generate a stereo frame for each 32-cycle boundary the divider crossed.
+  const std::uint32_t samples = (after / 32u) - (before / 32u);
+  const std::span<const std::uint8_t, 65536> ram{state_.ram};
+  for (std::uint32_t n = 0; n < samples; ++n)
+    frames_.push_back(stepDspSample(state_.dsp, ram));
+}
+
+std::vector<StereoFrame> Apu::takeFrames() {
+  std::vector<StereoFrame> drained = std::move(frames_);
+  frames_.clear();
+  return drained;
 }
 
 void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
@@ -138,6 +152,7 @@ void Apu::reset() {
     fresh.ram[addr] = state_.ram[addr];
   state_ = std::move(fresh);
   cpu_.restore(state_.cpu);
+  frames_.clear();  // a reset abandons any un-drained output
 }
 
 std::uint8_t Apu::busRead(std::uint16_t address) {
