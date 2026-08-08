@@ -10,6 +10,8 @@ constexpr std::uint8_t kDspKon = 0x4C;
 constexpr std::uint8_t kDspKoff = 0x5C;
 constexpr std::uint8_t kDspDir = 0x5D;
 constexpr std::uint8_t kDspEndx = 0x7C;
+constexpr std::uint8_t kVoiceVolLeft = 0x00;
+constexpr std::uint8_t kVoiceVolRight = 0x01;
 constexpr std::uint8_t kVoicePitchLow = 0x02;
 constexpr std::uint8_t kVoicePitchHigh = 0x03;
 constexpr std::uint8_t kVoiceSrcn = 0x04;
@@ -17,6 +19,7 @@ constexpr std::uint8_t kVoiceAdsr1 = 0x05;
 constexpr std::uint8_t kVoiceAdsr2 = 0x06;
 constexpr std::uint8_t kVoiceGain = 0x07;
 constexpr std::uint8_t kVoiceEnvx = 0x08;
+constexpr std::uint8_t kVoiceOutx = 0x09;
 
 // The global counter's power-on / wrap value: it counts down from 0x77FF.
 constexpr std::uint16_t kGlobalCounterReload = 0x77FF;
@@ -119,7 +122,11 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 // flag sets the voice's ENDX bit — the hardware sets it at the START of
 // decoding the end block, not after it. The decoded sample shifts into the
 // window; the filter's history is the window's two newest taps.
-void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+//
+// Returns whether the sample just entered an End+Mute block (header code 1: end
+// set, loop clear) — the caller silences the voice and drops its envelope to 0.
+// An End+Loop block (code 3) returns false: it loops without muting.
+bool decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                         std::size_t voice) noexcept {
   VoiceState& v = dsp.voices[voice];
   if (v.brrSampleIndex >= 16) {
@@ -133,8 +140,10 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     v.brrSampleIndex = 0;
   }
   const std::uint8_t header = ram[v.brrAddress];
+  bool enteredEndMute = false;
   if (v.brrSampleIndex == 0 && (header & 0x01) != 0) {
     dsp[kDspEndx] |= static_cast<std::uint8_t>(1u << voice);
+    enteredEndMute = (header & 0x02) == 0;  // end set, loop clear = code 1
   }
   const std::uint8_t byte =
       ram[static_cast<std::uint16_t>(v.brrAddress + 1 + v.brrSampleIndex / 2)];
@@ -147,6 +156,31 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   v.window.old = v.window.newest;
   v.window.newest = decoded;
   ++v.brrSampleIndex;
+  return enteredEndMute;
+}
+
+// Advances a voice's stream by the samples this 32 kHz output sample passes: the
+// pitch counter gains the voice's live 14-bit step, and every whole sample
+// position it crosses is decoded. Returns whether any of those decodes entered
+// an End+Mute block. Shared by stepVoice (which reports the interpolated result)
+// and stepDspSample (which also needs the mute signal).
+bool advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                        std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  const std::uint32_t advanced = v.pitchCounter + voicePitch(dsp, voice);
+  const std::uint32_t passed = (advanced >> 12) - (v.pitchCounter >> 12);
+  v.pitchCounter = static_cast<std::uint16_t>(advanced);
+  bool endMute = false;
+  for (std::uint32_t n = 0; n < passed; ++n) endMute |= decodeStreamSample(dsp, ram, voice);
+  return endMute;
+}
+
+// Clamps a mix accumulator to signed 16 bits — the hardware clamps (never wraps)
+// after each addition in the output sum.
+[[nodiscard]] std::int32_t clampSigned16(std::int32_t value) noexcept {
+  if (value > 0x7FFF) return 0x7FFF;
+  if (value < -0x8000) return -0x8000;
+  return value;
 }
 
 }  // namespace
@@ -216,11 +250,7 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 
 std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                        std::size_t voice) noexcept {
-  VoiceState& v = dsp.voices[voice];
-  const std::uint32_t advanced = v.pitchCounter + voicePitch(dsp, voice);
-  const std::uint32_t passed = (advanced >> 12) - (v.pitchCounter >> 12);
-  v.pitchCounter = static_cast<std::uint16_t>(advanced);
-  for (std::uint32_t n = 0; n < passed; ++n) decodeStreamSample(dsp, ram, voice);
+  advanceVoiceStream(dsp, ram, voice);
   return interpolatedSample(dsp, voice);
 }
 
@@ -243,6 +273,47 @@ bool envelopeRateFires(std::uint16_t counter, std::uint8_t rate) noexcept {
 void tickDspSample(DspState& dsp) noexcept {
   dsp.globalCounter = nextGlobalCounter(dsp.globalCounter);
   ++dsp.sampleIndex;
+}
+
+StereoFrame stepDspSample(DspState& dsp,
+                          std::span<const std::uint8_t, 65536> ram) noexcept {
+  pollKeying(dsp, ram);
+
+  std::int32_t left = 0;
+  std::int32_t right = 0;
+  for (std::size_t voice = 0; voice < 8; ++voice) {
+    VoiceState& v = dsp.voices[voice];
+
+    int amplitude;
+    if (v.konDelay > 0) {
+      // Startup: the voice is silent, and neither the stream nor the envelope
+      // advances past the countdown (stepVoiceEnvelope decrements it).
+      stepVoiceEnvelope(dsp, voice, false);
+      amplitude = 0;
+    } else {
+      const bool endMute = advanceVoiceStream(dsp, ram, voice);
+      const int sample = interpolatedSample(dsp, voice);
+      const std::uint16_t envelope = stepVoiceEnvelope(dsp, voice, endMute);
+      // The envelope scales the interpolated sample into the internal
+      // -4000h..+3FFFh amplitude — the value VxOUTX reports and PMON reads.
+      amplitude = (sample * static_cast<int>(envelope)) >> 11;
+    }
+
+    // VxOUTX returns the high byte of the 15-bit amplitude (-128..+127).
+    dsp[voiceRegister(voice, kVoiceOutx)] = static_cast<std::uint8_t>((amplitude >> 7) & 0xFF);
+
+    // Each channel scales by its signed 8-bit volume and recovers the low bit
+    // the BRR decoder dropped: (amplitude * VxVOL) >> 6. The sum clamps to
+    // signed 16 bits after every voice.
+    const int volLeft = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolLeft)]);
+    const int volRight = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolRight)]);
+    left = clampSigned16(left + ((amplitude * volLeft) >> 6));
+    right = clampSigned16(right + ((amplitude * volRight) >> 6));
+  }
+
+  tickDspSample(dsp);
+  return StereoFrame{.left = static_cast<std::int16_t>(left),
+                     .right = static_cast<std::int16_t>(right)};
 }
 
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
