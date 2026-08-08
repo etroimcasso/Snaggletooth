@@ -8,19 +8,30 @@ namespace {
 // registers live at voice*10h plus the per-voice offset.
 constexpr std::uint8_t kDspMvolLeft = 0x0C;
 constexpr std::uint8_t kDspMvolRight = 0x1C;
+constexpr std::uint8_t kDspEfb = 0x0D;
+constexpr std::uint8_t kDspEvolLeft = 0x2C;
+constexpr std::uint8_t kDspEvolRight = 0x3C;
 constexpr std::uint8_t kDspPmon = 0x2D;
 constexpr std::uint8_t kDspNon = 0x3D;
 constexpr std::uint8_t kDspKon = 0x4C;
+constexpr std::uint8_t kDspEon = 0x4D;
 constexpr std::uint8_t kDspKoff = 0x5C;
 constexpr std::uint8_t kDspDir = 0x5D;
 constexpr std::uint8_t kDspFlg = 0x6C;
+constexpr std::uint8_t kDspEsa = 0x6D;
 constexpr std::uint8_t kDspEndx = 0x7C;
+constexpr std::uint8_t kDspEdl = 0x7D;
 
 // FLG bit masks: bits 0-4 are the noise rate, bit 5 disables echo writes, bit 6
 // mutes the output amplifier, bit 7 is the per-sample soft reset.
 constexpr std::uint8_t kFlgNoiseRate = 0x1F;
+constexpr std::uint8_t kFlgEchoWriteDisable = 0x20;
 constexpr std::uint8_t kFlgMute = 0x40;
 constexpr std::uint8_t kFlgSoftReset = 0x80;
+
+// The per-voice offset of the echo FIR coefficient registers: FIR0..FIR7 live at
+// $0F, $1F, ... $7F (tap*10h + this), each a signed 8-bit coefficient.
+constexpr std::uint8_t kFirCoeff = 0x0F;
 
 // The pitch step's 128 kHz ceiling: the counter advances at most four source
 // samples (four times the 32 kHz output rate) per output sample. The base 14-bit
@@ -225,6 +236,85 @@ bool advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   return value;
 }
 
+// The echo unit's per-channel FIR output, added into the main mix through EVOL.
+struct EchoOutput {
+  int left = 0;
+  int right = 0;
+};
+
+// Advances the echo unit one 32 kHz sample and returns its FIR output for the two
+// channels. It reads the oldest 4-byte ring entry (based at ESA*100h, offset by the
+// ring index) into the per-channel FIR history, runs the 8-tap filter over the last
+// eight entries, and — when echoRam is non-null and FLG bit 5 is clear — mixes the
+// EON send (sendLeft/sendRight, the EON-enabled voices' post-VxVOL sums) with the
+// FIR feedback (EFB) and writes the result back over the entry it read. The ring
+// index and FIR history advance every sample regardless of the write, so a
+// read-only caller (echoRam null) sees the static-buffer behaviour FLG bit 5
+// produces. The two channels filter separately with the same coefficients.
+EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                    std::uint8_t* echoRam, int sendLeft, int sendRight) noexcept {
+  // EDL is consulted only when the ring index is 0: latch the entry count there.
+  // EDL<<9 entries; EDL 0 latches a count of 0, which the wrap rule below turns
+  // into a single reused entry, and an EDL change is not seen until the next wrap.
+  if (dsp.echoIndex == 0)
+    dsp.echoLength = static_cast<std::uint16_t>((dsp[kDspEdl] & 0x0F) << 9);
+
+  const std::uint16_t base = static_cast<std::uint16_t>(dsp[kDspEsa] * 0x100);
+  const std::uint16_t entry = static_cast<std::uint16_t>(base + dsp.echoIndex * 4);
+  const auto at = [&](int offset) -> std::uint16_t {
+    return static_cast<std::uint16_t>(entry + offset);  // wraps within the 64KB space
+  };
+
+  // Read the entry: a 16-bit little-endian left sample then right, each stored with
+  // bit 0 cleared; the arithmetic SAR 1 recovers the 15-bit value into the FIR
+  // history's newest slot.
+  const auto sample16 = [&](int lowByte) -> int {
+    return static_cast<std::int16_t>(ram[at(lowByte)] | (ram[at(lowByte + 1)] << 8));
+  };
+  dsp.echoFirLeft[dsp.echoFirPos] = static_cast<std::int16_t>(sample16(0) >> 1);
+  dsp.echoFirRight[dsp.echoFirPos] = static_cast<std::int16_t>(sample16(2) >> 1);
+
+  // FIR: taps oldest*FIR0 ... newest*FIR7, each product SAR 6. The first seven
+  // additions wrap at 16 bits; only the final (newest) addition saturates. The
+  // newest history slot is echoFirPos, so tap k reads slot (echoFirPos+1+k) & 7.
+  const auto filter = [&](const std::array<std::int16_t, 8>& history) -> int {
+    int sum = 0;
+    for (int tap = 0; tap < 8; ++tap) {
+      const std::uint8_t slot = static_cast<std::uint8_t>((dsp.echoFirPos + 1 + tap) & 7);
+      const int coeff =
+          static_cast<std::int8_t>(dsp[voiceRegister(static_cast<std::size_t>(tap), kFirCoeff)]);
+      const int product = (history[slot] * coeff) >> 6;
+      sum = tap < 7 ? static_cast<std::int16_t>(sum + product) : clampSigned16(sum + product);
+    }
+    return sum;
+  };
+  const int firLeft = filter(dsp.echoFirLeft);
+  const int firRight = filter(dsp.echoFirRight);
+
+  // Feedback: the EON send plus fir*EFB SAR 7, clamped, bit 0 cleared, written back
+  // over the entry — unless echo writes are disabled or the caller passed no
+  // writable RAM. The FIR output feeding EVOL/EFB is the unmasked 16-bit sum; only
+  // the buffer write clears bit 0.
+  const bool writeEnabled = echoRam != nullptr && (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
+  if (writeEnabled) {
+    const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
+    const int writeLeft = clampSigned16(sendLeft + ((firLeft * efb) >> 7)) & ~1;
+    const int writeRight = clampSigned16(sendRight + ((firRight * efb) >> 7)) & ~1;
+    echoRam[at(0)] = static_cast<std::uint8_t>(writeLeft & 0xFF);
+    echoRam[at(1)] = static_cast<std::uint8_t>((writeLeft >> 8) & 0xFF);
+    echoRam[at(2)] = static_cast<std::uint8_t>(writeRight & 0xFF);
+    echoRam[at(3)] = static_cast<std::uint8_t>((writeRight >> 8) & 0xFF);
+  }
+
+  // Advance the FIR history cursor and the ring index; wrap the index at the
+  // latched length (a count of 0 collapses to the single-entry buffer).
+  dsp.echoFirPos = static_cast<std::uint8_t>((dsp.echoFirPos + 1) & 7);
+  dsp.echoIndex = static_cast<std::uint16_t>(dsp.echoIndex + 1);
+  if (dsp.echoIndex >= dsp.echoLength) dsp.echoIndex = 0;
+
+  return EchoOutput{.left = firLeft, .right = firRight};
+}
+
 }  // namespace
 
 BrrSource readBrrSource(std::span<const std::uint8_t, 65536> ram, std::uint8_t dir,
@@ -317,8 +407,11 @@ void tickDspSample(DspState& dsp) noexcept {
   ++dsp.sampleIndex;
 }
 
-StereoFrame stepDspSample(DspState& dsp,
-                          std::span<const std::uint8_t, 65536> ram) noexcept {
+// The full per-sample pipeline both public overloads share. echoRam is the machine
+// RAM the echo unit writes its feedback into, or null for a read-only caller (echo
+// still reads and contributes its output, but cannot write — the FLG bit 5 case).
+static StereoFrame stepDspSampleImpl(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                                     std::uint8_t* echoRam) noexcept {
   pollKeying(dsp, ram);
 
   const std::uint8_t flg = dsp[kDspFlg];
@@ -326,6 +419,8 @@ StereoFrame stepDspSample(DspState& dsp,
 
   std::int32_t left = 0;
   std::int32_t right = 0;
+  std::int32_t echoLeft = 0;   // the EON-enabled voices' post-VxVOL send to the echo write
+  std::int32_t echoRight = 0;
   int prevAmplitude = 0;  // the previous voice's amplitude this sample, for PMON
   for (std::size_t voice = 0; voice < 8; ++voice) {
     VoiceState& v = dsp.voices[voice];
@@ -374,18 +469,36 @@ StereoFrame stepDspSample(DspState& dsp,
     // signed 16 bits after every voice.
     const int volLeft = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolLeft)]);
     const int volRight = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolRight)]);
-    left = clampSigned16(left + ((amplitude * volLeft) >> 6));
-    right = clampSigned16(right + ((amplitude * volRight) >> 6));
+    const int sendLeft = (amplitude * volLeft) >> 6;
+    const int sendRight = (amplitude * volRight) >> 6;
+    left = clampSigned16(left + sendLeft);
+    right = clampSigned16(right + sendRight);
+    // Echo splits off after the per-voice volume: a voice enabled in EON adds the
+    // same post-volume sample into the echo send, clamped the same way. This send
+    // plus the FIR feedback is what the echo unit writes back to its buffer.
+    if (((dsp[kDspEon] >> voice) & 1) != 0) {
+      echoLeft = clampSigned16(echoLeft + sendLeft);
+      echoRight = clampSigned16(echoRight + sendRight);
+    }
   }
 
   // Master volume scales the summed mix: sum * MVOL SAR 7. The multiply truncates
   // to 16 bits with no clamp — the one overflowing case (MVOL -128 against a
-  // full-scale sum) wraps, matching the hardware. The echo the mixer adds after
-  // this is present once the echo unit is enabled.
+  // full-scale sum) wraps, matching the hardware.
   const int mvolLeft = static_cast<std::int8_t>(dsp[kDspMvolLeft]);
   const int mvolRight = static_cast<std::int8_t>(dsp[kDspMvolRight]);
   left = static_cast<std::int16_t>((left * mvolLeft) >> 7);
   right = static_cast<std::int16_t>((right * mvolRight) >> 7);
+
+  // The echo unit reads and filters its buffer and feeds back the EON send; its FIR
+  // output is added to the master-scaled mix through the echo volume (EVOL), with a
+  // 16-bit clamp. This runs every sample, before the mute gate — echo processing
+  // never stops, and the write inside stepEcho is what the delay line depends on.
+  const EchoOutput echo = stepEcho(dsp, ram, echoRam, echoLeft, echoRight);
+  const int evolLeft = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
+  const int evolRight = static_cast<std::int8_t>(dsp[kDspEvolRight]);
+  left = clampSigned16(left + ((echo.left * evolLeft) >> 7));
+  right = clampSigned16(right + ((echo.right * evolRight) >> 7));
 
   // FLG bit 6 mutes the emitted frame to silence; every internal mechanism above
   // already ran, so mute stops output only.
@@ -401,6 +514,15 @@ StereoFrame stepDspSample(DspState& dsp,
   tickDspSample(dsp);
   return StereoFrame{.left = static_cast<std::int16_t>(left),
                      .right = static_cast<std::int16_t>(right)};
+}
+
+StereoFrame stepDspSample(DspState& dsp, std::span<std::uint8_t, 65536> ram) noexcept {
+  return stepDspSampleImpl(dsp, ram, ram.data());
+}
+
+StereoFrame stepDspSample(DspState& dsp,
+                          std::span<const std::uint8_t, 65536> ram) noexcept {
+  return stepDspSampleImpl(dsp, ram, nullptr);
 }
 
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,

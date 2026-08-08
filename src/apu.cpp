@@ -121,9 +121,11 @@ void Apu::advanceDsp(std::uint32_t cycles) {
   const std::uint32_t after = before + cycles;
   state_.dsp.sampleDivider = static_cast<std::uint16_t>(after);
 
-  // Generate a stereo frame for each 32-cycle boundary the divider crossed.
+  // Generate a stereo frame for each 32-cycle boundary the divider crossed. The
+  // span is writable so the echo unit can write its feedback straight into APU RAM
+  // (its own bus access — no overlay), the delay line the echo effect depends on.
   const std::uint32_t samples = (after / 32u) - (before / 32u);
-  const std::span<const std::uint8_t, 65536> ram{state_.ram};
+  const std::span<std::uint8_t, 65536> ram{state_.ram};
   for (std::uint32_t n = 0; n < samples; ++n)
     frames_.push_back(stepDspSample(state_.dsp, ram));
 }

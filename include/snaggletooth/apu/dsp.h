@@ -23,10 +23,20 @@
 // -4000h..+3FFFh amplitude, then by its signed per-voice left/right volume, and
 // the eight results are summed with a 16-bit clamp after every addition. The
 // summed mix is then scaled by the signed master volume (MVOLL/MVOLR, a
-// truncating multiply where the -128 product wraps) and, when FLG bit 6 is set,
-// muted to silence — mute stops the emitted frame only; every voice, the noise
-// generator and the envelopes keep advancing. The echo contribution the mixer
-// adds is present once the echo unit is enabled.
+// truncating multiply where the -128 product wraps), the echo unit's output is
+// added through the echo volume (EVOLL/EVOLR), and, when FLG bit 6 is set, the
+// frame is muted to silence — mute stops the emitted frame only; every voice, the
+// noise generator, the envelopes and the echo unit keep advancing.
+//
+// The echo unit is a delay line in APU RAM: each sample it reads the oldest 4-byte
+// entry of a ring buffer based at ESA*100h, runs a per-channel 8-tap FIR filter
+// over the last eight entries, adds that output to the main mix through EVOL, and
+// — unless FLG bit 5 disables echo writes — mixes the EON-enabled voices with the
+// FIR output scaled by the echo feedback (EFB) and writes the result back over the
+// entry it read. The buffer size is EDL<<9 entries (EDL zero gives a single-entry
+// buffer); with writes disabled the buffer is a static loop that keeps feeding the
+// filter. Echo samples are 15 bits stored left-justified in a 16-bit word, so a
+// read arithmetic-shifts right one and a write clears bit 0.
 
 #include <array>
 #include <cstddef>
@@ -117,6 +127,19 @@ struct DspState {
   // advances by the documented 15-bit LFSR at the FLG noise rate, shared by every
   // NON voice. It is machine state — snapshot and restore carry it.
   std::int16_t noiseLevel = -0x4000;
+
+  // The echo unit's state. echoIndex is the ring position (in 4-byte entries) that
+  // walks the echo buffer in APU RAM based at ESA*100h; echoLength is the latched
+  // entry count (EDL<<9), read only when echoIndex is 0, so an EDL change takes up
+  // to a full buffer to take effect. The per-channel FIR history holds the last
+  // eight entries read from the buffer, newest at echoFirPos; the two channels
+  // filter separately with the same coefficients. All plain value fields — the
+  // snapshot carries them; power-on and reset default them to zero.
+  std::uint16_t echoIndex = 0;
+  std::uint16_t echoLength = 0;
+  std::array<std::int16_t, 8> echoFirLeft{};
+  std::array<std::int16_t, 8> echoFirRight{};
+  std::uint8_t echoFirPos = 0;
 
   // The eight voices' streaming state, beside the register file.
   std::array<VoiceState, 8> voices{};
@@ -225,8 +248,8 @@ void tickDspSample(DspState& dsp) noexcept;
 // The order is the hardware's: poll KON/KOFF, then for each of the eight voices
 // stream a sample, step its envelope, and fold its enveloped amplitude into the
 // left/right sum through the per-voice volume; then scale the sum by the master
-// volume, apply the mute gate, advance the shared noise generator, and tick the
-// per-sample state.
+// volume, add the echo unit's FIR output through the echo volume, apply the mute
+// gate, advance the shared noise generator, and tick the per-sample state.
 //
 // A voice in its post-key-on startup outputs silence and neither streams nor
 // advances its envelope past the countdown. Otherwise the voice's sample is its
@@ -238,8 +261,19 @@ void tickDspSample(DspState& dsp) noexcept;
 // channel adds (amplitude * VxVOL) >> 6 (the signed 8-bit volume with the
 // BRR-dropped low bit recovered), and the sum is clamped to signed 16 bits after
 // every addition. The summed mix is scaled by the signed master volume
-// (sum * MVOL >> 7, truncated so the -128 product wraps); FLG bit 6 mutes the
-// returned frame to silence while every internal mechanism keeps running.
+// (sum * MVOL >> 7, truncated so the -128 product wraps); the echo output is added
+// as (fir * EVOL) >> 7 with a 16-bit clamp; FLG bit 6 mutes the returned frame to
+// silence while every internal mechanism keeps running.
+//
+// The two overloads differ only in whether the echo unit may write its buffer.
+// The first takes writable RAM and runs the full unit, including the feedback
+// write the echo delay line depends on. The second takes read-only RAM: the echo
+// unit still reads, filters and contributes its output, but it cannot write, which
+// is identical to holding FLG bit 5 set (echo writes disabled) — the buffer is a
+// static loop. Callers that exercise the echo delay use the first; callers that
+// only need the voice mix and never arm echo use the second.
+[[nodiscard]] StereoFrame stepDspSample(DspState& dsp,
+                                        std::span<std::uint8_t, 65536> ram) noexcept;
 [[nodiscard]] StereoFrame stepDspSample(DspState& dsp,
                                         std::span<const std::uint8_t, 65536> ram) noexcept;
 
