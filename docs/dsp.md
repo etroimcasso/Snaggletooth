@@ -2,19 +2,19 @@
 
 The S-DSP is the chip that turns compressed sample data into sound. It reads BRR-encoded waveforms
 from the APU's RAM, resamples each of eight voices to its own pitch, shapes each with a volume
-envelope, and sums them into a 32 kHz stereo stream. The [APU machine](apu-machine.md) drives it: as
-the SPC700 runs, the machine clocks the DSP one sample every 32 cycles and collects the frames it
-produces.
+envelope, mixes them, applies an echo delay line, and produces a 32 kHz stereo stream. The
+[APU machine](apu-machine.md) drives it: as the SPC700 runs, the machine clocks the DSP one sample
+every 32 cycles and collects the frames it produces.
 
-This page covers the voice pipeline as it stands: BRR decode, pitch and Gaussian interpolation, the
-volume envelope, key-on/key-off, and the output stage that mixes the voices. Echo, the noise
-generator, pitch modulation, and the master volume are the DSP's remaining registers — they are
-present in the register file but not yet wired, so a frame here is the dry per-voice mix, not the
-final DAC output. The status table in the [README](../README.md) tracks what is live.
+This page covers the DSP end to end: BRR decode, pitch and Gaussian interpolation, the volume
+envelope, key-on/key-off, the shared noise generator, pitch modulation, and the output mixer — the
+per-voice sum, the master volume, the echo unit, and the mute gate — into the final 32 kHz stereo
+output. The status table in the [README](../README.md) tracks what is live.
 
 Every value in the pipeline is derived from public hardware documentation and validated against it;
-the exactness — the BRR overflow glitches, the Gaussian table's ROM values, the envelope rate tables
-— is deliberate, because a sample-accurate core is the point.
+the exactness — the BRR overflow glitches, the Gaussian table's ROM values, the envelope rate tables,
+the echo FIR's wrap-then-saturate arithmetic — is deliberate, because a sample-accurate core is the
+point.
 
 ## Running the DSP through the machine
 
@@ -65,6 +65,21 @@ Global registers the voices use:
 | `$5D` | DIR | High byte of the sample directory's address (`DIR × $100`). |
 | `$7C` | ENDX | Per-voice end flags; the DSP sets a bit when a voice reaches an end block. Any write clears all bits. |
 
+Global mixer, control, and echo registers:
+
+| Address | Register | Role |
+|---|---|---|
+| `$0C` / `$1C` | MVOLL / MVOLR | Master volume, signed 8-bit (negative inverts the phase). |
+| `$2C` / `$3C` | EVOLL / EVOLR | Echo output volume, signed 8-bit. |
+| `$0D` | EFB | Echo feedback volume, signed 8-bit. |
+| `$2D` | PMON | Pitch-modulation enable per voice (voices 1–7). |
+| `$3D` | NON | Noise enable per voice — the voice outputs the shared noise level. |
+| `$4D` | EON | Echo-send enable per voice — the voice feeds the echo buffer write. |
+| `$6C` | FLG | Soft reset (bit 7), mute (bit 6), echo-write disable (bit 5), noise rate (bits 0–4). |
+| `$6D` | ESA | Echo buffer base address (`ESA × $100`). |
+| `$7D` | EDL | Echo buffer size — `EDL << 9` 4-byte entries (`EDL` = 0 gives one entry). |
+| `$xF` | FIRx | The eight echo FIR coefficients, signed 8-bit, at `$0F`, `$1F`, … `$7F`. |
+
 VxENVX and VxOUTX are written by the DSP every sample; a value the CPU writes to them is overwritten
 at the next sample.
 
@@ -92,9 +107,9 @@ falls to zero on key-off (Release); in GAIN mode the level is driven directly or
 exponentially. A global counter gates the per-rate timing, driven by the documented rate tables.
 
 **Output.** The enveloped sample is the voice's amplitude — an internal signed value in the range
-`-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. Each channel scales it by the signed
-per-voice volume and adds it into the mix; the running sum is clamped to signed 16 bits after every
-voice. The eight scaled amplitudes summed are the frame.
+`-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit set outputs the
+shared noise level here in place of its interpolated sample. The amplitude feeds the output mixer
+(below), and it is also the value the next voice's pitch modulation reads.
 
 ## Key-on and key-off
 
@@ -112,26 +127,86 @@ poll window may collapse to the later one.
 A block whose header marks it End+Mute releases the voice and drops its envelope to zero the moment
 the voice reaches it; an End+Loop block loops without muting. Both set the voice's `ENDX` bit.
 
+## The output mixer
+
+The eight voices become a frame through a fixed chain, in this order:
+
+1. **Per-voice volume.** Each voice's amplitude is scaled by its signed `VxVOL` for each channel and
+   added into the running sum, which is clamped to signed 16 bits after every voice.
+2. **Master volume.** The sum is scaled by the signed `MVOL` for each channel (`sum × MVOL >> 7`). A
+   negative master volume inverts the phase; the one value that overflows, `MVOL = -128` against a
+   full-scale sum, wraps rather than clamping — the hardware's behavior.
+3. **Echo.** The echo unit's filtered output is scaled by the signed `EVOL` and added to the
+   master-scaled mix, clamped to signed 16 bits (see below).
+4. **Mute.** When `FLG` bit 6 is set, the emitted frame is zeroed. Mute stops only the output — every
+   voice, the envelopes, the noise generator, and the echo unit keep running.
+
+## The echo unit
+
+Echo is a delay line living in the APU's own RAM. Each sample, the unit reads the oldest 4-byte entry
+of a ring buffer, runs it through an 8-tap FIR filter, mixes the filtered signal back into the output,
+and writes a new entry built from the enabled voices plus a feedback of the filtered signal.
+
+- **The buffer** is a ring of 4-byte entries based at `ESA × $100`: a 16-bit left sample then a 16-bit
+  right sample, each holding a 15-bit value left-justified (bit 0 unused). `EDL` sizes the ring at
+  `EDL << 9` entries (`EDL` = 0 gives a single entry); the size is latched only when the ring wraps to
+  its start, so a change to `EDL` takes up to a full buffer to take effect. The buffer address wraps
+  within the 64 KB space, and the unit writes straight into RAM — a buffer placed over code or data
+  overwrites it, exactly as the hardware does.
+- **The FIR filter** runs per channel over the last eight entries read: the taps are oldest × `FIR0`
+  through newest × `FIR7`, each product shifted right 6. The first seven additions wrap at 16 bits and
+  only the final addition saturates — the documented arithmetic. Left and right filter separately with
+  the same coefficients.
+- **Output and feedback.** The filtered signal is added to the main mix through `EVOL`. Separately, the
+  voices enabled in `EON` are summed (after their per-voice volume) and added to the filtered signal
+  scaled by `EFB`; the result, with bit 0 cleared, is written back over the entry that was read.
+  `FLG` bit 5 disables the write — reads and output continue, so the buffer becomes a static loop that
+  keeps feeding the filter.
+
+A typical echo sets `ESA`/`EDL` for the delay, `EVOL` for how loud the echo is, `EFB` for how long it
+repeats, and the `FIRx` coefficients (summing near `$80`) for its tone.
+
+## Noise and pitch modulation
+
+**Noise.** One 15-bit LFSR is shared by every voice. It advances at the rate in `FLG` bits 0–4 (rate 0
+holds it), gated by the same global counter the envelopes use. A voice with its `NON` bit set outputs
+the current noise level in place of its interpolated sample — pitch and Gaussian interpolation do not
+apply to noise, though the voice keeps decoding its BRR data, so an End+Mute block still releases it.
+
+**Pitch modulation.** With a voice's `PMON` bit set (voices 1–7 only), its pitch step is scaled by the
+previous voice's current amplitude, so voice *x*−1 frequency-modulates voice *x*. A silent previous
+voice leaves the step unmodulated. The modulated step is capped at four source samples per output
+sample (128 kHz).
+
 ## Inspecting the pipeline directly
 
 The pipeline's stages are also plain functions over a `DspState`, for tests and tools that drive the
 DSP outside a running machine. `stepDspSample(dsp, ram)` produces one frame and advances the whole
-DSP — poll, then per voice stream, envelope, and mix. Below it, `decodeBrrBlock` decodes a block,
-`gaussInterpolate` runs the kernel, `stepVoice` advances one voice's stream, `stepVoiceEnvelope`
-advances one envelope, and `keyOnVoice` / `keyOffVoice` / `pollKeying` drive keying. The
-`DspState` is a value: copy it to snapshot, assign it to restore.
+DSP — poll, then per voice stream, envelope, and mix, then the echo unit. It has two forms: given
+writable RAM the echo unit writes its buffer, as in a running machine; given read-only RAM it still
+reads, filters, and outputs echo but cannot write, which is the same as holding echo writes disabled.
+Below it, `decodeBrrBlock` decodes a block, `gaussInterpolate` runs the kernel, `stepVoice` advances
+one voice's stream, `stepVoiceEnvelope` advances one envelope, and `keyOnVoice` / `keyOffVoice` /
+`pollKeying` drive keying. The `DspState` is a value: copy it to snapshot, assign it to restore.
 
 ## Gotchas
 
-- **The frame is the dry mix.** Master volume, echo, the noise generator, pitch modulation, and the
-  FLG mute are not applied yet, so a frame is the summed per-voice output and nothing more. It is not
-  the final DAC signal.
 - **Register writes take effect at the next sample.** The DSP reads its registers once per sample.
   Changes are sample-granular; the hardware's finer intra-sample access schedule is not modeled.
 - **A released voice keeps decoding.** Key-off changes only the envelope. `ENDX` bits can be set by a
   voice you have keyed off, because its stream is still running.
 - **`VxOUTX` is the high byte of the internal amplitude.** The full amplitude is `-$4000`…`+$3FFF`;
   the register carries `-128`…`+127`.
+- **`FLG` starts at `$E0`.** On reset the DSP boots muted, soft-reset, with echo writes disabled and
+  noise stopped. A driver clears `FLG` once it has set the DSP up; until then no sound is emitted.
+- **The echo buffer is raw RAM.** The unit writes `EDL << 9` entries starting at `ESA × $100` with no
+  bounds check — a buffer that overlaps a driver's code or data will overwrite it. Placement is the
+  driver's responsibility.
+- **`EDL` changes are slow.** The buffer size is latched only when the ring returns to its start, so a
+  new `EDL` value can take up to the buffer's full length to take effect.
+- **Mute and soft reset differ.** Mute (`FLG` bit 6) zeroes the emitted frame but leaves the echo
+  output running internally; soft reset (bit 7) silences the voices but does not mute the echo output.
+  Neither stops the echo unit from processing and writing its buffer.
 
 ## Where to look
 
