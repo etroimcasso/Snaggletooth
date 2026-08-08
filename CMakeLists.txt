@@ -43,6 +43,37 @@ else()
   target_compile_options(snaggletooth PRIVATE -Wall -Wextra -Werror)
 endif()
 
+# The .spc tooling — the loader, the WAV writer, and the spc_render command-line
+# renderer. A small static helper carries the loader and writer so the CLI and the
+# tests both link them. Built for a top-level developer build or whenever the tests
+# are on; a parent build that vendors the library and runs its own suite pulls in
+# none of it.
+if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
+  add_library(snaggletooth_spc STATIC
+    tools/spc/spc_loader.cpp
+    tools/spc/wav_writer.cpp
+  )
+  target_link_libraries(snaggletooth_spc PUBLIC snaggletooth::snaggletooth)
+  target_include_directories(snaggletooth_spc PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_spc PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_spc PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_spc PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_spc PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(spc_render tools/spc/spc_render_main.cpp)
+  target_link_libraries(spc_render PRIVATE snaggletooth_spc)
+  if(MSVC)
+    target_compile_options(spc_render PRIVATE /W4 /WX)
+  else()
+    target_compile_options(spc_render PRIVATE -Wall -Wextra -Werror)
+  endif()
+endif()
+
 if(SNAGGLETOOTH_BUILD_TESTS)
   enable_testing()
 
@@ -79,9 +110,14 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/dsp/voice_mix_test.cpp
     tests/dsp/noise_master_test.cpp
     tests/dsp/echo_test.cpp
+    tests/spc/loader_test.cpp
+    tests/spc/wav_test.cpp
+    tests/spc/render_test.cpp
   )
+  # snaggletooth_spc links snaggletooth::snaggletooth publicly, so the test target
+  # reaches the library through it — no separate direct link.
   target_link_libraries(snaggletooth_tests PRIVATE
-    snaggletooth::snaggletooth
+    snaggletooth_spc
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
