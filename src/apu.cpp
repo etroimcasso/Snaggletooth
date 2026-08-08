@@ -11,6 +11,10 @@ namespace {
 // storing the value: any write acknowledges (clears) all voice end flags.
 constexpr std::uint8_t kDspEndx = 0x7C;
 
+// FLG ($6C) resets to $E0: soft reset set, amplifier muted, echo writes disabled,
+// noise stopped. A driver clears it once it has set up the DSP.
+constexpr std::uint8_t kDspFlg = 0x6C;
+
 // The seeded post-IPL power-on state: what the machine looks like once the boot
 // ROM has cleared zero page, posted the ready bytes, and handed control over.
 ApuState powerOnState() {
@@ -19,6 +23,7 @@ ApuState powerOnState() {
   s.test = 0x0A;
   s.control = 0xB0;               // bit 7 (IPL mapping) is carried but gates nothing
   s.outputPorts = {0xAA, 0xBB, 0x00, 0x00};  // the ready bytes a host polls for
+  s.dsp[kDspFlg] = 0xE0;          // FLG's documented reset value
   for (TimerState& t : s.timers) {
     t.target = 0x00;
     t.stage2 = 0x00;
