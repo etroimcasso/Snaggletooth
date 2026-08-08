@@ -162,10 +162,15 @@ TEST(ApuBoot, PowerOnStateMatchesSeededValues) {
   for (std::size_t i = 0; i < s.ram.size(); ++i)
     if (s.ram[i] != 0) { ramZero = false; break; }
   EXPECT_TRUE(ramZero);
-  bool dspZero = true;
-  for (std::uint8_t v : s.dsp)
-    if (v != 0) { dspZero = false; break; }
-  EXPECT_TRUE(dspZero);
+  // The DSP register file powers on zeroed except FLG ($6C), whose documented
+  // reset value is $E0 (soft reset / mute / echo-write-off / noise stopped).
+  bool dspSeeded = true;
+  for (std::size_t i = 0; i < 128; ++i) {
+    const std::uint8_t expected = (i == 0x6C) ? 0xE0 : 0x00;
+    if (s.dsp[i] != expected) { dspSeeded = false; break; }
+  }
+  EXPECT_TRUE(dspSeeded);
+  EXPECT_EQ(s.dsp[0x6C], 0xE0);
 }
 
 // ── Snapshot / restore and construction ─────────────────────────────────────
