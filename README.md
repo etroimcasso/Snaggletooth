@@ -42,14 +42,16 @@ is kept honest as components land.
 | APU machine (64KB RAM, timers, communication ports) | complete — register overlay, 3 timers, comm ports |
 | S-DSP voice pipeline (BRR, pitch, envelopes, 8-voice mix) | complete — decode, interpolation, keying, stereo frames |
 | S-DSP completion (echo, noise, pitch modulation, master volume) | complete — noise, PMON, master volume, echo delay line |
-| SPC song-playback harness | not started |
+| SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders it to a 32 kHz WAV; output validation against reference renders not yet done |
 | Public embedding API | not started |
 | 5A22 CPU, PPU, full system | future — see the roadmap |
 
 See [docs/spc700-cpu.md](docs/spc700-cpu.md) for the CPU core's surface, usage, and how to run the
 vector suite, [docs/apu-machine.md](docs/apu-machine.md) for the machine's memory map, timers, ports,
 and stepping, and [docs/dsp.md](docs/dsp.md) for the full DSP — voices, the output mixer, and the
-echo unit — and its stereo output.
+echo unit — and its stereo output. [docs/spc-rendering.md](docs/spc-rendering.md)
+covers loading an SPC dump and rendering it to a WAV, and what a dump does and does
+not carry.
 
 ## Roadmap
 
