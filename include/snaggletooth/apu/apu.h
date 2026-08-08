@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include "snaggletooth/apu/dsp.h"
 #include "snaggletooth/apu/spc700.h"
@@ -102,6 +103,13 @@ class Apu {
   // costs at least 2 cycles, so the budget is always reached.
   std::uint64_t run(std::uint64_t budget);
 
+  // Drains the 32 kHz stereo frames the DSP has produced since the last drain,
+  // clearing the internal queue. step() and run() append one frame per DSP
+  // sample (every 32 machine cycles), so a caller drains periodically to bound
+  // the queue. Frames are output, not machine state: they are not part of a
+  // snapshot, and restore() and reset() discard any that are pending.
+  [[nodiscard]] std::vector<StereoFrame> takeFrames();
+
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
   // is RAM. Both the CPU and its dummy reads pass through here.
@@ -126,12 +134,14 @@ class Apu {
   // stage-1 ticks to each enabled timer's stage-2/stage-3 counters.
   void advanceTimers(std::uint32_t cycles);
 
-  // Advances the DSP's 32-cycle sample divider by `cycles`. It free-runs; the
-  // voice pipeline that consumes its sample ticks arrives with the next unit.
+  // Advances the DSP's 32-cycle sample divider by `cycles` and generates one
+  // stereo frame for each 32 kHz sample boundary the divider crosses. The
+  // divider free-runs, so the sample phase is continuous across steps.
   void advanceDsp(std::uint32_t cycles);
 
   Spc700 cpu_;      // the live CPU state during a step
   ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced at each step
+  std::vector<StereoFrame> frames_;  // DSP output awaiting the host's drain; not part of the snapshot
 };
 
 }  // namespace snaggletooth
