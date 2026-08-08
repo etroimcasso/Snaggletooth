@@ -5,9 +5,10 @@
 // sample pipeline's pure mechanisms: BRR sample decode (turning a 9-byte
 // compressed block into sixteen 15-bit samples), the sample-directory read,
 // the per-voice BRR streaming interlock under a pitch counter, 4-point
-// Gaussian interpolation over the stream's four most recent samples, the volume
-// envelope, and the output stage — envelope application, per-voice volume, and
-// the eight-voice sum into a 32 kHz stereo frame.
+// Gaussian interpolation over the stream's four most recent samples, the shared
+// noise generator, the volume envelope, and the output stage — envelope
+// application, per-voice volume, the eight-voice sum, master volume, and the
+// mute gate, into a 32 kHz stereo frame.
 //
 // A BRR block is decoded exactly as the hardware does — the four integer
 // filters, the shift-13..15 anomaly, and the clamp-to-16-then-clip-to-15
@@ -16,12 +17,16 @@
 // Gaussian table is the hardware's ROM data, and the kernel keeps the
 // hardware's partial overflow handling, documented wrap included.
 //
-// The output stage is the master volume's predecessor: each voice's
-// interpolated sample is scaled by its 11-bit envelope, then by its signed
-// per-voice left/right volume, and the eight results are summed with a 16-bit
-// clamp after every addition. MVOL, echo and the FLG mute arrive with the DSP's
-// completion, so a frame here is the dry per-voice mix, not the final DAC
-// output.
+// The output stage runs the hardware's mixer chain. Each voice's sample — its
+// interpolated BRR output, or the shared noise level when the voice's NON bit
+// is set — is scaled by the voice's 11-bit envelope into the internal
+// -4000h..+3FFFh amplitude, then by its signed per-voice left/right volume, and
+// the eight results are summed with a 16-bit clamp after every addition. The
+// summed mix is then scaled by the signed master volume (MVOLL/MVOLR, a
+// truncating multiply where the -128 product wraps) and, when FLG bit 6 is set,
+// muted to silence — mute stops the emitted frame only; every voice, the noise
+// generator and the envelopes keep advancing. The echo contribution the mixer
+// adds is present once the echo unit is enabled.
 
 #include <array>
 #include <cstddef>
@@ -105,6 +110,13 @@ struct DspState {
   // KON register into this latch and keys the corresponding voices on; the latch
   // is cleared at the following poll (the hardware holds it about two samples).
   std::uint8_t internalKon = 0;
+
+  // The one shared noise generator's 15-bit level, in the internal sample range
+  // -4000h..+3FFFh, seeded to -4000h at power-on and reset. A voice whose NON bit
+  // is set outputs this level in place of its interpolated BRR sample; the level
+  // advances by the documented 15-bit LFSR at the FLG noise rate, shared by every
+  // NON voice. It is machine state — snapshot and restore carry it.
+  std::int16_t noiseLevel = -0x4000;
 
   // The eight voices' streaming state, beside the register file.
   std::array<VoiceState, 8> voices{};
@@ -212,15 +224,22 @@ void tickDspSample(DspState& dsp) noexcept;
 // Generates one 32 kHz stereo output sample and advances the whole DSP by it.
 // The order is the hardware's: poll KON/KOFF, then for each of the eight voices
 // stream a sample, step its envelope, and fold its enveloped amplitude into the
-// left/right sum through the per-voice volume, then tick the per-sample state.
+// left/right sum through the per-voice volume; then scale the sum by the master
+// volume, apply the mute gate, advance the shared noise generator, and tick the
+// per-sample state.
 //
 // A voice in its post-key-on startup outputs silence and neither streams nor
-// advances its envelope past the countdown. Otherwise the enveloped amplitude
-// is (interpolated * envelope) >> 11 — the internal -4000h..+3FFFh sample that
-// VxOUTX returns the high byte of and PMON reads. Each channel adds
-// (amplitude * VxVOL) >> 6 (the signed 8-bit volume with the BRR-dropped low
-// bit recovered), and the sum is clamped to signed 16 bits after every
-// addition. The returned frame is the dry mix: no master volume, echo or mute.
+// advances its envelope past the countdown. Otherwise the voice's sample is its
+// interpolated BRR output, or the shared noise level when its NON bit is set,
+// and the enveloped amplitude is (sample * envelope) >> 11 — the internal
+// -4000h..+3FFFh value that VxOUTX returns the high byte of and the next voice's
+// PMON reads. When PMON is enabled for a voice (bits 1-7), its pitch step is
+// scaled by the previous voice's amplitude and capped at the 128 kHz rate. Each
+// channel adds (amplitude * VxVOL) >> 6 (the signed 8-bit volume with the
+// BRR-dropped low bit recovered), and the sum is clamped to signed 16 bits after
+// every addition. The summed mix is scaled by the signed master volume
+// (sum * MVOL >> 7, truncated so the -128 product wraps); FLG bit 6 mutes the
+// returned frame to silence while every internal mechanism keeps running.
 [[nodiscard]] StereoFrame stepDspSample(DspState& dsp,
                                         std::span<const std::uint8_t, 65536> ram) noexcept;
 

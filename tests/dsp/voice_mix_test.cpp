@@ -1,16 +1,21 @@
 // The DSP output stage: envelope application, VxOUTX, the per-voice left/right
-// volume, and the eight-voice sum into a 32 kHz stereo frame — plus the frames
-// the Apu surfaces as it runs.
+// volume, the eight-voice sum, and the master volume into a 32 kHz stereo frame
+// — plus the frames the Apu surfaces as it runs.
 //
 // Expected values are hand-derived from fullsnes's output pipeline (the primary
 // contract): VxOUTX at lines 2950-2954 (the high byte of the internal
 // -4000h..+3FFFh amplitude), the Output Mixer at 3021-3034 (each voice added as
-// sample*VxVOL SAR 6, with 16-bit overflow handling after every addition), the
-// VxVOL registers at 3012-3019, and the five empty key-on samples at 3053-3055.
-// Anomie's S-DSP doc is the cross-check: it states the same chain (lines 40-63)
-// and pins the per-voice shift by converting the 15-bit sample "to 16-bits by
-// adding a 0 bit on the low end" before the >>7 volume adjust — the dropped BRR
-// low bit recovered — which is fullsnes's SAR 6 on the raw 15-bit amplitude.
+// sample*VxVOL SAR 6 with 16-bit overflow handling after every addition, then
+// sum*MVOL SAR 7), the VxVOL registers at 3012-3019, the MVOL registers at
+// 3005-3010, and the five empty key-on samples at 3053-3055. Anomie's S-DSP doc
+// is the cross-check: it states the same chain (lines 40-63) and pins the
+// per-voice shift by converting the 15-bit sample "to 16-bits by adding a 0 bit
+// on the low end" before the >>7 volume adjust — the dropped BRR low bit
+// recovered — which is fullsnes's SAR 6 on the raw 15-bit amplitude.
+//
+// The master volume is +127 ($7F) in every sounding setup: sum*127 SAR 7, which
+// is 127/128 of the summed mix (there is no unity master volume, since $7F is
+// 127/128). Each frame below is the dry per-voice sum passed through that scale.
 //
 // The interpolated amplitude feeding the output stage is isolated to a single
 // Gaussian tap so its value is exact: a window with only `older` set reads
@@ -78,6 +83,8 @@ void placeAmplitudeVoice(DspState& dsp, std::size_t v, std::int16_t older,
   gain(dsp, v) = directGain;        // bit 7 clear -> Direct Gain, level (gain&7Fh)<<4
   volLeft(dsp, v) = left;
   volRight(dsp, v) = right;
+  dsp[0x0C] = 0x7F;                 // MVOLL = +127 (sounding: sum*127 SAR 7)
+  dsp[0x1C] = 0x7F;                 // MVOLR = +127
 }
 
 // ── Silence ─────────────────────────────────────────────────────────────────
@@ -101,57 +108,61 @@ TEST(OutputStage, EnvelopeAndVolumeScaleAPositiveVoice) {
   // 7Fh gives envelope 7F0h = 2032, so amplitude = (1305 * 2032) >> 11 = 1294.
   // VxOUTX is the high byte: (1294 >> 7) = 0Ah. VxVOLL=+40h gives (1294*64)>>6 =
   // 1294 exactly (the SAR-6/low-bit-recovery: a 40h volume is unity, not half),
-  // and VxVOLR=-40h inverts the phase to -1294.
+  // and VxVOLR=-40h inverts the phase to -1294. The master volume then scales:
+  // (1294*127)>>7 = 1283, and (-1294*127)>>7 = -1284 (SAR 7 rounds toward -inf).
   DspState dsp;
   Ram ram{};
   placeAmplitudeVoice(dsp, 0, 0x0800, 0x7F, 0x40, 0xC0);
   ASSERT_EQ(interpolatedSample(dsp, 0), 0x519);
 
   const StereoFrame frame = stepDspSample(dsp, std::span<const std::uint8_t, 65536>{ram});
-  EXPECT_EQ(outx(dsp, 0), 0x0A);
-  EXPECT_EQ(frame.left, 1294);
-  EXPECT_EQ(frame.right, -1294);
+  EXPECT_EQ(outx(dsp, 0), 0x0A);  // VxOUTX is pre-master-volume, unchanged
+  EXPECT_EQ(frame.left, 1283);
+  EXPECT_EQ(frame.right, -1284);
 }
 
 TEST(OutputStage, UnityVolumeRecoversTheDroppedLowBit) {
   // The per-voice volume shift is 6, not 7: a +40h (=64) volume scales the
-  // amplitude by 64/64 = 1. A >>7 would halve it. The frame equalling the
-  // amplitude (1294) proves the recovered low bit (fullsnes Output Mixer SAR 6 /
-  // Anomie's 15->16-bit conversion before the >>7 adjust).
+  // amplitude by 64/64 = 1. A >>7 would halve it. Through the +127 master volume
+  // the frame is (1294*127)>>7 = 1283; a per-voice >>7 would have made it
+  // (647*127)>>7 = 641, so 1283 still proves the recovered low bit (fullsnes
+  // Output Mixer SAR 6 / Anomie's 15->16-bit conversion before the >>7 adjust).
   DspState dsp;
   Ram ram{};
   placeAmplitudeVoice(dsp, 0, 0x0800, 0x7F, 0x40, 0x40);
   const StereoFrame frame = stepDspSample(dsp, std::span<const std::uint8_t, 65536>{ram});
-  EXPECT_EQ(frame.left, 1294);   // == amplitude, not 647
-  EXPECT_EQ(frame.right, 1294);
+  EXPECT_EQ(frame.left, 1283);   // (amplitude 1294)*127>>7, not (647)*127>>7=641
+  EXPECT_EQ(frame.right, 1283);
 }
 
 TEST(OutputStage, NegativeAmplitudeGivesASignedOutxAndFrame) {
   // older=-800h -> interp = -519h = -1305; amplitude = (-1305 * 2032) >> 11 =
   // -1295 (arithmetic shift rounds toward -inf). VxOUTX = (-1295 >> 7) & FFh =
-  // -11 & FFh = F5h. VxVOLL=+40h keeps the sign: (-1295 * 64) >> 6 = -1295.
+  // -11 & FFh = F5h. VxVOLL=+40h keeps the sign: (-1295 * 64) >> 6 = -1295, and
+  // the +127 master volume gives (-1295*127)>>7 = -1285.
   DspState dsp;
   Ram ram{};
   placeAmplitudeVoice(dsp, 0, static_cast<std::int16_t>(-0x0800), 0x7F, 0x40, 0x40);
   ASSERT_EQ(interpolatedSample(dsp, 0), -0x519);
 
   const StereoFrame frame = stepDspSample(dsp, std::span<const std::uint8_t, 65536>{ram});
-  EXPECT_EQ(outx(dsp, 0), 0xF5);
-  EXPECT_EQ(frame.left, -1295);
-  EXPECT_EQ(frame.right, -1295);
+  EXPECT_EQ(outx(dsp, 0), 0xF5);  // VxOUTX is pre-master-volume, unchanged
+  EXPECT_EQ(frame.left, -1285);
+  EXPECT_EQ(frame.right, -1285);
 }
 
 // ── Eight-voice sum with per-addition clamp ─────────────────────────────────
 
 TEST(OutputStage, VoicesSumTogether) {
   // Two voices of the same amplitude add. older=800h, gain 7Fh, VxVOLL=7Fh:
-  // amplitude 1294, contribution (1294*127)>>6 = 2567. Two of them = 5134.
+  // amplitude 1294, contribution (1294*127)>>6 = 2567. Two of them = 5134, and
+  // the +127 master volume gives (5134*127)>>7 = 5093.
   DspState dsp;
   Ram ram{};
   placeAmplitudeVoice(dsp, 0, 0x0800, 0x7F, 0x7F, 0x00);
   placeAmplitudeVoice(dsp, 1, 0x0800, 0x7F, 0x7F, 0x00);
   const StereoFrame frame = stepDspSample(dsp, std::span<const std::uint8_t, 65536>{ram});
-  EXPECT_EQ(frame.left, 5134);
+  EXPECT_EQ(frame.left, 5093);
   EXPECT_EQ(frame.right, 0);
 }
 
@@ -160,23 +171,26 @@ TEST(OutputStage, ThePositiveSumClampsToSignedSixteenBits) {
   // 15660 < 8000h). Direct Gain 7Fh -> amplitude (7830*2032)>>11 = 7768;
   // VxVOLL=7Fh -> contribution (7768*127)>>6 = 15414. Two voices = 30828 (under
   // the cap); a third would reach 46242, so the sum clamps to 7FFFh rather than
-  // wrapping — the "16-bit overflow handling after each addition".
+  // wrapping — the "16-bit overflow handling after each addition". The +127
+  // master volume then gives (7FFFh*127)>>7 = 32511; had the sum wrapped to
+  // -19294 the frame would be -19143, so 32511 discriminates clamp from wrap.
   DspState dsp;
   Ram ram{};
   for (std::size_t v = 0; v < 3; ++v) placeAmplitudeVoice(dsp, v, 0x3000, 0x7F, 0x7F, 0x00);
   const StereoFrame frame = stepDspSample(dsp, std::span<const std::uint8_t, 65536>{ram});
-  EXPECT_EQ(frame.left, 0x7FFF);
+  EXPECT_EQ(frame.left, 32511);
 }
 
 TEST(OutputStage, TheNegativeSumClampsToSignedSixteenBits) {
   // The same three voices with an inverting VxVOLL (81h = -127): each
   // contribution is (7768 * -127) >> 6 = -15415, and three sum past -8000h, so
-  // the mix clamps to -8000h.
+  // the mix clamps to -8000h. The +127 master volume gives (-8000h*127)>>7 =
+  // -32512, discriminating the clamp from a wrap the same way.
   DspState dsp;
   Ram ram{};
   for (std::size_t v = 0; v < 3; ++v) placeAmplitudeVoice(dsp, v, 0x3000, 0x7F, 0x81, 0x00);
   const StereoFrame frame = stepDspSample(dsp, std::span<const std::uint8_t, 65536>{ram});
-  EXPECT_EQ(frame.left, static_cast<std::int16_t>(-0x8000));
+  EXPECT_EQ(frame.left, -32512);
 }
 
 // ── End+Mute through the frame loop ─────────────────────────────────────────
@@ -227,6 +241,8 @@ TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
   gain(dsp, 0) = 0x7F;    // Direct Gain, a full fixed level once sounding
   volLeft(dsp, 0) = 0x7F;
   volRight(dsp, 0) = 0x81;  // inverted right channel
+  dsp[0x0C] = 0x7F;         // MVOLL = +127
+  dsp[0x1C] = 0x7F;         // MVOLR = +127
   dsp[kKon] = 0x01;         // key voice 0 on at the first (even) poll
 
   const std::span<const std::uint8_t, 65536> ram_span{ram};
@@ -247,11 +263,12 @@ TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
 // ── The Apu surfaces frames as it runs ──────────────────────────────────────
 
 // A machine whose RAM is all NOPs (00h) at PC 0, with one voice preset to sound
-// through Direct Gain at a stationary pitch, so each 32 kHz sample is the same
-// exact frame.
+// through Direct Gain at a stationary pitch (and the master volume placed by the
+// helper), so each 32 kHz sample is the same exact frame. FLG is 0 in this
+// default state, so nothing is muted or soft-reset.
 ApuState soundingMachine() {
   ApuState s{};
-  placeAmplitudeVoice(s.dsp, 0, 0x0800, 0x7F, 0x40, 0xC0);  // frame {1294, -1294}
+  placeAmplitudeVoice(s.dsp, 0, 0x0800, 0x7F, 0x40, 0xC0);  // frame {1283, -1284}
   return s;
 }
 
@@ -261,8 +278,8 @@ TEST(ApuFrames, RunEmitsOneFramePerThirtyTwoCycles) {
   const std::vector<StereoFrame> frames = apu.takeFrames();
   ASSERT_EQ(frames.size(), 2u);
   for (const StereoFrame& f : frames) {
-    EXPECT_EQ(f.left, 1294);
-    EXPECT_EQ(f.right, -1294);
+    EXPECT_EQ(f.left, 1283);    // (1294*127)>>7
+    EXPECT_EQ(f.right, -1284);  // (-1294*127)>>7
   }
 }
 
