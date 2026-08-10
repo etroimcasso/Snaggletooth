@@ -125,6 +125,18 @@ class Cpu65816 {
     state_.p = static_cast<std::uint8_t>(carry ? (state_.p | kCpuFlagC)
                                                : (state_.p & ~kCpuFlagC));
   }
+  void setOverflow(bool v) noexcept {
+    state_.p = static_cast<std::uint8_t>(v ? (state_.p | kCpuFlagV)
+                                           : (state_.p & ~kCpuFlagV));
+  }
+  void setN(bool n) noexcept {
+    state_.p = static_cast<std::uint8_t>(n ? (state_.p | kCpuFlagN)
+                                           : (state_.p & ~kCpuFlagN));
+  }
+  void setZ(bool z) noexcept {
+    state_.p = static_cast<std::uint8_t>(z ? (state_.p | kCpuFlagZ)
+                                           : (state_.p & ~kCpuFlagZ));
+  }
 
   // Loads leave the unused half of a register alone (an 8-bit load preserves the
   // high byte of the accumulator; an 8-bit index load clears the index high byte)
@@ -154,6 +166,173 @@ class Cpu65816 {
     } else {
       state_.y = v;
       setNZ16(v);
+    }
+  }
+
+  // ---- arithmetic and logic -----------------------------------------------
+  // ADC and SBC share one adder: SBC adds the ones-complement of the operand with
+  // the same carry in, so the borrow, the carry and the signed overflow all fall
+  // out of the same addition (A - M - !C is A + ~M + C). Binary mode is a plain
+  // two's-complement add; decimal mode adjusts each BCD nibble on the fly and costs
+  // no extra cycle. N, Z and C describe the final result at the accumulator width.
+  // The v flag is a signed-overflow flag; BCD is an unsigned representation, so v
+  // has no defined meaning in decimal mode (it is computed but not meaningful).
+  void adcOp(std::uint16_t operand) { addWithCarry(operand, /*subtract=*/false); }
+  void sbcOp(std::uint16_t operand) { addWithCarry(operand, /*subtract=*/true); }
+
+  // BCD subtract, nibble by nibble: each digit is a binary subtract with the borrow
+  // from below; a digit that underflows is corrected by subtracting six and borrows
+  // into the next. Matches the hardware on out-of-range nibbles too. `digits` is 2
+  // for an 8-bit accumulator, 4 for 16-bit. Only the result is decimal; the carry
+  // and overflow flags come from the binary subtraction.
+  [[nodiscard]] static std::uint32_t decimalSubtract(std::uint32_t a, std::uint32_t operand,
+                                                     std::uint32_t carryIn, int digits) noexcept {
+    int borrow = static_cast<int>(1u - carryIn);
+    std::uint32_t res = 0;
+    for (int i = 0; i < digits; ++i) {
+      const int an = static_cast<int>((a >> (4 * i)) & 0x0Fu);
+      const int mn = static_cast<int>((operand >> (4 * i)) & 0x0Fu);
+      int d = an - mn - borrow;
+      if (d < 0) {
+        d -= 0x06;
+        borrow = 1;
+      } else {
+        borrow = 0;
+      }
+      res |= static_cast<std::uint32_t>(d & 0x0F) << (4 * i);
+    }
+    return res;
+  }
+
+  void addWithCarry(std::uint16_t operand, bool subtract) {
+    const std::uint32_t cin = (state_.p & kCpuFlagC) ? 1u : 0u;
+    const bool decimal = (state_.p & kCpuFlagD) != 0;
+    if (accum8()) {
+      const std::uint32_t a = state_.a & 0xFFu;
+      const std::uint32_t m = (subtract ? (operand ^ 0xFFu) : operand) & 0xFFu;
+      const std::uint32_t bin = a + m + cin;  // the binary sum of the ones-complement form
+      const bool carryBin = (bin & 0x100u) != 0;
+      // Overflow comes from the binary sum for a binary add and for SBC in either
+      // mode; decimal ADC takes it from the high-nibble sum before the final adjust.
+      bool ovf = ((~(a ^ m) & (a ^ (bin & 0xFFu))) & 0x80u) != 0;
+      std::uint32_t res = bin & 0xFFu;
+      bool carry = carryBin;
+      if (decimal && !subtract) {
+        std::uint32_t lo = (a & 0x0Fu) + (operand & 0x0Fu) + cin;
+        if (lo > 0x09u) lo = ((lo + 0x06u) & 0x0Fu) + 0x10u;
+        std::uint32_t t = (a & 0xF0u) + (operand & 0xF0u) + lo;
+        ovf = ((~(a ^ operand) & (a ^ t)) & 0x80u) != 0;
+        if (t > 0x9Fu) t += 0x60u;
+        carry = t > 0xFFu;
+        res = t & 0xFFu;
+      } else if (decimal) {
+        res = decimalSubtract(a, operand, cin, 2);
+      }
+      state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | res);
+      setNZ8(static_cast<std::uint8_t>(res));
+      setCarry(carry);
+      setOverflow(ovf);
+    } else {
+      const std::uint32_t a = state_.a;
+      const std::uint32_t m = (subtract ? (operand ^ 0xFFFFu) : operand) & 0xFFFFu;
+      const std::uint32_t bin = a + m + cin;
+      const bool carryBin = (bin & 0x10000u) != 0;
+      bool ovf = ((~(a ^ m) & (a ^ (bin & 0xFFFFu))) & 0x8000u) != 0;
+      std::uint32_t res = bin & 0xFFFFu;
+      bool carry = carryBin;
+      if (decimal && !subtract) {
+        std::uint32_t lo = (a & 0x000Fu) + (operand & 0x000Fu) + cin;
+        if (lo > 0x09u) lo = ((lo + 0x06u) & 0x000Fu) + 0x10u;
+        std::uint32_t t = (a & 0x00F0u) + (operand & 0x00F0u) + lo;
+        if (t > 0x9Fu) t = ((t + 0x60u) & 0x00FFu) + 0x100u;
+        t = (a & 0x0F00u) + (operand & 0x0F00u) + t;
+        if (t > 0x9FFu) t = ((t + 0x600u) & 0x0FFFu) + 0x1000u;
+        t = (a & 0xF000u) + (operand & 0xF000u) + t;
+        ovf = ((~(a ^ operand) & (a ^ t)) & 0x8000u) != 0;
+        if (t > 0x9FFFu) t += 0x6000u;
+        carry = t > 0xFFFFu;
+        res = t & 0xFFFFu;
+      } else if (decimal) {
+        res = decimalSubtract(a, operand, cin, 4);
+      }
+      state_.a = static_cast<std::uint16_t>(res);
+      setNZ16(static_cast<std::uint16_t>(res));
+      setCarry(carry);
+      setOverflow(ovf);
+    }
+  }
+
+  // CMP/CPX/CPY subtract the operand from a register without carry-in and without
+  // storing: only N, Z and C move (no overflow), C set when the register is at or
+  // above the operand (no borrow). The comparison runs at the register's width.
+  void compareWith(std::uint16_t reg, std::uint16_t operand, bool eightBit) {
+    if (eightBit) {
+      const std::uint8_t r = static_cast<std::uint8_t>(reg) -
+                             static_cast<std::uint8_t>(operand);
+      setNZ8(r);
+      setCarry((reg & 0xFFu) >= (operand & 0xFFu));
+    } else {
+      const std::uint16_t r = static_cast<std::uint16_t>(reg - operand);
+      setNZ16(r);
+      setCarry(reg >= operand);
+    }
+  }
+
+  // The bitwise operators combine the operand into the accumulator at its width and
+  // set N and Z from the result; an 8-bit operation leaves the accumulator's high
+  // byte intact.
+  void andOp(std::uint16_t operand) {
+    if (accum8()) {
+      const std::uint8_t r = static_cast<std::uint8_t>(state_.a) &
+                             static_cast<std::uint8_t>(operand);
+      state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | r);
+      setNZ8(r);
+    } else {
+      state_.a = static_cast<std::uint16_t>(state_.a & operand);
+      setNZ16(state_.a);
+    }
+  }
+  void oraOp(std::uint16_t operand) {
+    if (accum8()) {
+      const std::uint8_t r = static_cast<std::uint8_t>(state_.a) |
+                             static_cast<std::uint8_t>(operand);
+      state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | r);
+      setNZ8(r);
+    } else {
+      state_.a = static_cast<std::uint16_t>(state_.a | operand);
+      setNZ16(state_.a);
+    }
+  }
+  void eorOp(std::uint16_t operand) {
+    if (accum8()) {
+      const std::uint8_t r = static_cast<std::uint8_t>(state_.a) ^
+                             static_cast<std::uint8_t>(operand);
+      state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | r);
+      setNZ8(r);
+    } else {
+      state_.a = static_cast<std::uint16_t>(state_.a ^ operand);
+      setNZ16(state_.a);
+    }
+  }
+
+  // BIT tests the operand against the accumulator with a bitwise AND. Z always
+  // reflects that AND. In the non-immediate forms N and V take the top two bits of
+  // the operand itself (not the AND); the immediate form leaves N and V alone —
+  // the one instruction whose flags depend on its addressing mode.
+  void bitOp(std::uint16_t operand, bool immediate) {
+    if (accum8()) {
+      setZ((static_cast<std::uint8_t>(state_.a) &
+            static_cast<std::uint8_t>(operand)) == 0);
+      if (!immediate) {
+        setN((operand & 0x80u) != 0);
+        setOverflow((operand & 0x40u) != 0);
+      }
+    } else {
+      setZ((state_.a & operand) == 0);
+      if (!immediate) {
+        setN((operand & 0x8000u) != 0);
+        setOverflow((operand & 0x4000u) != 0);
+      }
     }
   }
 
@@ -222,13 +401,16 @@ class Cpu65816 {
     return (addr + 1u) & 0xFFFFFFu;
   }
 
-  // A 16-bit pointer read from the direct page (its bytes wrap per the direct-page
-  // rule); a 24-bit pointer likewise; and a 16-bit pointer read from the stack
-  // area (bank-zero wrap, no page wrap — stack-relative is a native-only mode).
+  // A 16-bit pointer read from the direct page. The base address already carries
+  // the direct-page page-wrap (dpAddr computes it); the pointer's own two bytes are
+  // consecutive and wrap only at the bank-zero boundary, never within a page. So a
+  // pointer based at the last byte of a page reads its high byte from the next page
+  // even in emulation mode with a page-aligned direct register — matching the 24-bit
+  // and stack pointer reads below.
   template <SnesBus B>
   std::uint16_t readDpWord(B& bus, std::uint32_t base) {
     const std::uint16_t lo = bus.read(base);
-    const std::uint16_t hi = bus.read(nextByte(base, AddrKind::Direct));
+    const std::uint16_t hi = bus.read(nextByte(base, AddrKind::Bank0));
     return static_cast<std::uint16_t>(lo | (hi << 8));
   }
   // The 24-bit indirect-long modes are new to the 65816: their pointer wraps at
@@ -497,6 +679,161 @@ std::uint32_t Cpu65816::step(B& bus) {
       }
       return 2;
     }
+
+    // ---- ADC: add with carry (accumulator width; N,V,Z,C) ----
+    case 0x69: {  // ADC #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      adcOp(v);
+      return 3u - accCyc();
+    }
+    case 0x65: { Operand o = eaDir(bus);        adcOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // ADC dir
+    case 0x75: { Operand o = eaDirX(bus);       adcOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // ADC dir,X
+    case 0x6D: { Operand o = eaAbs(bus);        adcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ADC abs
+    case 0x7D: { Operand o = eaAbsX(bus);       adcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC abs,X
+    case 0x79: { Operand o = eaAbsY(bus);       adcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC abs,Y
+    case 0x6F: { Operand o = eaLong(bus);       adcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ADC long
+    case 0x7F: { Operand o = eaLongX(bus);      adcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ADC long,X
+    case 0x61: { Operand o = eaDirIndX(bus);    adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC (dir,X)
+    case 0x71: { Operand o = eaDirIndY(bus);    adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC (dir),Y
+    case 0x72: { Operand o = eaDirInd(bus);     adcOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // ADC (dir)
+    case 0x67: { Operand o = eaDirIndLong(bus); adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC [dir]
+    case 0x77: { Operand o = eaDirIndLongY(bus);adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC [dir],Y
+    case 0x63: { Operand o = eaStack(bus);      adcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ADC stk,S
+    case 0x73: { Operand o = eaStackIndY(bus);  adcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ADC (stk,S),Y
+
+    // ---- SBC: subtract with carry (accumulator width; N,V,Z,C) ----
+    case 0xE9: {  // SBC #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      sbcOp(v);
+      return 3u - accCyc();
+    }
+    case 0xE5: { Operand o = eaDir(bus);        sbcOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // SBC dir
+    case 0xF5: { Operand o = eaDirX(bus);       sbcOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // SBC dir,X
+    case 0xED: { Operand o = eaAbs(bus);        sbcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // SBC abs
+    case 0xFD: { Operand o = eaAbsX(bus);       sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC abs,X
+    case 0xF9: { Operand o = eaAbsY(bus);       sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC abs,Y
+    case 0xEF: { Operand o = eaLong(bus);       sbcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // SBC long
+    case 0xFF: { Operand o = eaLongX(bus);      sbcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // SBC long,X
+    case 0xE1: { Operand o = eaDirIndX(bus);    sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC (dir,X)
+    case 0xF1: { Operand o = eaDirIndY(bus);    sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC (dir),Y
+    case 0xF2: { Operand o = eaDirInd(bus);     sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // SBC (dir)
+    case 0xE7: { Operand o = eaDirIndLong(bus); sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC [dir]
+    case 0xF7: { Operand o = eaDirIndLongY(bus);sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC [dir],Y
+    case 0xE3: { Operand o = eaStack(bus);      sbcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // SBC stk,S
+    case 0xF3: { Operand o = eaStackIndY(bus);  sbcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // SBC (stk,S),Y
+
+    // ---- CMP: compare with the accumulator (accumulator width; N,Z,C) ----
+    case 0xC9: {  // CMP #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      compareWith(state_.a, v, accum8());
+      return 3u - accCyc();
+    }
+    case 0xC5: { Operand o = eaDir(bus);        compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 4u - accCyc() + dpCyc(); }        // CMP dir
+    case 0xD5: { Operand o = eaDirX(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc() + dpCyc(); }        // CMP dir,X
+    case 0xCD: { Operand o = eaAbs(bus);        compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc(); }                  // CMP abs
+    case 0xDD: { Operand o = eaAbsX(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP abs,X
+    case 0xD9: { Operand o = eaAbsY(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP abs,Y
+    case 0xCF: { Operand o = eaLong(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc(); }                  // CMP long
+    case 0xDF: { Operand o = eaLongX(bus);      compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc(); }                  // CMP long,X
+    case 0xC1: { Operand o = eaDirIndX(bus);    compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP (dir,X)
+    case 0xD1: { Operand o = eaDirIndY(bus);    compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP (dir),Y
+    case 0xD2: { Operand o = eaDirInd(bus);     compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() + dpCyc(); }        // CMP (dir)
+    case 0xC7: { Operand o = eaDirIndLong(bus); compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP [dir]
+    case 0xD7: { Operand o = eaDirIndLongY(bus);compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP [dir],Y
+    case 0xC3: { Operand o = eaStack(bus);      compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc(); }                  // CMP stk,S
+    case 0xD3: { Operand o = eaStackIndY(bus);  compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 8u - accCyc(); }                  // CMP (stk,S),Y
+
+    // ---- CPX / CPY: compare with an index register (index width; N,Z,C) ----
+    case 0xE0: {  // CPX #imm
+      const std::uint16_t v = index8() ? fetch(bus) : fetchWord(bus);
+      compareWith(state_.x, v, index8());
+      return 3u - indexCyc();
+    }
+    case 0xE4: { Operand o = eaDir(bus); compareWith(state_.x, readValue(bus, o, index8()), index8()); return 4u - indexCyc() + dpCyc(); }  // CPX dir
+    case 0xEC: { Operand o = eaAbs(bus); compareWith(state_.x, readValue(bus, o, index8()), index8()); return 5u - indexCyc(); }            // CPX abs
+    case 0xC0: {  // CPY #imm
+      const std::uint16_t v = index8() ? fetch(bus) : fetchWord(bus);
+      compareWith(state_.y, v, index8());
+      return 3u - indexCyc();
+    }
+    case 0xC4: { Operand o = eaDir(bus); compareWith(state_.y, readValue(bus, o, index8()), index8()); return 4u - indexCyc() + dpCyc(); }  // CPY dir
+    case 0xCC: { Operand o = eaAbs(bus); compareWith(state_.y, readValue(bus, o, index8()), index8()); return 5u - indexCyc(); }            // CPY abs
+
+    // ---- AND: bitwise AND into the accumulator (accumulator width; N,Z) ----
+    case 0x29: {  // AND #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      andOp(v);
+      return 3u - accCyc();
+    }
+    case 0x25: { Operand o = eaDir(bus);        andOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // AND dir
+    case 0x35: { Operand o = eaDirX(bus);       andOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // AND dir,X
+    case 0x2D: { Operand o = eaAbs(bus);        andOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // AND abs
+    case 0x3D: { Operand o = eaAbsX(bus);       andOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND abs,X
+    case 0x39: { Operand o = eaAbsY(bus);       andOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND abs,Y
+    case 0x2F: { Operand o = eaLong(bus);       andOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // AND long
+    case 0x3F: { Operand o = eaLongX(bus);      andOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // AND long,X
+    case 0x21: { Operand o = eaDirIndX(bus);    andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND (dir,X)
+    case 0x31: { Operand o = eaDirIndY(bus);    andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND (dir),Y
+    case 0x32: { Operand o = eaDirInd(bus);     andOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // AND (dir)
+    case 0x27: { Operand o = eaDirIndLong(bus); andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND [dir]
+    case 0x37: { Operand o = eaDirIndLongY(bus);andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND [dir],Y
+    case 0x23: { Operand o = eaStack(bus);      andOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // AND stk,S
+    case 0x33: { Operand o = eaStackIndY(bus);  andOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // AND (stk,S),Y
+
+    // ---- EOR: bitwise exclusive-OR into the accumulator (accumulator width; N,Z) ----
+    case 0x49: {  // EOR #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      eorOp(v);
+      return 3u - accCyc();
+    }
+    case 0x45: { Operand o = eaDir(bus);        eorOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // EOR dir
+    case 0x55: { Operand o = eaDirX(bus);       eorOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // EOR dir,X
+    case 0x4D: { Operand o = eaAbs(bus);        eorOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // EOR abs
+    case 0x5D: { Operand o = eaAbsX(bus);       eorOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR abs,X
+    case 0x59: { Operand o = eaAbsY(bus);       eorOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR abs,Y
+    case 0x4F: { Operand o = eaLong(bus);       eorOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // EOR long
+    case 0x5F: { Operand o = eaLongX(bus);      eorOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // EOR long,X
+    case 0x41: { Operand o = eaDirIndX(bus);    eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR (dir,X)
+    case 0x51: { Operand o = eaDirIndY(bus);    eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR (dir),Y
+    case 0x52: { Operand o = eaDirInd(bus);     eorOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // EOR (dir)
+    case 0x47: { Operand o = eaDirIndLong(bus); eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR [dir]
+    case 0x57: { Operand o = eaDirIndLongY(bus);eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR [dir],Y
+    case 0x43: { Operand o = eaStack(bus);      eorOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // EOR stk,S
+    case 0x53: { Operand o = eaStackIndY(bus);  eorOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // EOR (stk,S),Y
+
+    // ---- ORA: bitwise OR into the accumulator (accumulator width; N,Z) ----
+    case 0x09: {  // ORA #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      oraOp(v);
+      return 3u - accCyc();
+    }
+    case 0x05: { Operand o = eaDir(bus);        oraOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // ORA dir
+    case 0x15: { Operand o = eaDirX(bus);       oraOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // ORA dir,X
+    case 0x0D: { Operand o = eaAbs(bus);        oraOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ORA abs
+    case 0x1D: { Operand o = eaAbsX(bus);       oraOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA abs,X
+    case 0x19: { Operand o = eaAbsY(bus);       oraOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA abs,Y
+    case 0x0F: { Operand o = eaLong(bus);       oraOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ORA long
+    case 0x1F: { Operand o = eaLongX(bus);      oraOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ORA long,X
+    case 0x01: { Operand o = eaDirIndX(bus);    oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA (dir,X)
+    case 0x11: { Operand o = eaDirIndY(bus);    oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA (dir),Y
+    case 0x12: { Operand o = eaDirInd(bus);     oraOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // ORA (dir)
+    case 0x07: { Operand o = eaDirIndLong(bus); oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA [dir]
+    case 0x17: { Operand o = eaDirIndLongY(bus);oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA [dir],Y
+    case 0x03: { Operand o = eaStack(bus);      oraOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ORA stk,S
+    case 0x13: { Operand o = eaStackIndY(bus);  oraOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ORA (stk,S),Y
+
+    // ---- BIT: test bits against the accumulator (accumulator width). Non-immediate
+    //      forms take N,V from the operand's top two bits and set Z from the AND;
+    //      the immediate form sets Z alone ----
+    case 0x89: {  // BIT #imm
+      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
+      bitOp(v, /*immediate=*/true);
+      return 3u - accCyc();
+    }
+    case 0x24: { Operand o = eaDir(bus);  bitOp(readValue(bus, o, accum8()), false); return 4u - accCyc() + dpCyc(); }  // BIT dir
+    case 0x2C: { Operand o = eaAbs(bus);  bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc(); }            // BIT abs
+    case 0x34: { Operand o = eaDirX(bus); bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc() + dpCyc(); }  // BIT dir,X
+    case 0x3C: { Operand o = eaAbsX(bus); bitOp(readValue(bus, o, accum8()), false); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // BIT abs,X
 
     default:
       // Not yet routed. This family lands opcode by opcode across the sub-blocks;
