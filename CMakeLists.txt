@@ -93,6 +93,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   set(SNAGGLETOOTH_SPC700_VECTORS "" CACHE PATH
       "Path to the SingleStepTests SPC700 'v1' vector directory")
 
+  # Path to the SingleStepTests 65816 "v1" directory (per-opcode-per-mode JSON
+  # vectors, native and emulated). When empty, the 65816 vector tests register but
+  # skip with a visible reason. Large machine-generated reference data — never
+  # vendored.
+  set(SNAGGLETOOTH_65816_VECTORS "" CACHE PATH
+      "Path to the SingleStepTests 65816 'v1' vector directory")
+
   add_executable(snaggletooth_tests
     tests/version_test.cpp
     tests/spc700/vector_harness.cpp
@@ -100,6 +107,10 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/algorithm_test.cpp
     tests/spc700/vector_test.cpp
     tests/spc700/dummy_read_test.cpp
+    tests/cpu65816/vector_harness.cpp
+    tests/cpu65816/harness_test.cpp
+    tests/cpu65816/algorithm_test.cpp
+    tests/cpu65816/vector_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
@@ -121,7 +132,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
-    SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}")
+    SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
+    SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}")
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
     # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the
