@@ -220,21 +220,24 @@ TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructio
   EXPECT_TRUE(Cpu65816::cycleStepped(0xAF));   // LDA long
   EXPECT_TRUE(Cpu65816::cycleStepped(0xBF));   // LDA long,X
   EXPECT_TRUE(Cpu65816::cycleStepped(0x1E));   // ASL abs,X
-  EXPECT_FALSE(Cpu65816::cycleStepped(0xB2));  // LDA (dir)
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xB2));   // LDA (dir)
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xA1));   // LDA (dir,X)
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xB1));   // LDA (dir),Y
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xA7));   // LDA [dir]
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xB7));   // LDA [dir],Y
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xA3));   // LDA sr,S
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xB3));   // LDA (sr,S),Y
   EXPECT_FALSE(Cpu65816::cycleStepped(0x48));  // PHA
 }
 
 TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineStillRunsAsAWhole) {
-  // LDA ($10) runs whole rather than a cycle at a time; stepInstruction executes it
+  // PHA runs whole rather than a cycle at a time; stepInstruction executes it
   // correctly and reports its documented count.
-  auto bus = busWith({{0x001000, 0xB2},
-                      {0x001001, 0x10},
-                      {0x000010, 0x34},
-                      {0x000011, 0x12},
-                      {0x001234, 0x7F}});
-  Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .p = kCpuFlagM | kCpuFlagX});
-  EXPECT_EQ(cpu.stepInstruction(bus), 5u);
-  EXPECT_EQ(cpu.state().a & 0xFF, 0x7F);
+  auto bus = busWith({{0x001000, 0x48}});
+  Cpu65816 cpu(
+      Cpu65816State{.pc = 0x1000, .s = 0x01FF, .a = 0x7F, .p = kCpuFlagM | kCpuFlagX});
+  EXPECT_EQ(cpu.stepInstruction(bus), 3u);
+  EXPECT_EQ(bus.mem[0x0001FF], 0x7F);
   EXPECT_TRUE(cpu.atInstructionBoundary());
 }
 
@@ -242,17 +245,14 @@ TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineCannotBeSteppedACycleAtATime)
   // Asking for one cycle of an instruction the engine does not carry produces no
   // bus activity at all — the cycle that was asked for plainly did not happen,
   // rather than being filled in with invented traffic.
-  auto bus = busWith({{0x001000, 0xB2},
-                      {0x001001, 0x10},
-                      {0x000010, 0x34},
-                      {0x000011, 0x12},
-                      {0x001234, 0x7F}});
-  Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .p = kCpuFlagM | kCpuFlagX});
+  auto bus = busWith({{0x001000, 0x48}});
+  Cpu65816 cpu(
+      Cpu65816State{.pc = 0x1000, .s = 0x01FF, .a = 0x7F, .p = kCpuFlagM | kCpuFlagX});
   cpu.stepCycle(bus);  // the opcode fetch, which every instruction shares
   ASSERT_EQ(bus.trace.size(), 1u);
   cpu.stepCycle(bus);
   EXPECT_EQ(bus.trace.size(), 1u);
-  EXPECT_EQ(cpu.state().a, 0x0000);
+  EXPECT_EQ(bus.mem.count(0x0001FF), 0u);
 }
 
 // ---- what a cycle's pin string reports ----

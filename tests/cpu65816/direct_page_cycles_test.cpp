@@ -331,9 +331,9 @@ TEST(Cpu65816DirectPage, EveryDirectPageOpcodeRunsOnTheCycleEngine) {
   for (int op = 0; op < 256; ++op) {
     if (Cpu65816::cycleStepped(static_cast<std::uint8_t>(op))) ++carried;
   }
-  // The forty-seven implied and immediate instructions, this family, and the
-  // sixty-six absolute and long ones.
-  EXPECT_EQ(carried, 47 + 44 + 66);
+  // The forty-seven implied and immediate instructions, this family, the sixty-six
+  // absolute and long ones, and the fifty-six indirect and stack-relative ones.
+  EXPECT_EQ(carried, 47 + 44 + 66 + 56);
 }
 
 }  // namespace

@@ -614,34 +614,11 @@ class Cpu65816 {
     return (addr + 1u) & 0xFFFFFFu;
   }
 
-  // A 16-bit pointer read from the direct page. The base address already carries
-  // the direct-page page-wrap (dpAddr computes it); the pointer's own two bytes are
-  // consecutive and wrap only at the bank-zero boundary, never within a page. So a
-  // pointer based at the last byte of a page reads its high byte from the next page
-  // even in emulation mode with a page-aligned direct register — matching the 24-bit
-  // and stack pointer reads below.
+  // A 16-bit pointer read from the direct page, for PEI — whose two bytes run on
+  // into the page above rather than wrapping inside the direct page, one of the
+  // three cases section 7.2.1 names as leaving the emulated direct-page range.
   template <SnesBus B>
   std::uint16_t readDpWord(B& bus, std::uint32_t base) {
-    const std::uint16_t lo = bus.read(base, CycleKind::DataRead);
-    const std::uint16_t hi =
-        bus.read(nextByte(base, AddrKind::Bank0), CycleKind::DataRead);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-  // The 24-bit indirect-long modes are new to the 65816: their pointer wraps at
-  // the bank-zero boundary but never within a page, even while emulation mode
-  // page-wraps the old direct-page modes — so its bytes step with the bank-zero
-  // rule, not the direct-page one.
-  template <SnesBus B>
-  std::uint32_t readDpLong(B& bus, std::uint32_t base) {
-    const std::uint32_t b0 = bus.read(base, CycleKind::DataRead);
-    const std::uint32_t a1 = nextByte(base, AddrKind::Bank0);
-    const std::uint32_t b1 = bus.read(a1, CycleKind::DataRead);
-    const std::uint32_t b2 =
-        bus.read(nextByte(a1, AddrKind::Bank0), CycleKind::DataRead);
-    return b0 | (b1 << 8) | (b2 << 16);
-  }
-  template <SnesBus B>
-  std::uint16_t readStackWord(B& bus, std::uint32_t base) {
     const std::uint16_t lo = bus.read(base, CycleKind::DataRead);
     const std::uint16_t hi =
         bus.read(nextByte(base, AddrKind::Bank0), CycleKind::DataRead);
@@ -656,43 +633,6 @@ class Cpu65816 {
   // the low byte) — the only case that costs a cycle, and only with 8-bit indexes.
   [[nodiscard]] static bool crossesPage(std::uint16_t base, std::uint16_t index) noexcept {
     return ((base & 0xFFu) + (index & 0xFFu)) > 0xFFu;
-  }
-
-  template <SnesBus B>
-  Operand eaStack(B& bus) {
-    return {static_cast<std::uint16_t>(state_.s + fetch(bus)), AddrKind::Bank0, false};
-  }
-  template <SnesBus B>
-  Operand eaDirInd(B& bus) {
-    const std::uint16_t ptr = readDpWord(bus, dpAddr(fetch(bus), 0));
-    return {bankAddr(ptr), AddrKind::Flat, false};
-  }
-  template <SnesBus B>
-  Operand eaDirIndY(B& bus) {
-    const std::uint16_t ptr = readDpWord(bus, dpAddr(fetch(bus), 0));
-    const std::uint16_t index = idxY();
-    return {(bankAddr(ptr) + index) & 0xFFFFFFu, AddrKind::Flat,
-            crossesPage(ptr, index)};
-  }
-  template <SnesBus B>
-  Operand eaDirIndX(B& bus) {
-    const std::uint16_t ptr = readDpWord(bus, dpAddr(fetch(bus), idxX()));
-    return {bankAddr(ptr), AddrKind::Flat, false};
-  }
-  template <SnesBus B>
-  Operand eaDirIndLong(B& bus) {
-    return {readDpLong(bus, dpAddr(fetch(bus), 0)), AddrKind::Flat, false};
-  }
-  template <SnesBus B>
-  Operand eaDirIndLongY(B& bus) {
-    return {(readDpLong(bus, dpAddr(fetch(bus), 0)) + idxY()) & 0xFFFFFFu,
-            AddrKind::Flat, false};
-  }
-  template <SnesBus B>
-  Operand eaStackIndY(B& bus) {
-    const std::uint16_t ptr =
-        readStackWord(bus, static_cast<std::uint16_t>(state_.s + fetch(bus)));
-    return {(bankAddr(ptr) + idxY()) & 0xFFFFFFu, AddrKind::Flat, false};
   }
 
   // ---- data access at an effective address --------------------------------
@@ -919,6 +859,111 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeAbsoluteCycle(B& bus, const AbsForm& form);
 
+  // ---- the indirect and stack-relative instructions ------------------------
+  // Where an indirect or stack-relative instruction finds its address. The first
+  // five read a pointer out of the direct page; the last two work from the stack
+  // pointer, one reading its operand there and one a pointer to it.
+  enum class IndMode : std::uint8_t {
+    DirectX,   // (dp,X)   — the offset and X are added before the pointer is read
+    DirectY,   // (dp),Y   — Y is added to the pointer the direct page holds
+    Direct,    // (dp)
+    Long,      // [dp]     — a three-byte pointer, naming its own bank
+    LongY,     // [dp],Y
+    Stack,     // sr,S     — the operand itself is at an offset from the stack
+    StackY,    // (sr,S),Y — a pointer is at that offset, and Y indexes it
+  };
+
+  // The shape of one indirect or stack-relative instruction. Every opcode in the
+  // family works on the accumulator, so the operand's width is always the
+  // accumulator's and only the access and the mode vary.
+  struct IndForm {
+    MemAccess access = MemAccess::Read;
+    IndMode mode = IndMode::Direct;
+  };
+
+  // Fills in the form of an indirect or stack-relative instruction and answers
+  // whether the opcode is one. The seven addressing modes share a single cycle
+  // sequence, so the opcode's only per-instruction contributions are this shape and
+  // the operator applied once the operand has arrived.
+  [[nodiscard]] static constexpr bool indirectForm(std::uint8_t opcode,
+                                                   IndForm& form) noexcept;
+
+  // Whether the mode works from the stack pointer rather than the direct page.
+  [[nodiscard]] static constexpr bool stackRelative(IndMode mode) noexcept {
+    return mode == IndMode::Stack || mode == IndMode::StackY;
+  }
+
+  // Whether the mode adds Y to the address its pointer names.
+  [[nodiscard]] static constexpr bool indIndexed(IndMode mode) noexcept {
+    return mode == IndMode::DirectY || mode == IndMode::LongY ||
+           mode == IndMode::StackY;
+  }
+
+  // How many bytes of pointer the mode reads: three for the modes whose pointer
+  // names its own bank, two for the rest, and none for stack-relative addressing,
+  // whose operand lies at the stack offset itself.
+  [[nodiscard]] static constexpr std::uint8_t indPointerBytes(IndMode mode) noexcept {
+    switch (mode) {
+      case IndMode::Long:
+      case IndMode::LongY: return 3u;
+      case IndMode::Stack: return 0u;
+      default: return 2u;
+    }
+  }
+
+  // The internal cycles between the offset fetch and the first pointer byte: one
+  // for a direct register with a low byte, one more for the index addition that
+  // (dp,X) always pays, and one for the stack addition the stack-relative modes
+  // always pay.
+  [[nodiscard]] std::uint8_t indSetupCycles(IndMode mode) const noexcept {
+    switch (mode) {
+      case IndMode::Stack:
+      case IndMode::StackY: return 1u;
+      case IndMode::DirectX: return static_cast<std::uint8_t>(dpCyc() + 1u);
+      default: return static_cast<std::uint8_t>(dpCyc());
+    }
+  }
+
+  // How the bytes of a pointer step. The three modes the 6502 and 65C02 already had
+  // keep their pointer inside page zero while emulation mode runs the direct page
+  // there; the four the 65816 added read on out of it, and so does every pointer
+  // once the direct register holds an address of its own. Outside that one case
+  // every pointer wraps at the end of bank zero and nowhere else.
+  [[nodiscard]] AddrKind indPointerKind(IndMode mode) const noexcept {
+    const bool addedByThe65816 = mode == IndMode::Long || mode == IndMode::LongY ||
+                                 stackRelative(mode);
+    if (state_.e && state_.d == 0 && !addedByThe65816) return AddrKind::Direct;
+    return AddrKind::Bank0;
+  }
+
+  // Whether the instruction spends a cycle on the indexing addition. (dp),Y pays for
+  // it on the same terms as an indexed absolute address — a read with eight-bit index
+  // registers only when the addition carries out of the low byte, a write or a
+  // sixteen-bit index every time — while (sr,S),Y pays for it unconditionally. The
+  // long modes add their index into a full 24-bit address and never pay for it.
+  [[nodiscard]] bool indIndexCycle(const IndForm& form) const noexcept {
+    if (form.mode == IndMode::StackY) return true;
+    if (form.mode != IndMode::DirectY) return false;
+    if (form.access != MemAccess::Read) return true;
+    return state_.pageCross || !index8();
+  }
+
+  // The address driven while that addition happens. (dp),Y drives the pointer's bank
+  // and high byte with only the low byte of the index added, exactly as an indexed
+  // absolute address does — the carry has not reached the high byte yet. (sr,S),Y
+  // instead stays parked on the last byte of the pointer it just read, which is one
+  // on from the stack offset the instruction fetched.
+  [[nodiscard]] std::uint32_t indIndexingAddr(const IndForm& form) const noexcept {
+    if (form.mode == IndMode::StackY) {
+      return static_cast<std::uint16_t>(state_.s + state_.tmp + 1u);
+    }
+    return (bankAddr(state_.ptr) & 0xFFFF00u) | ((state_.ptr + idxY()) & 0xFFu);
+  }
+
+  // Executes one cycle of an indirect or stack-relative instruction.
+  template <SnesBus B>
+  bool executeIndirectCycle(B& bus, const IndForm& form);
+
   // The immediate operand's width: the accumulator instructions take an operand as
   // wide as the accumulator, the index instructions one as wide as the index
   // registers.
@@ -976,7 +1021,9 @@ constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
   DpForm dp{};
   if (directPageForm(opcode, dp)) return true;
   AbsForm abs{};
-  return absoluteForm(opcode, abs);
+  if (absoluteForm(opcode, abs)) return true;
+  IndForm ind{};
+  return indirectForm(opcode, ind);
 }
 
 constexpr bool Cpu65816::directPageForm(std::uint8_t opcode, DpForm& form) noexcept {
@@ -1095,6 +1142,71 @@ constexpr bool Cpu65816::absoluteForm(std::uint8_t opcode, AbsForm& form) noexce
       return true;
     case 0x1E: case 0x3E: case 0x5E: case 0x7E: case 0xDE: case 0xFE:
       form = {.access = MemAccess::Modify, .mode = AbsMode::AbsoluteX, .indexWidth = false};
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+constexpr bool Cpu65816::indirectForm(std::uint8_t opcode, IndForm& form) noexcept {
+  // Each mode is a column of the opcode matrix: seven accumulator instructions read
+  // their operand and STA writes one.
+  switch (opcode) {
+    // ---- (dp,X) ----
+    case 0x01: case 0x21: case 0x41: case 0x61: case 0xA1: case 0xC1: case 0xE1:
+      form = {.access = MemAccess::Read, .mode = IndMode::DirectX};
+      return true;
+    case 0x81:
+      form = {.access = MemAccess::Write, .mode = IndMode::DirectX};
+      return true;
+
+    // ---- (dp),Y ----
+    case 0x11: case 0x31: case 0x51: case 0x71: case 0xB1: case 0xD1: case 0xF1:
+      form = {.access = MemAccess::Read, .mode = IndMode::DirectY};
+      return true;
+    case 0x91:
+      form = {.access = MemAccess::Write, .mode = IndMode::DirectY};
+      return true;
+
+    // ---- (dp) ----
+    case 0x12: case 0x32: case 0x52: case 0x72: case 0xB2: case 0xD2: case 0xF2:
+      form = {.access = MemAccess::Read, .mode = IndMode::Direct};
+      return true;
+    case 0x92:
+      form = {.access = MemAccess::Write, .mode = IndMode::Direct};
+      return true;
+
+    // ---- [dp] ----
+    case 0x07: case 0x27: case 0x47: case 0x67: case 0xA7: case 0xC7: case 0xE7:
+      form = {.access = MemAccess::Read, .mode = IndMode::Long};
+      return true;
+    case 0x87:
+      form = {.access = MemAccess::Write, .mode = IndMode::Long};
+      return true;
+
+    // ---- [dp],Y ----
+    case 0x17: case 0x37: case 0x57: case 0x77: case 0xB7: case 0xD7: case 0xF7:
+      form = {.access = MemAccess::Read, .mode = IndMode::LongY};
+      return true;
+    case 0x97:
+      form = {.access = MemAccess::Write, .mode = IndMode::LongY};
+      return true;
+
+    // ---- sr,S ----
+    case 0x03: case 0x23: case 0x43: case 0x63: case 0xA3: case 0xC3: case 0xE3:
+      form = {.access = MemAccess::Read, .mode = IndMode::Stack};
+      return true;
+    case 0x83:
+      form = {.access = MemAccess::Write, .mode = IndMode::Stack};
+      return true;
+
+    // ---- (sr,S),Y ----
+    case 0x13: case 0x33: case 0x53: case 0x73: case 0xB3: case 0xD3: case 0xF3:
+      form = {.access = MemAccess::Read, .mode = IndMode::StackY};
+      return true;
+    case 0x93:
+      form = {.access = MemAccess::Write, .mode = IndMode::StackY};
       return true;
 
     default:
@@ -1222,6 +1334,7 @@ inline void Cpu65816::applyMemoryRead(std::uint8_t opcode, std::uint16_t value) 
   switch (opcode) {
     // LDA
     case 0xA5: case 0xB5: case 0xAD: case 0xBD: case 0xB9: case 0xAF: case 0xBF:
+    case 0xA1: case 0xB1: case 0xB2: case 0xA7: case 0xB7: case 0xA3: case 0xB3:
       loadA(value);
       break;
     // LDX
@@ -1234,22 +1347,27 @@ inline void Cpu65816::applyMemoryRead(std::uint8_t opcode, std::uint16_t value) 
       break;
     // ADC
     case 0x65: case 0x75: case 0x6D: case 0x7D: case 0x79: case 0x6F: case 0x7F:
+    case 0x61: case 0x71: case 0x72: case 0x67: case 0x77: case 0x63: case 0x73:
       adcOp(value);
       break;
     // SBC
     case 0xE5: case 0xF5: case 0xED: case 0xFD: case 0xF9: case 0xEF: case 0xFF:
+    case 0xE1: case 0xF1: case 0xF2: case 0xE7: case 0xF7: case 0xE3: case 0xF3:
       sbcOp(value);
       break;
     // AND
     case 0x25: case 0x35: case 0x2D: case 0x3D: case 0x39: case 0x2F: case 0x3F:
+    case 0x21: case 0x31: case 0x32: case 0x27: case 0x37: case 0x23: case 0x33:
       andOp(value);
       break;
     // EOR
     case 0x45: case 0x55: case 0x4D: case 0x5D: case 0x59: case 0x4F: case 0x5F:
+    case 0x41: case 0x51: case 0x52: case 0x47: case 0x57: case 0x43: case 0x53:
       eorOp(value);
       break;
     // ORA
     case 0x05: case 0x15: case 0x0D: case 0x1D: case 0x19: case 0x0F: case 0x1F:
+    case 0x01: case 0x11: case 0x12: case 0x07: case 0x17: case 0x03: case 0x13:
       oraOp(value);
       break;
     // BIT
@@ -1258,6 +1376,7 @@ inline void Cpu65816::applyMemoryRead(std::uint8_t opcode, std::uint16_t value) 
       break;
     // CMP
     case 0xC5: case 0xD5: case 0xCD: case 0xDD: case 0xD9: case 0xCF: case 0xDF:
+    case 0xC1: case 0xD1: case 0xD2: case 0xC7: case 0xD7: case 0xC3: case 0xD3:
       compareWith(state_.a, value, accum8());
       break;
     // CPX
@@ -1276,6 +1395,7 @@ inline std::uint16_t Cpu65816::memoryStoreValue(std::uint8_t opcode) const noexc
   switch (opcode) {
     // STA
     case 0x85: case 0x95: case 0x8D: case 0x9D: case 0x99: case 0x8F: case 0x9F:
+    case 0x81: case 0x91: case 0x92: case 0x87: case 0x97: case 0x83: case 0x93:
       return state_.a;
     // STX
     case 0x86: case 0x96: case 0x8E:
@@ -1283,7 +1403,8 @@ inline std::uint16_t Cpu65816::memoryStoreValue(std::uint8_t opcode) const noexc
     // STY
     case 0x84: case 0x94: case 0x8C:
       return state_.y;
-    // STZ stores zero
+    // STZ stores zero, and nothing else reaches this
+    case 0x64: case 0x74: case 0x9C: case 0x9E:
     default:
       return 0;
   }
@@ -1449,6 +1570,77 @@ bool Cpu65816::executeAbsoluteCycle(B& bus, const AbsForm& form) {
                           AddrKind::Flat);
 }
 
+// An indirect instruction fetches an offset, spends its setup cycles, reads a
+// pointer from the direct page or the stack, and reaches memory through it. The
+// direct-page offset is added the same way a plain direct-page address is; the
+// pointer's own bytes step by the rule indPointerKind gives them; and Y is added to
+// the whole 24-bit address the pointer names, so the sum runs on into the next bank.
+// Stack-relative addressing skips the pointer: its operand is at the offset itself,
+// in bank zero.
+template <SnesBus B>
+bool Cpu65816::executeIndirectCycle(B& bus, const IndForm& form) {
+  const std::uint8_t pointerBytes = indPointerBytes(form.mode);
+  const std::uint8_t pointerCycle =
+      static_cast<std::uint8_t>(2u + indSetupCycles(form.mode));
+
+  if (state_.tcu == 1) {
+    state_.tmp = fetch(bus);  // the direct-page or stack offset
+    return false;
+  }
+  if (state_.tcu < pointerCycle) {
+    // The direct-register, indexing and stack-addition cycles: the address the
+    // offset came from is still driven while the chip does the addition.
+    bus.internal(operandAddr());
+    return false;
+  }
+
+  const std::uint8_t offset = static_cast<std::uint8_t>(state_.tmp);
+  if (state_.tcu == pointerCycle) {
+    // The pointer's own address, or — with no pointer to read — the operand's.
+    state_.ea = stackRelative(form.mode)
+                    ? static_cast<std::uint16_t>(state_.s + offset)
+                    : dpAddr(offset, form.mode == IndMode::DirectX ? idxX() : 0u);
+    state_.ptr = 0;
+  }
+
+  const std::uint8_t step = static_cast<std::uint8_t>(state_.tcu - pointerCycle);
+  if (step < pointerBytes) {
+    const std::uint32_t byte = bus.read(state_.ea, CycleKind::DataRead);
+    if (step + 1u < pointerBytes) {
+      state_.ptr = static_cast<std::uint16_t>(state_.ptr | (byte << (8u * step)));
+      state_.ea = nextByte(state_.ea, indPointerKind(form.mode));
+      return false;
+    }
+    // The last pointer byte settles the address the instruction will reach — and
+    // with it whether the index addition carries out of the low byte, one cycle
+    // before the indexing cycle asks. The index is added to the whole 24-bit
+    // address, so it carries into the next bank rather than wrapping in this one.
+    std::uint32_t base = 0;
+    if (pointerBytes == 3) {
+      base = (byte << 16) | state_.ptr;
+    } else {
+      state_.ptr = static_cast<std::uint16_t>(state_.ptr | (byte << 8));
+      base = bankAddr(state_.ptr);
+    }
+    const std::uint16_t index = indIndexed(form.mode) ? idxY() : std::uint16_t{0};
+    state_.pageCross = crossesPage(static_cast<std::uint16_t>(base), index);
+    state_.ea = (base + index) & 0xFFFFFFu;
+    return false;
+  }
+
+  const std::uint8_t dataCycle =
+      static_cast<std::uint8_t>(pointerCycle + pointerBytes +
+                                (indIndexCycle(form) ? 1u : 0u));
+  if (state_.tcu < dataCycle) {
+    bus.internal(indIndexingAddr(form));
+    return false;
+  }
+  return executeDataCycle(bus, static_cast<std::uint8_t>(state_.tcu - dataCycle),
+                          form.access, accum8(),
+                          form.mode == IndMode::Stack ? AddrKind::Bank0
+                                                      : AddrKind::Flat);
+}
+
 template <SnesBus B>
 bool Cpu65816::executeCycle(B& bus) {
   const std::uint8_t opcode = state_.ir;
@@ -1457,6 +1649,9 @@ bool Cpu65816::executeCycle(B& bus) {
   }
   if (AbsForm form{}; absoluteForm(opcode, form)) {
     return executeAbsoluteCycle(bus, form);
+  }
+  if (IndForm form{}; indirectForm(opcode, form)) {
+    return executeIndirectCycle(bus, form);
   }
   switch (opcode) {
     // ---- REP / SEP: fetch the mask, then spend an internal cycle parked on the
@@ -1568,76 +1763,20 @@ template <SnesBus B>
 std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
   switch (opcode) {
     // ---- LDA: load the accumulator (N,Z at the accumulator width) ----
-    case 0xA1: { Operand o = eaDirIndX(bus);    loadA(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // LDA (dir,X)
-    case 0xB1: { Operand o = eaDirIndY(bus);    loadA(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDA (dir),Y
-    case 0xB2: { Operand o = eaDirInd(bus);     loadA(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // LDA (dir)
-    case 0xA7: { Operand o = eaDirIndLong(bus); loadA(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // LDA [dir]
-    case 0xB7: { Operand o = eaDirIndLongY(bus);loadA(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // LDA [dir],Y
-    case 0xA3: { Operand o = eaStack(bus);      loadA(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // LDA stk,S
-    case 0xB3: { Operand o = eaStackIndY(bus);  loadA(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // LDA (stk,S),Y
 
     // ---- STA: store the accumulator (no flags) ----
-    case 0x81: { Operand o = eaDirIndX(bus);    writeValue(bus, o, state_.a, accum8()); return 7u - accCyc() + dpCyc(); }  // STA (dir,X)
-    case 0x91: { Operand o = eaDirIndY(bus);    writeValue(bus, o, state_.a, accum8()); return 7u - accCyc() + dpCyc(); }  // STA (dir),Y
-    case 0x92: { Operand o = eaDirInd(bus);     writeValue(bus, o, state_.a, accum8()); return 6u - accCyc() + dpCyc(); }  // STA (dir)
-    case 0x87: { Operand o = eaDirIndLong(bus); writeValue(bus, o, state_.a, accum8()); return 7u - accCyc() + dpCyc(); }  // STA [dir]
-    case 0x97: { Operand o = eaDirIndLongY(bus);writeValue(bus, o, state_.a, accum8()); return 7u - accCyc() + dpCyc(); }  // STA [dir],Y
-    case 0x83: { Operand o = eaStack(bus);      writeValue(bus, o, state_.a, accum8()); return 5u - accCyc(); }            // STA stk,S
-    case 0x93: { Operand o = eaStackIndY(bus);  writeValue(bus, o, state_.a, accum8()); return 8u - accCyc(); }            // STA (stk,S),Y
 
     // ---- ADC: add with carry (accumulator width; N,V,Z,C) ----
-    case 0x61: { Operand o = eaDirIndX(bus);    adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC (dir,X)
-    case 0x71: { Operand o = eaDirIndY(bus);    adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC (dir),Y
-    case 0x72: { Operand o = eaDirInd(bus);     adcOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // ADC (dir)
-    case 0x67: { Operand o = eaDirIndLong(bus); adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC [dir]
-    case 0x77: { Operand o = eaDirIndLongY(bus);adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC [dir],Y
-    case 0x63: { Operand o = eaStack(bus);      adcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ADC stk,S
-    case 0x73: { Operand o = eaStackIndY(bus);  adcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ADC (stk,S),Y
 
     // ---- SBC: subtract with carry (accumulator width; N,V,Z,C) ----
-    case 0xE1: { Operand o = eaDirIndX(bus);    sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC (dir,X)
-    case 0xF1: { Operand o = eaDirIndY(bus);    sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC (dir),Y
-    case 0xF2: { Operand o = eaDirInd(bus);     sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // SBC (dir)
-    case 0xE7: { Operand o = eaDirIndLong(bus); sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC [dir]
-    case 0xF7: { Operand o = eaDirIndLongY(bus);sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC [dir],Y
-    case 0xE3: { Operand o = eaStack(bus);      sbcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // SBC stk,S
-    case 0xF3: { Operand o = eaStackIndY(bus);  sbcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // SBC (stk,S),Y
 
     // ---- CMP: compare with the accumulator (accumulator width; N,Z,C) ----
-    case 0xC1: { Operand o = eaDirIndX(bus);    compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP (dir,X)
-    case 0xD1: { Operand o = eaDirIndY(bus);    compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP (dir),Y
-    case 0xD2: { Operand o = eaDirInd(bus);     compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() + dpCyc(); }        // CMP (dir)
-    case 0xC7: { Operand o = eaDirIndLong(bus); compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP [dir]
-    case 0xD7: { Operand o = eaDirIndLongY(bus);compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP [dir],Y
-    case 0xC3: { Operand o = eaStack(bus);      compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc(); }                  // CMP stk,S
-    case 0xD3: { Operand o = eaStackIndY(bus);  compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 8u - accCyc(); }                  // CMP (stk,S),Y
 
     // ---- AND: bitwise AND into the accumulator (accumulator width; N,Z) ----
-    case 0x21: { Operand o = eaDirIndX(bus);    andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND (dir,X)
-    case 0x31: { Operand o = eaDirIndY(bus);    andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND (dir),Y
-    case 0x32: { Operand o = eaDirInd(bus);     andOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // AND (dir)
-    case 0x27: { Operand o = eaDirIndLong(bus); andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND [dir]
-    case 0x37: { Operand o = eaDirIndLongY(bus);andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND [dir],Y
-    case 0x23: { Operand o = eaStack(bus);      andOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // AND stk,S
-    case 0x33: { Operand o = eaStackIndY(bus);  andOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // AND (stk,S),Y
 
     // ---- EOR: bitwise exclusive-OR into the accumulator (accumulator width; N,Z) ----
-    case 0x41: { Operand o = eaDirIndX(bus);    eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR (dir,X)
-    case 0x51: { Operand o = eaDirIndY(bus);    eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR (dir),Y
-    case 0x52: { Operand o = eaDirInd(bus);     eorOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // EOR (dir)
-    case 0x47: { Operand o = eaDirIndLong(bus); eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR [dir]
-    case 0x57: { Operand o = eaDirIndLongY(bus);eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR [dir],Y
-    case 0x43: { Operand o = eaStack(bus);      eorOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // EOR stk,S
-    case 0x53: { Operand o = eaStackIndY(bus);  eorOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // EOR (stk,S),Y
 
     // ---- ORA: bitwise OR into the accumulator (accumulator width; N,Z) ----
-    case 0x01: { Operand o = eaDirIndX(bus);    oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA (dir,X)
-    case 0x11: { Operand o = eaDirIndY(bus);    oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA (dir),Y
-    case 0x12: { Operand o = eaDirInd(bus);     oraOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // ORA (dir)
-    case 0x07: { Operand o = eaDirIndLong(bus); oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA [dir]
-    case 0x17: { Operand o = eaDirIndLongY(bus);oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA [dir],Y
-    case 0x03: { Operand o = eaStack(bus);      oraOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ORA stk,S
-    case 0x13: { Operand o = eaStackIndY(bus);  oraOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ORA (stk,S),Y
 
     // ---- push a register onto the stack (no flags) ----
     case 0x48:  // PHA
