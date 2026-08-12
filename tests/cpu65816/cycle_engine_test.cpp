@@ -201,7 +201,7 @@ TEST(Cpu65816CycleEngine, AHaltedCoreTouchesNothing) {
 
 // ---- the two execution paths agree ----
 
-TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedAndImmediateInstructions) {
+TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndDirectPageInstructions) {
   // The families this core runs cycle by cycle. An instruction outside them still
   // executes, but only as a whole.
   EXPECT_TRUE(Cpu65816::cycleStepped(0xEA));   // NOP
@@ -210,25 +210,31 @@ TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedAndImmediateInstructions) {
   EXPECT_TRUE(Cpu65816::cycleStepped(0xEB));   // XBA
   EXPECT_TRUE(Cpu65816::cycleStepped(0xFB));   // XCE
   EXPECT_TRUE(Cpu65816::cycleStepped(0x42));   // WDM
-  EXPECT_FALSE(Cpu65816::cycleStepped(0xA5));  // LDA dir
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xA5));   // LDA dir
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xB5));   // LDA dir,X
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xB6));   // LDX dir,Y
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x06));   // ASL dir
+  EXPECT_FALSE(Cpu65816::cycleStepped(0xAD));  // LDA abs
   EXPECT_FALSE(Cpu65816::cycleStepped(0x48));  // PHA
 }
 
-TEST(Cpu65816CycleEngine, AnInstructionNotOnTheEngineStillRunsAsAWhole) {
-  // LDA $10 is not on the cycle engine yet; stepInstruction executes it correctly
-  // and reports its documented count.
-  auto bus = busWith({{0x001000, 0xA5}, {0x001001, 0x10}, {0x000010, 0x7F}});
+TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineStillRunsAsAWhole) {
+  // LDA $1234 runs whole rather than a cycle at a time; stepInstruction executes it
+  // correctly and reports its documented count.
+  auto bus = busWith(
+      {{0x001000, 0xAD}, {0x001001, 0x34}, {0x001002, 0x12}, {0x001234, 0x7F}});
   Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .p = kCpuFlagM | kCpuFlagX});
-  EXPECT_EQ(cpu.stepInstruction(bus), 3u);
+  EXPECT_EQ(cpu.stepInstruction(bus), 4u);
   EXPECT_EQ(cpu.state().a & 0xFF, 0x7F);
   EXPECT_TRUE(cpu.atInstructionBoundary());
 }
 
-TEST(Cpu65816CycleEngine, AnInstructionNotOnTheEngineCannotBeSteppedACycleAtATime) {
+TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineCannotBeSteppedACycleAtATime) {
   // Asking for one cycle of an instruction the engine does not carry produces no
   // bus activity at all — the cycle that was asked for plainly did not happen,
   // rather than being filled in with invented traffic.
-  auto bus = busWith({{0x001000, 0xA5}, {0x001001, 0x10}, {0x000010, 0x7F}});
+  auto bus = busWith(
+      {{0x001000, 0xAD}, {0x001001, 0x34}, {0x001002, 0x12}, {0x001234, 0x7F}});
   Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .p = kCpuFlagM | kCpuFlagX});
   cpu.stepCycle(bus);  // the opcode fetch, which every instruction shares
   ASSERT_EQ(bus.trace.size(), 1u);

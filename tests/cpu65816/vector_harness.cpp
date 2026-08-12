@@ -282,12 +282,19 @@ std::string signalsFor(CycleKind kind, bool e, bool m, bool x) {
       s[kSignalVda] = 'd';
       s[kSignalMlb] = 'l';
       break;
+    case CycleKind::RmwModify:  // no address is valid, but the lock is still held
+    case CycleKind::RmwModifyWrite:
+      s[kSignalMlb] = 'l';
+      break;
     case CycleKind::VectorRead:  // a data address, with the vector pull asserted
       s[kSignalVda] = 'd';
       s[kSignalVpb] = 'v';
       break;
   }
-  s[kSignalRw] = (kind == CycleKind::DataWrite || kind == CycleKind::RmwWrite) ? 'w' : 'r';
+  s[kSignalRw] = (kind == CycleKind::DataWrite || kind == CycleKind::RmwWrite ||
+                  kind == CycleKind::RmwModifyWrite)
+                     ? 'w'
+                     : 'r';
   if (e) s[kSignalE] = 'e';
   if (m) s[kSignalM] = 'm';
   if (x) s[kSignalX] = 'x';

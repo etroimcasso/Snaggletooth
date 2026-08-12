@@ -111,6 +111,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
     tests/cpu65816/cycle_engine_test.cpp
+    tests/cpu65816/direct_page_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp

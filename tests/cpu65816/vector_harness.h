@@ -87,6 +87,13 @@ struct RecordingBus {
                      .value = std::nullopt,
                      .signals = liveSignals(std::nullopt)});
   }
+  // The same, for a cycle whose pins differ from a plain internal one — the modify
+  // cycle of a read-modify-write holds the memory lock across it.
+  void internal(std::uint32_t address, CycleKind kind) {
+    trace.push_back({.address = address & 0xFFFFFFu,
+                     .value = std::nullopt,
+                     .signals = liveSignals(kind)});
+  }
 
  private:
   void record(std::uint32_t address, std::uint8_t value, CycleKind kind) {
