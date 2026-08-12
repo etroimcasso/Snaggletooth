@@ -155,9 +155,10 @@ class Cpu65816 {
   void setIrqLine(bool asserted) noexcept { state_.irqLine = asserted; }
 
   // Whether an opcode runs on the cycle engine. The engine carries the implied,
-  // accumulator, immediate and direct-page instructions; the rest execute whole, so
-  // stepCycle cannot observe them a cycle at a time while stepInstruction runs them
-  // correctly. Ask before stepping an instruction cycle by cycle.
+  // accumulator, immediate, direct-page, absolute and long instructions; the rest
+  // execute whole, so stepCycle cannot observe them a cycle at a time while
+  // stepInstruction runs them correctly. Ask before stepping an instruction cycle
+  // by cycle.
   [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept;
 
  private:
@@ -658,32 +659,6 @@ class Cpu65816 {
   }
 
   template <SnesBus B>
-  Operand eaAbs(B& bus) {
-    return {bankAddr(fetchWord(bus)), AddrKind::Flat, false};
-  }
-  template <SnesBus B>
-  Operand eaAbsX(B& bus) {
-    const std::uint16_t base = fetchWord(bus);
-    const std::uint16_t index = idxX();
-    return {(bankAddr(base) + index) & 0xFFFFFFu, AddrKind::Flat,
-            crossesPage(base, index)};
-  }
-  template <SnesBus B>
-  Operand eaAbsY(B& bus) {
-    const std::uint16_t base = fetchWord(bus);
-    const std::uint16_t index = idxY();
-    return {(bankAddr(base) + index) & 0xFFFFFFu, AddrKind::Flat,
-            crossesPage(base, index)};
-  }
-  template <SnesBus B>
-  Operand eaLong(B& bus) {
-    return {fetchLong(bus), AddrKind::Flat, false};
-  }
-  template <SnesBus B>
-  Operand eaLongX(B& bus) {
-    return {(fetchLong(bus) + idxX()) & 0xFFFFFFu, AddrKind::Flat, false};
-  }
-  template <SnesBus B>
   Operand eaStack(B& bus) {
     return {static_cast<std::uint16_t>(state_.s + fetch(bus)), AddrKind::Bank0, false};
   }
@@ -798,15 +773,6 @@ class Cpu65816 {
     if (state_.e) state_.s = static_cast<std::uint16_t>(0x0100u | (state_.s & 0xFFu));
   }
 
-  // Reads an operand, applies a read-modify-write operator at the accumulator width,
-  // and writes the result back to the same address.
-  template <SnesBus B>
-  void rmwMem(B& bus, const Operand& op,
-              std::uint16_t (Cpu65816::*fn)(std::uint16_t, bool)) {
-    const std::uint16_t v = readValue(bus, op, accum8(), CycleKind::RmwRead);
-    writeValue(bus, op, (this->*fn)(v, accum8()), accum8(), CycleKind::RmwWrite);
-  }
-
   // ---- the cycle engine ---------------------------------------------------
   // Executes one cycle of the instruction already in the instruction register, and
   // answers whether that cycle was its last. The cycle index says which cycle is
@@ -815,18 +781,39 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeCycle(B& bus);
 
-  // ---- the direct-page instructions ---------------------------------------
-  // How a direct-page instruction reaches memory: it reads its operand, writes one,
-  // or reads and writes the same address with the memory lock held between.
-  enum class DpAccess : std::uint8_t { Read, Write, Modify };
-  // Which index register is added to the direct-page offset, if any.
-  enum class DpIndex : std::uint8_t { None, X, Y };
+  // ---- reaching memory ----------------------------------------------------
+  // How an instruction reaches memory once its effective address is settled: it
+  // reads its operand, writes one, or reads and writes the same address with the
+  // memory lock held between. Every addressing mode ends in one of the three, so
+  // the cycles that carry them out are shared rather than written per mode.
+  enum class MemAccess : std::uint8_t { Read, Write, Modify };
+  // Which index register is added to an address, if any.
+  enum class MemIndex : std::uint8_t { None, X, Y };
 
+  // Executes one data cycle of an instruction whose effective address is settled —
+  // one byte of the read, of the write, or of the read-modify-write. `step` counts
+  // from the first such cycle, and the second byte's address wraps by the kind the
+  // addressing mode gives it. Answers whether the cycle was the instruction's last.
+  template <SnesBus B>
+  bool executeDataCycle(B& bus, std::uint8_t step, MemAccess access, bool eightBit,
+                        AddrKind kind);
+
+  // Applies an instruction that has finished reading its operand.
+  void applyMemoryRead(std::uint8_t opcode, std::uint16_t value);
+
+  // The value a store writes.
+  [[nodiscard]] std::uint16_t memoryStoreValue(std::uint8_t opcode) const noexcept;
+
+  // The operator a read-modify-write applies to the value it read.
+  [[nodiscard]] std::uint16_t memoryModify(std::uint8_t opcode, std::uint16_t value,
+                                           bool eightBit);
+
+  // ---- the direct-page instructions ---------------------------------------
   // The shape of one direct-page instruction: how it reaches memory, how its
   // address is indexed, and which width sizes its operand.
   struct DpForm {
-    DpAccess access = DpAccess::Read;
-    DpIndex index = DpIndex::None;
+    MemAccess access = MemAccess::Read;
+    MemIndex index = MemIndex::None;
     bool indexWidth = false;  // sized by the index registers rather than by A
   };
 
@@ -850,15 +837,15 @@ class Cpu65816 {
   // holds a low byte and another when the address is indexed.
   [[nodiscard]] std::uint8_t dpDataCycle(const DpForm& form) const noexcept {
     return static_cast<std::uint8_t>(2u + dpCyc() +
-                                     (form.index == DpIndex::None ? 0u : 1u));
+                                     (form.index == MemIndex::None ? 0u : 1u));
   }
 
   // The index added to the direct-page offset for this form.
   [[nodiscard]] std::uint16_t dpIndexValue(const DpForm& form) const noexcept {
     switch (form.index) {
-      case DpIndex::X: return idxX();
-      case DpIndex::Y: return idxY();
-      case DpIndex::None: break;
+      case MemIndex::X: return idxX();
+      case MemIndex::Y: return idxY();
+      case MemIndex::None: break;
     }
     return 0;
   }
@@ -867,15 +854,70 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeDirectPageCycle(B& bus, const DpForm& form);
 
-  // Applies a direct-page instruction that has finished reading its operand.
-  void applyDirectPageRead(std::uint8_t opcode, std::uint16_t value);
+  // ---- the absolute and long instructions ---------------------------------
+  // Where an absolute or long instruction's address comes from: a two-byte operand
+  // read in the data bank, optionally indexed, or a three-byte operand that names
+  // its own bank.
+  enum class AbsMode : std::uint8_t { Absolute, AbsoluteX, AbsoluteY, Long, LongX };
 
-  // The value a direct-page store writes.
-  [[nodiscard]] std::uint16_t directPageStoreValue(std::uint8_t opcode) const noexcept;
+  // The shape of one absolute or long instruction: how it reaches memory, where its
+  // address comes from, and which width sizes its operand.
+  struct AbsForm {
+    MemAccess access = MemAccess::Read;
+    AbsMode mode = AbsMode::Absolute;
+    bool indexWidth = false;  // sized by the index registers rather than by A
+  };
 
-  // The operator a direct-page read-modify-write applies to the value it read.
-  [[nodiscard]] std::uint16_t directPageModify(std::uint8_t opcode, std::uint16_t value,
-                                               bool eightBit);
+  // Fills in the form of an absolute or long instruction and answers whether the
+  // opcode is one. The five addressing modes share a single cycle sequence, so the
+  // opcode's only per-instruction contributions are this shape and the operator
+  // applied once the operand has arrived.
+  [[nodiscard]] static constexpr bool absoluteForm(std::uint8_t opcode,
+                                                   AbsForm& form) noexcept;
+
+  // How many operand bytes the mode fetches: two for an address in the data bank,
+  // three for one that carries its own bank.
+  [[nodiscard]] static constexpr std::uint8_t absOperandBytes(AbsMode mode) noexcept {
+    return (mode == AbsMode::Long || mode == AbsMode::LongX) ? 3u : 2u;
+  }
+
+  // The index added to the absolute address for this mode.
+  [[nodiscard]] std::uint16_t absIndexValue(AbsMode mode) const noexcept {
+    switch (mode) {
+      case AbsMode::AbsoluteX:
+      case AbsMode::LongX: return idxX();
+      case AbsMode::AbsoluteY: return idxY();
+      case AbsMode::Absolute:
+      case AbsMode::Long: break;
+    }
+    return 0;
+  }
+
+  // Whether the instruction spends a cycle on the indexing addition. A read with
+  // eight-bit index registers pays for it only when the addition carries out of the
+  // low byte; a write, a read-modify-write, and anything with sixteen-bit index
+  // registers pay for it every time. The long modes add their index into a full
+  // 24-bit address and never pay for it at all.
+  [[nodiscard]] bool absIndexCycle(const AbsForm& form) const noexcept {
+    if (form.mode != AbsMode::AbsoluteX && form.mode != AbsMode::AbsoluteY) {
+      return false;
+    }
+    if (form.access != MemAccess::Read) return true;
+    return state_.pageCross || !index8();
+  }
+
+  // The address driven while the indexing addition happens: the absolute address's
+  // bank and high byte with only the low byte of the index added. The carry out of
+  // that byte has not reached the high byte yet, so the address is one the
+  // instruction never means to read — which is why the cycle drives no valid access.
+  [[nodiscard]] std::uint32_t absIndexingAddr(AbsMode mode) const noexcept {
+    return (bankAddr(state_.ptr) & 0xFFFF00u) |
+           ((state_.ptr + absIndexValue(mode)) & 0xFFu);
+  }
+
+  // Executes one cycle of an absolute or long instruction.
+  template <SnesBus B>
+  bool executeAbsoluteCycle(B& bus, const AbsForm& form);
 
   // The immediate operand's width: the accumulator instructions take an operand as
   // wide as the accumulator, the index instructions one as wide as the index
@@ -931,8 +973,10 @@ constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
     default:
       break;
   }
-  DpForm form{};
-  return directPageForm(opcode, form);
+  DpForm dp{};
+  if (directPageForm(opcode, dp)) return true;
+  AbsForm abs{};
+  return absoluteForm(opcode, abs);
 }
 
 constexpr bool Cpu65816::directPageForm(std::uint8_t opcode, DpForm& form) noexcept {
@@ -940,48 +984,117 @@ constexpr bool Cpu65816::directPageForm(std::uint8_t opcode, DpForm& form) noexc
     // ---- read the operand at the accumulator width ----
     case 0x05: case 0x24: case 0x25: case 0x45: case 0x65: case 0xA5:
     case 0xC5: case 0xE5:
-      form = {.access = DpAccess::Read, .index = DpIndex::None, .indexWidth = false};
+      form = {.access = MemAccess::Read, .index = MemIndex::None, .indexWidth = false};
       return true;
     case 0x15: case 0x34: case 0x35: case 0x55: case 0x75: case 0xB5:
     case 0xD5: case 0xF5:
-      form = {.access = DpAccess::Read, .index = DpIndex::X, .indexWidth = false};
+      form = {.access = MemAccess::Read, .index = MemIndex::X, .indexWidth = false};
       return true;
 
     // ---- read the operand at the index width ----
     case 0xA4: case 0xA6: case 0xC4: case 0xE4:
-      form = {.access = DpAccess::Read, .index = DpIndex::None, .indexWidth = true};
+      form = {.access = MemAccess::Read, .index = MemIndex::None, .indexWidth = true};
       return true;
     case 0xB4:
-      form = {.access = DpAccess::Read, .index = DpIndex::X, .indexWidth = true};
+      form = {.access = MemAccess::Read, .index = MemIndex::X, .indexWidth = true};
       return true;
     case 0xB6:
-      form = {.access = DpAccess::Read, .index = DpIndex::Y, .indexWidth = true};
+      form = {.access = MemAccess::Read, .index = MemIndex::Y, .indexWidth = true};
       return true;
 
     // ---- store a register (STZ stores zero at the accumulator width) ----
     case 0x64: case 0x85:
-      form = {.access = DpAccess::Write, .index = DpIndex::None, .indexWidth = false};
+      form = {.access = MemAccess::Write, .index = MemIndex::None, .indexWidth = false};
       return true;
     case 0x74: case 0x95:
-      form = {.access = DpAccess::Write, .index = DpIndex::X, .indexWidth = false};
+      form = {.access = MemAccess::Write, .index = MemIndex::X, .indexWidth = false};
       return true;
     case 0x84: case 0x86:
-      form = {.access = DpAccess::Write, .index = DpIndex::None, .indexWidth = true};
+      form = {.access = MemAccess::Write, .index = MemIndex::None, .indexWidth = true};
       return true;
     case 0x94:
-      form = {.access = DpAccess::Write, .index = DpIndex::X, .indexWidth = true};
+      form = {.access = MemAccess::Write, .index = MemIndex::X, .indexWidth = true};
       return true;
     case 0x96:
-      form = {.access = DpAccess::Write, .index = DpIndex::Y, .indexWidth = true};
+      form = {.access = MemAccess::Write, .index = MemIndex::Y, .indexWidth = true};
       return true;
 
     // ---- read, modify and write the same address ----
     case 0x04: case 0x06: case 0x14: case 0x26: case 0x46: case 0x66:
     case 0xC6: case 0xE6:
-      form = {.access = DpAccess::Modify, .index = DpIndex::None, .indexWidth = false};
+      form = {.access = MemAccess::Modify, .index = MemIndex::None, .indexWidth = false};
       return true;
     case 0x16: case 0x36: case 0x56: case 0x76: case 0xD6: case 0xF6:
-      form = {.access = DpAccess::Modify, .index = DpIndex::X, .indexWidth = false};
+      form = {.access = MemAccess::Modify, .index = MemIndex::X, .indexWidth = false};
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+constexpr bool Cpu65816::absoluteForm(std::uint8_t opcode, AbsForm& form) noexcept {
+  switch (opcode) {
+    // ---- read the operand at the accumulator width ----
+    case 0x0D: case 0x2C: case 0x2D: case 0x4D: case 0x6D: case 0xAD:
+    case 0xCD: case 0xED:
+      form = {.access = MemAccess::Read, .mode = AbsMode::Absolute, .indexWidth = false};
+      return true;
+    case 0x1D: case 0x3C: case 0x3D: case 0x5D: case 0x7D: case 0xBD:
+    case 0xDD: case 0xFD:
+      form = {.access = MemAccess::Read, .mode = AbsMode::AbsoluteX, .indexWidth = false};
+      return true;
+    case 0x19: case 0x39: case 0x59: case 0x79: case 0xB9: case 0xD9:
+    case 0xF9:
+      form = {.access = MemAccess::Read, .mode = AbsMode::AbsoluteY, .indexWidth = false};
+      return true;
+    case 0x0F: case 0x2F: case 0x4F: case 0x6F: case 0xAF: case 0xCF:
+    case 0xEF:
+      form = {.access = MemAccess::Read, .mode = AbsMode::Long, .indexWidth = false};
+      return true;
+    case 0x1F: case 0x3F: case 0x5F: case 0x7F: case 0xBF: case 0xDF:
+    case 0xFF:
+      form = {.access = MemAccess::Read, .mode = AbsMode::LongX, .indexWidth = false};
+      return true;
+
+    // ---- read the operand at the index width ----
+    case 0xAC: case 0xAE: case 0xCC: case 0xEC:
+      form = {.access = MemAccess::Read, .mode = AbsMode::Absolute, .indexWidth = true};
+      return true;
+    case 0xBC:
+      form = {.access = MemAccess::Read, .mode = AbsMode::AbsoluteX, .indexWidth = true};
+      return true;
+    case 0xBE:
+      form = {.access = MemAccess::Read, .mode = AbsMode::AbsoluteY, .indexWidth = true};
+      return true;
+
+    // ---- store a register (STZ stores zero at the accumulator width) ----
+    case 0x8D: case 0x9C:
+      form = {.access = MemAccess::Write, .mode = AbsMode::Absolute, .indexWidth = false};
+      return true;
+    case 0x9D: case 0x9E:
+      form = {.access = MemAccess::Write, .mode = AbsMode::AbsoluteX, .indexWidth = false};
+      return true;
+    case 0x99:
+      form = {.access = MemAccess::Write, .mode = AbsMode::AbsoluteY, .indexWidth = false};
+      return true;
+    case 0x8F:
+      form = {.access = MemAccess::Write, .mode = AbsMode::Long, .indexWidth = false};
+      return true;
+    case 0x9F:
+      form = {.access = MemAccess::Write, .mode = AbsMode::LongX, .indexWidth = false};
+      return true;
+    case 0x8C: case 0x8E:
+      form = {.access = MemAccess::Write, .mode = AbsMode::Absolute, .indexWidth = true};
+      return true;
+
+    // ---- read, modify and write the same address ----
+    case 0x0C: case 0x0E: case 0x1C: case 0x2E: case 0x4E: case 0x6E:
+    case 0xCE: case 0xEE:
+      form = {.access = MemAccess::Modify, .mode = AbsMode::Absolute, .indexWidth = false};
+      return true;
+    case 0x1E: case 0x3E: case 0x5E: case 0x7E: case 0xDE: case 0xFE:
+      form = {.access = MemAccess::Modify, .mode = AbsMode::AbsoluteX, .indexWidth = false};
       return true;
 
     default:
@@ -1105,45 +1218,169 @@ inline void Cpu65816::applyImplied(std::uint8_t opcode) {
   }
 }
 
-inline void Cpu65816::applyDirectPageRead(std::uint8_t opcode, std::uint16_t value) {
+inline void Cpu65816::applyMemoryRead(std::uint8_t opcode, std::uint16_t value) {
   switch (opcode) {
-    case 0xA5: case 0xB5: loadA(value); break;                       // LDA
-    case 0xA6: case 0xB6: loadX(value); break;                       // LDX
-    case 0xA4: case 0xB4: loadY(value); break;                       // LDY
-    case 0x65: case 0x75: adcOp(value); break;                       // ADC
-    case 0xE5: case 0xF5: sbcOp(value); break;                       // SBC
-    case 0x25: case 0x35: andOp(value); break;                       // AND
-    case 0x45: case 0x55: eorOp(value); break;                       // EOR
-    case 0x05: case 0x15: oraOp(value); break;                       // ORA
-    case 0x24: case 0x34: bitOp(value, /*immediate=*/false); break;  // BIT
-    case 0xC5: case 0xD5: compareWith(state_.a, value, accum8()); break;  // CMP
-    case 0xE4: compareWith(state_.x, value, index8()); break;             // CPX
-    case 0xC4: compareWith(state_.y, value, index8()); break;             // CPY
+    // LDA
+    case 0xA5: case 0xB5: case 0xAD: case 0xBD: case 0xB9: case 0xAF: case 0xBF:
+      loadA(value);
+      break;
+    // LDX
+    case 0xA6: case 0xB6: case 0xAE: case 0xBE:
+      loadX(value);
+      break;
+    // LDY
+    case 0xA4: case 0xB4: case 0xAC: case 0xBC:
+      loadY(value);
+      break;
+    // ADC
+    case 0x65: case 0x75: case 0x6D: case 0x7D: case 0x79: case 0x6F: case 0x7F:
+      adcOp(value);
+      break;
+    // SBC
+    case 0xE5: case 0xF5: case 0xED: case 0xFD: case 0xF9: case 0xEF: case 0xFF:
+      sbcOp(value);
+      break;
+    // AND
+    case 0x25: case 0x35: case 0x2D: case 0x3D: case 0x39: case 0x2F: case 0x3F:
+      andOp(value);
+      break;
+    // EOR
+    case 0x45: case 0x55: case 0x4D: case 0x5D: case 0x59: case 0x4F: case 0x5F:
+      eorOp(value);
+      break;
+    // ORA
+    case 0x05: case 0x15: case 0x0D: case 0x1D: case 0x19: case 0x0F: case 0x1F:
+      oraOp(value);
+      break;
+    // BIT
+    case 0x24: case 0x34: case 0x2C: case 0x3C:
+      bitOp(value, /*immediate=*/false);
+      break;
+    // CMP
+    case 0xC5: case 0xD5: case 0xCD: case 0xDD: case 0xD9: case 0xCF: case 0xDF:
+      compareWith(state_.a, value, accum8());
+      break;
+    // CPX
+    case 0xE4: case 0xEC:
+      compareWith(state_.x, value, index8());
+      break;
+    // CPY
+    case 0xC4: case 0xCC:
+      compareWith(state_.y, value, index8());
+      break;
     default: break;
   }
 }
 
-inline std::uint16_t Cpu65816::directPageStoreValue(std::uint8_t opcode) const noexcept {
+inline std::uint16_t Cpu65816::memoryStoreValue(std::uint8_t opcode) const noexcept {
   switch (opcode) {
-    case 0x85: case 0x95: return state_.a;  // STA
-    case 0x86: case 0x96: return state_.x;  // STX
-    case 0x84: case 0x94: return state_.y;  // STY
-    default: return 0;                      // STZ stores zero
+    // STA
+    case 0x85: case 0x95: case 0x8D: case 0x9D: case 0x99: case 0x8F: case 0x9F:
+      return state_.a;
+    // STX
+    case 0x86: case 0x96: case 0x8E:
+      return state_.x;
+    // STY
+    case 0x84: case 0x94: case 0x8C:
+      return state_.y;
+    // STZ stores zero
+    default:
+      return 0;
   }
 }
 
-inline std::uint16_t Cpu65816::directPageModify(std::uint8_t opcode, std::uint16_t value,
-                                                bool eightBit) {
+inline std::uint16_t Cpu65816::memoryModify(std::uint8_t opcode, std::uint16_t value,
+                                            bool eightBit) {
   switch (opcode) {
-    case 0x06: case 0x16: return aslOp(value, eightBit);  // ASL
-    case 0x46: case 0x56: return lsrOp(value, eightBit);  // LSR
-    case 0x26: case 0x36: return rolOp(value, eightBit);  // ROL
-    case 0x66: case 0x76: return rorOp(value, eightBit);  // ROR
-    case 0xE6: case 0xF6: return incOp(value, eightBit);  // INC
-    case 0xC6: case 0xD6: return decOp(value, eightBit);  // DEC
-    case 0x04: return tsbOp(value, eightBit);             // TSB
-    default: return trbOp(value, eightBit);               // TRB
+    case 0x06: case 0x16: case 0x0E: case 0x1E: return aslOp(value, eightBit);  // ASL
+    case 0x46: case 0x56: case 0x4E: case 0x5E: return lsrOp(value, eightBit);  // LSR
+    case 0x26: case 0x36: case 0x2E: case 0x3E: return rolOp(value, eightBit);  // ROL
+    case 0x66: case 0x76: case 0x6E: case 0x7E: return rorOp(value, eightBit);  // ROR
+    case 0xE6: case 0xF6: case 0xEE: case 0xFE: return incOp(value, eightBit);  // INC
+    case 0xC6: case 0xD6: case 0xCE: case 0xDE: return decOp(value, eightBit);  // DEC
+    case 0x04: case 0x0C: return tsbOp(value, eightBit);                        // TSB
+    case 0x14: case 0x1C: return trbOp(value, eightBit);                        // TRB
+    default: return value;
   }
+}
+
+// The data cycles every addressing mode ends in. The effective address is settled
+// by the time the first of them runs, so what remains is one bus cycle per byte —
+// with a read-modify-write spending a cycle between its read and its write while
+// the value changes inside the chip, and holding the memory lock across all three.
+template <SnesBus B>
+bool Cpu65816::executeDataCycle(B& bus, std::uint8_t step, MemAccess access,
+                                bool eightBit, AddrKind kind) {
+  const std::uint8_t opcode = state_.ir;
+  const std::uint32_t high = nextByte(state_.ea, kind);
+
+  switch (access) {
+    case MemAccess::Read:
+      if (step == 0) {
+        const std::uint16_t lo = bus.read(state_.ea, CycleKind::DataRead);
+        if (!eightBit) {
+          state_.tmp = lo;
+          return false;
+        }
+        applyMemoryRead(opcode, lo);
+        return true;
+      }
+      applyMemoryRead(opcode, static_cast<std::uint16_t>(
+                                  state_.tmp | (bus.read(high, CycleKind::DataRead) << 8)));
+      return true;
+
+    case MemAccess::Write: {
+      const std::uint16_t value = memoryStoreValue(opcode);
+      if (step == 0) {
+        bus.write(state_.ea, static_cast<std::uint8_t>(value), CycleKind::DataWrite);
+        return eightBit;
+      }
+      bus.write(high, static_cast<std::uint8_t>(value >> 8), CycleKind::DataWrite);
+      return true;
+    }
+
+    case MemAccess::Modify:
+      // Eight bits wide: read, modify, write. Sixteen: both bytes are read, then
+      // written back high byte first — the reverse of the order they were read in.
+      if (eightBit) {
+        if (step == 0) {
+          state_.tmp = bus.read(state_.ea, CycleKind::RmwRead);
+          return false;
+        }
+        if (step == 1) {
+          if (state_.e) {
+            bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp),
+                      CycleKind::RmwModifyWrite);
+          } else {
+            bus.internal(state_.ea, CycleKind::RmwModify);
+          }
+          state_.tmp = memoryModify(opcode, state_.tmp, true);
+          return false;
+        }
+        bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp), CycleKind::RmwWrite);
+        return true;
+      }
+      switch (step) {
+        case 0:
+          state_.tmp = bus.read(state_.ea, CycleKind::RmwRead);
+          return false;
+        case 1:
+          state_.tmp = static_cast<std::uint16_t>(
+              state_.tmp | (bus.read(high, CycleKind::RmwRead) << 8));
+          return false;
+        case 2:
+          bus.internal(high, CycleKind::RmwModify);
+          state_.tmp = memoryModify(opcode, state_.tmp, false);
+          return false;
+        case 3:
+          bus.write(high, static_cast<std::uint8_t>(state_.tmp >> 8), CycleKind::RmwWrite);
+          return false;
+        default:
+          bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp), CycleKind::RmwWrite);
+          return true;
+      }
+  }
+  return true;
 }
 
 // A direct-page instruction fetches its offset, spends a cycle for a direct register
@@ -1152,8 +1389,6 @@ inline std::uint16_t Cpu65816::directPageModify(std::uint8_t opcode, std::uint16
 // page-aligned direct register, where the sum stays inside the direct page.
 template <SnesBus B>
 bool Cpu65816::executeDirectPageCycle(B& bus, const DpForm& form) {
-  const std::uint8_t opcode = state_.ir;
-  const bool eightBit = form.indexWidth ? index8() : accum8();
   const std::uint8_t dataCycle = dpDataCycle(form);
 
   if (state_.tcu == 1) {
@@ -1171,75 +1406,47 @@ bool Cpu65816::executeDirectPageCycle(B& bus, const DpForm& form) {
   if (step == 0) {
     state_.ea = dpAddr(static_cast<std::uint8_t>(state_.tmp), dpIndexValue(form));
   }
-  const std::uint32_t high = nextByte(state_.ea, AddrKind::Direct);
+  return executeDataCycle(bus, step, form.access,
+                          form.indexWidth ? index8() : accum8(), AddrKind::Direct);
+}
 
-  switch (form.access) {
-    case DpAccess::Read:
-      if (step == 0) {
-        const std::uint16_t lo = bus.read(state_.ea, CycleKind::DataRead);
-        if (!eightBit) {
-          state_.tmp = lo;
-          return false;
-        }
-        applyDirectPageRead(opcode, lo);
-        return true;
-      }
-      applyDirectPageRead(opcode, static_cast<std::uint16_t>(
-                                      state_.tmp | (bus.read(high, CycleKind::DataRead) << 8)));
-      return true;
+// An absolute instruction fetches a two-byte address to read in the data bank, or a
+// three-byte one that names its own bank, then reaches memory. An index register is
+// added to the whole 24-bit address, so the sum runs on into the next bank rather
+// than wrapping at the end of the one it started in.
+template <SnesBus B>
+bool Cpu65816::executeAbsoluteCycle(B& bus, const AbsForm& form) {
+  const std::uint8_t operandBytes = absOperandBytes(form.mode);
 
-    case DpAccess::Write: {
-      const std::uint16_t value = directPageStoreValue(opcode);
-      if (step == 0) {
-        bus.write(state_.ea, static_cast<std::uint8_t>(value), CycleKind::DataWrite);
-        return eightBit;
+  if (state_.tcu <= operandBytes) {
+    const std::uint32_t byte = fetch(bus);
+    if (state_.tcu == 1) {
+      state_.ptr = static_cast<std::uint16_t>(byte);
+    } else if (state_.tcu == 2) {
+      state_.ptr = static_cast<std::uint16_t>(state_.ptr | (byte << 8));
+      if (operandBytes == 2) {
+        // Both the address and whether the index addition carries out of its low
+        // byte are settled here, one cycle before the indexing cycle asks.
+        const std::uint16_t index = absIndexValue(form.mode);
+        state_.pageCross = crossesPage(state_.ptr, index);
+        state_.ea = (bankAddr(state_.ptr) + index) & 0xFFFFFFu;
       }
-      bus.write(high, static_cast<std::uint8_t>(value >> 8), CycleKind::DataWrite);
-      return true;
+    } else {
+      const std::uint32_t base = (byte << 16) | state_.ptr;
+      state_.ea = (base + absIndexValue(form.mode)) & 0xFFFFFFu;
     }
-
-    case DpAccess::Modify:
-      // Eight bits wide: read, modify, write. Sixteen: both bytes are read, then
-      // written back high byte first — the reverse of the order they were read in.
-      if (eightBit) {
-        if (step == 0) {
-          state_.tmp = bus.read(state_.ea, CycleKind::RmwRead);
-          return false;
-        }
-        if (step == 1) {
-          if (state_.e) {
-            bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp),
-                      CycleKind::RmwModifyWrite);
-          } else {
-            bus.internal(state_.ea, CycleKind::RmwModify);
-          }
-          state_.tmp = directPageModify(opcode, state_.tmp, true);
-          return false;
-        }
-        bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp), CycleKind::RmwWrite);
-        return true;
-      }
-      switch (step) {
-        case 0:
-          state_.tmp = bus.read(state_.ea, CycleKind::RmwRead);
-          return false;
-        case 1:
-          state_.tmp = static_cast<std::uint16_t>(
-              state_.tmp | (bus.read(high, CycleKind::RmwRead) << 8));
-          return false;
-        case 2:
-          bus.internal(high, CycleKind::RmwModify);
-          state_.tmp = directPageModify(opcode, state_.tmp, false);
-          return false;
-        case 3:
-          bus.write(high, static_cast<std::uint8_t>(state_.tmp >> 8), CycleKind::RmwWrite);
-          return false;
-        default:
-          bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp), CycleKind::RmwWrite);
-          return true;
-      }
+    return false;
   }
-  return true;
+
+  const std::uint8_t dataCycle =
+      static_cast<std::uint8_t>(operandBytes + 1u + (absIndexCycle(form) ? 1u : 0u));
+  if (state_.tcu < dataCycle) {
+    bus.internal(absIndexingAddr(form.mode));
+    return false;
+  }
+  return executeDataCycle(bus, static_cast<std::uint8_t>(state_.tcu - dataCycle),
+                          form.access, form.indexWidth ? index8() : accum8(),
+                          AddrKind::Flat);
 }
 
 template <SnesBus B>
@@ -1247,6 +1454,9 @@ bool Cpu65816::executeCycle(B& bus) {
   const std::uint8_t opcode = state_.ir;
   if (DpForm form{}; directPageForm(opcode, form)) {
     return executeDirectPageCycle(bus, form);
+  }
+  if (AbsForm form{}; absoluteForm(opcode, form)) {
+    return executeAbsoluteCycle(bus, form);
   }
   switch (opcode) {
     // ---- REP / SEP: fetch the mask, then spend an internal cycle parked on the
@@ -1358,11 +1568,6 @@ template <SnesBus B>
 std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
   switch (opcode) {
     // ---- LDA: load the accumulator (N,Z at the accumulator width) ----
-    case 0xAD: { Operand o = eaAbs(bus);        loadA(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // LDA abs
-    case 0xBD: { Operand o = eaAbsX(bus);       loadA(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDA abs,X
-    case 0xB9: { Operand o = eaAbsY(bus);       loadA(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDA abs,Y
-    case 0xAF: { Operand o = eaLong(bus);       loadA(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // LDA long
-    case 0xBF: { Operand o = eaLongX(bus);      loadA(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // LDA long,X
     case 0xA1: { Operand o = eaDirIndX(bus);    loadA(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // LDA (dir,X)
     case 0xB1: { Operand o = eaDirIndY(bus);    loadA(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDA (dir),Y
     case 0xB2: { Operand o = eaDirInd(bus);     loadA(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // LDA (dir)
@@ -1371,19 +1576,7 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0xA3: { Operand o = eaStack(bus);      loadA(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // LDA stk,S
     case 0xB3: { Operand o = eaStackIndY(bus);  loadA(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // LDA (stk,S),Y
 
-    // ---- LDX / LDY: load an index register (N,Z at the index width) ----
-    case 0xAE: { Operand o = eaAbs(bus);   loadX(readValue(bus, o, index8())); return 5u - indexCyc(); }            // LDX abs
-    case 0xBE: { Operand o = eaAbsY(bus);  loadX(readValue(bus, o, index8())); return 6u - 2u * indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDX abs,Y
-    case 0xAC: { Operand o = eaAbs(bus);   loadY(readValue(bus, o, index8())); return 5u - indexCyc(); }            // LDY abs
-    case 0xBC: { Operand o = eaAbsX(bus);  loadY(readValue(bus, o, index8())); return 6u - 2u * indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDY abs,X
-
-    // ---- STA: store the accumulator (no flags; indexed stores take no page-cross
-    //      discount — the extra cycle is always paid) ----
-    case 0x8D: { Operand o = eaAbs(bus);        writeValue(bus, o, state_.a, accum8()); return 5u - accCyc(); }            // STA abs
-    case 0x9D: { Operand o = eaAbsX(bus);       writeValue(bus, o, state_.a, accum8()); return 6u - accCyc(); }            // STA abs,X
-    case 0x99: { Operand o = eaAbsY(bus);       writeValue(bus, o, state_.a, accum8()); return 6u - accCyc(); }            // STA abs,Y
-    case 0x8F: { Operand o = eaLong(bus);       writeValue(bus, o, state_.a, accum8()); return 6u - accCyc(); }            // STA long
-    case 0x9F: { Operand o = eaLongX(bus);      writeValue(bus, o, state_.a, accum8()); return 6u - accCyc(); }            // STA long,X
+    // ---- STA: store the accumulator (no flags) ----
     case 0x81: { Operand o = eaDirIndX(bus);    writeValue(bus, o, state_.a, accum8()); return 7u - accCyc() + dpCyc(); }  // STA (dir,X)
     case 0x91: { Operand o = eaDirIndY(bus);    writeValue(bus, o, state_.a, accum8()); return 7u - accCyc() + dpCyc(); }  // STA (dir),Y
     case 0x92: { Operand o = eaDirInd(bus);     writeValue(bus, o, state_.a, accum8()); return 6u - accCyc() + dpCyc(); }  // STA (dir)
@@ -1392,20 +1585,7 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0x83: { Operand o = eaStack(bus);      writeValue(bus, o, state_.a, accum8()); return 5u - accCyc(); }            // STA stk,S
     case 0x93: { Operand o = eaStackIndY(bus);  writeValue(bus, o, state_.a, accum8()); return 8u - accCyc(); }            // STA (stk,S),Y
 
-    // ---- STX / STY: store an index register (no flags) ----
-    case 0x8E: { Operand o = eaAbs(bus);  writeValue(bus, o, state_.x, index8()); return 5u - indexCyc(); }            // STX abs
-    case 0x8C: { Operand o = eaAbs(bus);  writeValue(bus, o, state_.y, index8()); return 5u - indexCyc(); }            // STY abs
-
-    // ---- STZ: store zero (accumulator width; no flags) ----
-    case 0x9C: { Operand o = eaAbs(bus);  writeValue(bus, o, 0, accum8()); return 5u - accCyc(); }            // STZ abs
-    case 0x9E: { Operand o = eaAbsX(bus); writeValue(bus, o, 0, accum8()); return 6u - accCyc(); }            // STZ abs,X
-
     // ---- ADC: add with carry (accumulator width; N,V,Z,C) ----
-    case 0x6D: { Operand o = eaAbs(bus);        adcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ADC abs
-    case 0x7D: { Operand o = eaAbsX(bus);       adcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC abs,X
-    case 0x79: { Operand o = eaAbsY(bus);       adcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC abs,Y
-    case 0x6F: { Operand o = eaLong(bus);       adcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ADC long
-    case 0x7F: { Operand o = eaLongX(bus);      adcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ADC long,X
     case 0x61: { Operand o = eaDirIndX(bus);    adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ADC (dir,X)
     case 0x71: { Operand o = eaDirIndY(bus);    adcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ADC (dir),Y
     case 0x72: { Operand o = eaDirInd(bus);     adcOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // ADC (dir)
@@ -1415,11 +1595,6 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0x73: { Operand o = eaStackIndY(bus);  adcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ADC (stk,S),Y
 
     // ---- SBC: subtract with carry (accumulator width; N,V,Z,C) ----
-    case 0xED: { Operand o = eaAbs(bus);        sbcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // SBC abs
-    case 0xFD: { Operand o = eaAbsX(bus);       sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC abs,X
-    case 0xF9: { Operand o = eaAbsY(bus);       sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC abs,Y
-    case 0xEF: { Operand o = eaLong(bus);       sbcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // SBC long
-    case 0xFF: { Operand o = eaLongX(bus);      sbcOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // SBC long,X
     case 0xE1: { Operand o = eaDirIndX(bus);    sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // SBC (dir,X)
     case 0xF1: { Operand o = eaDirIndY(bus);    sbcOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // SBC (dir),Y
     case 0xF2: { Operand o = eaDirInd(bus);     sbcOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // SBC (dir)
@@ -1429,11 +1604,6 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0xF3: { Operand o = eaStackIndY(bus);  sbcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // SBC (stk,S),Y
 
     // ---- CMP: compare with the accumulator (accumulator width; N,Z,C) ----
-    case 0xCD: { Operand o = eaAbs(bus);        compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc(); }                  // CMP abs
-    case 0xDD: { Operand o = eaAbsX(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP abs,X
-    case 0xD9: { Operand o = eaAbsY(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP abs,Y
-    case 0xCF: { Operand o = eaLong(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc(); }                  // CMP long
-    case 0xDF: { Operand o = eaLongX(bus);      compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc(); }                  // CMP long,X
     case 0xC1: { Operand o = eaDirIndX(bus);    compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc(); }        // CMP (dir,X)
     case 0xD1: { Operand o = eaDirIndY(bus);    compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // CMP (dir),Y
     case 0xD2: { Operand o = eaDirInd(bus);     compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 6u - accCyc() + dpCyc(); }        // CMP (dir)
@@ -1442,16 +1612,7 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0xC3: { Operand o = eaStack(bus);      compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc(); }                  // CMP stk,S
     case 0xD3: { Operand o = eaStackIndY(bus);  compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 8u - accCyc(); }                  // CMP (stk,S),Y
 
-    // ---- CPX / CPY: compare with an index register (index width; N,Z,C) ----
-    case 0xEC: { Operand o = eaAbs(bus); compareWith(state_.x, readValue(bus, o, index8()), index8()); return 5u - indexCyc(); }            // CPX abs
-    case 0xCC: { Operand o = eaAbs(bus); compareWith(state_.y, readValue(bus, o, index8()), index8()); return 5u - indexCyc(); }            // CPY abs
-
     // ---- AND: bitwise AND into the accumulator (accumulator width; N,Z) ----
-    case 0x2D: { Operand o = eaAbs(bus);        andOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // AND abs
-    case 0x3D: { Operand o = eaAbsX(bus);       andOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND abs,X
-    case 0x39: { Operand o = eaAbsY(bus);       andOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND abs,Y
-    case 0x2F: { Operand o = eaLong(bus);       andOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // AND long
-    case 0x3F: { Operand o = eaLongX(bus);      andOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // AND long,X
     case 0x21: { Operand o = eaDirIndX(bus);    andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // AND (dir,X)
     case 0x31: { Operand o = eaDirIndY(bus);    andOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // AND (dir),Y
     case 0x32: { Operand o = eaDirInd(bus);     andOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // AND (dir)
@@ -1461,11 +1622,6 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0x33: { Operand o = eaStackIndY(bus);  andOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // AND (stk,S),Y
 
     // ---- EOR: bitwise exclusive-OR into the accumulator (accumulator width; N,Z) ----
-    case 0x4D: { Operand o = eaAbs(bus);        eorOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // EOR abs
-    case 0x5D: { Operand o = eaAbsX(bus);       eorOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR abs,X
-    case 0x59: { Operand o = eaAbsY(bus);       eorOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR abs,Y
-    case 0x4F: { Operand o = eaLong(bus);       eorOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // EOR long
-    case 0x5F: { Operand o = eaLongX(bus);      eorOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // EOR long,X
     case 0x41: { Operand o = eaDirIndX(bus);    eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // EOR (dir,X)
     case 0x51: { Operand o = eaDirIndY(bus);    eorOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // EOR (dir),Y
     case 0x52: { Operand o = eaDirInd(bus);     eorOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // EOR (dir)
@@ -1475,11 +1631,6 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0x53: { Operand o = eaStackIndY(bus);  eorOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // EOR (stk,S),Y
 
     // ---- ORA: bitwise OR into the accumulator (accumulator width; N,Z) ----
-    case 0x0D: { Operand o = eaAbs(bus);        oraOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ORA abs
-    case 0x1D: { Operand o = eaAbsX(bus);       oraOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA abs,X
-    case 0x19: { Operand o = eaAbsY(bus);       oraOp(readValue(bus, o, accum8())); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA abs,Y
-    case 0x0F: { Operand o = eaLong(bus);       oraOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ORA long
-    case 0x1F: { Operand o = eaLongX(bus);      oraOp(readValue(bus, o, accum8())); return 6u - accCyc(); }                  // ORA long,X
     case 0x01: { Operand o = eaDirIndX(bus);    oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA (dir,X)
     case 0x11: { Operand o = eaDirIndY(bus);    oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // ORA (dir),Y
     case 0x12: { Operand o = eaDirInd(bus);     oraOp(readValue(bus, o, accum8())); return 6u - accCyc() + dpCyc(); }        // ORA (dir)
@@ -1487,32 +1638,6 @@ std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
     case 0x17: { Operand o = eaDirIndLongY(bus);oraOp(readValue(bus, o, accum8())); return 7u - accCyc() + dpCyc(); }        // ORA [dir],Y
     case 0x03: { Operand o = eaStack(bus);      oraOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ORA stk,S
     case 0x13: { Operand o = eaStackIndY(bus);  oraOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ORA (stk,S),Y
-
-    // ---- BIT: test bits against the accumulator (accumulator width). Non-immediate
-    //      forms take N,V from the operand's top two bits and set Z from the AND;
-    //      the immediate form sets Z alone ----
-    case 0x2C: { Operand o = eaAbs(bus);  bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc(); }            // BIT abs
-    case 0x3C: { Operand o = eaAbsX(bus); bitOp(readValue(bus, o, accum8()), false); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // BIT abs,X
-
-    // ---- INC / DEC: step a value by one (accumulator width; N,Z) ----
-    case 0xEE: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::incOp); return 8u - 2u * accCyc(); }            // INC abs
-    case 0xFE: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::incOp); return 9u - 2u * accCyc(); }            // INC abs,X
-    case 0xCE: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::decOp); return 8u - 2u * accCyc(); }            // DEC abs
-    case 0xDE: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::decOp); return 9u - 2u * accCyc(); }            // DEC abs,X
-
-    // ---- ASL / LSR / ROL / ROR: shifts and rotates (accumulator width; N,Z,C) ----
-    case 0x0E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::aslOp); return 8u - 2u * accCyc(); }            // ASL abs
-    case 0x1E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::aslOp); return 9u - 2u * accCyc(); }            // ASL abs,X
-    case 0x4E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::lsrOp); return 8u - 2u * accCyc(); }            // LSR abs
-    case 0x5E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::lsrOp); return 9u - 2u * accCyc(); }            // LSR abs,X
-    case 0x2E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::rolOp); return 8u - 2u * accCyc(); }            // ROL abs
-    case 0x3E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::rolOp); return 9u - 2u * accCyc(); }            // ROL abs,X
-    case 0x6E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::rorOp); return 8u - 2u * accCyc(); }            // ROR abs
-    case 0x7E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::rorOp); return 9u - 2u * accCyc(); }            // ROR abs,X
-
-    // ---- TSB / TRB: test-and-set / test-and-reset memory bits against A (Z only) ----
-    case 0x0C: { Operand o = eaAbs(bus); rmwMem(bus, o, &Cpu65816::tsbOp); return 8u - 2u * accCyc(); }            // TSB abs
-    case 0x1C: { Operand o = eaAbs(bus); rmwMem(bus, o, &Cpu65816::trbOp); return 8u - 2u * accCyc(); }            // TRB abs
 
     // ---- push a register onto the stack (no flags) ----
     case 0x48:  // PHA
