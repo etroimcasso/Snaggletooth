@@ -1,6 +1,23 @@
 #pragma once
 
-// The 65816 — the SNES main CPU's instruction-set core.
+// The 65816 — the SNES main CPU core.
+//
+// The core is cycle-stepped: stepCycle() executes exactly one chip cycle, and every
+// cycle is narrated through the bus — a cycle that reaches memory issues a read or a
+// write, and a cycle that does not still drives an address, reported as internal().
+// A machine that prices memory by region, or seizes the bus part-way through an
+// instruction, needs that grain; so does a test that compares the core against a
+// per-cycle recording of the real chip.
+//
+// Instruction progress is part of the state value, not the call stack: an
+// instruction register, a cycle index within the instruction, and a few scratch
+// fields. So state() and restore() are legal at any cycle, mid-instruction included,
+// and a snapshot is still a plain copy of the struct.
+//
+// stepInstruction() runs cycles to the next instruction boundary and returns how
+// many it took — the whole-instruction view, for hosts and for tests that care about
+// final state. Cycle totals are never computed from a formula; they are however many
+// cycles the instruction actually executed.
 //
 // The core runs over an abstract bus (the SnesBus concept): the flat test harness
 // and the full SNES machine both satisfy it, so the same interpreter drives plain
@@ -18,13 +35,31 @@
 
 namespace snaggletooth {
 
+// What a bus access is for. A machine prices a cycle by the region it reaches, and
+// the pins the chip drives differ by purpose: an opcode fetch asserts both program
+// and data valid, an operand fetch only program, a data access only data, the two
+// halves of a read-modify-write also assert the memory lock, and an interrupt
+// vector pull asserts the vector-pull pin.
+enum class CycleKind : std::uint8_t {
+  OpcodeFetch,
+  OperandFetch,
+  DataRead,
+  DataWrite,
+  RmwRead,
+  RmwWrite,
+  VectorRead,
+};
+
 // The 65816's view of the system: a 24-bit address space with 8-bit data. A
-// conforming bus answers an 8-bit read for any address and accepts an 8-bit write
-// to one; only the low 24 bits of the address are meaningful.
+// conforming bus answers an 8-bit read for any address, accepts an 8-bit write to
+// one, and accepts internal(), the cycle that drives an address without a valid
+// access. Only the low 24 bits of an address are meaningful.
 template <typename B>
-concept SnesBus = requires(B bus, std::uint32_t address, std::uint8_t value) {
-  { bus.read(address) } -> std::same_as<std::uint8_t>;
-  bus.write(address, value);
+concept SnesBus = requires(B bus, std::uint32_t address, std::uint8_t value,
+                           CycleKind kind) {
+  { bus.read(address, kind) } -> std::same_as<std::uint8_t>;
+  bus.write(address, value, kind);
+  bus.internal(address);
 };
 
 enum class CpuRunState : std::uint8_t { Running, Waiting, Stopped };
@@ -56,6 +91,21 @@ struct Cpu65816State {
   std::uint8_t dbr = 0;   // data bank register
   std::uint8_t pbr = 0;   // program bank register
   bool e = false;         // emulation mode
+
+  // How far into an instruction the core is. These carry no architectural meaning
+  // — they are the progress a running instruction has made, held as values so a
+  // snapshot taken mid-instruction restores to the same cycle.
+  std::uint8_t ir = 0;       // the instruction being executed
+  std::uint8_t tcu = 0;      // cycle index within it; 0 means the next cycle fetches
+  std::uint32_t ea = 0;      // effective-address scratch
+  std::uint16_t ptr = 0;     // indirect-pointer scratch
+  std::uint16_t tmp = 0;     // data scratch (a low byte latched while the high pends)
+  bool pageCross = false;    // an index addition carried past a page
+
+  // The interrupt inputs, sampled from the pins the machine drives.
+  bool nmiPending = false;   // latched by a high-to-low edge on the NMI line
+  bool irqLine = false;      // the IRQ line's current level
+
   CpuRunState run = CpuRunState::Running;
 };
 
@@ -67,12 +117,38 @@ class Cpu65816 {
   [[nodiscard]] const Cpu65816State& state() const noexcept { return state_; }
   void restore(Cpu65816State state) noexcept { state_ = state; }
 
-  // Executes one instruction and returns its chip cycle count (the machine
-  // converts chip cycles to master cycles). Cycle counts follow the documented
-  // per-instruction totals, including the memory-width, index-width, direct-page
-  // and page-cross adjustments.
+  // Executes exactly one chip cycle. The cycle either reaches memory — a read or a
+  // write, tagged with what it is for — or drives an address without a valid
+  // access, reported as internal(). A halted core (waiting or stopped) touches the
+  // bus not at all; its host prices the idle cycle from the run state.
   template <SnesBus B>
-  std::uint32_t step(B& bus);
+  void stepCycle(B& bus);
+
+  // Runs cycles until the next instruction boundary and returns how many it took.
+  // Called mid-instruction it finishes the instruction in progress rather than
+  // starting one. The count is what executed, not a formula.
+  template <SnesBus B>
+  std::uint32_t stepInstruction(B& bus);
+
+  // Whether the core sits between instructions — the only point at which an
+  // instruction can begin, and the state a completed instruction leaves behind.
+  [[nodiscard]] bool atInstructionBoundary() const noexcept { return state_.tcu == 0; }
+
+  // The interrupt lines, driven by the machine. NMI is edge-sensitive: the falling
+  // edge latches a pending request that survives until it is serviced. IRQ is
+  // level-sensitive: the core samples the line's current level, so a source must
+  // hold it asserted until acknowledged.
+  void setNmiLine(bool asserted) noexcept {
+    if (asserted && !nmiLine_) state_.nmiPending = true;
+    nmiLine_ = asserted;
+  }
+  void setIrqLine(bool asserted) noexcept { state_.irqLine = asserted; }
+
+  // Whether an opcode runs on the cycle engine. The engine carries the implied,
+  // accumulator and immediate instructions; the rest execute whole, so stepCycle
+  // cannot observe them a cycle at a time while stepInstruction runs them
+  // correctly. Ask before stepping an instruction cycle by cycle.
+  [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept;
 
  private:
   // ---- widths -------------------------------------------------------------
@@ -460,12 +536,15 @@ class Cpu65816 {
   }
 
   // ---- program fetch ------------------------------------------------------
+  // The address the program counter currently points at, in the program bank.
+  [[nodiscard]] std::uint32_t pcAddr() const noexcept {
+    return (static_cast<std::uint32_t>(state_.pbr) << 16) | state_.pc;
+  }
   // Reads the byte at the program counter and advances it. The program counter is
   // 16-bit and wraps within the program bank; the bank register does not change.
   template <SnesBus B>
   std::uint8_t fetch(B& bus) {
-    const std::uint8_t v =
-        bus.read((static_cast<std::uint32_t>(state_.pbr) << 16) | state_.pc);
+    const std::uint8_t v = bus.read(pcAddr(), CycleKind::OperandFetch);
     state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
     return v;
   }
@@ -532,8 +611,9 @@ class Cpu65816 {
   // and stack pointer reads below.
   template <SnesBus B>
   std::uint16_t readDpWord(B& bus, std::uint32_t base) {
-    const std::uint16_t lo = bus.read(base);
-    const std::uint16_t hi = bus.read(nextByte(base, AddrKind::Bank0));
+    const std::uint16_t lo = bus.read(base, CycleKind::DataRead);
+    const std::uint16_t hi =
+        bus.read(nextByte(base, AddrKind::Bank0), CycleKind::DataRead);
     return static_cast<std::uint16_t>(lo | (hi << 8));
   }
   // The 24-bit indirect-long modes are new to the 65816: their pointer wraps at
@@ -542,16 +622,18 @@ class Cpu65816 {
   // rule, not the direct-page one.
   template <SnesBus B>
   std::uint32_t readDpLong(B& bus, std::uint32_t base) {
-    const std::uint32_t b0 = bus.read(base);
+    const std::uint32_t b0 = bus.read(base, CycleKind::DataRead);
     const std::uint32_t a1 = nextByte(base, AddrKind::Bank0);
-    const std::uint32_t b1 = bus.read(a1);
-    const std::uint32_t b2 = bus.read(nextByte(a1, AddrKind::Bank0));
+    const std::uint32_t b1 = bus.read(a1, CycleKind::DataRead);
+    const std::uint32_t b2 =
+        bus.read(nextByte(a1, AddrKind::Bank0), CycleKind::DataRead);
     return b0 | (b1 << 8) | (b2 << 16);
   }
   template <SnesBus B>
   std::uint16_t readStackWord(B& bus, std::uint32_t base) {
-    const std::uint16_t lo = bus.read(base);
-    const std::uint16_t hi = bus.read(nextByte(base, AddrKind::Bank0));
+    const std::uint16_t lo = bus.read(base, CycleKind::DataRead);
+    const std::uint16_t hi =
+        bus.read(nextByte(base, AddrKind::Bank0), CycleKind::DataRead);
     return static_cast<std::uint16_t>(lo | (hi << 8));
   }
 
@@ -642,17 +724,19 @@ class Cpu65816 {
 
   // ---- data access at an effective address --------------------------------
   template <SnesBus B>
-  std::uint16_t readValue(B& bus, const Operand& op, bool eightBit) {
-    const std::uint16_t lo = bus.read(op.addr);
+  std::uint16_t readValue(B& bus, const Operand& op, bool eightBit,
+                          CycleKind kind = CycleKind::DataRead) {
+    const std::uint16_t lo = bus.read(op.addr, kind);
     if (eightBit) return lo;
-    const std::uint16_t hi = bus.read(nextByte(op.addr, op.kind));
+    const std::uint16_t hi = bus.read(nextByte(op.addr, op.kind), kind);
     return static_cast<std::uint16_t>(lo | (hi << 8));
   }
   template <SnesBus B>
-  void writeValue(B& bus, const Operand& op, std::uint16_t v, bool eightBit) {
-    bus.write(op.addr, static_cast<std::uint8_t>(v));
+  void writeValue(B& bus, const Operand& op, std::uint16_t v, bool eightBit,
+                  CycleKind kind = CycleKind::DataWrite) {
+    bus.write(op.addr, static_cast<std::uint8_t>(v), kind);
     if (!eightBit) {
-      bus.write(nextByte(op.addr, op.kind), static_cast<std::uint8_t>(v >> 8));
+      bus.write(nextByte(op.addr, op.kind), static_cast<std::uint8_t>(v >> 8), kind);
     }
   }
 
@@ -664,7 +748,7 @@ class Cpu65816 {
   // matching the little-endian order a pull reads back low byte first.
   template <SnesBus B>
   void push8(B& bus, std::uint8_t v) {
-    bus.write(state_.s, v);
+    bus.write(state_.s, v, CycleKind::DataWrite);
     state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | ((state_.s - 1) & 0xFFu))
                         : static_cast<std::uint16_t>(state_.s - 1);
   }
@@ -677,7 +761,7 @@ class Cpu65816 {
   std::uint8_t pull8(B& bus) {
     state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | ((state_.s + 1) & 0xFFu))
                         : static_cast<std::uint16_t>(state_.s + 1);
-    return bus.read(state_.s);
+    return bus.read(state_.s, CycleKind::DataRead);
   }
   template <SnesBus B>
   std::uint16_t pull16(B& bus) {
@@ -693,7 +777,7 @@ class Cpu65816 {
   // identically. Each such instruction transfers once, then calls settleStack.
   template <SnesBus B>
   void pushWide8(B& bus, std::uint8_t v) {
-    bus.write(state_.s, v);
+    bus.write(state_.s, v, CycleKind::DataWrite);
     state_.s = static_cast<std::uint16_t>(state_.s - 1);
   }
   template <SnesBus B>
@@ -704,7 +788,7 @@ class Cpu65816 {
   template <SnesBus B>
   std::uint8_t pullWide8(B& bus) {
     state_.s = static_cast<std::uint16_t>(state_.s + 1);
-    return bus.read(state_.s);
+    return bus.read(state_.s, CycleKind::DataRead);
   }
   template <SnesBus B>
   std::uint16_t pullWide16(B& bus) {
@@ -721,24 +805,303 @@ class Cpu65816 {
   template <SnesBus B>
   void rmwMem(B& bus, const Operand& op,
               std::uint16_t (Cpu65816::*fn)(std::uint16_t, bool)) {
-    const std::uint16_t v = readValue(bus, op, accum8());
-    writeValue(bus, op, (this->*fn)(v, accum8()), accum8());
+    const std::uint16_t v = readValue(bus, op, accum8(), CycleKind::RmwRead);
+    writeValue(bus, op, (this->*fn)(v, accum8()), accum8(), CycleKind::RmwWrite);
   }
 
+  // ---- the cycle engine ---------------------------------------------------
+  // Executes one cycle of the instruction already in the instruction register, and
+  // answers whether that cycle was its last. The cycle index says which cycle is
+  // due; every branch a cycle can take is decided by state the earlier cycles have
+  // already latched, so a handler never has to look ahead.
+  template <SnesBus B>
+  bool executeCycle(B& bus);
+
+  // The immediate operand's width: the accumulator instructions take an operand as
+  // wide as the accumulator, the index instructions one as wide as the index
+  // registers.
+  [[nodiscard]] bool immediateIsEightBit(std::uint8_t opcode) const noexcept {
+    switch (opcode) {
+      case 0xA2:  // LDX #imm
+      case 0xA0:  // LDY #imm
+      case 0xE0:  // CPX #imm
+      case 0xC0:  // CPY #imm
+        return index8();
+      default:
+        return accum8();
+    }
+  }
+
+  // Applies an instruction whose immediate operand has finished arriving.
+  void applyImmediate(std::uint8_t opcode, std::uint16_t operand);
+
+  // Applies an instruction that reads nothing and writes nothing — it works on the
+  // registers alone, and the internal cycle it spends has already been narrated.
+  void applyImplied(std::uint8_t opcode);
+
+  // Executes an instruction the cycle engine does not carry, all at once: the
+  // accesses land in order but within a single call, starting from the cycle after
+  // the opcode fetch. Returns the instruction's full documented cycle total.
+  template <SnesBus B>
+  std::uint32_t stepWhole(B& bus, std::uint8_t opcode);
+
   Cpu65816State state_{};
+  // The NMI pin's last observed level, kept so a high-to-low transition can be
+  // told from a line that is merely still asserted. It describes the machine
+  // outside the chip rather than the chip, so it is not part of the CPU state.
+  bool nmiLine_ = false;
 };
 
+constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
+  switch (opcode) {
+    // Implied and accumulator instructions: two cycles, the second internal.
+    case 0x0A: case 0x18: case 0x1A: case 0x1B: case 0x2A: case 0x38: case 0x3A:
+    case 0x3B: case 0x4A: case 0x58: case 0x5B: case 0x6A: case 0x78: case 0x7B:
+    case 0x88: case 0x8A: case 0x98: case 0x9A: case 0x9B: case 0xA8: case 0xAA:
+    case 0xB8: case 0xBA: case 0xBB: case 0xC8: case 0xCA: case 0xD8: case 0xE8:
+    case 0xEA: case 0xF8: case 0xFB:
+    // The accumulator byte exchange, which spends two internal cycles.
+    case 0xEB:
+    // The immediate operands, one or two bytes wide.
+    case 0x09: case 0x29: case 0x49: case 0x69: case 0x89: case 0xA0: case 0xA2:
+    case 0xA9: case 0xC0: case 0xC9: case 0xE0: case 0xE9:
+    // The status-mask instructions and the reserved two-byte no-op.
+    case 0x42: case 0xC2: case 0xE2:
+      return true;
+    default:
+      return false;
+  }
+}
+
+inline void Cpu65816::applyImmediate(std::uint8_t opcode, std::uint16_t operand) {
+  switch (opcode) {
+    case 0xA9: loadA(operand); break;                              // LDA #imm
+    case 0xA2: loadX(operand); break;                              // LDX #imm
+    case 0xA0: loadY(operand); break;                              // LDY #imm
+    case 0x69: adcOp(operand); break;                              // ADC #imm
+    case 0xE9: sbcOp(operand); break;                              // SBC #imm
+    case 0xC9: compareWith(state_.a, operand, accum8()); break;    // CMP #imm
+    case 0xE0: compareWith(state_.x, operand, index8()); break;    // CPX #imm
+    case 0xC0: compareWith(state_.y, operand, index8()); break;    // CPY #imm
+    case 0x29: andOp(operand); break;                              // AND #imm
+    case 0x49: eorOp(operand); break;                              // EOR #imm
+    case 0x09: oraOp(operand); break;                              // ORA #imm
+    case 0x89: bitOp(operand, /*immediate=*/true); break;          // BIT #imm
+    default: break;
+  }
+}
+
+inline void Cpu65816::applyImplied(std::uint8_t opcode) {
+  switch (opcode) {
+    // ---- register transfers. The destination's width decides how many bits move
+    //      and sets N,Z — except the transfers into the stack pointer, which set no
+    //      flags ----
+    case 0xAA:  // TAX
+      if (index8()) { state_.x = static_cast<std::uint16_t>(state_.a & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.a)); }
+      else { state_.x = state_.a; setNZ16(state_.a); }
+      break;
+    case 0xA8:  // TAY
+      if (index8()) { state_.y = static_cast<std::uint16_t>(state_.a & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.a)); }
+      else { state_.y = state_.a; setNZ16(state_.a); }
+      break;
+    case 0xBA:  // TSX
+      if (index8()) { state_.x = static_cast<std::uint16_t>(state_.s & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.s)); }
+      else { state_.x = state_.s; setNZ16(state_.s); }
+      break;
+    case 0x8A:  // TXA
+      if (accum8()) { state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | (state_.x & 0xFFu)); setNZ8(static_cast<std::uint8_t>(state_.x)); }
+      else { state_.a = state_.x; setNZ16(state_.x); }
+      break;
+    case 0x98:  // TYA
+      if (accum8()) { state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | (state_.y & 0xFFu)); setNZ8(static_cast<std::uint8_t>(state_.y)); }
+      else { state_.a = state_.y; setNZ16(state_.y); }
+      break;
+    case 0x9B:  // TXY
+      if (index8()) { state_.y = static_cast<std::uint16_t>(state_.x & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.x)); }
+      else { state_.y = state_.x; setNZ16(state_.x); }
+      break;
+    case 0xBB:  // TYX
+      if (index8()) { state_.x = static_cast<std::uint16_t>(state_.y & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.y)); }
+      else { state_.x = state_.y; setNZ16(state_.y); }
+      break;
+    case 0x9A:  // TXS (SH is $01 in emulation, so only XL moves there)
+      state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | (state_.x & 0xFFu)) : state_.x;
+      break;
+
+    // ---- 16-bit transfers to and from the direct and stack registers. These move
+    //      the whole 16-bit accumulator regardless of the m width and set N,Z on the
+    //      16-bit result — except TCS, which sets no flags ----
+    case 0x5B: state_.d = state_.a; setNZ16(state_.d); break;  // TCD
+    case 0x7B: state_.a = state_.d; setNZ16(state_.a); break;  // TDC
+    case 0x3B: state_.a = state_.s; setNZ16(state_.a); break;  // TSC
+    case 0x1B:  // TCS (SH is $01 in emulation, so only the low byte moves)
+      state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | (state_.a & 0xFFu)) : state_.a;
+      break;
+
+    // ---- step a value by one (accumulator or index width; N,Z) ----
+    case 0x1A: putAcc(incOp(accValue(), accum8())); break;  // INC A
+    case 0x3A: putAcc(decOp(accValue(), accum8())); break;  // DEC A
+    case 0xE8: stepIndex(state_.x, +1); break;              // INX
+    case 0xC8: stepIndex(state_.y, +1); break;              // INY
+    case 0xCA: stepIndex(state_.x, -1); break;              // DEX
+    case 0x88: stepIndex(state_.y, -1); break;              // DEY
+
+    // ---- shifts and rotates on the accumulator (accumulator width; N,Z,C) ----
+    case 0x0A: putAcc(aslOp(accValue(), accum8())); break;  // ASL A
+    case 0x4A: putAcc(lsrOp(accValue(), accum8())); break;  // LSR A
+    case 0x2A: putAcc(rolOp(accValue(), accum8())); break;  // ROL A
+    case 0x6A: putAcc(rorOp(accValue(), accum8())); break;  // ROR A
+
+    // ---- status-flag set / clear ----
+    case 0x18: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagC); break;  // CLC
+    case 0x38: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagC); break;   // SEC
+    case 0x58: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagI); break;  // CLI
+    case 0x78: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagI); break;   // SEI
+    case 0xD8: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagD); break;  // CLD
+    case 0xF8: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagD); break;   // SED
+    case 0xB8: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagV); break;  // CLV
+
+    // ---- XBA: exchange the accumulator halves (N,Z on the new low byte, always
+    //      8-bit) ----
+    case 0xEB:
+      state_.a = static_cast<std::uint16_t>(((state_.a & 0xFFu) << 8) | ((state_.a >> 8) & 0xFFu));
+      setNZ8(static_cast<std::uint8_t>(state_.a));
+      break;
+
+    // ---- XCE: exchange carry and emulation. Entering emulation forces the 8-bit
+    //      widths, the index high bytes to zero, and the stack to page one ----
+    case 0xFB: {
+      const bool oldCarry = (state_.p & kCpuFlagC) != 0;
+      setCarry(state_.e);
+      state_.e = oldCarry;
+      if (state_.e) {
+        state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagM | kCpuFlagX);
+        state_.x &= 0xFFu;
+        state_.y &= 0xFFu;
+        state_.s = static_cast<std::uint16_t>(0x0100u | (state_.s & 0xFFu));
+      }
+      break;
+    }
+
+    // ---- no operation ----
+    case 0xEA: break;  // NOP
+    default: break;
+  }
+}
+
 template <SnesBus B>
-std::uint32_t Cpu65816::step(B& bus) {
-  normalize();
-  const std::uint8_t opcode = fetch(bus);
+bool Cpu65816::executeCycle(B& bus) {
+  const std::uint8_t opcode = state_.ir;
+  switch (opcode) {
+    // ---- REP / SEP: fetch the mask, then spend an internal cycle parked on the
+    //      mask's own address. The status byte settles at the end of that cycle, so
+    //      the widths the cycle itself runs under are still the old ones ----
+    case 0xC2:  // REP #imm
+    case 0xE2:  // SEP #imm
+      if (state_.tcu == 1) {
+        state_.ea = pcAddr();
+        state_.tmp = fetch(bus);
+        return false;
+      }
+      bus.internal(state_.ea);
+      writeP(opcode == 0xC2
+                 ? static_cast<std::uint8_t>(state_.p & ~static_cast<std::uint8_t>(state_.tmp))
+                 : static_cast<std::uint8_t>(state_.p | static_cast<std::uint8_t>(state_.tmp)));
+      return true;
+
+    // ---- WDM: a reserved two-byte no-op. It steps the program counter over its
+    //      second byte without reading it — the cycle drives the address and takes
+    //      nothing from the bus ----
+    case 0x42:
+      bus.internal(pcAddr());
+      state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
+      return true;
+
+    // ---- XBA: two internal cycles, both parked at the program counter ----
+    case 0xEB:
+      bus.internal(pcAddr());
+      if (state_.tcu == 1) return false;
+      applyImplied(opcode);
+      return true;
+
+    // ---- an immediate operand: one byte, or two when the instruction's register
+    //      is 16-bit. The width is settled before the instruction begins, so the
+    //      first operand cycle already knows whether a second one follows ----
+    case 0x09: case 0x29: case 0x49: case 0x69: case 0x89:
+    case 0xA0: case 0xA2: case 0xA9: case 0xC0: case 0xC9:
+    case 0xE0: case 0xE9:
+      if (state_.tcu == 1) {
+        state_.tmp = fetch(bus);
+        if (!immediateIsEightBit(opcode)) return false;
+        applyImmediate(opcode, state_.tmp);
+        return true;
+      }
+      state_.tmp = static_cast<std::uint16_t>(state_.tmp | (fetch(bus) << 8));
+      applyImmediate(opcode, state_.tmp);
+      return true;
+
+    // ---- an implied or accumulator instruction: one internal cycle parked at the
+    //      program counter, and the register work settles at the end of it ----
+    default:
+      bus.internal(pcAddr());
+      applyImplied(opcode);
+      return true;
+  }
+}
+
+template <SnesBus B>
+void Cpu65816::stepCycle(B& bus) {
+  // A waiting or stopped core drives no address and touches no memory; the cycle
+  // still passes, and its host prices it from the run state.
+  if (state_.run != CpuRunState::Running) return;
+
+  if (atInstructionBoundary()) {
+    // The mode invariants settle on the fetch cycle, so an instruction always runs
+    // under a consistent view of the widths.
+    normalize();
+    state_.ir = bus.read(pcAddr(), CycleKind::OpcodeFetch);
+    state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
+    state_.tcu = 1;
+    return;
+  }
+
+  if (!cycleStepped(state_.ir)) {
+    // The instruction in progress runs whole rather than a cycle at a time, so
+    // there is no single cycle to run here. The core returns to a boundary without
+    // touching the bus: the cycle that was asked for plainly did not happen, rather
+    // than being filled in with invented traffic. Use stepInstruction instead.
+    state_.tcu = 0;
+    return;
+  }
+
+  state_.tcu = executeCycle(bus) ? std::uint8_t{0}
+                                 : static_cast<std::uint8_t>(state_.tcu + 1);
+}
+
+template <SnesBus B>
+std::uint32_t Cpu65816::stepInstruction(B& bus) {
+  if (state_.run != CpuRunState::Running) return 1;
+
+  std::uint32_t cycles = 0;
+  if (atInstructionBoundary()) {
+    stepCycle(bus);  // the opcode fetch
+    cycles = 1;
+    if (!cycleStepped(state_.ir)) {
+      state_.tcu = 0;
+      return stepWhole(bus, state_.ir);
+    }
+  }
+  while (!atInstructionBoundary()) {
+    stepCycle(bus);
+    ++cycles;
+  }
+  return cycles;
+}
+
+template <SnesBus B>
+std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
   switch (opcode) {
     // ---- LDA: load the accumulator (N,Z at the accumulator width) ----
-    case 0xA9: {  // LDA #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      loadA(v);
-      return 3u - accCyc();
-    }
     case 0xA5: { Operand o = eaDir(bus);        loadA(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // LDA dir
     case 0xB5: { Operand o = eaDirX(bus);       loadA(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // LDA dir,X
     case 0xAD: { Operand o = eaAbs(bus);        loadA(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // LDA abs
@@ -755,20 +1118,10 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0xB3: { Operand o = eaStackIndY(bus);  loadA(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // LDA (stk,S),Y
 
     // ---- LDX / LDY: load an index register (N,Z at the index width) ----
-    case 0xA2: {  // LDX #imm
-      const std::uint16_t v = index8() ? fetch(bus) : fetchWord(bus);
-      loadX(v);
-      return 3u - indexCyc();
-    }
     case 0xA6: { Operand o = eaDir(bus);   loadX(readValue(bus, o, index8())); return 4u - indexCyc() + dpCyc(); }  // LDX dir
     case 0xB6: { Operand o = eaDirY(bus);  loadX(readValue(bus, o, index8())); return 5u - indexCyc() + dpCyc(); }  // LDX dir,Y
     case 0xAE: { Operand o = eaAbs(bus);   loadX(readValue(bus, o, index8())); return 5u - indexCyc(); }            // LDX abs
     case 0xBE: { Operand o = eaAbsY(bus);  loadX(readValue(bus, o, index8())); return 6u - 2u * indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // LDX abs,Y
-    case 0xA0: {  // LDY #imm
-      const std::uint16_t v = index8() ? fetch(bus) : fetchWord(bus);
-      loadY(v);
-      return 3u - indexCyc();
-    }
     case 0xA4: { Operand o = eaDir(bus);   loadY(readValue(bus, o, index8())); return 4u - indexCyc() + dpCyc(); }  // LDY dir
     case 0xB4: { Operand o = eaDirX(bus);  loadY(readValue(bus, o, index8())); return 5u - indexCyc() + dpCyc(); }  // LDY dir,X
     case 0xAC: { Operand o = eaAbs(bus);   loadY(readValue(bus, o, index8())); return 5u - indexCyc(); }            // LDY abs
@@ -805,79 +1158,7 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0x9C: { Operand o = eaAbs(bus);  writeValue(bus, o, 0, accum8()); return 5u - accCyc(); }            // STZ abs
     case 0x9E: { Operand o = eaAbsX(bus); writeValue(bus, o, 0, accum8()); return 6u - accCyc(); }            // STZ abs,X
 
-    // ---- register transfers (2 cycles; the destination's width decides how many
-    //      bits move, and sets N,Z — except the transfers into the stack pointer,
-    //      which set no flags) ----
-    case 0xAA:  // TAX
-      if (index8()) { state_.x = static_cast<std::uint16_t>(state_.a & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.a)); }
-      else { state_.x = state_.a; setNZ16(state_.a); }
-      return 2;
-    case 0xA8:  // TAY
-      if (index8()) { state_.y = static_cast<std::uint16_t>(state_.a & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.a)); }
-      else { state_.y = state_.a; setNZ16(state_.a); }
-      return 2;
-    case 0xBA:  // TSX
-      if (index8()) { state_.x = static_cast<std::uint16_t>(state_.s & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.s)); }
-      else { state_.x = state_.s; setNZ16(state_.s); }
-      return 2;
-    case 0x8A:  // TXA
-      if (accum8()) { state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | (state_.x & 0xFFu)); setNZ8(static_cast<std::uint8_t>(state_.x)); }
-      else { state_.a = state_.x; setNZ16(state_.x); }
-      return 2;
-    case 0x98:  // TYA
-      if (accum8()) { state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | (state_.y & 0xFFu)); setNZ8(static_cast<std::uint8_t>(state_.y)); }
-      else { state_.a = state_.y; setNZ16(state_.y); }
-      return 2;
-    case 0x9B:  // TXY
-      if (index8()) { state_.y = static_cast<std::uint16_t>(state_.x & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.x)); }
-      else { state_.y = state_.x; setNZ16(state_.x); }
-      return 2;
-    case 0xBB:  // TYX
-      if (index8()) { state_.x = static_cast<std::uint16_t>(state_.y & 0xFFu); setNZ8(static_cast<std::uint8_t>(state_.y)); }
-      else { state_.x = state_.y; setNZ16(state_.y); }
-      return 2;
-    case 0x9A:  // TXS (no flags; SH is $01 in emulation, so only XL moves there)
-      state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | (state_.x & 0xFFu)) : state_.x;
-      return 2;
-
-    // ---- 16-bit transfers to and from the direct and stack registers. These move
-    //      the whole 16-bit accumulator regardless of the m width and set N,Z on
-    //      the 16-bit result — except TCS, which sets no flags ----
-    case 0x5B: state_.d = state_.a; setNZ16(state_.d); return 2;  // TCD
-    case 0x7B: state_.a = state_.d; setNZ16(state_.a); return 2;  // TDC
-    case 0x3B: state_.a = state_.s; setNZ16(state_.a); return 2;  // TSC
-    case 0x1B:  // TCS (no flags; SH is $01 in emulation, so only the low byte moves)
-      state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | (state_.a & 0xFFu)) : state_.a;
-      return 2;
-
-    // ---- XBA: exchange the accumulator halves (N,Z on the new low byte, always
-    //      8-bit) ----
-    case 0xEB:
-      state_.a = static_cast<std::uint16_t>(((state_.a & 0xFFu) << 8) | ((state_.a >> 8) & 0xFFu));
-      setNZ8(static_cast<std::uint8_t>(state_.a));
-      return 3;
-
-    // ---- XCE: exchange carry and emulation. Entering emulation forces the 8-bit
-    //      widths, the index high bytes to zero, and the stack to page one ----
-    case 0xFB: {
-      const bool oldCarry = (state_.p & kCpuFlagC) != 0;
-      setCarry(state_.e);
-      state_.e = oldCarry;
-      if (state_.e) {
-        state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagM | kCpuFlagX);
-        state_.x &= 0xFFu;
-        state_.y &= 0xFFu;
-        state_.s = static_cast<std::uint16_t>(0x0100u | (state_.s & 0xFFu));
-      }
-      return 2;
-    }
-
     // ---- ADC: add with carry (accumulator width; N,V,Z,C) ----
-    case 0x69: {  // ADC #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      adcOp(v);
-      return 3u - accCyc();
-    }
     case 0x65: { Operand o = eaDir(bus);        adcOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // ADC dir
     case 0x75: { Operand o = eaDirX(bus);       adcOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // ADC dir,X
     case 0x6D: { Operand o = eaAbs(bus);        adcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ADC abs
@@ -894,11 +1175,6 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0x73: { Operand o = eaStackIndY(bus);  adcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // ADC (stk,S),Y
 
     // ---- SBC: subtract with carry (accumulator width; N,V,Z,C) ----
-    case 0xE9: {  // SBC #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      sbcOp(v);
-      return 3u - accCyc();
-    }
     case 0xE5: { Operand o = eaDir(bus);        sbcOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // SBC dir
     case 0xF5: { Operand o = eaDirX(bus);       sbcOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // SBC dir,X
     case 0xED: { Operand o = eaAbs(bus);        sbcOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // SBC abs
@@ -915,11 +1191,6 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0xF3: { Operand o = eaStackIndY(bus);  sbcOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // SBC (stk,S),Y
 
     // ---- CMP: compare with the accumulator (accumulator width; N,Z,C) ----
-    case 0xC9: {  // CMP #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      compareWith(state_.a, v, accum8());
-      return 3u - accCyc();
-    }
     case 0xC5: { Operand o = eaDir(bus);        compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 4u - accCyc() + dpCyc(); }        // CMP dir
     case 0xD5: { Operand o = eaDirX(bus);       compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc() + dpCyc(); }        // CMP dir,X
     case 0xCD: { Operand o = eaAbs(bus);        compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 5u - accCyc(); }                  // CMP abs
@@ -936,27 +1207,12 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0xD3: { Operand o = eaStackIndY(bus);  compareWith(state_.a, readValue(bus, o, accum8()), accum8()); return 8u - accCyc(); }                  // CMP (stk,S),Y
 
     // ---- CPX / CPY: compare with an index register (index width; N,Z,C) ----
-    case 0xE0: {  // CPX #imm
-      const std::uint16_t v = index8() ? fetch(bus) : fetchWord(bus);
-      compareWith(state_.x, v, index8());
-      return 3u - indexCyc();
-    }
     case 0xE4: { Operand o = eaDir(bus); compareWith(state_.x, readValue(bus, o, index8()), index8()); return 4u - indexCyc() + dpCyc(); }  // CPX dir
     case 0xEC: { Operand o = eaAbs(bus); compareWith(state_.x, readValue(bus, o, index8()), index8()); return 5u - indexCyc(); }            // CPX abs
-    case 0xC0: {  // CPY #imm
-      const std::uint16_t v = index8() ? fetch(bus) : fetchWord(bus);
-      compareWith(state_.y, v, index8());
-      return 3u - indexCyc();
-    }
     case 0xC4: { Operand o = eaDir(bus); compareWith(state_.y, readValue(bus, o, index8()), index8()); return 4u - indexCyc() + dpCyc(); }  // CPY dir
     case 0xCC: { Operand o = eaAbs(bus); compareWith(state_.y, readValue(bus, o, index8()), index8()); return 5u - indexCyc(); }            // CPY abs
 
     // ---- AND: bitwise AND into the accumulator (accumulator width; N,Z) ----
-    case 0x29: {  // AND #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      andOp(v);
-      return 3u - accCyc();
-    }
     case 0x25: { Operand o = eaDir(bus);        andOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // AND dir
     case 0x35: { Operand o = eaDirX(bus);       andOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // AND dir,X
     case 0x2D: { Operand o = eaAbs(bus);        andOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // AND abs
@@ -973,11 +1229,6 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0x33: { Operand o = eaStackIndY(bus);  andOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // AND (stk,S),Y
 
     // ---- EOR: bitwise exclusive-OR into the accumulator (accumulator width; N,Z) ----
-    case 0x49: {  // EOR #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      eorOp(v);
-      return 3u - accCyc();
-    }
     case 0x45: { Operand o = eaDir(bus);        eorOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // EOR dir
     case 0x55: { Operand o = eaDirX(bus);       eorOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // EOR dir,X
     case 0x4D: { Operand o = eaAbs(bus);        eorOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // EOR abs
@@ -994,11 +1245,6 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0x53: { Operand o = eaStackIndY(bus);  eorOp(readValue(bus, o, accum8())); return 8u - accCyc(); }                  // EOR (stk,S),Y
 
     // ---- ORA: bitwise OR into the accumulator (accumulator width; N,Z) ----
-    case 0x09: {  // ORA #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      oraOp(v);
-      return 3u - accCyc();
-    }
     case 0x05: { Operand o = eaDir(bus);        oraOp(readValue(bus, o, accum8())); return 4u - accCyc() + dpCyc(); }        // ORA dir
     case 0x15: { Operand o = eaDirX(bus);       oraOp(readValue(bus, o, accum8())); return 5u - accCyc() + dpCyc(); }        // ORA dir,X
     case 0x0D: { Operand o = eaAbs(bus);        oraOp(readValue(bus, o, accum8())); return 5u - accCyc(); }                  // ORA abs
@@ -1017,19 +1263,12 @@ std::uint32_t Cpu65816::step(B& bus) {
     // ---- BIT: test bits against the accumulator (accumulator width). Non-immediate
     //      forms take N,V from the operand's top two bits and set Z from the AND;
     //      the immediate form sets Z alone ----
-    case 0x89: {  // BIT #imm
-      const std::uint16_t v = accum8() ? fetch(bus) : fetchWord(bus);
-      bitOp(v, /*immediate=*/true);
-      return 3u - accCyc();
-    }
     case 0x24: { Operand o = eaDir(bus);  bitOp(readValue(bus, o, accum8()), false); return 4u - accCyc() + dpCyc(); }  // BIT dir
     case 0x2C: { Operand o = eaAbs(bus);  bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc(); }            // BIT abs
     case 0x34: { Operand o = eaDirX(bus); bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc() + dpCyc(); }  // BIT dir,X
     case 0x3C: { Operand o = eaAbsX(bus); bitOp(readValue(bus, o, accum8()), false); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // BIT abs,X
 
-    // ---- INC / DEC: step a value by one (accumulator or index width; N,Z) ----
-    case 0x1A: putAcc(incOp(accValue(), accum8())); return 2;  // INC A
-    case 0x3A: putAcc(decOp(accValue(), accum8())); return 2;  // DEC A
+    // ---- INC / DEC: step a value by one (accumulator width; N,Z) ----
     case 0xE6: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::incOp); return 7u - 2u * accCyc() + dpCyc(); }  // INC dir
     case 0xF6: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::incOp); return 8u - 2u * accCyc() + dpCyc(); }  // INC dir,X
     case 0xEE: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::incOp); return 8u - 2u * accCyc(); }            // INC abs
@@ -1039,29 +1278,19 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0xCE: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::decOp); return 8u - 2u * accCyc(); }            // DEC abs
     case 0xDE: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::decOp); return 9u - 2u * accCyc(); }            // DEC abs,X
 
-    // ---- INX / INY / DEX / DEY: step an index register (index width; N,Z) ----
-    case 0xE8: stepIndex(state_.x, +1); return 2;  // INX
-    case 0xC8: stepIndex(state_.y, +1); return 2;  // INY
-    case 0xCA: stepIndex(state_.x, -1); return 2;  // DEX
-    case 0x88: stepIndex(state_.y, -1); return 2;  // DEY
-
     // ---- ASL / LSR / ROL / ROR: shifts and rotates (accumulator width; N,Z,C) ----
-    case 0x0A: putAcc(aslOp(accValue(), accum8())); return 2;  // ASL A
     case 0x06: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::aslOp); return 7u - 2u * accCyc() + dpCyc(); }  // ASL dir
     case 0x16: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::aslOp); return 8u - 2u * accCyc() + dpCyc(); }  // ASL dir,X
     case 0x0E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::aslOp); return 8u - 2u * accCyc(); }            // ASL abs
     case 0x1E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::aslOp); return 9u - 2u * accCyc(); }            // ASL abs,X
-    case 0x4A: putAcc(lsrOp(accValue(), accum8())); return 2;  // LSR A
     case 0x46: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::lsrOp); return 7u - 2u * accCyc() + dpCyc(); }  // LSR dir
     case 0x56: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::lsrOp); return 8u - 2u * accCyc() + dpCyc(); }  // LSR dir,X
     case 0x4E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::lsrOp); return 8u - 2u * accCyc(); }            // LSR abs
     case 0x5E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::lsrOp); return 9u - 2u * accCyc(); }            // LSR abs,X
-    case 0x2A: putAcc(rolOp(accValue(), accum8())); return 2;  // ROL A
     case 0x26: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::rolOp); return 7u - 2u * accCyc() + dpCyc(); }  // ROL dir
     case 0x36: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::rolOp); return 8u - 2u * accCyc() + dpCyc(); }  // ROL dir,X
     case 0x2E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::rolOp); return 8u - 2u * accCyc(); }            // ROL abs
     case 0x3E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::rolOp); return 9u - 2u * accCyc(); }            // ROL abs,X
-    case 0x6A: putAcc(rorOp(accValue(), accum8())); return 2;  // ROR A
     case 0x66: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::rorOp); return 7u - 2u * accCyc() + dpCyc(); }  // ROR dir
     case 0x76: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::rorOp); return 8u - 2u * accCyc() + dpCyc(); }  // ROR dir,X
     case 0x6E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::rorOp); return 8u - 2u * accCyc(); }            // ROR abs
@@ -1099,29 +1328,9 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0xAB: { const std::uint8_t v = pullWide8(bus); settleStack(); state_.dbr = v; setNZ8(v); return 4; }    // PLB
     case 0x2B: { const std::uint16_t v = pullWide16(bus); settleStack(); state_.d = v; setNZ16(v); return 5; }   // PLD
 
-    // ---- status-flag set / clear (2 cycles) ----
-    case 0x18: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagC); return 2;  // CLC
-    case 0x38: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagC); return 2;   // SEC
-    case 0x58: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagI); return 2;  // CLI
-    case 0x78: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagI); return 2;   // SEI
-    case 0xD8: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagD); return 2;  // CLD
-    case 0xF8: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagD); return 2;   // SED
-    case 0xB8: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagV); return 2;  // CLV
-
-    // ---- REP / SEP: reset or set the status bits named by an immediate mask.
-    //      Emulation holds m and x set, and narrowing the index width clears the
-    //      index high bytes at once (writeP reapplies both) ----
-    case 0xC2: { const std::uint8_t m = fetch(bus); writeP(static_cast<std::uint8_t>(state_.p & ~m)); return 3; }  // REP #imm
-    case 0xE2: { const std::uint8_t m = fetch(bus); writeP(static_cast<std::uint8_t>(state_.p | m)); return 3; }   // SEP #imm
-
-    // ---- no operation (WDM is a two-byte reserved no-op) ----
-    case 0xEA: return 2;              // NOP
-    case 0x42: fetch(bus); return 2;  // WDM
-
     default:
-      // Not yet routed. This family lands opcode by opcode across the sub-blocks;
-      // an opcode that reaches here before its family is implemented returns zero,
-      // which a vector's non-zero cycle count rejects loudly rather than silently.
+      // An opcode the core does not decode. It returns a zero cycle count, which a
+      // vector's non-zero count rejects loudly rather than silently.
       return 0;
   }
 }

@@ -48,10 +48,9 @@ std::size_t caseCap() {
   return v > 0 ? static_cast<std::size_t>(v) : 0;
 }
 
-// The load/store and register-transfer family this sub-block lands: LDA/LDX/LDY,
-// STA/STX/STY/STZ across every addressing mode, the register-to-register transfers
-// (including the 16-bit direct/stack transfers), XBA and XCE. Later sub-blocks
-// extend this list until it covers every opcode.
+// The load/store and register-transfer family: LDA/LDX/LDY, STA/STX/STY/STZ across
+// every addressing mode, the register-to-register transfers (including the 16-bit
+// direct/stack transfers), XBA and XCE.
 constexpr std::uint8_t kLoadStoreTransferOpcodes[] = {
     // LDA (all modes)
     0xA9, 0xA5, 0xB5, 0xAD, 0xBD, 0xB9, 0xAF, 0xBF, 0xA1, 0xB1, 0xB2, 0xA7, 0xB7, 0xA3, 0xB3,
@@ -80,9 +79,9 @@ std::vector<VectorParam> loadStoreTransferParams() {
   return params;
 }
 
-// The arithmetic and logic family this sub-block lands: ADC/SBC and the three
-// bitwise operators across every accumulator addressing mode, the CMP/CPX/CPY
-// comparisons, and BIT (whose flags depend on its addressing mode).
+// The arithmetic and logic family: ADC/SBC and the three bitwise operators across
+// every accumulator addressing mode, the CMP/CPX/CPY comparisons, and BIT (whose
+// flags depend on its addressing mode).
 constexpr std::uint8_t kArithmeticLogicOpcodes[] = {
     // ADC (all modes)
     0x69, 0x65, 0x75, 0x6D, 0x7D, 0x79, 0x6F, 0x7F, 0x61, 0x71, 0x72, 0x67, 0x77, 0x63, 0x73,
@@ -111,7 +110,7 @@ std::vector<VectorParam> arithmeticLogicParams() {
   return params;
 }
 
-// The read-modify-write, stack, and flag/mode family this sub-block lands:
+// The read-modify-write, stack, and flag/mode family:
 // INC/DEC (accumulator, memory and the index registers), the ASL/LSR/ROL/ROR shifts
 // and rotates, TSB/TRB, the push and pull family (including PHB/PHD/PHK/PLB/PLD and
 // PEA/PEI/PER), the status-flag set/clear ops, REP/SEP, and NOP/WDM.
@@ -159,10 +158,42 @@ Cpu65816State stateOf(const RegState& r) {
 
 class Cpu65816Vectors : public ::testing::TestWithParam<VectorParam> {};
 
-// Every case for one opcode in one mode: seed the initial state on a recording
-// bus, step once, and demand the exact final registers, the exact final RAM, the
-// documented cycle count, and that no write landed outside the addresses the case
-// accounts for (a stray write cannot hide even though the 16 MB space is sparse).
+// Compares one instruction's recorded activity against the case, cycle by cycle. A
+// field the case leaves null says the chip drove nothing there, and is not asserted
+// — the pin string is what distinguishes a cycle that read from one that only drove
+// an address, so it is always asserted.
+void expectTraceMatches(const VectorCase& c,
+                        const std::vector<snaggletooth::cpu_vectors::CycleTrace>& got) {
+  ASSERT_EQ(got.size(), c.cycles.size()) << c.name << " (cycles executed)";
+  for (std::size_t i = 0; i < c.cycles.size(); ++i) {
+    const auto& want = c.cycles[i];
+    if (want.address.has_value()) {
+      ASSERT_TRUE(got[i].address.has_value())
+          << c.name << " (cycle " << i << " drove no address)";
+      EXPECT_EQ(*got[i].address, *want.address) << c.name << " (cycle " << i << " address)";
+    }
+    if (want.value.has_value()) {
+      ASSERT_TRUE(got[i].value.has_value())
+          << c.name << " (cycle " << i << " moved no byte)";
+      EXPECT_EQ(int{*got[i].value}, int{*want.value}) << c.name << " (cycle " << i << " value)";
+    }
+    EXPECT_EQ(got[i].signals, want.signals) << c.name << " (cycle " << i << " signals)";
+  }
+}
+
+// Every case for one opcode in one mode: seed the initial state on a recording bus,
+// run the instruction, and demand the exact final registers, the exact final RAM,
+// the documented cycle count, and that no write landed outside the addresses the
+// case accounts for (a stray write cannot hide even though the 16 MB space is
+// sparse).
+//
+// An opcode the cycle engine carries is held to more: the run is exactly as many
+// cycles as the case recorded, each one is compared against what the chip drove on
+// it, and the core must land on an instruction boundary — so the count is proven by
+// where the instruction ended rather than reported by it. An opcode that runs whole
+// is held to the final state and the count alone. The engine itself decides which
+// is which, so an opcode cannot be compared cycle by cycle without running that
+// way, or run that way without being compared.
 TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
   const VectorParam param = GetParam();
   if (vectorsDir().empty()) {
@@ -199,7 +230,20 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     for (const auto& [address, value] : c.initial.ram) bus.mem[address] = value;
 
     Cpu65816 cpu(stateOf(c.initial));
-    const std::uint32_t cycles = cpu.step(bus);
+    bus.cpu = &cpu;
+
+    const bool perCycle = Cpu65816::cycleStepped(param.opcode);
+    std::uint32_t cycles = 0;
+    if (perCycle) {
+      for (std::size_t i = 0; i < c.cycles.size(); ++i) cpu.stepCycle(bus);
+      cycles = static_cast<std::uint32_t>(c.cycles.size());
+      expectTraceMatches(c, bus.trace);
+      EXPECT_TRUE(cpu.atInstructionBoundary())
+          << c.name << " (the instruction had not finished after "
+          << c.cycles.size() << " cycles)";
+    } else {
+      cycles = cpu.stepInstruction(bus);
+    }
 
     const Cpu65816State& s = cpu.state();
     EXPECT_EQ(int{s.pc}, int{c.final_.pc}) << c.name << " (pc)";
@@ -212,7 +256,7 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     EXPECT_EQ(int{s.dbr}, int{c.final_.dbr}) << c.name << " (dbr)";
     EXPECT_EQ(int{s.pbr}, int{c.final_.pbr}) << c.name << " (pbr)";
     EXPECT_EQ(s.e, c.final_.e) << c.name << " (e)";
-    EXPECT_EQ(cycles, c.cycles) << c.name << " (cycle count)";
+    EXPECT_EQ(std::size_t{cycles}, c.cycles.size()) << c.name << " (cycle count)";
 
     // (a) every address the final state accounts for holds its listed value.
     std::unordered_set<std::uint32_t> accounted;

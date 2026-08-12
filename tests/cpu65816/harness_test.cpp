@@ -61,10 +61,65 @@ TEST(Cpu65816VectorHarness, ParsesTwentyFourBitRamAddresses) {
   EXPECT_EQ(cases.front().final_.ram[2].second, 156);
 }
 
-TEST(Cpu65816VectorHarness, CountsCycleEntriesIncludingNullValues) {
-  // The reader asserts only the length of the cycle list; the null-valued internal
-  // cycles must still count.
-  EXPECT_EQ(parseVectorFile(kOneCase).front().cycles, 3u);
+TEST(Cpu65816VectorHarness, ReadsEveryCycleEntry) {
+  const auto cases = parseVectorFile(kOneCase);
+  const auto& cycles = cases.front().cycles;
+  ASSERT_EQ(cycles.size(), 3u);
+  ASSERT_TRUE(cycles[0].address.has_value());
+  EXPECT_EQ(*cycles[0].address, 10281791u);
+  ASSERT_TRUE(cycles[0].value.has_value());
+  EXPECT_EQ(int{*cycles[0].value}, 0);
+  EXPECT_EQ(cycles[0].signals, "dp-r-mx-");
+  EXPECT_EQ(cycles[1].signals, "d--w-mx-");
+  EXPECT_EQ(cycles[2].signals, "d-vr-mx-");
+}
+
+TEST(Cpu65816VectorHarness, ReadsACycleThatMovedNoByte) {
+  // An internal cycle drives an address and reads nothing, so its value is null and
+  // must come back absent rather than as a zero that looks like a real byte.
+  const auto cases = parseVectorFile(
+      R"([{ "name": "x", "initial": { "ram": [] }, "final": { "ram": [] },
+           "cycles": [[4096, null, "---r-mx-"]] }])");
+  const auto& cycles = cases.front().cycles;
+  ASSERT_EQ(cycles.size(), 1u);
+  ASSERT_TRUE(cycles[0].address.has_value());
+  EXPECT_EQ(*cycles[0].address, 4096u);
+  EXPECT_FALSE(cycles[0].value.has_value());
+  EXPECT_EQ(cycles[0].signals, "---r-mx-");
+}
+
+TEST(Cpu65816VectorHarness, ReadsACycleThatDroveNoAddress) {
+  // A halted cycle drives nothing at all: both fields are null.
+  const auto cases = parseVectorFile(
+      R"([{ "name": "x", "initial": { "ram": [] }, "final": { "ram": [] },
+           "cycles": [[null, null, "--------"]] }])");
+  const auto& cycles = cases.front().cycles;
+  ASSERT_EQ(cycles.size(), 1u);
+  EXPECT_FALSE(cycles[0].address.has_value());
+  EXPECT_FALSE(cycles[0].value.has_value());
+  EXPECT_EQ(cycles[0].signals, "--------");
+}
+
+// The pin string the harness derives for a cycle must be the one the vectors write
+// for the same cycle — otherwise every per-cycle comparison is against a fiction.
+TEST(Cpu65816VectorHarness, DerivesThePinStringForEachKindOfCycle) {
+  using snaggletooth::CycleKind;
+  using snaggletooth::cpu_vectors::internalSignals;
+  using snaggletooth::cpu_vectors::signalsFor;
+  // Native, both registers 16-bit: only the access characters are set.
+  EXPECT_EQ(signalsFor(CycleKind::OpcodeFetch, false, false, false), "dp-r----");
+  EXPECT_EQ(signalsFor(CycleKind::OperandFetch, false, false, false), "-p-r----");
+  EXPECT_EQ(signalsFor(CycleKind::DataRead, false, false, false), "d--r----");
+  EXPECT_EQ(signalsFor(CycleKind::DataWrite, false, false, false), "d--w----");
+  EXPECT_EQ(signalsFor(CycleKind::RmwRead, false, false, false), "d--r---l");
+  EXPECT_EQ(signalsFor(CycleKind::RmwWrite, false, false, false), "d--w---l");
+  EXPECT_EQ(signalsFor(CycleKind::VectorRead, false, false, false), "d-vr----");
+  EXPECT_EQ(internalSignals(false, false, false), "---r----");
+  // The width characters report the processor, not the access.
+  EXPECT_EQ(signalsFor(CycleKind::OpcodeFetch, false, true, false), "dp-r-m--");
+  EXPECT_EQ(signalsFor(CycleKind::OpcodeFetch, false, false, true), "dp-r--x-");
+  EXPECT_EQ(signalsFor(CycleKind::OpcodeFetch, true, true, true), "dp-remx-");
+  EXPECT_EQ(internalSignals(true, true, true), "---remx-");
 }
 
 TEST(Cpu65816VectorHarness, ParsesMultipleCasesAndAWriteCase) {
@@ -78,13 +133,13 @@ TEST(Cpu65816VectorHarness, ParsesMultipleCasesAndAWriteCase) {
       ])";
   const auto cases = parseVectorFile(twoCases);
   ASSERT_EQ(cases.size(), 2u);
-  EXPECT_EQ(cases[0].cycles, 1u);
+  EXPECT_EQ(cases[0].cycles.size(), 1u);
   EXPECT_EQ(cases[1].name, "b");
   ASSERT_EQ(cases[1].initial.ram.size(), 2u);
   EXPECT_EQ(cases[1].initial.ram[1].first, 17u);
   ASSERT_EQ(cases[1].final_.ram.size(), 1u);
   EXPECT_EQ(cases[1].final_.ram[0].second, 42);
-  EXPECT_EQ(cases[1].cycles, 3u);
+  EXPECT_EQ(cases[1].cycles.size(), 3u);
 }
 
 TEST(Cpu65816VectorHarness, HandlesEmptyTopLevelArray) {
