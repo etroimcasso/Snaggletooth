@@ -138,6 +138,16 @@ class Cpu65816 {
                                            : (state_.p & ~kCpuFlagZ));
   }
 
+  // Replaces the whole status byte and reapplies the invariants it governs.
+  // Emulation mode holds the m and x bits set, and narrowing the index registers to
+  // 8-bit clears their high bytes at once — so PLP, REP and SEP settle the width the
+  // same way XCE does, within the instruction rather than on the next one.
+  void writeP(std::uint8_t v) noexcept {
+    if (state_.e) v = static_cast<std::uint8_t>(v | kCpuFlagM | kCpuFlagX);
+    state_.p = v;
+    normalize();
+  }
+
   // Loads leave the unused half of a register alone (an 8-bit load preserves the
   // high byte of the accumulator; an 8-bit index load clears the index high byte)
   // and set N and Z from the loaded value at its width.
@@ -336,6 +346,119 @@ class Cpu65816 {
     }
   }
 
+  // ---- shifts, rotates, increments (read-modify-write cores) --------------
+  // Each returns the modified value at the given width and sets the flags it owns;
+  // the caller writes the result back, to the accumulator or to memory. N and Z come
+  // from the result; the shifts and rotates also move the carry.
+  [[nodiscard]] std::uint16_t aslOp(std::uint16_t v, bool eight) noexcept {
+    if (eight) {
+      setCarry((v & 0x80u) != 0);
+      const std::uint8_t r = static_cast<std::uint8_t>(v << 1);
+      setNZ8(r);
+      return r;
+    }
+    setCarry((v & 0x8000u) != 0);
+    const std::uint16_t r = static_cast<std::uint16_t>(v << 1);
+    setNZ16(r);
+    return r;
+  }
+  // LSR shifts a zero into the top bit, so it always clears N.
+  [[nodiscard]] std::uint16_t lsrOp(std::uint16_t v, bool eight) noexcept {
+    setCarry((v & 0x01u) != 0);
+    if (eight) {
+      const std::uint8_t r = static_cast<std::uint8_t>((v & 0xFFu) >> 1);
+      setNZ8(r);
+      return r;
+    }
+    const std::uint16_t r = static_cast<std::uint16_t>(v >> 1);
+    setNZ16(r);
+    return r;
+  }
+  // ROL and ROR rotate through the carry: the old carry fills the vacated bit and
+  // the bit shifted out becomes the new carry.
+  [[nodiscard]] std::uint16_t rolOp(std::uint16_t v, bool eight) noexcept {
+    const std::uint16_t cin = (state_.p & kCpuFlagC) ? 1u : 0u;
+    if (eight) {
+      setCarry((v & 0x80u) != 0);
+      const std::uint8_t r = static_cast<std::uint8_t>((v << 1) | cin);
+      setNZ8(r);
+      return r;
+    }
+    setCarry((v & 0x8000u) != 0);
+    const std::uint16_t r = static_cast<std::uint16_t>((v << 1) | cin);
+    setNZ16(r);
+    return r;
+  }
+  [[nodiscard]] std::uint16_t rorOp(std::uint16_t v, bool eight) noexcept {
+    const std::uint16_t cin = (state_.p & kCpuFlagC) ? 1u : 0u;
+    setCarry((v & 0x01u) != 0);
+    if (eight) {
+      const std::uint8_t r = static_cast<std::uint8_t>(((v & 0xFFu) >> 1) | (cin << 7));
+      setNZ8(r);
+      return r;
+    }
+    const std::uint16_t r = static_cast<std::uint16_t>((v >> 1) | (cin << 15));
+    setNZ16(r);
+    return r;
+  }
+  // INC and DEC step a value by one at the given width; they move only N and Z.
+  [[nodiscard]] std::uint16_t incOp(std::uint16_t v, bool eight) noexcept {
+    if (eight) {
+      const std::uint8_t r = static_cast<std::uint8_t>(v + 1);
+      setNZ8(r);
+      return r;
+    }
+    const std::uint16_t r = static_cast<std::uint16_t>(v + 1);
+    setNZ16(r);
+    return r;
+  }
+  [[nodiscard]] std::uint16_t decOp(std::uint16_t v, bool eight) noexcept {
+    if (eight) {
+      const std::uint8_t r = static_cast<std::uint8_t>(v - 1);
+      setNZ8(r);
+      return r;
+    }
+    const std::uint16_t r = static_cast<std::uint16_t>(v - 1);
+    setNZ16(r);
+    return r;
+  }
+  // TSB and TRB test the accumulator's bits against memory, set only Z from that AND,
+  // and write the memory back with those bits set (TSB) or cleared (TRB).
+  [[nodiscard]] std::uint16_t tsbOp(std::uint16_t v, bool eight) noexcept {
+    const std::uint16_t a = eight ? static_cast<std::uint16_t>(state_.a & 0xFFu) : state_.a;
+    setZ((a & v) == 0);
+    return static_cast<std::uint16_t>(v | a);
+  }
+  [[nodiscard]] std::uint16_t trbOp(std::uint16_t v, bool eight) noexcept {
+    const std::uint16_t a = eight ? static_cast<std::uint16_t>(state_.a & 0xFFu) : state_.a;
+    setZ((a & v) == 0);
+    return static_cast<std::uint16_t>(v & ~a);
+  }
+
+  // The accumulator as a read-modify-write target at its current width.
+  [[nodiscard]] std::uint16_t accValue() const noexcept {
+    return accum8() ? static_cast<std::uint16_t>(state_.a & 0xFFu) : state_.a;
+  }
+  void putAcc(std::uint16_t r) noexcept {
+    if (accum8()) {
+      state_.a = static_cast<std::uint16_t>((state_.a & 0xFF00u) | (r & 0xFFu));
+    } else {
+      state_.a = r;
+    }
+  }
+  // INX/INY/DEX/DEY step an index register by one at the index width, setting N,Z.
+  void stepIndex(std::uint16_t& reg, int delta) noexcept {
+    if (index8()) {
+      const std::uint8_t r = static_cast<std::uint8_t>(static_cast<int>(reg) + delta);
+      reg = r;
+      setNZ8(r);
+    } else {
+      const std::uint16_t r = static_cast<std::uint16_t>(static_cast<int>(reg) + delta);
+      reg = r;
+      setNZ16(r);
+    }
+  }
+
   // ---- program fetch ------------------------------------------------------
   // Reads the byte at the program counter and advances it. The program counter is
   // 16-bit and wraps within the program bank; the bank register does not change.
@@ -531,6 +654,75 @@ class Cpu65816 {
     if (!eightBit) {
       bus.write(nextByte(op.addr, op.kind), static_cast<std::uint8_t>(v >> 8));
     }
+  }
+
+  // ---- stack --------------------------------------------------------------
+  // Pushes write to the current stack pointer and then decrement it; pulls
+  // pre-increment and then read. The stack lives in bank zero; emulation mode keeps
+  // it inside page one, so the pointer wraps within $01xx there and across bank zero
+  // otherwise. A 16-bit push stores the high byte first (at the higher address),
+  // matching the little-endian order a pull reads back low byte first.
+  template <SnesBus B>
+  void push8(B& bus, std::uint8_t v) {
+    bus.write(state_.s, v);
+    state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | ((state_.s - 1) & 0xFFu))
+                        : static_cast<std::uint16_t>(state_.s - 1);
+  }
+  template <SnesBus B>
+  void push16(B& bus, std::uint16_t v) {
+    push8(bus, static_cast<std::uint8_t>(v >> 8));
+    push8(bus, static_cast<std::uint8_t>(v));
+  }
+  template <SnesBus B>
+  std::uint8_t pull8(B& bus) {
+    state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | ((state_.s + 1) & 0xFFu))
+                        : static_cast<std::uint16_t>(state_.s + 1);
+    return bus.read(state_.s);
+  }
+  template <SnesBus B>
+  std::uint16_t pull16(B& bus) {
+    const std::uint16_t lo = pull8(bus);
+    const std::uint16_t hi = pull8(bus);
+    return static_cast<std::uint16_t>(lo | (hi << 8));
+  }
+
+  // The 65816-new stack instructions (PEA/PEI/PER, PHB/PHK/PHD, PLB/PLD) let the
+  // stack pointer leave page one during the access in emulation mode, then force its
+  // high byte back to $01 afterward — unlike the 6502-original push/pull above, which
+  // wrap the pointer within page one on every access. In native mode the two behave
+  // identically. Each such instruction transfers once, then calls settleStack.
+  template <SnesBus B>
+  void pushWide8(B& bus, std::uint8_t v) {
+    bus.write(state_.s, v);
+    state_.s = static_cast<std::uint16_t>(state_.s - 1);
+  }
+  template <SnesBus B>
+  void pushWide16(B& bus, std::uint16_t v) {
+    pushWide8(bus, static_cast<std::uint8_t>(v >> 8));
+    pushWide8(bus, static_cast<std::uint8_t>(v));
+  }
+  template <SnesBus B>
+  std::uint8_t pullWide8(B& bus) {
+    state_.s = static_cast<std::uint16_t>(state_.s + 1);
+    return bus.read(state_.s);
+  }
+  template <SnesBus B>
+  std::uint16_t pullWide16(B& bus) {
+    const std::uint16_t lo = pullWide8(bus);
+    const std::uint16_t hi = pullWide8(bus);
+    return static_cast<std::uint16_t>(lo | (hi << 8));
+  }
+  void settleStack() noexcept {
+    if (state_.e) state_.s = static_cast<std::uint16_t>(0x0100u | (state_.s & 0xFFu));
+  }
+
+  // Reads an operand, applies a read-modify-write operator at the accumulator width,
+  // and writes the result back to the same address.
+  template <SnesBus B>
+  void rmwMem(B& bus, const Operand& op,
+              std::uint16_t (Cpu65816::*fn)(std::uint16_t, bool)) {
+    const std::uint16_t v = readValue(bus, op, accum8());
+    writeValue(bus, op, (this->*fn)(v, accum8()), accum8());
   }
 
   Cpu65816State state_{};
@@ -834,6 +1026,97 @@ std::uint32_t Cpu65816::step(B& bus) {
     case 0x2C: { Operand o = eaAbs(bus);  bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc(); }            // BIT abs
     case 0x34: { Operand o = eaDirX(bus); bitOp(readValue(bus, o, accum8()), false); return 5u - accCyc() + dpCyc(); }  // BIT dir,X
     case 0x3C: { Operand o = eaAbsX(bus); bitOp(readValue(bus, o, accum8()), false); return 6u - accCyc() - indexCyc() + indexCyc() * (o.pageCross ? 1u : 0u); }  // BIT abs,X
+
+    // ---- INC / DEC: step a value by one (accumulator or index width; N,Z) ----
+    case 0x1A: putAcc(incOp(accValue(), accum8())); return 2;  // INC A
+    case 0x3A: putAcc(decOp(accValue(), accum8())); return 2;  // DEC A
+    case 0xE6: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::incOp); return 7u - 2u * accCyc() + dpCyc(); }  // INC dir
+    case 0xF6: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::incOp); return 8u - 2u * accCyc() + dpCyc(); }  // INC dir,X
+    case 0xEE: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::incOp); return 8u - 2u * accCyc(); }            // INC abs
+    case 0xFE: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::incOp); return 9u - 2u * accCyc(); }            // INC abs,X
+    case 0xC6: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::decOp); return 7u - 2u * accCyc() + dpCyc(); }  // DEC dir
+    case 0xD6: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::decOp); return 8u - 2u * accCyc() + dpCyc(); }  // DEC dir,X
+    case 0xCE: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::decOp); return 8u - 2u * accCyc(); }            // DEC abs
+    case 0xDE: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::decOp); return 9u - 2u * accCyc(); }            // DEC abs,X
+
+    // ---- INX / INY / DEX / DEY: step an index register (index width; N,Z) ----
+    case 0xE8: stepIndex(state_.x, +1); return 2;  // INX
+    case 0xC8: stepIndex(state_.y, +1); return 2;  // INY
+    case 0xCA: stepIndex(state_.x, -1); return 2;  // DEX
+    case 0x88: stepIndex(state_.y, -1); return 2;  // DEY
+
+    // ---- ASL / LSR / ROL / ROR: shifts and rotates (accumulator width; N,Z,C) ----
+    case 0x0A: putAcc(aslOp(accValue(), accum8())); return 2;  // ASL A
+    case 0x06: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::aslOp); return 7u - 2u * accCyc() + dpCyc(); }  // ASL dir
+    case 0x16: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::aslOp); return 8u - 2u * accCyc() + dpCyc(); }  // ASL dir,X
+    case 0x0E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::aslOp); return 8u - 2u * accCyc(); }            // ASL abs
+    case 0x1E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::aslOp); return 9u - 2u * accCyc(); }            // ASL abs,X
+    case 0x4A: putAcc(lsrOp(accValue(), accum8())); return 2;  // LSR A
+    case 0x46: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::lsrOp); return 7u - 2u * accCyc() + dpCyc(); }  // LSR dir
+    case 0x56: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::lsrOp); return 8u - 2u * accCyc() + dpCyc(); }  // LSR dir,X
+    case 0x4E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::lsrOp); return 8u - 2u * accCyc(); }            // LSR abs
+    case 0x5E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::lsrOp); return 9u - 2u * accCyc(); }            // LSR abs,X
+    case 0x2A: putAcc(rolOp(accValue(), accum8())); return 2;  // ROL A
+    case 0x26: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::rolOp); return 7u - 2u * accCyc() + dpCyc(); }  // ROL dir
+    case 0x36: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::rolOp); return 8u - 2u * accCyc() + dpCyc(); }  // ROL dir,X
+    case 0x2E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::rolOp); return 8u - 2u * accCyc(); }            // ROL abs
+    case 0x3E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::rolOp); return 9u - 2u * accCyc(); }            // ROL abs,X
+    case 0x6A: putAcc(rorOp(accValue(), accum8())); return 2;  // ROR A
+    case 0x66: { Operand o = eaDir(bus);  rmwMem(bus, o, &Cpu65816::rorOp); return 7u - 2u * accCyc() + dpCyc(); }  // ROR dir
+    case 0x76: { Operand o = eaDirX(bus); rmwMem(bus, o, &Cpu65816::rorOp); return 8u - 2u * accCyc() + dpCyc(); }  // ROR dir,X
+    case 0x6E: { Operand o = eaAbs(bus);  rmwMem(bus, o, &Cpu65816::rorOp); return 8u - 2u * accCyc(); }            // ROR abs
+    case 0x7E: { Operand o = eaAbsX(bus); rmwMem(bus, o, &Cpu65816::rorOp); return 9u - 2u * accCyc(); }            // ROR abs,X
+
+    // ---- TSB / TRB: test-and-set / test-and-reset memory bits against A (Z only) ----
+    case 0x04: { Operand o = eaDir(bus); rmwMem(bus, o, &Cpu65816::tsbOp); return 7u - 2u * accCyc() + dpCyc(); }  // TSB dir
+    case 0x0C: { Operand o = eaAbs(bus); rmwMem(bus, o, &Cpu65816::tsbOp); return 8u - 2u * accCyc(); }            // TSB abs
+    case 0x14: { Operand o = eaDir(bus); rmwMem(bus, o, &Cpu65816::trbOp); return 7u - 2u * accCyc() + dpCyc(); }  // TRB dir
+    case 0x1C: { Operand o = eaAbs(bus); rmwMem(bus, o, &Cpu65816::trbOp); return 8u - 2u * accCyc(); }            // TRB abs
+
+    // ---- push a register onto the stack (no flags) ----
+    case 0x48:  // PHA
+      if (accum8()) push8(bus, static_cast<std::uint8_t>(state_.a)); else push16(bus, state_.a);
+      return 4u - accCyc();
+    case 0xDA:  // PHX
+      if (index8()) push8(bus, static_cast<std::uint8_t>(state_.x)); else push16(bus, state_.x);
+      return 4u - indexCyc();
+    case 0x5A:  // PHY
+      if (index8()) push8(bus, static_cast<std::uint8_t>(state_.y)); else push16(bus, state_.y);
+      return 4u - indexCyc();
+    case 0x08: push8(bus, state_.p); return 3;                          // PHP
+    case 0x8B: pushWide8(bus, state_.dbr); settleStack(); return 3;     // PHB
+    case 0x4B: pushWide8(bus, state_.pbr); settleStack(); return 3;     // PHK
+    case 0x0B: pushWide16(bus, state_.d); settleStack(); return 4;      // PHD
+    case 0xF4: pushWide16(bus, fetchWord(bus)); settleStack(); return 5;  // PEA #imm
+    case 0xD4: { const std::uint16_t v = readDpWord(bus, dpAddr(fetch(bus), 0)); pushWide16(bus, v); settleStack(); return 6u + dpCyc(); }  // PEI dir
+    case 0x62: { const std::uint16_t rel = fetchWord(bus); pushWide16(bus, static_cast<std::uint16_t>(state_.pc + rel)); settleStack(); return 6; }  // PER
+
+    // ---- pull a register from the stack ----
+    case 0x68: loadA(accum8() ? pull8(bus) : pull16(bus)); return 5u - accCyc();     // PLA (N,Z at the accumulator width)
+    case 0xFA: loadX(index8() ? pull8(bus) : pull16(bus)); return 5u - indexCyc();   // PLX (N,Z at the index width)
+    case 0x7A: loadY(index8() ? pull8(bus) : pull16(bus)); return 5u - indexCyc();   // PLY
+    case 0x28: writeP(pull8(bus)); return 4;                                          // PLP
+    case 0xAB: { const std::uint8_t v = pullWide8(bus); settleStack(); state_.dbr = v; setNZ8(v); return 4; }    // PLB
+    case 0x2B: { const std::uint16_t v = pullWide16(bus); settleStack(); state_.d = v; setNZ16(v); return 5; }   // PLD
+
+    // ---- status-flag set / clear (2 cycles) ----
+    case 0x18: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagC); return 2;  // CLC
+    case 0x38: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagC); return 2;   // SEC
+    case 0x58: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagI); return 2;  // CLI
+    case 0x78: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagI); return 2;   // SEI
+    case 0xD8: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagD); return 2;  // CLD
+    case 0xF8: state_.p = static_cast<std::uint8_t>(state_.p | kCpuFlagD); return 2;   // SED
+    case 0xB8: state_.p = static_cast<std::uint8_t>(state_.p & ~kCpuFlagV); return 2;  // CLV
+
+    // ---- REP / SEP: reset or set the status bits named by an immediate mask.
+    //      Emulation holds m and x set, and narrowing the index width clears the
+    //      index high bytes at once (writeP reapplies both) ----
+    case 0xC2: { const std::uint8_t m = fetch(bus); writeP(static_cast<std::uint8_t>(state_.p & ~m)); return 3; }  // REP #imm
+    case 0xE2: { const std::uint8_t m = fetch(bus); writeP(static_cast<std::uint8_t>(state_.p | m)); return 3; }   // SEP #imm
+
+    // ---- no operation (WDM is a two-byte reserved no-op) ----
+    case 0xEA: return 2;              // NOP
+    case 0x42: fetch(bus); return 2;  // WDM
 
     default:
       // Not yet routed. This family lands opcode by opcode across the sub-blocks;
