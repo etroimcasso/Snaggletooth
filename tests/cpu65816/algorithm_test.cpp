@@ -448,4 +448,223 @@ TEST(Cpu65816Bit, ImmediateAffectsOnlyZero) {
   EXPECT_TRUE(r.st.p & kCpuFlagV);  // unchanged
 }
 
+// ---- INC / DEC (§6.1.1.3 — n from the high bit, z from zero; no carry) ----
+
+TEST(Cpu65816IncDec, IndexIncrementOverflowsToNegative) {
+  // The reference example: X = $7FFF, x = 0, after INX X = $8000, n = 1, z = 0.
+  // [65816 §6.1.1.3 example]
+  const auto r = run({.pc = 0x1000, .x = 0x7FFF, .p = 0}, {{0x001000, 0xE8}});
+  EXPECT_EQ(r.st.x, 0x8000);
+  EXPECT_TRUE(r.st.p & kCpuFlagN);
+  EXPECT_FALSE(r.st.p & kCpuFlagZ);
+  EXPECT_EQ(r.cycles, 2u);
+}
+
+TEST(Cpu65816IncDec, EightBitAccumulatorIncrementWrapsAndPreservesHighByte) {
+  // m = 1: INC A on $12FF rolls the low byte to $00 (z = 1) and leaves B intact.
+  // [65816 §6.1.1.3]
+  const auto r = run({.pc = 0x1000, .a = 0x12FF, .p = kCpuFlagM}, {{0x001000, 0x1A}});
+  EXPECT_EQ(r.st.a, 0x1200);
+  EXPECT_TRUE(r.st.p & kCpuFlagZ);
+}
+
+TEST(Cpu65816IncDec, EightBitMemoryDecrementWritesBackAndSetsNegative) {
+  // m = 1: DEC $10 on $00 wraps to $FF (n = 1) and writes it back. 7 - 2m + w = 5.
+  // [65816 §6.1.1.3]
+  const auto r = run({.pc = 0x1000, .d = 0x0000, .p = kCpuFlagM},
+                     {{0x001000, 0xC6}, {0x001001, 0x10}, {0x000010, 0x00}});
+  EXPECT_EQ(int{r.bus.read(0x0010)}, 0xFF);
+  EXPECT_TRUE(r.st.p & kCpuFlagN);
+  EXPECT_EQ(r.cycles, 5u);
+}
+
+// ---- ASL / LSR / ROL / ROR (§6.1.3) ----
+
+TEST(Cpu65816Shift, AslMemoryWorkedExample) {
+  // The reference example: m = 1, $10 holds $8F, after ASL $10 it holds $1E with
+  // n = 0, z = 0, c = 1 (the old high bit). 7 - 2m + w = 5. [65816 §6.1.3 example]
+  const auto r = run({.pc = 0x1000, .d = 0x0000, .p = kCpuFlagM},
+                     {{0x001000, 0x06}, {0x001001, 0x10}, {0x000010, 0x8F}});
+  EXPECT_EQ(int{r.bus.read(0x0010)}, 0x1E);
+  EXPECT_FALSE(r.st.p & kCpuFlagN);
+  EXPECT_FALSE(r.st.p & kCpuFlagZ);
+  EXPECT_TRUE(r.st.p & kCpuFlagC);
+  EXPECT_EQ(r.cycles, 5u);
+}
+
+TEST(Cpu65816Shift, AslSixteenBitAccumulatorShiftsIntoBit15) {
+  // m = 0: ASL A on $4000 gives $8000 (n = 1), no carry out. [65816 §6.1.3]
+  const auto r = run({.pc = 0x1000, .a = 0x4000, .p = 0}, {{0x001000, 0x0A}});
+  EXPECT_EQ(r.st.a, 0x8000);
+  EXPECT_TRUE(r.st.p & kCpuFlagN);
+  EXPECT_FALSE(r.st.p & kCpuFlagC);
+  EXPECT_EQ(r.cycles, 2u);
+}
+
+TEST(Cpu65816Shift, LsrAlwaysClearsNegativeAndTakesCarryFromBitZero) {
+  // m = 1: LSR A on $FF gives $7F — a zero shifts into the top bit, so n is cleared
+  // however high the input was; the old bit 0 becomes carry. [65816 §6.1.3]
+  const auto r = run({.pc = 0x1000, .a = 0x00FF, .p = kCpuFlagM | kCpuFlagN},
+                     {{0x001000, 0x4A}});
+  EXPECT_EQ(r.st.a, 0x007F);
+  EXPECT_FALSE(r.st.p & kCpuFlagN);
+  EXPECT_TRUE(r.st.p & kCpuFlagC);
+}
+
+TEST(Cpu65816Shift, RolFeedsCarryIntoBitZero) {
+  // m = 1, c = 1: ROL A on $80 shifts the old carry into bit 0 and the old high bit
+  // out to carry: $80 -> $01, c = 1. [65816 §6.1.3]
+  const auto r = run({.pc = 0x1000, .a = 0x0080, .p = kCpuFlagM | kCpuFlagC},
+                     {{0x001000, 0x2A}});
+  EXPECT_EQ(r.st.a, 0x0001);
+  EXPECT_TRUE(r.st.p & kCpuFlagC);
+  EXPECT_FALSE(r.st.p & kCpuFlagN);
+}
+
+TEST(Cpu65816Shift, RorFeedsCarryIntoTheHighBit) {
+  // m = 1, c = 1: ROR A on $01 shifts the old carry into the top bit and the old bit
+  // 0 out to carry: $01 -> $80 (n = 1), c = 1. [65816 §6.1.3]
+  const auto r = run({.pc = 0x1000, .a = 0x0001, .p = kCpuFlagM | kCpuFlagC},
+                     {{0x001000, 0x6A}});
+  EXPECT_EQ(r.st.a, 0x0080);
+  EXPECT_TRUE(r.st.p & kCpuFlagN);
+  EXPECT_TRUE(r.st.p & kCpuFlagC);
+}
+
+// ---- TSB / TRB (§6.1.2.3 — z from the AND, memory bits set / reset) ----
+
+TEST(Cpu65816TestBits, TsbSetsTheAccumulatorsBitsAndZFromTheAnd) {
+  // The reference example: A = $43, m = 1, $10 holds $9C; TSB sets z (the AND is
+  // zero) and writes $9C | $43 = $DF back. [65816 §6.1.2.3 example]
+  const auto r = run({.pc = 0x1000, .a = 0x0043, .d = 0x0000, .p = kCpuFlagM},
+                     {{0x001000, 0x04}, {0x001001, 0x10}, {0x000010, 0x9C}});
+  EXPECT_EQ(int{r.bus.read(0x0010)}, 0xDF);
+  EXPECT_TRUE(r.st.p & kCpuFlagZ);
+}
+
+TEST(Cpu65816TestBits, TrbClearsTheAccumulatorsBitsAndZReflectsTheAnd) {
+  // m = 1: A = $0F, $10 holds $FF; TRB clears the low nibble ($FF & ~$0F = $F0) and
+  // z = 0 because the AND is non-zero. [65816 §6.1.2.3]
+  const auto r = run({.pc = 0x1000, .a = 0x000F, .d = 0x0000, .p = kCpuFlagM},
+                     {{0x001000, 0x14}, {0x001001, 0x10}, {0x000010, 0xFF}});
+  EXPECT_EQ(int{r.bus.read(0x0010)}, 0xF0);
+  EXPECT_FALSE(r.st.p & kCpuFlagZ);
+}
+
+// ---- push / pull byte order and widths (§6.8.1–6.8.3) ----
+
+TEST(Cpu65816Stack, PushDirectRegisterStoresHighByteAtTheHigherAddress) {
+  // Native: PHD pushes D = $1234 high byte first, so the stack is little-endian —
+  // $34 at S-1, $12 at S — and S drops by two. No flags. [65816 §6.8.3 / §2]
+  const auto r = run({.pc = 0x1000, .s = 0x01FF, .d = 0x1234, .p = 0},
+                     {{0x001000, 0x0B}});
+  EXPECT_EQ(int{r.bus.read(0x01FF)}, 0x12);
+  EXPECT_EQ(int{r.bus.read(0x01FE)}, 0x34);
+  EXPECT_EQ(r.st.s, 0x01FD);
+  EXPECT_EQ(r.cycles, 4u);
+}
+
+TEST(Cpu65816Stack, PullDirectRegisterIsSixteenBitAndSetsFlags) {
+  // Native: PLD reads low then high and sets N,Z on the whole 16-bit value regardless
+  // of the m width. Stack $01FE/$01FF = $00/$80 -> D = $8000, n = 1. [65816 §6.8.3]
+  const auto r = run({.pc = 0x1000, .s = 0x01FD, .p = kCpuFlagM},
+                     {{0x001000, 0x2B}, {0x0001FE, 0x00}, {0x0001FF, 0x80}});
+  EXPECT_EQ(r.st.d, 0x8000);
+  EXPECT_TRUE(r.st.p & kCpuFlagN);
+  EXPECT_EQ(r.st.s, 0x01FF);
+  EXPECT_EQ(r.cycles, 5u);
+}
+
+TEST(Cpu65816Stack, PeaPushesTheImmediateWord) {
+  // Native: PEA #$1234 pushes the immediate directly, no flags. [65816 §6.8.1]
+  const auto r = run({.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagZ},
+                     {{0x001000, 0xF4}, {0x001001, 0x34}, {0x001002, 0x12}});
+  EXPECT_EQ(int{r.bus.read(0x01FF)}, 0x12);
+  EXPECT_EQ(int{r.bus.read(0x01FE)}, 0x34);
+  EXPECT_EQ(r.st.s, 0x01FD);
+  EXPECT_TRUE(r.st.p & kCpuFlagZ);  // unchanged
+  EXPECT_EQ(r.cycles, 5u);
+}
+
+TEST(Cpu65816Stack, PerPushesTheAddressRelativeToTheNextInstruction) {
+  // Native: PER adds its 16-bit displacement to the address of the next instruction
+  // (PC = $1003 here) and pushes the result $100D. [65816 §6.8.1 / §5.18]
+  const auto r = run({.pc = 0x1000, .s = 0x01FF, .p = 0},
+                     {{0x001000, 0x62}, {0x001001, 0x0A}, {0x001002, 0x00}});
+  EXPECT_EQ(int{r.bus.read(0x01FF)}, 0x10);
+  EXPECT_EQ(int{r.bus.read(0x01FE)}, 0x0D);
+  EXPECT_EQ(r.st.s, 0x01FD);
+  EXPECT_EQ(r.cycles, 6u);
+}
+
+// ---- emulation-mode stack wrapping (§5.22) ----
+
+TEST(Cpu65816Stack, EmulationOldPushWrapsWithinPageOne) {
+  // e = 1: PHA is a 6502-original push, so at S = $0100 the pointer wraps back to
+  // $01FF within page one after writing at $0100. [65816 §5.22 "old" instructions]
+  const auto r = run({.pc = 0x1000, .s = 0x0100, .a = 0x00AB, .p = 0x30, .e = true},
+                     {{0x001000, 0x48}});
+  EXPECT_EQ(int{r.bus.read(0x0100)}, 0xAB);
+  EXPECT_EQ(r.st.s, 0x01FF);
+}
+
+TEST(Cpu65816Stack, EmulationNewPullLeavesPageOneThenForcesTheHighByteBack) {
+  // e = 1: PLB is a 65816-new pull, so at S = $01FF it reads from $0200 (crossing out
+  // of page one), then the pointer's high byte is forced back to $01, leaving
+  // S = $0100. [65816 §5.22 "otherwise" + SL incremented]
+  const auto r = run({.pc = 0x1000, .s = 0x01FF, .p = 0x30, .e = true},
+                     {{0x001000, 0xAB}, {0x000200, 0x42}});
+  EXPECT_EQ(r.st.dbr, 0x42);
+  EXPECT_EQ(r.st.s, 0x0100);
+  EXPECT_FALSE(r.st.p & kCpuFlagZ);
+}
+
+// ---- status flags, mode, and no-ops (§6.4.1 / §6.4.2 / §6.7 / §6.8.3) ----
+
+TEST(Cpu65816Flags, SetAndClearIndividualFlags) {
+  // SEC sets carry; CLV clears overflow. [65816 §6.4.1]
+  const auto sec = run({.pc = 0x1000, .p = 0}, {{0x001000, 0x38}});
+  EXPECT_TRUE(sec.st.p & kCpuFlagC);
+  EXPECT_EQ(sec.cycles, 2u);
+  const auto clv = run({.pc = 0x1000, .p = kCpuFlagV}, {{0x001000, 0xB8}});
+  EXPECT_FALSE(clv.st.p & kCpuFlagV);
+}
+
+TEST(Cpu65816Flags, RepClearsTheMemoryWidthFlag) {
+  // REP #$20 clears m, widening the accumulator to 16-bit. [65816 §6.4.2]
+  const auto r = run({.pc = 0x1000, .p = kCpuFlagM},
+                     {{0x001000, 0xC2}, {0x001001, 0x20}});
+  EXPECT_FALSE(r.st.p & kCpuFlagM);
+  EXPECT_EQ(r.cycles, 3u);
+}
+
+TEST(Cpu65816Flags, SepNarrowingTheIndexWidthClearsTheIndexHighBytes) {
+  // SEP #$10 sets x; narrowing the index registers to 8-bit zeros their high bytes at
+  // once, so X = $1234 becomes $0034 and Y = $5678 becomes $0078. [65816 §6.4.2 / §4]
+  const auto r = run({.pc = 0x1000, .x = 0x1234, .y = 0x5678, .p = 0},
+                     {{0x001000, 0xE2}, {0x001001, 0x10}});
+  EXPECT_TRUE(r.st.p & kCpuFlagX);
+  EXPECT_EQ(r.st.x, 0x0034);
+  EXPECT_EQ(r.st.y, 0x0078);
+}
+
+TEST(Cpu65816Flags, PlpReplacesTheWholeStatusByte) {
+  // Native: PLP loads P from the stack wholesale. [65816 §6.8.3]
+  const auto r = run({.pc = 0x1000, .s = 0x01FF, .p = 0x00},
+                     {{0x001000, 0x28}, {0x000200, 0xCC}});
+  EXPECT_EQ(int{r.st.p}, 0xCC);
+  EXPECT_EQ(r.cycles, 4u);
+}
+
+TEST(Cpu65816Flags, NopAndWdmAdvancePastTheirBytes) {
+  // NOP is one byte, WDM is a two-byte reserved no-op; both take two cycles and touch
+  // nothing else. [65816 §6.7]
+  const auto nop = run({.pc = 0x1000, .p = 0}, {{0x001000, 0xEA}});
+  EXPECT_EQ(nop.st.pc, 0x1001);
+  EXPECT_EQ(nop.cycles, 2u);
+  const auto wdm = run({.pc = 0x1000, .p = 0}, {{0x001000, 0x42}, {0x001001, 0x00}});
+  EXPECT_EQ(wdm.st.pc, 0x1002);
+  EXPECT_EQ(wdm.cycles, 2u);
+}
+
 }  // namespace

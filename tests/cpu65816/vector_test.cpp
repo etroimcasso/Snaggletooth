@@ -111,6 +111,39 @@ std::vector<VectorParam> arithmeticLogicParams() {
   return params;
 }
 
+// The read-modify-write, stack, and flag/mode family this sub-block lands:
+// INC/DEC (accumulator, memory and the index registers), the ASL/LSR/ROL/ROR shifts
+// and rotates, TSB/TRB, the push and pull family (including PHB/PHD/PHK/PLB/PLD and
+// PEA/PEI/PER), the status-flag set/clear ops, REP/SEP, and NOP/WDM.
+constexpr std::uint8_t kRmwStackFlagOpcodes[] = {
+    // INC / DEC (accumulator, memory)
+    0x1A, 0xE6, 0xF6, 0xEE, 0xFE, 0x3A, 0xC6, 0xD6, 0xCE, 0xDE,
+    // INX / INY / DEX / DEY
+    0xE8, 0xC8, 0xCA, 0x88,
+    // ASL / LSR / ROL / ROR (accumulator, memory)
+    0x0A, 0x06, 0x16, 0x0E, 0x1E, 0x4A, 0x46, 0x56, 0x4E, 0x5E,
+    0x2A, 0x26, 0x36, 0x2E, 0x3E, 0x6A, 0x66, 0x76, 0x6E, 0x7E,
+    // TSB / TRB
+    0x04, 0x0C, 0x14, 0x1C,
+    // push
+    0x48, 0xDA, 0x5A, 0x08, 0x8B, 0x4B, 0x0B, 0xF4, 0xD4, 0x62,
+    // pull
+    0x68, 0xFA, 0x7A, 0x28, 0xAB, 0x2B,
+    // status flags
+    0x18, 0x38, 0x58, 0x78, 0xD8, 0xF8, 0xB8,
+    // REP / SEP, NOP / WDM
+    0xC2, 0xE2, 0xEA, 0x42,
+};
+
+std::vector<VectorParam> rmwStackFlagParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kRmwStackFlagOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
 Cpu65816State stateOf(const RegState& r) {
   return Cpu65816State{.pc = r.pc,
                        .s = r.s,
@@ -215,6 +248,16 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     ArithmeticLogic, Cpu65816Vectors,
     ::testing::ValuesIn(arithmeticLogicParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    RmwStackFlag, Cpu65816Vectors,
+    ::testing::ValuesIn(rmwStackFlagParams()),
     [](const ::testing::TestParamInfo<VectorParam>& info) {
       char label[16];
       std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
