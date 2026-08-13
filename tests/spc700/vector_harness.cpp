@@ -93,7 +93,7 @@ struct Parser {
     return neg ? -v : v;
   }
 
-  // Skips any value — used to count cycle entries without reading their contents.
+  // Skips any value — used for the keys the reader does not map.
   void skipValue() {
     char c = cur();
     if (c == '{') {
@@ -148,17 +148,49 @@ struct Parser {
     return pairs;
   }
 
-  std::size_t countArray() {
-    std::size_t n = 0;
+  // A number or the null literal: a cycle that reaches memory not at all leaves both
+  // its address and its value out, and a read the recording did not capture a byte for
+  // leaves out the value alone.
+  std::optional<long> integerOrNull() {
+    if (cur() == 'n') {
+      if (end - p < 4 || std::strncmp(p, "null", 4) != 0) fail("bad literal");
+      p += 4;
+      return std::nullopt;
+    }
+    return integer();
+  }
+
+  std::vector<CycleEvent> cycleEvents() {
+    std::vector<CycleEvent> events;
     want('[');
     if (!accept(']')) {
       do {
-        skipValue();
-        ++n;
+        CycleEvent event;
+        want('[');
+        if (const auto address = integerOrNull(); address.has_value()) {
+          event.address = static_cast<std::uint16_t>(*address);
+        }
+        want(',');
+        if (const auto value = integerOrNull(); value.has_value()) {
+          event.value = static_cast<std::uint8_t>(*value);
+        }
+        want(',');
+        const std::string kind = str();
+        if (kind == "read") {
+          event.kind = CycleEvent::Kind::Read;
+        } else if (kind == "write") {
+          event.kind = CycleEvent::Kind::Write;
+        } else if (kind == "wait") {
+          event.kind = CycleEvent::Kind::Wait;
+        } else {
+          fail("unknown cycle kind");
+        }
+        want(']');
+        events.push_back(event);
       } while (accept(','));
       want(']');
     }
-    return n;
+    return events;
   }
 
   RegState regs() {
@@ -205,7 +237,7 @@ struct Parser {
         } else if (key == "final") {
           c.final_ = regs();
         } else if (key == "cycles") {
-          c.cycles = countArray();
+          c.cycles = cycleEvents();
         } else {
           skipValue();
         }

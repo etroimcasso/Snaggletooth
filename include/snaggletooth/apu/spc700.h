@@ -2,6 +2,21 @@
 
 // The SPC700 — the SNES audio CPU's instruction-set core.
 //
+// The core is cycle-stepped: stepCycle() executes exactly one chip cycle. A cycle
+// either reaches memory — one read or one write, never both — or is internal, and an
+// internal cycle touches the bus not at all. A machine that advances timers and the
+// sample clock alongside execution needs that grain; so does a test that compares the
+// core against a per-cycle recording of the real chip.
+//
+// Instruction progress is part of the state value, not the call stack: an instruction
+// register, a cycle index within the instruction, and a few scratch fields. So state()
+// and restore() are legal at any cycle, mid-instruction included, and a snapshot is
+// still a plain copy of the struct.
+//
+// stepInstruction() runs cycles to the next instruction boundary and returns how many
+// it took — the whole-instruction view, for hosts and for tests that care about final
+// state. step() is that call.
+//
 // The core runs over an abstract bus (the ApuBus concept): the machine glue and
 // the flat-RAM test harness both satisfy it, so the same interpreter is exercised
 // on plain RAM and, later, on the register-overlaid APU. Reads may have side
@@ -41,6 +56,15 @@ struct Spc700State {
   std::uint8_t sp = 0;
   std::uint8_t psw = 0;
   RunState run = RunState::Running;
+
+  // How far into an instruction the core is. These carry no architectural meaning —
+  // they are the progress a running instruction has made, held as values so a
+  // snapshot taken mid-instruction restores to the same cycle.
+  std::uint8_t ir = 0;    // the instruction being executed
+  std::uint8_t tcu = 0;   // cycle index within it; 0 means the next cycle fetches
+  std::uint16_t ea = 0;   // effective-address scratch
+  std::uint16_t ptr = 0;  // pointer / second-address scratch
+  std::uint16_t tmp = 0;  // data scratch (an operand byte, or a value in flight)
 };
 
 class Spc700 {
@@ -51,10 +75,37 @@ class Spc700 {
   [[nodiscard]] const Spc700State& state() const noexcept { return state_; }
   void restore(Spc700State state) noexcept { state_ = state; }
 
-  // Executes one instruction and returns its documented cycle count. On a
-  // non-Running core this returns 2 cycles and touches neither state nor the bus.
+  // Executes exactly one chip cycle. The cycle either reaches memory — one read or
+  // one write — or is internal, in which case it touches the bus not at all. A halted
+  // core (sleeping or stopped) touches neither state nor bus; its host prices the idle
+  // cycle from the run state.
   template <ApuBus B>
-  std::uint32_t step(B& bus);
+  void stepCycle(B& bus);
+
+  // Runs cycles until the next instruction boundary and returns how many it took.
+  // Called mid-instruction it finishes the instruction in progress rather than
+  // starting one. On a non-Running core this returns 2 cycles and touches neither
+  // state nor the bus.
+  template <ApuBus B>
+  std::uint32_t stepInstruction(B& bus);
+
+  // Executes one instruction and returns its cycle count.
+  template <ApuBus B>
+  std::uint32_t step(B& bus) {
+    return stepInstruction(bus);
+  }
+
+  // Whether the core sits between instructions — the only point at which an
+  // instruction can begin, and the state a completed instruction leaves behind.
+  [[nodiscard]] bool atInstructionBoundary() const noexcept { return state_.tcu == 0; }
+
+  // Whether the cycle engine carries this opcode. The instruction families move onto
+  // it one at a time; an opcode it does not carry yet runs whole under
+  // stepInstruction() and cannot be driven a cycle at a time.
+  [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept {
+    MemForm form{};
+    return memoryForm(opcode, form);
+  }
 
  private:
   // The direct-page base: the P flag selects $0100 over $0000.
@@ -214,10 +265,6 @@ class Spc700 {
     return static_cast<std::uint16_t>(dpBase() + ((fetch(bus) + state_.x) & 0xFF));
   }
   template <ApuBus B>
-  std::uint16_t addrDpY(B& bus) {
-    return static_cast<std::uint16_t>(dpBase() + ((fetch(bus) + state_.y) & 0xFF));
-  }
-  template <ApuBus B>
   std::uint16_t addrAbs(B& bus) {
     std::uint16_t lo = fetch(bus);
     std::uint16_t hi = fetch(bus);
@@ -270,17 +317,6 @@ class Spc700 {
               static_cast<std::uint8_t>(v >> 8));
   }
 
-  // A MOV to memory reads its destination before writing it. The value is
-  // discarded, but the access is real: a destination with a read side effect
-  // (a timer output register clears when read) sees it. This is specific to the
-  // MOV-to-memory forms — MOV dp,dp reads its source instead, and the read/
-  // modify/write opcodes already read their operand.
-  template <ApuBus B>
-  void storeByte(B& bus, std::uint16_t addr, std::uint8_t value) {
-    static_cast<void>(bus.read(addr));
-    bus.write(addr, value);
-  }
-
   // The stack lives in page $01, addressed by SP as its low byte. A push writes
   // then post-decrements SP; a pop pre-increments then reads. SP is an 8-bit
   // register, so it wraps within the page.
@@ -322,84 +358,499 @@ class Spc700 {
     return notTakenCycles;
   }
 
+  // ---- the cycle engine ---------------------------------------------------
+  // Executes one cycle of the instruction already in the instruction register, and
+  // answers whether that cycle was its last. The cycle index says which cycle is due;
+  // every branch a cycle can take is decided by state the earlier cycles latched, so
+  // a handler never has to look ahead.
+  template <ApuBus B>
+  bool executeCycle(B& bus);
+
+  // Runs one whole instruction whose opcode has already been fetched, returning its
+  // documented cycle count. This is the path for the opcodes the cycle engine does
+  // not carry yet.
+  template <ApuBus B>
+  std::uint32_t stepWhole(B& bus, std::uint8_t opcode);
+
+  // ---- reaching memory ----------------------------------------------------
+  // Where a memory instruction's operand lives. Each mode is a fixed cycle sequence:
+  // the operand bytes it fetches, the internal cycles it spends, and the pointer
+  // reads it makes before its address is settled.
+  enum class AddrMode : std::uint8_t {
+    Implied,            // no operand at all
+    Immediate,          // the byte after the opcode
+    Dp,                 // dp + offset
+    DpX,                // dp + (offset + X), wrapping inside the page
+    DpY,                // dp + (offset + Y), wrapping inside the page
+    Abs,                // a two-byte address
+    AbsX,               // that address plus X
+    AbsY,               // that address plus Y
+    Indirect,           // (X): dp + X
+    IndirectIncrement,  // (X)+: the same, and X steps after
+    IndexedIndirect,    // [dp+X]: X indexes the offset, then a pointer
+    IndirectIndexed,    // [dp]+Y: a pointer, then Y indexes the address
+    DpToDp,             // two direct-page offsets: source then destination
+    ImmediateToDp,      // an immediate byte and a direct-page offset
+  };
+
+  // What an instruction does once its address is settled: read the byte there, or
+  // write one. A write reads its destination first — the value is discarded, but the
+  // access is real, so a register that clears when read sees it.
+  enum class MemAccess : std::uint8_t { Read, Write };
+
+  // The shape of one memory instruction: where its operand lives, what it does there,
+  // and whether a write reads its destination first.
+  struct MemForm {
+    AddrMode mode = AddrMode::Implied;
+    MemAccess access = MemAccess::Read;
+    bool readsDestination = true;
+  };
+
+  // Fills in the shape of a memory instruction and answers whether the opcode is one
+  // the cycle engine carries. Instructions sharing a mode share its cycle sequence, so
+  // an opcode's only per-instruction contributions are this shape and the payload
+  // applied once its operand has arrived.
+  [[nodiscard]] static constexpr bool memoryForm(std::uint8_t opcode,
+                                                 MemForm& form) noexcept;
+
+  // How many cycles a mode spends before it reaches memory: its operand fetches, its
+  // internal cycles, and its pointer reads.
+  [[nodiscard]] static constexpr std::uint8_t setupCycles(AddrMode mode) noexcept;
+
+  // Whether an indirect mode spends its internal cycle before reading its pointer.
+  // The read forms and [dp+X] do; the write form of [dp]+Y spends it after.
+  [[nodiscard]] static constexpr bool waitsBeforePointer(const MemForm& form) noexcept {
+    return form.mode != AddrMode::IndirectIndexed || form.access == MemAccess::Read;
+  }
+
+  // The address of one byte of an indirect mode's pointer. Both bytes live in the
+  // direct page, and the second wraps inside it.
+  [[nodiscard]] std::uint16_t pointerAddr(const MemForm& form,
+                                          std::uint8_t byte) const noexcept {
+    const std::uint8_t index =
+        form.mode == AddrMode::IndexedIndirect ? state_.x : std::uint8_t{0};
+    return dpAddr(static_cast<std::uint8_t>(state_.tmp + index + byte));
+  }
+
+  // Executes one cycle of a memory instruction.
+  template <ApuBus B>
+  bool executeMemoryCycle(B& bus, const MemForm& form);
+
+  // Executes one of the cycles a mode spends settling its address. Answers whether the
+  // instruction is finished, which only an implied one is.
+  template <ApuBus B>
+  bool executeSetupCycle(B& bus, const MemForm& form);
+
+  // Executes one cycle of an instruction carrying two operand bytes.
+  template <ApuBus B>
+  bool executeTwoOperandCycle(B& bus, const MemForm& form);
+
+  // Applies an instruction that has finished reading its operand.
+  void applyMemoryRead(std::uint8_t opcode, std::uint8_t value);
+
+  // The value a store writes.
+  [[nodiscard]] std::uint8_t memoryStoreValue(std::uint8_t opcode) const noexcept;
+
+  // Applies a register-to-register move.
+  void applyImplied(std::uint8_t opcode);
+
+  // The direct-page address an offset names: the base plus the offset, which wraps
+  // inside the page.
+  [[nodiscard]] std::uint16_t dpAddr(std::uint8_t offset) const noexcept {
+    return static_cast<std::uint16_t>(dpBase() + offset);
+  }
+
+  // Reads the byte after the opcode and discards it. A one-byte instruction still
+  // issues that read — on real hardware it has the side effects any read has — but the
+  // program counter does not step over it.
+  template <ApuBus B>
+  void discardNextByte(B& bus) {
+    static_cast<void>(bus.read(state_.pc));
+  }
+
   Spc700State state_{};
 };
 
-template <ApuBus B>
-std::uint32_t Spc700::step(B& bus) {
-  if (state_.run != RunState::Running) {
-    return 2;  // halted: no state change, no bus access
-  }
-  const std::uint8_t opcode = fetch(bus);
+// The routing table for the cycle engine: every opcode it carries, with the mode whose
+// cycle sequence it runs and what it does at the end of it.
+constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
   switch (opcode) {
-    // ---- 8-bit move: memory to register (N,Z from the loaded value) ----
-    case 0xE8: state_.a = fetch(bus); setNZ(state_.a); return 2;                                  // MOV A,#imm
-    case 0xE6: state_.a = bus.read(static_cast<std::uint16_t>(dpBase() + state_.x)); setNZ(state_.a); return 3;  // MOV A,(X)
-    case 0xBF: {                                                                                  // MOV A,(X)+
-      state_.a = bus.read(static_cast<std::uint16_t>(dpBase() + state_.x));
-      ++state_.x;
-      setNZ(state_.a);
-      return 4;
-    }
-    case 0xE4: state_.a = bus.read(addrDp(bus));   setNZ(state_.a); return 3;                     // MOV A,dp
-    case 0xF4: state_.a = bus.read(addrDpX(bus));  setNZ(state_.a); return 4;                     // MOV A,dp+X
-    case 0xE5: state_.a = bus.read(addrAbs(bus));  setNZ(state_.a); return 4;                     // MOV A,!abs
-    case 0xF5: state_.a = bus.read(addrAbsX(bus)); setNZ(state_.a); return 5;                     // MOV A,!abs+X
-    case 0xF6: state_.a = bus.read(addrAbsY(bus)); setNZ(state_.a); return 5;                     // MOV A,!abs+Y
-    case 0xE7: state_.a = bus.read(addrIndX(bus)); setNZ(state_.a); return 6;                     // MOV A,[dp+X]
-    case 0xF7: state_.a = bus.read(addrIndY(bus)); setNZ(state_.a); return 6;                     // MOV A,[dp]+Y
-    case 0xCD: state_.x = fetch(bus); setNZ(state_.x); return 2;                                  // MOV X,#imm
-    case 0xF8: state_.x = bus.read(addrDp(bus));   setNZ(state_.x); return 3;                     // MOV X,dp
-    case 0xF9: state_.x = bus.read(addrDpY(bus));  setNZ(state_.x); return 4;                     // MOV X,dp+Y
-    case 0xE9: state_.x = bus.read(addrAbs(bus));  setNZ(state_.x); return 4;                     // MOV X,!abs
-    case 0x8D: state_.y = fetch(bus); setNZ(state_.y); return 2;                                  // MOV Y,#imm
-    case 0xEB: state_.y = bus.read(addrDp(bus));   setNZ(state_.y); return 3;                     // MOV Y,dp
-    case 0xFB: state_.y = bus.read(addrDpX(bus));  setNZ(state_.y); return 4;                     // MOV Y,dp+X
-    case 0xEC: state_.y = bus.read(addrAbs(bus));  setNZ(state_.y); return 4;                     // MOV Y,!abs
+    // ---- 8-bit move: memory to register ----
+    case 0xE8: case 0xCD: case 0x8D:  // MOV A/X/Y,#imm
+      form = MemForm{.mode = AddrMode::Immediate, .access = MemAccess::Read};
+      return true;
+    case 0xE4: case 0xF8: case 0xEB:  // MOV A/X/Y,dp
+      form = MemForm{.mode = AddrMode::Dp, .access = MemAccess::Read};
+      return true;
+    case 0xF4: case 0xFB:             // MOV A/Y,dp+X
+      form = MemForm{.mode = AddrMode::DpX, .access = MemAccess::Read};
+      return true;
+    case 0xF9:                        // MOV X,dp+Y
+      form = MemForm{.mode = AddrMode::DpY, .access = MemAccess::Read};
+      return true;
+    case 0xE5: case 0xE9: case 0xEC:  // MOV A/X/Y,!abs
+      form = MemForm{.mode = AddrMode::Abs, .access = MemAccess::Read};
+      return true;
+    case 0xF5:                        // MOV A,!abs+X
+      form = MemForm{.mode = AddrMode::AbsX, .access = MemAccess::Read};
+      return true;
+    case 0xF6:                        // MOV A,!abs+Y
+      form = MemForm{.mode = AddrMode::AbsY, .access = MemAccess::Read};
+      return true;
+    case 0xE7:                        // MOV A,[dp+X]
+      form = MemForm{.mode = AddrMode::IndexedIndirect, .access = MemAccess::Read};
+      return true;
+    case 0xF7:                        // MOV A,[dp]+Y
+      form = MemForm{.mode = AddrMode::IndirectIndexed, .access = MemAccess::Read};
+      return true;
+    case 0xE6:                        // MOV A,(X)
+      form = MemForm{.mode = AddrMode::Indirect, .access = MemAccess::Read};
+      return true;
+    case 0xBF:                        // MOV A,(X)+
+      form = MemForm{.mode = AddrMode::IndirectIncrement, .access = MemAccess::Read};
+      return true;
 
-    // ---- 8-bit move: register to memory (no flags; each reads its
-    //      destination before writing — see storeByte) ----
-    case 0xC6: storeByte(bus, static_cast<std::uint16_t>(dpBase() + state_.x), state_.a); return 4;  // MOV (X),A
-    case 0xAF: {                                                                                  // MOV (X)+,A
-      storeByte(bus, static_cast<std::uint16_t>(dpBase() + state_.x), state_.a);
-      ++state_.x;
-      return 4;
-    }
-    case 0xC4: storeByte(bus, addrDp(bus),   state_.a); return 4;                                 // MOV dp,A
-    case 0xD4: storeByte(bus, addrDpX(bus),  state_.a); return 5;                                 // MOV dp+X,A
-    case 0xC5: storeByte(bus, addrAbs(bus),  state_.a); return 5;                                 // MOV !abs,A
-    case 0xD5: storeByte(bus, addrAbsX(bus), state_.a); return 6;                                 // MOV !abs+X,A
-    case 0xD6: storeByte(bus, addrAbsY(bus), state_.a); return 6;                                 // MOV !abs+Y,A
-    case 0xC7: storeByte(bus, addrIndX(bus), state_.a); return 7;                                 // MOV [dp+X],A
-    case 0xD7: storeByte(bus, addrIndY(bus), state_.a); return 7;                                 // MOV [dp]+Y,A
-    case 0xD8: storeByte(bus, addrDp(bus),   state_.x); return 4;                                 // MOV dp,X
-    case 0xD9: storeByte(bus, addrDpY(bus),  state_.x); return 5;                                 // MOV dp+Y,X
-    case 0xC9: storeByte(bus, addrAbs(bus),  state_.x); return 5;                                 // MOV !abs,X
-    case 0xCB: storeByte(bus, addrDp(bus),   state_.y); return 4;                                 // MOV dp,Y
-    case 0xDB: storeByte(bus, addrDpX(bus),  state_.y); return 5;                                 // MOV dp+X,Y
-    case 0xCC: storeByte(bus, addrAbs(bus),  state_.y); return 5;                                 // MOV !abs,Y
+    // ---- 8-bit move: register to memory ----
+    case 0xC4: case 0xCB: case 0xD8:  // MOV dp,A/Y/X
+      form = MemForm{.mode = AddrMode::Dp, .access = MemAccess::Write};
+      return true;
+    case 0xD4: case 0xDB:             // MOV dp+X,A/Y
+      form = MemForm{.mode = AddrMode::DpX, .access = MemAccess::Write};
+      return true;
+    case 0xD9:                        // MOV dp+Y,X
+      form = MemForm{.mode = AddrMode::DpY, .access = MemAccess::Write};
+      return true;
+    case 0xC5: case 0xC9: case 0xCC:  // MOV !abs,A/X/Y
+      form = MemForm{.mode = AddrMode::Abs, .access = MemAccess::Write};
+      return true;
+    case 0xD5:                        // MOV !abs+X,A
+      form = MemForm{.mode = AddrMode::AbsX, .access = MemAccess::Write};
+      return true;
+    case 0xD6:                        // MOV !abs+Y,A
+      form = MemForm{.mode = AddrMode::AbsY, .access = MemAccess::Write};
+      return true;
+    case 0xC7:                        // MOV [dp+X],A
+      form = MemForm{.mode = AddrMode::IndexedIndirect, .access = MemAccess::Write};
+      return true;
+    case 0xD7:                        // MOV [dp]+Y,A
+      form = MemForm{.mode = AddrMode::IndirectIndexed, .access = MemAccess::Write};
+      return true;
+    case 0xC6:                        // MOV (X),A
+      form = MemForm{.mode = AddrMode::Indirect, .access = MemAccess::Write};
+      return true;
+    case 0xAF:                        // MOV (X)+,A — the one write with no
+      form = MemForm{.mode = AddrMode::IndirectIncrement,  // destination read
+                     .access = MemAccess::Write,
+                     .readsDestination = false};
+      return true;
 
-    // ---- 8-bit move: register/register and special direct-page moves ----
-    case 0x7D: state_.a = state_.x;  setNZ(state_.a); return 2;                                   // MOV A,X
-    case 0xDD: state_.a = state_.y;  setNZ(state_.a); return 2;                                   // MOV A,Y
-    case 0x5D: state_.x = state_.a;  setNZ(state_.x); return 2;                                   // MOV X,A
-    case 0xFD: state_.y = state_.a;  setNZ(state_.y); return 2;                                   // MOV Y,A
-    case 0x9D: state_.x = state_.sp; setNZ(state_.x); return 2;                                   // MOV X,SP
-    case 0xBD: state_.sp = state_.x; return 2;                                                    // MOV SP,X (no flags)
-    case 0xFA: {                                                                                  // MOV dp,dp (encoded source-first: FA src dst)
-      std::uint8_t src = fetch(bus);
-      std::uint8_t val = bus.read(static_cast<std::uint16_t>(dpBase() + src));
-      std::uint8_t dst = fetch(bus);
-      bus.write(static_cast<std::uint16_t>(dpBase() + dst), val);
-      return 5;
-    }
-    case 0x8F: {                                                                                  // MOV dp,#imm (encoded immediate-first: 8F imm dst)
-      std::uint8_t imm = fetch(bus);
-      std::uint8_t dst = fetch(bus);
-      storeByte(bus, static_cast<std::uint16_t>(dpBase() + dst), imm);
-      return 5;
+    // ---- 8-bit move: register to register, and the two-operand direct-page moves ----
+    case 0x7D: case 0xDD: case 0x5D: case 0xFD: case 0x9D: case 0xBD:
+      form = MemForm{.mode = AddrMode::Implied};
+      return true;
+    case 0xFA:                        // MOV dp,dp
+      form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Write};
+      return true;
+    case 0x8F:                        // MOV dp,#imm
+      form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Write};
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+constexpr std::uint8_t Spc700::setupCycles(AddrMode mode) noexcept {
+  switch (mode) {
+    case AddrMode::Immediate: return 0;      // the operand fetch is the access itself
+    case AddrMode::Implied:
+    case AddrMode::Dp:
+    case AddrMode::Indirect:
+    case AddrMode::IndirectIncrement: return 1;
+    case AddrMode::DpX:
+    case AddrMode::DpY:
+    case AddrMode::Abs: return 2;
+    case AddrMode::AbsX:
+    case AddrMode::AbsY: return 3;
+    case AddrMode::IndexedIndirect:
+    case AddrMode::IndirectIndexed: return 4;
+    case AddrMode::DpToDp:
+    case AddrMode::ImmediateToDp: break;  // these run their own cycle sequence
+  }
+  return 0;
+}
+
+// An address settles over a mode's setup cycles: the operand bytes come off the
+// program stream, an indexed mode spends a cycle on the addition, and an indirect one
+// reads its pointer out of the direct page. Only an implied instruction finishes here
+// — it has no address to settle.
+template <ApuBus B>
+bool Spc700::executeSetupCycle(B& bus, const MemForm& form) {
+  switch (form.mode) {
+    case AddrMode::Implied:
+      discardNextByte(bus);
+      applyImplied(state_.ir);
+      return true;
+
+    case AddrMode::Dp:
+      state_.ea = dpAddr(fetch(bus));
+      return false;
+
+    case AddrMode::DpX:
+    case AddrMode::DpY:
+      if (state_.tcu == 1) {
+        state_.tmp = fetch(bus);
+        return false;
+      }
+      // The indexing cycle: the addition happens inside the chip, so the cycle
+      // reaches memory not at all.
+      state_.ea = dpAddr(static_cast<std::uint8_t>(
+          state_.tmp + (form.mode == AddrMode::DpX ? state_.x : state_.y)));
+      return false;
+
+    case AddrMode::Abs:
+    case AddrMode::AbsX:
+    case AddrMode::AbsY:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        if (form.mode == AddrMode::Abs) state_.ea = state_.ptr;
+        return false;
+      }
+      state_.ea = static_cast<std::uint16_t>(
+          state_.ptr + (form.mode == AddrMode::AbsX ? state_.x : state_.y));
+      return false;
+
+    case AddrMode::Indirect:
+    case AddrMode::IndirectIncrement:
+      // X is the whole address here, so the byte after the opcode is read and thrown
+      // away rather than being an operand.
+      discardNextByte(bus);
+      state_.ea = dpAddr(state_.x);
+      return false;
+
+    case AddrMode::IndexedIndirect:
+    case AddrMode::IndirectIndexed: {
+      if (state_.tcu == 1) {
+        state_.tmp = fetch(bus);
+        return false;
+      }
+      const std::uint8_t pointerCycle = waitsBeforePointer(form) ? 3 : 2;
+      if (state_.tcu == pointerCycle) {
+        state_.ptr = bus.read(pointerAddr(form, 0));
+        return false;
+      }
+      if (state_.tcu == pointerCycle + 1) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr |
+                                                (bus.read(pointerAddr(form, 1)) << 8));
+        state_.ea = form.mode == AddrMode::IndexedIndirect
+                        ? state_.ptr
+                        : static_cast<std::uint16_t>(state_.ptr + state_.y);
+        return false;
+      }
+      // The internal cycle, which sits before the pointer or after it by the mode.
+      return false;
     }
 
+    case AddrMode::Immediate:
+      break;  // its operand fetch is the access itself, so it has no setup cycle
+    case AddrMode::DpToDp:
+    case AddrMode::ImmediateToDp:
+      break;  // these run their own cycle sequence
+  }
+  return false;
+}
+
+// A two-operand instruction carries both of its bytes: a source offset and a
+// destination offset, or an immediate byte and a destination offset. The first form
+// reads its source between the two fetches; the second has its byte already and reads
+// the destination instead.
+template <ApuBus B>
+bool Spc700::executeTwoOperandCycle(B& bus, const MemForm& form) {
+  const bool immediate = form.mode == AddrMode::ImmediateToDp;
+  switch (state_.tcu) {
+    case 1:
+      if (immediate) {
+        state_.tmp = fetch(bus);
+      } else {
+        state_.ptr = fetch(bus);
+      }
+      return false;
+    case 2:
+      if (immediate) {
+        state_.ea = dpAddr(fetch(bus));
+      } else {
+        state_.tmp = bus.read(dpAddr(static_cast<std::uint8_t>(state_.ptr)));
+      }
+      return false;
+    case 3:
+      if (immediate) {
+        static_cast<void>(bus.read(state_.ea));
+      } else {
+        state_.ea = dpAddr(fetch(bus));
+      }
+      return false;
+    default:
+      bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp));
+      return true;
+  }
+}
+
+// Once the address is settled the instruction reaches memory: one cycle to read the
+// byte, or two to read the destination and write it. Register work lands on the
+// instruction's last cycle, so a snapshot taken mid-instruction never holds a register
+// the hardware has not written yet.
+template <ApuBus B>
+bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
+  if (form.mode == AddrMode::DpToDp || form.mode == AddrMode::ImmediateToDp) {
+    return executeTwoOperandCycle(bus, form);
+  }
+
+  const std::uint8_t setup = setupCycles(form.mode);
+  if (state_.tcu <= setup) return executeSetupCycle(bus, form);
+
+  const std::uint8_t step = static_cast<std::uint8_t>(state_.tcu - setup);
+  if (form.mode == AddrMode::Immediate) {
+    applyMemoryRead(state_.ir, fetch(bus));
+    return true;
+  }
+
+  if (form.access == MemAccess::Read) {
+    if (step == 1) {
+      const std::uint8_t value = bus.read(state_.ea);
+      if (form.mode != AddrMode::IndirectIncrement) {
+        applyMemoryRead(state_.ir, value);
+        return true;
+      }
+      state_.tmp = value;
+      return false;
+    }
+    // (X)+ spends a last cycle stepping X, and the load settles with it.
+    applyMemoryRead(state_.ir, static_cast<std::uint8_t>(state_.tmp));
+    ++state_.x;
+    return true;
+  }
+
+  if (step == 1) {
+    // The destination read. MOV (X)+,A is the one write form that does not make it:
+    // its cycle passes without reaching memory at all.
+    if (form.readsDestination) static_cast<void>(bus.read(state_.ea));
+    return false;
+  }
+  bus.write(state_.ea, memoryStoreValue(state_.ir));
+  if (form.mode == AddrMode::IndirectIncrement) ++state_.x;
+  return true;
+}
+
+inline void Spc700::applyMemoryRead(std::uint8_t opcode, std::uint8_t value) {
+  switch (opcode) {
+    case 0xE8: case 0xE6: case 0xBF: case 0xE4: case 0xF4:
+    case 0xE5: case 0xF5: case 0xF6: case 0xE7: case 0xF7:
+      state_.a = value;
+      setNZ(value);
+      break;
+    case 0xCD: case 0xF8: case 0xF9: case 0xE9:
+      state_.x = value;
+      setNZ(value);
+      break;
+    case 0x8D: case 0xEB: case 0xFB: case 0xEC:
+      state_.y = value;
+      setNZ(value);
+      break;
+    default:
+      // Every routed read form is listed above. stepCycle refuses an opcode the
+      // engine does not carry, so nothing else reaches here.
+      break;
+  }
+}
+
+inline std::uint8_t Spc700::memoryStoreValue(std::uint8_t opcode) const noexcept {
+  switch (opcode) {
+    case 0xC6: case 0xAF: case 0xC4: case 0xD4: case 0xC5:
+    case 0xD5: case 0xD6: case 0xC7: case 0xD7:
+      return state_.a;
+    case 0xD8: case 0xD9: case 0xC9:
+      return state_.x;
+    case 0xCB: case 0xDB: case 0xCC:
+      return state_.y;
+    default:
+      // As for applyMemoryRead: every routed store form is listed above.
+      return 0;
+  }
+}
+
+inline void Spc700::applyImplied(std::uint8_t opcode) {
+  switch (opcode) {
+    case 0x7D: state_.a = state_.x;  setNZ(state_.a); break;  // MOV A,X
+    case 0xDD: state_.a = state_.y;  setNZ(state_.a); break;  // MOV A,Y
+    case 0x5D: state_.x = state_.a;  setNZ(state_.x); break;  // MOV X,A
+    case 0xFD: state_.y = state_.a;  setNZ(state_.y); break;  // MOV Y,A
+    case 0x9D: state_.x = state_.sp; setNZ(state_.x); break;  // MOV X,SP
+    case 0xBD: state_.sp = state_.x; break;                   // MOV SP,X (no flags)
+    default: break;
+  }
+}
+
+template <ApuBus B>
+bool Spc700::executeCycle(B& bus) {
+  if (MemForm form{}; memoryForm(state_.ir, form)) {
+    return executeMemoryCycle(bus, form);
+  }
+  // stepCycle consults cycleStepped before dispatching, so an instruction the engine
+  // does not carry never reaches here.
+  return true;
+}
+
+template <ApuBus B>
+void Spc700::stepCycle(B& bus) {
+  // A sleeping or stopped core reaches memory not at all; the cycle still passes, and
+  // the machine around it keeps time.
+  if (state_.run != RunState::Running) return;
+
+  if (atInstructionBoundary()) {
+    state_.ir = fetch(bus);
+    state_.tcu = 1;
+    return;
+  }
+  // An instruction the cycle engine does not carry has no per-cycle handler: the cycle
+  // reaches memory not at all and the instruction makes no progress, so driving one
+  // this way fails loudly on its second cycle rather than passing quietly.
+  if (!cycleStepped(state_.ir)) return;
+
+  state_.tcu = executeCycle(bus) ? std::uint8_t{0}
+                                 : static_cast<std::uint8_t>(state_.tcu + 1);
+}
+
+template <ApuBus B>
+std::uint32_t Spc700::stepInstruction(B& bus) {
+  if (state_.run != RunState::Running) {
+    stepCycle(bus);  // halted: two cycles that change nothing and reach nothing
+    stepCycle(bus);
+    return 2;
+  }
+
+  std::uint32_t cycles = 1;
+  if (atInstructionBoundary()) {
+    const std::uint8_t opcode = fetch(bus);
+    if (!cycleStepped(opcode)) return stepWhole(bus, opcode);
+    state_.ir = opcode;
+    state_.tcu = 1;
+  } else {
+    cycles = 0;
+  }
+  while (!atInstructionBoundary()) {
+    stepCycle(bus);
+    ++cycles;
+  }
+  return cycles;
+}
+
+template <ApuBus B>
+std::uint32_t Spc700::stepWhole(B& bus, std::uint8_t opcode) {
+  switch (opcode) {
     // ---- 8-bit arithmetic: ADC (A = A + operand + C; N,V,H,Z,C) ----
     case 0x88: state_.a = adcOp(state_.a, fetch(bus)); return 2;                                  // ADC A,#imm
     case 0x86: state_.a = adcOp(state_.a, bus.read(static_cast<std::uint16_t>(dpBase() + state_.x))); return 3;  // ADC A,(X)
@@ -930,9 +1381,10 @@ std::uint32_t Spc700::step(B& bus) {
     case 0xFF: state_.run = RunState::Stopped;  return 7;                                         // STOP
 
     default:
-      // Every opcode is now routed; this arm is unreachable. It stays as a loud
-      // failure — zero cycles, no state change — so any future dispatch gap
-      // reddens the vector suite instead of passing silently.
+      // Every opcode the cycle engine does not carry is listed above, and the engine
+      // carries the rest, so this arm is unreachable. It stays as a loud failure —
+      // zero cycles, no state change — so any dispatch gap reddens the vector suite
+      // instead of passing silently.
       return 0;
   }
 }

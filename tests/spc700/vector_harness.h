@@ -25,6 +25,39 @@ struct FlatRamBus {
   void write(std::uint16_t address, std::uint8_t value) { ram[address] = value; }
 };
 
+// One cycle as the vectors record it: what crossed the bus, if anything. A read or a
+// write carries the address it reached and, where the recording captured one, the byte
+// that moved; a wait carries neither, because the cycle reaches memory not at all.
+struct CycleEvent {
+  enum class Kind : std::uint8_t { Read, Write, Wait };
+
+  std::optional<std::uint16_t> address;
+  std::optional<std::uint8_t> value;
+  Kind kind = Kind::Wait;
+};
+
+// The same 64KB space, with every access appended to a log. A cycle-stepped run
+// compares that log against the recording one cycle at a time, so a bus this bus can
+// see is a bus the vectors can pin.
+struct RecordingFlatBus {
+  std::array<std::uint8_t, 65536> ram{};
+  std::vector<CycleEvent> events;
+
+  std::uint8_t read(std::uint16_t address) {
+    const std::uint8_t value = ram[address];
+    events.push_back({.address = address,
+                      .value = value,
+                      .kind = CycleEvent::Kind::Read});
+    return value;
+  }
+  void write(std::uint16_t address, std::uint8_t value) {
+    ram[address] = value;
+    events.push_back({.address = address,
+                      .value = value,
+                      .kind = CycleEvent::Kind::Write});
+  }
+};
+
 // One side (initial or final) of a vector case: the registers plus the sparse
 // list of non-zero RAM cells. Addresses absent from the list are zero.
 struct RegState {
@@ -37,14 +70,14 @@ struct RegState {
   std::vector<std::pair<std::uint16_t, std::uint8_t>> ram;
 };
 
-// One test case: a before state, an after state, and the number of machine
-// cycles the instruction took (the length of the case's cycle-activity list; its
-// per-cycle contents are the contested sub-cycle frontier and are not asserted).
+// One test case: a before state, an after state, and the recorded activity of every
+// cycle the instruction took. The cycle list is the per-cycle contract — its length is
+// the instruction's cycle count and its entries are what the chip did on each of them.
 struct VectorCase {
   std::string name;
   RegState initial;
   RegState final_;
-  std::size_t cycles = 0;
+  std::vector<CycleEvent> cycles;
 };
 
 // Parses every case in one vector file's text. Throws std::runtime_error on

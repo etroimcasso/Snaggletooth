@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -126,9 +127,101 @@ constexpr std::uint8_t kControlOpcodes[] = {
 
 class Spc700Vectors : public ::testing::TestWithParam<std::uint8_t> {};
 
-// Every case for one opcode: seed the initial state on a zeroed 64KB bus, step
-// once, and demand the exact final registers, the exact final RAM (a full-buffer
-// compare, so stray writes cannot hide), and the documented cycle count.
+using snaggletooth::test::CycleEvent;
+using snaggletooth::test::RecordingFlatBus;
+
+const char* kindName(CycleEvent::Kind kind) {
+  switch (kind) {
+    case CycleEvent::Kind::Read: return "read";
+    case CycleEvent::Kind::Write: return "write";
+    case CycleEvent::Kind::Wait: break;
+  }
+  return "wait";
+}
+
+// The state the case starts from. The progress fields stay at their defaults, so the
+// core begins on an instruction boundary.
+Spc700State stateOf(const snaggletooth::test::RegState& r) {
+  return Spc700State{.pc = r.pc, .a = r.a, .x = r.x, .y = r.y, .sp = r.sp, .psw = r.psw};
+}
+
+// The exact final registers the case demands.
+void expectFinalState(const Spc700State& s, const VectorCase& c) {
+  EXPECT_EQ(s.pc, c.final_.pc) << c.name << " (pc)";
+  EXPECT_EQ(int{s.a}, int{c.final_.a}) << c.name << " (a)";
+  EXPECT_EQ(int{s.x}, int{c.final_.x}) << c.name << " (x)";
+  EXPECT_EQ(int{s.y}, int{c.final_.y}) << c.name << " (y)";
+  EXPECT_EQ(int{s.sp}, int{c.final_.sp}) << c.name << " (sp)";
+  EXPECT_EQ(int{s.psw}, int{c.final_.psw}) << c.name << " (psw)";
+}
+
+// The exact final RAM: a full 64KB compare, so a stray write cannot hide.
+void expectFinalRam(const std::array<std::uint8_t, 65536>& ram, const VectorCase& c) {
+  std::array<std::uint8_t, 65536> expected{};
+  for (const auto& [address, value] : c.final_.ram) expected[address] = value;
+  EXPECT_EQ(ram, expected) << c.name << " (ram)";
+}
+
+// One case, run a cycle at a time and compared against the recording cycle by cycle. A
+// cycle the core narrates must match the recorded access in kind, address and byte; a
+// cycle it narrates nothing on must be a recorded wait, and a recorded wait must find
+// the core silent. A field the recording leaves null is not asserted — the byte a
+// discarded read moved was never captured.
+void runPerCycle(const VectorCase& c) {
+  RecordingFlatBus bus;
+  for (const auto& [address, value] : c.initial.ram) bus.ram[address] = value;
+
+  Spc700 cpu(stateOf(c.initial));
+  for (std::size_t i = 0; i < c.cycles.size(); ++i) {
+    const std::size_t narrated = bus.events.size();
+    cpu.stepCycle(bus);
+    const CycleEvent& want = c.cycles[i];
+
+    ASSERT_LE(bus.events.size(), narrated + 1)
+        << c.name << " (cycle " << i << " reached memory more than once)";
+    if (bus.events.size() == narrated) {
+      EXPECT_EQ(want.kind, CycleEvent::Kind::Wait)
+          << c.name << " (cycle " << i << " reached memory not at all, but the chip "
+          << kindName(want.kind) << ")";
+      continue;
+    }
+
+    const CycleEvent& got = bus.events.back();
+    ASSERT_NE(want.kind, CycleEvent::Kind::Wait)
+        << c.name << " (cycle " << i << " reached memory where the chip waited)";
+    EXPECT_EQ(kindName(got.kind), kindName(want.kind)) << c.name << " (cycle " << i << ")";
+    ASSERT_TRUE(want.address.has_value()) << c.name << " (cycle " << i << " address)";
+    EXPECT_EQ(*got.address, *want.address) << c.name << " (cycle " << i << " address)";
+    if (want.value.has_value()) {
+      EXPECT_EQ(int{*got.value}, int{*want.value}) << c.name << " (cycle " << i << " value)";
+    }
+  }
+
+  // Every SPC700 case runs a whole instruction, so the cycle count is proven by where
+  // the instruction ended rather than reported by it.
+  EXPECT_TRUE(cpu.atInstructionBoundary())
+      << c.name << " (the instruction had not finished after " << c.cycles.size()
+      << " cycles)";
+  expectFinalState(cpu.state(), c);
+  expectFinalRam(bus.ram, c);
+}
+
+// One case for an opcode the cycle engine does not carry yet: run the instruction
+// whole and demand its final state, its final RAM, and its cycle count.
+void runWhole(const VectorCase& c) {
+  FlatRamBus bus;
+  for (const auto& [address, value] : c.initial.ram) bus.ram[address] = value;
+
+  Spc700 cpu(stateOf(c.initial));
+  const std::uint32_t cycles = cpu.step(bus);
+
+  expectFinalState(cpu.state(), c);
+  EXPECT_EQ(cycles, c.cycles.size()) << c.name << " (cycle count)";
+  expectFinalRam(bus.ram, c);
+}
+
+// Every case for one opcode: seed the initial state on a zeroed 64KB bus and run it,
+// a cycle at a time where the engine carries the opcode and whole where it does not.
 TEST_P(Spc700Vectors, MatchFinalStateAndCycleCount) {
   const std::uint8_t opcode = GetParam();
   if (vectorsDir().empty()) {
@@ -160,29 +253,11 @@ TEST_P(Spc700Vectors, MatchFinalStateAndCycleCount) {
     }
     ++ran;
 
-    FlatRamBus bus;
-    for (const auto& [address, value] : c.initial.ram) bus.ram[address] = value;
-
-    Spc700 cpu(Spc700State{.pc = c.initial.pc,
-                           .a = c.initial.a,
-                           .x = c.initial.x,
-                           .y = c.initial.y,
-                           .sp = c.initial.sp,
-                           .psw = c.initial.psw});
-    const std::uint32_t cycles = cpu.step(bus);
-
-    FlatRamBus expected;
-    for (const auto& [address, value] : c.final_.ram) expected.ram[address] = value;
-
-    const snaggletooth::Spc700State& s = cpu.state();
-    EXPECT_EQ(s.pc, c.final_.pc) << c.name;
-    EXPECT_EQ(int{s.a}, int{c.final_.a}) << c.name;
-    EXPECT_EQ(int{s.x}, int{c.final_.x}) << c.name;
-    EXPECT_EQ(int{s.y}, int{c.final_.y}) << c.name;
-    EXPECT_EQ(int{s.sp}, int{c.final_.sp}) << c.name;
-    EXPECT_EQ(int{s.psw}, int{c.final_.psw}) << c.name;
-    EXPECT_EQ(cycles, c.cycles) << c.name << " (cycle count)";
-    EXPECT_EQ(bus.ram, expected.ram) << c.name << " (ram)";
+    if (Spc700::cycleStepped(opcode)) {
+      runPerCycle(c);
+    } else {
+      runWhole(c);
+    }
   }
 }
 

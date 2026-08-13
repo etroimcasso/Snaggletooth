@@ -1,8 +1,9 @@
 // A MOV to memory reads its destination before writing it. On flat RAM the read
-// is invisible (its value is discarded), so the vector oracle cannot see it; a
+// is invisible (its value is discarded), so a final-state comparison cannot see it; a
 // bus that records its accesses can. These tests pin that the documented dummy
-// read is issued for the MOV-to-memory forms, that MOV dp,dp reads its source
-// instead, and that MOVW reads only the low byte of its destination.
+// read is issued for the MOV-to-memory forms, that the auto-incrementing form makes
+// no such read, that MOV dp,dp reads its source instead, and that MOVW reads only the
+// low byte of its destination.
 
 #include <algorithm>
 #include <array>
@@ -80,10 +81,13 @@ TEST(Spc700DummyRead, MovIndirectYReadsResolvedDestination) {
   EXPECT_EQ(bus.ram[0x3005], 0x77);
 }
 
-TEST(Spc700DummyRead, MovXPlusAReadsDestinationThenIncrements) {
+TEST(Spc700DummyRead, MovXPlusADoesNotReadDestination) {
+  // The exception among the stores: the auto-incrementing form writes its destination
+  // without reading it first, so a store through it to a register that clears when
+  // read leaves that register alone.
   Spc700State s{}; s.a = 0x11; s.x = 0x20;
   RecordingBus bus = runOne({0xAF}, s);  // MOV (X)+,A -> $0020, X++
-  EXPECT_TRUE(bus.sawRead(0x0020));
+  EXPECT_FALSE(bus.sawRead(0x0020));
   EXPECT_EQ(bus.ram[0x0020], 0x11);
 }
 
