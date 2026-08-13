@@ -143,6 +143,30 @@ std::vector<VectorParam> rmwStackFlagParams() {
   return params;
 }
 
+// The control-flow family: the nine relative branches and BRL, the five jumps, the
+// three subroutine calls, and the three returns.
+constexpr std::uint8_t kControlFlowOpcodes[] = {
+    // relative branches
+    0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0, 0x80,
+    // BRL
+    0x82,
+    // JMP (absolute, long, indirect, indirect long, indexed indirect)
+    0x4C, 0x5C, 0x6C, 0xDC, 0x7C,
+    // JSR / JSL
+    0x20, 0xFC, 0x22,
+    // RTS / RTL / RTI
+    0x60, 0x6B, 0x40,
+};
+
+std::vector<VectorParam> controlFlowParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kControlFlowOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
 Cpu65816State stateOf(const RegState& r) {
   return Cpu65816State{.pc = r.pc,
                        .s = r.s,
@@ -302,6 +326,16 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     RmwStackFlag, Cpu65816Vectors,
     ::testing::ValuesIn(rmwStackFlagParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    ControlFlow, Cpu65816Vectors,
+    ::testing::ValuesIn(controlFlowParams()),
     [](const ::testing::TestParamInfo<VectorParam>& info) {
       char label[16];
       std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,

@@ -115,6 +115,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/absolute_cycles_test.cpp
     tests/cpu65816/indirect_cycles_test.cpp
     tests/cpu65816/stack_cycles_test.cpp
+    tests/cpu65816/control_flow_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp

@@ -230,15 +230,23 @@ TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructio
   EXPECT_TRUE(Cpu65816::cycleStepped(0x48));   // PHA
   EXPECT_TRUE(Cpu65816::cycleStepped(0x28));   // PLP
   EXPECT_TRUE(Cpu65816::cycleStepped(0xD4));   // PEI dir
-  EXPECT_FALSE(Cpu65816::cycleStepped(0x4C));  // JMP abs
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x90));   // BCC rel
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x82));   // BRL
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x4C));   // JMP abs
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x6C));   // JMP (abs)
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x7C));   // JMP (abs,X)
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x20));   // JSR abs
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x22));   // JSL
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x60));   // RTS
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x40));   // RTI
+  EXPECT_FALSE(Cpu65816::cycleStepped(0x44));  // MVP
 }
 
 TEST(Cpu65816CycleEngine, AnUndecodedOpcodeReportsNoCyclesRatherThanGuessing) {
-  // Every opcode the core decodes runs on the cycle engine. One it does not — the
-  // control-flow instructions, for now — reports a zero count from stepInstruction,
-  // which a recorded case's non-zero count rejects loudly rather than passing in
-  // silence.
-  auto bus = busWith({{0x001000, 0x4C}, {0x001001, 0x34}, {0x001002, 0x12}});
+  // Every opcode the core decodes runs on the cycle engine. One it does not decode
+  // reports a zero count from stepInstruction, which a recorded case's non-zero
+  // count rejects loudly rather than passing in silence.
+  auto bus = busWith({{0x001000, 0x44}, {0x001001, 0x34}, {0x001002, 0x12}});
   Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagM | kCpuFlagX});
   EXPECT_EQ(cpu.stepInstruction(bus), 0u);
   EXPECT_TRUE(cpu.atInstructionBoundary());
@@ -248,7 +256,7 @@ TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineCannotBeSteppedACycleAtATime)
   // Asking for one cycle of an instruction the engine does not carry produces no
   // bus activity at all — the cycle that was asked for plainly did not happen,
   // rather than being filled in with invented traffic.
-  auto bus = busWith({{0x001000, 0x4C}, {0x001001, 0x34}, {0x001002, 0x12}});
+  auto bus = busWith({{0x001000, 0x44}, {0x001001, 0x34}, {0x001002, 0x12}});
   Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagM | kCpuFlagX});
   cpu.stepCycle(bus);  // the opcode fetch, which every instruction shares
   ASSERT_EQ(bus.trace.size(), 1u);

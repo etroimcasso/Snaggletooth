@@ -597,6 +597,12 @@ class Cpu65816 {
   [[nodiscard]] std::uint32_t bankAddr(std::uint16_t offset) const noexcept {
     return (static_cast<std::uint32_t>(state_.dbr) << 16) | offset;
   }
+  // Program-bank-relative addresses. The indexed indirect jumps take their pointer
+  // from the program bank rather than the data bank (section 7.9), and it wraps
+  // within that bank.
+  [[nodiscard]] std::uint32_t programAddr(std::uint16_t offset) const noexcept {
+    return (static_cast<std::uint32_t>(state_.pbr) << 16) | offset;
+  }
   // Whether adding an 8-bit index to a 16-bit base crosses a page (carries out of
   // the low byte) — the only case that costs a cycle, and only with 8-bit indexes.
   [[nodiscard]] static bool crossesPage(std::uint16_t base, std::uint16_t index) noexcept {
@@ -978,6 +984,59 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeStackCycle(B& bus, const StackForm& form);
 
+  // ---- the control-flow instructions --------------------------------------
+  // What an instruction that moves the program counter does with it. Each shape
+  // is its own cycle sequence: the branches read a displacement and add it, the
+  // jumps take a destination (directly, or through a pointer), the subroutine
+  // calls push a return address around the same work, and the returns pull one.
+  enum class CtrlKind : std::uint8_t {
+    Branch,             // the nine relative branches — taken or not
+    BranchLong,         // BRL: a 16-bit displacement, always taken
+    Jump,               // JMP a: the operand is the destination
+    JumpLong,           // JMP al: the operand carries a bank as well
+    JumpIndirect,       // JMP (a): a bank-zero pointer holds the destination
+    JumpIndirectLong,   // JML [a]: the same pointer, carrying a bank too
+    JumpIndexed,        // JMP (a,x): a pointer in the program bank, indexed
+    Subroutine,         // JSR a
+    SubroutineIndexed,  // JSR (a,x)
+    SubroutineLong,     // JSL al
+    Return,             // RTS
+    ReturnLong,         // RTL
+    ReturnInterrupt,    // RTI
+  };
+
+  // The shape of one control-flow instruction. A branch also carries the flag it
+  // tests and the state of that flag which takes it.
+  struct CtrlForm {
+    CtrlKind kind = CtrlKind::Jump;
+    std::uint8_t flag = 0;   // the status bit a branch tests; 0 for BRA
+    bool whenSet = false;    // whether the branch is taken with the flag set
+  };
+
+  // Fills in the form of a control-flow instruction and answers whether the
+  // opcode is one.
+  [[nodiscard]] static constexpr bool controlForm(std::uint8_t opcode,
+                                                  CtrlForm& form) noexcept;
+
+  // Whether a branch's condition holds. BRA carries no flag and is always taken.
+  [[nodiscard]] bool branchTaken(const CtrlForm& form) const noexcept {
+    return form.flag == 0 || ((state_.p & form.flag) != 0) == form.whenSet;
+  }
+
+  // Whether the stack pointer may step outside page one during a transfer. JSL
+  // and RTL are free of the page; the calls and returns the 6502 already had wrap
+  // inside it (section 7.1). Section 7.1 lists JSR (a,x) as free of it too, but
+  // the recorded hardware traces wrap it inside the page on every case that
+  // reaches the edge, so the traces are followed and the disagreement is recorded
+  // with the contract sources.
+  [[nodiscard]] static constexpr bool controlLeavesPage(const CtrlForm& form) noexcept {
+    return form.kind == CtrlKind::SubroutineLong || form.kind == CtrlKind::ReturnLong;
+  }
+
+  // Executes one cycle of a control-flow instruction.
+  template <SnesBus B>
+  bool executeControlCycle(B& bus, const CtrlForm& form);
+
   // The immediate operand's width: the accumulator instructions take an operand as
   // wide as the accumulator, the index instructions one as wide as the index
   // registers.
@@ -1040,7 +1099,87 @@ constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
   IndForm ind{};
   if (indirectForm(opcode, ind)) return true;
   StackForm stack{};
-  return stackForm(opcode, stack);
+  if (stackForm(opcode, stack)) return true;
+  CtrlForm ctrl{};
+  return controlForm(opcode, ctrl);
+}
+
+constexpr bool Cpu65816::controlForm(std::uint8_t opcode, CtrlForm& form) noexcept {
+  switch (opcode) {
+    // ---- the relative branches: the flag each tests, and the state that takes
+    //      it. BRA carries no flag at all ----
+    case 0x10:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagN, .whenSet = false};
+      return true;
+    case 0x30:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagN, .whenSet = true};
+      return true;
+    case 0x50:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagV, .whenSet = false};
+      return true;
+    case 0x70:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagV, .whenSet = true};
+      return true;
+    case 0x90:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagC, .whenSet = false};
+      return true;
+    case 0xB0:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagC, .whenSet = true};
+      return true;
+    case 0xD0:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagZ, .whenSet = false};
+      return true;
+    case 0xF0:
+      form = {.kind = CtrlKind::Branch, .flag = kCpuFlagZ, .whenSet = true};
+      return true;
+    case 0x80:
+      form = {.kind = CtrlKind::Branch};
+      return true;
+
+    // ---- the jumps ----
+    case 0x82:
+      form = {.kind = CtrlKind::BranchLong};
+      return true;
+    case 0x4C:
+      form = {.kind = CtrlKind::Jump};
+      return true;
+    case 0x5C:
+      form = {.kind = CtrlKind::JumpLong};
+      return true;
+    case 0x6C:
+      form = {.kind = CtrlKind::JumpIndirect};
+      return true;
+    case 0xDC:
+      form = {.kind = CtrlKind::JumpIndirectLong};
+      return true;
+    case 0x7C:
+      form = {.kind = CtrlKind::JumpIndexed};
+      return true;
+
+    // ---- the subroutine calls and the returns ----
+    case 0x20:
+      form = {.kind = CtrlKind::Subroutine};
+      return true;
+    case 0xFC:
+      form = {.kind = CtrlKind::SubroutineIndexed};
+      return true;
+    case 0x22:
+      form = {.kind = CtrlKind::SubroutineLong};
+      return true;
+    case 0x60:
+      form = {.kind = CtrlKind::Return};
+      return true;
+    case 0x6B:
+      form = {.kind = CtrlKind::ReturnLong};
+      return true;
+    case 0x40:
+      form = {.kind = CtrlKind::ReturnInterrupt};
+      return true;
+
+    default:
+      break;
+  }
+  return false;
 }
 
 constexpr bool Cpu65816::stackForm(std::uint8_t opcode, StackForm& form) noexcept {
@@ -1829,6 +1968,302 @@ bool Cpu65816::executeStackCycle(B& bus, const StackForm& form) {
 }
 
 template <SnesBus B>
+bool Cpu65816::executeControlCycle(B& bus, const CtrlForm& form) {
+  const bool leavesPage = controlLeavesPage(form);
+
+  switch (form.kind) {
+    // ---- the relative branches. An untaken branch is over once its displacement
+    //      has arrived; a taken one spends a cycle parked on the displacement's own
+    //      address while the addition happens, and in emulation mode a second one
+    //      when the destination lands in another page (notes 5 and 6) ----
+    case CtrlKind::Branch:
+      if (state_.tcu == 1) {
+        const std::uint8_t offset = fetch(bus);
+        if (!branchTaken(form)) return true;
+        state_.ptr = static_cast<std::uint16_t>(state_.pc +
+                                                static_cast<std::int8_t>(offset));
+        return false;
+      }
+      bus.internal(operandAddr());
+      if (state_.tcu == 2 && state_.e &&
+          (state_.ptr & 0xFF00u) != (state_.pc & 0xFF00u)) {
+        return false;
+      }
+      state_.pc = state_.ptr;
+      return true;
+
+    // ---- BRL: a 16-bit displacement, added over one internal cycle parked on the
+    //      displacement's high byte. Always taken, and the same length in both
+    //      modes — the program counter wraps within the bank ----
+    case CtrlKind::BranchLong:
+      if (state_.tcu == 1) {
+        state_.tmp = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.tmp = static_cast<std::uint16_t>(state_.tmp | (fetch(bus) << 8));
+        return false;
+      }
+      bus.internal(operandAddr());
+      state_.pc = static_cast<std::uint16_t>(state_.pc + state_.tmp);
+      return true;
+
+    // ---- JMP a and JMP al: the operand is the destination, and the long form
+    //      carries the bank in a third byte ----
+    case CtrlKind::Jump:
+    case CtrlKind::JumpLong:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        if (form.kind == CtrlKind::Jump) {
+          state_.pc = state_.ptr;
+          return true;
+        }
+        return false;
+      }
+      // The bank byte is read through the bank the instruction started in, and
+      // only then does the program bank move.
+      state_.pbr = fetch(bus);
+      state_.pc = state_.ptr;
+      return true;
+
+    // ---- JMP (a) and JML [a]: the operand addresses a pointer in bank zero,
+    //      which wraps within that bank (section 7.9). The long form takes a
+    //      third byte for the bank ----
+    case CtrlKind::JumpIndirect:
+    case CtrlKind::JumpIndirectLong:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        state_.ea = state_.ptr;
+        return false;
+      }
+      if (state_.tcu == 3) {
+        state_.tmp = bus.read(state_.ea, CycleKind::DataRead);
+        state_.ea = nextByte(state_.ea, AddrKind::Bank0);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = static_cast<std::uint16_t>(
+            state_.tmp | (bus.read(state_.ea, CycleKind::DataRead) << 8));
+        if (form.kind == CtrlKind::JumpIndirect) {
+          state_.pc = state_.tmp;
+          return true;
+        }
+        state_.ea = nextByte(state_.ea, AddrKind::Bank0);
+        return false;
+      }
+      state_.pbr = bus.read(state_.ea, CycleKind::DataRead);
+      state_.pc = state_.tmp;
+      return true;
+
+    // ---- JMP (a,x): the operand plus X addresses a pointer in the program bank,
+    //      and the indexing cycle is spent whether or not the addition carries ----
+    case CtrlKind::JumpIndexed:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        return false;
+      }
+      if (state_.tcu == 3) {
+        bus.internal(operandAddr());
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr + idxX());
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = bus.read(programAddr(state_.ptr), CycleKind::DataRead);
+        return false;
+      }
+      state_.tmp = static_cast<std::uint16_t>(
+          state_.tmp |
+          (bus.read(programAddr(static_cast<std::uint16_t>(state_.ptr + 1)),
+                    CycleKind::DataRead)
+           << 8));
+      state_.pc = state_.tmp;
+      return true;
+
+    // ---- JSR a: the return address is the instruction's last byte, not the one
+    //      after it, so the return pulls it and adds one. It goes on high byte
+    //      first, after an internal cycle parked on that same last byte ----
+    case CtrlKind::Subroutine:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        return false;
+      }
+      if (state_.tcu == 3) {
+        bus.internal(operandAddr());
+        return false;
+      }
+      if (state_.tcu == 4) {
+        stackPush(bus, static_cast<std::uint8_t>((state_.pc - 1) >> 8), leavesPage);
+        return false;
+      }
+      stackPush(bus, static_cast<std::uint8_t>(state_.pc - 1), leavesPage);
+      state_.pc = state_.ptr;
+      return true;
+
+    // ---- JSR (a,x): the same call, but the return address is pushed before the
+    //      operand's high byte is even read — the one instruction in the family
+    //      that interleaves its push with its fetch ----
+    case CtrlKind::SubroutineIndexed:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        stackPush(bus, static_cast<std::uint8_t>(state_.pc >> 8), leavesPage);
+        return false;
+      }
+      if (state_.tcu == 3) {
+        stackPush(bus, static_cast<std::uint8_t>(state_.pc), leavesPage);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        return false;
+      }
+      if (state_.tcu == 5) {
+        bus.internal(operandAddr());
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr + idxX());
+        return false;
+      }
+      if (state_.tcu == 6) {
+        state_.tmp = bus.read(programAddr(state_.ptr), CycleKind::DataRead);
+        return false;
+      }
+      state_.tmp = static_cast<std::uint16_t>(
+          state_.tmp |
+          (bus.read(programAddr(static_cast<std::uint16_t>(state_.ptr + 1)),
+                    CycleKind::DataRead)
+           << 8));
+      state_.pc = state_.tmp;
+      return true;
+
+    // ---- JSL: the program bank goes on the stack first, on its own, and an
+    //      internal cycle parks on the byte just written before the destination
+    //      bank is read. The return address follows ----
+    case CtrlKind::SubroutineLong:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        return false;
+      }
+      if (state_.tcu == 3) {
+        stackPush(bus, state_.pbr, leavesPage);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        bus.internal(static_cast<std::uint16_t>(state_.s + 1));
+        return false;
+      }
+      if (state_.tcu == 5) {
+        state_.tmp = fetch(bus);  // the destination bank, read through the old one
+        return false;
+      }
+      if (state_.tcu == 6) {
+        stackPush(bus, static_cast<std::uint8_t>((state_.pc - 1) >> 8), leavesPage);
+        return false;
+      }
+      stackPush(bus, static_cast<std::uint8_t>(state_.pc - 1), leavesPage);
+      settleStack();
+      state_.pbr = static_cast<std::uint8_t>(state_.tmp);
+      state_.pc = state_.ptr;
+      return true;
+
+    // ---- RTS: two internal cycles at the program counter, the return address,
+    //      then a third internal cycle parked on the byte just pulled while the
+    //      address is stepped past the call's last byte ----
+    case CtrlKind::Return:
+      if (state_.tcu <= 2) {
+        bus.internal(pcAddr());
+        return false;
+      }
+      if (state_.tcu == 3) {
+        state_.tmp = stackPull(bus, leavesPage);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = static_cast<std::uint16_t>(state_.tmp |
+                                                (stackPull(bus, leavesPage) << 8));
+        return false;
+      }
+      bus.internal(state_.s);
+      state_.pc = static_cast<std::uint16_t>(state_.tmp + 1);
+      return true;
+
+    // ---- RTL: the same, with a bank byte in place of the last internal cycle.
+    //      The address is stepped the same way, so JSL and RTL pair as JSR and
+    //      RTS do ----
+    case CtrlKind::ReturnLong:
+      if (state_.tcu <= 2) {
+        bus.internal(pcAddr());
+        return false;
+      }
+      if (state_.tcu == 3) {
+        state_.tmp = stackPull(bus, leavesPage);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = static_cast<std::uint16_t>(state_.tmp |
+                                                (stackPull(bus, leavesPage) << 8));
+        return false;
+      }
+      state_.pbr = stackPull(bus, leavesPage);
+      settleStack();
+      state_.pc = static_cast<std::uint16_t>(state_.tmp + 1);
+      return true;
+
+    // ---- RTI: the status byte comes back first, then the return address itself —
+    //      which is used as it stands, since an interrupt pushed the address it was
+    //      going to resume at. Native mode takes a bank byte as well (note 7).
+    //      The pulled status settles at the end of the instruction: every cycle of
+    //      RTI runs under the widths it started with ----
+    case CtrlKind::ReturnInterrupt:
+      if (state_.tcu <= 2) {
+        bus.internal(pcAddr());
+        return false;
+      }
+      if (state_.tcu == 3) {
+        state_.ptr = stackPull(bus, leavesPage);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = stackPull(bus, leavesPage);
+        return false;
+      }
+      if (state_.tcu == 5) {
+        state_.tmp = static_cast<std::uint16_t>(state_.tmp |
+                                                (stackPull(bus, leavesPage) << 8));
+        if (!state_.e) return false;
+        writeP(static_cast<std::uint8_t>(state_.ptr));
+        state_.pc = state_.tmp;
+        return true;
+      }
+      state_.pbr = stackPull(bus, leavesPage);
+      writeP(static_cast<std::uint8_t>(state_.ptr));
+      state_.pc = state_.tmp;
+      return true;
+  }
+  return true;
+}
+
+template <SnesBus B>
 bool Cpu65816::executeCycle(B& bus) {
   const std::uint8_t opcode = state_.ir;
   if (DpForm form{}; directPageForm(opcode, form)) {
@@ -1842,6 +2277,9 @@ bool Cpu65816::executeCycle(B& bus) {
   }
   if (StackForm form{}; stackForm(opcode, form)) {
     return executeStackCycle(bus, form);
+  }
+  if (CtrlForm form{}; controlForm(opcode, form)) {
+    return executeControlCycle(bus, form);
   }
   switch (opcode) {
     // ---- REP / SEP: fetch the mask, then spend an internal cycle parked on the
