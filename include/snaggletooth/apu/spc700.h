@@ -104,7 +104,7 @@ class Spc700 {
   // stepInstruction() and cannot be driven a cycle at a time.
   [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept {
     MemForm form{};
-    return memoryForm(opcode, form);
+    return memoryForm(opcode, form) || wordForm(opcode) != WordForm::None;
   }
 
  private:
@@ -275,24 +275,6 @@ class Spc700 {
     return static_cast<std::uint16_t>(addrAbs(bus) + state_.x);
   }
 
-  // A 16-bit word in the direct page: the two bytes live at dp and dp+1, and the
-  // high byte's address wraps within the direct page (dp = $FF reads its high
-  // byte from the page base).
-  template <ApuBus B>
-  std::uint16_t readWordDp(B& bus, std::uint8_t d) {
-    std::uint16_t lo = bus.read(static_cast<std::uint16_t>(dpBase() + d));
-    std::uint16_t hi =
-        bus.read(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)));
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-  template <ApuBus B>
-  void writeWordDp(B& bus, std::uint8_t d, std::uint16_t v) {
-    bus.write(static_cast<std::uint16_t>(dpBase() + d),
-              static_cast<std::uint8_t>(v));
-    bus.write(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)),
-              static_cast<std::uint8_t>(v >> 8));
-  }
-
   // The stack lives in page $01, addressed by SP as its low byte. A push writes
   // then post-decrements SP; a pop pre-increments then reads. SP is an 8-bit
   // register, so it wraps within the page.
@@ -361,6 +343,8 @@ class Spc700 {
     Abs,                 // a two-byte address
     AbsX,                // that address plus X
     AbsY,                // that address plus Y
+    AbsBit,              // a two-byte operand: an address in the low 13 bits, a bit index
+                         // in the top 3
     Indirect,            // (X): dp + X
     IndirectIncrement,   // (X)+: the same, and X steps after
     IndexedIndirect,     // [dp+X]: X indexes the offset, then a pointer
@@ -372,18 +356,38 @@ class Spc700 {
 
   // What an instruction does once its address is settled.
   enum class MemAccess : std::uint8_t {
-    Read,     // read the byte and apply it to a register
-    Write,    // put a value there
-    Modify,   // read the byte, compute from it, and write the result back
-    Compare,  // read the byte and compare it, writing nothing
+    Read,      // read the byte and apply it to a register or to the carry flag
+    Write,     // put a value there
+    Modify,    // read the byte, compute from it, and write the result back
+    Internal,  // read the byte and settle on it inside the chip, writing nothing
   };
 
-  // What an instruction that reaches a destination does on the cycle before it settles
-  // there. Most forms read the byte: a modify needs it, and a plain write discards it
-  // but still makes the access, so a register that clears when read sees it. One store
-  // spends the cycle internally instead, and the two-operand moves have no such cycle
-  // at all.
-  enum class DestinationCycle : std::uint8_t { None, Internal, Read };
+  // What an instruction that reaches a destination does on the cycles between settling
+  // its address and writing. Most forms read the byte once: a modify needs it, and a
+  // plain write discards it but still makes the access, so a register that clears when
+  // read sees it. The two test-and-set instructions read it twice; the bit store reads
+  // it and then spends a cycle inside the chip; one store spends its only such cycle
+  // inside the chip; and the two-operand moves have no such cycle at all.
+  enum class DestinationCycle : std::uint8_t {
+    None,
+    Internal,
+    Read,
+    ReadTwice,
+    ReadThenWait,
+  };
+
+  // How many cycles a form spends between settling its address and writing.
+  [[nodiscard]] static constexpr std::uint8_t destinationCycles(
+      DestinationCycle destination) noexcept {
+    switch (destination) {
+      case DestinationCycle::None: return 0;
+      case DestinationCycle::Internal:
+      case DestinationCycle::Read: return 1;
+      case DestinationCycle::ReadTwice:
+      case DestinationCycle::ReadThenWait: return 2;
+    }
+    return 0;
+  }
 
   // The shape of one memory instruction: where its operand lives, what it does there,
   // how it reaches its destination, and how many internal cycles it spends.
@@ -404,6 +408,20 @@ class Spc700 {
   // How many cycles a mode spends before it reaches memory: its operand fetches, its
   // internal cycles, and its pointer reads.
   [[nodiscard]] static constexpr std::uint8_t setupCycles(AddrMode mode) noexcept;
+
+  // Where a direct-page word instruction's cycles go. One offset names both of its
+  // bytes — the second wraps inside the page — and the shapes differ in what happens
+  // between them.
+  enum class WordForm : std::uint8_t {
+    None,     // not a direct-page word instruction
+    Read,     // the low byte · a cycle inside the chip · the high byte
+    Compare,  // the low byte · the high byte, with no cycle between them
+    Modify,   // the low byte · write it back · the high byte · write it back
+    Store,    // read the low byte · write the low byte · write the high byte
+  };
+
+  // Which of those shapes an opcode runs, and whether it is a word instruction at all.
+  [[nodiscard]] static constexpr WordForm wordForm(std::uint8_t opcode) noexcept;
 
   // Whether an indirect mode spends its internal cycle before reading its pointer.
   // The read forms and [dp+X] do; the write form of [dp]+Y spends it after.
@@ -441,9 +459,41 @@ class Spc700 {
   [[nodiscard]] std::uint8_t memoryModifyValue(std::uint8_t opcode, std::uint8_t destination,
                                                std::uint8_t source);
 
-  // Applies an implied instruction — a register-to-register move, or a register's own
-  // increment, shift or nibble exchange.
+  // Applies an implied instruction — a register-to-register move, a register's own
+  // increment, shift or nibble exchange, or one of the multi-cycle computations the
+  // chip runs entirely inside itself.
   void applyImplied(std::uint8_t opcode);
+
+  // Applies an instruction that settles on the byte it read without writing anything —
+  // a comparison, or a carry-bit operation that spends a last cycle inside the chip.
+  void applyInternalResult(std::uint8_t opcode, std::uint8_t destination,
+                           std::uint8_t source);
+
+  // Executes one cycle of a direct-page word instruction.
+  template <ApuBus B>
+  bool executeWordCycle(B& bus, WordForm form);
+
+  // Applies a word instruction that has both of its bytes.
+  void applyWordRead(std::uint8_t opcode, std::uint16_t word);
+
+  // The 16-bit accumulator pair: Y is the high byte, A the low.
+  [[nodiscard]] std::uint16_t ya() const noexcept {
+    return static_cast<std::uint16_t>(state_.a | (state_.y << 8));
+  }
+  void setYa(std::uint16_t word) noexcept {
+    state_.a = static_cast<std::uint8_t>(word);
+    state_.y = static_cast<std::uint8_t>(word >> 8);
+  }
+
+  // A bit-addressing instruction's operand names an address in its low 13 bits and a
+  // bit index in its top 3. The whole operand stays in the pointer scratch, so the
+  // index is still there when the byte arrives.
+  [[nodiscard]] std::uint8_t operandBitMask() const noexcept {
+    return static_cast<std::uint8_t>(1u << (state_.ptr >> 13));
+  }
+  [[nodiscard]] bool operandBit(std::uint8_t value) const noexcept {
+    return (value & operandBitMask()) != 0;
+  }
 
   // Whether a mode carries a second operand byte, which lives in the pointer scratch
   // while the byte at the destination lives in the data scratch.
@@ -617,23 +667,82 @@ constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
       form = MemForm{.mode = AddrMode::IndirectToIndirect, .access = MemAccess::Modify};
       return true;
     case 0x79:                        // CMP (X),(Y) — compares and writes nothing
-      form = MemForm{.mode = AddrMode::IndirectToIndirect, .access = MemAccess::Compare};
+      form = MemForm{.mode = AddrMode::IndirectToIndirect, .access = MemAccess::Internal};
       return true;
     case 0x89: case 0xA9: case 0x29: case 0x09: case 0x49:  // ...dp,dp
       form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Modify};
       return true;
     case 0x69:                        // CMP dp,dp
-      form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Compare};
+      form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Internal};
       return true;
     case 0x98: case 0xB8: case 0x38: case 0x18: case 0x58:  // ...dp,#imm
       form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Modify};
       return true;
     case 0x78:                        // CMP dp,#imm
-      form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Compare};
+      form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Internal};
+      return true;
+
+    // ---- multiply, divide and decimal adjust ----
+    // Each reads the byte after the opcode, discards it, and spends every remaining
+    // cycle computing inside the chip.
+    case 0xCF:                        // MUL YA
+      form = MemForm{.mode = AddrMode::Implied, .internals = 7};
+      return true;
+    case 0x9E:                        // DIV YA,X
+      form = MemForm{.mode = AddrMode::Implied, .internals = 10};
+      return true;
+    case 0xDF: case 0xBE:             // DAA / DAS A
+      form = MemForm{.mode = AddrMode::Implied, .internals = 1};
+      return true;
+
+    // ---- one bit of a direct-page byte, set or cleared ----
+    // The read-modify-write seat once more: the byte is read and written back with a
+    // single bit changed, and no flag moves.
+    case 0x02: case 0x22: case 0x42: case 0x62:  // SET1 dp.0..7
+    case 0x82: case 0xA2: case 0xC2: case 0xE2:
+    case 0x12: case 0x32: case 0x52: case 0x72:  // CLR1 dp.0..7
+    case 0x92: case 0xB2: case 0xD2: case 0xF2:
+      form = MemForm{.mode = AddrMode::Dp, .access = MemAccess::Modify};
+      return true;
+
+    // ---- test and set or clear the bits of an absolute byte ----
+    case 0x0E: case 0x4E:             // TSET1 / TCLR1 !abs — the byte is read, and
+      form = MemForm{.mode = AddrMode::Abs,             // then read a second time
+                     .access = MemAccess::Modify,
+                     .destination = DestinationCycle::ReadTwice};
+      return true;
+
+    // ---- the carry flag against one bit of an absolute byte ----
+    case 0x4A: case 0x6A: case 0xAA:  // AND1 C,m.b and C,/m.b; MOV1 C,m.b
+      form = MemForm{.mode = AddrMode::AbsBit, .access = MemAccess::Read};
+      return true;
+    case 0x0A: case 0x2A: case 0x8A:  // OR1 C,m.b and C,/m.b; EOR1 C,m.b — each pays
+      form = MemForm{.mode = AddrMode::AbsBit,            // a last cycle inside the chip
+                     .access = MemAccess::Internal};
+      return true;
+    case 0xEA:                        // NOT1 m.b
+      form = MemForm{.mode = AddrMode::AbsBit, .access = MemAccess::Modify};
+      return true;
+    case 0xCA:                        // MOV1 m.b,C — reads its byte, spends a cycle
+      form = MemForm{.mode = AddrMode::AbsBit,            // inside the chip, then writes
+                     .access = MemAccess::Modify,
+                     .destination = DestinationCycle::ReadThenWait};
       return true;
 
     default:
       return false;
+  }
+}
+
+// The direct-page word instructions, which the cycle engine carries beside the memory
+// forms: one offset, two bytes, and a shape that says what happens between them.
+constexpr Spc700::WordForm Spc700::wordForm(std::uint8_t opcode) noexcept {
+  switch (opcode) {
+    case 0x7A: case 0x9A: case 0xBA: return WordForm::Read;     // ADDW/SUBW/MOVW YA,dp
+    case 0x5A: return WordForm::Compare;                        // CMPW YA,dp
+    case 0x1A: case 0x3A: return WordForm::Modify;              // DECW / INCW dp
+    case 0xDA: return WordForm::Store;                          // MOVW dp,YA
+    default: return WordForm::None;
   }
 }
 
@@ -647,6 +756,7 @@ constexpr std::uint8_t Spc700::setupCycles(AddrMode mode) noexcept {
     case AddrMode::DpX:
     case AddrMode::DpY:
     case AddrMode::Abs:
+    case AddrMode::AbsBit:
     case AddrMode::IndirectToIndirect:
     case AddrMode::ImmediateToDp: return 2;
     case AddrMode::AbsX:
@@ -695,13 +805,20 @@ bool Spc700::executeSetupCycle(B& bus, const MemForm& form) {
     case AddrMode::Abs:
     case AddrMode::AbsX:
     case AddrMode::AbsY:
+    case AddrMode::AbsBit:
       if (state_.tcu == 1) {
         state_.ptr = fetch(bus);
         return false;
       }
       if (state_.tcu == 2) {
         state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        // A plain absolute operand is the address itself. A bit operand carries the
+        // address in its low 13 bits and the bit index in the three above them, so the
+        // whole operand stays in the pointer scratch and only the address reaches memory.
         if (form.mode == AddrMode::Abs) state_.ea = state_.ptr;
+        if (form.mode == AddrMode::AbsBit) {
+          state_.ea = static_cast<std::uint16_t>(state_.ptr & 0x1FFFu);
+        }
         return false;
       }
       state_.ea = static_cast<std::uint16_t>(
@@ -811,12 +928,17 @@ bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
     return true;
   }
 
-  // The cycle before the instruction settles at its destination. Most forms read the
-  // byte there — a modify needs it, a plain store discards it but still makes the
-  // access. MOV (X)+,A spends the cycle internally, and the two-operand moves have no
-  // such cycle at all.
-  if (step == 1 && form.destination != DestinationCycle::None) {
-    if (form.destination == DestinationCycle::Read) state_.tmp = bus.read(state_.ea);
+  // The cycles between the settled address and the write. Most forms read the byte
+  // there once — a modify needs it, a plain store discards it but still makes the
+  // access. The test-and-set pair reads it twice, MOV1 m.b,C reads it and then spends a
+  // cycle inside the chip, MOV (X)+,A spends its one such cycle inside the chip, and
+  // the two-operand moves have no such cycle at all.
+  if (step <= destinationCycles(form.destination)) {
+    const bool reachesMemory =
+        form.destination == DestinationCycle::Read ||
+        form.destination == DestinationCycle::ReadTwice ||
+        (form.destination == DestinationCycle::ReadThenWait && step == 1);
+    if (reachesMemory) state_.tmp = bus.read(state_.ea);
     return false;
   }
 
@@ -833,9 +955,9 @@ bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
     case MemAccess::Modify:
       bus.write(state_.ea, memoryModifyValue(state_.ir, destination, source));
       break;
-    case MemAccess::Compare:
-      // The comparison happens inside the chip, so this cycle reaches memory not at all.
-      cmpOp(destination, source);
+    case MemAccess::Internal:
+      // The result settles inside the chip, so this cycle reaches memory not at all.
+      applyInternalResult(state_.ir, destination, source);
       break;
     case MemAccess::Read:
       break;  // a read settles on the cycle above, never here
@@ -894,6 +1016,17 @@ inline void Spc700::applyMemoryRead(std::uint8_t opcode, std::uint8_t value) {
       setNZ(state_.a);
       break;
 
+    // ---- one bit of that byte, into the carry flag ----
+    case 0x4A:                                               // AND1 C,m.b
+      setCarry((state_.psw & kFlagC) && operandBit(value));
+      break;
+    case 0x6A:                                               // AND1 C,/m.b
+      setCarry((state_.psw & kFlagC) && !operandBit(value));
+      break;
+    case 0xAA:                                               // MOV1 C,m.b
+      setCarry(operandBit(value));
+      break;
+
     default:
       // Every routed read form is listed above. stepCycle refuses an opcode the
       // engine does not carry, so nothing else reaches here.
@@ -941,7 +1074,105 @@ inline void Spc700::applyImplied(std::uint8_t opcode) {
       setNZ(state_.a);
       break;
 
+    // ---- multiply and divide (YA is the pair A=low, Y=high) ----
+    case 0xCF: {                                              // MUL YA (N,Z from Y only)
+      const std::uint16_t product =
+          static_cast<std::uint16_t>(unsigned{state_.y} * unsigned{state_.a});
+      setYa(product);
+      setNZ(state_.y);
+      break;
+    }
+    case 0x9E: {                                              // DIV YA,X
+      // The documented 9-iteration restoring division: the 17-bit accumulator ends as
+      // YYYYYYYY V AAAAAAAA, so Y and A are the quotient/remainder and bit 8 is the
+      // overflow flag. N,Z come from A; H is the nibble comparison X&$F <= Y&$F on the
+      // entry values. The result past a quotient of 511 is hardware garbage the
+      // algorithm still reproduces.
+      const unsigned entryX = state_.x, entryY = state_.y;
+      std::uint32_t yva = static_cast<std::uint32_t>((entryY << 8) | state_.a);
+      const std::uint32_t x9 = static_cast<std::uint32_t>(entryX) << 9;
+      for (int i = 0; i < 9; ++i) {
+        yva = ((yva << 1) | ((yva >> 16) & 1u)) & 0x1FFFFu;  // rotate left within 17 bits
+        if (yva >= x9) yva ^= 1u;
+        if (yva & 1u) yva = (yva - x9) & 0x1FFFFu;
+      }
+      state_.a = static_cast<std::uint8_t>(yva & 0xFFu);
+      state_.y = static_cast<std::uint8_t>((yva >> 9) & 0xFFu);
+      std::uint8_t psw = static_cast<std::uint8_t>(
+          state_.psw & ~(kFlagN | kFlagV | kFlagH | kFlagZ));
+      if (state_.a & 0x80u) psw |= kFlagN;
+      if (state_.a == 0) psw |= kFlagZ;
+      if (yva & 0x100u) psw |= kFlagV;
+      if ((entryX & 0x0Fu) <= (entryY & 0x0Fu)) psw |= kFlagH;
+      state_.psw = psw;
+      break;
+    }
+
+    // ---- decimal adjust (N,Z,C; H is read but never changed) ----
+    case 0xDF: {                                              // DAA A
+      std::uint16_t a = state_.a;
+      if ((state_.psw & kFlagC) || a > 0x99u) {
+        a += 0x60u;
+        state_.psw = static_cast<std::uint8_t>(state_.psw | kFlagC);
+      }
+      if ((state_.psw & kFlagH) || (state_.a & 0x0Fu) > 0x09u) a += 0x06u;
+      state_.a = static_cast<std::uint8_t>(a);
+      setNZ(state_.a);
+      break;
+    }
+    case 0xBE: {                                              // DAS A
+      std::uint16_t a = state_.a;
+      if (!(state_.psw & kFlagC) || a > 0x99u) {
+        a -= 0x60u;
+        state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagC);
+      }
+      if (!(state_.psw & kFlagH) || (state_.a & 0x0Fu) > 0x09u) a -= 0x06u;
+      state_.a = static_cast<std::uint8_t>(a);
+      setNZ(state_.a);
+      break;
+    }
+
     default: break;
+  }
+}
+
+inline void Spc700::applyInternalResult(std::uint8_t opcode, std::uint8_t destination,
+                                        std::uint8_t source) {
+  switch (opcode) {
+    case 0x69: case 0x78: case 0x79:  // CMP dp,dp / dp,#imm / (X),(Y)
+      cmpOp(destination, source);
+      break;
+
+    // ---- the carry flag against one bit of a byte ----
+    case 0x0A:                                                // OR1 C,m.b
+      setCarry((state_.psw & kFlagC) || operandBit(destination));
+      break;
+    case 0x2A:                                                // OR1 C,/m.b
+      setCarry((state_.psw & kFlagC) || !operandBit(destination));
+      break;
+    case 0x8A:                                                // EOR1 C,m.b
+      setCarry(((state_.psw & kFlagC) != 0) != operandBit(destination));
+      break;
+
+    default:
+      // As for applyMemoryRead: every form that settles inside the chip is listed above.
+      break;
+  }
+}
+
+inline void Spc700::applyWordRead(std::uint8_t opcode, std::uint16_t word) {
+  switch (opcode) {
+    case 0xBA:                        // MOVW YA,dp
+      setYa(word);
+      setNZ16(word);
+      break;
+    case 0x7A: setYa(addwOp(ya(), word)); break;  // ADDW YA,dp
+    case 0x9A: setYa(subwOp(ya(), word)); break;  // SUBW YA,dp
+    case 0x5A: cmpwOp(ya(), word); break;         // CMPW YA,dp (the difference is discarded)
+
+    default:
+      // As for applyMemoryRead: every word form that reads a whole word is listed above.
+      break;
   }
 }
 
@@ -985,14 +1216,122 @@ inline std::uint8_t Spc700::memoryModifyValue(std::uint8_t opcode, std::uint8_t 
       return v;
     }
 
+    // ---- one bit of a direct-page byte, set or cleared (no flags) ----
+    // The bit index is in the opcode's top three bits, and the low nibble tells the two
+    // instructions apart: SET1 is $x2 with an even high nibble, CLR1 with an odd one.
+    case 0x02: case 0x22: case 0x42: case 0x62:               // SET1 dp.0..7
+    case 0x82: case 0xA2: case 0xC2: case 0xE2:
+      return static_cast<std::uint8_t>(destination | (1u << (opcode >> 5)));
+    case 0x12: case 0x32: case 0x52: case 0x72:               // CLR1 dp.0..7
+    case 0x92: case 0xB2: case 0xD2: case 0xF2:
+      return static_cast<std::uint8_t>(destination & ~(1u << (opcode >> 5)));
+
+    // ---- the byte tested against A, then its bits set or cleared by A ----
+    // The flags are those of A - memory; A itself is untouched, and the bits it holds
+    // are the ones the write turns on or off.
+    case 0x0E: case 0x4E:                                     // TSET1 / TCLR1 !abs
+      setNZ(static_cast<std::uint8_t>(state_.a - destination));
+      return opcode == 0x0E ? static_cast<std::uint8_t>(destination | state_.a)
+                            : static_cast<std::uint8_t>(destination & ~state_.a);
+
+    // ---- one bit of a byte, flipped or written from the carry flag (no flags) ----
+    case 0xEA:                                                // NOT1 m.b
+      return static_cast<std::uint8_t>(destination ^ operandBitMask());
+    case 0xCA:                                                // MOV1 m.b,C
+      return (state_.psw & kFlagC)
+                 ? static_cast<std::uint8_t>(destination | operandBitMask())
+                 : static_cast<std::uint8_t>(destination & ~operandBitMask());
+
     default:
       // As for applyMemoryRead: every routed modify form is listed above.
       return destination;
   }
 }
 
+// A direct-page word instruction, one cycle at a time. One offset settles both
+// addresses at once — the low byte's, and the high byte's one past it, wrapped inside
+// the page — and from there the shapes differ only in what happens between the two
+// bytes.
+template <ApuBus B>
+bool Spc700::executeWordCycle(B& bus, WordForm form) {
+  if (state_.tcu == 1) {
+    const std::uint8_t offset = fetch(bus);
+    state_.ea = dpAddr(offset);
+    state_.ptr = dpAddr(static_cast<std::uint8_t>(offset + 1));
+    return false;
+  }
+
+  const std::uint8_t step = static_cast<std::uint8_t>(state_.tcu - 1);
+  switch (form) {
+    case WordForm::Read:
+    case WordForm::Compare:
+      // Both read the low byte and then the high one; the arithmetic and move forms
+      // spend a cycle inside the chip between them, and the comparison does not.
+      if (step == 1) {
+        state_.tmp = bus.read(state_.ea);
+        return false;
+      }
+      if (form == WordForm::Read && step == 2) return false;
+      applyWordRead(state_.ir, static_cast<std::uint16_t>(
+                                   state_.tmp | (bus.read(state_.ptr) << 8)));
+      return true;
+
+    case WordForm::Modify: {
+      // Each half is written back before the next is read, so the two addresses are
+      // reached in the order the chip reaches them. The high byte moves only when the
+      // low one wrapped past its own end, and the flags are those of the whole word.
+      const bool increment = state_.ir == 0x3A;  // INCW dp; DECW dp is 0x1A
+      if (step == 1) {
+        state_.tmp = bus.read(state_.ea);
+        return false;
+      }
+      if (step == 2) {
+        const std::uint8_t low =
+            static_cast<std::uint8_t>(increment ? state_.tmp + 1 : state_.tmp - 1);
+        bus.write(state_.ea, low);
+        state_.tmp = low;
+        return false;
+      }
+      if (step == 3) {
+        state_.tmp = static_cast<std::uint16_t>(state_.tmp | (bus.read(state_.ptr) << 8));
+        return false;
+      }
+      const std::uint8_t low = static_cast<std::uint8_t>(state_.tmp);
+      const std::uint8_t read = static_cast<std::uint8_t>(state_.tmp >> 8);
+      const bool carries = increment ? low == 0x00 : low == 0xFF;
+      const std::uint8_t high =
+          static_cast<std::uint8_t>(carries ? (increment ? read + 1 : read - 1) : read);
+      bus.write(state_.ptr, high);
+      setNZ16(static_cast<std::uint16_t>(low | (high << 8)));
+      return true;
+    }
+
+    case WordForm::Store:
+      // The low byte is read and discarded before either half is written, so a store
+      // through this instruction clears a register that clears when read — but only the
+      // one at the low address. Neither write sets a flag.
+      if (step == 1) {
+        static_cast<void>(bus.read(state_.ea));
+        return false;
+      }
+      if (step == 2) {
+        bus.write(state_.ea, state_.a);
+        return false;
+      }
+      bus.write(state_.ptr, state_.y);
+      return true;
+
+    case WordForm::None:
+      break;  // executeCycle reaches this path only for the shapes above
+  }
+  return true;
+}
+
 template <ApuBus B>
 bool Spc700::executeCycle(B& bus) {
+  if (const WordForm word = wordForm(state_.ir); word != WordForm::None) {
+    return executeWordCycle(bus, word);
+  }
   if (MemForm form{}; memoryForm(state_.ir, form)) {
     return executeMemoryCycle(bus, form);
   }
@@ -1048,204 +1387,6 @@ std::uint32_t Spc700::stepInstruction(B& bus) {
 template <ApuBus B>
 std::uint32_t Spc700::stepWhole(B& bus, std::uint8_t opcode) {
   switch (opcode) {
-    // ---- 16-bit word moves (YA is the pair A=low, Y=high; N,Z from the word) ----
-    case 0xBA: {                                                                                  // MOVW YA,dp
-      std::uint16_t w = readWordDp(bus, fetch(bus));
-      state_.a = static_cast<std::uint8_t>(w);
-      state_.y = static_cast<std::uint8_t>(w >> 8);
-      setNZ16(w);
-      return 5;
-    }
-    case 0xDA: {                                                                                  // MOVW dp,YA (no flags)
-      std::uint8_t d = fetch(bus);
-      static_cast<void>(bus.read(static_cast<std::uint16_t>(dpBase() + d)));  // documented dummy read of the low byte
-      writeWordDp(bus, d, static_cast<std::uint16_t>(state_.a | (state_.y << 8)));
-      return 5;
-    }
-
-    // ---- 16-bit word increment / decrement (N,Z from the word) ----
-    case 0x3A: {                                                                                  // INCW dp
-      std::uint8_t d = fetch(bus);
-      std::uint16_t w = static_cast<std::uint16_t>(readWordDp(bus, d) + 1);
-      setNZ16(w);
-      writeWordDp(bus, d, w);
-      return 6;
-    }
-    case 0x1A: {                                                                                  // DECW dp
-      std::uint8_t d = fetch(bus);
-      std::uint16_t w = static_cast<std::uint16_t>(readWordDp(bus, d) - 1);
-      setNZ16(w);
-      writeWordDp(bus, d, w);
-      return 6;
-    }
-
-    // ---- 16-bit word arithmetic (N,V,H,Z,C; H is the carry on the high byte) ----
-    case 0x7A: {                                                                                  // ADDW YA,dp
-      std::uint16_t r = addwOp(static_cast<std::uint16_t>(state_.a | (state_.y << 8)),
-                               readWordDp(bus, fetch(bus)));
-      state_.a = static_cast<std::uint8_t>(r);
-      state_.y = static_cast<std::uint8_t>(r >> 8);
-      return 5;
-    }
-    case 0x9A: {                                                                                  // SUBW YA,dp
-      std::uint16_t r = subwOp(static_cast<std::uint16_t>(state_.a | (state_.y << 8)),
-                               readWordDp(bus, fetch(bus)));
-      state_.a = static_cast<std::uint8_t>(r);
-      state_.y = static_cast<std::uint8_t>(r >> 8);
-      return 5;
-    }
-    case 0x5A:                                                                                    // CMPW YA,dp
-      cmpwOp(static_cast<std::uint16_t>(state_.a | (state_.y << 8)),
-             readWordDp(bus, fetch(bus)));
-      return 4;
-
-    // ---- multiply / divide ----
-    case 0xCF: {                                                                                  // MUL YA (YA = Y*A; N,Z from Y only)
-      std::uint16_t p = static_cast<std::uint16_t>(unsigned{state_.y} * unsigned{state_.a});
-      state_.a = static_cast<std::uint8_t>(p);
-      state_.y = static_cast<std::uint8_t>(p >> 8);
-      setNZ(state_.y);
-      return 9;
-    }
-    case 0x9E: {                                                                                  // DIV YA,X (A = YA/X, Y = YA%X)
-      // The documented 9-iteration restoring division: the 17-bit accumulator
-      // ends as YYYYYYYY V AAAAAAAA, so Y and A are the quotient/remainder and
-      // bit 8 is the overflow flag. N,Z come from A; H is the nibble comparison
-      // X&$F <= Y&$F on the entry values. The result past a quotient of 511 is
-      // hardware garbage the algorithm still reproduces.
-      const unsigned entryX = state_.x, entryY = state_.y;
-      std::uint32_t yva = static_cast<std::uint32_t>((entryY << 8) | state_.a);
-      const std::uint32_t x9 = static_cast<std::uint32_t>(entryX) << 9;
-      for (int i = 0; i < 9; ++i) {
-        yva = ((yva << 1) | ((yva >> 16) & 1u)) & 0x1FFFFu;  // rotate left within 17 bits
-        if (yva >= x9) yva ^= 1u;
-        if (yva & 1u) yva = (yva - x9) & 0x1FFFFu;
-      }
-      state_.a = static_cast<std::uint8_t>(yva & 0xFFu);
-      state_.y = static_cast<std::uint8_t>((yva >> 9) & 0xFFu);
-      std::uint8_t psw = static_cast<std::uint8_t>(
-          state_.psw & ~(kFlagN | kFlagV | kFlagH | kFlagZ));
-      if (state_.a & 0x80u) psw |= kFlagN;
-      if (state_.a == 0) psw |= kFlagZ;
-      if (yva & 0x100u) psw |= kFlagV;
-      if ((entryX & 0x0Fu) <= (entryY & 0x0Fu)) psw |= kFlagH;
-      state_.psw = psw;
-      return 12;
-    }
-
-    // ---- decimal adjust (N,Z,C; H is read but never changed) ----
-    case 0xDF: {                                                                                  // DAA A
-      std::uint16_t a = state_.a;
-      if ((state_.psw & kFlagC) || a > 0x99u) {
-        a += 0x60u;
-        state_.psw = static_cast<std::uint8_t>(state_.psw | kFlagC);
-      }
-      if ((state_.psw & kFlagH) || (state_.a & 0x0Fu) > 0x09u) a += 0x06u;
-      state_.a = static_cast<std::uint8_t>(a);
-      setNZ(state_.a);
-      return 3;
-    }
-    case 0xBE: {                                                                                  // DAS A
-      std::uint16_t a = state_.a;
-      if (!(state_.psw & kFlagC) || a > 0x99u) {
-        a -= 0x60u;
-        state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagC);
-      }
-      if (!(state_.psw & kFlagH) || (state_.a & 0x0Fu) > 0x09u) a -= 0x06u;
-      state_.a = static_cast<std::uint8_t>(a);
-      setNZ(state_.a);
-      return 3;
-    }
-
-    // ---- single-bit set / clear on a direct-page byte (bit in opcode; no flags) ----
-    case 0x02: case 0x22: case 0x42: case 0x62: case 0x82: case 0xA2: case 0xC2: case 0xE2:       // SET1 dp.0..7
-    case 0x12: case 0x32: case 0x52: case 0x72: case 0x92: case 0xB2: case 0xD2: case 0xF2: {     // CLR1 dp.0..7
-      const std::uint8_t mask = static_cast<std::uint8_t>(1u << (opcode >> 5));
-      const std::uint16_t addr = addrDp(bus);
-      const std::uint8_t m = bus.read(addr);
-      bus.write(addr, (opcode & 0x10u) ? static_cast<std::uint8_t>(m & ~mask)
-                                       : static_cast<std::uint8_t>(m | mask));
-      return 4;
-    }
-
-    // ---- test and set/clear bits in an absolute byte (N,Z as for A - memory) ----
-    case 0x0E: {                                                                                  // TSET1 !abs
-      const std::uint16_t addr = addrAbs(bus);
-      const std::uint8_t m = bus.read(addr);
-      setNZ(static_cast<std::uint8_t>(state_.a - m));
-      bus.write(addr, static_cast<std::uint8_t>(m | state_.a));
-      return 6;
-    }
-    case 0x4E: {                                                                                  // TCLR1 !abs
-      const std::uint16_t addr = addrAbs(bus);
-      const std::uint8_t m = bus.read(addr);
-      setNZ(static_cast<std::uint8_t>(state_.a - m));
-      bus.write(addr, static_cast<std::uint8_t>(m & ~state_.a));
-      return 6;
-    }
-
-    // ---- carry-bit logic against one bit of an absolute byte (the 16-bit
-    //      operand carries a 13-bit address in the low bits and the bit index in
-    //      the top 3; only C is affected) ----
-    case 0x4A: {                                                                                  // AND1 C,m.b
-      const std::uint16_t operand = addrAbs(bus);
-      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
-                       (operand >> 13)) & 1u) != 0u;
-      setCarry((state_.psw & kFlagC) && b);
-      return 4;
-    }
-    case 0x6A: {                                                                                  // AND1 C,/m.b
-      const std::uint16_t operand = addrAbs(bus);
-      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
-                       (operand >> 13)) & 1u) != 0u;
-      setCarry((state_.psw & kFlagC) && !b);
-      return 4;
-    }
-    case 0x0A: {                                                                                  // OR1 C,m.b
-      const std::uint16_t operand = addrAbs(bus);
-      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
-                       (operand >> 13)) & 1u) != 0u;
-      setCarry((state_.psw & kFlagC) || b);
-      return 5;
-    }
-    case 0x2A: {                                                                                  // OR1 C,/m.b
-      const std::uint16_t operand = addrAbs(bus);
-      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
-                       (operand >> 13)) & 1u) != 0u;
-      setCarry((state_.psw & kFlagC) || !b);
-      return 5;
-    }
-    case 0x8A: {                                                                                  // EOR1 C,m.b
-      const std::uint16_t operand = addrAbs(bus);
-      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
-                       (operand >> 13)) & 1u) != 0u;
-      setCarry(((state_.psw & kFlagC) != 0) != b);
-      return 5;
-    }
-    case 0xEA: {                                                                                  // NOT1 m.b (no flags)
-      const std::uint16_t operand = addrAbs(bus);
-      const std::uint16_t addr = static_cast<std::uint16_t>(operand & 0x1FFFu);
-      const std::uint8_t mask = static_cast<std::uint8_t>(1u << (operand >> 13));
-      bus.write(addr, static_cast<std::uint8_t>(bus.read(addr) ^ mask));
-      return 5;
-    }
-    case 0xAA: {                                                                                  // MOV1 C,m.b
-      const std::uint16_t operand = addrAbs(bus);
-      const bool b = ((bus.read(static_cast<std::uint16_t>(operand & 0x1FFFu)) >>
-                       (operand >> 13)) & 1u) != 0u;
-      setCarry(b);
-      return 4;
-    }
-    case 0xCA: {                                                                                  // MOV1 m.b,C (no flags)
-      const std::uint16_t operand = addrAbs(bus);
-      const std::uint16_t addr = static_cast<std::uint16_t>(operand & 0x1FFFu);
-      const std::uint8_t mask = static_cast<std::uint8_t>(1u << (operand >> 13));
-      const std::uint8_t m = bus.read(addr);
-      bus.write(addr, (state_.psw & kFlagC) ? static_cast<std::uint8_t>(m | mask)
-                                            : static_cast<std::uint8_t>(m & ~mask));
-      return 6;
-    }
-
     // ---- conditional and unconditional relative branches (2 cycles, +2 when
     //      taken; BRA is always taken) ----
     case 0x2F: return branchIf(bus, true, 4, 4);                                                  // BRA

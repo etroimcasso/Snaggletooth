@@ -182,17 +182,19 @@ to resume it.
 
 ## The cycle bar
 
-The move and arithmetic families run a cycle at a time. Every one of their cycles is placed — which
-cycle reads, which writes, which reaches memory not at all, and what address each drives — and every
-one is checked against a per-cycle recording of the real chip.
+The move, arithmetic, 16-bit and bit families run a cycle at a time. Every one of their cycles is
+placed — which cycle reads, which writes, which reaches memory not at all, and what address each
+drives — and every one is checked against a per-cycle recording of the real chip.
 
-The rest of the instruction set runs whole. Its cycle counts match the documented per-instruction
-totals and it issues the documented accesses, but which cycle each access falls on is not modelled
+The control-flow instructions — the branches, the jumps, the calls and returns, the stack, the flag
+operations, and the halts — run whole. Their cycle counts match the documented per-instruction
+totals and they issue the documented accesses, but which cycle each access falls on is not modelled
 yet. `cycleStepped()` reports which of the two paths an opcode is on:
 
 ```cpp
 snaggletooth::Spc700::cycleStepped(0x84);  // true  — ADC A,dp
-snaggletooth::Spc700::cycleStepped(0xBA);  // false — MOVW YA,dp
+snaggletooth::Spc700::cycleStepped(0xBA);  // true  — MOVW YA,dp
+snaggletooth::Spc700::cycleStepped(0x2F);  // false — BRA
 ```
 
 An opcode on the whole-instruction path cannot be driven with `stepCycle()`. The call that would
@@ -396,6 +398,109 @@ that reach memory not at all.
 `XCN` is the one instruction here that spends more than one cycle inside the chip: it reads the
 opcode, reads and discards the byte after it, then swaps the nibbles of A over three more cycles.
 
+## The words and the bits
+
+Four groups run on shapes of their own: the 16-bit instructions over a direct-page word, the
+multiply and divide, the decimal adjusts, and the instructions that reach a single bit.
+
+### A word is two direct-page bytes
+
+One offset names both bytes: the low byte at `dp`, the high byte one past it — and that second
+address **wraps inside the direct page**, so a word at `$FF` takes its high byte from the page base.
+
+| Instruction | Cycles |
+|---|---|
+| `MOVW YA,dp` | opcode · offset · low byte · a cycle inside the chip · high byte |
+| `ADDW YA,dp` | opcode · offset · low byte · a cycle inside the chip · high byte |
+| `SUBW YA,dp` | opcode · offset · low byte · a cycle inside the chip · high byte |
+| `CMPW YA,dp` | opcode · offset · low byte · high byte |
+| `INCW dp` | opcode · offset · low byte · write low · high byte · write high |
+| `DECW dp` | opcode · offset · low byte · write low · high byte · write high |
+| `MOVW dp,YA` | opcode · offset · destination read · write low · write high |
+
+`CMPW` is the one word instruction with no cycle inside the chip, and it is a cycle shorter than
+`ADDW` and `SUBW` for it — it discards its result, so it has nothing to settle.
+
+**`INCW` and `DECW` interleave.** Neither reads the whole word and then writes it back: each half is
+written before the next is read.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0x3A;  // INCW $10
+ram.bytes[0x0201] = 0x10;
+ram.bytes[0x0010] = 0xFF;  // the word $01FF
+ram.bytes[0x0011] = 0x01;
+
+snaggletooth::Spc700 cpu(snaggletooth::Spc700State{.pc = 0x0200});
+cpu.stepInstruction(ram);
+// six cycles: opcode, offset, read $0010, write $0010, read $0011, write $0011
+// ram.bytes[0x0010] == 0x00  — the low byte wrapped
+// ram.bytes[0x0011] == 0x02  — so the high byte stepped with it
+```
+
+The high byte moves only when the low one wrapped past its own end, and `N` and `Z` come from the
+whole 16-bit result, not from either half.
+
+**`MOVW dp,YA` reads only its low byte.** It reads the byte it is about to overwrite — once, at the
+low address — and then writes both halves. On a bus with read side effects that matters: the low
+address is reached, the high one only written.
+
+### One bit at a time
+
+`SET1` and `CLR1` name a direct-page byte and a bit in the opcode itself, and run the
+read-modify-write seat: `opcode · offset · read · write`, with no flag touched.
+
+`TSET1` and `TCLR1` reach an absolute byte and **read it twice** — the fifth of their six cycles is a
+second read of the same address, not a cycle inside the chip. Both reads are real, so a register
+that clears when read is reached twice. They set `N` and `Z` from `A - memory` and write `A`'s bits
+into the byte (`TSET1` sets them, `TCLR1` clears them); `A` itself is untouched.
+
+The carry-bit instructions take a 16-bit operand that packs two things: the **address in its low 13
+bits**, and the **bit index in the three above them**.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0xAA;  // MOV1 C,$0300.3
+ram.bytes[0x0201] = 0x00;  // the operand is $6300:
+ram.bytes[0x0202] = 0x63;  //   $0300 is the address, 3 the bit index
+ram.bytes[0x0300] = 0x08;
+
+snaggletooth::Spc700 cpu(snaggletooth::Spc700State{.pc = 0x0200});
+cpu.stepInstruction(ram);
+// four cycles: opcode, operand low, operand high, the read of $0300
+// cpu.state().psw & snaggletooth::kFlagC — set, because bit 3 of $08 is set
+```
+
+| Instruction | Cycles |
+|---|---|
+| `AND1 C,m.b` / `AND1 C,/m.b` | opcode · operand low · operand high · read |
+| `MOV1 C,m.b` | opcode · operand low · operand high · read |
+| `OR1 C,m.b` / `OR1 C,/m.b` | opcode · operand low · operand high · read · a cycle inside the chip |
+| `EOR1 C,m.b` | opcode · operand low · operand high · read · a cycle inside the chip |
+| `NOT1 m.b` | opcode · operand low · operand high · read · write |
+| `MOV1 m.b,C` | opcode · operand low · operand high · read · a cycle inside the chip · write |
+
+`AND1` and `MOV1 C,m.b` settle as the byte arrives; `OR1` and `EOR1` pay one more cycle inside the
+chip after it. Only `NOT1` and `MOV1 m.b,C` write, and only the write form of `MOV1` spends a cycle
+between the read and the write.
+
+### Multiply, divide, and the decimal adjusts
+
+`MUL YA` and `DIV YA,X` reach memory exactly twice — the opcode, and the byte after it that every
+one-byte instruction reads and discards — and spend every remaining cycle computing inside the
+chip. They are the two longest instructions the CPU has:
+
+| Instruction | Cycles |
+|---|---|
+| `MUL YA` | opcode · discarded read · seven cycles inside the chip |
+| `DIV YA,X` | opcode · discarded read · ten cycles inside the chip |
+| `DAA A` / `DAS A` | opcode · discarded read · one cycle inside the chip |
+
+`DIV` past a quotient of 511 produces what the hardware produces: the documented nine-iteration
+restoring division runs to the end, sets `V` from the overflow bit, and leaves the garbage that
+falls out. `H` is the nibble comparison `X & $F <= Y & $F` on the values the instruction started
+with.
+
 ## Testing against the vectors
 
 The core is checked per opcode against the SingleStepTests SPC700 vectors — one file per opcode,
@@ -440,6 +545,8 @@ environment variables shape a run:
   wrap within that page.
 - **The direct page can move.** Address `dp` with `P` set and you are reaching `$0100+dp`, not
   `$0000+dp`.
+- **A word wraps inside the direct page.** The high byte of a word at `$FF` is at the page base, not
+  in the page above. The same holds for the second byte of an indirect mode's pointer.
 - **A halted core still costs time.** Stepping it returns 2 cycles rather than 0, because the clock
   belongs to the machine around the CPU, not to the CPU.
 
@@ -452,4 +559,7 @@ environment variables shape a run:
 - `tests/spc700/alu_cycles_test.cpp` — the arithmetic family's cycle placement: the indexing law,
   the read-modify-write seat, the order of the two-operand forms, and the comparison that writes
   nothing.
+- `tests/spc700/word_bit_cycles_test.cpp` — the 16-bit and bit families' cycle placement: the word
+  page-wrap and its interleave, the second read of `TSET1`, the bit operand's packing, and the
+  instructions that run inside the chip.
 - `tests/spc700/` — the vector harness and runner, and the hand-derived flag/algorithm cross-checks.
