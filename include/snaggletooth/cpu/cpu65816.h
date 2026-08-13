@@ -155,10 +155,10 @@ class Cpu65816 {
   void setIrqLine(bool asserted) noexcept { state_.irqLine = asserted; }
 
   // Whether an opcode runs on the cycle engine. The engine carries the implied,
-  // accumulator, immediate, direct-page, absolute and long instructions; the rest
-  // execute whole, so stepCycle cannot observe them a cycle at a time while
-  // stepInstruction runs them correctly. Ask before stepping an instruction cycle
-  // by cycle.
+  // accumulator and immediate instructions, every addressing mode that reaches
+  // memory, and the stack instructions; the control-flow instructions do not run on
+  // it yet, so stepCycle cannot observe one a cycle at a time. Ask before stepping
+  // an instruction cycle by cycle.
   [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept;
 
  private:
@@ -171,10 +171,8 @@ class Cpu65816 {
   [[nodiscard]] bool index8() const noexcept {
     return state_.e || (state_.p & kCpuFlagX);
   }
-  // The cycle-count adjustment terms: one extra cycle per extra byte moved for a
-  // 16-bit access, and one extra when the direct register's low byte is non-zero.
-  [[nodiscard]] std::uint32_t accCyc() const noexcept { return accum8() ? 1u : 0u; }
-  [[nodiscard]] std::uint32_t indexCyc() const noexcept { return index8() ? 1u : 0u; }
+  // The extra cycle a direct-page address costs when the direct register's low byte
+  // is non-zero.
   [[nodiscard]] std::uint32_t dpCyc() const noexcept {
     return (state_.d & 0xFFu) != 0u ? 1u : 0u;
   }
@@ -559,19 +557,6 @@ class Cpu65816 {
     state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
     return v;
   }
-  template <SnesBus B>
-  std::uint16_t fetchWord(B& bus) {
-    const std::uint16_t lo = fetch(bus);
-    const std::uint16_t hi = fetch(bus);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-  template <SnesBus B>
-  std::uint32_t fetchLong(B& bus) {
-    const std::uint32_t lo = fetch(bus);
-    const std::uint32_t mid = fetch(bus);
-    const std::uint32_t hi = fetch(bus);
-    return lo | (mid << 8) | (hi << 16);
-  }
 
   // ---- effective addresses ------------------------------------------------
   // How a resolved operand's consecutive bytes wrap: flat 24-bit for data reached
@@ -579,12 +564,6 @@ class Cpu65816 {
   // the stack; and within the page for the direct page while emulation mode wraps
   // it (the documented $00-direct-low case).
   enum class AddrKind : std::uint8_t { Flat, Bank0, Direct };
-
-  struct Operand {
-    std::uint32_t addr = 0;
-    AddrKind kind = AddrKind::Flat;
-    bool pageCross = false;  // an index addition carried past a page — one extra cycle
-  };
 
   // Emulation mode wraps the direct page within a page when the direct register's
   // low byte is zero; otherwise direct-page arithmetic wraps within bank zero.
@@ -614,17 +593,6 @@ class Cpu65816 {
     return (addr + 1u) & 0xFFFFFFu;
   }
 
-  // A 16-bit pointer read from the direct page, for PEI — whose two bytes run on
-  // into the page above rather than wrapping inside the direct page, one of the
-  // three cases section 7.2.1 names as leaving the emulated direct-page range.
-  template <SnesBus B>
-  std::uint16_t readDpWord(B& bus, std::uint32_t base) {
-    const std::uint16_t lo = bus.read(base, CycleKind::DataRead);
-    const std::uint16_t hi =
-        bus.read(nextByte(base, AddrKind::Bank0), CycleKind::DataRead);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-
   // Data-bank-relative addresses, formed from the operand and the data bank.
   [[nodiscard]] std::uint32_t bankAddr(std::uint16_t offset) const noexcept {
     return (static_cast<std::uint32_t>(state_.dbr) << 16) | offset;
@@ -635,80 +603,32 @@ class Cpu65816 {
     return ((base & 0xFFu) + (index & 0xFFu)) > 0xFFu;
   }
 
-  // ---- data access at an effective address --------------------------------
-  template <SnesBus B>
-  std::uint16_t readValue(B& bus, const Operand& op, bool eightBit,
-                          CycleKind kind = CycleKind::DataRead) {
-    const std::uint16_t lo = bus.read(op.addr, kind);
-    if (eightBit) return lo;
-    const std::uint16_t hi = bus.read(nextByte(op.addr, op.kind), kind);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-  template <SnesBus B>
-  void writeValue(B& bus, const Operand& op, std::uint16_t v, bool eightBit,
-                  CycleKind kind = CycleKind::DataWrite) {
-    bus.write(op.addr, static_cast<std::uint8_t>(v), kind);
-    if (!eightBit) {
-      bus.write(nextByte(op.addr, op.kind), static_cast<std::uint8_t>(v >> 8), kind);
-    }
-  }
-
   // ---- stack --------------------------------------------------------------
-  // Pushes write to the current stack pointer and then decrement it; pulls
-  // pre-increment and then read. The stack lives in bank zero; emulation mode keeps
-  // it inside page one, so the pointer wraps within $01xx there and across bank zero
-  // otherwise. A 16-bit push stores the high byte first (at the higher address),
-  // matching the little-endian order a pull reads back low byte first.
+  // One byte at a time: a push writes at the stack pointer and then steps it down,
+  // a pull steps it up and then reads. The stack lives in bank zero, and a word
+  // goes on high byte first — at the higher address — so a pull reads it back low
+  // byte first.
+  //
+  // Emulation mode pins the stack to page one. The push and pull instructions the
+  // 6502 already had wrap the pointer inside that page on every access; the ones
+  // the 65816 added step past it during the transfer and are put back afterwards
+  // (section 7.1), which `leavesPage` selects. In native mode the two are the same.
   template <SnesBus B>
-  void push8(B& bus, std::uint8_t v) {
-    bus.write(state_.s, v, CycleKind::DataWrite);
-    state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | ((state_.s - 1) & 0xFFu))
-                        : static_cast<std::uint16_t>(state_.s - 1);
+  void stackPush(B& bus, std::uint8_t value, bool leavesPage) {
+    bus.write(state_.s, value, CycleKind::DataWrite);
+    state_.s = (state_.e && !leavesPage)
+                   ? static_cast<std::uint16_t>(0x0100u | ((state_.s - 1) & 0xFFu))
+                   : static_cast<std::uint16_t>(state_.s - 1);
   }
   template <SnesBus B>
-  void push16(B& bus, std::uint16_t v) {
-    push8(bus, static_cast<std::uint8_t>(v >> 8));
-    push8(bus, static_cast<std::uint8_t>(v));
-  }
-  template <SnesBus B>
-  std::uint8_t pull8(B& bus) {
-    state_.s = state_.e ? static_cast<std::uint16_t>(0x0100u | ((state_.s + 1) & 0xFFu))
-                        : static_cast<std::uint16_t>(state_.s + 1);
+  std::uint8_t stackPull(B& bus, bool leavesPage) {
+    state_.s = (state_.e && !leavesPage)
+                   ? static_cast<std::uint16_t>(0x0100u | ((state_.s + 1) & 0xFFu))
+                   : static_cast<std::uint16_t>(state_.s + 1);
     return bus.read(state_.s, CycleKind::DataRead);
   }
-  template <SnesBus B>
-  std::uint16_t pull16(B& bus) {
-    const std::uint16_t lo = pull8(bus);
-    const std::uint16_t hi = pull8(bus);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-
-  // The 65816-new stack instructions (PEA/PEI/PER, PHB/PHK/PHD, PLB/PLD) let the
-  // stack pointer leave page one during the access in emulation mode, then force its
-  // high byte back to $01 afterward — unlike the 6502-original push/pull above, which
-  // wrap the pointer within page one on every access. In native mode the two behave
-  // identically. Each such instruction transfers once, then calls settleStack.
-  template <SnesBus B>
-  void pushWide8(B& bus, std::uint8_t v) {
-    bus.write(state_.s, v, CycleKind::DataWrite);
-    state_.s = static_cast<std::uint16_t>(state_.s - 1);
-  }
-  template <SnesBus B>
-  void pushWide16(B& bus, std::uint16_t v) {
-    pushWide8(bus, static_cast<std::uint8_t>(v >> 8));
-    pushWide8(bus, static_cast<std::uint8_t>(v));
-  }
-  template <SnesBus B>
-  std::uint8_t pullWide8(B& bus) {
-    state_.s = static_cast<std::uint16_t>(state_.s + 1);
-    return bus.read(state_.s, CycleKind::DataRead);
-  }
-  template <SnesBus B>
-  std::uint16_t pullWide16(B& bus) {
-    const std::uint16_t lo = pullWide8(bus);
-    const std::uint16_t hi = pullWide8(bus);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
+  // Puts the stack pointer back inside page one once a transfer that was allowed to
+  // leave it has finished. Native mode leaves the pointer alone.
   void settleStack() noexcept {
     if (state_.e) state_.s = static_cast<std::uint16_t>(0x0100u | (state_.s & 0xFFu));
   }
@@ -964,6 +884,100 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeIndirectCycle(B& bus, const IndForm& form);
 
+  // ---- the stack instructions ---------------------------------------------
+  // What a stack instruction moves. Most of the family carries one register; the
+  // three push-effective instructions compute a word first and push that, so they
+  // share a register of their own.
+  enum class StackReg : std::uint8_t { A, X, Y, P, Dbr, Pbr, D, Effective };
+
+  // Where a push-effective instruction's word comes from: the operand itself
+  // (PEA), the direct-page word the operand names (PEI), or the program counter
+  // with the operand added (PER). Everything else takes a register.
+  enum class StackSource : std::uint8_t { Register, Absolute, Indirect, Relative };
+
+  // The shape of one stack instruction: which way it moves, what it moves, and —
+  // for the push-effective instructions — where the word comes from.
+  struct StackForm {
+    bool push = true;
+    StackReg reg = StackReg::A;
+    StackSource source = StackSource::Register;
+  };
+
+  // Fills in the form of a stack instruction and answers whether the opcode is one.
+  [[nodiscard]] static constexpr bool stackForm(std::uint8_t opcode,
+                                                StackForm& form) noexcept;
+
+  // How wide the transfer is: the width of the register being carried, or a whole
+  // word for the direct register and for a computed address.
+  [[nodiscard]] bool stackEightBit(const StackForm& form) const noexcept {
+    switch (form.reg) {
+      case StackReg::A: return accum8();
+      case StackReg::X:
+      case StackReg::Y: return index8();
+      case StackReg::P:
+      case StackReg::Dbr:
+      case StackReg::Pbr: return true;
+      case StackReg::D:
+      case StackReg::Effective: break;
+    }
+    return false;
+  }
+
+  // Whether the stack pointer may step outside page one during the access. The
+  // four registers the 6502 already pushed and pulled keep it inside; everything
+  // the 65816 added is free of the page (section 7.1). The difference shows only on
+  // a pull or on a transfer of more than one byte — a single-byte push writes at
+  // the pointer either way and leaves it in the same place.
+  [[nodiscard]] static constexpr bool stackLeavesPage(const StackForm& form) noexcept {
+    switch (form.reg) {
+      case StackReg::A:
+      case StackReg::X:
+      case StackReg::Y:
+      case StackReg::P: return false;
+      default: break;
+    }
+    return true;
+  }
+
+  // The cycle index at which the instruction first reaches the stack: past the
+  // opcode fetch, whatever operand and pointer bytes the form reads, and the
+  // internal cycles it spends — one before a push, two before a pull, one for a
+  // direct register with a low byte, and one for the addition PER makes.
+  [[nodiscard]] std::uint8_t stackTransferCycle(const StackForm& form) const noexcept {
+    switch (form.source) {
+      case StackSource::Absolute: return 3u;
+      case StackSource::Relative: return 4u;
+      case StackSource::Indirect: return static_cast<std::uint8_t>(4u + dpCyc());
+      case StackSource::Register: break;
+    }
+    return form.push ? std::uint8_t{2} : std::uint8_t{3};
+  }
+
+  // The value a push writes, taken from its register — or, for a push-effective
+  // instruction, from the word its earlier cycles worked out.
+  [[nodiscard]] std::uint16_t stackPushValue(const StackForm& form) const noexcept {
+    switch (form.reg) {
+      case StackReg::A: return state_.a;
+      case StackReg::X: return state_.x;
+      case StackReg::Y: return state_.y;
+      case StackReg::P: return state_.p;
+      case StackReg::Dbr: return state_.dbr;
+      case StackReg::Pbr: return state_.pbr;
+      case StackReg::D: return state_.d;
+      case StackReg::Effective: break;
+    }
+    return state_.tmp;
+  }
+
+  // Lands a pulled value in its register. The three that load a register set N and
+  // Z at its width; PLP replaces the whole status byte and settles the widths it
+  // governs; PLB and PLD set N and Z on what they loaded.
+  void applyStackPull(const StackForm& form, std::uint16_t value);
+
+  // Executes one cycle of a stack instruction.
+  template <SnesBus B>
+  bool executeStackCycle(B& bus, const StackForm& form);
+
   // The immediate operand's width: the accumulator instructions take an operand as
   // wide as the accumulator, the index instructions one as wide as the index
   // registers.
@@ -986,9 +1000,10 @@ class Cpu65816 {
   // registers alone, and the internal cycle it spends has already been narrated.
   void applyImplied(std::uint8_t opcode);
 
-  // Executes an instruction the cycle engine does not carry, all at once: the
-  // accesses land in order but within a single call, starting from the cycle after
-  // the opcode fetch. Returns the instruction's full documented cycle total.
+  // An opcode the core does not decode. It returns a zero cycle count, which a
+  // vector's non-zero count rejects loudly rather than passing in silence. Every
+  // opcode the core does decode now runs on the cycle engine, so nothing else
+  // reaches here.
   template <SnesBus B>
   std::uint32_t stepWhole(B& bus, std::uint8_t opcode);
 
@@ -1023,7 +1038,70 @@ constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
   AbsForm abs{};
   if (absoluteForm(opcode, abs)) return true;
   IndForm ind{};
-  return indirectForm(opcode, ind);
+  if (indirectForm(opcode, ind)) return true;
+  StackForm stack{};
+  return stackForm(opcode, stack);
+}
+
+constexpr bool Cpu65816::stackForm(std::uint8_t opcode, StackForm& form) noexcept {
+  switch (opcode) {
+    // ---- push a register ----
+    case 0x48:
+      form = {.push = true, .reg = StackReg::A, .source = StackSource::Register};
+      return true;
+    case 0xDA:
+      form = {.push = true, .reg = StackReg::X, .source = StackSource::Register};
+      return true;
+    case 0x5A:
+      form = {.push = true, .reg = StackReg::Y, .source = StackSource::Register};
+      return true;
+    case 0x08:
+      form = {.push = true, .reg = StackReg::P, .source = StackSource::Register};
+      return true;
+    case 0x8B:
+      form = {.push = true, .reg = StackReg::Dbr, .source = StackSource::Register};
+      return true;
+    case 0x4B:
+      form = {.push = true, .reg = StackReg::Pbr, .source = StackSource::Register};
+      return true;
+    case 0x0B:
+      form = {.push = true, .reg = StackReg::D, .source = StackSource::Register};
+      return true;
+
+    // ---- push an address the instruction works out ----
+    case 0xF4:  // PEA — the operand itself
+      form = {.push = true, .reg = StackReg::Effective, .source = StackSource::Absolute};
+      return true;
+    case 0xD4:  // PEI — the word the direct page holds
+      form = {.push = true, .reg = StackReg::Effective, .source = StackSource::Indirect};
+      return true;
+    case 0x62:  // PER — the program counter plus the operand
+      form = {.push = true, .reg = StackReg::Effective, .source = StackSource::Relative};
+      return true;
+
+    // ---- pull a register ----
+    case 0x68:
+      form = {.push = false, .reg = StackReg::A, .source = StackSource::Register};
+      return true;
+    case 0xFA:
+      form = {.push = false, .reg = StackReg::X, .source = StackSource::Register};
+      return true;
+    case 0x7A:
+      form = {.push = false, .reg = StackReg::Y, .source = StackSource::Register};
+      return true;
+    case 0x28:
+      form = {.push = false, .reg = StackReg::P, .source = StackSource::Register};
+      return true;
+    case 0xAB:
+      form = {.push = false, .reg = StackReg::Dbr, .source = StackSource::Register};
+      return true;
+    case 0x2B:
+      form = {.push = false, .reg = StackReg::D, .source = StackSource::Register};
+      return true;
+
+    default:
+      return false;
+  }
 }
 
 constexpr bool Cpu65816::directPageForm(std::uint8_t opcode, DpForm& form) noexcept {
@@ -1641,6 +1719,115 @@ bool Cpu65816::executeIndirectCycle(B& bus, const IndForm& form) {
                                                       : AddrKind::Flat);
 }
 
+inline void Cpu65816::applyStackPull(const StackForm& form, std::uint16_t value) {
+  switch (form.reg) {
+    case StackReg::A: loadA(value); break;
+    case StackReg::X: loadX(value); break;
+    case StackReg::Y: loadY(value); break;
+    case StackReg::P: writeP(static_cast<std::uint8_t>(value)); break;
+    case StackReg::Dbr:
+      state_.dbr = static_cast<std::uint8_t>(value);
+      setNZ8(static_cast<std::uint8_t>(value));
+      break;
+    case StackReg::D:
+      state_.d = value;
+      setNZ16(value);
+      break;
+    case StackReg::Pbr:
+    case StackReg::Effective:
+      break;
+  }
+}
+
+// A stack instruction spends its early cycles working out what to move — one
+// internal cycle before a push and two before a pull, or the operand and pointer
+// bytes a push-effective instruction reads — and its last ones moving it, a byte
+// per cycle. The internal cycles park at the program counter, except the one PER
+// spends on its addition, which stays on the second byte of its offset.
+template <SnesBus B>
+bool Cpu65816::executeStackCycle(B& bus, const StackForm& form) {
+  const std::uint8_t transferCycle = stackTransferCycle(form);
+
+  if (state_.tcu < transferCycle) {
+    switch (form.source) {
+      case StackSource::Register:
+        bus.internal(pcAddr());
+        return false;
+
+      case StackSource::Absolute:
+        if (state_.tcu == 1) {
+          state_.tmp = fetch(bus);
+        } else {
+          state_.tmp = static_cast<std::uint16_t>(state_.tmp | (fetch(bus) << 8));
+        }
+        return false;
+
+      case StackSource::Relative:
+        if (state_.tcu == 1) {
+          state_.tmp = fetch(bus);
+          return false;
+        }
+        if (state_.tcu == 2) {
+          state_.tmp = static_cast<std::uint16_t>(state_.tmp | (fetch(bus) << 8));
+          return false;
+        }
+        // The offset is relative to the address after the instruction, which is
+        // where the program counter already stands.
+        bus.internal(operandAddr());
+        state_.tmp = static_cast<std::uint16_t>(state_.pc + state_.tmp);
+        return false;
+
+      case StackSource::Indirect: {
+        if (state_.tcu == 1) {
+          state_.ptr = fetch(bus);  // the direct-page offset
+          return false;
+        }
+        if (state_.tcu < 2u + dpCyc()) {
+          bus.internal(operandAddr());
+          return false;
+        }
+        if (state_.tcu == 2u + dpCyc()) {
+          state_.ea = dpAddr(static_cast<std::uint8_t>(state_.ptr), 0);
+          state_.tmp = bus.read(state_.ea, CycleKind::DataRead);
+          return false;
+        }
+        // The second byte of this pointer runs on past the direct page rather than
+        // wrapping inside it — one of the three cases section 7.2.1 names.
+        state_.tmp = static_cast<std::uint16_t>(
+            state_.tmp |
+            (bus.read(nextByte(state_.ea, AddrKind::Bank0), CycleKind::DataRead) << 8));
+        return false;
+      }
+    }
+  }
+
+  const std::uint8_t step = static_cast<std::uint8_t>(state_.tcu - transferCycle);
+  const bool eightBit = stackEightBit(form);
+  const bool leavesPage = stackLeavesPage(form);
+
+  if (form.push) {
+    const std::uint16_t value = stackPushValue(form);
+    if (step == 0 && !eightBit) {
+      stackPush(bus, static_cast<std::uint8_t>(value >> 8), leavesPage);
+      return false;
+    }
+    stackPush(bus, static_cast<std::uint8_t>(value), leavesPage);
+    settleStack();
+    return true;
+  }
+
+  const std::uint8_t byte = stackPull(bus, leavesPage);
+  if (step == 0) {
+    state_.tmp = byte;
+    if (!eightBit) return false;
+  } else {
+    state_.tmp = static_cast<std::uint16_t>(state_.tmp | (byte << 8));
+  }
+  applyStackPull(form, state_.tmp);
+  settleStack();
+  return true;
+}
+
 template <SnesBus B>
 bool Cpu65816::executeCycle(B& bus) {
   const std::uint8_t opcode = state_.ir;
@@ -1652,6 +1839,9 @@ bool Cpu65816::executeCycle(B& bus) {
   }
   if (IndForm form{}; indirectForm(opcode, form)) {
     return executeIndirectCycle(bus, form);
+  }
+  if (StackForm form{}; stackForm(opcode, form)) {
+    return executeStackCycle(bus, form);
   }
   switch (opcode) {
     // ---- REP / SEP: fetch the mask, then spend an internal cycle parked on the
@@ -1760,55 +1950,8 @@ std::uint32_t Cpu65816::stepInstruction(B& bus) {
 }
 
 template <SnesBus B>
-std::uint32_t Cpu65816::stepWhole(B& bus, std::uint8_t opcode) {
-  switch (opcode) {
-    // ---- LDA: load the accumulator (N,Z at the accumulator width) ----
-
-    // ---- STA: store the accumulator (no flags) ----
-
-    // ---- ADC: add with carry (accumulator width; N,V,Z,C) ----
-
-    // ---- SBC: subtract with carry (accumulator width; N,V,Z,C) ----
-
-    // ---- CMP: compare with the accumulator (accumulator width; N,Z,C) ----
-
-    // ---- AND: bitwise AND into the accumulator (accumulator width; N,Z) ----
-
-    // ---- EOR: bitwise exclusive-OR into the accumulator (accumulator width; N,Z) ----
-
-    // ---- ORA: bitwise OR into the accumulator (accumulator width; N,Z) ----
-
-    // ---- push a register onto the stack (no flags) ----
-    case 0x48:  // PHA
-      if (accum8()) push8(bus, static_cast<std::uint8_t>(state_.a)); else push16(bus, state_.a);
-      return 4u - accCyc();
-    case 0xDA:  // PHX
-      if (index8()) push8(bus, static_cast<std::uint8_t>(state_.x)); else push16(bus, state_.x);
-      return 4u - indexCyc();
-    case 0x5A:  // PHY
-      if (index8()) push8(bus, static_cast<std::uint8_t>(state_.y)); else push16(bus, state_.y);
-      return 4u - indexCyc();
-    case 0x08: push8(bus, state_.p); return 3;                          // PHP
-    case 0x8B: pushWide8(bus, state_.dbr); settleStack(); return 3;     // PHB
-    case 0x4B: pushWide8(bus, state_.pbr); settleStack(); return 3;     // PHK
-    case 0x0B: pushWide16(bus, state_.d); settleStack(); return 4;      // PHD
-    case 0xF4: pushWide16(bus, fetchWord(bus)); settleStack(); return 5;  // PEA #imm
-    case 0xD4: { const std::uint16_t v = readDpWord(bus, dpAddr(fetch(bus), 0)); pushWide16(bus, v); settleStack(); return 6u + dpCyc(); }  // PEI dir
-    case 0x62: { const std::uint16_t rel = fetchWord(bus); pushWide16(bus, static_cast<std::uint16_t>(state_.pc + rel)); settleStack(); return 6; }  // PER
-
-    // ---- pull a register from the stack ----
-    case 0x68: loadA(accum8() ? pull8(bus) : pull16(bus)); return 5u - accCyc();     // PLA (N,Z at the accumulator width)
-    case 0xFA: loadX(index8() ? pull8(bus) : pull16(bus)); return 5u - indexCyc();   // PLX (N,Z at the index width)
-    case 0x7A: loadY(index8() ? pull8(bus) : pull16(bus)); return 5u - indexCyc();   // PLY
-    case 0x28: writeP(pull8(bus)); return 4;                                          // PLP
-    case 0xAB: { const std::uint8_t v = pullWide8(bus); settleStack(); state_.dbr = v; setNZ8(v); return 4; }    // PLB
-    case 0x2B: { const std::uint16_t v = pullWide16(bus); settleStack(); state_.d = v; setNZ16(v); return 5; }   // PLD
-
-    default:
-      // An opcode the core does not decode. It returns a zero cycle count, which a
-      // vector's non-zero count rejects loudly rather than silently.
-      return 0;
-  }
+std::uint32_t Cpu65816::stepWhole(B&, std::uint8_t) {
+  return 0;
 }
 
 }  // namespace snaggletooth

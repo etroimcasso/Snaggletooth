@@ -202,8 +202,8 @@ TEST(Cpu65816CycleEngine, AHaltedCoreTouchesNothing) {
 // ---- the two execution paths agree ----
 
 TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructions) {
-  // The families this core runs cycle by cycle. An instruction outside them still
-  // executes, but only as a whole.
+  // The families this core runs cycle by cycle. The control-flow instructions are
+  // outside them and are not decoded at all yet.
   EXPECT_TRUE(Cpu65816::cycleStepped(0xEA));   // NOP
   EXPECT_TRUE(Cpu65816::cycleStepped(0xA9));   // LDA #imm
   EXPECT_TRUE(Cpu65816::cycleStepped(0xC2));   // REP #imm
@@ -227,17 +227,20 @@ TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructio
   EXPECT_TRUE(Cpu65816::cycleStepped(0xB7));   // LDA [dir],Y
   EXPECT_TRUE(Cpu65816::cycleStepped(0xA3));   // LDA sr,S
   EXPECT_TRUE(Cpu65816::cycleStepped(0xB3));   // LDA (sr,S),Y
-  EXPECT_FALSE(Cpu65816::cycleStepped(0x48));  // PHA
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x48));   // PHA
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x28));   // PLP
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xD4));   // PEI dir
+  EXPECT_FALSE(Cpu65816::cycleStepped(0x4C));  // JMP abs
 }
 
-TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineStillRunsAsAWhole) {
-  // PHA runs whole rather than a cycle at a time; stepInstruction executes it
-  // correctly and reports its documented count.
-  auto bus = busWith({{0x001000, 0x48}});
-  Cpu65816 cpu(
-      Cpu65816State{.pc = 0x1000, .s = 0x01FF, .a = 0x7F, .p = kCpuFlagM | kCpuFlagX});
-  EXPECT_EQ(cpu.stepInstruction(bus), 3u);
-  EXPECT_EQ(bus.mem[0x0001FF], 0x7F);
+TEST(Cpu65816CycleEngine, AnUndecodedOpcodeReportsNoCyclesRatherThanGuessing) {
+  // Every opcode the core decodes runs on the cycle engine. One it does not — the
+  // control-flow instructions, for now — reports a zero count from stepInstruction,
+  // which a recorded case's non-zero count rejects loudly rather than passing in
+  // silence.
+  auto bus = busWith({{0x001000, 0x4C}, {0x001001, 0x34}, {0x001002, 0x12}});
+  Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagM | kCpuFlagX});
+  EXPECT_EQ(cpu.stepInstruction(bus), 0u);
   EXPECT_TRUE(cpu.atInstructionBoundary());
 }
 
@@ -245,14 +248,13 @@ TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineCannotBeSteppedACycleAtATime)
   // Asking for one cycle of an instruction the engine does not carry produces no
   // bus activity at all — the cycle that was asked for plainly did not happen,
   // rather than being filled in with invented traffic.
-  auto bus = busWith({{0x001000, 0x48}});
-  Cpu65816 cpu(
-      Cpu65816State{.pc = 0x1000, .s = 0x01FF, .a = 0x7F, .p = kCpuFlagM | kCpuFlagX});
+  auto bus = busWith({{0x001000, 0x4C}, {0x001001, 0x34}, {0x001002, 0x12}});
+  Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagM | kCpuFlagX});
   cpu.stepCycle(bus);  // the opcode fetch, which every instruction shares
   ASSERT_EQ(bus.trace.size(), 1u);
   cpu.stepCycle(bus);
   EXPECT_EQ(bus.trace.size(), 1u);
-  EXPECT_EQ(bus.mem.count(0x0001FF), 0u);
+  EXPECT_TRUE(cpu.atInstructionBoundary());
 }
 
 // ---- what a cycle's pin string reports ----
