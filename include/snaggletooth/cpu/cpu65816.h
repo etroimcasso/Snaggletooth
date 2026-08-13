@@ -74,6 +74,13 @@ concept SnesBus = requires(B bus, std::uint32_t address, std::uint8_t value,
 
 enum class CpuRunState : std::uint8_t { Running, Waiting, Stopped };
 
+// Which hardware interrupt sequence the core is running, if any. A hardware request
+// is not an instruction — it borrows the same cycle machinery without an opcode of
+// its own — so the sequence in progress is part of the state rather than the
+// instruction register. BRK and COP run the same sequence and name themselves through
+// that register, so they leave this at None.
+enum class InterruptRequest : std::uint8_t { None, Irq, Nmi };
+
 // Processor-status flag masks. In emulation mode bit 4 is the break flag rather
 // than x, and bit 5 is unused; the m and x widths are forced regardless, so the
 // width queries below read the e flag directly instead of these bits.
@@ -116,6 +123,11 @@ struct Cpu65816State {
   bool nmiPending = false;   // latched by a high-to-low edge on the NMI line
   bool irqLine = false;      // the IRQ line's current level
 
+  // The hardware interrupt sequence in progress, which has no opcode to be held in
+  // the instruction register. It is progress state like the fields above: a snapshot
+  // taken part-way through a sequence restores to the same cycle of it.
+  InterruptRequest servicing = InterruptRequest::None;
+
   CpuRunState run = CpuRunState::Running;
 };
 
@@ -156,9 +168,9 @@ class Cpu65816 {
 
   // Whether an opcode runs on the cycle engine. The engine carries the implied,
   // accumulator and immediate instructions, every addressing mode that reaches
-  // memory, and the stack instructions; the control-flow instructions do not run on
-  // it yet, so stepCycle cannot observe one a cycle at a time. Ask before stepping
-  // an instruction cycle by cycle.
+  // memory, the stack and control-flow instructions, and the software interrupts and
+  // halts; the two block moves do not run on it yet, so stepCycle cannot observe one
+  // a cycle at a time. Ask before stepping an instruction cycle by cycle.
   [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept;
 
  private:
@@ -1037,6 +1049,52 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeControlCycle(B& bus, const CtrlForm& form);
 
+  // ---- the interrupts and the halts ----------------------------------------
+  // Whether the opcode is a software interrupt — the two instructions that run the
+  // interrupt sequence themselves.
+  [[nodiscard]] static constexpr bool softwareInterrupt(std::uint8_t opcode) noexcept {
+    return opcode == 0x00 || opcode == 0x02;  // BRK, COP
+  }
+
+  // Which hardware request is due, if any. It is answered between instructions: a
+  // request is taken once the instruction under way has finished (sections 2.18 and
+  // 2.21). The non-maskable request outranks the maskable one (section 7.19), and the
+  // maskable one is taken only while the interrupt-disable flag is clear.
+  [[nodiscard]] InterruptRequest pendingRequest() const noexcept {
+    if (state_.nmiPending) return InterruptRequest::Nmi;
+    if (state_.irqLine && (state_.p & kCpuFlagI) == 0) return InterruptRequest::Irq;
+    return InterruptRequest::None;
+  }
+
+  // Where the sequence reads its new program counter (tables 5-2 and 5-3). The two
+  // hardware requests name themselves through the state; the two software ones
+  // through the instruction register. Every vector lives in bank zero.
+  [[nodiscard]] std::uint16_t interruptVector() const noexcept {
+    switch (state_.servicing) {
+      case InterruptRequest::Nmi: return state_.e ? 0xFFFAu : 0xFFEAu;
+      case InterruptRequest::Irq: return state_.e ? 0xFFFEu : 0xFFEEu;
+      case InterruptRequest::None: break;
+    }
+    if (state_.ir == 0x02) return state_.e ? 0xFFF4u : 0xFFE4u;  // COP
+    return state_.e ? 0xFFFEu : 0xFFE6u;                         // BRK
+  }
+
+  // The status byte the sequence saves. In emulation mode bit 4 is the break flag
+  // rather than the index width, and a hardware request clears it — which is how a
+  // handler tells one from a BRK (note 11 to table 5-7). Native mode saves the
+  // register as it stands, where that bit belongs to the index width.
+  [[nodiscard]] std::uint8_t interruptStatus() const noexcept {
+    if (state_.e && state_.servicing != InterruptRequest::None) {
+      return static_cast<std::uint8_t>(state_.p & ~kCpuFlagX);
+    }
+    return state_.p;
+  }
+
+  // Executes one cycle of an interrupt sequence — the same sequence for all four
+  // sources, differing only in its first cycle, its vector, and the break flag.
+  template <SnesBus B>
+  bool executeInterruptCycle(B& bus);
+
   // The immediate operand's width: the accumulator instructions take an operand as
   // wide as the accumulator, the index instructions one as wide as the index
   // registers.
@@ -1088,6 +1146,8 @@ constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
     case 0xA9: case 0xC0: case 0xC9: case 0xE0: case 0xE9:
     // The status-mask instructions and the reserved two-byte no-op.
     case 0x42: case 0xC2: case 0xE2:
+    // The software interrupts and the two halts.
+    case 0x00: case 0x02: case 0xCB: case 0xDB:
       return true;
     default:
       break;
@@ -2263,9 +2323,64 @@ bool Cpu65816::executeControlCycle(B& bus, const CtrlForm& form) {
   return true;
 }
 
+// The interrupt sequence, shared by all four sources (table 5-7 rows 22a and 22j).
+// After its first cycle it saves the return address and the status byte on the stack
+// and reads a vector, and the two differ only in what that first cycle is: a software
+// interrupt reads a signature byte and steps past it, a hardware one reads the
+// instruction it interrupted and throws the byte away.
+template <SnesBus B>
+bool Cpu65816::executeInterruptCycle(B& bus) {
+  // Emulation mode does not save the program bank (note 7, section 7.11.2), so every
+  // cycle after the first sits one place earlier in that mode.
+  const std::uint8_t step =
+      static_cast<std::uint8_t>(state_.tcu + (state_.e && state_.tcu >= 2 ? 1 : 0));
+  switch (step) {
+    case 1:
+      if (state_.servicing != InterruptRequest::None) {
+        // The program counter does not move, so the address saved below is the
+        // instruction the sequence interrupted rather than the one after it.
+        bus.read(pcAddr(), CycleKind::DataRead);
+      } else {
+        fetch(bus);  // the signature byte, read and not used (section 7.22)
+      }
+      return false;
+    case 2:
+      stackPush(bus, state_.pbr, /*leavesPage=*/false);
+      return false;
+    case 3:
+      stackPush(bus, static_cast<std::uint8_t>(state_.pc >> 8), /*leavesPage=*/false);
+      return false;
+    case 4:
+      stackPush(bus, static_cast<std::uint8_t>(state_.pc), /*leavesPage=*/false);
+      return false;
+    case 5:
+      stackPush(bus, interruptStatus(), /*leavesPage=*/false);
+      return false;
+    case 6:
+      state_.tmp = bus.read(interruptVector(), CycleKind::VectorRead);
+      return false;
+    default:
+      state_.pc = static_cast<std::uint16_t>(
+          state_.tmp |
+          (bus.read(interruptVector() + 1u, CycleKind::VectorRead) << 8));
+      // The handler runs in bank zero with the previous bank saved on the stack in
+      // native mode and lost in emulation mode (sections 7.11.1 and 7.11.2), in
+      // binary mode, and with further maskable requests disabled (section 7.12).
+      state_.pbr = 0;
+      state_.p = static_cast<std::uint8_t>((state_.p & ~kCpuFlagD) | kCpuFlagI);
+      state_.servicing = InterruptRequest::None;
+      return true;
+  }
+}
+
 template <SnesBus B>
 bool Cpu65816::executeCycle(B& bus) {
+  // A hardware sequence has no opcode of its own, so it is asked about before the
+  // instruction register is consulted at all.
+  if (state_.servicing != InterruptRequest::None) return executeInterruptCycle(bus);
+
   const std::uint8_t opcode = state_.ir;
+  if (softwareInterrupt(opcode)) return executeInterruptCycle(bus);
   if (DpForm form{}; directPageForm(opcode, form)) {
     return executeDirectPageCycle(bus, form);
   }
@@ -2306,6 +2421,16 @@ bool Cpu65816::executeCycle(B& bus) {
       state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
       return true;
 
+    // ---- WAI and STP: two internal cycles parked at the program counter, and the
+    //      core halts at the end of the second. A waiting core is released by either
+    //      interrupt line; a stopped one only by a reset (sections 7.13 and 7.14) ----
+    case 0xCB:  // WAI
+    case 0xDB:  // STP
+      bus.internal(pcAddr());
+      if (state_.tcu == 1) return false;
+      state_.run = opcode == 0xCB ? CpuRunState::Waiting : CpuRunState::Stopped;
+      return true;
+
     // ---- XBA: two internal cycles, both parked at the program counter ----
     case 0xEB:
       bus.internal(pcAddr());
@@ -2341,20 +2466,42 @@ bool Cpu65816::executeCycle(B& bus) {
 template <SnesBus B>
 void Cpu65816::stepCycle(B& bus) {
   // A waiting or stopped core drives no address and touches no memory; the cycle
-  // still passes, and its host prices it from the run state.
-  if (state_.run != CpuRunState::Running) return;
+  // still passes, and its host prices it from the run state. Either interrupt line
+  // releases a waiting core, the masked one included — a masked request wakes it
+  // without being dispatched, so execution resumes at the instruction after the wait
+  // (section 7.13). Only a reset restarts a stopped one (section 7.14), and a reset
+  // reaches the core as a fresh state rather than as a line.
+  if (state_.run != CpuRunState::Running) {
+    if (state_.run == CpuRunState::Waiting && (state_.nmiPending || state_.irqLine)) {
+      state_.run = CpuRunState::Running;
+    }
+    return;
+  }
 
   if (atInstructionBoundary()) {
     // The mode invariants settle on the fetch cycle, so an instruction always runs
     // under a consistent view of the widths.
     normalize();
+    if (const InterruptRequest request = pendingRequest();
+        request != InterruptRequest::None) {
+      // A hardware request is taken between instructions. Its first cycle reads the
+      // instruction it interrupted and discards the byte, leaving the program counter
+      // where it is so the sequence saves the address it will resume at. The
+      // non-maskable latch is cleared as the sequence begins: a line still held low
+      // afterwards asks for nothing more (section 2.21).
+      state_.servicing = request;
+      state_.nmiPending = false;
+      bus.read(pcAddr(), CycleKind::OpcodeFetch);
+      state_.tcu = 1;
+      return;
+    }
     state_.ir = bus.read(pcAddr(), CycleKind::OpcodeFetch);
     state_.pc = static_cast<std::uint16_t>(state_.pc + 1);
     state_.tcu = 1;
     return;
   }
 
-  if (!cycleStepped(state_.ir)) {
+  if (state_.servicing == InterruptRequest::None && !cycleStepped(state_.ir)) {
     // The instruction in progress runs whole rather than a cycle at a time, so
     // there is no single cycle to run here. The core returns to a boundary without
     // touching the bus: the cycle that was asked for plainly did not happen, rather
@@ -2369,13 +2516,16 @@ void Cpu65816::stepCycle(B& bus) {
 
 template <SnesBus B>
 std::uint32_t Cpu65816::stepInstruction(B& bus) {
-  if (state_.run != CpuRunState::Running) return 1;
+  if (state_.run != CpuRunState::Running) {
+    stepCycle(bus);  // a halted cycle, which may be the one that ends a wait
+    return 1;
+  }
 
   std::uint32_t cycles = 0;
   if (atInstructionBoundary()) {
-    stepCycle(bus);  // the opcode fetch
+    stepCycle(bus);  // the opcode fetch, or the first cycle of an interrupt sequence
     cycles = 1;
-    if (!cycleStepped(state_.ir)) {
+    if (state_.servicing == InterruptRequest::None && !cycleStepped(state_.ir)) {
       state_.tcu = 0;
       return stepWhole(bus, state_.ir);
     }

@@ -333,8 +333,9 @@ TEST(Cpu65816DirectPage, EveryDirectPageOpcodeRunsOnTheCycleEngine) {
   }
   // The forty-seven implied and immediate instructions, this family, the sixty-six
   // absolute and long ones, the fifty-six indirect and stack-relative ones, the
-  // sixteen stack instructions, and the twenty-one control-flow ones.
-  EXPECT_EQ(carried, 47 + 44 + 66 + 56 + 16 + 21);
+  // sixteen stack instructions, the twenty-one control-flow ones, and the two
+  // software interrupts with the two halts.
+  EXPECT_EQ(carried, 47 + 44 + 66 + 56 + 16 + 21 + 4);
 }
 
 }  // namespace

@@ -202,8 +202,8 @@ TEST(Cpu65816CycleEngine, AHaltedCoreTouchesNothing) {
 // ---- the two execution paths agree ----
 
 TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructions) {
-  // The families this core runs cycle by cycle. The control-flow instructions are
-  // outside them and are not decoded at all yet.
+  // The families this core runs cycle by cycle. The two block moves are outside them
+  // and are not decoded at all yet.
   EXPECT_TRUE(Cpu65816::cycleStepped(0xEA));   // NOP
   EXPECT_TRUE(Cpu65816::cycleStepped(0xA9));   // LDA #imm
   EXPECT_TRUE(Cpu65816::cycleStepped(0xC2));   // REP #imm
@@ -239,6 +239,10 @@ TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructio
   EXPECT_TRUE(Cpu65816::cycleStepped(0x22));   // JSL
   EXPECT_TRUE(Cpu65816::cycleStepped(0x60));   // RTS
   EXPECT_TRUE(Cpu65816::cycleStepped(0x40));   // RTI
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x00));   // BRK
+  EXPECT_TRUE(Cpu65816::cycleStepped(0x02));   // COP
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xCB));   // WAI
+  EXPECT_TRUE(Cpu65816::cycleStepped(0xDB));   // STP
   EXPECT_FALSE(Cpu65816::cycleStepped(0x44));  // MVP
 }
 

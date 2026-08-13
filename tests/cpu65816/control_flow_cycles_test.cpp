@@ -509,8 +509,8 @@ TEST(Cpu65816ControlFlow, EveryControlFlowOpcodeRunsOnTheCycleEngine) {
   for (std::uint8_t opcode : kFamily) {
     EXPECT_TRUE(Cpu65816::cycleStepped(opcode)) << "opcode " << int{opcode};
   }
-  // The software interrupts, the halts and the block moves are not decoded.
-  constexpr std::uint8_t kUndecoded[] = {0x00, 0x02, 0x44, 0x54, 0xCB, 0xDB};
+  // The two block moves are not decoded.
+  constexpr std::uint8_t kUndecoded[] = {0x44, 0x54};
   for (std::uint8_t opcode : kUndecoded) {
     EXPECT_FALSE(Cpu65816::cycleStepped(opcode)) << "opcode " << int{opcode};
   }

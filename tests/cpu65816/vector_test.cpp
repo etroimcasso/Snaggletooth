@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -167,6 +168,23 @@ std::vector<VectorParam> controlFlowParams() {
   return params;
 }
 
+// The interrupt and halt family: the two software interrupts and the two halts. The
+// hardware interrupt sequence shares its cycles with BRK and COP but has no opcode,
+// so no vector file covers it — it is pinned by the tests derived from the datasheet.
+constexpr std::uint8_t kInterruptHaltOpcodes[] = {
+    0x00, 0x02,  // BRK / COP
+    0xCB, 0xDB,  // WAI / STP
+};
+
+std::vector<VectorParam> interruptHaltParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kInterruptHaltOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
 Cpu65816State stateOf(const RegState& r) {
   return Cpu65816State{.pc = r.pc,
                        .s = r.s,
@@ -195,6 +213,12 @@ void expectTraceMatches(const VectorCase& c,
       ASSERT_TRUE(got[i].address.has_value())
           << c.name << " (cycle " << i << " drove no address)";
       EXPECT_EQ(*got[i].address, *want.address) << c.name << " (cycle " << i << " address)";
+    } else {
+      // The recording leaves the address out only where the chip drove none at all,
+      // which is a halted cycle. Driving one there is as wrong as driving the wrong
+      // one, so the absence is asserted rather than skipped.
+      EXPECT_FALSE(got[i].address.has_value())
+          << c.name << " (cycle " << i << " drove an address where the chip drove none)";
     }
     if (want.value.has_value()) {
       ASSERT_TRUE(got[i].value.has_value())
@@ -259,7 +283,19 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     const bool perCycle = Cpu65816::cycleStepped(param.opcode);
     std::uint32_t cycles = 0;
     if (perCycle) {
-      for (std::size_t i = 0; i < c.cycles.size(); ++i) cpu.stepCycle(bus);
+      for (std::size_t i = 0; i < c.cycles.size(); ++i) {
+        const std::size_t narrated = bus.trace.size();
+        cpu.stepCycle(bus);
+        if (bus.trace.size() == narrated) {
+          // The core halted and drove nothing at all. The recording still has a row
+          // for the cycle, with every pin inactive, so the runner supplies it — which
+          // is what lets a halt be compared cycle for cycle like anything else.
+          bus.trace.push_back(
+              {.address = std::nullopt,
+               .value = std::nullopt,
+               .signals = snaggletooth::cpu_vectors::kHaltedSignals});
+        }
+      }
       cycles = static_cast<std::uint32_t>(c.cycles.size());
       expectTraceMatches(c, bus.trace);
       EXPECT_TRUE(cpu.atInstructionBoundary())
@@ -336,6 +372,16 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     ControlFlow, Cpu65816Vectors,
     ::testing::ValuesIn(controlFlowParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    InterruptHalt, Cpu65816Vectors,
+    ::testing::ValuesIn(interruptHaltParams()),
     [](const ::testing::TestParamInfo<VectorParam>& info) {
       char label[16];
       std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
