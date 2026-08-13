@@ -274,30 +274,6 @@ class Spc700 {
   std::uint16_t addrAbsX(B& bus) {
     return static_cast<std::uint16_t>(addrAbs(bus) + state_.x);
   }
-  template <ApuBus B>
-  std::uint16_t addrAbsY(B& bus) {
-    return static_cast<std::uint16_t>(addrAbs(bus) + state_.y);
-  }
-  // [dp+X]: X is added to the direct-page offset before the pointer lookup; the
-  // two pointer bytes wrap within the direct page.
-  template <ApuBus B>
-  std::uint16_t addrIndX(B& bus) {
-    std::uint8_t d = static_cast<std::uint8_t>(fetch(bus) + state_.x);
-    std::uint16_t lo = bus.read(static_cast<std::uint16_t>(dpBase() + d));
-    std::uint16_t hi =
-        bus.read(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)));
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-  // [dp]+Y: the pointer is looked up from the direct page (wrapping within it),
-  // then Y is added to the resolved 16-bit address.
-  template <ApuBus B>
-  std::uint16_t addrIndY(B& bus) {
-    std::uint8_t d = fetch(bus);
-    std::uint16_t lo = bus.read(static_cast<std::uint16_t>(dpBase() + d));
-    std::uint16_t hi =
-        bus.read(static_cast<std::uint16_t>(dpBase() + ((d + 1) & 0xFF)));
-    return static_cast<std::uint16_t>((lo | (hi << 8)) + state_.y);
-  }
 
   // A 16-bit word in the direct page: the two bytes live at dp and dp+1, and the
   // high byte's address wraps within the direct page (dp = $FF reads its high
@@ -377,33 +353,45 @@ class Spc700 {
   // the operand bytes it fetches, the internal cycles it spends, and the pointer
   // reads it makes before its address is settled.
   enum class AddrMode : std::uint8_t {
-    Implied,            // no operand at all
-    Immediate,          // the byte after the opcode
-    Dp,                 // dp + offset
-    DpX,                // dp + (offset + X), wrapping inside the page
-    DpY,                // dp + (offset + Y), wrapping inside the page
-    Abs,                // a two-byte address
-    AbsX,               // that address plus X
-    AbsY,               // that address plus Y
-    Indirect,           // (X): dp + X
-    IndirectIncrement,  // (X)+: the same, and X steps after
-    IndexedIndirect,    // [dp+X]: X indexes the offset, then a pointer
-    IndirectIndexed,    // [dp]+Y: a pointer, then Y indexes the address
-    DpToDp,             // two direct-page offsets: source then destination
-    ImmediateToDp,      // an immediate byte and a direct-page offset
+    Implied,             // no operand at all
+    Immediate,           // the byte after the opcode
+    Dp,                  // dp + offset
+    DpX,                 // dp + (offset + X), wrapping inside the page
+    DpY,                 // dp + (offset + Y), wrapping inside the page
+    Abs,                 // a two-byte address
+    AbsX,                // that address plus X
+    AbsY,                // that address plus Y
+    Indirect,            // (X): dp + X
+    IndirectIncrement,   // (X)+: the same, and X steps after
+    IndexedIndirect,     // [dp+X]: X indexes the offset, then a pointer
+    IndirectIndexed,     // [dp]+Y: a pointer, then Y indexes the address
+    IndirectToIndirect,  // (X),(Y): the Y side is the source, the X side the target
+    DpToDp,              // two direct-page offsets: source then destination
+    ImmediateToDp,       // an immediate byte and a direct-page offset
   };
 
-  // What an instruction does once its address is settled: read the byte there, or
-  // write one. A write reads its destination first — the value is discarded, but the
-  // access is real, so a register that clears when read sees it.
-  enum class MemAccess : std::uint8_t { Read, Write };
+  // What an instruction does once its address is settled.
+  enum class MemAccess : std::uint8_t {
+    Read,     // read the byte and apply it to a register
+    Write,    // put a value there
+    Modify,   // read the byte, compute from it, and write the result back
+    Compare,  // read the byte and compare it, writing nothing
+  };
+
+  // What an instruction that reaches a destination does on the cycle before it settles
+  // there. Most forms read the byte: a modify needs it, and a plain write discards it
+  // but still makes the access, so a register that clears when read sees it. One store
+  // spends the cycle internally instead, and the two-operand moves have no such cycle
+  // at all.
+  enum class DestinationCycle : std::uint8_t { None, Internal, Read };
 
   // The shape of one memory instruction: where its operand lives, what it does there,
-  // and whether a write reads its destination first.
+  // how it reaches its destination, and how many internal cycles it spends.
   struct MemForm {
     AddrMode mode = AddrMode::Implied;
     MemAccess access = MemAccess::Read;
-    bool readsDestination = true;
+    DestinationCycle destination = DestinationCycle::Read;
+    std::uint8_t internals = 0;  // extra internal cycles, on the implied forms only
   };
 
   // Fills in the shape of a memory instruction and answers whether the opcode is one
@@ -441,18 +429,28 @@ class Spc700 {
   template <ApuBus B>
   bool executeSetupCycle(B& bus, const MemForm& form);
 
-  // Executes one cycle of an instruction carrying two operand bytes.
-  template <ApuBus B>
-  bool executeTwoOperandCycle(B& bus, const MemForm& form);
-
   // Applies an instruction that has finished reading its operand.
   void applyMemoryRead(std::uint8_t opcode, std::uint8_t value);
 
   // The value a store writes.
   [[nodiscard]] std::uint8_t memoryStoreValue(std::uint8_t opcode) const noexcept;
 
-  // Applies a register-to-register move.
+  // The value a read-modify-write instruction writes back: computed from the byte at
+  // the destination and, for the two-operand forms, the source byte beside it. The
+  // flags it sets are the instruction's, so this runs on the cycle that writes.
+  [[nodiscard]] std::uint8_t memoryModifyValue(std::uint8_t opcode, std::uint8_t destination,
+                                               std::uint8_t source);
+
+  // Applies an implied instruction — a register-to-register move, or a register's own
+  // increment, shift or nibble exchange.
   void applyImplied(std::uint8_t opcode);
+
+  // Whether a mode carries a second operand byte, which lives in the pointer scratch
+  // while the byte at the destination lives in the data scratch.
+  [[nodiscard]] static constexpr bool twoOperand(AddrMode mode) noexcept {
+    return mode == AddrMode::IndirectToIndirect || mode == AddrMode::DpToDp ||
+           mode == AddrMode::ImmediateToDp;
+  }
 
   // The direct-page address an offset names: the base plus the offset, which wraps
   // inside the page.
@@ -538,21 +536,100 @@ constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
     case 0xC6:                        // MOV (X),A
       form = MemForm{.mode = AddrMode::Indirect, .access = MemAccess::Write};
       return true;
-    case 0xAF:                        // MOV (X)+,A — the one write with no
-      form = MemForm{.mode = AddrMode::IndirectIncrement,  // destination read
-                     .access = MemAccess::Write,
-                     .readsDestination = false};
+    case 0xAF:                        // MOV (X)+,A — the one store that spends its
+      form = MemForm{.mode = AddrMode::IndirectIncrement,  // destination cycle
+                     .access = MemAccess::Write,           // internally
+                     .destination = DestinationCycle::Internal};
       return true;
 
     // ---- 8-bit move: register to register, and the two-operand direct-page moves ----
     case 0x7D: case 0xDD: case 0x5D: case 0xFD: case 0x9D: case 0xBD:
       form = MemForm{.mode = AddrMode::Implied};
       return true;
-    case 0xFA:                        // MOV dp,dp
-      form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Write};
+    case 0xFA:                        // MOV dp,dp — the one two-operand form that
+      form = MemForm{.mode = AddrMode::DpToDp,           // reaches its destination
+                     .access = MemAccess::Write,         // only to write
+                     .destination = DestinationCycle::None};
       return true;
     case 0x8F:                        // MOV dp,#imm
       form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Write};
+      return true;
+
+    // ---- 8-bit arithmetic, logic and comparison against a register ----
+    // Every one of these reads a byte and applies it to A, X or Y; they differ only in
+    // the payload, so they share the read sequence of the move that fetches the same way.
+    case 0x88: case 0xA8: case 0x68: case 0xC8: case 0xAD:  // ADC/SBC/CMP A,#imm,
+    case 0x28: case 0x08: case 0x48:                        // CMP X/Y,#imm, AND/OR/EOR
+      form = MemForm{.mode = AddrMode::Immediate, .access = MemAccess::Read};
+      return true;
+    case 0x84: case 0xA4: case 0x64: case 0x3E: case 0x7E:  // ...,dp
+    case 0x24: case 0x04: case 0x44:
+      form = MemForm{.mode = AddrMode::Dp, .access = MemAccess::Read};
+      return true;
+    case 0x94: case 0xB4: case 0x74: case 0x34: case 0x14: case 0x54:  // ...,dp+X
+      form = MemForm{.mode = AddrMode::DpX, .access = MemAccess::Read};
+      return true;
+    case 0x85: case 0xA5: case 0x65: case 0x1E: case 0x5E:  // ...,!abs
+    case 0x25: case 0x05: case 0x45:
+      form = MemForm{.mode = AddrMode::Abs, .access = MemAccess::Read};
+      return true;
+    case 0x95: case 0xB5: case 0x75: case 0x35: case 0x15: case 0x55:  // ...,!abs+X
+      form = MemForm{.mode = AddrMode::AbsX, .access = MemAccess::Read};
+      return true;
+    case 0x96: case 0xB6: case 0x76: case 0x36: case 0x16: case 0x56:  // ...,!abs+Y
+      form = MemForm{.mode = AddrMode::AbsY, .access = MemAccess::Read};
+      return true;
+    case 0x87: case 0xA7: case 0x67: case 0x27: case 0x07: case 0x47:  // ...,[dp+X]
+      form = MemForm{.mode = AddrMode::IndexedIndirect, .access = MemAccess::Read};
+      return true;
+    case 0x97: case 0xB7: case 0x77: case 0x37: case 0x17: case 0x57:  // ...,[dp]+Y
+      form = MemForm{.mode = AddrMode::IndirectIndexed, .access = MemAccess::Read};
+      return true;
+    case 0x86: case 0xA6: case 0x66: case 0x26: case 0x06: case 0x46:  // ...,(X)
+      form = MemForm{.mode = AddrMode::Indirect, .access = MemAccess::Read};
+      return true;
+
+    // ---- 8-bit increment, decrement, shift and rotation of a register ----
+    case 0xBC: case 0x3D: case 0xFC: case 0x9C: case 0x1D: case 0xDC:  // INC/DEC A/X/Y
+    case 0x1C: case 0x5C: case 0x3C: case 0x7C:                        // ASL/LSR/ROL/ROR A
+      form = MemForm{.mode = AddrMode::Implied};
+      return true;
+    case 0x9F:                        // XCN A — the exchange runs on internal cycles
+      form = MemForm{.mode = AddrMode::Implied, .internals = 3};
+      return true;
+
+    // ---- 8-bit increment, decrement, shift and rotation of a byte in memory ----
+    // The read-modify-write seat: the byte is read, the result computed from it, and
+    // the result written back to the same address.
+    case 0xAB: case 0x8B: case 0x0B: case 0x4B: case 0x2B: case 0x6B:  // ...dp
+      form = MemForm{.mode = AddrMode::Dp, .access = MemAccess::Modify};
+      return true;
+    case 0xBB: case 0x9B: case 0x1B: case 0x5B: case 0x3B: case 0x7B:  // ...dp+X
+      form = MemForm{.mode = AddrMode::DpX, .access = MemAccess::Modify};
+      return true;
+    case 0xAC: case 0x8C: case 0x0C: case 0x4C: case 0x2C: case 0x6C:  // ...!abs
+      form = MemForm{.mode = AddrMode::Abs, .access = MemAccess::Modify};
+      return true;
+
+    // ---- 8-bit arithmetic and logic between two bytes in memory ----
+    // The Y side is the source and the X side both the other operand and the target.
+    case 0x99: case 0xB9: case 0x39: case 0x19: case 0x59:  // ADC/SBC/AND/OR/EOR (X),(Y)
+      form = MemForm{.mode = AddrMode::IndirectToIndirect, .access = MemAccess::Modify};
+      return true;
+    case 0x79:                        // CMP (X),(Y) — compares and writes nothing
+      form = MemForm{.mode = AddrMode::IndirectToIndirect, .access = MemAccess::Compare};
+      return true;
+    case 0x89: case 0xA9: case 0x29: case 0x09: case 0x49:  // ...dp,dp
+      form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Modify};
+      return true;
+    case 0x69:                        // CMP dp,dp
+      form = MemForm{.mode = AddrMode::DpToDp, .access = MemAccess::Compare};
+      return true;
+    case 0x98: case 0xB8: case 0x38: case 0x18: case 0x58:  // ...dp,#imm
+      form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Modify};
+      return true;
+    case 0x78:                        // CMP dp,#imm
+      form = MemForm{.mode = AddrMode::ImmediateToDp, .access = MemAccess::Compare};
       return true;
 
     default:
@@ -569,13 +646,14 @@ constexpr std::uint8_t Spc700::setupCycles(AddrMode mode) noexcept {
     case AddrMode::IndirectIncrement: return 1;
     case AddrMode::DpX:
     case AddrMode::DpY:
-    case AddrMode::Abs: return 2;
+    case AddrMode::Abs:
+    case AddrMode::IndirectToIndirect:
+    case AddrMode::ImmediateToDp: return 2;
     case AddrMode::AbsX:
-    case AddrMode::AbsY: return 3;
+    case AddrMode::AbsY:
+    case AddrMode::DpToDp: return 3;
     case AddrMode::IndexedIndirect:
     case AddrMode::IndirectIndexed: return 4;
-    case AddrMode::DpToDp:
-    case AddrMode::ImmediateToDp: break;  // these run their own cycle sequence
   }
   return 0;
 }
@@ -587,10 +665,16 @@ constexpr std::uint8_t Spc700::setupCycles(AddrMode mode) noexcept {
 template <ApuBus B>
 bool Spc700::executeSetupCycle(B& bus, const MemForm& form) {
   switch (form.mode) {
-    case AddrMode::Implied:
-      discardNextByte(bus);
+    case AddrMode::Implied: {
+      // The byte after the opcode is read and thrown away. Whatever the instruction
+      // computes happens inside the chip, over as many cycles as it takes, and lands
+      // on the last of them.
+      const std::uint8_t last = static_cast<std::uint8_t>(1 + form.internals);
+      if (state_.tcu == 1) discardNextByte(bus);
+      if (state_.tcu != last) return false;
       applyImplied(state_.ir);
       return true;
+    }
 
     case AddrMode::Dp:
       state_.ea = dpAddr(fetch(bus));
@@ -655,61 +739,54 @@ bool Spc700::executeSetupCycle(B& bus, const MemForm& form) {
       return false;
     }
 
+    case AddrMode::IndirectToIndirect:
+      // X names the target and Y the source. X addresses the target on its own, so the
+      // byte after the opcode is read and thrown away as it is for every (X) form.
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        state_.ea = dpAddr(state_.x);
+        return false;
+      }
+      state_.ptr = bus.read(dpAddr(state_.y));
+      return false;
+
+    case AddrMode::DpToDp:
+      // The source offset, then the byte it names, then the destination offset. The
+      // source byte takes the pointer scratch once the offset that found it is spent.
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = bus.read(dpAddr(static_cast<std::uint8_t>(state_.ptr)));
+        return false;
+      }
+      state_.ea = dpAddr(fetch(bus));
+      return false;
+
+    case AddrMode::ImmediateToDp:
+      // The source byte is in the instruction, so only the destination offset follows.
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      state_.ea = dpAddr(fetch(bus));
+      return false;
+
     case AddrMode::Immediate:
       break;  // its operand fetch is the access itself, so it has no setup cycle
-    case AddrMode::DpToDp:
-    case AddrMode::ImmediateToDp:
-      break;  // these run their own cycle sequence
   }
   return false;
 }
 
-// A two-operand instruction carries both of its bytes: a source offset and a
-// destination offset, or an immediate byte and a destination offset. The first form
-// reads its source between the two fetches; the second has its byte already and reads
-// the destination instead.
-template <ApuBus B>
-bool Spc700::executeTwoOperandCycle(B& bus, const MemForm& form) {
-  const bool immediate = form.mode == AddrMode::ImmediateToDp;
-  switch (state_.tcu) {
-    case 1:
-      if (immediate) {
-        state_.tmp = fetch(bus);
-      } else {
-        state_.ptr = fetch(bus);
-      }
-      return false;
-    case 2:
-      if (immediate) {
-        state_.ea = dpAddr(fetch(bus));
-      } else {
-        state_.tmp = bus.read(dpAddr(static_cast<std::uint8_t>(state_.ptr)));
-      }
-      return false;
-    case 3:
-      if (immediate) {
-        static_cast<void>(bus.read(state_.ea));
-      } else {
-        state_.ea = dpAddr(fetch(bus));
-      }
-      return false;
-    default:
-      bus.write(state_.ea, static_cast<std::uint8_t>(state_.tmp));
-      return true;
-  }
-}
-
 // Once the address is settled the instruction reaches memory: one cycle to read the
-// byte, or two to read the destination and write it. Register work lands on the
+// byte, or two to reach the destination and settle there. Register work lands on the
 // instruction's last cycle, so a snapshot taken mid-instruction never holds a register
 // the hardware has not written yet.
 template <ApuBus B>
 bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
-  if (form.mode == AddrMode::DpToDp || form.mode == AddrMode::ImmediateToDp) {
-    return executeTwoOperandCycle(bus, form);
-  }
-
-  const std::uint8_t setup = setupCycles(form.mode);
+  const std::uint8_t setup =
+      static_cast<std::uint8_t>(setupCycles(form.mode) + form.internals);
   if (state_.tcu <= setup) return executeSetupCycle(bus, form);
 
   const std::uint8_t step = static_cast<std::uint8_t>(state_.tcu - setup);
@@ -734,14 +811,35 @@ bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
     return true;
   }
 
-  if (step == 1) {
-    // The destination read. MOV (X)+,A is the one write form that does not make it:
-    // its cycle passes without reaching memory at all.
-    if (form.readsDestination) static_cast<void>(bus.read(state_.ea));
+  // The cycle before the instruction settles at its destination. Most forms read the
+  // byte there — a modify needs it, a plain store discards it but still makes the
+  // access. MOV (X)+,A spends the cycle internally, and the two-operand moves have no
+  // such cycle at all.
+  if (step == 1 && form.destination != DestinationCycle::None) {
+    if (form.destination == DestinationCycle::Read) state_.tmp = bus.read(state_.ea);
     return false;
   }
-  bus.write(state_.ea, memoryStoreValue(state_.ir));
-  if (form.mode == AddrMode::IndirectIncrement) ++state_.x;
+
+  const std::uint8_t destination = static_cast<std::uint8_t>(state_.tmp);
+  const std::uint8_t source = static_cast<std::uint8_t>(state_.ptr);
+  switch (form.access) {
+    case MemAccess::Write:
+      // A two-operand move carries the byte it writes; every other store writes a
+      // register.
+      bus.write(state_.ea,
+                twoOperand(form.mode) ? source : memoryStoreValue(state_.ir));
+      if (form.mode == AddrMode::IndirectIncrement) ++state_.x;
+      break;
+    case MemAccess::Modify:
+      bus.write(state_.ea, memoryModifyValue(state_.ir, destination, source));
+      break;
+    case MemAccess::Compare:
+      // The comparison happens inside the chip, so this cycle reaches memory not at all.
+      cmpOp(destination, source);
+      break;
+    case MemAccess::Read:
+      break;  // a read settles on the cycle above, never here
+  }
   return true;
 }
 
@@ -760,6 +858,42 @@ inline void Spc700::applyMemoryRead(std::uint8_t opcode, std::uint8_t value) {
       state_.y = value;
       setNZ(value);
       break;
+
+    // ---- the same reads, applied arithmetically to A ----
+    case 0x88: case 0x86: case 0x84: case 0x94: case 0x85:
+    case 0x95: case 0x96: case 0x87: case 0x97:              // ADC A,operand
+      state_.a = adcOp(state_.a, value);
+      break;
+    case 0xA8: case 0xA6: case 0xA4: case 0xB4: case 0xA5:
+    case 0xB5: case 0xB6: case 0xA7: case 0xB7:              // SBC A,operand
+      state_.a = sbcOp(state_.a, value);
+      break;
+    case 0x68: case 0x66: case 0x64: case 0x74: case 0x65:
+    case 0x75: case 0x76: case 0x67: case 0x77:              // CMP A,operand
+      cmpOp(state_.a, value);
+      break;
+    case 0xC8: case 0x3E: case 0x1E:                         // CMP X,operand
+      cmpOp(state_.x, value);
+      break;
+    case 0xAD: case 0x7E: case 0x5E:                         // CMP Y,operand
+      cmpOp(state_.y, value);
+      break;
+    case 0x28: case 0x26: case 0x24: case 0x34: case 0x25:
+    case 0x35: case 0x36: case 0x27: case 0x37:              // AND A,operand
+      state_.a = static_cast<std::uint8_t>(state_.a & value);
+      setNZ(state_.a);
+      break;
+    case 0x08: case 0x06: case 0x04: case 0x14: case 0x05:
+    case 0x15: case 0x16: case 0x07: case 0x17:              // OR A,operand
+      state_.a = static_cast<std::uint8_t>(state_.a | value);
+      setNZ(state_.a);
+      break;
+    case 0x48: case 0x46: case 0x44: case 0x54: case 0x45:
+    case 0x55: case 0x56: case 0x47: case 0x57:              // EOR A,operand
+      state_.a = static_cast<std::uint8_t>(state_.a ^ value);
+      setNZ(state_.a);
+      break;
+
     default:
       // Every routed read form is listed above. stepCycle refuses an opcode the
       // engine does not carry, so nothing else reaches here.
@@ -790,7 +924,70 @@ inline void Spc700::applyImplied(std::uint8_t opcode) {
     case 0xFD: state_.y = state_.a;  setNZ(state_.y); break;  // MOV Y,A
     case 0x9D: state_.x = state_.sp; setNZ(state_.x); break;  // MOV X,SP
     case 0xBD: state_.sp = state_.x; break;                   // MOV SP,X (no flags)
+
+    // ---- a register's own increment, decrement, shift and rotation ----
+    case 0xBC: ++state_.a; setNZ(state_.a); break;            // INC A
+    case 0x3D: ++state_.x; setNZ(state_.x); break;            // INC X
+    case 0xFC: ++state_.y; setNZ(state_.y); break;            // INC Y
+    case 0x9C: --state_.a; setNZ(state_.a); break;            // DEC A
+    case 0x1D: --state_.x; setNZ(state_.x); break;            // DEC X
+    case 0xDC: --state_.y; setNZ(state_.y); break;            // DEC Y
+    case 0x1C: state_.a = aslOp(state_.a); break;             // ASL A
+    case 0x5C: state_.a = lsrOp(state_.a); break;             // LSR A
+    case 0x3C: state_.a = rolOp(state_.a); break;             // ROL A
+    case 0x7C: state_.a = rorOp(state_.a); break;             // ROR A
+    case 0x9F:                                                // XCN A
+      state_.a = static_cast<std::uint8_t>((state_.a << 4) | (state_.a >> 4));
+      setNZ(state_.a);
+      break;
+
     default: break;
+  }
+}
+
+inline std::uint8_t Spc700::memoryModifyValue(std::uint8_t opcode, std::uint8_t destination,
+                                              std::uint8_t source) {
+  switch (opcode) {
+    // ---- one byte, changed in place ----
+    case 0xAB: case 0xBB: case 0xAC: {                        // INC dp / dp+X / !abs
+      const std::uint8_t v = static_cast<std::uint8_t>(destination + 1);
+      setNZ(v);
+      return v;
+    }
+    case 0x8B: case 0x9B: case 0x8C: {                        // DEC dp / dp+X / !abs
+      const std::uint8_t v = static_cast<std::uint8_t>(destination - 1);
+      setNZ(v);
+      return v;
+    }
+    case 0x0B: case 0x1B: case 0x0C: return aslOp(destination);  // ASL dp / dp+X / !abs
+    case 0x4B: case 0x5B: case 0x4C: return lsrOp(destination);  // LSR dp / dp+X / !abs
+    case 0x2B: case 0x3B: case 0x2C: return rolOp(destination);  // ROL dp / dp+X / !abs
+    case 0x6B: case 0x7B: case 0x6C: return rorOp(destination);  // ROR dp / dp+X / !abs
+
+    // ---- two bytes, the result landing on the destination ----
+    case 0x99: case 0x89: case 0x98:                          // ADC (X),(Y) / dp,dp / dp,#imm
+      return adcOp(destination, source);
+    case 0xB9: case 0xA9: case 0xB8:                          // SBC ...
+      return sbcOp(destination, source);
+    case 0x39: case 0x29: case 0x38: {                        // AND ...
+      const std::uint8_t v = static_cast<std::uint8_t>(destination & source);
+      setNZ(v);
+      return v;
+    }
+    case 0x19: case 0x09: case 0x18: {                        // OR ...
+      const std::uint8_t v = static_cast<std::uint8_t>(destination | source);
+      setNZ(v);
+      return v;
+    }
+    case 0x59: case 0x49: case 0x58: {                        // EOR ...
+      const std::uint8_t v = static_cast<std::uint8_t>(destination ^ source);
+      setNZ(v);
+      return v;
+    }
+
+    default:
+      // As for applyMemoryRead: every routed modify form is listed above.
+      return destination;
   }
 }
 
@@ -851,221 +1048,6 @@ std::uint32_t Spc700::stepInstruction(B& bus) {
 template <ApuBus B>
 std::uint32_t Spc700::stepWhole(B& bus, std::uint8_t opcode) {
   switch (opcode) {
-    // ---- 8-bit arithmetic: ADC (A = A + operand + C; N,V,H,Z,C) ----
-    case 0x88: state_.a = adcOp(state_.a, fetch(bus)); return 2;                                  // ADC A,#imm
-    case 0x86: state_.a = adcOp(state_.a, bus.read(static_cast<std::uint16_t>(dpBase() + state_.x))); return 3;  // ADC A,(X)
-    case 0x84: state_.a = adcOp(state_.a, bus.read(addrDp(bus)));   return 3;                     // ADC A,dp
-    case 0x94: state_.a = adcOp(state_.a, bus.read(addrDpX(bus)));  return 4;                     // ADC A,dp+X
-    case 0x85: state_.a = adcOp(state_.a, bus.read(addrAbs(bus)));  return 4;                     // ADC A,!abs
-    case 0x95: state_.a = adcOp(state_.a, bus.read(addrAbsX(bus))); return 5;                     // ADC A,!abs+X
-    case 0x96: state_.a = adcOp(state_.a, bus.read(addrAbsY(bus))); return 5;                     // ADC A,!abs+Y
-    case 0x87: state_.a = adcOp(state_.a, bus.read(addrIndX(bus))); return 6;                     // ADC A,[dp+X]
-    case 0x97: state_.a = adcOp(state_.a, bus.read(addrIndY(bus))); return 6;                     // ADC A,[dp]+Y
-    case 0x99: {                                                                                  // ADC (X),(Y)
-      std::uint16_t dst = static_cast<std::uint16_t>(dpBase() + state_.x);
-      std::uint8_t rhs = bus.read(static_cast<std::uint16_t>(dpBase() + state_.y));
-      bus.write(dst, adcOp(bus.read(dst), rhs));
-      return 5;
-    }
-    case 0x89: {                                                                                  // ADC dp,dp (encoded source-first)
-      std::uint8_t src = bus.read(static_cast<std::uint16_t>(dpBase() + fetch(bus)));
-      std::uint16_t dst = addrDp(bus);
-      bus.write(dst, adcOp(bus.read(dst), src));
-      return 6;
-    }
-    case 0x98: {                                                                                  // ADC dp,#imm (encoded immediate-first)
-      std::uint8_t imm = fetch(bus);
-      std::uint16_t dst = addrDp(bus);
-      bus.write(dst, adcOp(bus.read(dst), imm));
-      return 5;
-    }
-
-    // ---- 8-bit arithmetic: SBC (A = A - operand - !C; N,V,H,Z,C) ----
-    case 0xA8: state_.a = sbcOp(state_.a, fetch(bus)); return 2;                                  // SBC A,#imm
-    case 0xA6: state_.a = sbcOp(state_.a, bus.read(static_cast<std::uint16_t>(dpBase() + state_.x))); return 3;  // SBC A,(X)
-    case 0xA4: state_.a = sbcOp(state_.a, bus.read(addrDp(bus)));   return 3;                     // SBC A,dp
-    case 0xB4: state_.a = sbcOp(state_.a, bus.read(addrDpX(bus)));  return 4;                     // SBC A,dp+X
-    case 0xA5: state_.a = sbcOp(state_.a, bus.read(addrAbs(bus)));  return 4;                     // SBC A,!abs
-    case 0xB5: state_.a = sbcOp(state_.a, bus.read(addrAbsX(bus))); return 5;                     // SBC A,!abs+X
-    case 0xB6: state_.a = sbcOp(state_.a, bus.read(addrAbsY(bus))); return 5;                     // SBC A,!abs+Y
-    case 0xA7: state_.a = sbcOp(state_.a, bus.read(addrIndX(bus))); return 6;                     // SBC A,[dp+X]
-    case 0xB7: state_.a = sbcOp(state_.a, bus.read(addrIndY(bus))); return 6;                     // SBC A,[dp]+Y
-    case 0xB9: {                                                                                  // SBC (X),(Y)
-      std::uint16_t dst = static_cast<std::uint16_t>(dpBase() + state_.x);
-      std::uint8_t rhs = bus.read(static_cast<std::uint16_t>(dpBase() + state_.y));
-      bus.write(dst, sbcOp(bus.read(dst), rhs));
-      return 5;
-    }
-    case 0xA9: {                                                                                  // SBC dp,dp (encoded source-first)
-      std::uint8_t src = bus.read(static_cast<std::uint16_t>(dpBase() + fetch(bus)));
-      std::uint16_t dst = addrDp(bus);
-      bus.write(dst, sbcOp(bus.read(dst), src));
-      return 6;
-    }
-    case 0xB8: {                                                                                  // SBC dp,#imm (encoded immediate-first)
-      std::uint8_t imm = fetch(bus);
-      std::uint16_t dst = addrDp(bus);
-      bus.write(dst, sbcOp(bus.read(dst), imm));
-      return 5;
-    }
-
-    // ---- 8-bit arithmetic: CMP (operand1 - operand2, result discarded; N,Z,C) ----
-    case 0x68: cmpOp(state_.a, fetch(bus)); return 2;                                             // CMP A,#imm
-    case 0x66: cmpOp(state_.a, bus.read(static_cast<std::uint16_t>(dpBase() + state_.x))); return 3;  // CMP A,(X)
-    case 0x64: cmpOp(state_.a, bus.read(addrDp(bus)));   return 3;                                // CMP A,dp
-    case 0x74: cmpOp(state_.a, bus.read(addrDpX(bus)));  return 4;                                // CMP A,dp+X
-    case 0x65: cmpOp(state_.a, bus.read(addrAbs(bus)));  return 4;                                // CMP A,!abs
-    case 0x75: cmpOp(state_.a, bus.read(addrAbsX(bus))); return 5;                                // CMP A,!abs+X
-    case 0x76: cmpOp(state_.a, bus.read(addrAbsY(bus))); return 5;                                // CMP A,!abs+Y
-    case 0x67: cmpOp(state_.a, bus.read(addrIndX(bus))); return 6;                                // CMP A,[dp+X]
-    case 0x77: cmpOp(state_.a, bus.read(addrIndY(bus))); return 6;                                // CMP A,[dp]+Y
-    case 0x79: {                                                                                  // CMP (X),(Y)
-      std::uint8_t rhs = bus.read(static_cast<std::uint16_t>(dpBase() + state_.y));
-      cmpOp(bus.read(static_cast<std::uint16_t>(dpBase() + state_.x)), rhs);
-      return 5;
-    }
-    case 0x69: {                                                                                  // CMP dp,dp (encoded source-first)
-      std::uint8_t src = bus.read(static_cast<std::uint16_t>(dpBase() + fetch(bus)));
-      cmpOp(bus.read(addrDp(bus)), src);
-      return 6;
-    }
-    case 0x78: {                                                                                  // CMP dp,#imm (encoded immediate-first)
-      std::uint8_t imm = fetch(bus);
-      cmpOp(bus.read(addrDp(bus)), imm);
-      return 5;
-    }
-    case 0xC8: cmpOp(state_.x, fetch(bus)); return 2;                                             // CMP X,#imm
-    case 0x3E: cmpOp(state_.x, bus.read(addrDp(bus)));  return 3;                                 // CMP X,dp
-    case 0x1E: cmpOp(state_.x, bus.read(addrAbs(bus))); return 4;                                 // CMP X,!abs
-    case 0xAD: cmpOp(state_.y, fetch(bus)); return 2;                                             // CMP Y,#imm
-    case 0x7E: cmpOp(state_.y, bus.read(addrDp(bus)));  return 3;                                 // CMP Y,dp
-    case 0x5E: cmpOp(state_.y, bus.read(addrAbs(bus))); return 4;                                 // CMP Y,!abs
-
-    // ---- 8-bit boolean logic: AND (A &= operand; N,Z) ----
-    case 0x28: state_.a &= fetch(bus); setNZ(state_.a); return 2;                                 // AND A,#imm
-    case 0x26: state_.a &= bus.read(static_cast<std::uint16_t>(dpBase() + state_.x)); setNZ(state_.a); return 3;  // AND A,(X)
-    case 0x24: state_.a &= bus.read(addrDp(bus));   setNZ(state_.a); return 3;                    // AND A,dp
-    case 0x34: state_.a &= bus.read(addrDpX(bus));  setNZ(state_.a); return 4;                    // AND A,dp+X
-    case 0x25: state_.a &= bus.read(addrAbs(bus));  setNZ(state_.a); return 4;                    // AND A,!abs
-    case 0x35: state_.a &= bus.read(addrAbsX(bus)); setNZ(state_.a); return 5;                    // AND A,!abs+X
-    case 0x36: state_.a &= bus.read(addrAbsY(bus)); setNZ(state_.a); return 5;                    // AND A,!abs+Y
-    case 0x27: state_.a &= bus.read(addrIndX(bus)); setNZ(state_.a); return 6;                    // AND A,[dp+X]
-    case 0x37: state_.a &= bus.read(addrIndY(bus)); setNZ(state_.a); return 6;                    // AND A,[dp]+Y
-    case 0x39: {                                                                                  // AND (X),(Y)
-      std::uint16_t dst = static_cast<std::uint16_t>(dpBase() + state_.x);
-      std::uint8_t rhs = bus.read(static_cast<std::uint16_t>(dpBase() + state_.y));
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) & rhs);
-      setNZ(r); bus.write(dst, r); return 5;
-    }
-    case 0x29: {                                                                                  // AND dp,dp (encoded source-first)
-      std::uint8_t src = bus.read(static_cast<std::uint16_t>(dpBase() + fetch(bus)));
-      std::uint16_t dst = addrDp(bus);
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) & src);
-      setNZ(r); bus.write(dst, r); return 6;
-    }
-    case 0x38: {                                                                                  // AND dp,#imm (encoded immediate-first)
-      std::uint8_t imm = fetch(bus);
-      std::uint16_t dst = addrDp(bus);
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) & imm);
-      setNZ(r); bus.write(dst, r); return 5;
-    }
-
-    // ---- 8-bit boolean logic: OR (A |= operand; N,Z) ----
-    case 0x08: state_.a |= fetch(bus); setNZ(state_.a); return 2;                                 // OR A,#imm
-    case 0x06: state_.a |= bus.read(static_cast<std::uint16_t>(dpBase() + state_.x)); setNZ(state_.a); return 3;  // OR A,(X)
-    case 0x04: state_.a |= bus.read(addrDp(bus));   setNZ(state_.a); return 3;                    // OR A,dp
-    case 0x14: state_.a |= bus.read(addrDpX(bus));  setNZ(state_.a); return 4;                    // OR A,dp+X
-    case 0x05: state_.a |= bus.read(addrAbs(bus));  setNZ(state_.a); return 4;                    // OR A,!abs
-    case 0x15: state_.a |= bus.read(addrAbsX(bus)); setNZ(state_.a); return 5;                    // OR A,!abs+X
-    case 0x16: state_.a |= bus.read(addrAbsY(bus)); setNZ(state_.a); return 5;                    // OR A,!abs+Y
-    case 0x07: state_.a |= bus.read(addrIndX(bus)); setNZ(state_.a); return 6;                    // OR A,[dp+X]
-    case 0x17: state_.a |= bus.read(addrIndY(bus)); setNZ(state_.a); return 6;                    // OR A,[dp]+Y
-    case 0x19: {                                                                                  // OR (X),(Y)
-      std::uint16_t dst = static_cast<std::uint16_t>(dpBase() + state_.x);
-      std::uint8_t rhs = bus.read(static_cast<std::uint16_t>(dpBase() + state_.y));
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) | rhs);
-      setNZ(r); bus.write(dst, r); return 5;
-    }
-    case 0x09: {                                                                                  // OR dp,dp (encoded source-first)
-      std::uint8_t src = bus.read(static_cast<std::uint16_t>(dpBase() + fetch(bus)));
-      std::uint16_t dst = addrDp(bus);
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) | src);
-      setNZ(r); bus.write(dst, r); return 6;
-    }
-    case 0x18: {                                                                                  // OR dp,#imm (encoded immediate-first)
-      std::uint8_t imm = fetch(bus);
-      std::uint16_t dst = addrDp(bus);
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) | imm);
-      setNZ(r); bus.write(dst, r); return 5;
-    }
-
-    // ---- 8-bit boolean logic: EOR (A ^= operand; N,Z) ----
-    case 0x48: state_.a ^= fetch(bus); setNZ(state_.a); return 2;                                 // EOR A,#imm
-    case 0x46: state_.a ^= bus.read(static_cast<std::uint16_t>(dpBase() + state_.x)); setNZ(state_.a); return 3;  // EOR A,(X)
-    case 0x44: state_.a ^= bus.read(addrDp(bus));   setNZ(state_.a); return 3;                    // EOR A,dp
-    case 0x54: state_.a ^= bus.read(addrDpX(bus));  setNZ(state_.a); return 4;                    // EOR A,dp+X
-    case 0x45: state_.a ^= bus.read(addrAbs(bus));  setNZ(state_.a); return 4;                    // EOR A,!abs
-    case 0x55: state_.a ^= bus.read(addrAbsX(bus)); setNZ(state_.a); return 5;                    // EOR A,!abs+X
-    case 0x56: state_.a ^= bus.read(addrAbsY(bus)); setNZ(state_.a); return 5;                    // EOR A,!abs+Y
-    case 0x47: state_.a ^= bus.read(addrIndX(bus)); setNZ(state_.a); return 6;                    // EOR A,[dp+X]
-    case 0x57: state_.a ^= bus.read(addrIndY(bus)); setNZ(state_.a); return 6;                    // EOR A,[dp]+Y
-    case 0x59: {                                                                                  // EOR (X),(Y)
-      std::uint16_t dst = static_cast<std::uint16_t>(dpBase() + state_.x);
-      std::uint8_t rhs = bus.read(static_cast<std::uint16_t>(dpBase() + state_.y));
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) ^ rhs);
-      setNZ(r); bus.write(dst, r); return 5;
-    }
-    case 0x49: {                                                                                  // EOR dp,dp (encoded source-first)
-      std::uint8_t src = bus.read(static_cast<std::uint16_t>(dpBase() + fetch(bus)));
-      std::uint16_t dst = addrDp(bus);
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) ^ src);
-      setNZ(r); bus.write(dst, r); return 6;
-    }
-    case 0x58: {                                                                                  // EOR dp,#imm (encoded immediate-first)
-      std::uint8_t imm = fetch(bus);
-      std::uint16_t dst = addrDp(bus);
-      std::uint8_t r = static_cast<std::uint8_t>(bus.read(dst) ^ imm);
-      setNZ(r); bus.write(dst, r); return 5;
-    }
-
-    // ---- 8-bit increment / decrement (N,Z; no carry) ----
-    case 0xBC: ++state_.a; setNZ(state_.a); return 2;                                             // INC A
-    case 0x3D: ++state_.x; setNZ(state_.x); return 2;                                             // INC X
-    case 0xFC: ++state_.y; setNZ(state_.y); return 2;                                             // INC Y
-    case 0xAB: { std::uint16_t a = addrDp(bus);  std::uint8_t v = static_cast<std::uint8_t>(bus.read(a) + 1); setNZ(v); bus.write(a, v); return 4; }  // INC dp
-    case 0xBB: { std::uint16_t a = addrDpX(bus); std::uint8_t v = static_cast<std::uint8_t>(bus.read(a) + 1); setNZ(v); bus.write(a, v); return 5; }  // INC dp+X
-    case 0xAC: { std::uint16_t a = addrAbs(bus); std::uint8_t v = static_cast<std::uint8_t>(bus.read(a) + 1); setNZ(v); bus.write(a, v); return 5; }  // INC !abs
-    case 0x9C: --state_.a; setNZ(state_.a); return 2;                                             // DEC A
-    case 0x1D: --state_.x; setNZ(state_.x); return 2;                                             // DEC X
-    case 0xDC: --state_.y; setNZ(state_.y); return 2;                                             // DEC Y
-    case 0x8B: { std::uint16_t a = addrDp(bus);  std::uint8_t v = static_cast<std::uint8_t>(bus.read(a) - 1); setNZ(v); bus.write(a, v); return 4; }  // DEC dp
-    case 0x9B: { std::uint16_t a = addrDpX(bus); std::uint8_t v = static_cast<std::uint8_t>(bus.read(a) - 1); setNZ(v); bus.write(a, v); return 5; }  // DEC dp+X
-    case 0x8C: { std::uint16_t a = addrAbs(bus); std::uint8_t v = static_cast<std::uint8_t>(bus.read(a) - 1); setNZ(v); bus.write(a, v); return 5; }  // DEC !abs
-
-    // ---- 8-bit shift / rotation (N,Z,C) ----
-    case 0x1C: state_.a = aslOp(state_.a); return 2;                                              // ASL A
-    case 0x0B: { std::uint16_t a = addrDp(bus);  bus.write(a, aslOp(bus.read(a))); return 4; }    // ASL dp
-    case 0x1B: { std::uint16_t a = addrDpX(bus); bus.write(a, aslOp(bus.read(a))); return 5; }    // ASL dp+X
-    case 0x0C: { std::uint16_t a = addrAbs(bus); bus.write(a, aslOp(bus.read(a))); return 5; }    // ASL !abs
-    case 0x5C: state_.a = lsrOp(state_.a); return 2;                                              // LSR A
-    case 0x4B: { std::uint16_t a = addrDp(bus);  bus.write(a, lsrOp(bus.read(a))); return 4; }    // LSR dp
-    case 0x5B: { std::uint16_t a = addrDpX(bus); bus.write(a, lsrOp(bus.read(a))); return 5; }    // LSR dp+X
-    case 0x4C: { std::uint16_t a = addrAbs(bus); bus.write(a, lsrOp(bus.read(a))); return 5; }    // LSR !abs
-    case 0x3C: state_.a = rolOp(state_.a); return 2;                                              // ROL A
-    case 0x2B: { std::uint16_t a = addrDp(bus);  bus.write(a, rolOp(bus.read(a))); return 4; }    // ROL dp
-    case 0x3B: { std::uint16_t a = addrDpX(bus); bus.write(a, rolOp(bus.read(a))); return 5; }    // ROL dp+X
-    case 0x2C: { std::uint16_t a = addrAbs(bus); bus.write(a, rolOp(bus.read(a))); return 5; }    // ROL !abs
-    case 0x7C: state_.a = rorOp(state_.a); return 2;                                              // ROR A
-    case 0x6B: { std::uint16_t a = addrDp(bus);  bus.write(a, rorOp(bus.read(a))); return 4; }    // ROR dp
-    case 0x7B: { std::uint16_t a = addrDpX(bus); bus.write(a, rorOp(bus.read(a))); return 5; }    // ROR dp+X
-    case 0x6C: { std::uint16_t a = addrAbs(bus); bus.write(a, rorOp(bus.read(a))); return 5; }    // ROR !abs
-
-    // ---- nibble exchange (N,Z) ----
-    case 0x9F:                                                                                    // XCN A
-      state_.a = static_cast<std::uint8_t>((state_.a << 4) | (state_.a >> 4));
-      setNZ(state_.a);
-      return 5;
-
     // ---- 16-bit word moves (YA is the pair A=low, Y=high; N,Z from the word) ----
     case 0xBA: {                                                                                  // MOVW YA,dp
       std::uint16_t w = readWordDp(bus, fetch(bus));

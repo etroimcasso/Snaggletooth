@@ -275,13 +275,17 @@ TEST(Spc700CycleEngine, TheAutoIncrementLoadStepsXOnItsLastCycle) {
   EXPECT_EQ(int{cpu.state().x}, 0x21);
 }
 
-TEST(Spc700CycleEngine, TheEngineCarriesTheMoveFamilyAndNothingElseYet) {
+TEST(Spc700CycleEngine, TheEngineCarriesTheMoveAndArithmeticFamiliesAndNothingElseYet) {
   // The routing ratchet: an opcode the engine carries runs a cycle at a time, and one
   // it does not runs whole. Every family joins the first list as it lands.
   EXPECT_TRUE(Spc700::cycleStepped(0xE4));   // MOV A,dp
   EXPECT_TRUE(Spc700::cycleStepped(0xAF));   // MOV (X)+,A
   EXPECT_TRUE(Spc700::cycleStepped(0x8F));   // MOV dp,#imm
-  EXPECT_FALSE(Spc700::cycleStepped(0x84));  // ADC A,dp
+  EXPECT_TRUE(Spc700::cycleStepped(0x84));   // ADC A,dp
+  EXPECT_TRUE(Spc700::cycleStepped(0x99));   // ADC (X),(Y)
+  EXPECT_TRUE(Spc700::cycleStepped(0xAB));   // INC dp
+  EXPECT_TRUE(Spc700::cycleStepped(0x9F));   // XCN A
+  EXPECT_FALSE(Spc700::cycleStepped(0xBA));  // MOVW YA,dp
   EXPECT_FALSE(Spc700::cycleStepped(0x00));  // NOP
 }
 

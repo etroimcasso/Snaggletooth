@@ -182,17 +182,17 @@ to resume it.
 
 ## The cycle bar
 
-The move family runs a cycle at a time. Every one of its cycles is placed — which cycle reads,
-which writes, which reaches memory not at all, and what address each drives — and every one is
-checked against a per-cycle recording of the real chip.
+The move and arithmetic families run a cycle at a time. Every one of their cycles is placed — which
+cycle reads, which writes, which reaches memory not at all, and what address each drives — and every
+one is checked against a per-cycle recording of the real chip.
 
 The rest of the instruction set runs whole. Its cycle counts match the documented per-instruction
 totals and it issues the documented accesses, but which cycle each access falls on is not modelled
 yet. `cycleStepped()` reports which of the two paths an opcode is on:
 
 ```cpp
-snaggletooth::Spc700::cycleStepped(0xE4);  // true  — MOV A,dp
-snaggletooth::Spc700::cycleStepped(0x84);  // false — ADC A,dp
+snaggletooth::Spc700::cycleStepped(0x84);  // true  — ADC A,dp
+snaggletooth::Spc700::cycleStepped(0xBA);  // false — MOVW YA,dp
 ```
 
 An opcode on the whole-instruction path cannot be driven with `stepCycle()`. The call that would
@@ -294,6 +294,108 @@ addresses. `MOV $FF,$00` reads its **source** and never its destination — so i
 timer output at `$FF`. `MOV $FF,#$00` has its byte already and reads the **destination** — so it
 does.
 
+## The arithmetic
+
+Arithmetic (ADC, SBC, CMP), logic (AND, OR, EOR), increment and decrement, the shifts and
+rotations, and the nibble exchange all run on the same cycle sequences the moves do. Three shapes
+cover the family.
+
+**A byte read into a register** runs exactly as the matching move does. `ADC A,$30+X` spends the
+same cycles as `MOV A,$30+X` — offset, index, read — and differs only in what it does with the
+byte. So every law in [The moves](#the-moves) carries over unchanged: the byte after the opcode is
+always read, and an indexed mode spends its cycle *before* the access.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0x14;  // OR A,$10+X
+ram.bytes[0x0201] = 0x10;
+ram.bytes[0x0014] = 0x0F;
+
+snaggletooth::Spc700 cpu(
+    snaggletooth::Spc700State{.pc = 0x0200, .a = 0xF0, .x = 0x04});
+cpu.stepInstruction(ram);
+// four cycles: opcode, offset, a cycle reaching nothing, the read of $0014
+// cpu.state().a == 0xFF
+```
+
+**A byte changed in place** is the read-modify-write seat: the byte is read, and the result goes
+back to the same address on the next cycle. `INC`, `DEC`, `ASL`, `LSR`, `ROL` and `ROR` all run it
+against `dp`, `dp+X` and `!abs`.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0xAB;  // INC $10
+ram.bytes[0x0201] = 0x10;
+ram.bytes[0x0010] = 0x41;
+
+snaggletooth::Spc700 cpu(snaggletooth::Spc700State{.pc = 0x0200});
+cpu.stepInstruction(ram);
+// four cycles: opcode, offset, the read of $0010, the write back to $0010
+// ram.bytes[0x0010] == 0x42
+```
+
+The result settles on the cycle that writes it, and so do the flags. Step that instruction three
+cycles instead and the byte in memory is still the one that was read.
+
+**Two bytes in memory** covers the three two-operand forms. Each takes its source from one place
+and both its other operand and its target from another:
+
+| Instruction | Source | Target |
+|---|---|---|
+| `ADC (X),(Y)` | the byte at `dp+Y` | the byte at `dp+X` |
+| `ADC dp,dp` | the byte named by the **first** offset | the byte named by the second |
+| `ADC dp,#imm` | the immediate byte | the byte named by the offset |
+
+The source is always reached first. `ADC (X),(Y)` reads the Y side, then the X side, then writes
+the X side; `ADC dp,dp` reads its source byte as soon as the offset naming it has arrived, before
+it has even fetched the destination offset.
+
+### The comparison that writes nothing
+
+`CMP` discards its result. Where its arithmetic siblings write, it reaches memory not at all — but
+the cycle is still spent, so the two forms take exactly the same time:
+
+| Instruction | Cycles |
+|---|---|
+| `OR dp,dp` | opcode · source offset · source read · destination offset · destination read · **write** |
+| `CMP dp,dp` | opcode · source offset · source read · destination offset · destination read · **nothing** |
+
+The same pairing holds for `CMP dp,#imm` against `OR dp,#imm`, and for `CMP (X),(Y)` against
+`OR (X),(Y)`. This is the only place in the family where a final cycle reaches memory not at all.
+
+`CMP` against a register — `CMP A,dp`, `CMP X,#imm`, `CMP Y,!abs` — is a plain read, not one of
+these forms.
+
+### Where the cycles go
+
+| Instruction | Cycles |
+|---|---|
+| `ADC A,#imm` | opcode · the immediate |
+| `INC A` | opcode · discarded read |
+| `XCN A` | opcode · discarded read · three cycles inside the chip |
+| `ADC A,dp` | opcode · offset · read |
+| `ADC A,dp+X` | opcode · offset · index · read |
+| `ADC A,!abs` | opcode · address low · address high · read |
+| `ADC A,!abs+X` | opcode · address low · address high · index · read |
+| `ADC A,(X)` | opcode · discarded read · read |
+| `ADC A,[dp+X]` | opcode · offset · index · pointer low · pointer high · read |
+| `ADC A,[dp]+Y` | opcode · offset · index · pointer low · pointer high · read |
+| `INC dp` | opcode · offset · read · write |
+| `INC dp+X` | opcode · offset · index · read · write |
+| `INC !abs` | opcode · address low · address high · read · write |
+| `ADC (X),(Y)` | opcode · discarded read · source read · target read · write |
+| `ADC dp,dp` | opcode · source offset · source read · destination offset · destination read · write |
+| `ADC dp,#imm` | opcode · immediate · destination offset · destination read · write |
+| `CMP (X),(Y)` | opcode · discarded read · source read · target read · nothing |
+| `CMP dp,dp` | opcode · source offset · source read · destination offset · destination read · nothing |
+| `CMP dp,#imm` | opcode · immediate · destination offset · destination read · nothing |
+
+The *index* rows, the three cycles of `XCN`, and the final row of each comparison are the cycles
+that reach memory not at all.
+
+`XCN` is the one instruction here that spends more than one cycle inside the chip: it reads the
+opcode, reads and discards the byte after it, then swaps the nibbles of A over three more cycles.
+
 ## Testing against the vectors
 
 The core is checked per opcode against the SingleStepTests SPC700 vectors — one file per opcode,
@@ -347,4 +449,7 @@ environment variables shape a run:
   flag masks, and the `Spc700` class with its cycle engine.
 - `tests/spc700/cycle_engine_test.cpp` — the engine's own contract and the move shapes, pinned on
   hand-written programs.
+- `tests/spc700/alu_cycles_test.cpp` — the arithmetic family's cycle placement: the indexing law,
+  the read-modify-write seat, the order of the two-operand forms, and the comparison that writes
+  nothing.
 - `tests/spc700/` — the vector harness and runner, and the hand-derived flag/algorithm cross-checks.
