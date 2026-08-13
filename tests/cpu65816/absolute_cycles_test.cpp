@@ -431,10 +431,10 @@ TEST(Cpu65816Absolute, AHalfFinishedAbsoluteInstructionSurvivesASnapshot) {
 // ---- the family's membership is its coverage ----
 
 TEST(Cpu65816Absolute, EveryAbsoluteAndLongOpcodeRunsOnTheCycleEngine) {
-  // The runner compares cycle by cycle only where the engine carries the opcode, so
-  // naming the family here is what keeps its per-cycle coverage from narrowing.
-  // Sixty-six opcodes: five addressing modes across loads, stores, arithmetic,
-  // logic, BIT and the read-modify-writes.
+  // Naming the family here is what keeps its per-cycle coverage from narrowing: each
+  // opcode runs a cycle at a time and narrates every one, which is what lets the
+  // recorded traces be compared cycle for cycle. Sixty-six opcodes: five addressing
+  // modes across loads, stores, arithmetic, logic, BIT and the read-modify-writes.
   constexpr std::uint8_t kFamily[] = {
       // absolute, reading
       0x0D, 0x2C, 0x2D, 0x4D, 0x6D, 0xAC, 0xAD, 0xAE, 0xCC, 0xCD, 0xEC, 0xED,
@@ -454,7 +454,11 @@ TEST(Cpu65816Absolute, EveryAbsoluteAndLongOpcodeRunsOnTheCycleEngine) {
   };
   static_assert(sizeof kFamily == 66);
   for (const std::uint8_t opcode : kFamily) {
-    EXPECT_TRUE(Cpu65816::cycleStepped(opcode)) << "opcode " << int{opcode};
+    auto bus = busWith({{0x001000, opcode}});
+    Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+    const std::uint32_t cycles = run(bus, cpu);
+    EXPECT_GE(cycles, 2u) << "opcode " << int{opcode};
+    EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << int{opcode};
   }
 }
 

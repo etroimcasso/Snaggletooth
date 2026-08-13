@@ -324,18 +324,28 @@ TEST(Cpu65816DirectPage, AHalfFinishedDirectPageInstructionSurvivesASnapshot) {
 }
 
 TEST(Cpu65816DirectPage, EveryDirectPageOpcodeRunsOnTheCycleEngine) {
-  // The runner compares cycle by cycle only where the engine carries the opcode, so
-  // the family's membership is the coverage. Forty-four opcodes: the three
-  // addressing modes across loads, stores, arithmetic, logic and the shifts.
-  int carried = 0;
-  for (int op = 0; op < 256; ++op) {
-    if (Cpu65816::cycleStepped(static_cast<std::uint8_t>(op))) ++carried;
+  // The family's coverage, forty-four opcodes: the three addressing modes across
+  // loads, stores, arithmetic, logic, BIT and the read-modify-writes. Each runs a
+  // cycle at a time and narrates every one of them, which is what lets the recorded
+  // traces be compared cycle for cycle.
+  constexpr std::uint8_t kFamily[] = {
+      // direct page
+      0x04, 0x05, 0x06, 0x14, 0x24, 0x25, 0x26, 0x45, 0x46, 0x64, 0x65, 0x66,
+      0x84, 0x85, 0x86, 0xA4, 0xA5, 0xA6, 0xC4, 0xC5, 0xC6, 0xE4, 0xE5, 0xE6,
+      // direct page indexed with X
+      0x15, 0x16, 0x34, 0x35, 0x36, 0x55, 0x56, 0x74, 0x75, 0x76, 0x94, 0x95,
+      0xB4, 0xB5, 0xD5, 0xD6, 0xF5, 0xF6,
+      // direct page indexed with Y
+      0x96, 0xB6,
+  };
+  static_assert(sizeof kFamily == 44);
+  for (const std::uint8_t opcode : kFamily) {
+    auto bus = busWith({{0x001000, opcode}});
+    Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+    const std::uint32_t cycles = run(bus, cpu);
+    EXPECT_GE(cycles, 3u) << "opcode " << int{opcode};
+    EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << int{opcode};
   }
-  // The forty-seven implied and immediate instructions, this family, the sixty-six
-  // absolute and long ones, the fifty-six indirect and stack-relative ones, the
-  // sixteen stack instructions, the twenty-one control-flow ones, and the two
-  // software interrupts with the two halts.
-  EXPECT_EQ(carried, 47 + 44 + 66 + 56 + 16 + 21 + 4);
 }
 
 }  // namespace

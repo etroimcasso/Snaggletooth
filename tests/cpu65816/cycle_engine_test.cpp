@@ -199,74 +199,22 @@ TEST(Cpu65816CycleEngine, AHaltedCoreTouchesNothing) {
   EXPECT_EQ(cpu.state().pc, 0x1000);
 }
 
-// ---- the two execution paths agree ----
+// ---- every opcode runs on the engine ----
 
-TEST(Cpu65816CycleEngine, TheEngineCarriesTheImpliedImmediateAndMemoryInstructions) {
-  // The families this core runs cycle by cycle. The two block moves are outside them
-  // and are not decoded at all yet.
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xEA));   // NOP
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xA9));   // LDA #imm
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xC2));   // REP #imm
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xEB));   // XBA
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xFB));   // XCE
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x42));   // WDM
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xA5));   // LDA dir
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB5));   // LDA dir,X
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB6));   // LDX dir,Y
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x06));   // ASL dir
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xAD));   // LDA abs
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xBD));   // LDA abs,X
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB9));   // LDA abs,Y
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xAF));   // LDA long
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xBF));   // LDA long,X
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x1E));   // ASL abs,X
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB2));   // LDA (dir)
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xA1));   // LDA (dir,X)
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB1));   // LDA (dir),Y
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xA7));   // LDA [dir]
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB7));   // LDA [dir],Y
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xA3));   // LDA sr,S
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xB3));   // LDA (sr,S),Y
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x48));   // PHA
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x28));   // PLP
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xD4));   // PEI dir
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x90));   // BCC rel
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x82));   // BRL
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x4C));   // JMP abs
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x6C));   // JMP (abs)
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x7C));   // JMP (abs,X)
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x20));   // JSR abs
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x22));   // JSL
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x60));   // RTS
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x40));   // RTI
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x00));   // BRK
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x02));   // COP
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xCB));   // WAI
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xDB));   // STP
-  EXPECT_FALSE(Cpu65816::cycleStepped(0x44));  // MVP
-}
-
-TEST(Cpu65816CycleEngine, AnUndecodedOpcodeReportsNoCyclesRatherThanGuessing) {
-  // Every opcode the core decodes runs on the cycle engine. One it does not decode
-  // reports a zero count from stepInstruction, which a recorded case's non-zero
-  // count rejects loudly rather than passing in silence.
-  auto bus = busWith({{0x001000, 0x44}, {0x001001, 0x34}, {0x001002, 0x12}});
-  Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagM | kCpuFlagX});
-  EXPECT_EQ(cpu.stepInstruction(bus), 0u);
-  EXPECT_TRUE(cpu.atInstructionBoundary());
-}
-
-TEST(Cpu65816CycleEngine, AnInstructionOffTheEngineCannotBeSteppedACycleAtATime) {
-  // Asking for one cycle of an instruction the engine does not carry produces no
-  // bus activity at all — the cycle that was asked for plainly did not happen,
-  // rather than being filled in with invented traffic.
-  auto bus = busWith({{0x001000, 0x44}, {0x001001, 0x34}, {0x001002, 0x12}});
-  Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF, .p = kCpuFlagM | kCpuFlagX});
-  cpu.stepCycle(bus);  // the opcode fetch, which every instruction shares
-  ASSERT_EQ(bus.trace.size(), 1u);
-  cpu.stepCycle(bus);
-  EXPECT_EQ(bus.trace.size(), 1u);
-  EXPECT_TRUE(cpu.atInstructionBoundary());
+TEST(Cpu65816CycleEngine, EveryOpcodeRunsOnTheCycleEngine) {
+  // There is one execution path and every opcode is on it: all 256 decode, run a
+  // cycle at a time, and narrate each cycle through the bus. Nothing reports a count
+  // it did not drive, and no opcode can be observed only from outside.
+  for (int op = 0; op < 256; ++op) {
+    const auto opcode = static_cast<std::uint8_t>(op);
+    auto bus = busWith({{0x001000, opcode}});
+    Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+    bus.cpu = &cpu;
+    const std::uint32_t cycles = cpu.stepInstruction(bus);
+    // Two cycles is the shortest instruction the chip has.
+    EXPECT_GE(cycles, 2u) << "opcode " << std::hex << op;
+    EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << std::hex << op;
+  }
 }
 
 // ---- what a cycle's pin string reports ----

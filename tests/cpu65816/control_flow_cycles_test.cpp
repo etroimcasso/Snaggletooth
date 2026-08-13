@@ -500,19 +500,18 @@ TEST(Cpu65816ControlFlow, TheIndexedCallStaysInPageOneDespiteTheDocumentedList) 
 // ---- the family's membership ----
 
 TEST(Cpu65816ControlFlow, EveryControlFlowOpcodeRunsOnTheCycleEngine) {
-  // The runner compares cycle by cycle only where the engine carries the opcode, so
-  // the family's membership is the coverage. Twenty-one opcodes: nine relative
-  // branches and BRL, five jumps, three calls, three returns.
+  // The family's coverage, twenty-one opcodes: nine relative branches and BRL, five
+  // jumps, three calls, three returns. Each runs a cycle at a time and narrates every
+  // one of them, which is what lets the recorded traces be compared cycle for cycle.
   constexpr std::uint8_t kFamily[] = {0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0,
                                       0xF0, 0x80, 0x82, 0x4C, 0x5C, 0x6C, 0xDC,
                                       0x7C, 0x20, 0xFC, 0x22, 0x60, 0x6B, 0x40};
   for (std::uint8_t opcode : kFamily) {
-    EXPECT_TRUE(Cpu65816::cycleStepped(opcode)) << "opcode " << int{opcode};
-  }
-  // The two block moves are not decoded.
-  constexpr std::uint8_t kUndecoded[] = {0x44, 0x54};
-  for (std::uint8_t opcode : kUndecoded) {
-    EXPECT_FALSE(Cpu65816::cycleStepped(opcode)) << "opcode " << int{opcode};
+    auto bus = busWith({{0x001000, opcode}});
+    Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+    const std::uint32_t cycles = run(bus, cpu);
+    EXPECT_GE(cycles, 2u) << "opcode " << int{opcode};
+    EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << int{opcode};
   }
 }
 

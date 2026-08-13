@@ -148,7 +148,9 @@ class Cpu65816 {
 
   // Runs cycles until the next instruction boundary and returns how many it took.
   // Called mid-instruction it finishes the instruction in progress rather than
-  // starting one. The count is what executed, not a formula.
+  // starting one. The count is what executed, not a formula. A block move reaches a
+  // boundary after each byte it carries, so it reports seven cycles at a time and
+  // resumes on the next call until its counter runs out.
   template <SnesBus B>
   std::uint32_t stepInstruction(B& bus);
 
@@ -165,13 +167,6 @@ class Cpu65816 {
     nmiLine_ = asserted;
   }
   void setIrqLine(bool asserted) noexcept { state_.irqLine = asserted; }
-
-  // Whether an opcode runs on the cycle engine. The engine carries the implied,
-  // accumulator and immediate instructions, every addressing mode that reaches
-  // memory, the stack and control-flow instructions, and the software interrupts and
-  // halts; the two block moves do not run on it yet, so stepCycle cannot observe one
-  // a cycle at a time. Ask before stepping an instruction cycle by cycle.
-  [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept;
 
  private:
   // ---- widths -------------------------------------------------------------
@@ -1117,12 +1112,11 @@ class Cpu65816 {
   // registers alone, and the internal cycle it spends has already been narrated.
   void applyImplied(std::uint8_t opcode);
 
-  // An opcode the core does not decode. It returns a zero cycle count, which a
-  // vector's non-zero count rejects loudly rather than passing in silence. Every
-  // opcode the core does decode now runs on the cycle engine, so nothing else
-  // reaches here.
+  // Executes one cycle of a block move, which carries a single byte per seven
+  // cycles and re-enters itself for the next one. `forward` counts the indexes up
+  // (MVN) rather than down (MVP).
   template <SnesBus B>
-  std::uint32_t stepWhole(B& bus, std::uint8_t opcode);
+  bool executeBlockMoveCycle(B& bus, bool forward);
 
   Cpu65816State state_{};
   // The NMI pin's last observed level, kept so a high-to-low transition can be
@@ -1131,38 +1125,6 @@ class Cpu65816 {
   bool nmiLine_ = false;
 };
 
-constexpr bool Cpu65816::cycleStepped(std::uint8_t opcode) noexcept {
-  switch (opcode) {
-    // Implied and accumulator instructions: two cycles, the second internal.
-    case 0x0A: case 0x18: case 0x1A: case 0x1B: case 0x2A: case 0x38: case 0x3A:
-    case 0x3B: case 0x4A: case 0x58: case 0x5B: case 0x6A: case 0x78: case 0x7B:
-    case 0x88: case 0x8A: case 0x98: case 0x9A: case 0x9B: case 0xA8: case 0xAA:
-    case 0xB8: case 0xBA: case 0xBB: case 0xC8: case 0xCA: case 0xD8: case 0xE8:
-    case 0xEA: case 0xF8: case 0xFB:
-    // The accumulator byte exchange, which spends two internal cycles.
-    case 0xEB:
-    // The immediate operands, one or two bytes wide.
-    case 0x09: case 0x29: case 0x49: case 0x69: case 0x89: case 0xA0: case 0xA2:
-    case 0xA9: case 0xC0: case 0xC9: case 0xE0: case 0xE9:
-    // The status-mask instructions and the reserved two-byte no-op.
-    case 0x42: case 0xC2: case 0xE2:
-    // The software interrupts and the two halts.
-    case 0x00: case 0x02: case 0xCB: case 0xDB:
-      return true;
-    default:
-      break;
-  }
-  DpForm dp{};
-  if (directPageForm(opcode, dp)) return true;
-  AbsForm abs{};
-  if (absoluteForm(opcode, abs)) return true;
-  IndForm ind{};
-  if (indirectForm(opcode, ind)) return true;
-  StackForm stack{};
-  if (stackForm(opcode, stack)) return true;
-  CtrlForm ctrl{};
-  return controlForm(opcode, ctrl);
-}
 
 constexpr bool Cpu65816::controlForm(std::uint8_t opcode, CtrlForm& form) noexcept {
   switch (opcode) {
@@ -2397,6 +2359,11 @@ bool Cpu65816::executeCycle(B& bus) {
     return executeControlCycle(bus, form);
   }
   switch (opcode) {
+    // ---- the block moves, which carry one byte per seven cycles ----
+    case 0x54:  // MVN, counting the indexes up
+    case 0x44:  // MVP, counting them down
+      return executeBlockMoveCycle(bus, opcode == 0x54);
+
     // ---- REP / SEP: fetch the mask, then spend an internal cycle parked on the
     //      mask's own address. The status byte settles at the end of that cycle, so
     //      the widths the cycle itself runs under are still the old ones ----
@@ -2463,6 +2430,58 @@ bool Cpu65816::executeCycle(B& bus) {
   }
 }
 
+// A block move carries one byte per seven cycles (Table 5-7 rows 9a and 9b): the
+// instruction re-fetches its own opcode and both bank bytes, reads the byte at the
+// source, writes it at the destination, and spends two cycles parked on the address
+// it just wrote. The indexes then step, the counter in the accumulator drops by one,
+// and while the counter has not run out the program counter steps back to the
+// instruction's own address so the next byte begins with a fresh opcode fetch.
+//
+// That re-entry is what makes the move interruptible. Between bytes the core sits on
+// an instruction boundary with the program counter on the block move itself, so a
+// request taken there saves the address the move resumes at, and the registers carry
+// how far it got — which is exactly what an RTI needs to pick it up again.
+template <SnesBus B>
+bool Cpu65816::executeBlockMoveCycle(B& bus, bool forward) {
+  switch (state_.tcu) {
+    case 1:  // the destination bank, which the data bank register takes with it
+      state_.dbr = fetch(bus);
+      return false;
+    case 2:  // the source bank, which this byte's read needs and nothing else keeps
+      state_.ea = static_cast<std::uint32_t>(fetch(bus)) << 16;
+      return false;
+    case 3:  // the byte itself, from the source bank at X
+      state_.tmp = bus.read(state_.ea | idxX(), CycleKind::DataRead);
+      return false;
+    default:
+      break;
+  }
+
+  // The destination bank reached the data bank register on its own fetch cycle
+  // (section 7.18), so the destination is that register over Y. The two cycles after
+  // the write stay parked there, which is why the indexes step only once the byte is
+  // finished rather than as soon as it lands.
+  const std::uint32_t destination =
+      (static_cast<std::uint32_t>(state_.dbr) << 16) | idxY();
+  if (state_.tcu == 4) {
+    bus.write(destination, static_cast<std::uint8_t>(state_.tmp), CycleKind::DataWrite);
+    return false;
+  }
+  bus.internal(destination);
+  if (state_.tcu == 5) return false;
+
+  const int step = forward ? 1 : -1;
+  // Narrow index registers step in their low byte alone, the high byte being zero.
+  const std::uint16_t mask = index8() ? 0x00FFu : 0xFFFFu;
+  state_.x = static_cast<std::uint16_t>((state_.x + step) & mask);
+  state_.y = static_cast<std::uint16_t>((state_.y + step) & mask);
+  // The count is the whole 16-bit accumulator whatever width the accumulator is
+  // running at, and the move ends when it runs past zero.
+  state_.a = static_cast<std::uint16_t>(state_.a - 1);
+  if (state_.a != 0xFFFFu) state_.pc = static_cast<std::uint16_t>(state_.pc - 3);
+  return true;
+}
+
 template <SnesBus B>
 void Cpu65816::stepCycle(B& bus) {
   // A waiting or stopped core drives no address and touches no memory; the cycle
@@ -2501,15 +2520,6 @@ void Cpu65816::stepCycle(B& bus) {
     return;
   }
 
-  if (state_.servicing == InterruptRequest::None && !cycleStepped(state_.ir)) {
-    // The instruction in progress runs whole rather than a cycle at a time, so
-    // there is no single cycle to run here. The core returns to a boundary without
-    // touching the bus: the cycle that was asked for plainly did not happen, rather
-    // than being filled in with invented traffic. Use stepInstruction instead.
-    state_.tcu = 0;
-    return;
-  }
-
   state_.tcu = executeCycle(bus) ? std::uint8_t{0}
                                  : static_cast<std::uint8_t>(state_.tcu + 1);
 }
@@ -2525,21 +2535,12 @@ std::uint32_t Cpu65816::stepInstruction(B& bus) {
   if (atInstructionBoundary()) {
     stepCycle(bus);  // the opcode fetch, or the first cycle of an interrupt sequence
     cycles = 1;
-    if (state_.servicing == InterruptRequest::None && !cycleStepped(state_.ir)) {
-      state_.tcu = 0;
-      return stepWhole(bus, state_.ir);
-    }
   }
   while (!atInstructionBoundary()) {
     stepCycle(bus);
     ++cycles;
   }
   return cycles;
-}
-
-template <SnesBus B>
-std::uint32_t Cpu65816::stepWhole(B&, std::uint8_t) {
-  return 0;
 }
 
 }  // namespace snaggletooth

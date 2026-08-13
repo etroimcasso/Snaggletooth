@@ -542,12 +542,15 @@ TEST(Cpu65816Interrupt, AnInterruptSequenceSnapshotsAndRestoresPartWayThrough) {
 }
 
 TEST(Cpu65816Interrupt, TheCycleEngineCarriesTheInterruptsAndTheHalts) {
-  // All four run on the cycle engine, so a machine can watch a sequence one cycle at
-  // a time rather than only from outside it.
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x00));  // BRK
-  EXPECT_TRUE(Cpu65816::cycleStepped(0x02));  // COP
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xCB));  // WAI
-  EXPECT_TRUE(Cpu65816::cycleStepped(0xDB));  // STP
+  // All four run on the cycle engine, narrating every cycle, so a machine can watch a
+  // sequence one cycle at a time rather than only from outside it.
+  for (int opcode : {0x00, 0x02, 0xCB, 0xDB}) {  // BRK, COP, WAI, STP
+    auto bus = busWith({{0x001000, static_cast<std::uint8_t>(opcode)}});
+    Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+    const std::uint32_t cycles = run(bus, cpu);
+    EXPECT_GE(cycles, 2u) << "opcode " << std::hex << opcode;
+    EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << std::hex << opcode;
+  }
 }
 
 }  // namespace

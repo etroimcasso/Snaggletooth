@@ -509,14 +509,17 @@ TEST(Cpu65816Indirect, AnInstructionCanBeSnapshotWhileItsPointerIsHalfRead) {
 }
 
 TEST(Cpu65816Indirect, EveryIndirectOpcodeRunsOnTheCycleEngine) {
-  // The runner compares cycle by cycle only where the engine carries the opcode, so
-  // the family's membership is the coverage: seven addressing modes across the eight
-  // accumulator instructions.
+  // The family's coverage: seven addressing modes across the eight accumulator
+  // instructions. Each runs a cycle at a time and narrates every one of them, which
+  // is what lets the recorded traces be compared cycle for cycle.
   for (int column : {0x01, 0x11, 0x12, 0x07, 0x17, 0x03, 0x13}) {
     for (int i = 0; i < 8; ++i) {
       const auto opcode = static_cast<std::uint8_t>(column + i * 0x20);
-      EXPECT_TRUE(Cpu65816::cycleStepped(opcode))
-          << "opcode " << std::hex << int{opcode};
+      auto bus = busWith({{0x001000, opcode}});
+      Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+      const std::uint32_t cycles = run(bus, cpu);
+      EXPECT_GE(cycles, 2u) << "opcode " << std::hex << int{opcode};
+      EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << std::hex << int{opcode};
     }
   }
 }

@@ -185,6 +185,24 @@ std::vector<VectorParam> interruptHaltParams() {
   return params;
 }
 
+// The two block moves, which carry one byte per seven cycles and run until their
+// counter empties — long enough that the recorder stops them part-way.
+constexpr std::uint8_t kBlockMoveOpcodes[] = {0x54, 0x44};  // MVN / MVP
+
+std::vector<VectorParam> blockMoveParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kBlockMoveOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
+// The recorder stops a trace here. No instruction but a block move runs long enough
+// to reach it, and a case it stopped part-way leaves the core mid-instruction — so
+// that is the one case whose last cycle is not an instruction's last.
+constexpr std::size_t kRecordedCycleCap = 100;
+
 Cpu65816State stateOf(const RegState& r) {
   return Cpu65816State{.pc = r.pc,
                        .s = r.s,
@@ -230,18 +248,16 @@ void expectTraceMatches(const VectorCase& c,
 }
 
 // Every case for one opcode in one mode: seed the initial state on a recording bus,
-// run the instruction, and demand the exact final registers, the exact final RAM,
-// the documented cycle count, and that no write landed outside the addresses the
-// case accounts for (a stray write cannot hide even though the 16 MB space is
-// sparse).
+// step exactly as many cycles as the case recorded, and compare each one against
+// what the chip drove on it — then demand the exact final registers, the exact final
+// RAM, and that no write landed outside the addresses the case accounts for (a stray
+// write cannot hide even though the 16 MB space is sparse).
 //
-// An opcode the cycle engine carries is held to more: the run is exactly as many
-// cycles as the case recorded, each one is compared against what the chip drove on
-// it, and the core must land on an instruction boundary — so the count is proven by
-// where the instruction ended rather than reported by it. An opcode that runs whole
-// is held to the final state and the count alone. The engine itself decides which
-// is which, so an opcode cannot be compared cycle by cycle without running that
-// way, or run that way without being compared.
+// The core must also land on an instruction boundary, so the cycle count is proven by
+// where the instruction ended rather than reported by it. The exception is a case the
+// recorder stopped at its cap: there the instruction genuinely has not finished, and
+// the registers the case lists are a mid-instruction snapshot — which every one of
+// them is required to match exactly.
 TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
   const VectorParam param = GetParam();
   if (vectorsDir().empty()) {
@@ -280,29 +296,24 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     Cpu65816 cpu(stateOf(c.initial));
     bus.cpu = &cpu;
 
-    const bool perCycle = Cpu65816::cycleStepped(param.opcode);
-    std::uint32_t cycles = 0;
-    if (perCycle) {
-      for (std::size_t i = 0; i < c.cycles.size(); ++i) {
-        const std::size_t narrated = bus.trace.size();
-        cpu.stepCycle(bus);
-        if (bus.trace.size() == narrated) {
-          // The core halted and drove nothing at all. The recording still has a row
-          // for the cycle, with every pin inactive, so the runner supplies it — which
-          // is what lets a halt be compared cycle for cycle like anything else.
-          bus.trace.push_back(
-              {.address = std::nullopt,
-               .value = std::nullopt,
-               .signals = snaggletooth::cpu_vectors::kHaltedSignals});
-        }
+    for (std::size_t i = 0; i < c.cycles.size(); ++i) {
+      const std::size_t narrated = bus.trace.size();
+      cpu.stepCycle(bus);
+      if (bus.trace.size() == narrated) {
+        // The core halted and drove nothing at all. The recording still has a row
+        // for the cycle, with every pin inactive, so the runner supplies it — which
+        // is what lets a halt be compared cycle for cycle like anything else.
+        bus.trace.push_back(
+            {.address = std::nullopt,
+             .value = std::nullopt,
+             .signals = snaggletooth::cpu_vectors::kHaltedSignals});
       }
-      cycles = static_cast<std::uint32_t>(c.cycles.size());
-      expectTraceMatches(c, bus.trace);
+    }
+    expectTraceMatches(c, bus.trace);
+    if (c.cycles.size() < kRecordedCycleCap) {
       EXPECT_TRUE(cpu.atInstructionBoundary())
           << c.name << " (the instruction had not finished after "
           << c.cycles.size() << " cycles)";
-    } else {
-      cycles = cpu.stepInstruction(bus);
     }
 
     const Cpu65816State& s = cpu.state();
@@ -316,7 +327,6 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     EXPECT_EQ(int{s.dbr}, int{c.final_.dbr}) << c.name << " (dbr)";
     EXPECT_EQ(int{s.pbr}, int{c.final_.pbr}) << c.name << " (pbr)";
     EXPECT_EQ(s.e, c.final_.e) << c.name << " (e)";
-    EXPECT_EQ(std::size_t{cycles}, c.cycles.size()) << c.name << " (cycle count)";
 
     // (a) every address the final state accounts for holds its listed value.
     std::unordered_set<std::uint32_t> accounted;
@@ -382,6 +392,16 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     InterruptHalt, Cpu65816Vectors,
     ::testing::ValuesIn(interruptHaltParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    BlockMove, Cpu65816Vectors,
+    ::testing::ValuesIn(blockMoveParams()),
     [](const ::testing::TestParamInfo<VectorParam>& info) {
       char label[16];
       std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,

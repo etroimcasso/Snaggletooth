@@ -393,14 +393,17 @@ TEST(Cpu65816Stack, AStackInstructionResumesFromAMidInstructionSnapshot) {
 }
 
 TEST(Cpu65816Stack, EveryStackOpcodeRunsOnTheCycleEngine) {
-  // The runner compares cycle by cycle only where the engine carries the opcode, so
-  // the family's membership is the coverage: seven pushes, six pulls, and the three
-  // push-effective instructions.
+  // The family's coverage: seven pushes, six pulls, and the three push-effective
+  // instructions. Each runs a cycle at a time and narrates every one of them, which
+  // is what lets the recorded traces be compared cycle for cycle.
   for (int opcode : {0x48, 0xDA, 0x5A, 0x08, 0x8B, 0x4B, 0x0B,   // push
                      0x68, 0xFA, 0x7A, 0x28, 0xAB, 0x2B,         // pull
                      0xF4, 0xD4, 0x62}) {                        // PEA, PEI, PER
-    EXPECT_TRUE(Cpu65816::cycleStepped(static_cast<std::uint8_t>(opcode)))
-        << "opcode " << std::hex << opcode;
+    auto bus = busWith({{0x001000, static_cast<std::uint8_t>(opcode)}});
+    Cpu65816 cpu(Cpu65816State{.pc = 0x1000, .s = 0x01FF});
+    const std::uint32_t cycles = run(bus, cpu);
+    EXPECT_GE(cycles, 2u) << "opcode " << std::hex << opcode;
+    EXPECT_EQ(bus.trace.size(), cycles) << "opcode " << std::hex << opcode;
   }
 }
 
