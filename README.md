@@ -33,8 +33,11 @@ cycle counts matched to the documented per-instruction totals and validated per 
 SingleStepTests vectors, and the machine's 64KB RAM, register overlay, three timers, and
 communication ports. The S-DSP is complete: BRR decode, pitch and Gaussian interpolation, the volume
 envelope, key-on/key-off, the eight-voice stereo mix, the shared noise generator, pitch modulation,
-the master volume, and the echo delay line, surfaced as 32 kHz frames through the machine. This table
-is kept honest as components land.
+the master volume, and the echo delay line, surfaced as 32 kHz frames through the machine. The main
+CPU's instruction set is complete too: all 256 of the 65816's opcodes run a cycle at a time, and every
+cycle is checked against the recorded hardware traces — each address driven, each byte moved, and each
+signal pin. The rest of the 5A22 around it has not been built. This table is kept honest as components
+land.
 
 | Component | Status |
 |---|---|
@@ -44,7 +47,7 @@ is kept honest as components land.
 | S-DSP completion (echo, noise, pitch modulation, master volume) | complete — noise, PMON, master volume, echo delay line |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders it to a 32 kHz WAV; output validation against reference renders not yet done |
 | Public embedding API | not started |
-| 5A22 CPU core (the 65816) | in progress — load/store, register transfers, arithmetic and logic (ADC/SBC with decimal mode, CMP/CPX/CPY, AND/ORA/EOR, BIT), and the read-modify-write, stack and flag family (INC/DEC, ASL/LSR/ROL/ROR, TSB/TRB, push/pull incl. PEA/PEI/PER, flag ops, REP/SEP, NOP/WDM) across every addressing mode, with the 8/16-bit width and emulation-mode machinery, per-opcode vector-validated (native and emulated) |
+| 5A22 CPU core (the 65816) | in progress — the instruction set is complete: all 256 opcodes execute one cycle at a time, with the 8/16-bit width and emulation-mode machinery, and every cycle is validated against the vectors in both modes. The rest of the 5A22 — DMA and HDMA, the hardware multiply and divide registers, and the memory-speed model — is not started |
 | PPU, full system | future — see the roadmap |
 
 See [docs/spc700-cpu.md](docs/spc700-cpu.md) for the CPU core's surface, usage, and how to run the
@@ -53,7 +56,8 @@ and stepping, and [docs/dsp.md](docs/dsp.md) for the full DSP — voices, the ou
 echo unit — and its stereo output. [docs/spc-rendering.md](docs/spc-rendering.md)
 covers loading an SPC dump and rendering it to a WAV, and what a dump does and does
 not carry. [docs/65816-cpu.md](docs/65816-cpu.md) covers the main CPU core — its bus,
-state, the 8/16-bit width and emulation-mode machinery, and how to run the vector suite.
+state, the 8/16-bit width and emulation-mode machinery, cycle-stepped execution and
+what each cycle drives, and how to run the vector suite.
 
 ## Roadmap
 

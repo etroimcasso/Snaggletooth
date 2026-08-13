@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -48,10 +49,9 @@ std::size_t caseCap() {
   return v > 0 ? static_cast<std::size_t>(v) : 0;
 }
 
-// The load/store and register-transfer family this sub-block lands: LDA/LDX/LDY,
-// STA/STX/STY/STZ across every addressing mode, the register-to-register transfers
-// (including the 16-bit direct/stack transfers), XBA and XCE. Later sub-blocks
-// extend this list until it covers every opcode.
+// The load/store and register-transfer family: LDA/LDX/LDY, STA/STX/STY/STZ across
+// every addressing mode, the register-to-register transfers (including the 16-bit
+// direct/stack transfers), XBA and XCE.
 constexpr std::uint8_t kLoadStoreTransferOpcodes[] = {
     // LDA (all modes)
     0xA9, 0xA5, 0xB5, 0xAD, 0xBD, 0xB9, 0xAF, 0xBF, 0xA1, 0xB1, 0xB2, 0xA7, 0xB7, 0xA3, 0xB3,
@@ -80,9 +80,9 @@ std::vector<VectorParam> loadStoreTransferParams() {
   return params;
 }
 
-// The arithmetic and logic family this sub-block lands: ADC/SBC and the three
-// bitwise operators across every accumulator addressing mode, the CMP/CPX/CPY
-// comparisons, and BIT (whose flags depend on its addressing mode).
+// The arithmetic and logic family: ADC/SBC and the three bitwise operators across
+// every accumulator addressing mode, the CMP/CPX/CPY comparisons, and BIT (whose
+// flags depend on its addressing mode).
 constexpr std::uint8_t kArithmeticLogicOpcodes[] = {
     // ADC (all modes)
     0x69, 0x65, 0x75, 0x6D, 0x7D, 0x79, 0x6F, 0x7F, 0x61, 0x71, 0x72, 0x67, 0x77, 0x63, 0x73,
@@ -111,7 +111,7 @@ std::vector<VectorParam> arithmeticLogicParams() {
   return params;
 }
 
-// The read-modify-write, stack, and flag/mode family this sub-block lands:
+// The read-modify-write, stack, and flag/mode family:
 // INC/DEC (accumulator, memory and the index registers), the ASL/LSR/ROL/ROR shifts
 // and rotates, TSB/TRB, the push and pull family (including PHB/PHD/PHK/PLB/PLD and
 // PEA/PEI/PER), the status-flag set/clear ops, REP/SEP, and NOP/WDM.
@@ -144,6 +144,65 @@ std::vector<VectorParam> rmwStackFlagParams() {
   return params;
 }
 
+// The control-flow family: the nine relative branches and BRL, the five jumps, the
+// three subroutine calls, and the three returns.
+constexpr std::uint8_t kControlFlowOpcodes[] = {
+    // relative branches
+    0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0, 0x80,
+    // BRL
+    0x82,
+    // JMP (absolute, long, indirect, indirect long, indexed indirect)
+    0x4C, 0x5C, 0x6C, 0xDC, 0x7C,
+    // JSR / JSL
+    0x20, 0xFC, 0x22,
+    // RTS / RTL / RTI
+    0x60, 0x6B, 0x40,
+};
+
+std::vector<VectorParam> controlFlowParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kControlFlowOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
+// The interrupt and halt family: the two software interrupts and the two halts. The
+// hardware interrupt sequence shares its cycles with BRK and COP but has no opcode,
+// so no vector file covers it — it is pinned by the tests derived from the datasheet.
+constexpr std::uint8_t kInterruptHaltOpcodes[] = {
+    0x00, 0x02,  // BRK / COP
+    0xCB, 0xDB,  // WAI / STP
+};
+
+std::vector<VectorParam> interruptHaltParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kInterruptHaltOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
+// The two block moves, which carry one byte per seven cycles and run until their
+// counter empties — long enough that the recorder stops them part-way.
+constexpr std::uint8_t kBlockMoveOpcodes[] = {0x54, 0x44};  // MVN / MVP
+
+std::vector<VectorParam> blockMoveParams() {
+  std::vector<VectorParam> params;
+  for (std::uint8_t opcode : kBlockMoveOpcodes) {
+    params.push_back({opcode, 'n'});
+    params.push_back({opcode, 'e'});
+  }
+  return params;
+}
+
+// The recorder stops a trace here. No instruction but a block move runs long enough
+// to reach it, and a case it stopped part-way leaves the core mid-instruction — so
+// that is the one case whose last cycle is not an instruction's last.
+constexpr std::size_t kRecordedCycleCap = 100;
+
 Cpu65816State stateOf(const RegState& r) {
   return Cpu65816State{.pc = r.pc,
                        .s = r.s,
@@ -159,10 +218,46 @@ Cpu65816State stateOf(const RegState& r) {
 
 class Cpu65816Vectors : public ::testing::TestWithParam<VectorParam> {};
 
-// Every case for one opcode in one mode: seed the initial state on a recording
-// bus, step once, and demand the exact final registers, the exact final RAM, the
-// documented cycle count, and that no write landed outside the addresses the case
-// accounts for (a stray write cannot hide even though the 16 MB space is sparse).
+// Compares one instruction's recorded activity against the case, cycle by cycle. A
+// field the case leaves null says the chip drove nothing there, and is not asserted
+// — the pin string is what distinguishes a cycle that read from one that only drove
+// an address, so it is always asserted.
+void expectTraceMatches(const VectorCase& c,
+                        const std::vector<snaggletooth::cpu_vectors::CycleTrace>& got) {
+  ASSERT_EQ(got.size(), c.cycles.size()) << c.name << " (cycles executed)";
+  for (std::size_t i = 0; i < c.cycles.size(); ++i) {
+    const auto& want = c.cycles[i];
+    if (want.address.has_value()) {
+      ASSERT_TRUE(got[i].address.has_value())
+          << c.name << " (cycle " << i << " drove no address)";
+      EXPECT_EQ(*got[i].address, *want.address) << c.name << " (cycle " << i << " address)";
+    } else {
+      // The recording leaves the address out only where the chip drove none at all,
+      // which is a halted cycle. Driving one there is as wrong as driving the wrong
+      // one, so the absence is asserted rather than skipped.
+      EXPECT_FALSE(got[i].address.has_value())
+          << c.name << " (cycle " << i << " drove an address where the chip drove none)";
+    }
+    if (want.value.has_value()) {
+      ASSERT_TRUE(got[i].value.has_value())
+          << c.name << " (cycle " << i << " moved no byte)";
+      EXPECT_EQ(int{*got[i].value}, int{*want.value}) << c.name << " (cycle " << i << " value)";
+    }
+    EXPECT_EQ(got[i].signals, want.signals) << c.name << " (cycle " << i << " signals)";
+  }
+}
+
+// Every case for one opcode in one mode: seed the initial state on a recording bus,
+// step exactly as many cycles as the case recorded, and compare each one against
+// what the chip drove on it — then demand the exact final registers, the exact final
+// RAM, and that no write landed outside the addresses the case accounts for (a stray
+// write cannot hide even though the 16 MB space is sparse).
+//
+// The core must also land on an instruction boundary, so the cycle count is proven by
+// where the instruction ended rather than reported by it. The exception is a case the
+// recorder stopped at its cap: there the instruction genuinely has not finished, and
+// the registers the case lists are a mid-instruction snapshot — which every one of
+// them is required to match exactly.
 TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
   const VectorParam param = GetParam();
   if (vectorsDir().empty()) {
@@ -199,7 +294,27 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     for (const auto& [address, value] : c.initial.ram) bus.mem[address] = value;
 
     Cpu65816 cpu(stateOf(c.initial));
-    const std::uint32_t cycles = cpu.step(bus);
+    bus.cpu = &cpu;
+
+    for (std::size_t i = 0; i < c.cycles.size(); ++i) {
+      const std::size_t narrated = bus.trace.size();
+      cpu.stepCycle(bus);
+      if (bus.trace.size() == narrated) {
+        // The core halted and drove nothing at all. The recording still has a row
+        // for the cycle, with every pin inactive, so the runner supplies it — which
+        // is what lets a halt be compared cycle for cycle like anything else.
+        bus.trace.push_back(
+            {.address = std::nullopt,
+             .value = std::nullopt,
+             .signals = snaggletooth::cpu_vectors::kHaltedSignals});
+      }
+    }
+    expectTraceMatches(c, bus.trace);
+    if (c.cycles.size() < kRecordedCycleCap) {
+      EXPECT_TRUE(cpu.atInstructionBoundary())
+          << c.name << " (the instruction had not finished after "
+          << c.cycles.size() << " cycles)";
+    }
 
     const Cpu65816State& s = cpu.state();
     EXPECT_EQ(int{s.pc}, int{c.final_.pc}) << c.name << " (pc)";
@@ -212,7 +327,6 @@ TEST_P(Cpu65816Vectors, MatchFinalStateAndCycleCount) {
     EXPECT_EQ(int{s.dbr}, int{c.final_.dbr}) << c.name << " (dbr)";
     EXPECT_EQ(int{s.pbr}, int{c.final_.pbr}) << c.name << " (pbr)";
     EXPECT_EQ(s.e, c.final_.e) << c.name << " (e)";
-    EXPECT_EQ(cycles, c.cycles) << c.name << " (cycle count)";
 
     // (a) every address the final state accounts for holds its listed value.
     std::unordered_set<std::uint32_t> accounted;
@@ -258,6 +372,36 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     RmwStackFlag, Cpu65816Vectors,
     ::testing::ValuesIn(rmwStackFlagParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    ControlFlow, Cpu65816Vectors,
+    ::testing::ValuesIn(controlFlowParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    InterruptHalt, Cpu65816Vectors,
+    ::testing::ValuesIn(interruptHaltParams()),
+    [](const ::testing::TestParamInfo<VectorParam>& info) {
+      char label[16];
+      std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,
+                    info.param.mode);
+      return std::string(label);
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    BlockMove, Cpu65816Vectors,
+    ::testing::ValuesIn(blockMoveParams()),
     [](const ::testing::TestParamInfo<VectorParam>& info) {
       char label[16];
       std::snprintf(label, sizeof label, "op%02X_%c", info.param.opcode,

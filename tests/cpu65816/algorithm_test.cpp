@@ -37,7 +37,7 @@ Result run(const Cpu65816State& init,
   RecordingBus bus;
   for (const auto& [address, value] : ram) bus.mem[address] = value;
   Cpu65816 cpu(init);
-  const std::uint32_t cycles = cpu.step(bus);
+  const std::uint32_t cycles = cpu.stepInstruction(bus);
   return {cpu.state(), cycles, std::move(bus)};
 }
 

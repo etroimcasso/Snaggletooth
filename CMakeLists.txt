@@ -110,6 +110,14 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
+    tests/cpu65816/cycle_engine_test.cpp
+    tests/cpu65816/direct_page_cycles_test.cpp
+    tests/cpu65816/absolute_cycles_test.cpp
+    tests/cpu65816/indirect_cycles_test.cpp
+    tests/cpu65816/stack_cycles_test.cpp
+    tests/cpu65816/control_flow_cycles_test.cpp
+    tests/cpu65816/interrupt_cycles_test.cpp
+    tests/cpu65816/block_move_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
