@@ -131,8 +131,6 @@ class Spc700 {
   std::uint32_t step(B& bus);                  // the same call
 
   bool atInstructionBoundary() const noexcept; // between instructions?
-
-  static bool cycleStepped(std::uint8_t opcode) noexcept;  // runs a cycle at a time?
 };
 ```
 
@@ -178,28 +176,15 @@ SLEEP and STOP set `run` to `Sleeping` or `Stopped` and stop advancing. A `stepC
 that is not `Running` touches neither the state nor the bus, and `stepInstruction()` returns 2
 cycles having done nothing — the machine that owns the clock keeps time passing (timers still tick
 on delivered cycles) while the CPU sits idle. Move the core back to `Running` through `restore()`
-to resume it.
+to resume it. The instructions themselves are seven cycles long; [The control flow](#the-control-flow)
+has their shape.
 
 ## The cycle bar
 
-The move, arithmetic, 16-bit and bit families run a cycle at a time. Every one of their cycles is
-placed — which cycle reads, which writes, which reaches memory not at all, and what address each
-drives — and every one is checked against a per-cycle recording of the real chip.
-
-The control-flow instructions — the branches, the jumps, the calls and returns, the stack, the flag
-operations, and the halts — run whole. Their cycle counts match the documented per-instruction
-totals and they issue the documented accesses, but which cycle each access falls on is not modelled
-yet. `cycleStepped()` reports which of the two paths an opcode is on:
-
-```cpp
-snaggletooth::Spc700::cycleStepped(0x84);  // true  — ADC A,dp
-snaggletooth::Spc700::cycleStepped(0xBA);  // true  — MOVW YA,dp
-snaggletooth::Spc700::cycleStepped(0x2F);  // false — BRA
-```
-
-An opcode on the whole-instruction path cannot be driven with `stepCycle()`. The call that would
-run its second cycle reaches memory not at all and the instruction makes no progress, so a
-per-cycle run over one fails loudly instead of passing quietly. Run it with `stepInstruction()`.
+All 256 opcodes run a cycle at a time. Every cycle is placed — which one reads, which writes, which
+reaches memory not at all, and what address each drives — and every one is checked against a
+per-cycle recording of the real chip. There is no second path: `stepInstruction()` is the cycles the
+instruction is made of, run to the next boundary.
 
 ## The moves
 
@@ -501,20 +486,150 @@ restoring division runs to the end, sets `V` from the overflow bit, and leaves t
 falls out. `H` is the nibble comparison `X & $F <= Y & $F` on the values the instruction started
 with.
 
+## The control flow
+
+The branches, the jumps, the calls and returns, the stack transfers, the flag operations and the
+halts all move — or decline to move — the program counter. Two laws run through the whole family.
+
+**A branch's condition is settled before the cycles it costs.** The cycle that reads what the branch
+tests decides it; the cycles that follow are spent, or not, on that decision.
+
+**The program counter moves on the last cycle**, like every other register. That is why a call
+writes its return address to the stack *before* its destination reaches the core, and why every
+address in a stack instruction is measured from where `sp` began rather than from where it ends up.
+
+### The branches
+
+A relative branch is two cycles when its condition fails: the opcode, and the displacement. When it
+holds, two more cycles pass inside the chip and the program counter moves at the end of them. The
+displacement counts from past the whole instruction.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0x2F;  // BRA +5
+ram.bytes[0x0201] = 0x05;
+
+snaggletooth::Spc700 cpu(snaggletooth::Spc700State{.pc = 0x0200});
+std::uint32_t cycles = cpu.stepInstruction(ram);
+// four cycles: opcode, displacement, and two reaching memory not at all
+// cpu.state().pc == 0x0207 — $0202, past the instruction, plus 5
+```
+
+`BRA` is the one that always takes them. `BEQ`, `BNE`, `BCS`, `BCC`, `BVS`, `BVC`, `BMI` and `BPL`
+test one status bit each.
+
+The other four branches read something first, and their displacement is the byte *after* that
+operand:
+
+| Instruction | Cycles | Not taken / taken |
+|---|---|---|
+| `BBS dp.b,rel` / `BBC dp.b,rel` | opcode · offset · read · a cycle inside the chip · displacement | 5 / 7 |
+| `CBNE dp,rel` | opcode · offset · read · a cycle inside the chip · displacement | 5 / 7 |
+| `CBNE dp+X,rel` | opcode · offset · index · read · a cycle inside the chip · displacement | 6 / 8 |
+| `DBNZ dp,rel` | opcode · offset · read · **write** · displacement | 5 / 7 |
+| `DBNZ Y,rel` | opcode · displacement · a cycle inside the chip · displacement again | 4 / 6 |
+
+Two of those rows are worth reading twice. **`DBNZ dp` writes the decremented byte back before it
+reads the displacement**, so the store lands whether or not the branch is taken. And **`DBNZ Y` has
+only one operand byte and reads it twice** — once as the displacement, and again after the cycle the
+decrement takes. Neither `CBNE` nor `DBNZ` sets a flag: the comparison and the decrement both settle
+inside the chip.
+
+### The jumps
+
+`JMP !abs` is three cycles and spends none of them inside the chip — the operand is the destination.
+
+`JMP [!abs+X]` adds X to the operand and reads a pointer there, and **that pointer's two bytes are
+one linear byte apart**. It is the only address in the core that does not wrap inside a page: a
+pointer at `$02FF` takes its high byte from `$0300`, where a direct-page word or an indirect mode's
+pointer would wrap to the page base.
+
+| Instruction | Cycles |
+|---|---|
+| `JMP !abs` | opcode · address low · address high |
+| `JMP [!abs+X]` | opcode · address low · address high · index · pointer low · pointer high |
+
+### The calls and the returns
+
+A call writes the return address high byte first, so the low byte lands at the lower address and is
+the first one read back. `sp` names the byte the first write reaches, and settles two (or, for
+`BRK`, three) entries down at the end of the instruction.
+
+| Instruction | Cycles |
+|---|---|
+| `CALL !abs` | opcode · address low · address high · internal · push high · push low · internal · internal |
+| `PCALL up` | opcode · offset · internal · push high · push low · internal |
+| `TCALL n` | opcode · discarded read · internal · push high · push low · internal · vector low · vector high |
+| `BRK` | opcode · discarded read · push high · push low · push status · internal · vector low · vector high |
+| `RET` | opcode · discarded read · internal · pull low · pull high |
+| `RETI` | opcode · discarded read · internal · pull status · pull low · pull high |
+
+`PCALL`'s destination is `$FF00` plus its one operand byte. `TCALL n` takes its destination from the
+table that ends at `$FFDE` and counts downwards two bytes per entry, so `TCALL 0` reads `$FFDE` and
+`$FFDF` and `TCALL 15` reads `$FFC0` and `$FFC1`. `BRK` reads the same entry `TCALL 0` does — and
+differs in three ways: it pushes the status byte under the return address, it begins its pushes
+immediately where `TCALL` spends a cycle inside the chip first, and it sets `B` and clears `I` at
+the end, after the byte it pushed was already the old one.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0x3F;  // CALL !$0300
+ram.bytes[0x0201] = 0x00;
+ram.bytes[0x0202] = 0x03;
+
+snaggletooth::Spc700 cpu(snaggletooth::Spc700State{.pc = 0x0200, .sp = 0xEF});
+cpu.stepInstruction(ram);
+// ram.bytes[0x01EF] == 0x02  — the return address, high byte at the higher address
+// ram.bytes[0x01EE] == 0x03
+// cpu.state().pc == 0x0300
+// cpu.state().sp == 0xED
+```
+
+### The stack transfers
+
+`PUSH` and `POP` are mirror images of each other, and both are four cycles: the push writes on the
+third and spends the fourth inside the chip, the pop spends the third inside the chip and reads on
+the fourth.
+
+| Instruction | Cycles |
+|---|---|
+| `PUSH A` / `PUSH X` / `PUSH Y` / `PUSH PSW` | opcode · discarded read · write at `$0100+sp` · internal |
+| `POP A` / `POP X` / `POP Y` / `POP PSW` | opcode · discarded read · internal · read at `$0100+sp+1` |
+
+Popping a register sets no flag. `POP PSW` replaces the whole status byte, the flags it carries
+included.
+
+### The flag operations and the halts
+
+`CLRC`, `SETC`, `CLRP`, `SETP`, `CLRV` and `NOP` are two cycles — the opcode and the discarded read.
+`NOTC`, `EI` and `DI` spend one further cycle inside the chip and take three. `CLRV` clears the
+half-carry along with the overflow.
+
+`SLEEP` and `STOP` are seven cycles with a shape of their own: the byte after the opcode is read
+three times over, each read followed by a cycle inside the chip. The core halts as the last of them
+ends — on an instruction boundary, with the program counter left on the byte it kept reading.
+
+```cpp
+FlatRam ram;
+ram.bytes[0x0200] = 0xEF;  // SLEEP
+
+snaggletooth::Spc700 cpu(snaggletooth::Spc700State{.pc = 0x0200});
+std::uint32_t cycles = cpu.stepInstruction(ram);
+// cycles == 7
+// cpu.state().run == snaggletooth::RunState::Sleeping
+// cpu.state().pc  == 0x0201 — the byte is read, never stepped over
+```
+
 ## Testing against the vectors
 
 The core is checked per opcode against the SingleStepTests SPC700 vectors — one file per opcode,
 each case a before state, an after state, and a recording of every cycle the instruction took.
 
-For an opcode the cycle engine carries, the suite runs the case one cycle at a time and compares
-each cycle against the recording: what the cycle did (read, write, or nothing at all), the address
-it drove, and the byte that moved. A field the recording leaves null is not asserted — the byte a
-discarded read moved was never captured. It then demands that the core landed on an instruction
-boundary, the exact final registers, and the exact final RAM (a full 64KB compare, so a stray write
-cannot hide).
-
-For an opcode on the whole-instruction path, the suite runs it whole and demands the same final
-state plus the recorded cycle count.
+Every case runs one cycle at a time, and each cycle is compared against the recording: what the
+cycle did (read, write, or nothing at all), the address it drove, and the byte that moved. A field
+the recording leaves null is not asserted — the byte a discarded read moved was never captured. The
+suite then demands that the core landed on an instruction boundary, the exact final registers, and
+the exact final RAM (a full 64KB compare, so a stray write cannot hide).
 
 The vectors are large, machine-generated reference data and are not vendored. Point the build at a
 local checkout of the SingleStepTests SPC700 `v1` directory:
@@ -546,7 +661,10 @@ environment variables shape a run:
 - **The direct page can move.** Address `dp` with `P` set and you are reaching `$0100+dp`, not
   `$0000+dp`.
 - **A word wraps inside the direct page.** The high byte of a word at `$FF` is at the page base, not
-  in the page above. The same holds for the second byte of an indirect mode's pointer.
+  in the page above. The same holds for the second byte of an indirect mode's pointer — and not for
+  `JMP [!abs+X]`, whose pointer is the one that steps linearly.
+- **A branch's displacement counts from past the instruction.** `BRA` at `$0200` with a displacement
+  of 5 lands at `$0207`, not `$0205`.
 - **A halted core still costs time.** Stepping it returns 2 cycles rather than 0, because the clock
   belongs to the machine around the CPU, not to the CPU.
 
@@ -562,4 +680,7 @@ environment variables shape a run:
 - `tests/spc700/word_bit_cycles_test.cpp` — the 16-bit and bit families' cycle placement: the word
   page-wrap and its interleave, the second read of `TSET1`, the bit operand's packing, and the
   instructions that run inside the chip.
+- `tests/spc700/control_flow_cycles_test.cpp` — the control-flow family's cycle placement: what a
+  taken branch costs, the order a call reaches the stack and its destination in, the linear pointer
+  of `JMP [!abs+X]`, and the shape of a halt.
 - `tests/spc700/` — the vector harness and runner, and the hand-derived flag/algorithm cross-checks.

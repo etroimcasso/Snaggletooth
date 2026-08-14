@@ -18,7 +18,6 @@ namespace {
 
 using snaggletooth::Spc700;
 using snaggletooth::Spc700State;
-using snaggletooth::test::FlatRamBus;
 using snaggletooth::test::VectorCase;
 
 std::string vectorsDir() { return SNAGGLETOOTH_SPC700_VECTORS; }
@@ -39,8 +38,8 @@ std::size_t caseCap() {
 }
 
 // The 41 opcodes of the 8-bit MOV family — the three "8-bit move" groups of the
-// SNESdev instruction-set table. Each sub-block extends this list to the families
-// it lands; the suite is green at every commit.
+// SNESdev instruction-set table. The four lists below name every opcode 0x00..0xFF
+// exactly once, grouped by family so a failure names the family it came from.
 constexpr std::uint8_t kMovOpcodes[] = {
     // memory to register
     0xE8, 0xE6, 0xBF, 0xE4, 0xF4, 0xE5, 0xF5, 0xF6, 0xE7, 0xF7,
@@ -206,22 +205,9 @@ void runPerCycle(const VectorCase& c) {
   expectFinalRam(bus.ram, c);
 }
 
-// One case for an opcode the cycle engine does not carry yet: run the instruction
-// whole and demand its final state, its final RAM, and its cycle count.
-void runWhole(const VectorCase& c) {
-  FlatRamBus bus;
-  for (const auto& [address, value] : c.initial.ram) bus.ram[address] = value;
-
-  Spc700 cpu(stateOf(c.initial));
-  const std::uint32_t cycles = cpu.step(bus);
-
-  expectFinalState(cpu.state(), c);
-  EXPECT_EQ(cycles, c.cycles.size()) << c.name << " (cycle count)";
-  expectFinalRam(bus.ram, c);
-}
-
-// Every case for one opcode: seed the initial state on a zeroed 64KB bus and run it,
-// a cycle at a time where the engine carries the opcode and whole where it does not.
+// Every case for one opcode: seed the initial state on a zeroed 64KB bus and run it a
+// cycle at a time. Every opcode runs that way — the whole instruction set is on the
+// cycle engine, so no case is compared on its final state alone.
 TEST_P(Spc700Vectors, MatchFinalStateAndCycleCount) {
   const std::uint8_t opcode = GetParam();
   if (vectorsDir().empty()) {
@@ -252,12 +238,7 @@ TEST_P(Spc700Vectors, MatchFinalStateAndCycleCount) {
       break;
     }
     ++ran;
-
-    if (Spc700::cycleStepped(opcode)) {
-      runPerCycle(c);
-    } else {
-      runWhole(c);
-    }
+    runPerCycle(c);
   }
 }
 

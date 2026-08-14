@@ -275,24 +275,34 @@ TEST(Spc700CycleEngine, TheAutoIncrementLoadStepsXOnItsLastCycle) {
   EXPECT_EQ(int{cpu.state().x}, 0x21);
 }
 
-TEST(Spc700CycleEngine, TheEngineCarriesEveryFamilyButTheControlFlowOne) {
-  // The routing ratchet: an opcode the engine carries runs a cycle at a time, and one
-  // it does not runs whole. Every family joins the first list as it lands.
-  EXPECT_TRUE(Spc700::cycleStepped(0xE4));   // MOV A,dp
-  EXPECT_TRUE(Spc700::cycleStepped(0xAF));   // MOV (X)+,A
-  EXPECT_TRUE(Spc700::cycleStepped(0x8F));   // MOV dp,#imm
-  EXPECT_TRUE(Spc700::cycleStepped(0x84));   // ADC A,dp
-  EXPECT_TRUE(Spc700::cycleStepped(0x99));   // ADC (X),(Y)
-  EXPECT_TRUE(Spc700::cycleStepped(0xAB));   // INC dp
-  EXPECT_TRUE(Spc700::cycleStepped(0x9F));   // XCN A
-  EXPECT_TRUE(Spc700::cycleStepped(0xBA));   // MOVW YA,dp
-  EXPECT_TRUE(Spc700::cycleStepped(0x3A));   // INCW dp
-  EXPECT_TRUE(Spc700::cycleStepped(0xCF));   // MUL YA
-  EXPECT_TRUE(Spc700::cycleStepped(0xA2));   // SET1 dp.5
-  EXPECT_TRUE(Spc700::cycleStepped(0x0E));   // TSET1 !abs
-  EXPECT_TRUE(Spc700::cycleStepped(0xCA));   // MOV1 m.b,C
-  EXPECT_FALSE(Spc700::cycleStepped(0x00));  // NOP
-  EXPECT_FALSE(Spc700::cycleStepped(0x2F));  // BRA
+TEST(Spc700CycleEngine, EveryOpcodeFinishesOneCycleAtATime) {
+  // The whole instruction set runs on the cycle engine. Driving each of the 256
+  // opcodes from a boundary reaches the next boundary within the longest instruction
+  // the CPU has, so an opcode with no cycle sequence would show up here as one that
+  // never finishes rather than as one that quietly does nothing.
+  constexpr std::size_t kLongestInstruction = 12;  // DIV YA,X
+  for (unsigned opcode = 0; opcode <= 0xFF; ++opcode) {
+    RecordingFlatBus bus = busWith({static_cast<std::uint8_t>(opcode)});
+    Spc700 cpu(Spc700State{.pc = kProgram});
+
+    std::size_t cycles = 0;
+    do {
+      cpu.stepCycle(bus);
+      ++cycles;
+    } while (!cpu.atInstructionBoundary() && cycles <= kLongestInstruction);
+
+    EXPECT_TRUE(cpu.atInstructionBoundary())
+        << "opcode " << opcode << " had not finished after " << cycles << " cycles";
+    EXPECT_GE(cycles, 2u) << "opcode " << opcode << " (every instruction reads the "
+                             "byte after its opcode)";
+
+    // And the whole-instruction call agrees with the cycles it is made of.
+    RecordingFlatBus whole = busWith({static_cast<std::uint8_t>(opcode)});
+    Spc700 wholeCpu(Spc700State{.pc = kProgram});
+    EXPECT_EQ(wholeCpu.stepInstruction(whole), cycles)
+        << "opcode " << opcode << " (the two calls disagree on its length)";
+    EXPECT_EQ(whole.ram, bus.ram) << "opcode " << opcode;
+  }
 }
 
 }  // namespace

@@ -65,6 +65,7 @@ struct Spc700State {
   std::uint16_t ea = 0;   // effective-address scratch
   std::uint16_t ptr = 0;  // pointer / second-address scratch
   std::uint16_t tmp = 0;  // data scratch (an operand byte, or a value in flight)
+  bool taken = false;     // a branch condition, settled before the cycles it prices
 };
 
 class Spc700 {
@@ -98,14 +99,6 @@ class Spc700 {
   // Whether the core sits between instructions — the only point at which an
   // instruction can begin, and the state a completed instruction leaves behind.
   [[nodiscard]] bool atInstructionBoundary() const noexcept { return state_.tcu == 0; }
-
-  // Whether the cycle engine carries this opcode. The instruction families move onto
-  // it one at a time; an opcode it does not carry yet runs whole under
-  // stepInstruction() and cannot be driven a cycle at a time.
-  [[nodiscard]] static constexpr bool cycleStepped(std::uint8_t opcode) noexcept {
-    MemForm form{};
-    return memoryForm(opcode, form) || wordForm(opcode) != WordForm::None;
-  }
 
  private:
   // The direct-page base: the P flag selects $0100 over $0000.
@@ -254,66 +247,13 @@ class Spc700 {
     return bus.read(state_.pc++);
   }
 
-  // Effective-address helpers. Each consumes its operand bytes from the program
-  // stream and issues any pointer reads, returning the target address.
-  template <ApuBus B>
-  std::uint16_t addrDp(B& bus) {
-    return static_cast<std::uint16_t>(dpBase() + fetch(bus));
-  }
-  template <ApuBus B>
-  std::uint16_t addrDpX(B& bus) {
-    return static_cast<std::uint16_t>(dpBase() + ((fetch(bus) + state_.x) & 0xFF));
-  }
-  template <ApuBus B>
-  std::uint16_t addrAbs(B& bus) {
-    std::uint16_t lo = fetch(bus);
-    std::uint16_t hi = fetch(bus);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-  template <ApuBus B>
-  std::uint16_t addrAbsX(B& bus) {
-    return static_cast<std::uint16_t>(addrAbs(bus) + state_.x);
-  }
-
-  // The stack lives in page $01, addressed by SP as its low byte. A push writes
-  // then post-decrements SP; a pop pre-increments then reads. SP is an 8-bit
-  // register, so it wraps within the page.
-  template <ApuBus B>
-  void push(B& bus, std::uint8_t v) {
-    bus.write(static_cast<std::uint16_t>(0x0100u + state_.sp), v);
-    --state_.sp;
-  }
-  template <ApuBus B>
-  std::uint8_t pop(B& bus) {
-    ++state_.sp;
-    return bus.read(static_cast<std::uint16_t>(0x0100u + state_.sp));
-  }
-  // A 16-bit value on the stack: the high byte is pushed first, so the low byte
-  // lands at the lower address and is the first one popped back.
-  template <ApuBus B>
-  void pushWord(B& bus, std::uint16_t w) {
-    push(bus, static_cast<std::uint8_t>(w >> 8));
-    push(bus, static_cast<std::uint8_t>(w));
-  }
-  template <ApuBus B>
-  std::uint16_t popWord(B& bus) {
-    std::uint16_t lo = pop(bus);
-    std::uint16_t hi = pop(bus);
-    return static_cast<std::uint16_t>(lo | (hi << 8));
-  }
-
-  // Consumes the relative-offset byte and, when the condition holds, adds it to
-  // PC as a signed displacement — PC already points past the whole instruction.
-  // Returns the taken or not-taken cycle count.
-  template <ApuBus B>
-  std::uint32_t branchIf(B& bus, bool taken, std::uint32_t takenCycles,
-                         std::uint32_t notTakenCycles) {
-    const std::int8_t rel = static_cast<std::int8_t>(fetch(bus));
-    if (taken) {
-      state_.pc = static_cast<std::uint16_t>(state_.pc + rel);
-      return takenCycles;
-    }
-    return notTakenCycles;
+  // The stack lives in page $01, addressed by SP as its low byte. `step` counts
+  // entries from the one SP names — a push reaches 0 then -1, a pop reaches +1 then
+  // +2 — and the count wraps inside the page, because SP is an 8-bit register. The
+  // register itself settles on the instruction's last cycle, so every address in a
+  // stack instruction is measured from where SP began.
+  [[nodiscard]] std::uint16_t stackAddr(int step) const noexcept {
+    return static_cast<std::uint16_t>(0x0100u + ((state_.sp + step) & 0xFF));
   }
 
   // ---- the cycle engine ---------------------------------------------------
@@ -323,12 +263,6 @@ class Spc700 {
   // a handler never has to look ahead.
   template <ApuBus B>
   bool executeCycle(B& bus);
-
-  // Runs one whole instruction whose opcode has already been fetched, returning its
-  // documented cycle count. This is the path for the opcodes the cycle engine does
-  // not carry yet.
-  template <ApuBus B>
-  std::uint32_t stepWhole(B& bus, std::uint8_t opcode);
 
   // ---- reaching memory ----------------------------------------------------
   // Where a memory instruction's operand lives. Each mode is a fixed cycle sequence:
@@ -475,6 +409,101 @@ class Spc700 {
 
   // Applies a word instruction that has both of its bytes.
   void applyWordRead(std::uint8_t opcode, std::uint16_t word);
+
+  // ---- reaching the program counter ---------------------------------------
+  // What an instruction that moves the program counter does with it. Each kind is
+  // its own cycle sequence: a branch reads a displacement and adds it, a jump takes
+  // a destination, a call puts the return address on the stack around the same work,
+  // and a return takes one back off it.
+  enum class CtrlKind : std::uint8_t {
+    Branch,           // the eight conditional relative branches, and BRA
+    BitBranch,        // BBS/BBC dp.b and CBNE dp: a direct-page byte, then the offset
+    CompareIndexed,   // CBNE dp+X: the same, with the indexing cycle before the byte
+    DecrementDp,      // DBNZ dp: the decremented byte is written before the offset
+    DecrementY,       // DBNZ Y: the offset's own address is read a second time
+    Jump,             // JMP !abs
+    JumpIndexed,      // JMP [!abs+X]: an indexed pointer, its halves a linear byte apart
+    Call,             // CALL !abs
+    CallPage,         // PCALL up: the destination is one byte into page $FF
+    CallVector,       // TCALL n: the destination comes from the table below $FFDE
+    Break,            // BRK: the same table, with the status byte pushed as well
+    Return,           // RET
+    ReturnInterrupt,  // RETI: the status byte comes back under the return address
+    Push,             // PUSH A/X/Y/PSW
+    Pop,              // POP A/X/Y/PSW
+    Halt,             // SLEEP / STOP
+  };
+
+  // The shape of one control-flow instruction. A relative branch also carries the
+  // status bit it tests and the state of that bit which takes it.
+  struct CtrlForm {
+    CtrlKind kind = CtrlKind::Branch;
+    std::uint8_t flag = 0;  // the status bit the branch tests; 0 for BRA
+    bool whenSet = false;   // whether the branch is taken with that bit set
+  };
+
+  // Fills in the shape of a control-flow instruction and answers whether the opcode
+  // is one.
+  [[nodiscard]] static constexpr bool controlForm(std::uint8_t opcode,
+                                                  CtrlForm& form) noexcept;
+
+  // Whether a relative branch's condition holds. BRA carries no flag and is always
+  // taken.
+  [[nodiscard]] bool branchTaken(const CtrlForm& form) const noexcept {
+    return form.flag == 0 || (((state_.psw & form.flag) != 0) == form.whenSet);
+  }
+
+  // Whether one of the instructions that reads a byte before its displacement takes
+  // its branch. The two compare forms branch when A differs from the byte; BBS and
+  // BBC test one of its bits, the index in the opcode's top three bits and the
+  // polarity in the fourth — an even high nibble branches on the bit set.
+  [[nodiscard]] bool byteBranchTaken(std::uint8_t opcode,
+                                     std::uint8_t value) const noexcept {
+    if (opcode == 0x2E || opcode == 0xDE) return state_.a != value;
+    const std::uint8_t high = static_cast<std::uint8_t>(opcode >> 4);
+    const bool set = ((value >> (high >> 1)) & 1u) != 0;
+    return set == ((high & 1u) == 0u);
+  }
+
+  // Adds the displacement in the data scratch to the program counter, which already
+  // points past the whole instruction.
+  void takeBranch() noexcept {
+    state_.pc = static_cast<std::uint16_t>(state_.pc +
+                                           static_cast<std::int8_t>(state_.tmp));
+  }
+
+  // The table entry a call through the top of memory reads its destination from. The
+  // table ends at $FFDE and counts downwards, two bytes per entry; BRK takes the same
+  // entry as TCALL 0.
+  [[nodiscard]] std::uint16_t callVector() const noexcept {
+    const unsigned entry = state_.ir == 0x0F ? 0u : unsigned{state_.ir} >> 4;
+    return static_cast<std::uint16_t>(0xFFDEu - 2u * entry);
+  }
+
+  // The register a push writes.
+  [[nodiscard]] std::uint8_t pushValue(std::uint8_t opcode) const noexcept {
+    switch (opcode) {
+      case 0x2D: return state_.a;
+      case 0x4D: return state_.x;
+      case 0x6D: return state_.y;
+      default: return state_.psw;  // PUSH PSW
+    }
+  }
+
+  // Lands a popped byte in its register. None of the three register forms sets a
+  // flag; POP PSW replaces the whole status byte, the flags it carries included.
+  void applyPop(std::uint8_t opcode, std::uint8_t value) noexcept {
+    switch (opcode) {
+      case 0xAE: state_.a = value; break;
+      case 0xCE: state_.x = value; break;
+      case 0xEE: state_.y = value; break;
+      default: state_.psw = value; break;  // POP PSW
+    }
+  }
+
+  // Executes one cycle of a control-flow instruction.
+  template <ApuBus B>
+  bool executeControlCycle(B& bus, const CtrlForm& form);
 
   // The 16-bit accumulator pair: Y is the high byte, A the low.
   [[nodiscard]] std::uint16_t ya() const noexcept {
@@ -695,6 +724,19 @@ constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
       form = MemForm{.mode = AddrMode::Implied, .internals = 1};
       return true;
 
+    // ---- the status flags, and the instruction that does nothing at all ----
+    // Each reads the byte after the opcode and discards it, and the three that settle
+    // a cycle later spend that cycle inside the chip.
+    case 0x00:                        // NOP
+    case 0x20: case 0x40:             // CLRP / SETP
+    case 0x60: case 0x80:             // CLRC / SETC
+    case 0xE0:                        // CLRV
+      form = MemForm{.mode = AddrMode::Implied};
+      return true;
+    case 0xED: case 0xA0: case 0xC0:  // NOTC / EI / DI
+      form = MemForm{.mode = AddrMode::Implied, .internals = 1};
+      return true;
+
     // ---- one bit of a direct-page byte, set or cleared ----
     // The read-modify-write seat once more: the byte is read and written back with a
     // single bit changed, and no flag moves.
@@ -727,6 +769,93 @@ constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
       form = MemForm{.mode = AddrMode::AbsBit,            // inside the chip, then writes
                      .access = MemAccess::Modify,
                      .destination = DestinationCycle::ReadThenWait};
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+// The routing table for the instructions that move the program counter. Every opcode
+// the memory and word tables do not carry is one of these, so between the three every
+// opcode has a cycle sequence.
+constexpr bool Spc700::controlForm(std::uint8_t opcode, CtrlForm& form) noexcept {
+  switch (opcode) {
+    // ---- the relative branches. Two cycles when the condition fails, and two more
+    //      inside the chip when it holds ----
+    case 0x2F:  // BRA — no flag, so always taken
+      form = CtrlForm{.kind = CtrlKind::Branch};
+      return true;
+    case 0xF0:  // BEQ
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagZ, .whenSet = true};
+      return true;
+    case 0xD0:  // BNE
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagZ};
+      return true;
+    case 0xB0:  // BCS
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagC, .whenSet = true};
+      return true;
+    case 0x90:  // BCC
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagC};
+      return true;
+    case 0x70:  // BVS
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagV, .whenSet = true};
+      return true;
+    case 0x50:  // BVC
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagV};
+      return true;
+    case 0x30:  // BMI
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagN, .whenSet = true};
+      return true;
+    case 0x10:  // BPL
+      form = CtrlForm{.kind = CtrlKind::Branch, .flag = kFlagN};
+      return true;
+
+    // ---- the branches that read a byte first: one bit of a direct-page byte, or
+    //      that byte against A. They share a cycle sequence and differ in the test ----
+    case 0x03: case 0x23: case 0x43: case 0x63:  // BBS dp.0..7,rel
+    case 0x83: case 0xA3: case 0xC3: case 0xE3:
+    case 0x13: case 0x33: case 0x53: case 0x73:  // BBC dp.0..7,rel
+    case 0x93: case 0xB3: case 0xD3: case 0xF3:
+    case 0x2E:                                   // CBNE dp,rel
+      form = CtrlForm{.kind = CtrlKind::BitBranch};
+      return true;
+    case 0xDE:                                   // CBNE dp+X,rel
+      form = CtrlForm{.kind = CtrlKind::CompareIndexed};
+      return true;
+    case 0x6E:                                   // DBNZ dp,rel
+      form = CtrlForm{.kind = CtrlKind::DecrementDp};
+      return true;
+    case 0xFE:                                   // DBNZ Y,rel
+      form = CtrlForm{.kind = CtrlKind::DecrementY};
+      return true;
+
+    // ---- jumps, calls and returns ----
+    case 0x5F: form = CtrlForm{.kind = CtrlKind::Jump}; return true;         // JMP !abs
+    case 0x1F: form = CtrlForm{.kind = CtrlKind::JumpIndexed}; return true;  // JMP [!abs+X]
+    case 0x3F: form = CtrlForm{.kind = CtrlKind::Call}; return true;         // CALL !abs
+    case 0x4F: form = CtrlForm{.kind = CtrlKind::CallPage}; return true;     // PCALL up
+    case 0x01: case 0x11: case 0x21: case 0x31:  // TCALL 0..7
+    case 0x41: case 0x51: case 0x61: case 0x71:
+    case 0x81: case 0x91: case 0xA1: case 0xB1:  // TCALL 8..15
+    case 0xC1: case 0xD1: case 0xE1: case 0xF1:
+      form = CtrlForm{.kind = CtrlKind::CallVector};
+      return true;
+    case 0x0F: form = CtrlForm{.kind = CtrlKind::Break}; return true;            // BRK
+    case 0x6F: form = CtrlForm{.kind = CtrlKind::Return}; return true;           // RET
+    case 0x7F: form = CtrlForm{.kind = CtrlKind::ReturnInterrupt}; return true;  // RETI
+
+    // ---- the stack ----
+    case 0x2D: case 0x4D: case 0x6D: case 0x0D:  // PUSH A/X/Y/PSW
+      form = CtrlForm{.kind = CtrlKind::Push};
+      return true;
+    case 0xAE: case 0xCE: case 0xEE: case 0x8E:  // POP A/X/Y/PSW
+      form = CtrlForm{.kind = CtrlKind::Pop};
+      return true;
+
+    // ---- the halts ----
+    case 0xEF: case 0xFF:                        // SLEEP / STOP
+      form = CtrlForm{.kind = CtrlKind::Halt};
       return true;
 
     default:
@@ -1028,8 +1157,8 @@ inline void Spc700::applyMemoryRead(std::uint8_t opcode, std::uint8_t value) {
       break;
 
     default:
-      // Every routed read form is listed above. stepCycle refuses an opcode the
-      // engine does not carry, so nothing else reaches here.
+      // Every form that reads a byte into a register or into the carry flag is
+      // listed above; the tables send nothing else here.
       break;
   }
 }
@@ -1044,7 +1173,7 @@ inline std::uint8_t Spc700::memoryStoreValue(std::uint8_t opcode) const noexcept
     case 0xCB: case 0xDB: case 0xCC:
       return state_.y;
     default:
-      // As for applyMemoryRead: every routed store form is listed above.
+      // As for applyMemoryRead: every store form is listed above.
       return 0;
   }
 }
@@ -1131,6 +1260,23 @@ inline void Spc700::applyImplied(std::uint8_t opcode) {
       setNZ(state_.a);
       break;
     }
+
+    // ---- the status flags ----
+    // CLRV clears the half-carry with the overflow, and I is an enable rather than a
+    // disable: EI sets it, DI clears it. The audio unit has no interrupt source, so
+    // nothing is ever delivered through it.
+    case 0x60: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagC); break;
+    case 0x80: state_.psw = static_cast<std::uint8_t>(state_.psw | kFlagC); break;
+    case 0xED: state_.psw = static_cast<std::uint8_t>(state_.psw ^ kFlagC); break;
+    case 0x20: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagP); break;
+    case 0x40: state_.psw = static_cast<std::uint8_t>(state_.psw | kFlagP); break;
+    case 0xE0:
+      state_.psw = static_cast<std::uint8_t>(state_.psw & ~(kFlagV | kFlagH));
+      break;
+    case 0xA0: state_.psw = static_cast<std::uint8_t>(state_.psw | kFlagI); break;
+    case 0xC0: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagI); break;
+
+    case 0x00: break;  // NOP, which reads the byte after the opcode and nothing else
 
     default: break;
   }
@@ -1243,7 +1389,7 @@ inline std::uint8_t Spc700::memoryModifyValue(std::uint8_t opcode, std::uint8_t 
                  : static_cast<std::uint8_t>(destination & ~operandBitMask());
 
     default:
-      // As for applyMemoryRead: every routed modify form is listed above.
+      // As for applyMemoryRead: every modify form is listed above.
       return destination;
   }
 }
@@ -1327,6 +1473,333 @@ bool Spc700::executeWordCycle(B& bus, WordForm form) {
   return true;
 }
 
+// A control-flow instruction, one cycle at a time. Two laws run through the family.
+// A branch's condition is settled on the cycle that reads what it tests, so the
+// cycles it prices afterwards are already known to be spent or not. And the program
+// counter, like every other register, moves on the instruction's last cycle — which
+// is why a stack address is measured from where the stack pointer began, and why a
+// return address goes onto the stack before the destination reaches the core.
+template <ApuBus B>
+bool Spc700::executeControlCycle(B& bus, const CtrlForm& form) {
+  switch (form.kind) {
+    // ---- the relative branches. The displacement arrives on the second cycle and
+    //      the condition settles with it; a taken branch spends two more cycles
+    //      inside the chip before the program counter moves ----
+    case CtrlKind::Branch:
+      if (state_.tcu == 1) {
+        state_.tmp = fetch(bus);
+        state_.taken = branchTaken(form);
+        return !state_.taken;
+      }
+      if (state_.tcu == 2) return false;
+      takeBranch();
+      return true;
+
+    // ---- BBS, BBC and CBNE dp: the direct-page byte is read, a cycle passes inside
+    //      the chip, and only then does the displacement follow at PC+2 ----
+    case CtrlKind::BitBranch:
+      if (state_.tcu == 1) {
+        state_.ea = dpAddr(fetch(bus));
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.taken = byteBranchTaken(state_.ir, bus.read(state_.ea));
+        return false;
+      }
+      if (state_.tcu == 3) return false;
+      if (state_.tcu == 4) {
+        state_.tmp = fetch(bus);
+        return !state_.taken;
+      }
+      if (state_.tcu == 5) return false;
+      takeBranch();
+      return true;
+
+    // ---- CBNE dp+X: the indexing cycle comes before the byte, as it does in every
+    //      indexed mode, which puts the whole instruction one cycle behind CBNE dp ----
+    case CtrlKind::CompareIndexed:
+      if (state_.tcu == 1) {
+        state_.tmp = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ea = dpAddr(static_cast<std::uint8_t>(state_.tmp + state_.x));
+        return false;
+      }
+      if (state_.tcu == 3) {
+        state_.taken = byteBranchTaken(state_.ir, bus.read(state_.ea));
+        return false;
+      }
+      if (state_.tcu == 4) return false;
+      if (state_.tcu == 5) {
+        state_.tmp = fetch(bus);
+        return !state_.taken;
+      }
+      if (state_.tcu == 6) return false;
+      takeBranch();
+      return true;
+
+    // ---- DBNZ dp: the byte goes back decremented before the displacement is read,
+    //      so the store lands whether or not the branch is taken ----
+    case CtrlKind::DecrementDp:
+      if (state_.tcu == 1) {
+        state_.ea = dpAddr(fetch(bus));
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.tmp = bus.read(state_.ea);
+        return false;
+      }
+      if (state_.tcu == 3) {
+        const std::uint8_t value = static_cast<std::uint8_t>(state_.tmp - 1);
+        bus.write(state_.ea, value);
+        state_.taken = value != 0;
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = fetch(bus);
+        return !state_.taken;
+      }
+      if (state_.tcu == 5) return false;
+      takeBranch();
+      return true;
+
+    // ---- DBNZ Y: the displacement is read, a cycle passes on the decrement, and the
+    //      displacement's own address is read a second time. Y settles at the end ----
+    case CtrlKind::DecrementY:
+      if (state_.tcu == 1) {
+        state_.ea = state_.pc;
+        state_.tmp = fetch(bus);
+        state_.taken = static_cast<std::uint8_t>(state_.y - 1) != 0;
+        return false;
+      }
+      if (state_.tcu == 2) return false;
+      if (state_.tcu == 3) {
+        static_cast<void>(bus.read(state_.ea));
+        if (state_.taken) return false;
+        --state_.y;
+        return true;
+      }
+      if (state_.tcu == 4) return false;
+      --state_.y;
+      takeBranch();
+      return true;
+
+    // ---- JMP !abs: the operand is the destination, and no cycle is spent inside the
+    //      chip at all — the shortest instruction that moves the program counter ----
+    case CtrlKind::Jump:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      state_.pc = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+      return true;
+
+    // ---- JMP [!abs+X]: the operand plus X addresses a pointer, and that pointer's
+    //      two bytes are one LINEAR byte apart. It is the one address in the core
+    //      that does not wrap inside a page ----
+    case CtrlKind::JumpIndexed:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        return false;
+      }
+      if (state_.tcu == 3) {
+        state_.ea = static_cast<std::uint16_t>(state_.ptr + state_.x);
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = bus.read(state_.ea);
+        return false;
+      }
+      state_.pc = static_cast<std::uint16_t>(
+          state_.tmp | (bus.read(static_cast<std::uint16_t>(state_.ea + 1)) << 8));
+      return true;
+
+    // ---- CALL !abs: the destination arrives first, then the return address goes on
+    //      the stack high byte first, and two cycles pass inside the chip ----
+    case CtrlKind::Call:
+      if (state_.tcu == 1) {
+        state_.ptr = fetch(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        state_.ptr = static_cast<std::uint16_t>(state_.ptr | (fetch(bus) << 8));
+        return false;
+      }
+      if (state_.tcu == 3) return false;
+      if (state_.tcu == 4) {
+        bus.write(stackAddr(0), static_cast<std::uint8_t>(state_.pc >> 8));
+        return false;
+      }
+      if (state_.tcu == 5) {
+        bus.write(stackAddr(-1), static_cast<std::uint8_t>(state_.pc));
+        return false;
+      }
+      if (state_.tcu == 6) return false;
+      state_.sp = static_cast<std::uint8_t>(state_.sp - 2);
+      state_.pc = state_.ptr;
+      return true;
+
+    // ---- PCALL: the destination is one byte into page $FF, so the pushes begin a
+    //      cycle earlier than CALL's and only one trails them ----
+    case CtrlKind::CallPage:
+      if (state_.tcu == 1) {
+        state_.ptr = static_cast<std::uint16_t>(0xFF00u | fetch(bus));
+        return false;
+      }
+      if (state_.tcu == 2) return false;
+      if (state_.tcu == 3) {
+        bus.write(stackAddr(0), static_cast<std::uint8_t>(state_.pc >> 8));
+        return false;
+      }
+      if (state_.tcu == 4) {
+        bus.write(stackAddr(-1), static_cast<std::uint8_t>(state_.pc));
+        return false;
+      }
+      state_.sp = static_cast<std::uint8_t>(state_.sp - 2);
+      state_.pc = state_.ptr;
+      return true;
+
+    // ---- TCALL: the byte after the opcode is read and discarded, a cycle passes,
+    //      the return address goes on the stack, and only after another cycle is the
+    //      destination read out of the table ----
+    case CtrlKind::CallVector:
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu == 2) return false;
+      if (state_.tcu == 3) {
+        bus.write(stackAddr(0), static_cast<std::uint8_t>(state_.pc >> 8));
+        return false;
+      }
+      if (state_.tcu == 4) {
+        bus.write(stackAddr(-1), static_cast<std::uint8_t>(state_.pc));
+        return false;
+      }
+      if (state_.tcu == 5) return false;
+      if (state_.tcu == 6) {
+        state_.tmp = bus.read(callVector());
+        return false;
+      }
+      state_.pc = static_cast<std::uint16_t>(
+          state_.tmp | (bus.read(static_cast<std::uint16_t>(callVector() + 1)) << 8));
+      state_.sp = static_cast<std::uint8_t>(state_.sp - 2);
+      return true;
+
+    // ---- BRK: the same table entry TCALL 0 reaches, with the status byte pushed
+    //      under the return address — and the three pushes begin immediately, where
+    //      TCALL spends a cycle inside the chip first ----
+    case CtrlKind::Break:
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        bus.write(stackAddr(0), static_cast<std::uint8_t>(state_.pc >> 8));
+        return false;
+      }
+      if (state_.tcu == 3) {
+        bus.write(stackAddr(-1), static_cast<std::uint8_t>(state_.pc));
+        return false;
+      }
+      if (state_.tcu == 4) {
+        // The status byte as it stands now: the break and interrupt flags move at
+        // the end of the instruction, after the byte is already on the stack.
+        bus.write(stackAddr(-2), state_.psw);
+        return false;
+      }
+      if (state_.tcu == 5) return false;
+      if (state_.tcu == 6) {
+        state_.tmp = bus.read(callVector());
+        return false;
+      }
+      state_.pc = static_cast<std::uint16_t>(
+          state_.tmp | (bus.read(static_cast<std::uint16_t>(callVector() + 1)) << 8));
+      state_.sp = static_cast<std::uint8_t>(state_.sp - 3);
+      state_.psw = static_cast<std::uint8_t>((state_.psw | kFlagB) & ~kFlagI);
+      return true;
+
+    // ---- RET: a cycle inside the chip, then the return address off the stack, low
+    //      byte first — the order it was pushed in ----
+    case CtrlKind::Return:
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu == 2) return false;
+      if (state_.tcu == 3) {
+        state_.tmp = bus.read(stackAddr(1));
+        return false;
+      }
+      state_.pc = static_cast<std::uint16_t>(state_.tmp | (bus.read(stackAddr(2)) << 8));
+      state_.sp = static_cast<std::uint8_t>(state_.sp + 2);
+      return true;
+
+    // ---- RETI: the same, with the status byte coming back first ----
+    case CtrlKind::ReturnInterrupt:
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu == 2) return false;
+      if (state_.tcu == 3) {
+        state_.ptr = bus.read(stackAddr(1));
+        return false;
+      }
+      if (state_.tcu == 4) {
+        state_.tmp = bus.read(stackAddr(2));
+        return false;
+      }
+      state_.pc = static_cast<std::uint16_t>(state_.tmp | (bus.read(stackAddr(3)) << 8));
+      state_.psw = static_cast<std::uint8_t>(state_.ptr);
+      state_.sp = static_cast<std::uint8_t>(state_.sp + 3);
+      return true;
+
+    // ---- the stack transfers, which are mirror images: a push writes and then
+    //      spends a cycle inside the chip, a pop spends the cycle and then reads ----
+    case CtrlKind::Push:
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu == 2) {
+        bus.write(stackAddr(0), pushValue(state_.ir));
+        return false;
+      }
+      --state_.sp;
+      return true;
+
+    case CtrlKind::Pop:
+      if (state_.tcu == 1) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu == 2) return false;
+      applyPop(state_.ir, bus.read(stackAddr(1)));
+      ++state_.sp;
+      return true;
+
+    // ---- SLEEP and STOP: the byte after the opcode is read three times over, each
+    //      read followed by a cycle inside the chip, and the core halts as the last
+    //      of them ends — on an instruction boundary, with the program counter left
+    //      on the byte it kept reading ----
+    case CtrlKind::Halt:
+      if (state_.tcu == 1 || state_.tcu == 3 || state_.tcu == 5) {
+        discardNextByte(bus);
+        return false;
+      }
+      if (state_.tcu != 6) return false;
+      state_.run = state_.ir == 0xEF ? RunState::Sleeping : RunState::Stopped;
+      return true;
+  }
+  return true;
+}
+
 template <ApuBus B>
 bool Spc700::executeCycle(B& bus) {
   if (const WordForm word = wordForm(state_.ir); word != WordForm::None) {
@@ -1335,9 +1808,9 @@ bool Spc700::executeCycle(B& bus) {
   if (MemForm form{}; memoryForm(state_.ir, form)) {
     return executeMemoryCycle(bus, form);
   }
-  // stepCycle consults cycleStepped before dispatching, so an instruction the engine
-  // does not carry never reaches here.
-  return true;
+  CtrlForm control{};
+  static_cast<void>(controlForm(state_.ir, control));
+  return executeControlCycle(bus, control);
 }
 
 template <ApuBus B>
@@ -1351,10 +1824,6 @@ void Spc700::stepCycle(B& bus) {
     state_.tcu = 1;
     return;
   }
-  // An instruction the cycle engine does not carry has no per-cycle handler: the cycle
-  // reaches memory not at all and the instruction makes no progress, so driving one
-  // this way fails loudly on its second cycle rather than passing quietly.
-  if (!cycleStepped(state_.ir)) return;
 
   state_.tcu = executeCycle(bus) ? std::uint8_t{0}
                                  : static_cast<std::uint8_t>(state_.tcu + 1);
@@ -1368,148 +1837,16 @@ std::uint32_t Spc700::stepInstruction(B& bus) {
     return 2;
   }
 
-  std::uint32_t cycles = 1;
+  std::uint32_t cycles = 0;
   if (atInstructionBoundary()) {
-    const std::uint8_t opcode = fetch(bus);
-    if (!cycleStepped(opcode)) return stepWhole(bus, opcode);
-    state_.ir = opcode;
-    state_.tcu = 1;
-  } else {
-    cycles = 0;
+    stepCycle(bus);  // the opcode fetch
+    cycles = 1;
   }
   while (!atInstructionBoundary()) {
     stepCycle(bus);
     ++cycles;
   }
   return cycles;
-}
-
-template <ApuBus B>
-std::uint32_t Spc700::stepWhole(B& bus, std::uint8_t opcode) {
-  switch (opcode) {
-    // ---- conditional and unconditional relative branches (2 cycles, +2 when
-    //      taken; BRA is always taken) ----
-    case 0x2F: return branchIf(bus, true, 4, 4);                                                  // BRA
-    case 0xF0: return branchIf(bus, (state_.psw & kFlagZ) != 0, 4, 2);                            // BEQ
-    case 0xD0: return branchIf(bus, (state_.psw & kFlagZ) == 0, 4, 2);                            // BNE
-    case 0xB0: return branchIf(bus, (state_.psw & kFlagC) != 0, 4, 2);                            // BCS
-    case 0x90: return branchIf(bus, (state_.psw & kFlagC) == 0, 4, 2);                            // BCC
-    case 0x70: return branchIf(bus, (state_.psw & kFlagV) != 0, 4, 2);                            // BVS
-    case 0x50: return branchIf(bus, (state_.psw & kFlagV) == 0, 4, 2);                            // BVC
-    case 0x30: return branchIf(bus, (state_.psw & kFlagN) != 0, 4, 2);                            // BMI
-    case 0x10: return branchIf(bus, (state_.psw & kFlagN) == 0, 4, 2);                            // BPL
-
-    // ---- branch on one direct-page bit: BBS on set / BBC on clear. The bit index
-    //      is in opcode bits 5-7; BBC is the odd high nibble (5/7 cycles) ----
-    case 0x03: case 0x23: case 0x43: case 0x63: case 0x83: case 0xA3: case 0xC3: case 0xE3:       // BBS dp.0..7,rel
-    case 0x13: case 0x33: case 0x53: case 0x73: case 0x93: case 0xB3: case 0xD3: case 0xF3: {     // BBC dp.0..7,rel
-      const std::uint8_t high = static_cast<std::uint8_t>(opcode >> 4);
-      const std::uint8_t bit = static_cast<std::uint8_t>(high >> 1);
-      const bool branchOnSet = (high & 1u) == 0u;  // even high nibble = BBS
-      const std::uint8_t m = bus.read(addrDp(bus));
-      const bool isSet = ((m >> bit) & 1u) != 0u;
-      return branchIf(bus, isSet == branchOnSet, 7, 5);
-    }
-
-    // ---- compare-and-branch / decrement-and-branch. The internal compare or
-    //      decrement leaves PSW untouched — these set no flags ----
-    case 0x2E: return branchIf(bus, state_.a != bus.read(addrDp(bus)),  7, 5);                    // CBNE dp,rel
-    case 0xDE: return branchIf(bus, state_.a != bus.read(addrDpX(bus)), 8, 6);                    // CBNE dp+X,rel
-    case 0x6E: {                                                                                  // DBNZ dp,rel
-      const std::uint16_t addr = addrDp(bus);
-      const std::uint8_t v = static_cast<std::uint8_t>(bus.read(addr) - 1);
-      bus.write(addr, v);
-      return branchIf(bus, v != 0, 7, 5);
-    }
-    case 0xFE: --state_.y; return branchIf(bus, state_.y != 0, 6, 4);                             // DBNZ Y,rel
-
-    // ---- jumps ----
-    case 0x5F: state_.pc = addrAbs(bus); return 3;                                                // JMP !abs
-    case 0x1F: {                                                                                  // JMP [!abs+X]
-      const std::uint16_t ptr = addrAbsX(bus);
-      const std::uint16_t lo = bus.read(ptr);
-      const std::uint16_t hi = bus.read(static_cast<std::uint16_t>(ptr + 1));
-      state_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
-      return 6;
-    }
-
-    // ---- subroutine calls and returns. The pushed return address is the next
-    //      instruction with no 6502-style pre-decrement; RET pops it directly ----
-    case 0x3F: {                                                                                  // CALL !abs
-      const std::uint16_t target = addrAbs(bus);
-      pushWord(bus, state_.pc);
-      state_.pc = target;
-      return 8;
-    }
-    case 0x4F: {                                                                                  // PCALL up (CALL $FF00+up)
-      const std::uint16_t target = static_cast<std::uint16_t>(0xFF00u | fetch(bus));
-      pushWord(bus, state_.pc);
-      state_.pc = target;
-      return 6;
-    }
-    case 0x01: case 0x11: case 0x21: case 0x31: case 0x41: case 0x51: case 0x61: case 0x71:       // TCALL 0..7
-    case 0x81: case 0x91: case 0xA1: case 0xB1: case 0xC1: case 0xD1: case 0xE1: case 0xF1: {     // TCALL 8..15
-      const std::uint8_t n = static_cast<std::uint8_t>(opcode >> 4);
-      const std::uint16_t vec = static_cast<std::uint16_t>(0xFFDEu - 2u * n);
-      pushWord(bus, state_.pc);
-      const std::uint16_t lo = bus.read(vec);
-      const std::uint16_t hi = bus.read(static_cast<std::uint16_t>(vec + 1));
-      state_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
-      return 8;
-    }
-    case 0x6F: state_.pc = popWord(bus); return 5;                                                // RET
-    case 0x7F: {                                                                                  // RETI
-      state_.psw = pop(bus);
-      state_.pc = popWord(bus);
-      return 6;
-    }
-    case 0x0F: {                                                                                  // BRK
-      pushWord(bus, state_.pc);
-      push(bus, state_.psw);
-      state_.psw = static_cast<std::uint8_t>((state_.psw | kFlagB) & ~kFlagI);
-      const std::uint16_t lo = bus.read(static_cast<std::uint16_t>(0xFFDEu));
-      const std::uint16_t hi = bus.read(static_cast<std::uint16_t>(0xFFDFu));
-      state_.pc = static_cast<std::uint16_t>(lo | (hi << 8));
-      return 8;
-    }
-
-    // ---- stack push / pop (POP sets no flags except POP PSW, which restores
-    //      the whole status word) ----
-    case 0x2D: push(bus, state_.a);   return 4;                                                   // PUSH A
-    case 0x4D: push(bus, state_.x);   return 4;                                                   // PUSH X
-    case 0x6D: push(bus, state_.y);   return 4;                                                   // PUSH Y
-    case 0x0D: push(bus, state_.psw); return 4;                                                   // PUSH PSW
-    case 0xAE: state_.a = pop(bus);   return 4;                                                   // POP A
-    case 0xCE: state_.x = pop(bus);   return 4;                                                   // POP X
-    case 0xEE: state_.y = pop(bus);   return 4;                                                   // POP Y
-    case 0x8E: state_.psw = pop(bus); return 4;                                                   // POP PSW
-
-    // ---- status-flag operations ----
-    case 0x60: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagC); return 2;            // CLRC
-    case 0x80: state_.psw = static_cast<std::uint8_t>(state_.psw |  kFlagC); return 2;            // SETC
-    case 0xED: state_.psw = static_cast<std::uint8_t>(state_.psw ^  kFlagC); return 3;            // NOTC
-    case 0xE0: state_.psw = static_cast<std::uint8_t>(state_.psw & ~(kFlagV | kFlagH)); return 2; // CLRV (clears V and H)
-    case 0x20: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagP); return 2;            // CLRP
-    case 0x40: state_.psw = static_cast<std::uint8_t>(state_.psw |  kFlagP); return 2;            // SETP
-    case 0xA0: state_.psw = static_cast<std::uint8_t>(state_.psw |  kFlagI); return 3;            // EI
-    case 0xC0: state_.psw = static_cast<std::uint8_t>(state_.psw & ~kFlagI); return 3;            // DI
-
-    // ---- no-operation and halt. SLEEP and STOP advance PC past the opcode, set
-    //      the run state, and take 7 cycles — the opcode fetch, a dummy read of
-    //      the next byte, then the halt loop's wait/read cycles the oracle
-    //      captures (the SNESdev table's 3/2 are its notional counts). A later
-    //      step on a halted core returns 2 and touches nothing (the guard above). ----
-    case 0x00: return 2;                                                                          // NOP
-    case 0xEF: state_.run = RunState::Sleeping; return 7;                                         // SLEEP
-    case 0xFF: state_.run = RunState::Stopped;  return 7;                                         // STOP
-
-    default:
-      // Every opcode the cycle engine does not carry is listed above, and the engine
-      // carries the rest, so this arm is unreachable. It stays as a loud failure —
-      // zero cycles, no state change — so any dispatch gap reddens the vector suite
-      // instead of passing silently.
-      return 0;
-  }
 }
 
 }  // namespace snaggletooth
