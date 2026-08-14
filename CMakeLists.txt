@@ -134,6 +134,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/dsp/voice_mix_test.cpp
     tests/dsp/noise_master_test.cpp
     tests/dsp/echo_test.cpp
+    tests/dsp/sample_schedule_test.cpp
     tests/spc/loader_test.cpp
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp

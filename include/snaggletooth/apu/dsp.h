@@ -90,6 +90,15 @@ struct VoiceState {
   std::uint16_t bentGainRef = 0;
 };
 
+// One 32 kHz stereo output sample: the eight-voice mix through the master volume,
+// the echo unit, and the mute gate.
+struct StereoFrame {
+  std::int16_t left = 0;
+  std::int16_t right = 0;
+
+  [[nodiscard]] bool operator==(const StereoFrame&) const noexcept = default;
+};
+
 // The S-DSP's state as a value: snapshot by copy, restore by assignment. The
 // 128-byte register file the CPU reaches through DSPADDR/DSPDATA lives here
 // (ApuState carries only the DSPADDR latch beside it). Indexing or
@@ -140,22 +149,62 @@ struct DspState {
   // The eight voices' streaming state, beside the register file.
   std::array<VoiceState, 8> voices{};
 
+  // --- The intra-sample slot pipeline ---
+  //
+  // The DSP runs one of a sample's 32 clock slots per machine cycle. These value
+  // fields (snapshot-legal, defaulted to the seed shape) carry the frame being
+  // assembled across its slots and the voice-0 output pipeline across the frame
+  // wrap. A standalone DspState is self-driving: it advances slotCursor itself, so
+  // the machine never passes it redundant phase.
+  //
+  // slotCursor is the next slot Tk (0..31) a stepDspCycle call runs. primed marks
+  // whether the pipeline scratch is live: a freshly seeded state has no prepared
+  // voice-0 output, so its first frame computes at once — byte-identical to the
+  // frame-at-once model — and primes the pipeline at its close; every later frame
+  // is fully slot-scheduled and voice 0's output rides one update behind voices
+  // 1-7 (the hardware's envelope pipeline).
+  std::uint8_t slotCursor = 0;
+  bool primed = false;
+
+  // The frame under construction: the running left/right voice mix and the
+  // EON-enabled echo send, each clamped to signed 16 bits after every voice's
+  // volume step, and the finished stereo frame the wrap delivers (finalized by
+  // the left slot T27 and the right slot T28).
+  std::int32_t mixLeft = 0;
+  std::int32_t mixRight = 0;
+  std::int32_t echoSendLeft = 0;
+  std::int32_t echoSendRight = 0;
+  StereoFrame slotFrame{};
+
+  // Each voice's amplitude, computed at the voice's S3 slot and applied at its
+  // S4/S5 volume slots. Voice 0's is prepared at slot T31 for the following frame
+  // — the one-update pipeline lag — while voices 1-7 compute and apply within one
+  // frame. voice n's S3 reads voice n-1's stored amplitude for pitch modulation.
+  std::array<int, 8> voiceAmplitude{};
+
+  // VxOUTX and VxENVX are computed at a voice's S3 slot but do not become readable
+  // in the register file until its later output slots (S8/S9). These hold the
+  // computed-but-not-yet-visible bytes; a CPU read before the visibility slot sees
+  // the previous sample's value, and a CPU write up to that slot overwrites the
+  // pending one. Voice 0's visibility slots fall in the following frame, so its
+  // OUTX/ENVX ride one frame behind, matching its output.
+  std::array<std::uint8_t, 8> preparedOutx{};
+  std::array<std::uint8_t, 8> preparedEnvx{};
+
+  // The echo unit's FIR output for the frame, computed when the buffer is read
+  // (slot T24) and added to the master-scaled mix through the echo volume at the
+  // left/right output slots (T27/T28); the write-back and ring advance land at
+  // T31. The ESA base is latched at T30 and applied by the T31 write.
+  int echoFirOutLeft = 0;
+  int echoFirOutRight = 0;
+  std::uint16_t echoWriteBase = 0;
+
   [[nodiscard]] std::uint8_t& operator[](std::size_t reg) noexcept { return regs[reg]; }
   [[nodiscard]] const std::uint8_t& operator[](std::size_t reg) const noexcept {
     return regs[reg];
   }
   [[nodiscard]] auto begin() const noexcept { return regs.begin(); }
   [[nodiscard]] auto end() const noexcept { return regs.end(); }
-};
-
-// One 32 kHz stereo output sample. This is the DSP's interim delivery surface:
-// the dry eight-voice mix, before the master volume and echo the DSP's
-// completion adds. The public streaming API replaces or wraps it later.
-struct StereoFrame {
-  std::int16_t left = 0;
-  std::int16_t right = 0;
-
-  [[nodiscard]] bool operator==(const StereoFrame&) const noexcept = default;
 };
 
 // A voice's BRR source, read from the sample directory: the start address used
@@ -272,6 +321,21 @@ void tickDspSample(DspState& dsp) noexcept;
                                         std::span<std::uint8_t, 65536> ram) noexcept;
 [[nodiscard]] StereoFrame stepDspSample(DspState& dsp,
                                         std::span<const std::uint8_t, 65536> ram) noexcept;
+
+// Runs exactly one 32-clock slot of the current sample: the slot at dsp.slotCursor,
+// which is then advanced. Slot T0 (the wrap) delivers the frame the previous sample
+// finalized — the return holds it and `delivered` is set true — while every other
+// slot returns silence with `delivered` false. The machine calls this once per
+// cycle so the sample's work spreads across its 32 slots (a mid-frame register
+// write is seen only if it lands before its consuming slot); a standalone caller
+// loops it (stepDspSample does exactly that). The two overloads differ only in
+// whether the echo unit may write its delay line, matching stepDspSample.
+struct SlotResult {
+  StereoFrame frame{};
+  bool delivered = false;
+};
+SlotResult stepDspCycle(DspState& dsp, std::span<std::uint8_t, 65536> ram) noexcept;
+SlotResult stepDspCycle(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept;
 
 // Runs the KON/KOFF poll. On even-indexed samples it reads the KON ($4C) and
 // KOFF ($5C) registers: a set KON bit latches internal-KON and keys the voice on

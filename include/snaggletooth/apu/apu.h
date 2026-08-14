@@ -132,6 +132,10 @@ class Apu {
     }
   };
 
+  // Reloads the live CPU from state_ and re-locks the DSP sample slot to the master
+  // counter after a construct, restore, or reset.
+  void syncCpuAndSlot();
+
   std::uint8_t busRead(std::uint16_t address);
   void busWrite(std::uint16_t address, std::uint8_t value);
   std::uint8_t readRegister(std::uint8_t reg);
@@ -151,8 +155,9 @@ class Apu {
   // timer is enabled and, on reaching the target, advances stage 3 and zeroes.
   void tickTimer(std::size_t index);
 
-  // Runs the DSP's sample and queues the stereo frame it produced. The RAM span
-  // is writable so the echo unit can reach its delay line in APU RAM directly.
+  // Runs one of the DSP sample's 32 slots this cycle and, on the wrap slot, queues
+  // the stereo frame the sample finished. The RAM span is writable so the echo unit
+  // can reach its delay line in APU RAM directly.
   void sampleFrame();
 
   Spc700 cpu_;      // the live CPU state while the machine runs

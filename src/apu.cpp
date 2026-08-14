@@ -34,14 +34,23 @@ ApuState powerOnState() {
 
 }  // namespace
 
-Apu::Apu() : state_(powerOnState()) { cpu_.restore(state_.cpu); }
+Apu::Apu() : state_(powerOnState()) { syncCpuAndSlot(); }
 
-Apu::Apu(ApuState state) : state_(std::move(state)) { cpu_.restore(state_.cpu); }
+Apu::Apu(ApuState state) : state_(std::move(state)) { syncCpuAndSlot(); }
 
 void Apu::restore(ApuState state) {
   state_ = std::move(state);
-  cpu_.restore(state_.cpu);
+  syncCpuAndSlot();
   frames_.clear();  // pending output belongs to the machine that produced it
+}
+
+void Apu::syncCpuAndSlot() {
+  cpu_.restore(state_.cpu);
+  // The DSP's sample slot rides the master counter: after a cycle that leaves the
+  // counter at D, the DSP has run slot (D-1) and its cursor sits at D mod 32. A
+  // restored or seeded state re-establishes that lockstep so the machine drives
+  // the schedule without passing the phase every cycle.
+  state_.dsp.slotCursor = static_cast<std::uint8_t>(state_.divider & 31u);
 }
 
 void Apu::writePort(std::uint8_t index, std::uint8_t value) {
@@ -78,7 +87,7 @@ void Apu::machineCycle() {
     tickTimer(1);
   }
   if (phase % 16u == 1u) tickTimer(2);
-  if (phase % 32u == 0u) sampleFrame();
+  sampleFrame();
 
   // The CPU's access closes the cycle. A halted core reaches nothing here, and
   // the cycle still passes for everything above.
@@ -99,10 +108,13 @@ void Apu::tickTimer(std::size_t index) {
 }
 
 void Apu::sampleFrame() {
-  // The span is writable so the echo unit can write its feedback straight into
-  // APU RAM (its own bus access — no overlay), the delay line the echo depends on.
+  // The DSP runs one of a sample's 32 slots this cycle; the wrap slot delivers the
+  // finished stereo frame, which joins the queue. The span is writable so the echo
+  // unit can write its feedback straight into APU RAM (its own bus access — no
+  // overlay), the delay line the echo depends on.
   const std::span<std::uint8_t, 65536> ram{state_.ram};
-  frames_.push_back(stepDspSample(state_.dsp, ram));
+  const SlotResult sample = stepDspCycle(state_.dsp, ram);
+  if (sample.delivered) frames_.push_back(sample.frame);
 }
 
 std::uint32_t Apu::step() {
@@ -157,7 +169,7 @@ void Apu::reset() {
   for (std::size_t addr = 0x0100; addr < fresh.ram.size(); ++addr)
     fresh.ram[addr] = state_.ram[addr];
   state_ = std::move(fresh);
-  cpu_.restore(state_.cpu);
+  syncCpuAndSlot();
   frames_.clear();  // a reset abandons any un-drained output
 }
 
