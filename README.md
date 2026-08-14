@@ -28,10 +28,10 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 ## Status
 
-The SPC700 CPU core and the APU machine that gives it real memory are complete: all 256 opcodes with
-cycle counts matched to the documented per-instruction totals and validated per opcode against the
-SingleStepTests vectors, and the machine's 64KB RAM, register overlay, three timers, and
-communication ports. The S-DSP is complete: BRR decode, pitch and Gaussian interpolation, the volume
+The SPC700 CPU core and the APU machine that gives it real memory are complete: all 256 opcodes run a
+cycle at a time, with every cycle checked against the SingleStepTests vectors — the address it drove,
+the byte that moved, and the cycles that reach memory not at all — and the machine's 64KB RAM,
+register overlay, three timers, and communication ports. The S-DSP is complete: BRR decode, pitch and Gaussian interpolation, the volume
 envelope, key-on/key-off, the eight-voice stereo mix, the shared noise generator, pitch modulation,
 the master volume, and the echo delay line, surfaced as 32 kHz frames through the machine. The main
 CPU's instruction set is complete too: all 256 of the 65816's opcodes run a cycle at a time, and every
@@ -41,7 +41,7 @@ land.
 
 | Component | Status |
 |---|---|
-| SPC700 CPU core (the audio CPU's instruction set) | complete — 256 opcodes, per-opcode vector-validated |
+| SPC700 CPU core (the audio CPU's instruction set) | complete — 256 opcodes, cycle-stepped, every cycle vector-validated |
 | APU machine (64KB RAM, timers, communication ports) | complete — register overlay, 3 timers, comm ports |
 | S-DSP voice pipeline (BRR, pitch, envelopes, 8-voice mix) | complete — decode, interpolation, keying, stereo frames |
 | S-DSP completion (echo, noise, pitch modulation, master volume) | complete — noise, PMON, master volume, echo delay line |

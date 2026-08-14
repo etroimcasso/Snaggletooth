@@ -7,6 +7,7 @@
 
 namespace {
 
+using snaggletooth::test::CycleEvent;
 using snaggletooth::test::parseVectorFile;
 using snaggletooth::test::VectorCase;
 
@@ -43,10 +44,41 @@ TEST(VectorHarness, ParsesSparseRamPairs) {
   EXPECT_EQ(cases.front().initial.ram[0].second, 0);
 }
 
-TEST(VectorHarness, CountsCycleEntriesIncludingNullValues) {
-  // The reader asserts only the length of the cycle list; the null-valued dummy
-  // read must still count.
-  EXPECT_EQ(parseVectorFile(kOneCase).front().cycles, 2u);
+TEST(VectorHarness, ParsesCycleEntriesIncludingANullValue) {
+  // Each entry is an address, the byte that crossed the bus, and what the cycle was.
+  // The second entry is the discarded read a one-byte instruction makes: the recording
+  // captured no byte for it, so its value is absent while its address is not.
+  const auto cycles = parseVectorFile(kOneCase).front().cycles;
+  ASSERT_EQ(cycles.size(), 2u);
+  EXPECT_EQ(cycles[0].kind, CycleEvent::Kind::Read);
+  ASSERT_TRUE(cycles[0].address.has_value());
+  EXPECT_EQ(*cycles[0].address, 30256);
+  ASSERT_TRUE(cycles[0].value.has_value());
+  EXPECT_EQ(int{*cycles[0].value}, 0);
+  EXPECT_EQ(cycles[1].kind, CycleEvent::Kind::Read);
+  ASSERT_TRUE(cycles[1].address.has_value());
+  EXPECT_EQ(*cycles[1].address, 30257);
+  EXPECT_FALSE(cycles[1].value.has_value());
+}
+
+TEST(VectorHarness, ParsesAWaitCycleAsReachingNothing) {
+  // A wait carries neither an address nor a value: the cycle reaches memory not at all.
+  const char* withWait =
+      R"([{
+        "name": "af 0001",
+        "initial": { "pc": 512, "ram": [] },
+        "final":   { "pc": 513, "ram": [] },
+        "cycles":  [[512, 175, "read"], [513, null, "read"],
+                    [null, null, "wait"], [32, 243, "write"]]
+      }])";
+  const auto cycles = parseVectorFile(withWait).front().cycles;
+  ASSERT_EQ(cycles.size(), 4u);
+  EXPECT_EQ(cycles[2].kind, CycleEvent::Kind::Wait);
+  EXPECT_FALSE(cycles[2].address.has_value());
+  EXPECT_FALSE(cycles[2].value.has_value());
+  EXPECT_EQ(cycles[3].kind, CycleEvent::Kind::Write);
+  ASSERT_TRUE(cycles[3].address.has_value());
+  EXPECT_EQ(*cycles[3].address, 32);
 }
 
 TEST(VectorHarness, ParsesMultipleCasesAndAWriteCase) {
@@ -60,13 +92,16 @@ TEST(VectorHarness, ParsesMultipleCasesAndAWriteCase) {
       ])";
   const auto cases = parseVectorFile(twoCases);
   ASSERT_EQ(cases.size(), 2u);
-  EXPECT_EQ(cases[0].cycles, 1u);
+  EXPECT_EQ(cases[0].cycles.size(), 1u);
   EXPECT_EQ(cases[1].name, "b");
   ASSERT_EQ(cases[1].initial.ram.size(), 2u);
   EXPECT_EQ(cases[1].initial.ram[1].first, 17);
   ASSERT_EQ(cases[1].final_.ram.size(), 1u);
   EXPECT_EQ(cases[1].final_.ram[0].second, 42);
-  EXPECT_EQ(cases[1].cycles, 3u);
+  ASSERT_EQ(cases[1].cycles.size(), 3u);
+  EXPECT_EQ(cases[1].cycles[2].kind, CycleEvent::Kind::Write);
+  ASSERT_TRUE(cases[1].cycles[2].value.has_value());
+  EXPECT_EQ(int{*cases[1].cycles[2].value}, 42);
 }
 
 TEST(VectorHarness, HandlesEmptyTopLevelArray) {

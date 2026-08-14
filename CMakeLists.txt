@@ -105,6 +105,10 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/vector_harness.cpp
     tests/spc700/harness_test.cpp
     tests/spc700/algorithm_test.cpp
+    tests/spc700/cycle_engine_test.cpp
+    tests/spc700/alu_cycles_test.cpp
+    tests/spc700/word_bit_cycles_test.cpp
+    tests/spc700/control_flow_cycles_test.cpp
     tests/spc700/vector_test.cpp
     tests/spc700/dummy_read_test.cpp
     tests/cpu65816/vector_harness.cpp
