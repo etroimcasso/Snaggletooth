@@ -153,6 +153,7 @@ TEST(Non, SubstitutesTheNoiseLevelForTheInterpolatedSample) {
   dsp[kNon] = 0x00;  // control: BRR path, interp of a zero window
   dsp.voices[0].pitchCounter = 0;
   step(dsp, ram);
+  step(dsp, ram);  // voice 0's VxOUTX reads one sample behind its output, so catch up
   EXPECT_EQ(outx(dsp, 0), 0x00);
 }
 
@@ -196,9 +197,12 @@ TEST(Non, EndMuteBlockStillTerminatesNoise) {
 
   step(dsp, ram);  // finishes the normal block, still noising
   ASSERT_GT(dsp.voices[0].envelope, 0);
-  step(dsp, ram);  // crosses into End+Mute
+  step(dsp, ram);  // crosses into End+Mute: the envelope terminates at once
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);
+  // Voice 0's VxOUTX becomes readable at a slot that falls in the next sample, so
+  // it reflects the silenced amplitude one sample after the envelope zeroes.
+  step(dsp, ram);
   EXPECT_EQ(outx(dsp, 0), 0x00);  // noise silenced with the envelope
 }
 
@@ -368,7 +372,14 @@ TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
   for (int i = 0; i < 8; ++i) {
     const StereoFrame f = step(dsp, ram);
     EXPECT_EQ(f.left, 0) << "soft-reset sample " << i;
-    EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "soft-reset sample " << i;
+    // Voice 0's compute runs at a sample's last slot, just before that sample's
+    // KON/KOFF poll. On an even sample the poll re-keys the voice (Attack) after
+    // its soft-reset compute has already silenced it, so it reads Attack until the
+    // next compute re-silences it; every odd sample and the first (which polls
+    // before it computes) reads Release. The envelope stays 0 throughout.
+    const EnvPhase expected =
+        (i >= 2 && i % 2 == 0) ? EnvPhase::Attack : EnvPhase::Release;
+    EXPECT_EQ(dsp.voices[0].phase, expected) << "soft-reset sample " << i;
     EXPECT_EQ(dsp.voices[0].envelope, 0) << "soft-reset sample " << i;
   }
 
@@ -399,20 +410,24 @@ TEST(SoftReset, IsPolledEverySampleUnlikeKeyOff) {
     return dsp;
   };
 
+  // Voice 0's output rides one sample behind (its amplitude is computed at a
+  // sample's last slot and applied at the next sample's start), so the immediacy
+  // of the soft-reset poll shows in its envelope — zeroed the sample the bit is
+  // read — rather than in that same frame's emitted output.
   Ram ram{};
   DspState softReset = sounding(ram);
   ASSERT_GT(stepDspSample(softReset, view(ram)).left, 0);  // sample 0 (even) sounds
   ASSERT_EQ(softReset.sampleIndex, 1u);                    // next poll is odd
   softReset[kFlg] = 0x80;
-  const StereoFrame silenced = stepDspSample(softReset, view(ram));
-  EXPECT_EQ(silenced.left, 0);  // soft reset applied on the odd sample
+  static_cast<void>(stepDspSample(softReset, view(ram)));
+  EXPECT_EQ(softReset.voices[0].envelope, 0);  // soft reset applied on the odd sample
 
   DspState keyOff = sounding(ram);
   ASSERT_GT(stepDspSample(keyOff, view(ram)).left, 0);
   ASSERT_EQ(keyOff.sampleIndex, 1u);
   keyOff[0x5C] = 0x01;  // KOFF voice 0, written before the odd sample
-  const StereoFrame stillSounding = stepDspSample(keyOff, view(ram));
-  EXPECT_GT(stillSounding.left, 0);  // KOFF not polled yet on the odd sample
+  static_cast<void>(stepDspSample(keyOff, view(ram)));
+  EXPECT_GT(keyOff.voices[0].envelope, 0);  // KOFF not polled yet on the odd sample
 }
 
 }  // namespace

@@ -407,11 +407,78 @@ void tickDspSample(DspState& dsp) noexcept {
   ++dsp.sampleIndex;
 }
 
-// The full per-sample pipeline both public overloads share. echoRam is the machine
-// RAM the echo unit writes its feedback into, or null for a read-only caller (echo
-// still reads and contributes its output, but cannot write — the FLG bit 5 case).
-static StereoFrame stepDspSampleImpl(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                                     std::uint8_t* echoRam) noexcept {
+// One voice's per-sample body: advance it by one 32 kHz output sample and return
+// its enveloped amplitude — the internal -4000h..+3FFFh value VxOUTX reports and
+// the next voice's PMON reads. `prevAmplitude` is the previous voice's amplitude
+// this sample (for pitch modulation); `softReset` is FLG bit 7. Writes VxOUTX;
+// advances the stream and the envelope (or the key-on countdown). Extracted so the
+// frame-at-once path and the per-slot schedule compute a voice bit-for-bit alike.
+static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                                 std::size_t voice, int prevAmplitude, bool softReset) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  const std::uint32_t step = pitchStep(dsp, voice, prevAmplitude);
+
+  int amplitude;
+  if (softReset) {
+    // FLG bit 7 keys every voice off and forces its envelope to 0 each sample. BRR
+    // decoding keeps running (ENDX and loop transitions still fire); only the
+    // emitted amplitude is silenced.
+    v.phase = EnvPhase::Release;
+    if (v.konDelay > 0)
+      --v.konDelay;
+    else
+      advanceVoiceStream(dsp, ram, voice, step);
+    v.envelope = 0;
+    dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
+    amplitude = 0;
+  } else if (v.konDelay > 0) {
+    // Startup: the voice is silent, and neither the stream nor the envelope
+    // advances past the countdown (stepVoiceEnvelope decrements it).
+    stepVoiceEnvelope(dsp, voice, false);
+    amplitude = 0;
+  } else {
+    const bool endMute = advanceVoiceStream(dsp, ram, voice, step);
+    // A voice whose NON bit is set outputs the shared noise level in place of its
+    // interpolated BRR sample; the stream still advanced above, so decoding and
+    // ENDX are unaffected.
+    const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
+    const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
+    const std::uint16_t envelope = stepVoiceEnvelope(dsp, voice, endMute);
+    amplitude = (sample * static_cast<int>(envelope)) >> 11;
+  }
+
+  // VxOUTX returns the high byte of the 15-bit amplitude (-128..+127).
+  dsp[voiceRegister(voice, kVoiceOutx)] = static_cast<std::uint8_t>((amplitude >> 7) & 0xFF);
+  return amplitude;
+}
+
+// Folds one voice's amplitude into the running left mix and the EON echo send
+// through its left volume (the S4 slot's work), clamping to signed 16 bits.
+static void applyVoiceLeft(DspState& dsp, std::size_t voice) noexcept {
+  const int vol = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolLeft)]);
+  const int send = (dsp.voiceAmplitude[voice] * vol) >> 6;
+  dsp.mixLeft = clampSigned16(dsp.mixLeft + send);
+  if (((dsp[kDspEon] >> voice) & 1) != 0)
+    dsp.echoSendLeft = clampSigned16(dsp.echoSendLeft + send);
+}
+
+// The S5 slot's work — the same fold for the right channel.
+static void applyVoiceRight(DspState& dsp, std::size_t voice) noexcept {
+  const int vol = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolRight)]);
+  const int send = (dsp.voiceAmplitude[voice] * vol) >> 6;
+  dsp.mixRight = clampSigned16(dsp.mixRight + send);
+  if (((dsp[kDspEon] >> voice) & 1) != 0)
+    dsp.echoSendRight = clampSigned16(dsp.echoSendRight + send);
+}
+
+// The frame-at-once pipeline, run for a freshly seeded (unprimed) DspState's first
+// sample. An unprimed state has no prepared voice-0 output, so its first sample
+// reads every register at once and every voice in-frame — byte-identical to a
+// machine with no intra-sample schedule — then primes the schedule for the samples
+// that follow. echoRam is the machine RAM the echo unit writes into, or null for a
+// read-only caller (the FLG bit 5 case).
+static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                                       std::uint8_t* echoRam) noexcept {
   pollKeying(dsp, ram);
 
   const std::uint8_t flg = dsp[kDspFlg];
@@ -419,96 +486,48 @@ static StereoFrame stepDspSampleImpl(DspState& dsp, std::span<const std::uint8_t
 
   std::int32_t left = 0;
   std::int32_t right = 0;
-  std::int32_t echoLeft = 0;   // the EON-enabled voices' post-VxVOL send to the echo write
+  std::int32_t echoLeft = 0;
   std::int32_t echoRight = 0;
-  int prevAmplitude = 0;  // the previous voice's amplitude this sample, for PMON
+  int prevAmplitude = 0;
   for (std::size_t voice = 0; voice < 8; ++voice) {
-    VoiceState& v = dsp.voices[voice];
-    const std::uint32_t step = pitchStep(dsp, voice, prevAmplitude);
-
-    int amplitude;
-    if (softReset) {
-      // FLG bit 7 keys every voice off and forces its envelope to 0 each sample.
-      // BRR decoding keeps running (ENDX and loop transitions still fire); only
-      // the emitted amplitude is silenced. A key-on that fired at this sample's
-      // poll starts and is immediately re-silenced, so nothing sounds until the
-      // bit clears.
-      v.phase = EnvPhase::Release;
-      if (v.konDelay > 0)
-        --v.konDelay;
-      else
-        advanceVoiceStream(dsp, ram, voice, step);
-      v.envelope = 0;
-      dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
-      amplitude = 0;
-    } else if (v.konDelay > 0) {
-      // Startup: the voice is silent, and neither the stream nor the envelope
-      // advances past the countdown (stepVoiceEnvelope decrements it).
-      stepVoiceEnvelope(dsp, voice, false);
-      amplitude = 0;
-    } else {
-      const bool endMute = advanceVoiceStream(dsp, ram, voice, step);
-      // A voice whose NON bit is set outputs the shared noise level in place of
-      // its interpolated BRR sample; the stream still advanced above, so decoding
-      // and ENDX are unaffected, and neither pitch nor Gaussian interpolation
-      // touches noise.
-      const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
-      const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
-      const std::uint16_t envelope = stepVoiceEnvelope(dsp, voice, endMute);
-      // The envelope scales the sample into the internal -4000h..+3FFFh
-      // amplitude — the value VxOUTX reports and the next voice's PMON reads.
-      amplitude = (sample * static_cast<int>(envelope)) >> 11;
-    }
-
-    // VxOUTX returns the high byte of the 15-bit amplitude (-128..+127).
-    dsp[voiceRegister(voice, kVoiceOutx)] = static_cast<std::uint8_t>((amplitude >> 7) & 0xFF);
+    const int amplitude = computeVoiceAmplitude(dsp, ram, voice, prevAmplitude, softReset);
+    // Record each voice's amplitude: voice 0's becomes the value the following
+    // slot-scheduled frame applies (its output rides one frame behind), so the
+    // first sample's voice-0 advance is not repeated. Seed the prepared OUTX/ENVX
+    // too, so the first slot-scheduled frame's visibility slots publish this
+    // sample's values rather than an empty scratch.
+    dsp.voiceAmplitude[voice] = amplitude;
+    dsp.preparedOutx[voice] = dsp[voiceRegister(voice, kVoiceOutx)];
+    dsp.preparedEnvx[voice] = dsp[voiceRegister(voice, kVoiceEnvx)];
     prevAmplitude = amplitude;
-
-    // Each channel scales by its signed 8-bit volume and recovers the low bit
-    // the BRR decoder dropped: (amplitude * VxVOL) >> 6. The sum clamps to
-    // signed 16 bits after every voice.
     const int volLeft = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolLeft)]);
     const int volRight = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolRight)]);
     const int sendLeft = (amplitude * volLeft) >> 6;
     const int sendRight = (amplitude * volRight) >> 6;
     left = clampSigned16(left + sendLeft);
     right = clampSigned16(right + sendRight);
-    // Echo splits off after the per-voice volume: a voice enabled in EON adds the
-    // same post-volume sample into the echo send, clamped the same way. This send
-    // plus the FIR feedback is what the echo unit writes back to its buffer.
     if (((dsp[kDspEon] >> voice) & 1) != 0) {
       echoLeft = clampSigned16(echoLeft + sendLeft);
       echoRight = clampSigned16(echoRight + sendRight);
     }
   }
 
-  // Master volume scales the summed mix: sum * MVOL SAR 7. The multiply truncates
-  // to 16 bits with no clamp — the one overflowing case (MVOL -128 against a
-  // full-scale sum) wraps, matching the hardware.
   const int mvolLeft = static_cast<std::int8_t>(dsp[kDspMvolLeft]);
   const int mvolRight = static_cast<std::int8_t>(dsp[kDspMvolRight]);
   left = static_cast<std::int16_t>((left * mvolLeft) >> 7);
   right = static_cast<std::int16_t>((right * mvolRight) >> 7);
 
-  // The echo unit reads and filters its buffer and feeds back the EON send; its FIR
-  // output is added to the master-scaled mix through the echo volume (EVOL), with a
-  // 16-bit clamp. This runs every sample, before the mute gate — echo processing
-  // never stops, and the write inside stepEcho is what the delay line depends on.
   const EchoOutput echo = stepEcho(dsp, ram, echoRam, echoLeft, echoRight);
   const int evolLeft = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
   const int evolRight = static_cast<std::int8_t>(dsp[kDspEvolRight]);
   left = clampSigned16(left + ((echo.left * evolLeft) >> 7));
   right = clampSigned16(right + ((echo.right * evolRight) >> 7));
 
-  // FLG bit 6 mutes the emitted frame to silence; every internal mechanism above
-  // already ran, so mute stops output only.
   if ((flg & kFlgMute) != 0) {
     left = 0;
     right = 0;
   }
 
-  // Advance the shared noise generator at the FLG noise rate (rate 0 holds it),
-  // then tick the per-sample global state — both on the sample boundary.
   if (envelopeRateFires(dsp.globalCounter, flg & kFlgNoiseRate))
     dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
   tickDspSample(dsp);
@@ -516,13 +535,182 @@ static StereoFrame stepDspSampleImpl(DspState& dsp, std::span<const std::uint8_t
                      .right = static_cast<std::int16_t>(right)};
 }
 
+// The per-voice schedule. s3Slot is where a voice runs its whole compute body;
+// s4Slot/s5Slot are where its left/right volume folds into the mix. Voice 0's
+// compute sits at slot T31 and feeds the following frame's output at T0..T5 — the
+// one-update lag the S-DSP's envelope pipeline produces.
+constexpr std::array<std::uint8_t, 8> kVoiceS3Slot = {31, 2, 5, 8, 11, 14, 17, 20};
+constexpr std::array<std::uint8_t, 8> kVoiceS4Slot = {0, 3, 6, 9, 12, 15, 18, 21};
+constexpr std::array<std::uint8_t, 8> kVoiceS5Slot = {1, 4, 7, 10, 13, 16, 19, 22};
+// The two-phase visibility slots: VxOUTX becomes readable at S8, VxENVX at S9.
+constexpr std::array<std::uint8_t, 8> kVoiceS8Slot = {4, 7, 10, 13, 16, 19, 22, 25};
+constexpr std::array<std::uint8_t, 8> kVoiceS9Slot = {5, 8, 11, 14, 17, 20, 23, 26};
+
+// Computes voice `voice` at its S3 slot, storing the amplitude the S4/S5 slots
+// apply. voice n reads voice n-1's stored amplitude for pitch modulation; voice 0
+// reads voice 7's (from this frame — it does not modulate, so the value is inert).
+// VxOUTX and VxENVX are computed here but held back from the register file until
+// the voice's S8/S9 slots — a CPU read before then sees the previous sample's
+// value, the overwrite window the hardware exposes.
+static void computeVoiceSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                             std::size_t voice, bool softReset) noexcept {
+  const int prev = dsp.voiceAmplitude[(voice + 7) & 7];
+  const std::uint8_t heldOutx = dsp[voiceRegister(voice, kVoiceOutx)];
+  const std::uint8_t heldEnvx = dsp[voiceRegister(voice, kVoiceEnvx)];
+  dsp.voiceAmplitude[voice] = computeVoiceAmplitude(dsp, ram, voice, prev, softReset);
+  dsp.preparedOutx[voice] = dsp[voiceRegister(voice, kVoiceOutx)];
+  dsp.preparedEnvx[voice] = dsp[voiceRegister(voice, kVoiceEnvx)];
+  dsp[voiceRegister(voice, kVoiceOutx)] = heldOutx;
+  dsp[voiceRegister(voice, kVoiceEnvx)] = heldEnvx;
+}
+
+// Finalizes the left output (slot T27): the dry mix scaled by MVOLL, the echo FIR
+// output added through EVOLL, and the mute gate — the same arithmetic the
+// frame-at-once path runs, split by channel so MVOLL is consumed one slot before
+// MVOLR.
+static void finalizeLeft(DspState& dsp) noexcept {
+  const int mvol = static_cast<std::int8_t>(dsp[kDspMvolLeft]);
+  const int evol = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
+  std::int32_t out = static_cast<std::int16_t>((dsp.mixLeft * mvol) >> 7);
+  out = clampSigned16(out + ((dsp.echoFirOutLeft * evol) >> 7));
+  if ((dsp[kDspFlg] & kFlgMute) != 0) out = 0;
+  dsp.slotFrame.left = static_cast<std::int16_t>(out);
+}
+
+// Finalizes the right output (slot T28): MVOLR, EVOLR and the mute gate.
+static void finalizeRight(DspState& dsp) noexcept {
+  const int mvol = static_cast<std::int8_t>(dsp[kDspMvolRight]);
+  const int evol = static_cast<std::int8_t>(dsp[kDspEvolRight]);
+  std::int32_t out = static_cast<std::int16_t>((dsp.mixRight * mvol) >> 7);
+  out = clampSigned16(out + ((dsp.echoFirOutRight * evol) >> 7));
+  if ((dsp[kDspFlg] & kFlgMute) != 0) out = 0;
+  dsp.slotFrame.right = static_cast<std::int16_t>(out);
+}
+
+// Runs one 32-clock slot of a primed sample. Each register read lands on its
+// documented slot, so a mid-frame DSPDATA write is seen only if it precedes its
+// consuming slot; every no-write sample reproduces the frame-at-once output for
+// voices 1-7, and voice 0 rides one update behind.
+static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                          std::uint8_t* echoRam, std::uint8_t slot) noexcept {
+  const bool softReset = (dsp[kDspFlg] & kFlgSoftReset) != 0;
+
+  if (slot == 0) {
+    // Frame start: clear the mix the previous frame delivered, then apply voice 0's
+    // amplitude — prepared at the last frame's T31 (the pipeline lag).
+    dsp.mixLeft = 0;
+    dsp.mixRight = 0;
+    dsp.echoSendLeft = 0;
+    dsp.echoSendRight = 0;
+  }
+
+  // Voice compute at each voice's S3 slot (voice 0's is T31, handled in the tail).
+  for (std::size_t voice = 1; voice < 8; ++voice)
+    if (kVoiceS3Slot[voice] == slot) computeVoiceSlot(dsp, ram, voice, softReset);
+
+  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order; the
+  // computed OUTX/ENVX bytes become readable at the S8/S9 slots.
+  for (std::size_t voice = 0; voice < 8; ++voice) {
+    if (kVoiceS4Slot[voice] == slot) applyVoiceLeft(dsp, voice);
+    if (kVoiceS5Slot[voice] == slot) applyVoiceRight(dsp, voice);
+    if (kVoiceS8Slot[voice] == slot) dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
+    if (kVoiceS9Slot[voice] == slot) dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.preparedEnvx[voice];
+  }
+
+  switch (slot) {
+    case 24: {
+      // The echo unit reads its buffer, filters, and writes back its feedback —
+      // the EON sends are all folded by T22, so the whole unit runs here and its
+      // FIR output is held for the output slots.
+      const EchoOutput echo = stepEcho(dsp, ram, echoRam, dsp.echoSendLeft, dsp.echoSendRight);
+      dsp.echoFirOutLeft = echo.left;
+      dsp.echoFirOutRight = echo.right;
+      break;
+    }
+    case 27:
+      finalizeLeft(dsp);
+      break;
+    case 28:
+      finalizeRight(dsp);
+      break;
+    case 31: {
+      // Voice 0's compute runs before the counter, noise and keying updates that
+      // share this slot, so its envelope/noise/keying inputs are one update older
+      // than voices 1-7's — the hardware's envelope pipeline.
+      computeVoiceSlot(dsp, ram, 0, softReset);
+      // KON/KOFF load here, keeping the even-sample parity (the poll reads the
+      // pre-tick sample index, as the frame-at-once entry did); the keyed voices'
+      // next compute is the following frame's, so keying lands one frame later
+      // than the frame-at-once model and voice 0 one load behind voices 1-7.
+      pollKeying(dsp, ram);
+      if (envelopeRateFires(dsp.globalCounter, dsp[kDspFlg] & kFlgNoiseRate))
+        dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
+      tickDspSample(dsp);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// Runs one slot. An unprimed state runs its whole first sample at the wrap slot
+// T31 — the same cycle the frame-at-once model delivered on, so a write during the
+// first sample's slots reaches it exactly as before — then primes the schedule for
+// voice 0; every later sample is slot-scheduled.
+static SlotResult stepDspCycleImpl(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                                   std::uint8_t* echoRam) noexcept {
+  const std::uint8_t slot = dsp.slotCursor;
+
+  if (!dsp.primed) {
+    if (slot == 31) {
+      // The frame-at-once path advances voice 0 exactly once and records its
+      // amplitude in voiceAmplitude[0]; the next (slot-scheduled) frame applies
+      // that value at T0..T5, so voice 0's output rides one frame behind while its
+      // state trajectory stays the frame-at-once one.
+      dsp.slotFrame = stepDspSampleAtomic(dsp, ram, echoRam);
+      dsp.primed = true;
+    }
+  } else {
+    runPrimedSlot(dsp, ram, echoRam, slot);
+  }
+
+  dsp.slotCursor = static_cast<std::uint8_t>((slot + 1) & 31);
+  SlotResult result;
+  if (dsp.slotCursor == 0) {
+    result.frame = dsp.slotFrame;
+    result.delivered = true;  // the sample's 32 slots are complete
+  }
+  return result;
+}
+
+SlotResult stepDspCycle(DspState& dsp, std::span<std::uint8_t, 65536> ram) noexcept {
+  return stepDspCycleImpl(dsp, ram, ram.data());
+}
+
+SlotResult stepDspCycle(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept {
+  return stepDspCycleImpl(dsp, ram, nullptr);
+}
+
+// Runs a whole sample's 32 slots and returns the frame they finalize. The machine
+// drives the DSP one slot per cycle instead (stepDspCycle), delivering the frame at
+// the wrap; a standalone caller uses this.
+static StereoFrame stepDspSampleLoop(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                                     std::uint8_t* echoRam) noexcept {
+  StereoFrame frame{};
+  for (int n = 0; n < 32; ++n) {
+    const SlotResult result = stepDspCycleImpl(dsp, ram, echoRam);
+    if (result.delivered) frame = result.frame;
+  }
+  return frame;
+}
+
 StereoFrame stepDspSample(DspState& dsp, std::span<std::uint8_t, 65536> ram) noexcept {
-  return stepDspSampleImpl(dsp, ram, ram.data());
+  return stepDspSampleLoop(dsp, ram, ram.data());
 }
 
 StereoFrame stepDspSample(DspState& dsp,
                           std::span<const std::uint8_t, 65536> ram) noexcept {
-  return stepDspSampleImpl(dsp, ram, nullptr);
+  return stepDspSampleLoop(dsp, ram, nullptr);
 }
 
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,

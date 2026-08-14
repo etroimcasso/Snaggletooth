@@ -178,21 +178,56 @@ previous voice's current amplitude, so voice *x*−1 frequency-modulates voice *
 voice leaves the step unmodulated. The modulated step is capped at four source samples per output
 sample (128 kHz).
 
+## When a register write takes effect
+
+The DSP builds a sample over 32 clock slots, and it reads each register on a fixed slot of that
+window. A `DSPDATA` write reaches the sample being built only if it lands before the slot that reads
+the register; a write after that slot waits for the next sample. The slots, numbered T0–T31 as the
+counter's residue mod 32 numbers them:
+
+| Slot | What the DSP does there |
+|---|---|
+| T2, T5, …, T20 | Voices 1–7 each run their whole compute (stream, noise, envelope, amplitude). |
+| a voice's T3/T4 … | That voice folds its left (`VxVOLL`) then right (`VxVOLR`) volume into the mix. |
+| T24 | The echo unit reads its buffer, filters, and writes its feedback. |
+| T27 / T28 | The left / right output: `MVOLL`+`EVOLL` then `MVOLR`+`EVOLR`, then the mute gate. |
+| T31 | Voice 0 computes; `KON`/`KOFF` are polled (even samples); the global counter and noise step. |
+
+Two consequences are worth knowing:
+
+- **`VxOUTX` and `VxENVX` lag their compute.** A voice computes its amplitude at its own slot but does
+  not publish `VxOUTX` (and then `VxENVX`) into the register file until a few slots later. A CPU read
+  in between returns the *previous* sample's value, and a CPU write in that window overwrites the
+  pending one — the hardware's read-back delay.
+- **Voice 0's output rides one sample behind voices 1–7.** Voice 0 computes at the last slot (T31) and
+  its result is applied at the *next* sample's first slots, so its envelope, noise, and keying inputs
+  are one update older than the other voices' for the same delivered frame. Its first sample from a
+  seed is the exception — a freshly seeded state computes its whole first sample at once, so voice 0 is
+  heard in it immediately, and the one-sample pipeline begins only afterward.
+
+This intra-sample schedule is derived from the S-DSP timing charts and is provisional pending the
+Blargg DSP test ROMs; the exact ordering within the last slot and the `VxENVX`/`VxOUTX` publish slots
+are the least-certain parts.
+
 ## Inspecting the pipeline directly
 
 The pipeline's stages are also plain functions over a `DspState`, for tests and tools that drive the
-DSP outside a running machine. `stepDspSample(dsp, ram)` produces one frame and advances the whole
-DSP — poll, then per voice stream, envelope, and mix, then the echo unit. It has two forms: given
-writable RAM the echo unit writes its buffer, as in a running machine; given read-only RAM it still
-reads, filters, and outputs echo but cannot write, which is the same as holding echo writes disabled.
-Below it, `decodeBrrBlock` decodes a block, `gaussInterpolate` runs the kernel, `stepVoice` advances
-one voice's stream, `stepVoiceEnvelope` advances one envelope, and `keyOnVoice` / `keyOffVoice` /
-`pollKeying` drive keying. The `DspState` is a value: copy it to snapshot, assign it to restore.
+DSP outside a running machine. `stepDspSample(dsp, ram)` produces one frame and advances the whole DSP
+by one sample; `stepDspCycle(dsp, ram)` runs a single one of the sample's 32 slots and, on the wrap
+slot, reports the finished frame — the machine drives the DSP one slot per cycle through the latter.
+Both have two forms: given writable RAM the echo unit writes its buffer, as in a running machine;
+given read-only RAM it still reads, filters, and outputs echo but cannot write, which is the same as
+holding echo writes disabled. Below them, `decodeBrrBlock` decodes a block, `gaussInterpolate` runs
+the kernel, `stepVoice` advances one voice's stream, `stepVoiceEnvelope` advances one envelope, and
+`keyOnVoice` / `keyOffVoice` / `pollKeying` drive keying. The `DspState` is a value: copy it to
+snapshot, assign it to restore.
 
 ## Gotchas
 
-- **Register writes take effect at the next sample.** The DSP reads its registers once per sample.
-  Changes are sample-granular; the hardware's finer intra-sample access schedule is not modeled.
+- **A register write can land mid-sample.** The DSP reads each register on a fixed slot of the sample
+  it is building, so a write is picked up this sample or the next depending on where it lands — see
+  [When a register write takes effect](#when-a-register-write-takes-effect). `VxOUTX`/`VxENVX` read
+  back one sample behind, and voice 0's output rides one sample behind the others.
 - **A released voice keeps decoding.** Key-off changes only the envelope. `ENDX` bits can be set by a
   voice you have keyed off, because its stream is still running.
 - **`VxOUTX` is the high byte of the internal amplitude.** The full amplitude is `-$4000`…`+$3FFF`;
