@@ -1,10 +1,11 @@
-// The DSP register file's move into DspState, and the 32 kHz sample divider.
+// The DSP register file inside DspState, and the sample clock that drives it.
 //
-// The register file is now owned by DspState (indexed through the overlay as
-// before). ENDX ($7C) becomes a real register whose write acknowledges all end
-// flags. The sample divider free-runs on delivered cycles like the timers'
-// stage-1 divider — nothing consumes its ticks yet. Assertions are derived from
-// fullsnes's DSP register notes and the DSP's 32 kHz sample-clock model.
+// The register file is owned by DspState and indexed through the overlay. ENDX
+// ($7C) is the one register whose write acknowledges all end flags. The sample
+// clock is the machine's master counter: it counts every machine cycle, aligns
+// to zero at power-on, and is retained across reset, so the sample phase is
+// continuous. Assertions are derived from fullsnes's DSP register notes and the
+// DSP's 32 kHz sample-clock model.
 
 #include <cstdint>
 #include <initializer_list>
@@ -54,18 +55,18 @@ TEST(DspRegisters, OrdinaryRegisterStoresTheWrittenValue) {
   EXPECT_EQ(apu.state().dsp[0x10], 0xAA);
 }
 
-// ── The 32 kHz sample divider ───────────────────────────────────────────────
+// ── The 32 kHz sample clock ─────────────────────────────────────────────────
 
 TEST(DspSampleClock, PowerOnAlignsToZero) {
   Apu apu;
-  EXPECT_EQ(apu.state().dsp.sampleDivider, 0);
+  EXPECT_EQ(apu.state().divider, 0);
 }
 
 TEST(DspSampleClock, AdvancesByDeliveredCycles) {
-  // The divider counts machine cycles toward the 32-cycle sample period. Three
+  // The counter counts machine cycles toward the 32-cycle sample period. Three
   // NOPs deliver 2 cycles each.
   Apu apu = run({0x00, 0x00, 0x00}, 3);  // NOP NOP NOP
-  EXPECT_EQ(apu.state().dsp.sampleDivider, 6);
+  EXPECT_EQ(apu.state().divider, 6);
 }
 
 TEST(DspSampleClock, KeepsCountingWhileTheCoreIsHalted) {
@@ -76,17 +77,17 @@ TEST(DspSampleClock, KeepsCountingWhileTheCoreIsHalted) {
   apu.setPc(0x0200);
   apu.step();  // SLEEP: 7 cycles, core now sleeping
   apu.step();  // halted: 2 cycles
-  EXPECT_EQ(apu.state().dsp.sampleDivider, 9);
+  EXPECT_EQ(apu.state().divider, 9);
   EXPECT_EQ(apu.state().cpu.run, snaggletooth::RunState::Sleeping);
 }
 
 TEST(DspSampleClock, IsRetainedAcrossReset) {
-  // Like the timers' stage-1 divider, the free-running sample divider cannot be
-  // reset — reset() keeps its running phase.
-  Apu apu = run({0x00, 0x00, 0x00}, 3);  // divider = 6
-  ASSERT_EQ(apu.state().dsp.sampleDivider, 6);
+  // The free-running counter cannot be reset — reset() keeps its running phase,
+  // so both the sample boundaries and the timer ticks stay on their slots.
+  Apu apu = run({0x00, 0x00, 0x00}, 3);  // counter = 6
+  ASSERT_EQ(apu.state().divider, 6);
   apu.reset();
-  EXPECT_EQ(apu.state().dsp.sampleDivider, 6);
+  EXPECT_EQ(apu.state().divider, 6);
 }
 
 // ── Snapshot carries the DSP state ──────────────────────────────────────────
@@ -94,12 +95,12 @@ TEST(DspSampleClock, IsRetainedAcrossReset) {
 TEST(DspSnapshot, RoundTripsRegisterFileAndDivider) {
   Apu apu = run({0x8F, 0x21, 0xF2,   // select DSP $21
                  0x8F, 0x9C, 0xF3,   // dsp[$21] := $9C
-                 0x00, 0x00}, 4);    // two NOPs -> divider advances
+                 0x00, 0x00}, 4);    // two NOPs -> the counter advances
   const ApuState snap = apu.state();
   Apu fresh;
   fresh.restore(snap);
   EXPECT_EQ(fresh.state().dsp[0x21], 0x9C);
-  EXPECT_EQ(fresh.state().dsp.sampleDivider, snap.dsp.sampleDivider);
+  EXPECT_EQ(fresh.state().divider, snap.divider);
 }
 
 }  // namespace

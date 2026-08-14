@@ -4,10 +4,10 @@
 //   spc_render <in.spc> (--seconds N | --samples N) -o <out.wav>
 //
 // Rendering is from sample zero, verbatim: no warm-up, no skip, no fade — exactly N
-// samples from the restored state. N frames costs run(N*32) machine cycles; the
-// final instruction may overshoot a frame boundary, and any frames past N are
-// truncated here so the output is exactly N. Aligning the stream against any
-// reference is left to the caller.
+// samples from the restored state. N frames costs run(N*32) machine cycles, which
+// stops on the cycle the budget names and delivers exactly N frames; the resize
+// below is a bound on the written output, not a correction. Aligning the stream
+// against any reference is left to the caller.
 
 #include <cstdint>
 #include <cstdlib>

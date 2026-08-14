@@ -10,15 +10,25 @@
 // side and loads programs directly into RAM (there is no IPL ROM — the machine
 // boots into the seeded post-IPL ready state).
 //
-// The three timers advance on the cycles each instruction delivers. A single
-// free-running stage-1 divider counts machine cycles for all three (T0 and T1
-// tick every 128, T2 every 16); each timer's stage-2 counter increments on its
+// The machine runs one cycle at a time. Within a cycle the clocked events go
+// first — the master counter advances, the stage-1 timer ticks land, the DSP
+// takes its slot — and the CPU's single bus access lands last. So a read of a
+// timer output on the cycle that timer ticks returns the incremented count, and
+// a DSP write lands on its true cycle relative to the 32-cycle sample boundary.
+//
+// One counter drives all of it: the SPC700 and the DSP share a clock, so the
+// timer phase and the sample phase are the same free-running phase. T0 and T1
+// tick every 128 cycles and T2 every 16, on the counter's documented slots; the
+// DSP takes a sample every 32. Each timer's stage-2 counter increments on its
 // stage-1 ticks while enabled and, on reaching its target, advances a 4-bit
-// stage-3 counter that an overlay read of TnOUT returns and clears. step() runs
-// one instruction and then advances the timers by the cycles it took; run()
-// steps whole instructions against a cycle budget.
+// stage-3 counter that an overlay read of TnOUT returns and clears.
+//
+// step() runs one instruction; run() runs an exact number of cycles and may
+// stop mid-instruction, which is a legal resting place — instruction progress
+// is part of the state value.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -29,7 +39,8 @@
 namespace snaggletooth {
 
 // One timer's mutable stage counters. The enable bit lives in the CONTROL
-// register (ApuState::control); the shared stage-1 divider is ApuState::divider.
+// register (ApuState::control); the stage-1 ticks come off the machine's master
+// counter, ApuState::divider.
 struct TimerState {
   std::uint8_t stage2 = 0;  // 0-255 counter compared against the target
   std::uint8_t stage3 = 0;  // 4-bit output counter; an overlay read of TnOUT clears it
@@ -46,7 +57,7 @@ struct ApuState {
   DspState dsp{};
   std::array<std::uint8_t, 4> inputPorts{};   // host -> SPC700 (the CPU reads these at $F4-$F7)
   std::array<std::uint8_t, 4> outputPorts{};  // SPC700 -> host (the CPU writes these at $F4-$F7)
-  std::uint16_t divider = 0;                  // shared free-running stage-1 cycle counter
+  std::uint16_t divider = 0;                  // the master cycle counter: timer ticks and sample boundaries
   std::array<TimerState, 3> timers{};
 };
 
@@ -59,16 +70,17 @@ class Apu {
   Apu();
   explicit Apu(ApuState state);
 
-  // The whole machine as a value. state() is coherent between steps; restore()
-  // replaces every field.
+  // The whole machine as a value. state() is coherent at any cycle the machine
+  // has stopped on, mid-instruction included; restore() replaces every field and
+  // resumes exactly there.
   [[nodiscard]] const ApuState& state() const noexcept { return state_; }
   void restore(ApuState state);
 
   // Re-seeds the post-IPL state with the documented reset differences: the timer
-  // outputs clear to 0 (the power-on value is $F), but the targets and the shared
-  // stage-1 divider are retained (the divider cannot be reset), CONTROL and TEST
-  // return to their reset values, the ready bytes are re-posted, zero page is
-  // cleared, and the rest of RAM is left as it was.
+  // outputs clear to 0 (the power-on value is $F), but the targets and the master
+  // counter are retained (a free-running counter cannot be reset), CONTROL and
+  // TEST return to their reset values, the ready bytes are re-posted, zero page
+  // is cleared, and the rest of RAM is left as it was.
   void reset();
 
   // The host face of the comm ports (index 0-3). writePort sets an input latch
@@ -92,21 +104,20 @@ class Apu {
   // for). A convenience over restoring a whole state with a changed PC.
   void setPc(std::uint16_t pc);
 
-  // Runs one CPU instruction over the overlay, advances the timers by the cycles
-  // it took, and returns that count. A halted core still delivers 2 cycles, so
-  // the timers keep ticking while the CPU sits idle.
+  // Runs machine cycles to the end of one CPU instruction and returns how many it
+  // took. Called after run() stopped mid-instruction, it finishes the instruction
+  // in progress rather than starting one. A halted core runs 2 cycles and returns
+  // 2, so the timers and the DSP keep going while the CPU sits idle.
   std::uint32_t step();
 
-  // Steps whole instructions until at least `budget` cycles have run, returning
-  // the cycles actually run — the last instruction may overshoot, and the caller
-  // carries the remainder. run(0) runs nothing and returns 0. Every instruction
-  // costs at least 2 cycles, so the budget is always reached.
+  // Runs exactly `budget` machine cycles and returns that count. The stop lands
+  // wherever the budget falls, mid-instruction included — run(a) then run(b) is
+  // bitwise run(a+b). run(0) runs nothing.
   std::uint64_t run(std::uint64_t budget);
 
   // Drains the 32 kHz stereo frames the DSP has produced since the last drain,
-  // clearing the internal queue. step() and run() append one frame per DSP
-  // sample (every 32 machine cycles), so a caller drains periodically to bound
-  // the queue. Frames are output, not machine state: they are not part of a
+  // clearing the internal queue. One frame lands per DSP sample — every 32
+  // machine cycles — so a caller drains periodically to bound the queue. Frames are output, not machine state: they are not part of a
   // snapshot, and restore() and reset() discard any that are pending.
   [[nodiscard]] std::vector<StereoFrame> takeFrames();
 
@@ -130,17 +141,22 @@ class Apu {
   // ENDX ($7C) is a real register whose bits any write acknowledges (clears).
   void writeDspRegister(std::uint8_t reg, std::uint8_t value);
 
-  // Advances the shared stage-1 divider by `cycles` and passes the resulting
-  // stage-1 ticks to each enabled timer's stage-2/stage-3 counters.
-  void advanceTimers(std::uint32_t cycles);
+  // One machine cycle. The master counter advances, the timer ticks and the DSP
+  // sample boundary that land on the new count are taken, and then the CPU makes
+  // its one bus access — the order the chips share their multiplexed bus in, and
+  // the reason a read sees the tick that shares its cycle.
+  void machineCycle();
 
-  // Advances the DSP's 32-cycle sample divider by `cycles` and generates one
-  // stereo frame for each 32 kHz sample boundary the divider crosses. The
-  // divider free-runs, so the sample phase is continuous across steps.
-  void advanceDsp(std::uint32_t cycles);
+  // One stage-1 tick for timer `index`: its stage-2 counter increments while the
+  // timer is enabled and, on reaching the target, advances stage 3 and zeroes.
+  void tickTimer(std::size_t index);
 
-  Spc700 cpu_;      // the live CPU state during a step
-  ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced at each step
+  // Runs the DSP's sample and queues the stereo frame it produced. The RAM span
+  // is writable so the echo unit can reach its delay line in APU RAM directly.
+  void sampleFrame();
+
+  Spc700 cpu_;      // the live CPU state while the machine runs
+  ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced before every return
   std::vector<StereoFrame> frames_;  // DSP output awaiting the host's drain; not part of the snapshot
 };
 

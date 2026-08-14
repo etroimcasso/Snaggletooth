@@ -15,7 +15,7 @@
 //
 // stepInstruction() runs cycles to the next instruction boundary and returns how many
 // it took — the whole-instruction view, for hosts and for tests that care about final
-// state. step() is that call.
+// state.
 //
 // The core runs over an abstract bus (the ApuBus concept): the machine glue and
 // the flat-RAM test harness both satisfy it, so the same interpreter is exercised
@@ -89,12 +89,6 @@ class Spc700 {
   // state nor the bus.
   template <ApuBus B>
   std::uint32_t stepInstruction(B& bus);
-
-  // Executes one instruction and returns its cycle count.
-  template <ApuBus B>
-  std::uint32_t step(B& bus) {
-    return stepInstruction(bus);
-  }
 
   // Whether the core sits between instructions — the only point at which an
   // instruction can begin, and the state a completed instruction leaves behind.

@@ -94,16 +94,12 @@ struct VoiceState {
 // 128-byte register file the CPU reaches through DSPADDR/DSPDATA lives here
 // (ApuState carries only the DSPADDR latch beside it). Indexing or
 // iterating a DspState reaches its register file, so the machine's overlay
-// reads and writes a DSP register as dsp[reg]; the sample clock and the
-// voices' streaming state are named members beside it.
+// reads and writes a DSP register as dsp[reg]; the envelope counter, the noise
+// generator, the echo unit and the voices' streaming state are named members
+// beside it. The sample clock is not one of them — the machine owns the single
+// counter that drives both the timers and the sample boundaries.
 struct DspState {
   std::array<std::uint8_t, 128> regs{};
-
-  // The DSP samples at 32 kHz — one sample every 32 machine cycles. This divider
-  // free-runs on delivered cycles like the timers' stage-1 divider: it aligns to
-  // zero at power-on and is retained across reset (a free-running divider cannot
-  // be reset). Nothing consumes its sample ticks yet.
-  std::uint16_t sampleDivider = 0;
 
   // The global counter that gates every envelope/noise rate. It powers on at 0,
   // decrements once per 32 kHz sample, and wraps to 0x77FF when it would pass

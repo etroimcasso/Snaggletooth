@@ -183,7 +183,6 @@ TEST(SpcLoader, ExtraRamIsIgnoredWhenControlBit7IsClear) {
 TEST(SpcLoader, SeedsDspInternalsToPowerOnShape) {
   const snaggletooth::ApuState st = parseSpc(baseImage()).state.value();
   EXPECT_EQ(st.dsp.noiseLevel, -0x4000);
-  EXPECT_EQ(st.dsp.sampleDivider, 0);
   EXPECT_EQ(st.dsp.globalCounter, 0);
   EXPECT_EQ(st.dsp.sampleIndex, 0u);
   EXPECT_EQ(st.dsp.internalKon, 0);

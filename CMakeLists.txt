@@ -126,6 +126,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
+    tests/apu/cycle_timing_test.cpp
     tests/dsp/brr_test.cpp
     tests/dsp/dsp_state_test.cpp
     tests/dsp/pitch_gauss_test.cpp
