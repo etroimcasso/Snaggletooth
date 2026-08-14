@@ -125,7 +125,7 @@ TEST(Spc700CycleEngine, StepRunsTheSameInstructionAsTheCycles) {
   const Spc700State start{.pc = kProgram, .a = 0x99, .x = 0x04};
 
   Spc700 byInstruction(start);
-  const std::uint32_t cycles = byInstruction.step(whole);
+  const std::uint32_t cycles = byInstruction.stepInstruction(whole);
 
   RecordingFlatBus stepped = busWith({0xC7, 0x40});
   stepped.ram[0x0044] = 0x00;

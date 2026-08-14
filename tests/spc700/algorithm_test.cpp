@@ -31,7 +31,7 @@ Spc700 run1(Spc700State init, std::initializer_list<std::uint8_t> program,
   std::uint16_t at = init.pc;
   for (std::uint8_t byte : program) bus.ram[at++] = byte;
   Spc700 cpu(init);
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   return cpu;
 }
 
@@ -656,12 +656,12 @@ TEST(CallReturn, CallPushesNextAddressAndReturnRestoresIt) {
   bus.ram[0x0202] = 0x12;  // CALL $1234
   bus.ram[0x1234] = 0x6F;  // RET
   Spc700 cpu(Spc700State{.pc = 0x0200, .sp = 0xEF});
-  cpu.step(bus);  // CALL
+  cpu.stepInstruction(bus);  // CALL
   EXPECT_EQ(cpu.state().pc, 0x1234);
   EXPECT_EQ(cpu.state().sp, 0xED);
   EXPECT_EQ(bus.ram[0x01EF], 0x02);  // return high at the higher address
   EXPECT_EQ(bus.ram[0x01EE], 0x03);  // return low ($0203) at the lower address
-  cpu.step(bus);  // RET
+  cpu.stepInstruction(bus);  // RET
   EXPECT_EQ(cpu.state().pc, 0x0203);
   EXPECT_EQ(cpu.state().sp, 0xEF);
 }
@@ -672,7 +672,7 @@ TEST(CallReturn, PcallTargetsHighPage) {
   bus.ram[0x0600] = 0x4F;
   bus.ram[0x0601] = 0xC0;
   Spc700 cpu(Spc700State{.pc = 0x0600, .sp = 0xEF});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().pc, 0xFFC0);
   EXPECT_EQ(cpu.state().sp, 0xED);
   EXPECT_EQ(bus.ram[0x01EF], 0x06);
@@ -687,7 +687,7 @@ TEST(CallReturn, TcallReadsItsVector) {
   bus.ram[0xFFD8] = 0x40;  // vector low
   bus.ram[0xFFD9] = 0x20;  // vector high
   Spc700 cpu(Spc700State{.pc = 0x0700, .sp = 0xEF});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().pc, 0x2040);
   EXPECT_EQ(bus.ram[0x01EF], 0x07);
   EXPECT_EQ(bus.ram[0x01EE], 0x01);  // return low ($0701)
@@ -701,7 +701,7 @@ TEST(CallReturn, BrkVectorsAndSetsBreakClearsInterrupt) {
   bus.ram[0xFFDE] = 0x00;
   bus.ram[0xFFDF] = 0x30;  // BRK vector -> $3000
   Spc700 cpu(Spc700State{.pc = 0x0800, .sp = 0xEF, .psw = kFlagI});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().pc, 0x3000);
   EXPECT_EQ(cpu.state().psw & kFlagB, kFlagB);
   EXPECT_EQ(cpu.state().psw & kFlagI, 0u);
@@ -717,7 +717,7 @@ TEST(CallReturn, RetiRestoresStatusThenProgramCounter) {
   bus.ram[0x01EE] = 0x34;
   bus.ram[0x01EF] = 0x12;
   Spc700 cpu(Spc700State{.pc = 0x0900, .sp = 0xEC});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().psw, static_cast<std::uint8_t>(kFlagC | kFlagN));
   EXPECT_EQ(cpu.state().pc, 0x1234);
   EXPECT_EQ(cpu.state().sp, 0xEF);
@@ -731,10 +731,10 @@ TEST(StackOps, PushPopRoundTripsAndPopSetsNoFlags) {
   bus.ram[0x0A00] = 0x2D;  // PUSH A
   bus.ram[0x0A01] = 0xCE;  // POP X
   Spc700 cpu(Spc700State{.pc = 0x0A00, .a = 0x00, .x = 0xFF, .sp = 0xEF, .psw = 0});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().sp, 0xEE);
   EXPECT_EQ(bus.ram[0x01EF], 0x00);
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().x, 0x00);
   EXPECT_EQ(cpu.state().sp, 0xEF);
   EXPECT_EQ(cpu.state().psw & kFlagZ, 0u);
@@ -746,7 +746,7 @@ TEST(StackOps, PopStatusWordRestoresAllFlags) {
   bus.ram[0x0A00] = 0x8E;
   bus.ram[0x01F0] = 0xFF;
   Spc700 cpu(Spc700State{.pc = 0x0A00, .sp = 0xEF, .psw = 0});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(cpu.state().psw, 0xFF);
   EXPECT_EQ(cpu.state().sp, 0xF0);
 }
@@ -757,7 +757,7 @@ TEST(StackOps, StackWrapsWithinPageOne) {
   FlatRamBus bus;
   bus.ram[0x0A00] = 0x2D;  // PUSH A
   Spc700 cpu(Spc700State{.pc = 0x0A00, .a = 0x7E, .sp = 0x00});
-  cpu.step(bus);
+  cpu.stepInstruction(bus);
   EXPECT_EQ(bus.ram[0x0100], 0x7E);
   EXPECT_EQ(cpu.state().sp, 0xFF);
 }

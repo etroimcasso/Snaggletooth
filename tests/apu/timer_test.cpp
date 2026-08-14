@@ -36,6 +36,41 @@ std::uint8_t enableTimer(std::size_t n) {
   return static_cast<std::uint8_t>(0xB0 | (1u << n));
 }
 
+// Every field of two machine states compared, the CPU's in-instruction progress
+// included — two machines that ran the same cycles by different routes are the
+// same machine only if all of it matches.
+void expectSameMachine(const ApuState& a, const ApuState& b) {
+  EXPECT_EQ(a.cpu.pc, b.cpu.pc);
+  EXPECT_EQ(a.cpu.a, b.cpu.a);
+  EXPECT_EQ(a.cpu.x, b.cpu.x);
+  EXPECT_EQ(a.cpu.y, b.cpu.y);
+  EXPECT_EQ(a.cpu.sp, b.cpu.sp);
+  EXPECT_EQ(a.cpu.psw, b.cpu.psw);
+  EXPECT_EQ(a.cpu.run, b.cpu.run);
+  EXPECT_EQ(a.cpu.ir, b.cpu.ir);
+  EXPECT_EQ(a.cpu.tcu, b.cpu.tcu);
+  EXPECT_EQ(a.cpu.ea, b.cpu.ea);
+  EXPECT_EQ(a.cpu.ptr, b.cpu.ptr);
+  EXPECT_EQ(a.cpu.tmp, b.cpu.tmp);
+  EXPECT_EQ(a.cpu.taken, b.cpu.taken);
+  EXPECT_EQ(a.divider, b.divider);
+  EXPECT_EQ(a.control, b.control);
+  EXPECT_EQ(a.test, b.test);
+  EXPECT_EQ(a.dspAddr, b.dspAddr);
+  EXPECT_TRUE(a.ram == b.ram);
+  EXPECT_TRUE(a.inputPorts == b.inputPorts);
+  EXPECT_TRUE(a.outputPorts == b.outputPorts);
+  for (std::size_t i = 0; i < a.timers.size(); ++i) {
+    EXPECT_EQ(a.timers[i].stage2, b.timers[i].stage2);
+    EXPECT_EQ(a.timers[i].stage3, b.timers[i].stage3);
+    EXPECT_EQ(a.timers[i].target, b.timers[i].target);
+  }
+  EXPECT_TRUE(a.dsp.regs == b.dsp.regs);
+  EXPECT_EQ(a.dsp.globalCounter, b.dsp.globalCounter);
+  EXPECT_EQ(a.dsp.sampleIndex, b.dsp.sampleIndex);
+  EXPECT_EQ(a.dsp.noiseLevel, b.dsp.noiseLevel);
+}
+
 // ── Stage cadence: the base rates and the comparator ────────────────────────
 // [SPC] §$FA-$FF: "two (#0 and #1) with a base rate of 128 clock cycles and one
 // (#2) with a base rate of 16 clock cycles." Stage 2 increments each stage-1
@@ -177,9 +212,12 @@ TEST(ApuTimerEnable, DoesNotResetTheStageOneDivider) {
 }
 
 TEST(ApuTimerEnable, WritingAnAlreadyEnabledBitLeavesStagesAlone) {
-  // A 1->1 write is not a transition, so the stage counters are untouched.
+  // A 1->1 write is not a transition, so the stage counters are untouched. The
+  // counter starts at 1 so the instruction's five cycles (2-6) clear the T2 tick
+  // boundary at 17 — this pin is about the write, not about cadence.
   ApuState s = seed();
   s.control = enableTimer(2);  // T2 already enabled
+  s.divider = 1;
   s.timers[2].stage2 = 4;
   s.timers[2].stage3 = 3;
   s.ram[0x0200] = 0x8F; s.ram[0x0201] = enableTimer(2); s.ram[0x0202] = 0xF1;  // MOV $F1,#$B4 again
@@ -247,21 +285,51 @@ TEST(ApuTimerPhantomRead, ReadModifyWriteStrikesTheOverlay) {
   EXPECT_EQ(apu.state().timers[2].stage3, 0);
 }
 
-// ── Instruction-granular ordering ───────────────────────────────────────────
-// The timers advance after the instruction, so a mid-instruction read sees the
-// pre-step timer state; the tick lands afterward.
+// ── Cycle ordering: the tick and the access that share a cycle ──────────────
+// Within a machine cycle the clocked events go first and the CPU's access lands
+// last, so a read of TnOUT on a tick cycle returns the incremented count and
+// clears it. MOV A,$FF is 3 cycles and reads T2OUT on the third, which puts the
+// read one cycle either side of the T2 boundary at counter 17 as the seed moves.
 
-TEST(ApuTimerOrdering, MidInstructionReadSeesPreStepStateThenTheTickApplies) {
+TEST(ApuTimerOrdering, AReadOnTheTickCycleSeesTheTick) {
   ApuState s = seed();
   s.control = enableTimer(2);
   s.timers[2].target = 1;
   s.timers[2].stage3 = 5;
-  s.divider = 14;  // the next T2 boundary (16) is two cycles into this instruction
-  s.ram[0x0200] = 0xE4; s.ram[0x0201] = 0xFF;  // MOV A,$FF (3 cycles), reads T2OUT
+  s.divider = 14;  // cycles 15, 16, 17 — the read lands on the tick
+  s.ram[0x0200] = 0xE4; s.ram[0x0201] = 0xFF;  // MOV A,$FF, reads T2OUT
   Apu apu(std::move(s));
   apu.step();
-  EXPECT_EQ(apu.state().cpu.a, 5);             // the read observed the pre-step stage 3
-  EXPECT_EQ(apu.state().timers[2].stage3, 1);  // the tick applied after, over the cleared counter
+  EXPECT_EQ(apu.state().cpu.a, 6);             // the tick ran first: 5 -> 6
+  EXPECT_EQ(apu.state().timers[2].stage3, 0);  // and the read cleared the incremented count
+}
+
+TEST(ApuTimerOrdering, AReadBeforeTheTickCycleSeesTheOlderCount) {
+  ApuState s = seed();
+  s.control = enableTimer(2);
+  s.timers[2].target = 1;
+  s.timers[2].stage3 = 5;
+  s.divider = 13;  // cycles 14, 15, 16 — the read lands one cycle short of the tick
+  s.ram[0x0200] = 0xE4; s.ram[0x0201] = 0xFF;  // MOV A,$FF, reads T2OUT
+  Apu apu(std::move(s));
+  apu.step();
+  EXPECT_EQ(apu.state().cpu.a, 5);             // no tick has happened yet
+  EXPECT_EQ(apu.state().timers[2].stage3, 0);  // the read cleared it
+  apu.run(1);                                  // counter 17: the tick lands on the cleared counter
+  EXPECT_EQ(apu.state().timers[2].stage3, 1);
+}
+
+TEST(ApuTimerOrdering, AReadAfterTheTickCycleSeesTheNewCount) {
+  ApuState s = seed();
+  s.control = enableTimer(2);
+  s.timers[2].target = 1;
+  s.timers[2].stage3 = 5;
+  s.divider = 15;  // cycles 16, 17, 18 — the tick lands mid-instruction, the read follows it
+  s.ram[0x0200] = 0xE4; s.ram[0x0201] = 0xFF;  // MOV A,$FF, reads T2OUT
+  Apu apu(std::move(s));
+  apu.step();
+  EXPECT_EQ(apu.state().cpu.a, 6);             // the tick that ran two cycles earlier is visible
+  EXPECT_EQ(apu.state().timers[2].stage3, 0);
 }
 
 // ── Reset deltas ────────────────────────────────────────────────────────────
@@ -347,14 +415,32 @@ TEST(ApuRun, ReturnsTheCyclesActuallyRun) {
   EXPECT_EQ(apu.state().cpu.pc, 0x0205);
 }
 
-TEST(ApuRun, OvershootsOnTheFinalInstruction) {
+TEST(ApuRun, StopsExactlyOnTheBudgetMidInstruction) {
+  // run() spends the budget to the cycle: 12 cycles of 5-cycle instructions is
+  // two whole ones and two cycles of a third. The machine rests there, a
+  // snapshot carries the unfinished instruction, and finishing it from either
+  // machine lands where one uninterrupted run of 15 cycles lands.
   ApuState s = seed();
   for (std::uint16_t i = 0; i < 10; ++i) {
     s.ram[0x0200 + 2 * i] = 0xBA;  // MOVW YA,dp (5 cycles)
     s.ram[0x0201 + 2 * i] = 0x00;
   }
-  Apu apu(std::move(s));
-  EXPECT_EQ(apu.run(12), 15u);  // two whole instructions reach 10; the third overshoots to 15
+  const ApuState image = s;
+
+  Apu apu(image);
+  EXPECT_EQ(apu.run(12), 12u);
+  EXPECT_EQ(apu.state().divider, 12);
+  EXPECT_EQ(apu.state().cpu.tcu, 2);  // two cycles into the third instruction
+
+  Apu resumed;
+  resumed.restore(apu.state());  // the snapshot resumes mid-instruction
+  EXPECT_EQ(resumed.run(3), 3u);
+  EXPECT_EQ(apu.run(3), 3u);
+
+  Apu straight(image);
+  EXPECT_EQ(straight.run(15), 15u);
+  expectSameMachine(apu.state(), straight.state());
+  expectSameMachine(resumed.state(), straight.state());
 }
 
 TEST(ApuRun, RunZeroDoesNothing) {
@@ -378,13 +464,16 @@ TEST(ApuRun, HaltedCoreStillTicksTimers) {
 }
 
 TEST(ApuRun, HaltedCoreStepReturnsTwoAndTicks) {
+  // The counter starts at 1 so the step's two cycles (2 and 3) fall clear of a
+  // tick boundary: the subject is the price of a halted step, not the cadence.
   ApuState s = seed();
   s.cpu.run = RunState::Sleeping;
   s.control = enableTimer(2);
+  s.divider = 1;
   s.timers[2].target = 1;
   Apu apu(std::move(s));
   EXPECT_EQ(apu.step(), 2u);
-  EXPECT_EQ(apu.state().divider, 2);            // the divider advanced
+  EXPECT_EQ(apu.state().divider, 3);            // the counter advanced by exactly two
   EXPECT_EQ(apu.state().timers[2].stage3, 0);   // but 2 cycles is short of a T2 tick
 }
 

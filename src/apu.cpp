@@ -64,70 +64,69 @@ void Apu::setPc(std::uint16_t pc) {
   cpu_.restore(state_.cpu);
 }
 
-std::uint32_t Apu::step() {
+void Apu::machineCycle() {
+  // The counter wraps at 65536, a multiple of 128, 32 and 16, so every phase
+  // below survives the wrap unbroken.
+  ++state_.divider;
+  const std::uint16_t phase = state_.divider;
+
+  // The clocked events, on their documented slots of the DSP's 32-cycle sample
+  // frame: T0 and T1 tick on the first slot of every fourth frame, T2 on the
+  // first slot of every half-frame, and the sample lands on the frame boundary.
+  if (phase % 128u == 1u) {
+    tickTimer(0);
+    tickTimer(1);
+  }
+  if (phase % 16u == 1u) tickTimer(2);
+  if (phase % 32u == 0u) sampleFrame();
+
+  // The CPU's access closes the cycle. A halted core reaches nothing here, and
+  // the cycle still passes for everything above.
   Bus bus{*this};
-  const std::uint32_t cycles = cpu_.step(bus);
-  state_.cpu = cpu_.state();  // keep the snapshot coherent with the live CPU
-  // The timers and the DSP sample divider advance after the instruction, so a
-  // read the CPU issues mid-instruction observes their pre-step state
-  // (instruction-granular).
-  advanceTimers(cycles);
-  advanceDsp(cycles);
+  cpu_.stepCycle(bus);
+}
+
+void Apu::tickTimer(std::size_t index) {
+  const std::uint8_t enable = static_cast<std::uint8_t>(1u << index);
+  if (!(state_.control & enable)) return;  // stage 2 only counts while enabled
+  TimerState& t = state_.timers[index];
+  t.stage2 = static_cast<std::uint8_t>(t.stage2 + 1);  // 0-255 wraparound
+  // Post-increment comparator: a target of 0 matches only after 256 counts.
+  if (t.stage2 == t.target) {
+    t.stage3 = static_cast<std::uint8_t>((t.stage3 + 1) & 0x0Fu);  // 4-bit output
+    t.stage2 = 0;
+  }
+}
+
+void Apu::sampleFrame() {
+  // The span is writable so the echo unit can write its feedback straight into
+  // APU RAM (its own bus access — no overlay), the delay line the echo depends on.
+  const std::span<std::uint8_t, 65536> ram{state_.ram};
+  frames_.push_back(stepDspSample(state_.dsp, ram));
+}
+
+std::uint32_t Apu::step() {
+  std::uint32_t cycles = 0;
+  if (cpu_.state().run != RunState::Running) {
+    // A halted core prices two idle cycles, the same two the core itself charges
+    // for a step it cannot take.
+    machineCycle();
+    machineCycle();
+    cycles = 2;
+  } else {
+    do {
+      machineCycle();
+      ++cycles;
+    } while (!cpu_.atInstructionBoundary());
+  }
+  state_.cpu = cpu_.state();  // the snapshot is coherent wherever the machine stops
   return cycles;
 }
 
 std::uint64_t Apu::run(std::uint64_t budget) {
-  std::uint64_t consumed = 0;
-  while (consumed < budget) consumed += step();  // every step delivers >= 2 cycles
-  return consumed;
-}
-
-void Apu::advanceTimers(std::uint32_t cycles) {
-  // The divider is a free-running machine-cycle counter. Its wrap at 65536 is a
-  // multiple of both 128 and 16, so the tick phase is preserved across the wrap;
-  // a single step advances it by far less than a full period.
-  const std::uint32_t before = state_.divider;
-  const std::uint32_t after = before + cycles;
-  state_.divider = static_cast<std::uint16_t>(after);
-
-  // A stage-1 tick is a crossing of the timer's base period. T0 and T1 tick on
-  // the same 128-cycle boundaries; T2 ticks on every 16.
-  const std::uint32_t ticks128 = (after / 128u) - (before / 128u);
-  const std::uint32_t ticks16 = (after / 16u) - (before / 16u);
-
-  auto tick = [this](std::size_t index, std::uint32_t stage1Ticks) {
-    const std::uint8_t enable = static_cast<std::uint8_t>(1u << index);
-    if (!(state_.control & enable)) return;  // stage 2 only counts while enabled
-    TimerState& t = state_.timers[index];
-    for (std::uint32_t n = 0; n < stage1Ticks; ++n) {
-      t.stage2 = static_cast<std::uint8_t>(t.stage2 + 1);  // 0-255 wraparound
-      // Post-increment comparator: a target of 0 matches only after 256 counts.
-      if (t.stage2 == t.target) {
-        t.stage3 = static_cast<std::uint8_t>((t.stage3 + 1) & 0x0Fu);  // 4-bit output
-        t.stage2 = 0;
-      }
-    }
-  };
-  tick(0, ticks128);
-  tick(1, ticks128);
-  tick(2, ticks16);
-}
-
-void Apu::advanceDsp(std::uint32_t cycles) {
-  // One DSP sample every 32 machine cycles (32 kHz). The divider free-runs and
-  // wraps at 65536 — a multiple of 32, so the sample phase survives the wrap. It
-  // is retained across reset().
-  const std::uint32_t before = state_.dsp.sampleDivider;
-  const std::uint32_t after = before + cycles;
-  state_.dsp.sampleDivider = static_cast<std::uint16_t>(after);
-
-  // Generate a stereo frame for each 32-cycle boundary the divider crossed. The
-  // span is writable so the echo unit can write its feedback straight into APU RAM
-  // (its own bus access — no overlay), the delay line the echo effect depends on.
-  const std::uint32_t samples = (after / 32u) - (before / 32u);
-  const std::span<std::uint8_t, 65536> ram{state_.ram};
-  for (std::uint32_t n = 0; n < samples; ++n)
-    frames_.push_back(stepDspSample(state_.dsp, ram));
+  for (std::uint64_t n = 0; n < budget; ++n) machineCycle();
+  state_.cpu = cpu_.state();
+  return budget;
 }
 
 std::vector<StereoFrame> Apu::takeFrames() {
@@ -146,11 +145,11 @@ void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
 
 void Apu::reset() {
   ApuState fresh = powerOnState();
-  // The divider cannot be reset, the targets are retained, and RAM above zero
-  // page keeps its contents; the timer outputs go to 0 rather than the power-on
-  // $F. Everything else returns to its documented reset value via powerOnState.
+  // The master counter cannot be reset — the timer phase and the sample phase
+  // both ride it — the targets are retained, and RAM above zero page keeps its
+  // contents; the timer outputs go to 0 rather than the power-on $F. Everything
+  // else returns to its documented reset value via powerOnState.
   fresh.divider = state_.divider;
-  fresh.dsp.sampleDivider = state_.dsp.sampleDivider;  // the sample clock free-runs too
   for (std::size_t i = 0; i < fresh.timers.size(); ++i) {
     fresh.timers[i].target = state_.timers[i].target;
     fresh.timers[i].stage3 = 0x00;
