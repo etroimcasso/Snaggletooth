@@ -168,6 +168,14 @@ class Cpu65816 {
   }
   void setIrqLine(bool asserted) noexcept { state_.irqLine = asserted; }
 
+  // Re-establishes the NMI pin's remembered level without latching an edge. The
+  // pin level is a live member, not part of the snapshot, so after a restore it is
+  // stale from the pre-restore timeline; a machine re-derives the level from its own
+  // state and syncs it here. Unlike setNmiLine this never sets the pending latch —
+  // the pending flag rides the snapshot and is restored on its own, so minting an
+  // edge here would double a request the snapshot already carries.
+  void syncNmiLine(bool level) noexcept { nmiLine_ = level; }
+
  private:
   // ---- widths -------------------------------------------------------------
   // The accumulator/memory is 8-bit when the m flag is set; the index registers
