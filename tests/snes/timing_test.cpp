@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -222,11 +223,13 @@ TEST(SnesTiming, RestoreInVblankDoesNotMintASecondNmi) {
   ASSERT_FALSE(m.state().cpu.nmiPending);  // and the pending latch is already consumed
 
   const SnesState snap = m.state();
-  Snes restored(SnesConfig{.rom = rom});
-  restored.restore(snap);
-  restored.run(2000u);  // still within the same vblank; no new frame edge
+  // The restored machine lives on the heap: a SnesState is a quarter of a megabyte,
+  // and two machines plus a snapshot on the stack would overflow a small thread stack.
+  auto restored = std::make_unique<Snes>(SnesConfig{.rom = rom});
+  restored->restore(snap);
+  restored->run(2000u);  // still within the same vblank; no new frame edge
 
-  EXPECT_EQ(restored.state().wram[0x30], 1u);  // no spurious second NMI from the restore
+  EXPECT_EQ(restored->state().wram[0x30], 1u);  // no spurious second NMI from the restore
 }
 
 }  // namespace

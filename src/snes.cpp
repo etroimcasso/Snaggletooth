@@ -59,8 +59,8 @@ Snes::Snes(SnesConfig config)
   load();
 }
 
-void Snes::restore(SnesState state) {
-  state_ = std::move(state);
+void Snes::restore(const SnesState& state) {
+  state_ = state;
   load();
 }
 

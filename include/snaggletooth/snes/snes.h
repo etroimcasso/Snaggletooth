@@ -143,7 +143,9 @@ class Snes {
   // stopped on, mid-instruction included; restore() replaces the mutable machine
   // and resumes exactly there, keeping the cartridge and clock rate in place.
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
-  void restore(SnesState state);
+  // Takes the state by const reference rather than by value: a SnesState is a quarter
+  // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
+  void restore(const SnesState& state);
 
   // The clock rate the machine was built at. Fixed for its life, like the
   // cartridge.
