@@ -44,8 +44,8 @@ signal pin. The machine around it maps the LoROM cartridge and the 128KB work RA
 across the communication ports, prices each cycle by the region it reaches at either the NTSC or PAL
 clock rate, and spends an exact master-cycle budget. Its video counters drive a vertical-blank NMI and
 an H/V-timer IRQ, its hardware multiply and divide unit runs, and a PPU register file fills video memory
-without drawing it. DMA and HDMA, and the PPU that renders, are not built yet. This table is kept honest
-as components land.
+without drawing it. Its eight DMA channels run general-purpose transfers and per-scanline HDMA. The PPU
+that renders is not built yet. This table is kept honest as components land.
 
 | Component | Status |
 |---|---|
@@ -55,8 +55,8 @@ as components land.
 | S-DSP completion (echo, noise, pitch modulation, master volume) | complete — noise, PMON, master volume, echo delay line, intra-sample register schedule |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders it to a 32 kHz WAV; output validation against reference renders not yet done |
 | Public embedding API | not started |
-| 5A22 CPU core (the 65816) | in progress — the instruction set is complete: all 256 opcodes execute one cycle at a time, with the 8/16-bit width and emulation-mode machinery, and every cycle is validated against the vectors in both modes. The rest of the 5A22 — DMA and HDMA — is not started |
-| SNES machine (bus, memory map, clock, timing) | in progress — the LoROM map, 128KB work RAM and its data port, the APU communication ports, the 6/8/12-master-cycle region speed model (NTSC and PAL), exact master-cycle budgeting and the CPU-to-APU interleave; the H/V counters and scanline structure, the vertical-blank NMI and H/V-timer IRQ, the hardware multiply and divide unit, and the PPU register file (VRAM and CGRAM ports that store without rendering). DMA and HDMA are not started |
+| 5A22 CPU core (the 65816) | in progress — the instruction set is complete: all 256 opcodes execute one cycle at a time, with the 8/16-bit width and emulation-mode machinery, and every cycle is validated against the vectors in both modes. The eight-channel DMA and HDMA unit is built; the remaining 5A22 hardware follows |
+| SNES machine (bus, memory map, clock, timing) | in progress — the LoROM map, 128KB work RAM and its data port, the APU communication ports, the 6/8/12-master-cycle region speed model (NTSC and PAL), exact master-cycle budgeting and the CPU-to-APU interleave; the H/V counters and scanline structure, the vertical-blank NMI and H/V-timer IRQ, the hardware multiply and divide unit, the PPU register file (VRAM and CGRAM ports that store without rendering), and the eight DMA/HDMA channels (general-purpose transfers and per-scanline delivery). The rendering PPU is the remaining piece |
 | PPU, full system | future — see the roadmap |
 
 See [docs/spc700-cpu.md](docs/spc700-cpu.md) for the CPU core's surface, usage, and how to run the
