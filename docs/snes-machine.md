@@ -6,9 +6,11 @@ runs over any bus you hand it, the machine *is* the bus — it maps a 24-bit add
 hardware does, prices every cycle by the region it reaches, and paces the [APU](apu-machine.md)
 against the CPU on its own clock.
 
-The machine is the system minus the picture. It has no PPU, no DMA, and no interrupt sources yet —
-those are later components. What it has is a complete memory map, an exact clock, and the audio
-machine running underneath, which is enough to load a cartridge, run its code, and hear it.
+The machine is the system minus the picture. It does not draw and has no DMA engine. What it has is a
+complete memory map, an exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ,
+the hardware multiply/divide unit, a PPU register file that fills video memory without rendering it, and
+the audio machine running underneath — enough to load a cartridge, run its code under interrupts, and
+hear it.
 
 ## Building a machine
 
@@ -126,6 +128,74 @@ and a read returns its output latches — the two ready bytes `$AA` and `$BB` on
 power-on. The APU advances in step with the CPU, so a value written on one cycle is there for the APU
 on the next.
 
+## The video counters and interrupts
+
+The machine tracks where the beam is even though it draws nothing. `hpos` is the master cycle within the
+current scanline and `vpos` is the scanline down the frame; both advance as the machine runs. A scanline
+is 1364 master cycles (341 dots of four cycles each), and a frame is 262 lines on NTSC or 312 on PAL. The
+visible picture is lines 1 to 224; vertical blank runs from line 225 to the last line, and line 0 is the
+line after it. To keep the colour signal in step, NTSC shortens line 240 by one dot on every other frame;
+the `field` bit alternates each frame and selects it. (Interlace and overscan belong to the real PPU and
+are out of scope here — the structure modelled is the non-interlace one.)
+
+Two interrupt sources reach the CPU, both driven from these counters:
+
+- **The vertical-blank NMI.** The flag at `$4210` bit 7 sets at the start of vblank and clears at its
+  end, and reading `$4210` acknowledges it. While the flag is set and `$4200` bit 7 enables NMIs, the NMI
+  line is asserted; enabling NMIs mid-vblank raises the line there and then. Reading the flag before
+  re-enabling avoids taking an old NMI twice.
+- **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: at a horizontal dot (`$4207/$4208`), at a
+  vertical line (`$4209/$420A`), or at both. When the counter reaches it, `$4211` bit 7 latches and the
+  IRQ line asserts; reading `$4211` or disabling the IRQ acknowledges it. An IRQ handler must acknowledge,
+  or it runs again.
+
+`$4212` reports the current position directly: bit 7 is set during vblank, bit 6 during hblank (outside
+the active picture, which spans master cycles 88 to 1112), and bit 0 while the auto-joypad read is busy.
+
+```cpp
+// A minimal vblank-NMI loop: enable the NMI, then let the machine run into vblank.
+// LDA #$80 ; STA $4200 ; ...   the handler at the $FFFA vector runs once per frame.
+```
+
+The auto-joypad read is a stub: with `$4200` bit 0 enabled, `$4212` bit 0 reads busy for a fixed window
+early in each frame's vblank, and `$4218-$421F` read back zero — the reliable "no buttons" result — since
+no controller is modelled.
+
+## The multiply/divide unit
+
+The unsigned multiply and divide are the CPU's, not the PPU's. Set the multiplicand at `$4202` and write
+the multiplier to `$4203` to start a multiply; the 16-bit product is at `$4216/$4217` eight cycles later.
+Set the 16-bit dividend at `$4204/$4205` and write the divisor to `$4206` to start a divide; the quotient
+is at `$4214/$4215` and the remainder at `$4216/$4217` sixteen cycles later. The unit is clocked by the
+CPU, so the wait is the same number of instructions regardless of the memory speed.
+
+A read before the result lands returns the register's previous contents — the intermediate is not
+modelled, because it is not documented; wait the cycles the way hardware programs do. Two quirks are
+modelled: starting a multiply immediately loads the quotient register with the multiplier (the two
+operations share the unit), and dividing by zero yields an all-ones quotient with the dividend as the
+remainder.
+
+```cpp
+// LDA #7 ; STA $4202 ; LDA #9 ; STA $4203   start 7 * 9
+// ... a few cycles ...
+// LDA $4216                                 -> 63
+```
+
+## The video registers (a stub)
+
+There is no rendering PPU, but the register file that feeds one is here so a program can fill video
+memory and a host can read what it drew. `vram()` returns the 64 KB of video RAM and `cgram()` the
+512-byte palette; both are read faces, filled through the ports the console uses.
+
+The VRAM port is a word address at `$2116/$2117` and a data pair at `$2118/$2119`. `$2115` selects the
+increment (after the low or the high byte, by 1, 32, or 128 words) and an optional address translation
+for bitmap layouts. Reads come through `$2139/$213A` and carry the hardware's prefetch behaviour: the
+first word after setting the address is returned twice, because the prefetch register fills before the
+address steps rather than after. The palette port is an address at `$2121` and a two-write word at `$2122`
+(read back through `$213B`); the high byte keeps seven bits. `$2100` (forced blank and brightness), the
+background base registers (`$2107-$210C`), and the main-screen enables (`$212C`) store their values for a
+PPU to read. The screen powers on in forced blank.
+
 ## Snapshot and restore
 
 The whole mutable machine is a value. `state()` returns a `SnesState` coherent at any cycle the machine
@@ -146,6 +216,12 @@ machine.restore(saved);   // back to the saved cycle, exactly
 - `run()`'s budget is in *master* cycles, not CPU cycles; a single CPU cycle is 6, 8, or 12 of them.
 - MEMSEL is slow at power-on. Code that wants the fast second region sets `$420D` bit 0 itself.
 - Frames are output, not state: a snapshot does not carry pending frames, and `restore()` discards any.
+- A multiply or divide result is not there immediately; read it after the documented cycles. Reading
+  early returns the old value, not a partial one.
+- The first VRAM read after setting the address returns the same word twice — the documented prefetch
+  glitch. Issue a dummy read, or account for it.
+- An IRQ handler must acknowledge the timer (read `$4211` or disable the IRQ); an NMI handler need not,
+  but reading `$4210` before re-enabling NMIs avoids taking a stale one.
 
 ## See also
 

@@ -126,6 +126,9 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/vector_test.cpp
     tests/snes/bus_test.cpp
     tests/snes/machine_test.cpp
+    tests/snes/timing_test.cpp
+    tests/snes/math_test.cpp
+    tests/snes/ppu_stub_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp

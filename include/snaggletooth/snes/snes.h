@@ -43,6 +43,11 @@ namespace snaggletooth {
 // in both.
 enum class Region : std::uint8_t { Ntsc, Pal };
 
+// The arithmetic unit's current job, if any. A write to the multiplier or the
+// divisor starts one; it finishes its documented number of cycles later, at which
+// point the result registers take their value.
+enum class MathOp : std::uint8_t { None, Multiply, Divide };
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
@@ -65,6 +70,66 @@ struct SnesState {
   std::uint64_t master = 0;     // the free-running master-cycle counter
   std::uint64_t consumed = 0;   // master cycles reported through run(); master - consumed is the budget carried between calls
   std::uint32_t apuPhase = 0;   // the APU-clock accumulator for the exact master-to-APU cycle ratio
+
+  // ---- the video position ---------------------------------------------------
+  // Where the beam is, tracked in master cycles within the scanline and in whole
+  // scanlines down the frame. Both advance as the machine runs, so a mid-frame
+  // snapshot resumes on the exact dot. The frame-parity bit alternates every frame
+  // and selects the one short scanline NTSC uses to keep the colour signal in step.
+  std::uint16_t hpos = 0;   // master cycles into the current scanline (0..lineLength-1)
+  std::uint16_t vpos = 0;   // the current scanline (0..261 NTSC, 0..311 PAL)
+  std::uint8_t field = 0;   // frame parity (0/1); NTSC line 240 is short on odd frames
+
+  // ---- the interrupt registers ----------------------------------------------
+  std::uint8_t nmitimen = 0;    // $4200: bit7 NMI enable, bits5-4 H/V IRQ mode, bit0 auto-joypad enable
+  bool vblankNmi = false;       // $4210 bit7: set at the start of vblank, cleared on read and at vblank's end
+  bool timeup = false;          // $4211 bit7: set when the H/V counter reaches its timer, cleared on read
+  std::uint16_t htime = 0x01FF; // $4207/$4208: the H-count IRQ position, in dots (0..339)
+  std::uint16_t vtime = 0x01FF; // $4209/$420A: the V-count IRQ position, in lines (0..261/311)
+
+  // ---- the multiply/divide unit ---------------------------------------------
+  // A write to the multiplier or the divisor loads the operands and starts the
+  // unit; the result is ready a fixed number of cycles later. Until then the result
+  // registers hold their previous contents (the intermediate is not documented, so
+  // it is not invented) — except that starting a multiply immediately loads the
+  // quotient register with the multiplier, a documented quirk of the shared unit.
+  std::uint8_t wrmpya = 0xFF;   // $4202: the multiplicand
+  std::uint8_t wrmpyb = 0xFF;   // $4203: the multiplier (its write starts a multiply)
+  std::uint16_t wrdiv = 0xFFFF; // $4204/$4205: the dividend
+  std::uint8_t wrdivb = 0xFF;   // $4206: the divisor (its write starts a divide)
+  std::uint16_t rddiv = 0;      // $4214/$4215: the quotient
+  std::uint16_t rdmpy = 0;      // $4216/$4217: the product, or the division remainder
+  std::uint8_t mathClocks = 0;  // CPU cycles left before the result lands (0 = idle)
+  MathOp mathOp = MathOp::None; // which result the pending job will commit
+
+  // ---- the auto-joypad-read stub --------------------------------------------
+  // When enabled, the machine spends a fixed window each frame reading the pads; the
+  // busy flag is raised for that window. With no controller modelled the latched
+  // values are zero, the reliable "no buttons" result.
+  std::uint16_t autoJoyClocks = 0;      // master cycles left in the auto-read busy window (0 = idle)
+  std::array<std::uint8_t, 8> joy{};    // $4218-$421F: the four 16-bit pad reads
+
+  // ---- the PPU register-file stub -------------------------------------------
+  // Video memory and the register fields that reach it. Nothing renders — the arrays
+  // are exposed for a host to read, and the ports store into them the way the console
+  // does, so a program that fills VRAM or the palette leaves the memory a real PPU
+  // would have seen.
+  std::array<std::uint8_t, 65536> vram{};  // 64 KB video RAM (32K words)
+  std::array<std::uint8_t, 512> cgram{};   // 512 B palette RAM (256 words)
+  std::uint8_t inidisp = 0x80;  // $2100: bit7 forced blank (set at power-on), bits3-0 brightness
+  std::uint8_t vmain = 0;       // $2115: VRAM address increment mode and translation
+  std::uint16_t vmadd = 0;      // $2116/$2117: the VRAM word address
+  std::uint16_t vramLatch = 0;  // the 16-bit read-prefetch register behind $2139/$213A
+  std::uint8_t cgadd = 0;       // $2121: the CGRAM word address
+  bool cgLatchHigh = false;     // the $2122/$213B low/high access flip-flop (false = low byte next)
+  std::uint8_t cgLatch = 0;     // the low byte held between the two halves of a CGRAM write
+  std::uint8_t bg1sc = 0;       // $2107: BG1 screen base and size
+  std::uint8_t bg2sc = 0;       // $2108: BG2 screen base and size
+  std::uint8_t bg3sc = 0;       // $2109: BG3 screen base and size
+  std::uint8_t bg4sc = 0;       // $210A: BG4 screen base and size
+  std::uint8_t bg12nba = 0;     // $210B: BG1/BG2 character base
+  std::uint8_t bg34nba = 0;     // $210C: BG3/BG4 character base
+  std::uint8_t tm = 0;          // $212C: main-screen layer enables
 };
 
 class Snes {
@@ -101,6 +166,12 @@ class Snes {
   // periodically to bound the queue. Frames are output, not state.
   [[nodiscard]] std::vector<StereoFrame> takeFrames();
 
+  // The video memory a host reads to see what the program drew. Nothing renders it —
+  // the register ports store here the way the console does, and these faces hand the
+  // bytes back. VRAM is 64 KB (32K words), CGRAM 512 bytes (256 palette words).
+  [[nodiscard]] std::span<const std::uint8_t> vram() const noexcept { return state_.vram; }
+  [[nodiscard]] std::span<const std::uint8_t> cgram() const noexcept { return state_.cgram; }
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
@@ -120,6 +191,24 @@ class Snes {
   // by the master cycles it now owes.
   void machineCycle();
 
+  // Advances the machine's own events by `cost` master cycles: the H/V counters and
+  // the vblank flag, the H/V-timer compare, the arithmetic unit, and the auto-joypad
+  // window. It runs before the cycle's memory access resolves, so a register read
+  // sees the event it shares the cycle with. Called exactly once per cycle.
+  void tickVideo(std::uint32_t cost);
+
+  // Recomputes the NMI and IRQ line levels from the flags and enables as they now
+  // stand and drives them onto the core. It runs after the cycle's access, so a
+  // write that enables an interrupt takes effect this cycle and is sampled next.
+  void driveLines();
+
+  // The master-cycle length of the current scanline: 1364, except NTSC's line 240 on
+  // an odd frame, which is four cycles short to keep the colour signal in step.
+  [[nodiscard]] std::uint16_t lineLength() const noexcept;
+
+  // Commits the arithmetic result when its cycle countdown expires.
+  void commitMath() noexcept;
+
   // Reloads the live CPU and APU from state_ after a construct or restore.
   void load();
   // Copies the live CPU and APU back into state_ before a public return.
@@ -127,7 +216,11 @@ class Snes {
 
   std::uint8_t busRead(std::uint32_t address);
   void busWrite(std::uint32_t address, std::uint8_t value);
-  void busInternal() noexcept { lastCost_ = 6; }
+  void busInternal() {
+    lastCost_ = 6;
+    tickVideo(6);  // an internal cycle drives an address but makes no access; it still passes time
+    videoAdvanced_ = true;
+  }
 
   // The master-cycle cost of reaching `address`, by the documented region map. The
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
@@ -141,6 +234,31 @@ class Snes {
   // steps it; $2181-$2183 set the address and read back as open bus.
   std::uint8_t readWramPort(std::uint16_t offset);
   void writeWramPort(std::uint16_t offset, std::uint8_t value);
+
+  // The PPU register file ($2100-$213F): the forced-blank and background fields, the
+  // VRAM and CGRAM ports with their address translation and prefetch. Nothing renders.
+  std::uint8_t readPpuReg(std::uint16_t offset);
+  void writePpuReg(std::uint16_t offset, std::uint8_t value);
+
+  // The CPU-side registers ($4200-$421F): interrupt enables and flags, the H/V timer
+  // settings, the multiply/divide unit, and the auto-joypad read.
+  std::uint8_t readCpuReg(std::uint16_t offset);
+  void writeCpuReg(std::uint16_t offset, std::uint8_t value);
+
+  // The VRAM word the address currently reaches, after any $2115 address translation.
+  [[nodiscard]] std::uint16_t vramWordAddress() const noexcept;
+  // The 16-bit word at that address, the value the read-prefetch register takes.
+  [[nodiscard]] std::uint16_t readVramWord() const noexcept;
+  // Advances the VRAM word address by the step $2115 selects, after a low- or
+  // high-byte access as the increment mode directs.
+  void stepVramAddress(bool highByte) noexcept;
+
+  // Moves the beam to the next scanline, wrapping the frame and toggling its parity,
+  // and setting or clearing the vblank flag and starting the auto-joypad read at the
+  // boundaries the console does.
+  void advanceLine() noexcept;
+  // Whether the H/V-timer condition currently holds, by the mode $4200 selects.
+  [[nodiscard]] bool irqConditionMet() const noexcept;
 
   // Records `value` as the data bus's last byte and returns it, so an unmapped read
   // that follows sees it.
@@ -161,6 +279,7 @@ class Snes {
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
+  bool videoAdvanced_ = false;       // whether this cycle's access already ticked the machine's events
 };
 
 }  // namespace snaggletooth

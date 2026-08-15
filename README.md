@@ -42,8 +42,10 @@ CPU's instruction set is complete too: all 256 of the 65816's opcodes run a cycl
 cycle is checked against the recorded hardware traces — each address driven, each byte moved, and each
 signal pin. The machine around it maps the LoROM cartridge and the 128KB work RAM, drives the APU
 across the communication ports, prices each cycle by the region it reaches at either the NTSC or PAL
-clock rate, and spends an exact master-cycle budget. DMA, the register file, and the interrupt and
-video timing are not built yet. This table is kept honest as components land.
+clock rate, and spends an exact master-cycle budget. Its video counters drive a vertical-blank NMI and
+an H/V-timer IRQ, its hardware multiply and divide unit runs, and a PPU register file fills video memory
+without drawing it. DMA and HDMA, and the PPU that renders, are not built yet. This table is kept honest
+as components land.
 
 | Component | Status |
 |---|---|
@@ -53,8 +55,8 @@ video timing are not built yet. This table is kept honest as components land.
 | S-DSP completion (echo, noise, pitch modulation, master volume) | complete — noise, PMON, master volume, echo delay line, intra-sample register schedule |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders it to a 32 kHz WAV; output validation against reference renders not yet done |
 | Public embedding API | not started |
-| 5A22 CPU core (the 65816) | in progress — the instruction set is complete: all 256 opcodes execute one cycle at a time, with the 8/16-bit width and emulation-mode machinery, and every cycle is validated against the vectors in both modes. The rest of the 5A22 — DMA and HDMA, and the hardware multiply and divide registers — is not started |
-| SNES machine (bus, memory map, clock) | in progress — the LoROM map, 128KB work RAM and its data port, the APU communication ports, the 6/8/12-master-cycle region speed model (NTSC and PAL), exact master-cycle budgeting and the CPU-to-APU interleave. The register file, DMA, and interrupt and video timing are not started |
+| 5A22 CPU core (the 65816) | in progress — the instruction set is complete: all 256 opcodes execute one cycle at a time, with the 8/16-bit width and emulation-mode machinery, and every cycle is validated against the vectors in both modes. The rest of the 5A22 — DMA and HDMA — is not started |
+| SNES machine (bus, memory map, clock, timing) | in progress — the LoROM map, 128KB work RAM and its data port, the APU communication ports, the 6/8/12-master-cycle region speed model (NTSC and PAL), exact master-cycle budgeting and the CPU-to-APU interleave; the H/V counters and scanline structure, the vertical-blank NMI and H/V-timer IRQ, the hardware multiply and divide unit, and the PPU register file (VRAM and CGRAM ports that store without rendering). DMA and HDMA are not started |
 | PPU, full system | future — see the roadmap |
 
 See [docs/spc700-cpu.md](docs/spc700-cpu.md) for the CPU core's surface, usage, and how to run the
@@ -66,8 +68,9 @@ not carry. [docs/65816-cpu.md](docs/65816-cpu.md) covers the main CPU core — i
 state, the 8/16-bit width and emulation-mode machinery, cycle-stepped execution and
 what each cycle drives, and how to run the vector suite. [docs/snes-machine.md](docs/snes-machine.md)
 covers the machine that wraps it — the LoROM memory map, work RAM and its data port, the APU
-communication ports, the region-by-region cycle cost at both clock rates, and stepping, running,
-and snapshotting the whole machine.
+communication ports, the region-by-region cycle cost at both clock rates, the video counters and their
+vertical-blank NMI and H/V-timer IRQ, the multiply/divide unit, the PPU register file, and stepping,
+running, and snapshotting the whole machine.
 
 ## Roadmap
 
