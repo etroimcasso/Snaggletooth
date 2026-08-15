@@ -99,12 +99,40 @@ void Snes::machineCycle() {
   // access and keeps the fast rate, the same rate an internal cycle charges.
   lastCost_ = 6;
   videoAdvanced_ = false;
-  Bus bus{*this};
-  cpu_.stepCycle(bus);
+
+  // The bus has a priority order: HDMA outranks a general-purpose DMA, which
+  // outranks the CPU. HDMA runs a whole event in this one cycle; a general-purpose
+  // DMA runs a single byte or overhead cycle; otherwise the CPU steps, and a DMA
+  // armed by a recent $420B write engages after this one more CPU cycle.
+  if (state_.hdmaRunPending) {
+    hdmaCycle();
+    state_.hdmaRunPending = false;
+  } else if (state_.dmaRunning) {
+    dmaCycle();
+  } else {
+    const bool armedAtStart = state_.dmaArm != 0u;
+    Bus bus{*this};
+    cpu_.stepCycle(bus);
+    if (armedAtStart && --state_.dmaArm == 0u && state_.mdmaen != 0u) {
+      state_.dmaRunning = true;
+      state_.dmaOpened = false;
+      state_.dmaChannelOpened = false;
+      state_.dmaUnit = 0u;
+      state_.dmaPauseMaster = state_.master + lastCost_;  // the pause is the end of this cycle
+    }
+  }
 
   // Every access ticks the machine's events before its value resolves; a halted
   // cycle makes no access, so tick it here — time still passes while the CPU sits.
-  if (!videoAdvanced_) tickVideo(lastCost_);
+  // A halted cycle can also be the first one after a transfer, so it too owes the
+  // resume-rounding pad the bus callbacks apply on a live cycle.
+  if (!videoAdvanced_) {
+    if (state_.dmaResumePad) {
+      lastCost_ += resumePad(lastCost_);
+      state_.dmaResumePad = false;
+    }
+    tickVideo(lastCost_);
+  }
 
   // Drive the interrupt lines from the flags and enables as they now stand, after any
   // register write this cycle, so the level is settled for the next fetch to sample.
@@ -172,9 +200,30 @@ std::uint8_t Snes::romByte(std::uint8_t bank, std::uint16_t offset) const noexce
 }
 
 std::uint8_t Snes::busRead(std::uint32_t address) {
-  lastCost_ = accessCost(address);
+  const std::uint32_t cost = accessCost(address);
+  lastCost_ = cost;
+  if (state_.dmaResumePad) {  // the first cycle after a transfer pays the resume-rounding pad
+    lastCost_ += resumePad(cost);
+    state_.dmaResumePad = false;
+  }
   tickVideo(lastCost_);  // tick-first: the read sees the event it shares the cycle with
   videoAdvanced_ = true;
+  return routeRead(address);
+}
+
+void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
+  const std::uint32_t cost = accessCost(address);
+  lastCost_ = cost;
+  if (state_.dmaResumePad) {
+    lastCost_ += resumePad(cost);
+    state_.dmaResumePad = false;
+  }
+  tickVideo(lastCost_);  // tick-first, so a write lands after the event it shares the cycle with
+  videoAdvanced_ = true;
+  routeWrite(address, value);
+}
+
+std::uint8_t Snes::routeRead(std::uint32_t address) {
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
 
@@ -190,15 +239,13 @@ std::uint8_t Snes::busRead(std::uint32_t address) {
     }
     if (offset >= 0x2180 && offset <= 0x2183) return readWramPort(offset);
     if (offset >= 0x4200 && offset <= 0x421F) return readCpuReg(offset);
+    if (offset >= 0x4300 && offset <= 0x437F) return readDmaReg(offset);
   }
   if (offset >= 0x8000) return latch(romByte(bank, offset));
   return state_.mdr;  // an unmapped read returns the last value the data bus carried
 }
 
-void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
-  lastCost_ = accessCost(address);
-  tickVideo(lastCost_);  // tick-first, so a write lands after the event it shares the cycle with
-  videoAdvanced_ = true;
+void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
   state_.mdr = value;  // a write drives the data bus
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
@@ -227,6 +274,10 @@ void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
     }
     if (offset >= 0x4200 && offset <= 0x421F) {
       writeCpuReg(offset, value);
+      return;
+    }
+    if (offset >= 0x4300 && offset <= 0x437F) {
+      writeDmaReg(offset, value);
       return;
     }
   }
@@ -292,14 +343,17 @@ void Snes::advanceLine() noexcept {
     state_.vpos = 0u;
     state_.field ^= 1u;  // the next frame carries the other parity
   }
+  state_.hdmaLineFired = false;  // each scanline may trigger its own HDMA delivery
   if (state_.vpos == kVblankStartLine) {
     state_.vblankNmi = true;  // the NMI flag is set at the start of vblank, whether or not NMIs are enabled
+    state_.hdmaActive = 0u;   // and every HDMA channel deactivates for the rest of the frame
     if ((state_.nmitimen & 1u) != 0u) {
       state_.autoJoyClocks = kAutoJoyClocks;  // the auto-joypad read runs each frame it is enabled
     }
   }
   if (state_.vpos == 0u) {
-    state_.vblankNmi = false;  // and clears at the end of vblank
+    state_.vblankNmi = false;    // and clears at the end of vblank
+    state_.hdmaInited = false;   // the new frame re-initialises HDMA at line 0
   }
 }
 
@@ -327,6 +381,23 @@ void Snes::tickVideo(std::uint32_t cost) {
     advanceLine();
   }
   if (irqConditionMet() && !metBefore) state_.timeup = true;
+
+  // HDMA triggers, each latched so it fires once: the frame's initialisation as the
+  // beam passes dot 6 of line 0, and a delivery as it passes dot 278 of every
+  // visible line. Triggering only marks the event pending; it runs on the next
+  // machine cycle, so it preempts a general-purpose DMA at a whole byte.
+  if (!state_.hdmaInited && state_.vpos == 0u && state_.hpos >= 24u &&
+      state_.hdmaen != 0u) {
+    state_.hdmaInited = true;
+    state_.hdmaRunPending = true;
+    state_.hdmaIniting = true;
+  }
+  if (!state_.hdmaLineFired && state_.vpos <= 224u && state_.hpos >= kActiveEnd &&
+      state_.hdmaActive != 0u) {
+    state_.hdmaLineFired = true;
+    state_.hdmaRunPending = true;
+    state_.hdmaIniting = false;
+  }
 }
 
 void Snes::driveLines() {
@@ -538,8 +609,10 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x4208: state_.htime = static_cast<std::uint16_t>((state_.htime & 0x00FFu) | ((value & 1u) << 8)); return;
     case 0x4209: state_.vtime = static_cast<std::uint16_t>((state_.vtime & 0x0100u) | value); return;
     case 0x420A: state_.vtime = static_cast<std::uint16_t>((state_.vtime & 0x00FFu) | ((value & 1u) << 8)); return;
+    case 0x420B: triggerDma(value); return;             // start a general-purpose DMA on each selected channel
+    case 0x420C: state_.hdmaen = value; return;         // enable HDMA on the selected channels
     case 0x420D: state_.memsel = static_cast<std::uint8_t>(value & 1u); return;
-    default: return;  // $4201 WRIO, $420B/$420C DMA enables (F1.g), and read-only ports ignore writes
+    default: return;  // $4201 WRIO and the read-only ports ignore writes
   }
 }
 

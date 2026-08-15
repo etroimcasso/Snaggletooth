@@ -48,6 +48,22 @@ enum class Region : std::uint8_t { Ntsc, Pal };
 // point the result registers take their value.
 enum class MathOp : std::uint8_t { None, Multiply, Divide };
 
+// One of the eight DMA/HDMA channels as a plain value: the sixteen bytes of its
+// register file at $43n0-$43nF. Each channel serves both general-purpose DMA and
+// HDMA, so several registers carry a second meaning under HDMA, noted per field.
+// The power-on values are the console's ($FF everywhere).
+struct DmaChannel {
+  std::uint8_t dmap = 0xFF;    // $43n0: direction (bit7), indirect HDMA (bit6), address step (bits4-3), transfer pattern (bits2-0)
+  std::uint8_t bbad = 0xFF;    // $43n1: the B-bus register, the low byte of a $21xx address
+  std::uint16_t a1t = 0xFFFF;  // $43n2/$43n3: the DMA source address (HDMA: the table start), low 16 bits
+  std::uint8_t a1b = 0xFF;     // $43n4: the bank of that address; fixed across a transfer, which cannot cross a bank
+  std::uint16_t das = 0xFFFF;  // $43n5/$43n6: the DMA byte count (HDMA: the indirect address), low 16 bits
+  std::uint8_t dasb = 0xFF;    // $43n7: the bank of the HDMA indirect address
+  std::uint16_t a2a = 0xFFFF;  // $43n8/$43n9: the HDMA table's current address, low 16 bits
+  std::uint8_t nltr = 0xFF;    // $43nA: the HDMA line counter (bits6-0) and the repeat flag (bit7)
+  std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
+};
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
@@ -130,6 +146,31 @@ struct SnesState {
   std::uint8_t bg12nba = 0;     // $210B: BG1/BG2 character base
   std::uint8_t bg34nba = 0;     // $210C: BG3/BG4 character base
   std::uint8_t tm = 0;          // $212C: main-screen layer enables
+
+  // ---- DMA and HDMA ---------------------------------------------------------
+  // The eight channels and the two enable registers, plus the engines' progress.
+  // A general-purpose DMA holds the bus one byte at a time, so a snapshot taken
+  // mid-transfer resumes on the exact byte; HDMA runs a whole event at once (the
+  // CPU is halted, so no program sees a partial one), and its per-frame state is
+  // the only thing carried between scanlines.
+  std::array<DmaChannel, 8> dma{};
+  std::uint8_t mdmaen = 0;      // $420B: the channels a general-purpose DMA is running (a bit clears as its channel finishes)
+  std::uint8_t hdmaen = 0;      // $420C: the channels HDMA is enabled on
+
+  std::uint8_t dmaArm = 0;          // CPU cycles left before a triggered DMA engages (the "one more cycle"; 0 = none)
+  bool dmaRunning = false;          // a general-purpose DMA holds the bus
+  bool dmaOpened = false;           // the alignment pad and whole-transfer overhead have been paid
+  bool dmaChannelOpened = false;    // the current channel's overhead has been paid
+  std::uint8_t dmaUnit = 0;         // the byte position within the transfer pattern for the current channel
+  std::uint64_t dmaPauseMaster = 0; // the master counter at the transfer's pause, for the resume rounding
+  bool dmaResumePad = false;        // the first CPU cycle after the transfer owes the resume-rounding pad
+
+  std::uint8_t hdmaActive = 0;   // channels still running HDMA this frame (a bit clears when a table terminates)
+  std::uint8_t hdmaDoWrite = 0;  // per channel: whether this scanline delivers a value (rather than waiting)
+  bool hdmaInited = false;       // the start-of-frame initialisation has run this frame
+  bool hdmaLineFired = false;    // this scanline's delivery has been triggered
+  bool hdmaRunPending = false;   // an HDMA event is due on the next machine cycle
+  bool hdmaIniting = false;      // that pending event is the start-of-frame init (rather than a delivery)
 };
 
 class Snes {
@@ -220,9 +261,45 @@ class Snes {
   void busWrite(std::uint32_t address, std::uint8_t value);
   void busInternal() {
     lastCost_ = 6;
-    tickVideo(6);  // an internal cycle drives an address but makes no access; it still passes time
+    if (state_.dmaResumePad) {  // an internal cycle can be the first one after a transfer
+      lastCost_ += resumePad(6);
+      state_.dmaResumePad = false;
+    }
+    tickVideo(lastCost_);  // an internal cycle drives an address but makes no access; it still passes time
     videoAdvanced_ = true;
   }
+
+  // The mapped bus without the pricing: which byte an address reaches (with a
+  // register's read or write side effect), and nothing about the cycle's cost or
+  // its tick. busRead/busWrite price and tick a CPU access and then route through
+  // these; the DMA engine routes two accesses through them under one priced cycle.
+  std::uint8_t routeRead(std::uint32_t address);
+  void routeWrite(std::uint32_t address, std::uint8_t value);
+
+  // The general-purpose DMA engine ($420B): trigger, and one machine cycle of a
+  // running transfer (an overhead cycle or a single byte, priced at eight master
+  // cycles). The engine holds the bus between the CPU's instructions.
+  void triggerDma(std::uint8_t channels);
+  void dmaCycle();
+  // The A-bus side of a DMA byte: a read of a memory-mapped region returns open
+  // bus and a write to one is inert, the way the console forbids DMA there.
+  std::uint8_t dmaReadA(std::uint32_t address);
+  void dmaWriteA(std::uint32_t address, std::uint8_t value);
+  [[nodiscard]] static bool aBusExcluded(std::uint32_t address) noexcept;
+  // The resume-rounding pad added to the first CPU cycle after a transfer, so the
+  // machine resumes on a whole CPU-clock boundary since the pause.
+  [[nodiscard]] std::uint32_t resumePad(std::uint32_t cpuCycle) const noexcept;
+
+  // The HDMA engine: one whole event — the start-of-frame initialisation, or a
+  // single visible scanline's delivery for every active channel — and the helper
+  // that loads the next table entry into a channel.
+  void hdmaCycle();
+  void hdmaLoadEntry(DmaChannel& channel, bool indirect);
+
+  // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
+  // register files, read and written by their documented layout.
+  std::uint8_t readDmaReg(std::uint16_t offset);
+  void writeDmaReg(std::uint16_t offset, std::uint8_t value);
 
   // The master-cycle cost of reaching `address`, by the documented region map. The
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.

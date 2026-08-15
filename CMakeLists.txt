@@ -27,6 +27,7 @@ add_library(snaggletooth STATIC
   src/apu.cpp
   src/dsp.cpp
   src/snes.cpp
+  src/snes_dma.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -129,6 +130,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/timing_test.cpp
     tests/snes/math_test.cpp
     tests/snes/ppu_stub_test.cpp
+    tests/snes/dma_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
@@ -160,6 +162,11 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     # build. It reads a well-known variable name here, so accept the standard CRT
     # function rather than the _s variant.
     target_compile_definitions(snaggletooth_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # A SnesState is a quarter-megabyte value and a machine holds one; a test
+    # naturally places several machines and snapshots on the stack at once. MSVC
+    # reserves a 1 MB stack by default where the Unix toolchains reserve 8 MB, so
+    # give the test binary the same room.
+    target_link_options(snaggletooth_tests PRIVATE /STACK:8388608)
   else()
     target_compile_options(snaggletooth_tests PRIVATE -Wall -Wextra -Werror)
   endif()

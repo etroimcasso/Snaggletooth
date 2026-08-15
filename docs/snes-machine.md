@@ -196,6 +196,81 @@ address steps rather than after. The palette port is an address at `$2121` and a
 background base registers (`$2107-$210C`), and the main-screen enables (`$212C`) store their values for a
 PPU to read. The screen powers on in forced blank.
 
+## DMA and HDMA
+
+DMA copies bytes between the A bus (memory) and the B bus (the `$2100-$21FF` registers) far faster than
+the CPU can. A read on one bus is a write on the other, so a transfer always crosses buses. There are
+eight channels, shared between two modes: general-purpose DMA, which halts the CPU and runs a block in one
+burst, and HDMA, which delivers a table's values to a register once per visible scanline while the picture
+draws. Each channel is a sixteen-byte register file at `$43n0-$43nF` (channel `n` = 0..7), and
+`state().dma[n]` exposes it:
+
+| Register | Address | Meaning |
+|---|---|---|
+| `dmap` | `$43n0` | direction (bit 7: 0 = A→B, 1 = B→A), indirect HDMA (bit 6), address step (bits 4-3), transfer pattern (bits 2-0) |
+| `bbad` | `$43n1` | the B-bus register: the low byte of a `$21xx` address |
+| `a1t` / `a1b` | `$43n2-$43n4` | the DMA source address (HDMA: the table start); the bank is fixed across a transfer |
+| `das` | `$43n5/$43n6` | the DMA byte count (HDMA: the running indirect address) |
+| `dasb` | `$43n7` | the bank of an HDMA indirect address |
+| `a2a` | `$43n8/$43n9` | the HDMA table's current position |
+| `nltr` | `$43nA` | the HDMA line counter (bits 6-0) and the repeat flag (bit 7) |
+| `unused` | `$43nB`/`$43nF` | one spare byte, at two addresses; `$43nC-$43nE` read open bus |
+
+The transfer pattern (bits 2-0 of `dmap`) chooses which B-bus registers a unit touches, as offsets from
+`bbad`, and so how many bytes a unit is:
+
+| Pattern | Bytes | B offsets | Typical use |
+|---|---|---|---|
+| 0 | 1 | +0 | WRAM, Mode 7 |
+| 1 | 2 | +0 +1 | VRAM (`$2118/$2119`) |
+| 2 | 2 | +0 +0 | OAM, palette |
+| 3 | 4 | +0 +0 +1 +1 | scroll, Mode 7 parameters |
+| 4 | 4 | +0 +1 +2 +3 | window |
+| 5 | 4 | +0 +1 +0 +1 | — |
+| 6, 7 | | as 2, 3 | — |
+
+### General-purpose DMA
+
+Set a channel's registers, then write `$420B` with a bit set for each channel to run. The transfer engages
+after one more CPU cycle — in the middle of the following instruction — and the CPU is halted until every
+selected channel is done, lowest channel number first. The address step (bits 4-3 of `dmap`) walks the
+A-bus address after each byte: increment (0), decrement (2), or hold it fixed (1 or 3) to fill from one
+source byte. A byte count of zero means the whole 65536; when the transfer finishes, `das` is zero and the
+channel's `$420B` bit clears. DMA cannot reach the memory-mapped registers on the A bus
+(`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus.
+
+```cpp
+// A ROM->VRAM copy: channel 0, pattern 1, source $7E:0010, 8 bytes to $2118.
+//   $4300 = $01   ; A->B, increment, pattern 1
+//   $4301 = $18   ; B-bus = $2118 (VMDATAL)
+//   $4302 = $10 ; $4303 = $00 ; $4304 = $7E   ; source $7E:0010
+//   $4305 = $08 ; $4306 = $00                 ; 8 bytes
+//   $420B = $01                               ; run channel 0
+```
+
+Each transferred byte is eight master cycles regardless of the region it reaches, on top of eight per
+channel and eight for the whole transfer; the transfer also aligns to an eight-cycle boundary before it
+starts and rounds up to a whole CPU cycle before the CPU resumes. Because the CPU is halted a byte at a
+time, a snapshot taken with `run()` mid-transfer resumes on the exact byte.
+
+### HDMA
+
+Write `$420C` with a bit set per channel to arm HDMA. At the start of each frame the armed channels
+initialise from `a1t`, and on every visible scanline each active channel delivers one entry to its B-bus
+register, so a table can change a register — a scroll position, the brightness, a Mode 7 matrix — as the
+beam moves down the screen. All channels deactivate at the start of vblank.
+
+A table entry is a line-count byte followed by data. The line-count byte is `$00` to stop the channel for
+the frame, `$01-$80` to write one unit and then wait that many scanlines, or `$81-$FF` (the repeat flag)
+to write a unit on each of the next `count` lines. A direct table holds the data inline; an indirect table
+(bit 6 of `dmap`) holds a 16-bit pointer per entry, and the data is read from `dasb:das`.
+
+```cpp
+// Change brightness partway down the screen: write $2100 on line 0, then again on line 2.
+//   table: 02 0A 01 0B 00
+//          ^^ write once, wait 2 lines   ^^ write once, wait 1   ^^ stop
+```
+
 ## Snapshot and restore
 
 The whole mutable machine is a value. `state()` returns a `SnesState` coherent at any cycle the machine
@@ -222,6 +297,10 @@ machine.restore(saved);   // back to the saved cycle, exactly
   glitch. Issue a dummy read, or account for it.
 - An IRQ handler must acknowledge the timer (read `$4211` or disable the IRQ); an NMI handler need not,
   but reading `$4210` before re-enabling NMIs avoids taking a stale one.
+- A DMA byte count of zero (`das`) transfers the whole 65536 bytes, not none.
+- A transfer's A-bus bank is fixed: the address wraps within its bank and never crosses into the next.
+- HDMA re-initialises every frame and delivers only on the visible lines; arm `$420C` and set the table
+  before line 0, and it stops on its own at vblank.
 
 ## See also
 
