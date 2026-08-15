@@ -26,6 +26,7 @@ add_library(snaggletooth STATIC
   src/version.cpp
   src/apu.cpp
   src/dsp.cpp
+  src/snes.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -123,6 +124,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/interrupt_cycles_test.cpp
     tests/cpu65816/block_move_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
+    tests/snes/bus_test.cpp
+    tests/snes/machine_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
