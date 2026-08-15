@@ -72,22 +72,18 @@ TEST(SnesDma, RegistersRoundTripThroughTheBus) {
 }
 
 TEST(SnesDma, UnusedByteAliasesTwoAddresses) {
-  Snes m = haltedMachine();
-  SnesState s = m.state();
-  s.dma[3].unused = 0x5Au;
-  m.restore(s);
-  // Both $433B and $433F read the one unused byte.
-  Snes r = programMachine({
+  // Both $433B and $433F read and write the one unused byte of channel 3.
+  Snes m = programMachine({
       kLdaAbs, 0x3Bu, 0x43u, kStaAbs, 0x00u, 0x00u,
       kLdaAbs, 0x3Fu, 0x43u, kStaAbs, 0x01u, 0x00u,
       kStp,
   });
-  SnesState rs = r.state();
-  rs.dma[3].unused = 0x5Au;
-  r.restore(rs);
-  r.run(2000u);
-  EXPECT_EQ(r.state().wram[0], 0x5Au);
-  EXPECT_EQ(r.state().wram[1], 0x5Au);
+  SnesState s = m.state();
+  s.dma[3].unused = 0x5Au;
+  m.restore(s);
+  m.run(2000u);
+  EXPECT_EQ(m.state().wram[0], 0x5Au);
+  EXPECT_EQ(m.state().wram[1], 0x5Au);
 }
 
 TEST(SnesDma, MiddleRegistersReadOpenBus) {
