@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <utility>
 
+#include "snes_ipl_stub.h"
+
 namespace snaggletooth {
 namespace {
 
@@ -55,6 +57,13 @@ Snes::Snes(SnesConfig config)
   apuNum_ = ratio.num;
   apuDen_ = ratio.den;
   state_.apu = apu_.state();  // the APU's seeded post-boot ready state
+  if (config.iplStub) {
+    // Seed the upload stub over the ready state: the audio CPU runs the handshake
+    // and posts its own ready bytes, the way it does when the console powers on.
+    // Left off, the machine keeps the ready state, which is how a program loaded
+    // straight into audio RAM skips the handshake.
+    seedIplStub(state_.apu);
+  }
   state_.cpu = powerOnCpu();  // emulation mode, the program counter at the reset vector
   load();
 }

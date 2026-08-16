@@ -28,6 +28,7 @@ add_library(snaggletooth STATIC
   src/dsp.cpp
   src/snes.cpp
   src/snes_dma.cpp
+  src/snes_ipl_stub.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -102,6 +103,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   set(SNAGGLETOOTH_65816_VECTORS "" CACHE PATH
       "Path to the SingleStepTests 65816 'v1' vector directory")
 
+  # Path to a directory holding the four Blargg SPC test ROMs (spc_smp.sfc,
+  # spc_timer.sfc, spc_mem_access_times.sfc, spc_dsp6.sfc), searched recursively.
+  # When empty, the Blargg acceptance tests register but skip with a visible reason.
+  # The ROMs are third-party test binaries — staged locally, never vendored.
+  set(SNAGGLETOOTH_BLARGG_ROMS "" CACHE PATH
+      "Path to the directory holding the Blargg SPC test ROMs")
+
   add_executable(snaggletooth_tests
     tests/version_test.cpp
     tests/spc700/vector_harness.cpp
@@ -131,6 +139,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/math_test.cpp
     tests/snes/ppu_stub_test.cpp
     tests/snes/dma_test.cpp
+    tests/snes/ipl_stub_test.cpp
+    tests/snes/blargg_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
@@ -155,7 +165,12 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
-    SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}")
+    SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}"
+    SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}")
+  # The IPL-stub test seeds the stub into an audio machine through the internal
+  # seam in src/, so the test target reaches the private headers there.
+  target_include_directories(snaggletooth_tests PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
     # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the

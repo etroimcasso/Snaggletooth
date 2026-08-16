@@ -51,12 +51,39 @@ jobs:
           fi
           echo "CPU65816_VECTORS=$VECS/v1" >> "$GITHUB_ENV"
 
+      - name: Stage Blargg ROMs
+        run: |
+          set -eo pipefail
+          ROMS="$HOME/snaggletooth-blargg-roms"
+          if [ ! -f "$ROMS/.verified" ]; then
+            rm -rf "$ROMS"; mkdir -p "$ROMS"
+            curl -fsSL -o "$ROMS/blargg_testroms.zip" https://dl.qwertymodo.com/blargg_testroms.zip
+            unzip -q -o "$ROMS/blargg_testroms.zip" -d "$ROMS"
+            verify() {
+              path="$(find "$ROMS" -type f -name "$1" -print -quit)"
+              if [ -z "$path" ]; then echo "Blargg ROM $1 not found in the archive"; exit 1; fi
+              if command -v sha256sum >/dev/null 2>&1; then
+                got="$(sha256sum "$path" | cut -d' ' -f1)"
+              else
+                got="$(shasum -a 256 "$path" | cut -d' ' -f1)"
+              fi
+              if [ "$got" != "$2" ]; then echo "Blargg ROM $1 sha256 $got != $2"; exit 1; fi
+            }
+            verify spc_smp.sfc 2ed302c5b989675d4ab6b40001fd5166ac4c6e0188a6b1b6df878e4608999c03
+            verify spc_timer.sfc f4799b994a91d78689073f4e31c3668ae46c100abd78177b9f4813506d6c9629
+            verify spc_mem_access_times.sfc 53dc8005959d54ccfc95b8d4222e1d51d21e3d9f3491058320f105edc1a4454a
+            verify spc_dsp6.sfc b12038f865536a33003c9887e6f86fcbcb526b7f1766526ab30cb74b7380aa9a
+            touch "$ROMS/.verified"
+          fi
+          echo "BLARGG_ROMS=$ROMS" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DSNAGGLETOOTH_SPC700_VECTORS="$SPC700_VECTORS" \
-            -DSNAGGLETOOTH_65816_VECTORS="$CPU65816_VECTORS"
+            -DSNAGGLETOOTH_65816_VECTORS="$CPU65816_VECTORS" \
+            -DSNAGGLETOOTH_BLARGG_ROMS="$BLARGG_ROMS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
@@ -68,6 +95,7 @@ jobs:
         env:
           SNAGGLETOOTH_REQUIRE_VECTORS: '1'
           SNAGGLETOOTH_REQUIRE_65816_VECTORS: '1'
+          SNAGGLETOOTH_REQUIRE_BLARGG_ROMS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -112,13 +140,39 @@ jobs:
           }
           "CPU65816_VECTORS=$VECS/v1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Stage Blargg ROMs
+        shell: powershell
+        run: |
+          $ROMS = "$($env:USERPROFILE -replace '\\','/')/snaggletooth-blargg-roms"
+          if (-not (Test-Path "$ROMS/.verified")) {
+            if (Test-Path $ROMS) { Remove-Item $ROMS -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $ROMS | Out-Null
+            Invoke-WebRequest -Uri https://dl.qwertymodo.com/blargg_testroms.zip -OutFile "$ROMS/blargg_testroms.zip"
+            Expand-Archive -Path "$ROMS/blargg_testroms.zip" -DestinationPath $ROMS -Force
+            $pins = [ordered]@{
+              'spc_smp.sfc'              = '2ed302c5b989675d4ab6b40001fd5166ac4c6e0188a6b1b6df878e4608999c03'
+              'spc_timer.sfc'            = 'f4799b994a91d78689073f4e31c3668ae46c100abd78177b9f4813506d6c9629'
+              'spc_mem_access_times.sfc' = '53dc8005959d54ccfc95b8d4222e1d51d21e3d9f3491058320f105edc1a4454a'
+              'spc_dsp6.sfc'             = 'b12038f865536a33003c9887e6f86fcbcb526b7f1766526ab30cb74b7380aa9a'
+            }
+            foreach ($name in $pins.Keys) {
+              $file = Get-ChildItem -Path $ROMS -Recurse -Filter $name | Select-Object -First 1
+              if (-not $file) { Write-Error "Blargg ROM $name not found in the archive"; exit 1 }
+              $got = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
+              if ($got -ne $pins[$name].ToUpper()) { Write-Error "Blargg ROM $name sha256 $got != $($pins[$name])"; exit 1 }
+            }
+            New-Item -ItemType File -Path "$ROMS/.verified" -Force | Out-Null
+          }
+          "BLARGG_ROMS=$ROMS" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Configure
         shell: powershell
         run: |
           cmake -S $env:GITHUB_WORKSPACE -B C:\snaggletooth-ci-build `
             -G "Visual Studio 17 2022" -A x64 `
             -DSNAGGLETOOTH_SPC700_VECTORS="$env:SPC700_VECTORS" `
-            -DSNAGGLETOOTH_65816_VECTORS="$env:CPU65816_VECTORS"
+            -DSNAGGLETOOTH_65816_VECTORS="$env:CPU65816_VECTORS" `
+            -DSNAGGLETOOTH_BLARGG_ROMS="$env:BLARGG_ROMS"
 
       - name: Build
         shell: powershell
@@ -129,6 +183,7 @@ jobs:
         env:
           SNAGGLETOOTH_REQUIRE_VECTORS: '1'
           SNAGGLETOOTH_REQUIRE_65816_VECTORS: '1'
+          SNAGGLETOOTH_REQUIRE_BLARGG_ROMS: '1'
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
           $results = "$env:GITHUB_WORKSPACE\ci-output\windows-x64-results.txt"
@@ -176,12 +231,39 @@ jobs:
           fi
           echo "CPU65816_VECTORS=$VECS/v1" >> "$GITHUB_ENV"
 
+      - name: Stage Blargg ROMs
+        run: |
+          set -eo pipefail
+          ROMS="$HOME/snaggletooth-blargg-roms"
+          if [ ! -f "$ROMS/.verified" ]; then
+            rm -rf "$ROMS"; mkdir -p "$ROMS"
+            curl -fsSL -o "$ROMS/blargg_testroms.zip" https://dl.qwertymodo.com/blargg_testroms.zip
+            unzip -q -o "$ROMS/blargg_testroms.zip" -d "$ROMS"
+            verify() {
+              path="$(find "$ROMS" -type f -name "$1" -print -quit)"
+              if [ -z "$path" ]; then echo "Blargg ROM $1 not found in the archive"; exit 1; fi
+              if command -v sha256sum >/dev/null 2>&1; then
+                got="$(sha256sum "$path" | cut -d' ' -f1)"
+              else
+                got="$(shasum -a 256 "$path" | cut -d' ' -f1)"
+              fi
+              if [ "$got" != "$2" ]; then echo "Blargg ROM $1 sha256 $got != $2"; exit 1; fi
+            }
+            verify spc_smp.sfc 2ed302c5b989675d4ab6b40001fd5166ac4c6e0188a6b1b6df878e4608999c03
+            verify spc_timer.sfc f4799b994a91d78689073f4e31c3668ae46c100abd78177b9f4813506d6c9629
+            verify spc_mem_access_times.sfc 53dc8005959d54ccfc95b8d4222e1d51d21e3d9f3491058320f105edc1a4454a
+            verify spc_dsp6.sfc b12038f865536a33003c9887e6f86fcbcb526b7f1766526ab30cb74b7380aa9a
+            touch "$ROMS/.verified"
+          fi
+          echo "BLARGG_ROMS=$ROMS" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DSNAGGLETOOTH_SPC700_VECTORS="$SPC700_VECTORS" \
-            -DSNAGGLETOOTH_65816_VECTORS="$CPU65816_VECTORS"
+            -DSNAGGLETOOTH_65816_VECTORS="$CPU65816_VECTORS" \
+            -DSNAGGLETOOTH_BLARGG_ROMS="$BLARGG_ROMS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
@@ -193,6 +275,7 @@ jobs:
         env:
           SNAGGLETOOTH_REQUIRE_VECTORS: '1'
           SNAGGLETOOTH_REQUIRE_65816_VECTORS: '1'
+          SNAGGLETOOTH_REQUIRE_BLARGG_ROMS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -241,12 +324,39 @@ jobs:
           fi
           echo "CPU65816_VECTORS=$VECS/v1" >> "$GITHUB_ENV"
 
+      - name: Stage Blargg ROMs
+        run: |
+          set -eo pipefail
+          ROMS="$HOME/snaggletooth-blargg-roms"
+          if [ ! -f "$ROMS/.verified" ]; then
+            rm -rf "$ROMS"; mkdir -p "$ROMS"
+            curl -fsSL -o "$ROMS/blargg_testroms.zip" https://dl.qwertymodo.com/blargg_testroms.zip
+            unzip -q -o "$ROMS/blargg_testroms.zip" -d "$ROMS"
+            verify() {
+              path="$(find "$ROMS" -type f -name "$1" -print -quit)"
+              if [ -z "$path" ]; then echo "Blargg ROM $1 not found in the archive"; exit 1; fi
+              if command -v sha256sum >/dev/null 2>&1; then
+                got="$(sha256sum "$path" | cut -d' ' -f1)"
+              else
+                got="$(shasum -a 256 "$path" | cut -d' ' -f1)"
+              fi
+              if [ "$got" != "$2" ]; then echo "Blargg ROM $1 sha256 $got != $2"; exit 1; fi
+            }
+            verify spc_smp.sfc 2ed302c5b989675d4ab6b40001fd5166ac4c6e0188a6b1b6df878e4608999c03
+            verify spc_timer.sfc f4799b994a91d78689073f4e31c3668ae46c100abd78177b9f4813506d6c9629
+            verify spc_mem_access_times.sfc 53dc8005959d54ccfc95b8d4222e1d51d21e3d9f3491058320f105edc1a4454a
+            verify spc_dsp6.sfc b12038f865536a33003c9887e6f86fcbcb526b7f1766526ab30cb74b7380aa9a
+            touch "$ROMS/.verified"
+          fi
+          echo "BLARGG_ROMS=$ROMS" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -S "$GITHUB_WORKSPACE" -B "$GITHUB_WORKSPACE/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DSNAGGLETOOTH_SPC700_VECTORS="$SPC700_VECTORS" \
-            -DSNAGGLETOOTH_65816_VECTORS="$CPU65816_VECTORS"
+            -DSNAGGLETOOTH_65816_VECTORS="$CPU65816_VECTORS" \
+            -DSNAGGLETOOTH_BLARGG_ROMS="$BLARGG_ROMS"
 
       - name: Build
         run: cmake --build "$GITHUB_WORKSPACE/build" --parallel
@@ -258,6 +368,7 @@ jobs:
         env:
           SNAGGLETOOTH_REQUIRE_VECTORS: '1'
           SNAGGLETOOTH_REQUIRE_65816_VECTORS: '1'
+          SNAGGLETOOTH_REQUIRE_BLARGG_ROMS: '1'
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/ci-output"
@@ -304,13 +415,39 @@ jobs:
           }
           "CPU65816_VECTORS=$VECS/v1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Stage Blargg ROMs
+        shell: powershell
+        run: |
+          $ROMS = "$($env:USERPROFILE -replace '\\','/')/snaggletooth-blargg-roms"
+          if (-not (Test-Path "$ROMS/.verified")) {
+            if (Test-Path $ROMS) { Remove-Item $ROMS -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $ROMS | Out-Null
+            Invoke-WebRequest -Uri https://dl.qwertymodo.com/blargg_testroms.zip -OutFile "$ROMS/blargg_testroms.zip"
+            Expand-Archive -Path "$ROMS/blargg_testroms.zip" -DestinationPath $ROMS -Force
+            $pins = [ordered]@{
+              'spc_smp.sfc'              = '2ed302c5b989675d4ab6b40001fd5166ac4c6e0188a6b1b6df878e4608999c03'
+              'spc_timer.sfc'            = 'f4799b994a91d78689073f4e31c3668ae46c100abd78177b9f4813506d6c9629'
+              'spc_mem_access_times.sfc' = '53dc8005959d54ccfc95b8d4222e1d51d21e3d9f3491058320f105edc1a4454a'
+              'spc_dsp6.sfc'             = 'b12038f865536a33003c9887e6f86fcbcb526b7f1766526ab30cb74b7380aa9a'
+            }
+            foreach ($name in $pins.Keys) {
+              $file = Get-ChildItem -Path $ROMS -Recurse -Filter $name | Select-Object -First 1
+              if (-not $file) { Write-Error "Blargg ROM $name not found in the archive"; exit 1 }
+              $got = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
+              if ($got -ne $pins[$name].ToUpper()) { Write-Error "Blargg ROM $name sha256 $got != $($pins[$name])"; exit 1 }
+            }
+            New-Item -ItemType File -Path "$ROMS/.verified" -Force | Out-Null
+          }
+          "BLARGG_ROMS=$ROMS" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Configure
         shell: powershell
         run: |
           cmake -S $env:GITHUB_WORKSPACE -B C:\snaggletooth-ci-build `
             -G "Visual Studio 17 2022" -A ARM64 `
             -DSNAGGLETOOTH_SPC700_VECTORS="$env:SPC700_VECTORS" `
-            -DSNAGGLETOOTH_65816_VECTORS="$env:CPU65816_VECTORS"
+            -DSNAGGLETOOTH_65816_VECTORS="$env:CPU65816_VECTORS" `
+            -DSNAGGLETOOTH_BLARGG_ROMS="$env:BLARGG_ROMS"
 
       - name: Build
         shell: powershell
@@ -321,6 +458,7 @@ jobs:
         env:
           SNAGGLETOOTH_REQUIRE_VECTORS: '1'
           SNAGGLETOOTH_REQUIRE_65816_VECTORS: '1'
+          SNAGGLETOOTH_REQUIRE_BLARGG_ROMS: '1'
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\ci-output" | Out-Null
           $results = "$env:GITHUB_WORKSPACE\ci-output\windows-arm64-results.txt"

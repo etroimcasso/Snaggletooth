@@ -15,20 +15,22 @@ namespace snaggletooth {
 namespace {
 
 // Builds a machine from a raw LoROM image, pointing the reset vector at $8000
-// unless the image already sets it.
-Snes machineFromRom(std::vector<std::uint8_t> rom) {
+// unless the image already sets it. iplStub defaults on; a test that reads the APU
+// output ports on the first instruction turns it off, so the ports carry the seeded
+// ready bytes rather than waiting for the stub to post them.
+Snes machineFromRom(std::vector<std::uint8_t> rom, bool iplStub = true) {
   if (rom.size() < 0x8000u) rom.resize(0x8000u, 0x00u);
   if (rom[0x7FFCu] == 0 && rom[0x7FFDu] == 0) {
     rom[0x7FFCu] = 0x00u;  // reset vector -> $8000
     rom[0x7FFDu] = 0x80u;
   }
-  return Snes(SnesConfig{.rom = rom});
+  return Snes(SnesConfig{.rom = rom, .iplStub = iplStub});
 }
 
 // Builds a machine whose cartridge runs `program` from $8000.
-Snes machineWith(std::initializer_list<std::uint8_t> program) {
+Snes machineWith(std::initializer_list<std::uint8_t> program, bool iplStub = true) {
   std::vector<std::uint8_t> rom(program.begin(), program.end());
-  return machineFromRom(std::move(rom));
+  return machineFromRom(std::move(rom), iplStub);
 }
 
 // Steps until the CPU halts, so a program ending in STP settles.
@@ -109,11 +111,13 @@ TEST(SnesBus, WriteToCartridgeHasNoEffect) {
 // ---- APU communication ports ---------------------------------------------
 
 TEST(SnesBus, ReadingApuPortsReturnsTheReadyBytes) {
-  Snes m0 = machineWith({0xAD, 0x40, 0x21, 0xDB});  // LDA $2140; STP
+  // The ports are read on the first instruction, before an upload stub could post,
+  // so the seeded ready state is the fixture under test.
+  Snes m0 = machineWith({0xAD, 0x40, 0x21, 0xDB}, /*iplStub=*/false);  // LDA $2140; STP
   runToStop(m0);
   EXPECT_EQ(loByte(m0.state().cpu.a), 0xAAu);       // output port 0 posts $AA
 
-  Snes m1 = machineWith({0xAD, 0x41, 0x21, 0xDB});  // LDA $2141; STP
+  Snes m1 = machineWith({0xAD, 0x41, 0x21, 0xDB}, /*iplStub=*/false);  // LDA $2141; STP
   runToStop(m1);
   EXPECT_EQ(loByte(m1.state().cpu.a), 0xBBu);       // output port 1 posts $BB
 }
@@ -125,7 +129,9 @@ TEST(SnesBus, WritingApuPortReachesTheInputLatch) {
 }
 
 TEST(SnesBus, ApuPortsMirrorThrough217F) {
-  Snes m0 = machineWith({0xAD, 0x44, 0x21, 0xDB});  // LDA $2144 -> mirror of $2140
+  // The read of the output-port mirror runs first, so the seeded ready state stands
+  // in for a stub that has not yet posted.
+  Snes m0 = machineWith({0xAD, 0x44, 0x21, 0xDB}, /*iplStub=*/false);  // LDA $2144 -> mirror of $2140
   runToStop(m0);
   EXPECT_EQ(loByte(m0.state().cpu.a), 0xAAu);
 

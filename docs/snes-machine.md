@@ -32,9 +32,10 @@ reset vector (the 16-bit word at `$00:$FFFC`). The machine is ready to run its f
 `Region::Ntsc` and `Region::Pal` select the console clock rate. The choice is fixed for the machine's
 life, like the cartridge, and `region()` reports it back.
 
-`SnesConfig::iplStub` asks for the APU's upload stub to be seeded. The stub itself arrives with a later
-component; for now the APU boots into its ready state either way, so the field is accepted but has no
-effect yet.
+`SnesConfig::iplStub` seeds the APU's upload stub, on by default. With it on, the APU boots the small
+program that runs the upload handshake, the way the console does; with it off, the APU boots straight
+into its ready state and a host loads a program into audio RAM directly. See
+[The audio upload stub](#the-audio-upload-stub).
 
 ## The memory map
 
@@ -127,6 +128,32 @@ Communication with the APU is the CPU's job: a store to `$2140-$2143` reaches th
 and a read returns its output latches — the two ready bytes `$AA` and `$BB` on ports 0 and 1 at
 power-on. The APU advances in step with the CPU, so a value written on one cycle is there for the APU
 on the next.
+
+## The audio upload stub
+
+When the machine boots with `iplStub` on, the APU starts where the console starts it: a small program
+in the top of audio RAM that waits for the main CPU to hand it a driver. The main CPU sends a program
+across the four communication ports, and the stub writes it into audio RAM and jumps to it.
+
+The handshake runs entirely through the ports at `$2140-$2143` (the APU reads them as `$F4-$F7`):
+
+1. The stub posts `$AA` to port 0 and `$BB` to port 1 to signal it is ready.
+2. The main CPU writes a destination address to ports 2 and 3, a non-zero value to port 1, and `$CC`
+   to port 0. The stub acknowledges by echoing port 0.
+3. For each byte, the main CPU writes the byte to port 1 and the running index to port 0; the stub
+   stores the byte and echoes the index. The index counts every byte, and the destination follows it
+   past a page boundary, so a block of any length lands where it was addressed.
+4. To start the program, the main CPU writes zero to port 1 and a fresh value to port 0; the stub jumps
+   to the address in ports 2 and 3.
+
+Every step waits for the stub's echo before the next, so the two processors stay in step whatever their
+relative speed. The stub occupies `$FFC0-$FFFF`, the window the console maps its boot program to, so an
+upload to any lower address cannot overwrite it mid-transfer, and its first byte matches the console's
+boot ROM so a loaded program can jump back to `$FFC0` to receive more code — entering it there clears the
+ports and re-runs the handshake from the ready bytes.
+
+With `iplStub` off, none of this runs: the APU keeps the state it booted with, which is how a program
+placed directly into audio RAM skips the handshake.
 
 ## The video counters and interrupts
 
