@@ -17,7 +17,8 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 - **Clean-room.** Implemented from public hardware documentation only. No emulator source is
   consulted, and no copyrighted bytes (game ROMs, the boot ROM) are ever included — the audio
-  unit boots by seeding the documented post-boot state rather than executing Sony's boot code.
+  unit boots by seeding the documented post-boot state, and where it runs the console's upload
+  handshake it maps an original boot program written to the published protocol, never Sony's boot code.
 - **Deterministic and steppable.** Components advance by an externally supplied cycle budget —
   no wall clock, no threads inside the core. The same starting state and the same inputs produce
   the same bytes, every run; whole-machine state snapshots and restores as a value.

@@ -63,6 +63,11 @@ Snes::Snes(SnesConfig config)
     // Left off, the machine keeps the ready state, which is how a program loaded
     // straight into audio RAM skips the handshake.
     seedIplStub(state_.apu);
+    // Map the same image over the $FFC0 window. The upload shell scratch-writes
+    // that range in RAM and re-enters it expecting the boot code to read back
+    // unchanged; the mapping serves the image to the CPU while CONTROL bit 7 is set,
+    // so those reads survive the driver's writes to the RAM beneath.
+    apu_.mapIplRom(iplStubImage());
   }
   state_.cpu = powerOnCpu();  // emulation mode, the program counter at the reset vector
   load();

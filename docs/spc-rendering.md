@@ -51,8 +51,12 @@ command: the loader never keys a voice on from it.
 The extra-RAM field (64 bytes at the end of the file) overwrites `$FFC0`–`$FFFF`
 only when the dumped `CONTROL` bit 7 was set — the case where the dump was taken
 with the boot-ROM window mapped read-only, so the RAM image could not hold those
-bytes. Snaggletooth has no boot ROM and treats `$FFC0`–`$FFFF` as plain RAM either
-way (see the no-boot-ROM note in the [README](../README.md)).
+bytes. Snaggletooth has no console boot ROM, and the `.spc` loader maps no image
+over the window: it restores those bytes into plain RAM and reads them back there
+regardless of `CONTROL` bit 7. (A machine can map an original boot program over the
+window to run the console's upload handshake — the APU machine's
+[boot-ROM window](apu-machine.md#the-boot-rom-window) — but the `.spc` path never
+does; see also the [README](../README.md).)
 
 Because the DSP's internal state is not in the format, a dump taken **at track
 start** reconstructs exactly — nothing is mid-decay, and the seeded power-on state

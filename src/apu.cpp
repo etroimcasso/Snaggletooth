@@ -1,11 +1,16 @@
 #include "snaggletooth/apu/apu.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <utility>
 
 namespace snaggletooth {
 
 namespace {
+
+// CONTROL ($F1) bit 7 maps the boot-ROM image over the $FFC0 window for SPC700
+// reads (see Apu::mapIplRom); writes to the window always reach the RAM beneath.
+constexpr std::uint8_t kControlIplRom = 0x80;
 
 // ENDX ($7C) is the one DSP register whose write clears the register rather than
 // storing the value: any write acknowledges (clears) all voice end flags.
@@ -21,7 +26,7 @@ ApuState powerOnState() {
   ApuState s{};
   s.cpu.sp = 0xEF;  // the stack lives in page $01; the first push lands at $01EF
   s.test = 0x0A;
-  s.control = 0xB0;               // bit 7 (IPL mapping) is carried but gates nothing
+  s.control = 0xB0;               // bit 7 maps the $FFC0 window when an image is mapped
   s.outputPorts = {0xAA, 0xBB, 0x00, 0x00};  // the ready bytes a host polls for
   s.dsp[kDspFlg] = 0xE0;          // FLG's documented reset value
   for (TimerState& t : s.timers) {
@@ -71,6 +76,12 @@ void Apu::loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) no
 void Apu::setPc(std::uint16_t pc) {
   state_.cpu.pc = pc;
   cpu_.restore(state_.cpu);
+}
+
+void Apu::mapIplRom(std::span<const std::uint8_t, kIplWindowBytes> image) {
+  std::array<std::uint8_t, kIplWindowBytes> copy{};
+  std::copy(image.begin(), image.end(), copy.begin());
+  iplImage_ = copy;
 }
 
 void Apu::machineCycle() {
@@ -176,6 +187,12 @@ void Apu::reset() {
 std::uint8_t Apu::busRead(std::uint16_t address) {
   if (address >= 0x00F0u && address <= 0x00FFu)
     return readRegister(static_cast<std::uint8_t>(address));
+  // The boot-ROM window: with an image mapped and CONTROL bit 7 set, an SPC700 read
+  // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
+  // (busWrite always hits RAM), so a driver can scratch the window and still read the
+  // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
+  if (iplImage_ && address >= kIplWindowBase && (state_.control & kControlIplRom) != 0u)
+    return (*iplImage_)[address - kIplWindowBase];
   return state_.ram[address];
 }
 

@@ -5,10 +5,13 @@
 //
 // The machine owns the CPU, the RAM, and the hardware registers the CPU reaches
 // through the top sixteen bytes of zero page. Its internal bus satisfies the
-// ApuBus concept: reads and writes in $00F0-$00FF hit the register overlay,
-// everything else is plain RAM. The host drives the comm ports from the other
-// side and loads programs directly into RAM (there is no IPL ROM — the machine
-// boots into the seeded post-IPL ready state).
+// ApuBus concept: reads and writes in $00F0-$00FF hit the register overlay; an
+// SPC700 read in $FFC0-$FFFF returns the mapped boot-ROM image when one is set and
+// CONTROL bit 7 is on (see mapIplRom); everything else is plain RAM. The host
+// drives the comm ports from the other side and loads programs directly into RAM.
+// The machine holds no console boot ROM — it comes up in the seeded post-IPL ready
+// state, and any image a host maps over the window is an original program written
+// to the documented upload protocol.
 //
 // The machine runs one cycle at a time. Within a cycle the clocked events go
 // first — the master counter advances, the stage-1 timer ticks land, the DSP
@@ -30,6 +33,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -37,6 +41,12 @@
 #include "snaggletooth/apu/spc700.h"
 
 namespace snaggletooth {
+
+// The audio unit's boot-ROM window: 64 bytes at $FFC0-$FFFF. When CONTROL bit 7 is
+// set and an image is mapped (Apu::mapIplRom), an SPC700 read in this range returns
+// the image byte; the RAM beneath stays writable and reappears when the bit clears.
+inline constexpr std::uint16_t kIplWindowBase = 0xFFC0u;
+inline constexpr std::size_t kIplWindowBytes = 64u;
 
 // One timer's mutable stage counters. The enable bit lives in the CONTROL
 // register (ApuState::control); the stage-1 ticks come off the machine's master
@@ -65,8 +75,9 @@ class Apu {
  public:
   // The seeded post-IPL power-on machine: zeroed RAM, SP at $01EF, TEST $0A,
   // CONTROL $B0, the $AA/$BB ready bytes posted to output ports 0 and 1, and the
-  // timers at their power-on values (TnTARGET $00, TnOUT $F). There is no IPL
-  // ROM; a host points the CPU at a loaded image with setPc.
+  // timers at their power-on values (TnTARGET $00, TnOUT $F). No image is mapped
+  // over the $FFC0 window; a host loads a program into RAM and points the CPU at it
+  // with setPc, or maps a boot-ROM image with mapIplRom to run the upload protocol.
   Apu();
   explicit Apu(ApuState state);
 
@@ -103,6 +114,15 @@ class Apu {
   // Points the CPU at a loaded image (the machine has no IPL ROM to set an entry
   // for). A convenience over restoring a whole state with a changed PC.
   void setPc(std::uint16_t pc);
+
+  // Maps a 64-byte boot-ROM image over the $FFC0-$FFFF window. While CONTROL bit 7
+  // is set, an SPC700 read in that range returns the image; every write still lands
+  // in the RAM beneath, and clearing the bit exposes that RAM again. A machine with
+  // no image mapped — the default — reads plain RAM there regardless of the bit.
+  // The image is fixed configuration, not machine state: restore() and reset() keep
+  // it, the way the console keeps its boot ROM. There is no console ROM here; the
+  // image is an original program written to the documented upload protocol.
+  void mapIplRom(std::span<const std::uint8_t, kIplWindowBytes> image);
 
   // Runs machine cycles to the end of one CPU instruction and returns how many it
   // took. Called after run() stopped mid-instruction, it finishes the instruction
@@ -163,6 +183,7 @@ class Apu {
   Spc700 cpu_;      // the live CPU state while the machine runs
   ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced before every return
   std::vector<StereoFrame> frames_;  // DSP output awaiting the host's drain; not part of the snapshot
+  std::optional<std::array<std::uint8_t, kIplWindowBytes>> iplImage_;  // the $FFC0 window image; config, absent by default, kept across restore()/reset()
 };
 
 }  // namespace snaggletooth
