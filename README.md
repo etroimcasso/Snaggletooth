@@ -56,6 +56,8 @@ is not built yet. This table is kept honest as components land.
 | S-DSP voice pipeline (BRR, pitch, envelopes, 8-voice mix) | complete — decode, interpolation, keying, stereo frames |
 | S-DSP completion (echo, noise, pitch modulation, master volume) | complete — noise, PMON, master volume, echo delay line, intra-sample register schedule |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders it to a 32 kHz WAV; output validation against reference renders not yet done |
+| SPC700 disassembler | complete — traces control flow from entry points so data is never decoded as code, names hardware registers, marks bytes patched at run time, and emits assembly source; every opcode's cycle cost is measured from the interpreter |
+| SPC700 assembler | not started — the dialect it accepts is specified |
 | Public embedding API | not started |
 | 5A22 CPU core (the 65816) | in progress — the instruction set is complete: all 256 opcodes execute one cycle at a time, with the 8/16-bit width and emulation-mode machinery, and every cycle is validated against the vectors in both modes. The eight-channel DMA and HDMA unit is built; the remaining 5A22 hardware follows |
 | SNES machine (bus, memory map, clock, timing) | in progress — the LoROM map, 128KB work RAM and its data port, the APU communication ports, the 6/8/12-master-cycle region speed model (NTSC and PAL), exact master-cycle budgeting and the CPU-to-APU interleave; the H/V counters and scanline structure, the vertical-blank NMI and H/V-timer IRQ, the hardware multiply and divide unit, the PPU register file (VRAM and CGRAM ports that store without rendering), the eight DMA/HDMA channels (general-purpose transfers and per-scanline delivery), and the audio upload stub (the boot handshake that streams a driver into audio RAM across the communication ports). The rendering PPU is the remaining piece |
@@ -73,6 +75,9 @@ covers the machine that wraps it — the LoROM memory map, work RAM and its data
 communication ports, the region-by-region cycle cost at both clock rates, the video counters and their
 vertical-blank NMI and H/V-timer IRQ, the multiply/divide unit, the PPU register file, and stepping,
 running, and snapshotting the whole machine.
+[docs/spc700-disassembler.md](docs/spc700-disassembler.md) covers the disassembler — tracing from
+entry points, the register and patched-byte annotations, and the library surface — and
+[docs/spc700-assembly.md](docs/spc700-assembly.md) specifies the assembly language it emits.
 
 ## Roadmap
 

@@ -75,6 +75,34 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   else()
     target_compile_options(spc_render PRIVATE -Wall -Wextra -Werror)
   endif()
+
+  # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
+  # tooling above because that reads a file format and this reads the instruction
+  # set; the test tree already draws the same line between tests/spc and
+  # tests/spc700. The disassembler links the library because it measures each
+  # opcode's cost by running the interpreter rather than carrying a table beside it.
+  add_library(snaggletooth_spc700 STATIC
+    tools/spc700/spc700_disasm.cpp
+  )
+  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth)
+  target_include_directories(snaggletooth_spc700 PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/spc700>
+  )
+  target_compile_features(snaggletooth_spc700 PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_spc700 PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_spc700 PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_spc700 PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(spc700_disasm tools/spc700/spc700_disasm_main.cpp)
+  target_link_libraries(spc700_disasm PRIVATE snaggletooth_spc700)
+  if(MSVC)
+    target_compile_options(spc700_disasm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(spc700_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
 endif()
 
 if(SNAGGLETOOTH_BUILD_TESTS)
@@ -121,6 +149,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/control_flow_cycles_test.cpp
     tests/spc700/vector_test.cpp
     tests/spc700/dummy_read_test.cpp
+    tests/spc700/disasm_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
@@ -162,6 +191,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   # reaches the library through it — no separate direct link.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
+    snaggletooth_spc700
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
