@@ -134,6 +134,48 @@ TEST(Spc700DummyRead, MovDpDpReadsItsSourceAndNeverItsDestination) {
   EXPECT_EQ(*trace[4].address, 0x00FF) << "which is written without being read";
 }
 
+// How many cycles of the trace read that address.
+int countReads(const std::vector<CycleEvent>& trace, std::uint16_t address) {
+  int n = 0;
+  for (const CycleEvent& cycle : trace) {
+    if (cycle.kind == CycleEvent::Kind::Read && cycle.address == address) ++n;
+  }
+  return n;
+}
+
+TEST(Spc700DummyRead, Tset1AbsReadsItsOperandOnceThenWaitsBeforeWriting) {
+  // The counterpoint to the stores above. TSET1 reads its operand once, spends a cycle
+  // inside the chip, then writes — so, unlike a store to a timer output, a TSET1 does not
+  // clear it a second time.
+  RecordingFlatBus bus = busWith({0x0E, 0x34, 0x12});  // TSET1 !$1234
+  bus.ram[0x1234] = 0x0F;
+  const std::vector<CycleEvent> trace = traceOne(bus, Spc700State{.a = 0xF0});
+
+  ASSERT_EQ(trace.size(), 6u);
+  EXPECT_EQ(trace[3].kind, CycleEvent::Kind::Read);
+  EXPECT_EQ(*trace[3].address, 0x1234);
+  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Wait) << "the cycle a dummy read would fall on";
+  EXPECT_EQ(trace[5].kind, CycleEvent::Kind::Write);
+  EXPECT_EQ(*trace[5].address, 0x1234);
+  EXPECT_EQ(countReads(trace, 0x1234), 1) << "read once, not twice";
+  EXPECT_EQ(int{bus.ram[0x1234]}, 0xFF) << "the bits of A set into the operand";
+}
+
+TEST(Spc700DummyRead, Tclr1AbsReadsItsOperandOnceThenWaitsBeforeWriting) {
+  RecordingFlatBus bus = busWith({0x4E, 0x34, 0x12});  // TCLR1 !$1234
+  bus.ram[0x1234] = 0xFF;
+  const std::vector<CycleEvent> trace = traceOne(bus, Spc700State{.a = 0x0F});
+
+  ASSERT_EQ(trace.size(), 6u);
+  EXPECT_EQ(trace[3].kind, CycleEvent::Kind::Read);
+  EXPECT_EQ(*trace[3].address, 0x1234);
+  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Wait) << "the cycle a dummy read would fall on";
+  EXPECT_EQ(trace[5].kind, CycleEvent::Kind::Write);
+  EXPECT_EQ(*trace[5].address, 0x1234);
+  EXPECT_EQ(countReads(trace, 0x1234), 1) << "read once, not twice";
+  EXPECT_EQ(int{bus.ram[0x1234]}, 0xF0) << "the bits of A cleared from the operand";
+}
+
 TEST(Spc700DummyRead, MovwReadsOnlyTheLowByteOfItsDestination) {
   RecordingFlatBus bus = busWith({0xDA, 0x30});  // MOVW $30,YA
   const std::vector<CycleEvent> trace =
