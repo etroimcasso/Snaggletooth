@@ -20,6 +20,10 @@ constexpr std::uint8_t kDspEndx = 0x7C;
 // noise stopped. A driver clears it once it has set up the DSP.
 constexpr std::uint8_t kDspFlg = 0x6C;
 
+// KON ($4C) takes effect on the write: the value written becomes the internal
+// key-on the next poll acts on, beside the register byte the write also stores.
+constexpr std::uint8_t kDspKon = 0x4C;
+
 // The seeded post-IPL power-on state: what the machine looks like once the boot
 // ROM has cleared zero page, posted the ready bytes, and handed control over.
 ApuState powerOnState() {
@@ -164,6 +168,10 @@ void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
     return;
   }
   state_.dsp[reg] = value;
+  // A KON write also arms the internal key-on the poll consumes. The value
+  // replaces whatever was pending, so of two writes between polls only the
+  // second one keys anything on.
+  if (reg == kDspKon) state_.dsp.internalKon = value;
 }
 
 void Apu::reset() {

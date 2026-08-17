@@ -246,11 +246,11 @@ TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
   volRight(dsp, 0) = 0x81;  // inverted right channel
   dsp[0x0C] = 0x7F;         // MVOLL = +127
   dsp[0x1C] = 0x7F;         // MVOLR = +127
-  dsp[kKon] = 0x01;         // key voice 0 on at the first (even) poll
+  dsp[kKon] = 0x01;          // the register a driver wrote, kept for read-back
+  dsp.internalKon = 0x01;    // and the key-on it armed, for the first (even) poll
 
   const std::span<const std::uint8_t, 65536> ram_span{ram};
   const StereoFrame first = stepDspSample(dsp, ram_span);  // poll keys on; startup begins
-  dsp[kKon] = 0x00;                                        // a driver clears KON after writing it
   EXPECT_EQ(first.left, 0);
   EXPECT_EQ(first.right, 0);
   for (int sample = 2; sample <= 6; ++sample) {

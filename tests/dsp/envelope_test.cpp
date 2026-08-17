@@ -359,18 +359,62 @@ TEST(Keying, PollRunsOnEvenSamplesOnly) {
   // KON/KOFF are polled every second sample (Anomie; SNESdev Errata); the pin
   // runs the poll on even sample indices. An odd-index poll is a no-op.
   Keyable k;
-  k.dsp[kKon] = 0x01;
+  k.dsp.internalKon = 0x01;
 
   k.dsp.sampleIndex = 1;  // odd -> ignored
   pollKeying(k.dsp, k.ram);
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);  // unchanged power-on state
   EXPECT_EQ(k.dsp.voices[0].konDelay, 0);
+  EXPECT_EQ(k.dsp.internalKon, 0x01);  // still pending
 
   k.dsp.sampleIndex = 0;  // even -> polled
   pollKeying(k.dsp, k.ram);
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Attack);
   EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
-  EXPECT_EQ(k.dsp.internalKon, 0x01);
+  EXPECT_EQ(k.dsp.internalKon, 0x00);  // consumed
+}
+
+TEST(Keying, TheKeyOnComesFromTheInternalValueNotTheRegister) {
+  // "If the 'internal' value of KON has the channel's bit set, perform the KON
+  // actions" (Anomie 720-721, fullsnes 3141-3142). A register bit with no
+  // pending internal bit keys nothing on.
+  Keyable k;
+  k.dsp[kKon] = 0x01;       // register set
+  k.dsp.internalKon = 0x00;  // nothing pending
+  k.dsp.sampleIndex = 0;
+  pollKeying(k.dsp, k.ram);
+  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 0);
+}
+
+TEST(Keying, AKeyOnHappensOnceWhileTheKonRegisterStaysSet) {
+  // "KON effectively takes effect 'on write', even though a non-zero value can
+  // be read back much later" (Anomie 725-727, fullsnes 3148-3150). The poll
+  // clears the internal value, so a register bit left set does not re-key the
+  // voice on every later poll -- which would hold it in the five-sample startup
+  // forever and freeze its envelope at 0.
+  Keyable k;
+  adsr1(k.dsp, 0) = 0x80;  // attack index 0, fires at counter 0
+  k.dsp[kKon] = 0x01;
+  k.dsp.internalKon = 0x01;
+
+  k.dsp.sampleIndex = 0;
+  pollKeying(k.dsp, k.ram);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
+
+  // Two samples of startup, then the next poll with the register still set.
+  stepVoiceEnvelope(k.dsp, 0, false);
+  stepVoiceEnvelope(k.dsp, 0, false);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 3);
+
+  k.dsp.sampleIndex = 2;
+  pollKeying(k.dsp, k.ram);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 3);  // not re-keyed back to 5
+
+  // The startup runs out and the envelope leaves 0.
+  for (int n = 0; n < 3; ++n) EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0);
+  EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0x20);
+  EXPECT_EQ(k.dsp[kKon], 0x01);  // the register still reads back its value
 }
 
 TEST(Keying, PollKeysOffFromTheKoffRegister) {
@@ -380,6 +424,23 @@ TEST(Keying, PollKeysOffFromTheKoffRegister) {
   k.dsp.sampleIndex = 0;
   pollKeying(k.dsp, k.ram);
   EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Release);
+}
+
+TEST(Keying, KoffActsOnEveryPollWhileItsBitStays) {
+  // The contrast the contract draws: "KOFF and FLG.7 ... exert their influence
+  // constantly until a new value is written" (Anomie 726-728, fullsnes
+  // 3149-3151). Unlike KON, KOFF is read from the register at every poll.
+  Keyable k;
+  k.dsp[kKoff] = 0x02;  // voice 1
+
+  k.dsp.sampleIndex = 0;
+  pollKeying(k.dsp, k.ram);
+  EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Release);
+
+  placeEnvelope(k.dsp, 1, EnvPhase::Sustain, 0x400);  // put it back
+  k.dsp.sampleIndex = 2;
+  pollKeying(k.dsp, k.ram);
+  EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Release);  // the bit still acts
 }
 
 }  // namespace

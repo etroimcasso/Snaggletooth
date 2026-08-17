@@ -13,7 +13,6 @@ constexpr std::uint8_t kDspEvolLeft = 0x2C;
 constexpr std::uint8_t kDspEvolRight = 0x3C;
 constexpr std::uint8_t kDspPmon = 0x2D;
 constexpr std::uint8_t kDspNon = 0x3D;
-constexpr std::uint8_t kDspKon = 0x4C;
 constexpr std::uint8_t kDspEon = 0x4D;
 constexpr std::uint8_t kDspKoff = 0x5C;
 constexpr std::uint8_t kDspDir = 0x5D;
@@ -735,7 +734,11 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
   // choice that settles the hardware's probabilistic power-on poll phase.
   if (dsp.sampleIndex % 2 != 0) return;
 
-  const std::uint8_t kon = dsp[kDspKon];
+  // KOFF is read from the register, which exerts its influence at every poll
+  // for as long as the bit stays set. KON is read from the internal value a
+  // write arms, and the poll clears it — so a key-on happens once per write,
+  // however long the register keeps the bit.
+  const std::uint8_t kon = dsp.internalKon;
   const std::uint8_t koff = dsp[kDspKoff];
   for (std::size_t voice = 0; voice < 8; ++voice) {
     const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
@@ -743,9 +746,7 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
     // KON is applied after KOFF, so a voice with both bits set keys on.
     if ((kon & bit) != 0) keyOnVoice(dsp, ram, voice);
   }
-  // Load the internal-KON latch; the previous poll's latch (about two samples
-  // old) is replaced here.
-  dsp.internalKon = kon;
+  dsp.internalKon = 0;
 }
 
 std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMute) noexcept {

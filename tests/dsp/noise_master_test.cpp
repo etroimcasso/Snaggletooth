@@ -42,7 +42,6 @@ constexpr std::uint8_t kMvolLeft = 0x0C;
 constexpr std::uint8_t kMvolRight = 0x1C;
 constexpr std::uint8_t kPmon = 0x2D;
 constexpr std::uint8_t kNon = 0x3D;
-constexpr std::uint8_t kKon = 0x4C;
 constexpr std::uint8_t kDir = 0x5D;
 constexpr std::uint8_t kFlg = 0x6C;
 
@@ -366,27 +365,22 @@ TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
   reg(dsp, 0, 0x00) = 0x7F;  // VxVOLL
   dsp[kMvolLeft] = 0x7F;
   dsp[kMvolRight] = 0x7F;
-  dsp[kFlg] = 0x80;   // soft reset
-  dsp[kKon] = 0x01;   // key voice 0 on at the first (even) poll
+  dsp[kFlg] = 0x80;        // soft reset
+  dsp.internalKon = 0x01;  // a KON write arms voice 0 for the first (even) poll
 
   for (int i = 0; i < 8; ++i) {
     const StereoFrame f = step(dsp, ram);
     EXPECT_EQ(f.left, 0) << "soft-reset sample " << i;
-    // Voice 0's compute runs at a sample's last slot, just before that sample's
-    // KON/KOFF poll. On an even sample the poll re-keys the voice (Attack) after
-    // its soft-reset compute has already silenced it, so it reads Attack until the
-    // next compute re-silences it; every odd sample and the first (which polls
-    // before it computes) reads Release. The envelope stays 0 throughout.
-    const EnvPhase expected =
-        (i >= 2 && i % 2 == 0) ? EnvPhase::Attack : EnvPhase::Release;
-    EXPECT_EQ(dsp.voices[0].phase, expected) << "soft-reset sample " << i;
+    // The armed key-on is consumed once, at the first even poll, and voice 0's
+    // soft-reset compute re-silences it within that same sample. Nothing arms it
+    // again, so the voice reads Release throughout and its envelope stays 0.
+    EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "soft-reset sample " << i;
     EXPECT_EQ(dsp.voices[0].envelope, 0) << "soft-reset sample " << i;
   }
 
-  dsp[kFlg] = 0x00;   // release the soft reset
-  dsp[kKon] = 0x01;   // re-key at the next (even) poll
-  step(dsp, ram);     // the poll keys the voice on
-  dsp[kKon] = 0x00;   // a driver clears KON after writing it
+  dsp[kFlg] = 0x00;        // release the soft reset
+  dsp.internalKon = 0x01;  // a second KON write re-arms it
+  step(dsp, ram);          // the next even poll keys the voice on
   bool sounded = false;
   for (int i = 0; i < 8; ++i)
     if (step(dsp, ram).left != 0) { sounded = true; break; }

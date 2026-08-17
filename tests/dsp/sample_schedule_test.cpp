@@ -35,7 +35,6 @@ using Ram = std::array<std::uint8_t, 65536>;
 constexpr std::uint8_t kMvolLeft = 0x0C;
 constexpr std::uint8_t kMvolRight = 0x1C;
 constexpr std::uint8_t kNon = 0x3D;
-constexpr std::uint8_t kKon = 0x4C;
 constexpr std::uint8_t kFlg = 0x6C;
 
 std::uint8_t& reg(DspState& dsp, std::size_t v, std::uint8_t off) { return dsp[v * 0x10 + off]; }
@@ -247,7 +246,7 @@ TEST(SampleSchedule, KeyOnIsPolledAtTheLastSlotOnEvenSamples) {
   sample(dsp, ram);            // sample 0 done; sampleIndex now 1 (odd)
   ASSERT_EQ(dsp.sampleIndex % 2, 1u);
 
-  dsp[kKon] = 0x04;            // key voice 2 on
+  dsp.internalKon = 0x04;      // a KON write arms voice 2
   sample(dsp, ram);           // an odd sample: the poll does not run
   EXPECT_EQ(dsp.voices[2].konDelay, 0) << "no poll on the odd sample";
   sample(dsp, ram);           // the next (even) sample polls at its T31

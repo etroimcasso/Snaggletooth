@@ -121,9 +121,12 @@ struct DspState {
   // hardware's power-on poll-phase race).
   std::uint32_t sampleIndex = 0;
 
-  // The internal key-on latch (one bit per voice). The KON/KOFF poll loads the
-  // KON register into this latch and keys the corresponding voices on; the latch
-  // is cleared at the following poll (the hardware holds it about two samples).
+  // The internal key-on value (one bit per voice). A write to the KON register
+  // arms it with the value written; the KON/KOFF poll keys the armed voices on
+  // and clears it. So a key-on takes effect on the write and happens once,
+  // while the register keeps its value to be read back — unlike KOFF, which
+  // the poll reads from its register and which acts for as long as a bit stays
+  // set. Two writes between polls arm only the second.
   std::uint8_t internalKon = 0;
 
   // The one shared noise generator's 15-bit level, in the internal sample range

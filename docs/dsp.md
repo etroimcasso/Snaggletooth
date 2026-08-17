@@ -60,7 +60,7 @@ Global registers the voices use:
 
 | Address | Register | Role |
 |---|---|---|
-| `$4C` | KON | Key-on flags — a set bit starts that voice. |
+| `$4C` | KON | Key-on flags — writing a set bit starts that voice, once. |
 | `$5C` | KOFF | Key-off flags — a set bit releases that voice. |
 | `$5D` | DIR | High byte of the sample directory's address (`DIR × $100`). |
 | `$7C` | ENDX | Per-voice end flags; the DSP sets a bit when a voice reaches an end block. Any write clears all bits. |
@@ -116,13 +116,18 @@ shared noise level here in place of its interpolated sample. The amplitude feeds
 Writing a `KON` bit starts a voice: its envelope resets to zero, it enters Attack, its stream restarts
 from the source's start address, and its end flag clears. There are **five empty samples** after a
 key-on before the envelope and decoding begin — a voice you key on is silent for five samples, then
-sounds. A driver writes the `KON` bit and then clears the register; leaving it set re-keys the voice
-every sample.
+sounds.
+
+A key-on takes effect on the write, and happens once. The value written arms the next poll; that poll
+starts the armed voices and disarms itself. So a `KON` bit left set does not start the voice again,
+and the register keeps the value for you to read back. Two `KON` writes inside one poll window arm
+only the second one.
 
 Writing a `KOFF` bit releases a voice: its envelope decreases by 8 each sample until it reaches zero,
 regardless of the ADSR or GAIN settings. Decoding does not stop for a released voice — only the
-envelope changes. `KON` and `KOFF` are polled every second sample (16 kHz), so two writes within one
-poll window may collapse to the later one.
+envelope changes. `KOFF` is read from its register at every poll rather than armed by the write, so a
+set bit keeps releasing the voice until you write a new value. `KON` and `KOFF` are polled every
+second sample (16 kHz).
 
 A block whose header marks it End+Mute releases the voice and drops its envelope to zero the moment
 the voice reaches it; an End+Loop block loops without muting. Both set the voice's `ENDX` bit.

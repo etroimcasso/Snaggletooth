@@ -112,6 +112,26 @@ TEST(ApuDsp, WriteBeyondLimitIsIgnored) {
   EXPECT_EQ(apu.state().cpu.a, 0x00);
 }
 
+TEST(ApuDsp, KonWriteSetsThePendingKeyOn) {
+  // KON takes effect on the write: the written value becomes the internal KON
+  // the next poll acts on, while the register itself keeps the value for
+  // read-back (Anomie 720-727, fullsnes 3141-3150).
+  Apu apu = run({0x8F, 0x4C, 0xF2,   // select KON
+                 0x8F, 0x01, 0xF3}, 2);
+  EXPECT_EQ(apu.state().dsp[0x4C], 0x01);
+  EXPECT_EQ(apu.state().dsp.internalKon, 0x01);
+}
+
+TEST(ApuDsp, ASecondKonWriteReplacesThePendingKeyOn) {
+  // Anomie's worked example (706-708): writing KON=1 then KON=2 in close
+  // succession usually keys on voice 2 only, so the second write replaces the
+  // pending value rather than accumulating into it.
+  Apu apu = run({0x8F, 0x4C, 0xF2,   // select KON
+                 0x8F, 0x01, 0xF3,   // KON := 1
+                 0x8F, 0x02, 0xF3}, 3);
+  EXPECT_EQ(apu.state().dsp.internalKon, 0x02);
+}
+
 TEST(ApuDsp, ReadMasksAddressWith7F) {
   // Reads mask the DSP address with $7F, so $85 reads slot $05.
   Apu apu = run({0x8F, 0x05, 0xF2,   // select $05
