@@ -173,26 +173,27 @@ TEST(Spc700WordBitCycles, SettingOneBitRunsTheReadModifyWriteSeat) {
   EXPECT_EQ(int{clearing.ram[0x0010]}, 0xDF);
 }
 
-TEST(Spc700WordBitCycles, TestAndSetReadsItsByteOnceThenWaits) {
-  // TSET1 and TCLR1 are six cycles, and the fifth is a cycle inside the chip, not a
-  // second read of the address the fourth read — so a register that clears when read is
-  // reached only once.
+TEST(Spc700WordBitCycles, TestAndSetReachesItsByteTwiceThenWrites) {
+  // TSET1 and TCLR1 are six cycles, and the fifth reaches the same address the fourth
+  // read rather than passing inside the chip — the byte it keeps is the first one, but
+  // a register that clears when read is reached twice.
   RecordingFlatBus bus = busWith({0x0E, 0x00, 0x03});  // TSET1 !$0300
   bus.ram[0x0300] = 0x0F;
   Spc700 cpu(Spc700State{.pc = kProgram, .a = 0x30});
   const std::vector<CycleEvent> trace = traceOne(bus, cpu);
 
-  EXPECT_EQ(shapeOf(trace), "rrrr.w");
+  EXPECT_EQ(shapeOf(trace), "rrrrrw");
   ASSERT_EQ(trace.size(), 6u);
-  EXPECT_EQ(*trace[3].address, 0x0300) << "the byte is read once";
-  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Wait) << "then a cycle inside the chip";
+  EXPECT_EQ(*trace[3].address, 0x0300) << "the byte it keeps";
+  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Read) << "then a second, discarded read";
+  EXPECT_EQ(*trace[4].address, 0x0300);
   EXPECT_EQ(*trace[5].address, 0x0300);
   EXPECT_EQ(int{*trace[5].value}, 0x3F) << "A's bits are set in it";
   EXPECT_EQ(int{cpu.state().a}, 0x30) << "A itself is untouched";
   EXPECT_EQ(int{cpu.state().psw & snaggletooth::kFlagZ}, 0)
       << "the flags are those of A minus the byte";
 
-  EXPECT_EQ(shapeRun({0x4E, 0x00, 0x03}, {}), "rrrr.w") << "TCLR1 !abs";
+  EXPECT_EQ(shapeRun({0x4E, 0x00, 0x03}, {}), "rrrrrw") << "TCLR1 !abs";
 }
 
 TEST(Spc700WordBitCycles, TheCarryBitFormsDifferByOneInternalCycle) {

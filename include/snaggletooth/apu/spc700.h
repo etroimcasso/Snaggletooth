@@ -301,6 +301,7 @@ class Spc700 {
     Internal,
     Read,
     ReadThenWait,
+    ReadThenRead,
   };
 
   // How many cycles a form spends between settling its address and writing.
@@ -310,7 +311,8 @@ class Spc700 {
       case DestinationCycle::None: return 0;
       case DestinationCycle::Internal:
       case DestinationCycle::Read: return 1;
-      case DestinationCycle::ReadThenWait: return 2;
+      case DestinationCycle::ReadThenWait:
+      case DestinationCycle::ReadThenRead: return 2;
     }
     return 0;
   }
@@ -740,10 +742,10 @@ constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
       return true;
 
     // ---- test and set or clear the bits of an absolute byte ----
-    case 0x0E: case 0x4E:             // TSET1 / TCLR1 !abs — the byte is read once, a
-      form = MemForm{.mode = AddrMode::Abs,             // cycle passes inside the chip,
+    case 0x0E: case 0x4E:             // TSET1 / TCLR1 !abs — the operand is reached
+      form = MemForm{.mode = AddrMode::Abs,             // twice and the first byte kept,
                      .access = MemAccess::Modify,        // then the changed byte is written
-                     .destination = DestinationCycle::ReadThenWait};
+                     .destination = DestinationCycle::ReadThenRead};
       return true;
 
     // ---- the carry flag against one bit of an absolute byte ----
@@ -1057,8 +1059,16 @@ bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
   if (step <= destinationCycles(form.destination)) {
     const bool reachesMemory =
         form.destination == DestinationCycle::Read ||
+        form.destination == DestinationCycle::ReadThenRead ||
         (form.destination == DestinationCycle::ReadThenWait && step == 1);
-    if (reachesMemory) state_.tmp = bus.read(state_.ea);
+    // The test-and-set pair reaches its operand on both of these cycles and keeps
+    // the first byte: the second access drives the bus and its value is discarded.
+    const bool keepsValue =
+        !(form.destination == DestinationCycle::ReadThenRead && step == 2);
+    if (reachesMemory) {
+      const std::uint8_t value = bus.read(state_.ea);
+      if (keepsValue) state_.tmp = value;
+    }
     return false;
   }
 

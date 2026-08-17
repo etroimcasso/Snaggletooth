@@ -143,10 +143,10 @@ int countReads(const std::vector<CycleEvent>& trace, std::uint16_t address) {
   return n;
 }
 
-TEST(Spc700DummyRead, Tset1AbsReadsItsOperandOnceThenWaitsBeforeWriting) {
-  // The counterpoint to the stores above. TSET1 reads its operand once, spends a cycle
-  // inside the chip, then writes — so, unlike a store to a timer output, a TSET1 does not
-  // clear it a second time.
+TEST(Spc700DummyRead, Tset1AbsReachesItsOperandTwiceBeforeWriting) {
+  // TSET1 reaches its operand on both cycles between the settled address and the write.
+  // The first supplies the byte it tests; the second drives the bus and its value is
+  // discarded. So a TSET1 against a register that clears when read clears it twice.
   RecordingFlatBus bus = busWith({0x0E, 0x34, 0x12});  // TSET1 !$1234
   bus.ram[0x1234] = 0x0F;
   const std::vector<CycleEvent> trace = traceOne(bus, Spc700State{.a = 0xF0});
@@ -154,14 +154,15 @@ TEST(Spc700DummyRead, Tset1AbsReadsItsOperandOnceThenWaitsBeforeWriting) {
   ASSERT_EQ(trace.size(), 6u);
   EXPECT_EQ(trace[3].kind, CycleEvent::Kind::Read);
   EXPECT_EQ(*trace[3].address, 0x1234);
-  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Wait) << "the cycle a dummy read would fall on";
+  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Read) << "the second access is a dummy read";
+  EXPECT_EQ(*trace[4].address, 0x1234);
   EXPECT_EQ(trace[5].kind, CycleEvent::Kind::Write);
   EXPECT_EQ(*trace[5].address, 0x1234);
-  EXPECT_EQ(countReads(trace, 0x1234), 1) << "read once, not twice";
+  EXPECT_EQ(countReads(trace, 0x1234), 2) << "reached twice, the first byte kept";
   EXPECT_EQ(int{bus.ram[0x1234]}, 0xFF) << "the bits of A set into the operand";
 }
 
-TEST(Spc700DummyRead, Tclr1AbsReadsItsOperandOnceThenWaitsBeforeWriting) {
+TEST(Spc700DummyRead, Tclr1AbsReachesItsOperandTwiceBeforeWriting) {
   RecordingFlatBus bus = busWith({0x4E, 0x34, 0x12});  // TCLR1 !$1234
   bus.ram[0x1234] = 0xFF;
   const std::vector<CycleEvent> trace = traceOne(bus, Spc700State{.a = 0x0F});
@@ -169,10 +170,11 @@ TEST(Spc700DummyRead, Tclr1AbsReadsItsOperandOnceThenWaitsBeforeWriting) {
   ASSERT_EQ(trace.size(), 6u);
   EXPECT_EQ(trace[3].kind, CycleEvent::Kind::Read);
   EXPECT_EQ(*trace[3].address, 0x1234);
-  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Wait) << "the cycle a dummy read would fall on";
+  EXPECT_EQ(trace[4].kind, CycleEvent::Kind::Read) << "the second access is a dummy read";
+  EXPECT_EQ(*trace[4].address, 0x1234);
   EXPECT_EQ(trace[5].kind, CycleEvent::Kind::Write);
   EXPECT_EQ(*trace[5].address, 0x1234);
-  EXPECT_EQ(countReads(trace, 0x1234), 1) << "read once, not twice";
+  EXPECT_EQ(countReads(trace, 0x1234), 2) << "reached twice, the first byte kept";
   EXPECT_EQ(int{bus.ram[0x1234]}, 0xF0) << "the bits of A cleared from the operand";
 }
 
