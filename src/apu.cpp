@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>   // SNAG_TRACE (temporary adjudication knobs)
+#include <cstdlib>  // SNAG_TRACE (temporary adjudication knobs)
 #include <utility>
 
 namespace snaggletooth {
@@ -36,6 +38,34 @@ ApuState powerOnState() {
   }
   return s;
 }
+
+// SNAG_TRACE: temporary micro-semantics knobs for the mem_access_times adjudication.
+// All default to 0 = the shipped behavior, bit-for-bit. Never committed active.
+//   SNAG_TREAD:  TnOUT read coinciding with this cycle's tick.
+//     0 = returns the post-tick value, clear consumes the tick (shipped)
+//     1 = returns the PRE-tick value, clear still consumes the tick
+//     2 = returns the post-tick value, but the tick SURVIVES the clear (stage3 -> 1)
+//   SNAG_TWRITE: TnTARGET write landing on a stage-1 tick cycle.
+//     0 = the write just stores the target (shipped)
+//     1 = additionally, if the new target equals the stage-2 counter the comparator
+//         fires late: stage3 ticks and stage2 zeroes (the blargg-email race)
+int snagTread() {
+  static const int v = [] {
+    const char* e = std::getenv("SNAG_TREAD");
+    return e ? std::atoi(e) : 0;
+  }();
+  return v;
+}
+int snagTwrite() {
+  static const int v = [] {
+    const char* e = std::getenv("SNAG_TWRITE");
+    return e ? std::atoi(e) : 0;
+  }();
+  return v;
+}
+std::uint8_t g_prevStage3[3];  // stage3 before this cycle's ticks
+bool g_stage3Moved[3];         // did stage3 change this cycle
+bool g_stage1Tick[3];          // did this timer receive a stage-1 tick this cycle
 
 }  // namespace
 
@@ -90,30 +120,107 @@ void Apu::machineCycle() {
   ++state_.divider;
   const std::uint16_t phase = state_.divider;
 
+  // SNAG_TRACE: capture the pre-tick view for the coincident-cycle knobs.
+  for (int i = 0; i < 3; ++i) {
+    g_prevStage3[i] = state_.timers[i].stage3;
+    g_stage1Tick[i] = false;
+  }
+
   // The clocked events, on their documented slots of the DSP's 32-cycle sample
   // frame: T0 and T1 tick on the first slot of every fourth frame, T2 on the
   // first slot of every half-frame, and the sample lands on the frame boundary.
-  if (phase % 128u == 1u) {
-    tickTimer(0);
-    tickTimer(1);
+  // SNAG_TRACE: SNAG_TICKAFTER moves the stage-1 tick to after the CPU's access in
+  // the same cycle. The shipped order ticks first; that ordering is an inference,
+  // and it shifts every measured access by one cycle, so it is the one candidate
+  // whose signature is systematic across the whole opcode table.
+  static const bool tickAfter = std::getenv("SNAG_TICKAFTER") != nullptr;  // SNAG_TRACE
+  if (!tickAfter) {
+    if (phase % 128u == 1u) {
+      tickTimer(0);
+      tickTimer(1);
+      g_stage1Tick[0] = g_stage1Tick[1] = true;
+    }
+    if (phase % 16u == 1u) {
+      tickTimer(2);
+      g_stage1Tick[2] = true;
+    }
   }
-  if (phase % 16u == 1u) tickTimer(2);
+  for (int i = 0; i < 3; ++i)
+    g_stage3Moved[i] = state_.timers[i].stage3 != g_prevStage3[i];
   sampleFrame();
+
+  // SNAG_TRACE: the CRC-input log. In the mem_access_times driver, $0613 folds the
+  // byte in A into the running checksum and $0606 re-initializes it, so logging A
+  // at each entry gives the exact hash input instead of inferring it from port
+  // traffic. The gate is cached because this runs every cycle.
+  static const bool crcLog = std::getenv("SNAG_CRCLOG") != nullptr;  // SNAG_TRACE
+  if (crcLog && cpu_.atInstructionBoundary()) {
+    if (cpu_.state().pc == 0x0613u) {
+      std::fprintf(stderr, "CRCIN %02X\n", cpu_.state().a);
+    } else if (cpu_.state().pc == 0x0606u) {
+      std::fprintf(stderr, "CRCINIT\n");
+    }
+  }
+
+  // SNAG_TRACE: the raw per-cycle capture. $0A77 stores the probe's packed outcome
+  // byte into a descending buffer; $14 is that buffer's pointer and $11 the operand
+  // base the pass is probing ($FA = a timer target, write-observable; $FD = a timer
+  // output, read-observable). Logging all three separates the two passes, which the
+  // printed table folds into one mark per cycle.
+  // SNAG_TRACE: the accumulator read straight off the compare site at $0896, where
+  // the driver tests $DC-$DF against its expected constant. Reading it here is
+  // authoritative; reconstructing it from the hashed byte stream is not.
+  static const bool cmpLog = std::getenv("SNAG_CMPLOG") != nullptr;  // SNAG_TRACE
+  if (cmpLog && cpu_.atInstructionBoundary() && cpu_.state().pc == 0x0896u) {
+    std::fprintf(stderr, "COMPARE DC..DF = %02X %02X %02X %02X\n", state_.ram[0xDC],
+                 state_.ram[0xDD], state_.ram[0xDE], state_.ram[0xDF]);
+  }
+
+  static const bool recLog = std::getenv("SNAG_RECLOG") != nullptr;  // SNAG_TRACE
+  if (recLog && cpu_.atInstructionBoundary() && cpu_.state().pc == 0x0A77u) {
+    // $10 is the driver's index into the opcode table at $0B1B, so it names which
+    // opcode this capture belongs to without inferring it from ordering.
+    std::fprintf(stderr, "REC idx=%02X base=%02X slot=%02X a=%02X\n", state_.ram[0x10],
+                 state_.ram[0x11], state_.ram[0x14], cpu_.state().a);
+  }
 
   // The CPU's access closes the cycle. A halted core reaches nothing here, and
   // the cycle still passes for everything above.
   Bus bus{*this};
   cpu_.stepCycle(bus);
+
+  if (tickAfter) {  // SNAG_TRACE
+    if (phase % 128u == 1u) {
+      tickTimer(0);
+      tickTimer(1);
+      g_stage1Tick[0] = g_stage1Tick[1] = true;
+    }
+    if (phase % 16u == 1u) {
+      tickTimer(2);
+      g_stage1Tick[2] = true;
+    }
+  }
 }
 
 void Apu::tickTimer(std::size_t index) {
   const std::uint8_t enable = static_cast<std::uint8_t>(1u << index);
-  if (!(state_.control & enable)) return;  // stage 2 only counts while enabled
+  // SNAG_TRACE: SNAG_TIMDIS lets stage 2 keep counting while the timer is disabled.
+  //   0 = shipped: a disabled timer counts nothing
+  //   1 = counts fully, stage 3 included
+  //   2 = stage 2 counts, stage 3 suppressed while disabled
+  static const int timDis = [] {  // SNAG_TRACE
+    const char* e = std::getenv("SNAG_TIMDIS");
+    return e ? std::atoi(e) : 0;
+  }();
+  const bool enabled = (state_.control & enable) != 0;
+  if (!enabled && timDis == 0) return;  // stage 2 only counts while enabled
   TimerState& t = state_.timers[index];
   t.stage2 = static_cast<std::uint8_t>(t.stage2 + 1);  // 0-255 wraparound
   // Post-increment comparator: a target of 0 matches only after 256 counts.
   if (t.stage2 == t.target) {
-    t.stage3 = static_cast<std::uint8_t>((t.stage3 + 1) & 0x0Fu);  // 4-bit output
+    if (enabled || timDis == 1) {  // SNAG_TRACE: mode 2 counts stage 2 only
+      t.stage3 = static_cast<std::uint8_t>((t.stage3 + 1) & 0x0Fu);  // 4-bit output
+    }
     t.stage2 = 0;
   }
 }
@@ -214,8 +321,18 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
       return state_.ram[reg];
     case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
       TimerState& t = state_.timers[reg - 0xFDu];
-      const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
-      t.stage3 = 0;
+      const int n = reg - 0xFDu;
+      std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
+      std::uint8_t after = 0;
+      if (g_stage3Moved[n]) {  // SNAG_TRACE: coincident-tick knob
+        if (snagTread() == 1) out = static_cast<std::uint8_t>(g_prevStage3[n] & 0x0Fu);
+        if (snagTread() == 2) after = 1;
+      }
+      t.stage3 = after;
+      if (std::getenv("SNAG_TIMTRACE") != nullptr) {  // SNAG_TRACE
+        std::fprintf(stderr, "R %02X d=%u pc=%04X ->%u s2=%u tgt=%u\n", reg,
+                     state_.divider, cpu_.state().pc, out, t.stage2, t.target);
+      }
       return out;
     }
     // TEST, CONTROL and TnTARGET are write-only and read back 0.
@@ -225,6 +342,9 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
 }
 
 void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
+  if (std::getenv("SNAG_IOWTALLY") != nullptr && reg <= 0xF1u) {  // SNAG_TRACE
+    std::fprintf(stderr, "IOWRITE $%02X = %02X\n", reg, value);
+  }
   // Every overlay write also lands in the underlying RAM byte (the register is an
   // overlay on RAM), then applies the register's own effect. TEST while the P
   // flag is set is the one write that has no effect at all.
@@ -244,11 +364,18 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
       if (value & 0x20u) { state_.inputPorts[2] = 0; state_.inputPorts[3] = 0; }
       // A timer enable going 0->1 resets that timer's stage-2 and stage-3
       // counters; the shared stage-1 divider is left running.
+      // SNAG_TRACE: SNAG_NORESET suppresses the enable-transition reset.
+      //   0 = shipped: a 0->1 enable clears stage 2 and stage 3
+      //   1 = clears neither    2 = clears stage 2 only    3 = clears stage 3 only
+      static const int noReset = [] {  // SNAG_TRACE
+        const char* e = std::getenv("SNAG_NORESET");
+        return e ? std::atoi(e) : 0;
+      }();
       for (std::size_t i = 0; i < state_.timers.size(); ++i) {
         const std::uint8_t enable = static_cast<std::uint8_t>(1u << i);
         if ((value & enable) && !(previous & enable)) {
-          state_.timers[i].stage2 = 0;
-          state_.timers[i].stage3 = 0;
+          if (noReset == 0 || noReset == 2) state_.timers[i].stage2 = 0;
+          if (noReset == 0 || noReset == 3) state_.timers[i].stage3 = 0;
         }
       }
       return;
@@ -264,11 +391,32 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:  // output ports: SPC700 -> host
       state_.ram[reg] = value;
       state_.outputPorts[reg - 0xF4u] = value;
+      // SNAG_TRACE: the transmitted-stream log. The driver's output routines write
+      // the data byte to $F5 (and $F6 on the two-byte form) and fold that same byte
+      // into its CRC, so the $F5/$F6 write order is the hash input; $F4 carries the
+      // command tag, which is not hashed. Every write is logged and the filtering
+      // happens at analysis.
+      if (std::getenv("SNAG_PORTLOG") != nullptr) {  // SNAG_TRACE
+        std::fprintf(stderr, "PORTW %02X %02X\n", reg, value);
+      }
       return;
-    case 0xFA: case 0xFB: case 0xFC:  // TnTARGET
+    case 0xFA: case 0xFB: case 0xFC: {  // TnTARGET
       state_.ram[reg] = value;
-      state_.timers[reg - 0xFAu].target = value;
+      const int n = reg - 0xFAu;
+      TimerState& t = state_.timers[n];
+      t.target = value;
+      if (std::getenv("SNAG_TIMTRACE") != nullptr) {  // SNAG_TRACE
+        std::fprintf(stderr, "W %02X=%02X d=%u pc=%04X s2=%u\n", reg, value,
+                     state_.divider, cpu_.state().pc, t.stage2);
+      }
+      // SNAG_TRACE: the write-on-a-tick-cycle race knob.
+      if (snagTwrite() == 1 && g_stage1Tick[n] && t.stage2 == t.target &&
+          (state_.control & (1u << n))) {
+        t.stage3 = static_cast<std::uint8_t>((t.stage3 + 1) & 0x0Fu);
+        t.stage2 = 0;
+      }
       return;
+    }
     // $F8/$F9 are plain RAM, and a write to a TnOUT register ($FD-$FF) lands in
     // RAM but drives nothing. Both need only the RAM write above.
     default:

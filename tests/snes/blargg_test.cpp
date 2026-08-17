@@ -127,16 +127,32 @@ Result runRom(const std::vector<std::uint8_t>& rom) {
   // terminal banner is. The run stops when the report appears or the cap is reached.
   // The machine is deterministic, so the report lands at the same cycle on every
   // architecture; the cap is set past where the banner is drawn.
+  // SNAG_TRACE: with SNAG_APURAMDUMP set, dump the whole APU RAM to that path when
+  // the run stops (the uploaded test driver's code and data, for offline analysis).
+  const char* dump = std::getenv("SNAG_APURAMDUMP");
+  auto dumpRam = [&] {
+    if (dump == nullptr || dump[0] == '\0') return;
+    std::ofstream out(dump, std::ios::binary);
+    const auto& ram = machine.state().apu.ram;
+    out.write(reinterpret_cast<const char*>(ram.data()),
+              static_cast<std::streamsize>(ram.size()));
+  };
+
   std::string screen;
   for (int i = 0; i < kMaxChunks; ++i) {
     machine.run(kChunk);
     screen = joinScreen(decodeScreen(machine));
 
-    if (contains(screen, "PASSED")) return {.outcome = Outcome::Passed, .screen = screen};
+    if (contains(screen, "PASSED")) {
+      dumpRam();
+      return {.outcome = Outcome::Passed, .screen = screen};
+    }
     if (contains(screen, "FAILED") || contains(screen, "Failed")) {
+      dumpRam();
       return {.outcome = Outcome::Failed, .screen = screen};
     }
   }
+  dumpRam();
   return {.outcome = Outcome::Timeout, .screen = screen};
 }
 
