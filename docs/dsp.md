@@ -155,8 +155,9 @@ and writes a new entry built from the enabled voices plus a feedback of the filt
   overwrites it, exactly as the hardware does.
 - **The FIR filter** runs per channel over the last eight entries read: the taps are oldest × `FIR0`
   through newest × `FIR7`, each product shifted right 6. The first seven additions wrap at 16 bits and
-  only the final addition saturates — the documented arithmetic. Left and right filter separately with
-  the same coefficients.
+  only the final addition saturates — the documented arithmetic. Its result is a 15-bit sample, so the
+  low bit is dropped before `EVOL` and `EFB` read it. Left and right filter separately with the same
+  coefficients.
 - **Output and feedback.** The filtered signal is added to the main mix through `EVOL`. Separately, the
   voices enabled in `EON` are summed (after their per-voice volume) and added to the filtered signal
   scaled by `EFB`; the result, with bit 0 cleared, is written back over the entry that was read.

@@ -53,7 +53,8 @@ audio unit boots the upload handshake that streams a driver in from the main CPU
 accepts video memory without drawing it.
 
 **Validation.** Beyond the per-cycle vector suites, the machine runs self-checking SPC test ROMs
-end-to-end. The CPU, timer and memory-access-timing ROMs pass; the DSP echo test does not yet.
+end-to-end. The CPU, timer and memory-access-timing ROMs pass. The DSP ROM does not: it stops in the
+envelope tests.
 
 The table below is kept honest as components land.
 

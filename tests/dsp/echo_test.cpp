@@ -12,11 +12,13 @@
 // the echo split after per-voice volume at 253-261, EDL's D<<9 entries with D=0
 // giving one entry at 899-901, and the 16-bit buffer wrap at 884-886.
 //
-// One pre-adjudicated divergence (PLAN pre-lock 10): fullsnes feeds the unmasked
-// 16-bit FIR sum to EVOL/EFB and masks only the buffer write (AND FFFEh); Anomie
-// masks the FIR output before EVOL/EFB. fullsnes (primary) is implemented — the
-// tests below assert the buffer write is bit-0-clear, and read the FIR output
-// unmasked through EVOL.
+// The two sources place the FIR output's bit-0 mask differently: fullsnes feeds
+// the unmasked 16-bit sum to EVOL/EFB and masks only the buffer write (AND
+// FFFEh, line 3282), while Anomie makes the filter's own output 15 bits (lines
+// 46-47 and 940-942), so the low bit is gone before either volume reads it.
+// Anomie's placement is the one the hardware exhibits, which the SPC DSP test ROM
+// pins on the feedback path; the buffer write is masked as well, since the volume
+// multiply can put a low bit back.
 
 #include <array>
 #include <cstddef>
@@ -240,7 +242,41 @@ TEST(EchoFir, TheFirstSevenAddsWrapAndTheFinalAddSaturates) {
   EXPECT_EQ(frame.left, -4);  // fir = -8 (wrapping mid-sum), not 7FFFh (all-saturate)
 }
 
+TEST(EchoFir, TheOutputDropsItsLowBitBeforeTheEchoVolume) {
+  // The filter's output is a 15-bit sample (Anomie 46-47, 940-942), so an odd sum
+  // reaches EVOL one lower. A newest sample of 7Fh through a unity tap (FIR7 40h)
+  // sums to 127, which the drop takes to 126; EVOLL 7Fh then passes
+  // (126*127)>>7 = 125 into the frame, where the unmasked 127 would give 126.
+  DspState dsp;
+  Ram ram{};
+  staticBuffer(dsp, ram, 0x7F);
+  dsp[kFir7] = 0x40;
+  dsp[kEvolLeft] = 0x7F;
+  const StereoFrame frame = step(dsp, ram);
+  EXPECT_EQ(frame.left, 125);
+}
+
 // ── The feedback write path ──────────────────────────────────────────────────
+
+TEST(EchoFeedback, TheOutputDropsItsLowBitBeforeTheFeedbackMultiply) {
+  // The same 15-bit output feeds EFB, which is what a buffer holding a single odd
+  // sample shows: an entry of 2 reads as 1, a unity tap (FIR7 40h) sums to 1, and
+  // the drop takes it to 0 — so full negative feedback (EFB 80h) with no EON send
+  // writes 0 back. Feeding the unmasked 1 instead would write (1*-128)>>7 = -1,
+  // which the write's own mask turns into -2 rather than silence.
+  DspState dsp;
+  Ram ram{};
+  ram[0x2000] = 0x02;  // one odd sample: 2 stored, read back as 1
+  ram[0x2001] = 0x00;
+  dsp[kEsa] = 0x20;
+  dsp[kEdl] = 0x00;    // one entry
+  dsp[kFlg] = 0x00;    // echo writes enabled
+  dsp[kFir7] = 0x40;
+  dsp[kEfb] = 0x80;    // -128: the feedback inverts and holds its full scale
+  dsp[kEon] = 0x00;    // no voice send, so the write is feedback alone
+  step(dsp, ram);
+  EXPECT_EQ(entry16(ram, 0x2000), 0);
+}
 
 TEST(EchoFeedback, TheFirOutputDecaysThroughEfbAcrossPasses) {
   // With one entry, no voices (EON send 0), a unity newest tap (FIR7 40h) and echo

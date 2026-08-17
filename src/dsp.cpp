@@ -277,6 +277,8 @@ EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // FIR: taps oldest*FIR0 ... newest*FIR7, each product SAR 6. The first seven
   // additions wrap at 16 bits; only the final (newest) addition saturates. The
   // newest history slot is echoFirPos, so tap k reads slot (echoFirPos+1+k) & 7.
+  // The output is a 15-bit sample left-aligned in 16 bits, so the sum's low bit
+  // is dropped before EVOL and EFB read it.
   const auto filter = [&](const std::array<std::int16_t, 8>& history) -> int {
     int sum = 0;
     for (int tap = 0; tap < 8; ++tap) {
@@ -286,15 +288,15 @@ EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
       const int product = (history[slot] * coeff) >> 6;
       sum = tap < 7 ? static_cast<std::int16_t>(sum + product) : clampSigned16(sum + product);
     }
-    return sum;
+    return sum & ~1;
   };
   const int firLeft = filter(dsp.echoFirLeft);
   const int firRight = filter(dsp.echoFirRight);
 
   // Feedback: the EON send plus fir*EFB SAR 7, clamped, bit 0 cleared, written back
   // over the entry — unless echo writes are disabled or the caller passed no
-  // writable RAM. The FIR output feeding EVOL/EFB is the unmasked 16-bit sum; only
-  // the buffer write clears bit 0.
+  // writable RAM. The entry holds a 15-bit sample, so the write drops the low bit
+  // the volume multiply can reintroduce.
   const bool writeEnabled = echoRam != nullptr && (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
   if (writeEnabled) {
     const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
