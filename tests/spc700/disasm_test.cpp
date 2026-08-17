@@ -96,7 +96,9 @@ TEST(Spc700Disasm, MeasuredCostsMatchTheCoresCycleShapes) {
 // A conditional instruction carries both costs; an unconditional one carries one.
 TEST(Spc700Disasm, ConditionalInstructionsCarryBothCosts) {
   const std::array<CycleCost, 256>& costs = cycleTable();
-  for (std::uint8_t branch : {0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0}) {
+  constexpr std::array<std::uint8_t, 8> kRelativeBranches = {
+      0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0};
+  for (std::uint8_t branch : kRelativeBranches) {
     EXPECT_GT(costs[branch].taken, costs[branch].base)
         << "branch $" << std::hex << int{branch} << " costs no more when taken";
   }
