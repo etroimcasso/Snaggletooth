@@ -98,8 +98,9 @@ constexpr std::array<std::uint8_t, kIplStubSize> kImage = {
 
 const std::array<std::uint8_t, kIplStubSize>& iplStubImage() noexcept { return kImage; }
 
-void seedIplStub(ApuState& apu) noexcept {
-  const std::array<std::uint8_t, kIplStubSize>& image = kImage;
+void seedIplStub(ApuState& apu) noexcept { seedIplStub(apu, kImage); }
+
+void seedIplStub(ApuState& apu, std::span<const std::uint8_t, kIplStubSize> image) noexcept {
   for (std::size_t i = 0; i < kIplStubSize; ++i) {
     apu.ram[kIplStubBase + i] = image[i];
   }

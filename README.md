@@ -19,6 +19,8 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
   consulted, and no copyrighted bytes (game ROMs, the boot ROM) are ever included — the audio
   unit boots by seeding the documented post-boot state, and where it runs the console's upload
   handshake it maps an original boot program written to the published protocol, never Sony's boot code.
+  Nothing here needs a console boot ROM; a host holding its own dump may supply one through
+  `SnesConfig::bootRom`, which is the only way bytes like those ever reach the machine.
 - **Deterministic and steppable.** Components advance by an externally supplied cycle budget —
   no wall clock, no threads inside the core. The same starting state and the same inputs produce
   the same bytes, every run; whole-machine state snapshots and restores as a value.

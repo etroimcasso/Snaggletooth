@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 namespace snaggletooth {
 
@@ -33,9 +34,11 @@ inline constexpr std::size_t kIplStubSize = 64u;
 // machine seeds; seedIplStub is the seam the machine uses.
 [[nodiscard]] const std::array<std::uint8_t, kIplStubSize>& iplStubImage() noexcept;
 
-// Seeds `apu` with the upload stub: the image at $FFC0, the input and output ports
+// Seeds `apu` with a boot image: the 64 bytes at $FFC0, the input and output ports
 // cleared, and the CPU pointed at the entry with a clear direct page and the
-// post-boot stack pointer. Every other field is left as it was.
+// post-boot stack pointer. Every other field is left as it was. The image is the
+// stub unless one is given, which is how a caller runs a console's own boot ROM.
 void seedIplStub(ApuState& apu) noexcept;
+void seedIplStub(ApuState& apu, std::span<const std::uint8_t, kIplStubSize> image) noexcept;
 
 }  // namespace snaggletooth

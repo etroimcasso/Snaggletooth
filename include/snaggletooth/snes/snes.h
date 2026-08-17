@@ -30,6 +30,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -71,6 +72,14 @@ struct SnesConfig {
   std::span<const std::uint8_t> rom;   // a LoROM cartridge image
   Region region = Region::Ntsc;        // the console clock rate
   bool iplStub = true;                 // seed the APU with its upload stub (arrives with the loader)
+
+  // An audio boot ROM to run in place of the built-in stub. Absent by default, so
+  // the machine boots on the stub. Supply a console's own 64-byte boot ROM and the
+  // audio unit runs that code instead: it is seeded into RAM and mapped over the
+  // $FFC0 window exactly as the stub is, so everything downstream is unchanged.
+  // The image belongs to whoever supplies it and is never carried here. Ignored
+  // when iplStub is off, which skips the boot sequence entirely.
+  std::optional<std::array<std::uint8_t, kIplWindowBytes>> bootRom;
 };
 
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM

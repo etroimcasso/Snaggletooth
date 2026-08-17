@@ -62,12 +62,16 @@ Snes::Snes(SnesConfig config)
     // and posts its own ready bytes, the way it does when the console powers on.
     // Left off, the machine keeps the ready state, which is how a program loaded
     // straight into audio RAM skips the handshake.
-    seedIplStub(state_.apu);
+    // A supplied boot ROM takes the stub's place, and the audio unit runs it.
+    const std::span<const std::uint8_t, kIplWindowBytes> image =
+        config.bootRom.has_value() ? std::span<const std::uint8_t, kIplWindowBytes>(*config.bootRom)
+                                   : std::span<const std::uint8_t, kIplWindowBytes>(iplStubImage());
+    seedIplStub(state_.apu, image);
     // Map the same image over the $FFC0 window. The upload shell scratch-writes
     // that range in RAM and re-enters it expecting the boot code to read back
     // unchanged; the mapping serves the image to the CPU while CONTROL bit 7 is set,
     // so those reads survive the driver's writes to the RAM beneath.
-    apu_.mapIplRom(iplStubImage());
+    apu_.mapIplRom(image);
   }
   state_.cpu = powerOnCpu();  // emulation mode, the program counter at the reset vector
   load();

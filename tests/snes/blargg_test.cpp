@@ -14,15 +14,19 @@
 // SNAGGLETOOTH_REQUIRE_BLARGG_ROMS=1, which turns a missing ROM into a failure so
 // an environment that means to run them can never report green while running none.
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "snaggletooth/snes/snes.h"
+#include "snes_ipl_stub.h"
 
 namespace snaggletooth {
 namespace {
@@ -57,6 +61,24 @@ std::vector<std::uint8_t> readFile(const std::string& path) {
   return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(in),
                                    std::istreambuf_iterator<char>());
 }
+
+// The boot image the machine runs on. SNAGGLETOOTH_BOOT_ROM names a 64-byte audio
+// boot ROM to boot from; left empty, the machine boots on the built-in stub and
+// the cases below assert the stub's outcome instead. A file of the wrong size is a
+// configuration mistake, so it fails loudly rather than falling back.
+std::optional<std::array<std::uint8_t, kIplWindowBytes>> configuredBootRom() {
+  const std::string path = SNAGGLETOOTH_BOOT_ROM;
+  if (path.empty()) return std::nullopt;
+  const std::vector<std::uint8_t> image = readFile(path);
+  EXPECT_EQ(image.size(), kIplWindowBytes)
+      << "SNAGGLETOOTH_BOOT_ROM: " << path << " is not a " << kIplWindowBytes << "-byte boot ROM";
+  if (image.size() != kIplWindowBytes) return std::nullopt;
+  std::array<std::uint8_t, kIplWindowBytes> boot{};
+  std::copy(image.begin(), image.end(), boot.begin());
+  return boot;
+}
+
+bool bootsOnStub() { return !configuredBootRom().has_value(); }
 
 // A tile-index to character mapping for the shell's font. The font places the
 // printable ASCII glyphs at the tile whose index is the character code, and leaves
@@ -117,7 +139,7 @@ struct Result {
 // appears or the text stops changing. A generous emulated-cycle cap bounds a ROM
 // that never reports.
 Result runRom(const std::vector<std::uint8_t>& rom) {
-  Snes machine(SnesConfig{.rom = rom});
+  Snes machine(SnesConfig{.rom = rom, .bootRom = configuredBootRom()});
 
   constexpr std::uint64_t kChunk = 6'000'000u;  // master cycles per step (~0.3 s emulated)
   constexpr int kMaxChunks = 200;               // ~1.2 G master cycles, ~1 min emulated
@@ -170,22 +192,40 @@ Result runRom(const std::vector<std::uint8_t>& rom) {
   return ::testing::AssertionSuccess();
 }
 
-// Runs one ROM. A pass is a pass. Every ROM boots, uploads its driver through the
-// stub, and draws the shell's "Running tests:" banner — which the decoder reads,
-// confirming the whole machine and the tilemap decode — but the audio-side test
-// does not yet report a result on this machine, so a non-pass is a skip that
-// records what happened rather than a failure. Bringing each ROM to a real pass is
-// the all-pass sub-block; the REQUIRE guard still makes a missing ROM a failure, so
-// a skip here is a recorded finding, never an absence.
+// Loads and runs `name`, or skips the calling case when the ROM directory is unset.
+// `ran` reports whether `out` holds a run, so a caller stops rather than asserting
+// on a result that was never produced.
+void run(const std::string& name, Result& out, bool& ran) {
+  ran = false;
+  const ::testing::AssertionResult loaded = loadAndRun(name, out);
+  if (loaded) {
+    ran = true;
+    return;
+  }
+  if (std::string(loaded.message()) == "__skip__") {
+    GTEST_SKIP() << name << ": set SNAGGLETOOTH_BLARGG_ROMS to the Blargg ROM directory to run it";
+  }
+  ADD_FAILURE() << loaded.message();
+}
+
+// Runs one ROM and requires its pass banner.
+void expectPass(const std::string& name) {
+  Result result;
+  bool ran = false;
+  run(name, result, ran);
+  if (!ran) return;
+  EXPECT_EQ(result.outcome, Outcome::Passed)
+      << name << " does not report a pass\n--- decoded screen ---\n"
+      << result.screen << "----------------------";
+}
+
+// Runs one ROM that reports a failure this machine does not yet answer. The screen
+// is recorded so the skip carries what happened.
 void runOrSkip(const std::string& name) {
   Result result;
-  const ::testing::AssertionResult loaded = loadAndRun(name, result);
-  if (!loaded) {
-    if (std::string(loaded.message()) == "__skip__") {
-      GTEST_SKIP() << name << ": set SNAGGLETOOTH_BLARGG_ROMS to the Blargg ROM directory to run it";
-    }
-    FAIL() << loaded.message();
-  }
+  bool ran = false;
+  run(name, result, ran);
+  if (!ran) return;
   if (result.outcome == Outcome::Passed) {
     SUCCEED() << name << " passed";
     return;
@@ -198,9 +238,86 @@ void runOrSkip(const std::string& name) {
                << result.screen << "----------------------";
 }
 
-TEST(Blargg, SpcSmp) { runOrSkip("spc_smp.sfc"); }
-TEST(Blargg, SpcTimer) { runOrSkip("spc_timer.sfc"); }
-TEST(Blargg, SpcMemAccessTimes) { runOrSkip("spc_mem_access_times.sfc"); }
+// The sub-tests spc_smp.sfc runs, in the order it names them on screen.
+constexpr std::array<const char*, 8> kSpcSmpSubTests = {
+    "CPU Instructions/Full DAA DAS",
+    "CPU Timing/mem access times",
+    "CPU Timing/time all opcodes",
+    "CPU/addw and subw",
+    "CPU/psw is 8 independent bits",
+    "CPU/smp reg read-write behavior",
+    "CPU/tset tclr",
+    "CPU/verify IPL ROM",
+};
+
+// The screen without its spacing, so a comparison ignores the 32-column wrap.
+std::string unspaced(const std::string& text) {
+  std::string out;
+  for (const char c : text) {
+    if (c != ' ' && c != '\n') out.push_back(c);
+  }
+  return out;
+}
+
+// The 64 boot-window bytes as spc_smp.sfc prints them: two uppercase hex digits per
+// byte, in address order.
+std::string bootWindowHex(std::span<const std::uint8_t, kIplWindowBytes> image) {
+  static constexpr char kDigits[] = "0123456789ABCDEF";
+  std::string out;
+  for (const std::uint8_t byte : image) {
+    out.push_back(kDigits[byte >> 4]);
+    out.push_back(kDigits[byte & 0x0Fu]);
+  }
+  return out;
+}
+
+// spc_smp.sfc booted on the stub. Its last sub-test reads the boot-ROM window back
+// and checksums it against the console's own boot code, which only that code
+// satisfies — so the machine runs every sub-test, passes the seven that measure
+// behaviour, and stops at the one that measures identity. Supply the console's boot
+// ROM through SNAGGLETOOTH_BOOT_ROM and the same ROM reports a pass instead.
+//
+// Asserting the whole shape keeps the seven behavioural sub-tests covered: a
+// regression in any of them stops the run earlier, and the missing name fails here.
+void expectStubBootOutcome(const Result& result) {
+  ASSERT_EQ(result.outcome, Outcome::Failed)
+      << "spc_smp.sfc booted on the stub reports its boot-ROM check\n--- decoded screen ---\n"
+      << result.screen << "----------------------";
+
+  std::size_t previous = std::string::npos;  // no sub-test located yet
+  for (const char* subTest : kSpcSmpSubTests) {
+    const std::size_t at = result.screen.find(subTest);
+    ASSERT_NE(at, std::string::npos)
+        << "spc_smp.sfc does not reach " << subTest << "\n--- decoded screen ---\n"
+        << result.screen << "----------------------";
+    if (previous != std::string::npos) {
+      EXPECT_GT(at, previous) << subTest << " is out of order on screen";
+    }
+    previous = at;
+  }
+
+  // The window holds the stub, which is what the checksum reads and rejects.
+  EXPECT_NE(unspaced(result.screen).find(bootWindowHex(iplStubImage())), std::string::npos)
+      << "spc_smp.sfc prints boot-window bytes other than the stub's\n--- decoded screen ---\n"
+      << result.screen << "----------------------";
+}
+
+TEST(Blargg, SpcSmp) {
+  Result result;
+  bool ran = false;
+  run("spc_smp.sfc", result, ran);
+  if (!ran) return;
+  if (bootsOnStub()) {
+    expectStubBootOutcome(result);
+    return;
+  }
+  EXPECT_EQ(result.outcome, Outcome::Passed)
+      << "spc_smp.sfc booted on a boot ROM does not report a pass\n--- decoded screen ---\n"
+      << result.screen << "----------------------";
+}
+
+TEST(Blargg, SpcTimer) { expectPass("spc_timer.sfc"); }
+TEST(Blargg, SpcMemAccessTimes) { expectPass("spc_mem_access_times.sfc"); }
 TEST(Blargg, SpcDsp6) { runOrSkip("spc_dsp6.sfc"); }
 
 }  // namespace

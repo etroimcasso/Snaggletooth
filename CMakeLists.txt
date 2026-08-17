@@ -138,6 +138,15 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   set(SNAGGLETOOTH_BLARGG_ROMS "" CACHE PATH
       "Path to the directory holding the Blargg SPC test ROMs")
 
+  # Path to a 64-byte audio boot ROM. When set, the acceptance tests boot the
+  # machine on that image instead of the built-in upload stub, which is what a
+  # console's own boot code needs to be present for: one Blargg sub-test checksums
+  # the boot-ROM window and only the console's own bytes satisfy it. When empty,
+  # the tests run the stub and assert its outcome instead. The image is nobody's
+  # to distribute — supply your own or leave this unset.
+  set(SNAGGLETOOTH_BOOT_ROM "" CACHE FILEPATH
+      "Path to a 64-byte audio boot ROM to boot the acceptance tests on")
+
   add_executable(snaggletooth_tests
     tests/version_test.cpp
     tests/spc700/vector_harness.cpp
@@ -169,6 +178,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/ppu_stub_test.cpp
     tests/snes/dma_test.cpp
     tests/snes/ipl_stub_test.cpp
+    tests/snes/boot_rom_test.cpp
     tests/snes/blargg_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
@@ -197,7 +207,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   target_compile_definitions(snaggletooth_tests PRIVATE
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
     SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}"
-    SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}")
+    SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}"
+    SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}")
   # The IPL-stub test seeds the stub into an audio machine through the internal
   # seam in src/, so the test target reaches the private headers there.
   target_include_directories(snaggletooth_tests PRIVATE

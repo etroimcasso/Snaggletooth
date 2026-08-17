@@ -158,6 +158,27 @@ ready bytes.
 With `iplStub` off, none of this runs: the APU keeps the state it booted with, which is how a program
 placed directly into audio RAM skips the handshake.
 
+### Running a console's own boot ROM
+
+`SnesConfig::bootRom` takes a 64-byte boot image to run in place of the stub:
+
+```cpp
+std::array<std::uint8_t, kIplWindowBytes> image = readBootRom();  // your own dump
+Snes machine(SnesConfig{.rom = cartridge, .bootRom = image});
+```
+
+The supplied image is seeded into audio RAM and mapped over the `$FFC0` window exactly as the stub is,
+so everything above applies unchanged — the audio unit simply executes those bytes instead. Left absent,
+the machine runs the stub. The field is ignored when `iplStub` is off, which skips the boot sequence
+entirely.
+
+The image is configuration rather than machine state: it is not part of `SnesState`, and it survives
+`restore()`. A snapshot therefore carries the RAM beneath the window, never the mapped image.
+
+Snaggletooth ships no console boot code and none is required — the stub runs the same documented
+handshake. Supplying a dump matters when a program checks the window's contents rather than its
+behaviour: test software that checksums the boot ROM is satisfied only by the console's own bytes.
+
 ## The video counters and interrupts
 
 The machine tracks where the beam is even though it draws nothing. `hpos` is the master cycle within the
