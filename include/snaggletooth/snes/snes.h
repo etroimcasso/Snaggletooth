@@ -79,7 +79,7 @@ struct SnesConfig {
   // $FFC0 window exactly as the stub is, so everything downstream is unchanged.
   // The image belongs to whoever supplies it and is never carried here. Ignored
   // when iplStub is off, which skips the boot sequence entirely.
-  std::optional<std::array<std::uint8_t, kIplWindowBytes>> bootRom;
+  std::optional<std::array<std::uint8_t, kIplWindowBytes>> bootRom = std::nullopt;
 };
 
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM
