@@ -114,8 +114,20 @@ mode's step would carry the level outside the 11-bit range, either past `$7FF` o
 a rate of 0 that holds the level perfectly still. The boundary moves with the step: Linear Increase
 steps +32 and switches from `$7E0` upward, Bent Increase steps +8 in its upper range and switches
 from `$7F8`. Turn `ADSR1` bit 7 back on and the voice carries on in whatever phase it reached.
-Decay to Sustain is not like this — it reads the level an update actually wrote, so it waits for the
-rate.
+
+Decay to Sustain reads that computed value too, and it compares the value's upper three bits against
+a boundary — but the boundary comes from whichever register is driving the level. Under ADSR that is
+`ADSR2`'s sustain level, as you would expect. Under a GAIN mode it is **`GAIN`'s own bits 7-5**, which
+hold the gain mode and its enable bit rather than any sustain level, so a voice in Decay under GAIN
+reaches Sustain at a boundary nobody chose: `$4xx` under Linear Decrease, `$5xx` under Exponential
+Decrease, `$6xx` under Linear Increase, `$7xx` under Bent Increase, and `$0xx` under a direct gain
+below `$20`. This is hardware behaviour, not a simplification — reproduce it or a driver that steers
+its envelope through GAIN lands in the wrong phase.
+
+Both switches read the value the mode computed rather than the level it stored, which matters at a
+rate of 0: a voice parked at `$420` under Linear Decrease never moves, yet its step computes `$400`
+and the voice enters Sustain, while the same mode parked one lower at `$41F` computes `$3FF` and stays
+in Decay — even though `$41F`'s own upper three bits are the boundary.
 
 **Output.** The enveloped sample is the voice's amplitude — an internal signed value in the range
 `-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit set outputs the

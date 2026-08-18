@@ -830,18 +830,28 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
   // The level itself is clamped, so the overshoot is only visible here.
   const bool attackToDecay = (v.phase == EnvPhase::Attack) && ((newLevel & ~0x7FF) != 0);
 
-  // Everything else waits for the counter: the level takes the candidate, the
-  // Bent-Increase reference records it, and Decay->Sustain reads the level the
-  // update just wrote.
+  // The boundary Decay->Sustain compares against comes from whichever register
+  // is driving the envelope: ADSR2's sustain level under ADSR, and GAIN's top
+  // three bits while a GAIN mode drives the level. Those bits are the gain
+  // mode and its enable, not a sustain level, so a voice keyed on under GAIN
+  // reaches Sustain at a boundary its author never chose.
+  const int sustainBoundary =
+      (adsr1 & 0x80) != 0 ? ((adsr2 >> 5) & 0x07) : ((gain >> 5) & 0x07);
+
+  // Decay->Sustain reads the candidate, and reads it every sample: a voice
+  // parked in a rate-0 mode never takes the value, yet still changes phase when
+  // the value the mode computes reaches the boundary. A candidate outside the
+  // 11-bit range is the Attack->Decay case above and matches no boundary.
+  const bool decayToSustain = (v.phase == EnvPhase::Decay) && ((newLevel & ~0x7FF) == 0) &&
+                              ((newLevel >> 8) == sustainBoundary);
+
+  // The counter decides only whether the level takes the candidate, and with it
+  // the Bent-Increase reference.
   if (fires) {
     v.bentGainRef = static_cast<std::uint16_t>(newLevel & 0x7FF);
     v.envelope = clampEnvelope(newLevel);
-
-    // Decay->Sustain when the level's upper 3 bits reach the sustain level.
-    if (v.phase == EnvPhase::Decay) {
-      if ((v.envelope >> 8) == ((adsr2 >> 5) & 0x07)) v.phase = EnvPhase::Sustain;
-    }
   }
+  if (decayToSustain) v.phase = EnvPhase::Sustain;
   if (attackToDecay) v.phase = EnvPhase::Decay;
 
   writeEnvx();

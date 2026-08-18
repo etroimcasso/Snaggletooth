@@ -10,8 +10,10 @@
 // and the phase-transition thresholds: the Attack->Decay switch fires on a value
 // outside the 11-bit range (an attack reaching 0x800 clips to 0x7FF, and a
 // decrease below zero counts too), read from the mode's candidate whether or not
-// the counter lets the level take it; Decay->Sustain fires when the level an
-// update wrote has its upper 3 bits at the sustain level.
+// the counter lets the level take it; Decay->Sustain fires when the candidate's
+// upper 3 bits reach the boundary, which is the sustain level under ADSR but
+// VxGAIN's own bits 7-5 while a GAIN mode drives the level (fullsnes's "Gain
+// Notes", 2977-2984).
 
 #include <array>
 #include <cstddef>
@@ -388,20 +390,162 @@ TEST(PhaseMachine, ADecreasingModeHoldsAttackWhenItsStepReachesExactlyZero) {
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
 }
 
-TEST(PhaseMachine, DecayToSustainStillWaitsForTheCounter) {
-  // Only the Attack->Decay switch reads the candidate unfired. A voice that has
-  // just reached Decay with a level whose upper 3 bits already match the sustain
-  // level stays in Decay for as long as the rate holds the level still.
+TEST(PhaseMachine, DecayToSustainIgnoresACandidateOutsideTheRange) {
+  // A candidate below zero is the Attack->Decay case, and it belongs to no
+  // boundary: this voice sits at 0x1F under a Linear Decrease, so its candidate
+  // is -1 sample after sample and it stays in Decay however long it is stepped.
   DspState dsp;
   adsr1(dsp, 0) = 0x00;
-  adsr2(dsp, 0) = 0x00;  // sustain level 0, which 0x1F's upper 3 bits match
-  gain(dsp, 0) = 0x80;   // Linear Decrease, rate 0
+  adsr2(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0x80;  // Linear Decrease, rate 0
   placeEnvelope(dsp, 0, EnvPhase::Attack, 0x1F);
   stepVoiceEnvelope(dsp, 0, false);
   ASSERT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
   for (int i = 0; i < 4; ++i) stepVoiceEnvelope(dsp, 0, false);
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
   EXPECT_EQ(dsp.voices[0].envelope, 0x1F);
+}
+
+// ── Decay->Sustain: the boundary comes from the register in charge ───────────
+//
+// Under ADSR the boundary is VxADSR2's sustain level. Under a GAIN mode the
+// hardware reads it from VxGAIN bits 7-5 instead — the gain mode and its enable
+// bit, which are not a sustain level at all — so each mode sustains at its own
+// fixed boundary: 4 for Linear Decrease, 5 for Exp Decrease, 6 for Linear
+// Increase, 7 for Bent Increase (fullsnes 2977-2984, "though accidently reading
+// a garbage boundary value from VxGAIN.Bit7-5"). The comparison reads the
+// candidate every sample, so a rate of 0 that never moves the level still
+// changes the phase. Every case below sets a sustain level that does NOT match,
+// so a boundary read from VxADSR2 could not produce these answers.
+
+TEST(SustainBoundary, DirectGainSustainsOnItsOwnTopThreeBits) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;  // sustain level 1 - not the boundary in force
+  gain(dsp, 0) = 0x0F;   // direct, level 0x0F0; bits 7-5 are 0
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x0F0);
+  stepVoiceEnvelope(dsp, 0, false);  // candidate 0x0F0, upper 3 bits 0
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
+}
+
+TEST(SustainBoundary, DirectGainHoldsDecayOneBandAbove) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0x10;  // direct, level 0x100; bits 7-5 are still 0
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x100);
+  stepVoiceEnvelope(dsp, 0, false);  // candidate 0x100, upper 3 bits 1
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(SustainBoundary, LinearDecreaseSustainsWhenItsStepReachesBoundaryFour) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0x80;  // Linear Decrease, rate 0; bits 7-5 are 4
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x420);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x420);  // 0x420 - 32 = 0x400
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
+}
+
+TEST(SustainBoundary, LinearDecreaseReadsTheCandidateAndNotTheStoredLevel) {
+  // The case that separates the two readings: 0x41F's own upper 3 bits are
+  // already 4, so a comparison against the stored level would sustain here. The
+  // step is what is compared, and 0x41F - 32 = 0x3FF sits one band below.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0x80;
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x41F);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x41F);
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(SustainBoundary, ExpDecreaseSustainsWhenItsStepReachesBoundaryFive) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xA0;  // Exp Decrease, rate 0; bits 7-5 are 5
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x506);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x506);  // 0x506 - 6 = 0x500
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
+}
+
+TEST(SustainBoundary, ExpDecreaseHoldsDecayOneStepShort) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xA0;
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x505);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x505);  // 0x505 - 6 = 0x4FF
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(SustainBoundary, LinearIncreaseSustainsWhenItsStepReachesBoundarySix) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xC0;  // Linear Increase, rate 0; bits 7-5 are 6
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x5E0);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x5E0);  // 0x5E0 + 32 = 0x600
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
+}
+
+TEST(SustainBoundary, LinearIncreaseHoldsDecayOneStepShort) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xC0;
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x5DF);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x5DF);  // 0x5DF + 32 = 0x5FF
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(SustainBoundary, BentIncreaseSustainsOnItsOwnSmallerStepAtBoundarySeven) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xE0;  // Bent Increase, rate 0; bits 7-5 are 7
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x6F8);
+  dsp.voices[0].bentGainRef = 0x6F8;                   // at or past 0x600, so +8
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x6F8);  // 0x6F8 + 8 = 0x700
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
+}
+
+TEST(SustainBoundary, BentIncreaseHoldsDecayOneStepShort) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xE0;
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x6F7);
+  dsp.voices[0].bentGainRef = 0x6F7;
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x6F7);  // 0x6F7 + 8 = 0x6FF
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(SustainBoundary, AdsrModeReadsTheSustainLevelFromAdsr2) {
+  // With ADSR selected the boundary is the sustain level again, and VxGAIN's
+  // bits are ignored: this GAIN would name boundary 7, and the voice sustains at
+  // 1 because ADSR2 says so.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x80;  // ADSR, decay rate 0
+  adsr2(dsp, 0) = 0x20;  // sustain level 1
+  gain(dsp, 0) = 0xE0;
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x200);
+  dsp.globalCounter = 0;
+  stepVoiceEnvelope(dsp, 0, false);  // 0x200 - 2 = 0x1FE, upper 3 bits 1
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
+}
+
+TEST(SustainBoundary, AdsrModeHoldsDecayWhenTheStepMissesTheSustainLevel) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x80;
+  adsr2(dsp, 0) = 0x20;
+  gain(dsp, 0) = 0xE0;
+  placeEnvelope(dsp, 0, EnvPhase::Decay, 0x300);
+  dsp.globalCounter = 0;
+  stepVoiceEnvelope(dsp, 0, false);  // 0x300 - 3 = 0x2FD, upper 3 bits 2
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
 }
 
 // ── Keying ──────────────────────────────────────────────────────────────────
