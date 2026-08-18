@@ -7,9 +7,11 @@
 // 2992-2995, ENVX at 2942-2948, and the KON/KOFF registers at 3044-3066. Anomie's
 // S-DSP doc is the cross-check and the carrier of the exact counter scheme (the
 // Modulus[]/Offset[] tables and the (counter+offset)%period fire rule, line 230)
-// and the phase-transition thresholds: the Attack->Decay switch fires when the
-// value exceeds 0x7FF (an attack reaching 0x800 clips to 0x7FF), and
-// Decay->Sustain fires when the level's upper 3 bits reach the sustain level.
+// and the phase-transition thresholds: the Attack->Decay switch fires on a value
+// outside the 11-bit range (an attack reaching 0x800 clips to 0x7FF, and a
+// decrease below zero counts too), read from the mode's candidate whether or not
+// the counter lets the level take it; Decay->Sustain fires when the level an
+// update wrote has its upper 3 bits at the sustain level.
 
 #include <array>
 #include <cstddef>
@@ -315,6 +317,91 @@ TEST(EnvelopeGate, HoldsTheLevelWhenTheCounterDoesNotFire) {
   EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x40);
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
   EXPECT_EQ(envx(dsp, 0), 0x04);
+}
+
+// ── The phase machine under GAIN ────────────────────────────────────────────
+//
+// The selected mode computes a candidate level every sample; the counter decides
+// only whether the level takes it. So the Attack->Decay switch can fire while a
+// rate of 0 holds the level perfectly still, and it fires on the mode's own step
+// — the value that leaves the unsigned 11-bit range, whether by overshooting
+// 0x7FF or by going below zero. Each pair below brackets one mode's step.
+
+TEST(PhaseMachine, LinearIncreaseLeavesAttackWhenItsStepWouldOvershoot) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;  // GAIN mode
+  gain(dsp, 0) = 0xC0;   // custom, Linear Increase, rate 0 - never updates
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x7E0);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7E0);  // 0x7E0 + 32 = 0x800
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(PhaseMachine, LinearIncreaseHoldsAttackWhenItsStepStillFits) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xC0;
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x7DF);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7DF);  // 0x7DF + 32 = 0x7FF
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
+}
+
+TEST(PhaseMachine, BentIncreaseLeavesAttackOnItsOwnSmallerStep) {
+  // Bent Increase steps +8 once its reference reaches 0x600, so it switches 0x18
+  // higher than the Linear Increase pair above: the step, not a fixed level, sets
+  // the boundary.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xE0;  // custom, Bent Increase, rate 0
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x7F8);
+  dsp.voices[0].bentGainRef = 0x7F8;
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7F8);  // 0x7F8 + 8 = 0x800
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(PhaseMachine, BentIncreaseHoldsAttackOneStepBelow) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xE0;
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x7F7);
+  dsp.voices[0].bentGainRef = 0x7F7;
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7F7);  // 0x7F7 + 8 = 0x7FF
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
+}
+
+TEST(PhaseMachine, ADecreasingModeLeavesAttackWhenItsStepGoesBelowZero) {
+  // The switch reads a value outside the 11-bit range, which a decrease reaches
+  // from underneath: 0x1F - 32 is negative and takes the voice out of Attack.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0x80;  // custom, Linear Decrease, rate 0
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x1F);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x1F);
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+}
+
+TEST(PhaseMachine, ADecreasingModeHoldsAttackWhenItsStepReachesExactlyZero) {
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0x80;
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x20);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x20);  // 0x20 - 32 = 0
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
+}
+
+TEST(PhaseMachine, DecayToSustainStillWaitsForTheCounter) {
+  // Only the Attack->Decay switch reads the candidate unfired. A voice that has
+  // just reached Decay with a level whose upper 3 bits already match the sustain
+  // level stays in Decay for as long as the rate holds the level still.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  adsr2(dsp, 0) = 0x00;  // sustain level 0, which 0x1F's upper 3 bits match
+  gain(dsp, 0) = 0x80;   // Linear Decrease, rate 0
+  placeEnvelope(dsp, 0, EnvPhase::Attack, 0x1F);
+  stepVoiceEnvelope(dsp, 0, false);
+  ASSERT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+  for (int i = 0; i < 4; ++i) stepVoiceEnvelope(dsp, 0, false);
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay);
+  EXPECT_EQ(dsp.voices[0].envelope, 0x1F);
 }
 
 // ── Keying ──────────────────────────────────────────────────────────────────

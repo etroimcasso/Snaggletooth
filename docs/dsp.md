@@ -106,6 +106,17 @@ envelope rises on key-on (Attack), falls to a sustain level (Decay), holds and d
 falls to zero on key-off (Release); in GAIN mode the level is driven directly or ramped linearly or
 exponentially. A global counter gates the per-rate timing, driven by the documented rate tables.
 
+**Phase and mode.** Attack, Decay, Sustain and Release are the voice's own state, not a property of
+ADSR mode, and the phase keeps advancing while GAIN drives the level. Every sample the selected mode
+computes the level it would move to, and the Attack-to-Decay switch reads that value whether or not
+the rate lets the level change — so a voice in Attack under a GAIN mode leaves Attack as soon as that
+mode's step would carry the level outside the 11-bit range, either past `$7FF` or below zero, even at
+a rate of 0 that holds the level perfectly still. The boundary moves with the step: Linear Increase
+steps +32 and switches from `$7E0` upward, Bent Increase steps +8 in its upper range and switches
+from `$7F8`. Turn `ADSR1` bit 7 back on and the voice carries on in whatever phase it reached.
+Decay to Sustain is not like this — it reads the level an update actually wrote, so it waits for the
+rate.
+
 **Output.** The enveloped sample is the voice's amplitude — an internal signed value in the range
 `-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit set outputs the
 shared noise level here in place of its interpolated sample. The amplitude feeds the output mixer

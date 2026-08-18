@@ -778,6 +778,10 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
   const std::uint8_t gain = dsp[voiceRegister(voice, kVoiceGain)];
   const int level = v.envelope;
 
+  // The selected mode computes a candidate level every sample. The rate counter
+  // decides only whether the envelope takes that candidate; the Attack->Decay
+  // switch below reads it either way, which is what lets a voice change phase
+  // while a rate of 0 holds its level still.
   int newLevel = level;
   bool fires = false;
 
@@ -789,18 +793,18 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
       case EnvPhase::Attack: {
         const auto rate = static_cast<std::uint8_t>((adsr1 & 0x0F) * 2 + 1);
         fires = envelopeRateFires(dsp.globalCounter, rate);
-        if (fires) newLevel = level + ((adsr1 & 0x0F) == 0x0F ? 1024 : 32);
+        newLevel = level + ((adsr1 & 0x0F) == 0x0F ? 1024 : 32);
         break;
       }
       case EnvPhase::Decay: {
         const auto rate = static_cast<std::uint8_t>(((adsr1 >> 4) & 0x07) * 2 + 16);
         fires = envelopeRateFires(dsp.globalCounter, rate);
-        if (fires) newLevel = expDecrease(level);
+        newLevel = expDecrease(level);
         break;
       }
       case EnvPhase::Sustain: {
         fires = envelopeRateFires(dsp.globalCounter, static_cast<std::uint8_t>(adsr2 & 0x1F));
-        if (fires) newLevel = expDecrease(level);
+        newLevel = expDecrease(level);
         break;
       }
       case EnvPhase::Release:
@@ -811,33 +815,32 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     newLevel = (gain & 0x7F) << 4;
   } else {
     fires = envelopeRateFires(dsp.globalCounter, static_cast<std::uint8_t>(gain & 0x1F));
-    if (fires) {
-      switch ((gain >> 5) & 0x03) {
-        case 0: newLevel = level - 32; break;         // Linear Decrease
-        case 1: newLevel = expDecrease(level); break;  // Exp Decrease
-        case 2: newLevel = level + 32; break;          // Linear Increase
-        default:                                       // Bent Increase
-          newLevel = level + (v.bentGainRef < 0x600 ? 32 : 8);
-          break;
-      }
+    switch ((gain >> 5) & 0x03) {
+      case 0: newLevel = level - 32; break;          // Linear Decrease
+      case 1: newLevel = expDecrease(level); break;  // Exp Decrease
+      case 2: newLevel = level + 32; break;          // Linear Increase
+      default:                                       // Bent Increase
+        newLevel = level + (v.bentGainRef < 0x600 ? 32 : 8);
+        break;
     }
   }
 
-  if (!fires) {
-    writeEnvx();
-    return v.envelope;
-  }
+  // The Attack->Decay switch fires when the candidate leaves the unsigned 11-bit
+  // range: an attack overshooting 0x7FF, or a decreasing mode driven below zero.
+  // The level itself is clamped, so the overshoot is only visible here.
+  const bool attackToDecay = (v.phase == EnvPhase::Attack) && ((newLevel & ~0x7FF) != 0);
 
-  // The Attack->Decay switch needs the pre-clamp value to exceed 0x7FF (Anomie):
-  // an attack reaching 0x800 clips to 0x7FF and enters Decay. The Bent-Increase
-  // reference is the new value clipped, not clamped, to 11 bits.
-  const bool attackToDecay = (v.phase == EnvPhase::Attack) && (newLevel > 0x7FF);
-  v.bentGainRef = static_cast<std::uint16_t>(newLevel & 0x7FF);
-  v.envelope = clampEnvelope(newLevel);
+  // Everything else waits for the counter: the level takes the candidate, the
+  // Bent-Increase reference records it, and Decay->Sustain reads the level the
+  // update just wrote.
+  if (fires) {
+    v.bentGainRef = static_cast<std::uint16_t>(newLevel & 0x7FF);
+    v.envelope = clampEnvelope(newLevel);
 
-  // Decay->Sustain when the level's upper 3 bits reach the sustain level.
-  if (v.phase == EnvPhase::Decay) {
-    if ((v.envelope >> 8) == ((adsr2 >> 5) & 0x07)) v.phase = EnvPhase::Sustain;
+    // Decay->Sustain when the level's upper 3 bits reach the sustain level.
+    if (v.phase == EnvPhase::Decay) {
+      if ((v.envelope >> 8) == ((adsr2 >> 5) & 0x07)) v.phase = EnvPhase::Sustain;
+    }
   }
   if (attackToDecay) v.phase = EnvPhase::Decay;
 
