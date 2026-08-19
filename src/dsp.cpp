@@ -845,12 +845,16 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
   const bool decayToSustain = (v.phase == EnvPhase::Decay) && ((newLevel & ~0x7FF) == 0) &&
                               ((newLevel >> 8) == sustainBoundary);
 
-  // The counter decides only whether the level takes the candidate, and with it
-  // the Bent-Increase reference.
-  if (fires) {
-    v.bentGainRef = static_cast<std::uint16_t>(newLevel & 0x7FF);
-    v.envelope = clampEnvelope(newLevel);
-  }
+  // The counter decides only whether the level takes the candidate.
+  if (fires) v.envelope = clampEnvelope(newLevel);
+
+  // The Bent-Increase reference is the value the mode computes, saved every
+  // sample whether or not the counter fires — so a voice parked in a rate-0
+  // mode still hands the next Bent-Increase step that mode's own value rather
+  // than the level standing still. It is saved unclipped: a candidate driven
+  // below zero and one carried past 0x7FF both read at or past 0x600 and take
+  // the +8 branch.
+  v.bentGainRef = static_cast<std::uint16_t>(newLevel);
   if (decayToSustain) v.phase = EnvPhase::Sustain;
   if (attackToDecay) v.phase = EnvPhase::Decay;
 

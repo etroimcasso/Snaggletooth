@@ -76,9 +76,11 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // The envelope fields carry the 11-bit level (0..0x7FF), its phase, the 5-sample
 // post-key-on startup countdown (during which the voice outputs silence and
 // neither the envelope nor the stream advances), and the Bent-Increase reference
-// — the previous envelope operation's value clipped to 11 bits, which the GAIN
-// Bent-Increase mode reads to choose its +32/+8 step (a negative prior value
-// clips high, forcing the +8 branch).
+// — the value the selected mode computed last sample, which the GAIN
+// Bent-Increase mode reads to choose its +32/+8 step. Every mode computes that
+// value every sample, so a rate of 0 supplies one while holding the level still,
+// and it is kept unclipped: a value driven below zero or carried past 0x7FF both
+// read at or past 0x600 and force the +8 branch.
 struct VoiceState {
   std::uint16_t brrAddress = 0;
   std::uint8_t brrSampleIndex = 0;

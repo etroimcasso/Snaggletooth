@@ -3,7 +3,7 @@
 //
 // Every expected value is hand-derived from fullsnes's "SNES APU DSP ADSR/Gain
 // Envelope" section (the primary contract): the ADSR fields and steps at lines
-// 2899-2913, the GAIN modes at 2931-2937, the Bent-Increase clipped reference at
+// 2899-2913, the GAIN modes at 2931-2937, the Bent-Increase reference at
 // 2992-2995, ENVX at 2942-2948, and the KON/KOFF registers at 3044-3066. Anomie's
 // S-DSP doc is the cross-check and the carrier of the exact counter scheme (the
 // Modulus[]/Offset[] tables and the (counter+offset)%period fire rule, line 230)
@@ -279,19 +279,82 @@ TEST(Gain, CustomBentIncreaseAddsEightAtOrAboveSixHundred) {
   EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x108);
 }
 
-TEST(Gain, BentIncreaseUsesTheClippedNegativeReference) {
+TEST(Gain, BentIncreaseUsesTheNegativeReference) {
   // "a negative value for the new value will result in the clipped version
   // being greater than 0x600" (fullsnes lines 2992-2995): a Linear Decrease
-  // past 0 saves a reference of (value & 0x7FF) > 0x600, so the following
+  // past 0 saves a negative reference, which reads past 0x600, so the following
   // Bent-Increase sample takes the +8 branch even though the level is 0.
   DspState dsp;
   adsr1(dsp, 0) = 0x00;
   gain(dsp, 0) = 0x90;  // Linear Decrease, rate 16
   placeEnvelope(dsp, 0, EnvPhase::Sustain, 0x10);
   EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0);         // 0x10 - 32 clamps to 0
-  EXPECT_EQ(dsp.voices[0].bentGainRef, 0x7F0);            // (-16) & 0x7FF
+  EXPECT_EQ(dsp.voices[0].bentGainRef, 0xFFF0);           // -16, unclipped
   gain(dsp, 0) = 0xF0;  // switch to Bent Increase
   EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 8);         // +8, not +32, at level 0
+}
+
+// ── The Bent-Increase reference ─────────────────────────────────────────────
+//
+// Bent Increase chooses its step from the value the mode computed last sample,
+// never from the level itself. The mode computes that value every sample, so a
+// rate of 0 — which never lets the level move — still supplies a reference of
+// its own, and a reference driven outside the 11-bit range keeps the sign or the
+// carry that took it there. Each pair below brackets one edge of the comparison.
+
+TEST(BentReference, ARateOfZeroSuppliesTheValueItsModeComputed) {
+  // A Linear Increase parked at rate 0 computes 0x5E0 + 32 = 0x600 every sample
+  // while holding the level still, so the Bent Increase that follows reads a
+  // reference at the boundary and takes +8 — from a level below it.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xC0;  // custom, Linear Increase, rate 0
+  placeEnvelope(dsp, 0, EnvPhase::Sustain, 0x5E0);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x5E0);  // the rate holds the level
+  EXPECT_EQ(dsp.voices[0].bentGainRef, 0x600);
+  gain(dsp, 0) = 0xFF;  // Bent Increase, rate 31
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x5E8);
+}
+
+TEST(BentReference, ARateOfZeroOneStepShortOfTheBoundaryTakesTheLargerStep) {
+  // The bracket to the case above, from the other side and by another mode: an
+  // Exponential Decrease parked at rate 0 over 0x606 computes 0x5FF, one below
+  // the boundary, so the following step is +32 from a level above it.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xA0;  // custom, Exponential Decrease, rate 0
+  placeEnvelope(dsp, 0, EnvPhase::Sustain, 0x606);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x606);
+  EXPECT_EQ(dsp.voices[0].bentGainRef, 0x5FF);
+  gain(dsp, 0) = 0xFF;
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x626);
+}
+
+TEST(BentReference, AReferenceCarriedPastTheRangeReadsPastTheBoundary) {
+  // 0x7E0 + 32 = 0x800 leaves the 11-bit range. The reference keeps the carry,
+  // so it reads past 0x600 and the step is +8; a reference clipped to 11 bits
+  // would read 0x000 and take +32, saturating the level at 0x7FF instead.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xC0;  // custom, Linear Increase, rate 0
+  placeEnvelope(dsp, 0, EnvPhase::Sustain, 0x7E0);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7E0);
+  EXPECT_EQ(dsp.voices[0].bentGainRef, 0x800);
+  gain(dsp, 0) = 0xFF;
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7E8);
+}
+
+TEST(BentReference, AReferenceOneShortOfTheRangeTakesTheSameStep) {
+  // Its bracket: 0x7DF + 32 = 0x7FF stays inside the range and reads past 0x600
+  // on its own, so the pair differs by one in the level and not in the step.
+  DspState dsp;
+  adsr1(dsp, 0) = 0x00;
+  gain(dsp, 0) = 0xC0;
+  placeEnvelope(dsp, 0, EnvPhase::Sustain, 0x7DF);
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7DF);
+  EXPECT_EQ(dsp.voices[0].bentGainRef, 0x7FF);
+  gain(dsp, 0) = 0xFF;
+  EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7E7);
 }
 
 // ── ENVX ────────────────────────────────────────────────────────────────────
@@ -310,8 +373,9 @@ TEST(Envx, HoldsTheHighSevenBitsAndOverwritesWrites) {
 // ── The counter gate ────────────────────────────────────────────────────────
 
 TEST(EnvelopeGate, HoldsTheLevelWhenTheCounterDoesNotFire) {
-  // Between fires the level, phase and reference are untouched. Rate 1 fires
-  // only at counter % 2048 == 0; counter 1 does not fire.
+  // Between fires the level and phase are untouched (the Bent-Increase reference
+  // is not — it follows the mode, not the counter). Rate 1 fires only at
+  // counter % 2048 == 0; counter 1 does not fire.
   DspState dsp;
   adsr1(dsp, 0) = 0x80;  // attack index 0 -> rate 1
   placeEnvelope(dsp, 0, EnvPhase::Attack, 0x40);

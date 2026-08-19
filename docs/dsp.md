@@ -129,6 +129,15 @@ rate of 0: a voice parked at `$420` under Linear Decrease never moves, yet its s
 and the voice enters Sustain, while the same mode parked one lower at `$41F` computes `$3FF` and stays
 in Decay — even though `$41F`'s own upper three bits are the boundary.
 
+**Bent Increase reads that value too.** Its step — +32 below `$600`, +8 at or past it — is chosen from
+the value the selected mode computed on the *previous* sample, never from the current level. Since
+every mode computes that value every sample, a mode parked at a rate of 0 still supplies one: a voice
+held at `$5E0` by a rate-0 Linear Increase computes `$600`, so the Bent Increase that follows takes the
+small step from a level below the boundary. The value is kept whole rather than narrowed to the
+envelope's 11 bits, so one driven below zero and one carried past `$7FF` both read at or past `$600`
+and take +8 — a Linear Decrease that runs off the bottom leaves the level at 0, and the Bent Increase
+after it adds 8, not 32.
+
 **Output.** The enveloped sample is the voice's amplitude — an internal signed value in the range
 `-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit set outputs the
 shared noise level here in place of its interpolated sample. The amplitude feeds the output mixer
