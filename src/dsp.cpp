@@ -301,10 +301,16 @@ EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
     const int writeLeft = clampSigned16(sendLeft + ((firLeft * efb) >> 7)) & ~1;
     const int writeRight = clampSigned16(sendRight + ((firRight * efb) >> 7)) & ~1;
-    echoRam[at(0)] = static_cast<std::uint8_t>(writeLeft & 0xFF);
-    echoRam[at(1)] = static_cast<std::uint8_t>((writeLeft >> 8) & 0xFF);
-    echoRam[at(2)] = static_cast<std::uint8_t>(writeRight & 0xFF);
-    echoRam[at(3)] = static_cast<std::uint8_t>((writeRight >> 8) & 0xFF);
+    // The bytes do not land here: the buffer writes have their own slots — the
+    // left word at T30, the right word at T31 (both references' access charts) —
+    // so the value computed now is latched and the slot runner (or the
+    // frame-at-once caller) performs the write when its slot arrives.
+    dsp.echoWritePending = true;
+    dsp.echoWriteEntry = entry;
+    dsp.echoWriteBytes[0] = static_cast<std::uint8_t>(writeLeft & 0xFF);
+    dsp.echoWriteBytes[1] = static_cast<std::uint8_t>((writeLeft >> 8) & 0xFF);
+    dsp.echoWriteBytes[2] = static_cast<std::uint8_t>(writeRight & 0xFF);
+    dsp.echoWriteBytes[3] = static_cast<std::uint8_t>((writeRight >> 8) & 0xFF);
   }
 
   // Advance the FIR history cursor and the ring index; wrap the index at the
@@ -519,6 +525,13 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
   right = static_cast<std::int16_t>((right * mvolRight) >> 7);
 
   const EchoOutput echo = stepEcho(dsp, ram, echoRam, echoLeft, echoRight);
+  // The frame-at-once path delivers a whole sample in one call, so the latched
+  // echo write lands now — within-sample slot timing has no meaning here.
+  if (dsp.echoWritePending && echoRam != nullptr) {
+    for (int b = 0; b < 4; ++b)
+      echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + b)] = dsp.echoWriteBytes[b];
+  }
+  dsp.echoWritePending = false;
   const int evolLeft = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
   const int evolRight = static_cast<std::int8_t>(dsp[kDspEvolRight]);
   left = clampSigned16(left + ((echo.left * evolLeft) >> 7));
@@ -634,11 +647,25 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
     case 28:
       finalizeRight(dsp);
       break;
+    case 30:
+      // The left echo word lands at its write slot, T30 — the value was computed
+      // when the echo unit ran at T24 and held since.
+      if (dsp.echoWritePending && echoRam != nullptr) {
+        echoRam[dsp.echoWriteEntry] = dsp.echoWriteBytes[0];
+        echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 1)] = dsp.echoWriteBytes[1];
+      }
+      break;
     case 31: {
       // Voice 0's compute runs before the counter, noise and keying updates that
       // share this slot, so its envelope/noise/keying inputs are one update older
       // than voices 1-7's — the hardware's envelope pipeline.
       computeVoiceSlot(dsp, ram, 0, softReset);
+      // The right echo word lands at its write slot, T31.
+      if (dsp.echoWritePending && echoRam != nullptr) {
+        echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 2)] = dsp.echoWriteBytes[2];
+        echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 3)] = dsp.echoWriteBytes[3];
+      }
+      dsp.echoWritePending = false;
       // KON/KOFF load here, keeping the even-sample parity (the poll reads the
       // pre-tick sample index, as the frame-at-once entry did); the keyed voices'
       // next compute is the following frame's, so keying lands one frame later
@@ -719,7 +746,14 @@ void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
   VoiceState& v = dsp.voices[voice];
   v.phase = EnvPhase::Attack;
-  v.konDelay = 5;
+  // The startup countdown. The keying poll's own sample is the first of the five
+  // silent startup samples, and it takes no envelope call for the keyed voice
+  // (voice 0's compute at that slot runs before the poll; voices 1-7 compute in
+  // later slots of the following samples), so the counter covers the remaining
+  // four: four silent calls, then the fifth call after the load takes the first
+  // envelope step. A count of five put the first step one sample late, measured
+  // against the spc_dsp6 key-on tests.
+  v.konDelay = 4;
   // Key-on clears this voice's ENDX bit; a same-sample end-block set does not
   // override the clear, so clearing after the priming decode is correct.
   dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
@@ -755,8 +789,10 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     dsp[voiceRegister(voice, kVoiceEnvx)] = static_cast<std::uint8_t>(v.envelope >> 4);
   };
 
-  // Post-key-on startup: five silent samples during which the level holds at 0
-  // (set at key-on) and neither the envelope nor the stream advances.
+  // Post-key-on startup: the level holds at 0 (set at key-on) and neither the
+  // envelope nor the stream advances while the countdown runs. The call that
+  // takes the counter to 0 is itself silent, so a fresh key-on yields four
+  // silent calls before the first live step (see keyOnVoice for the count).
   if (v.konDelay > 0) {
     --v.konDelay;
     writeEnvx();

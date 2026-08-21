@@ -250,7 +250,38 @@ TEST(SampleSchedule, KeyOnIsPolledAtTheLastSlotOnEvenSamples) {
   sample(dsp, ram);           // an odd sample: the poll does not run
   EXPECT_EQ(dsp.voices[2].konDelay, 0) << "no poll on the odd sample";
   sample(dsp, ram);           // the next (even) sample polls at its T31
-  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "keyed on at the even sample's last slot";
+  EXPECT_EQ(dsp.voices[2].konDelay, 4) << "keyed on at the even sample's last slot";
+}
+
+TEST(SampleSchedule, TheEchoWriteLandsAtItsOwnSlots) {
+  // The echo unit computes its buffer write when it runs at T24, but the bytes
+  // land at the write slots — the left word at T30, the right word at T31
+  // (fullsnes chart rows WrEchoLeft/WrEchoRight; anomie's cycles 29-30) — so a
+  // read of the entry between T24 and T30 still sees the previous sample.
+  Ram ram{};
+  DspState dsp;
+  placeClimbingVoice(dsp, 1);  // a changing amplitude, so each frame's write differs
+  dsp[0x4D] = 0x02;            // EON: voice 1 feeds the echo buffer
+  // ESA and EDL default to 0: the single echo entry sits at $0000-$0003.
+  const std::span<std::uint8_t, 65536> wram{ram};
+
+  for (int n = 0; n < 32; ++n) stepDspCycle(dsp, wram);  // the first (atomic) frame
+
+  const auto word = [&](int lo) { return ram[lo] | (ram[lo + 1] << 8); };
+  const int leftBefore = word(0);
+  const int rightBefore = word(2);
+  while (dsp.slotCursor != 30) {
+    stepDspCycle(dsp, wram);
+    EXPECT_EQ(word(0), leftBefore)
+        << "left word held before T30 (cursor " << int(dsp.slotCursor) << ")";
+    EXPECT_EQ(word(2), rightBefore)
+        << "right word held before T30 (cursor " << int(dsp.slotCursor) << ")";
+  }
+  stepDspCycle(dsp, wram);  // T30 runs
+  EXPECT_NE(word(0), leftBefore) << "the left word landed at T30";
+  EXPECT_EQ(word(2), rightBefore) << "the right word still held at T30";
+  stepDspCycle(dsp, wram);  // T31 runs
+  EXPECT_NE(word(2), rightBefore) << "the right word landed at T31";
 }
 
 // ── Voice 0's output pipeline (one sample behind) ───────────────────────────

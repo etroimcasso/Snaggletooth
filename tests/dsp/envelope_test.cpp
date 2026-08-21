@@ -617,25 +617,31 @@ TEST(SustainBoundary, AdsrModeHoldsDecayWhenTheStepMissesTheSustainLevel) {
 TEST(Keying, KeyOnEntersAttackWithTheStartupCountdown) {
   // "there are 5 'empty' samples before envelope updates and BRR decoding
   // actually begin" (fullsnes lines 3053-3054); KON sets the state to Attack
-  // and the envelope to 0 (3050-3051), and clears the voice's ENDX bit.
+  // and the envelope to 0 (3050-3051), and clears the voice's ENDX bit. The
+  // counter holds 4, not 5: the keying poll's own sample is the first of the
+  // five and takes no envelope call for the keyed voice, so the counter covers
+  // the remaining four (Anomie's numbered startup account, lines 336-358;
+  // the count arbitrated by spc_dsp6's key-on sub-tests).
   Keyable k;
   k.dsp[kEndx] = 0xFF;
   keyOnVoice(k.dsp, k.ram, 0);
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Attack);
   EXPECT_EQ(k.dsp.voices[0].envelope, 0);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 4);
   EXPECT_EQ(k.dsp.voices[0].brrAddress, 0x1000);   // stream primed from the start
   EXPECT_EQ(k.dsp[kEndx] & 0x01, 0);               // this voice's ENDX bit cleared
   EXPECT_EQ(k.dsp[kEndx] & 0xFE, 0xFE);            // the others untouched
 }
 
-TEST(Keying, FiveEmptySamplesPrecedeTheFirstAttackStep) {
-  // The startup outputs five zero samples before the envelope moves.
+TEST(Keying, TheLoadSampleAndFourSilentCallsPrecedeTheFirstAttackStep) {
+  // The five silent startup samples are the load's own sample — which takes no
+  // envelope call for the keyed voice — plus four silent calls; the fifth call
+  // after the load takes the first attack step.
   Keyable k;
   adsr1(k.dsp, 0) = 0x80;  // attack index 0, fires at counter 0
   keyOnVoice(k.dsp, k.ram, 0);
-  for (int n = 0; n < 5; ++n) {
-    EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0) << "startup sample " << n;
+  for (int n = 0; n < 4; ++n) {
+    EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0) << "startup call " << n;
   }
   EXPECT_EQ(k.dsp.voices[0].konDelay, 0);
   EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0x20);  // Attack begins
@@ -665,7 +671,7 @@ TEST(Keying, PollRunsOnEvenSamplesOnly) {
   k.dsp.sampleIndex = 0;  // even -> polled
   pollKeying(k.dsp, k.ram);
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Attack);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 4);
   EXPECT_EQ(k.dsp.internalKon, 0x00);  // consumed
 }
 
@@ -695,19 +701,19 @@ TEST(Keying, AKeyOnHappensOnceWhileTheKonRegisterStaysSet) {
 
   k.dsp.sampleIndex = 0;
   pollKeying(k.dsp, k.ram);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 4);
 
   // Two samples of startup, then the next poll with the register still set.
   stepVoiceEnvelope(k.dsp, 0, false);
   stepVoiceEnvelope(k.dsp, 0, false);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 3);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 2);
 
   k.dsp.sampleIndex = 2;
   pollKeying(k.dsp, k.ram);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 3);  // not re-keyed back to 5
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 2);  // not re-keyed back to 4
 
   // The startup runs out and the envelope leaves 0.
-  for (int n = 0; n < 3; ++n) EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0);
+  for (int n = 0; n < 2; ++n) EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0);
   EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0x20);
   EXPECT_EQ(k.dsp[kKon], 0x01);  // the register still reads back its value
 }

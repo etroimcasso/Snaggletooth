@@ -181,6 +181,15 @@ struct DspState {
   std::int32_t echoSendRight = 0;
   StereoFrame slotFrame{};
 
+  // The echo write in flight: the echo unit computes its feedback value when it
+  // runs at T24, but the buffer bytes land at the write slots — the left word at
+  // T30, the right word at T31 — so a CPU read of the entry between those slots
+  // still sees the old sample. Plain values: the snapshot carries a write caught
+  // between its compute and its slots.
+  bool echoWritePending = false;
+  std::uint16_t echoWriteEntry = 0;
+  std::array<std::uint8_t, 4> echoWriteBytes{};
+
   // Each voice's amplitude, computed at the voice's S3 slot and applied at its
   // S4/S5 volume slots. Voice 0's is prepared at slot T31 for the following frame
   // — the one-update pipeline lag — while voices 1-7 compute and apply within one
