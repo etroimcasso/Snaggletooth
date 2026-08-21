@@ -162,8 +162,18 @@ envelope changes. `KOFF` is read from its register at every poll rather than arm
 set bit keeps releasing the voice until you write a new value. `KON` and `KOFF` are polled every
 second sample (16 kHz).
 
-A block whose header marks it End+Mute releases the voice and drops its envelope to zero the moment
-the voice reaches it; an End+Loop block loops without muting. Both set the voice's `ENDX` bit.
+A voice reads its current block's header from RAM every sample and checks its loop/end bits the same
+sample, whether or not its pitch counter has advanced far enough to decode anything. A header marking
+the block End+Mute releases the voice and drops its envelope to zero; an End+Loop block loops without
+muting. So rewriting a header under a playing voice takes effect on the next sample, including for a
+voice whose pitch is zero and which is decoding nothing at all.
+
+`ENDX` belongs to the decode rather than to that check: the bit is set when the voice reaches a block
+carrying the end flag, which a stopped voice never does.
+
+A freshly keyed-on voice makes no header check until two sample periods after the poll loads the
+key-on. Because the poll sits at a sample's last slot — where voice 0 also reads its header — voice 0
+crosses that point on its second sample after the load and the other voices on their third.
 
 ## The output mixer
 
@@ -273,6 +283,8 @@ snapshot, assign it to restore.
   back one sample behind, and voice 0's output rides one sample behind the others.
 - **A released voice keeps decoding.** Key-off changes only the envelope. `ENDX` bits can be set by a
   voice you have keyed off, because its stream is still running.
+- **A stopped voice still reads its header.** Setting `VxPITCH` to zero stops the decode, not the
+  per-sample header read, so a block that becomes End+Mute underneath such a voice still releases it.
 - **`VxOUTX` is the high byte of the internal amplitude.** The full amplitude is `-$4000`…`+$3FFF`;
   the register carries `-128`…`+127`.
 - **`FLG` starts at `$E0`.** On reset the DSP boots muted, soft-reset, with echo writes disabled and

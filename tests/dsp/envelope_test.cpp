@@ -18,6 +18,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include <gtest/gtest.h>
 
@@ -32,6 +33,7 @@ using snaggletooth::keyOffVoice;
 using snaggletooth::keyOnVoice;
 using snaggletooth::nextGlobalCounter;
 using snaggletooth::pollKeying;
+using snaggletooth::stepDspSample;
 using snaggletooth::stepVoiceEnvelope;
 using snaggletooth::tickDspSample;
 
@@ -742,6 +744,96 @@ TEST(Keying, KoffActsOnEveryPollWhileItsBitStays) {
   k.dsp.sampleIndex = 2;
   pollKeying(k.dsp, k.ram);
   EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Release);  // the bit still acts
+}
+
+// ── The per-sample BRR header check ─────────────────────────────────────────
+
+TEST(BrrHeaderCheck, AStoppedVoiceStillReadsItsHeaderAndReleasesOnEndMute) {
+  // Step V3b loads "the BRR header byte (every time)" and V3c checks its 'e' and
+  // 'l' bits "to determine if the voice ends" (Anomie 80-88), both every sample.
+  // Header code 1 is End+Mute: "Release, Env=000h" (fullsnes 2712). Neither the
+  // load nor the check waits on the pitch counter reaching a new sample, so a
+  // voice sitting still sees a block that turns End+Mute underneath it.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  gain(k.dsp, 0) = 0x7F;  // direct gain: a level that holds still at 7F0h
+  keyOnVoice(k.dsp, ram, 0);
+  for (int n = 0; n < 8; ++n) (void)stepDspSample(k.dsp, ram);
+  ASSERT_EQ(envx(k.dsp, 0), 0x7F);
+  const std::uint8_t restingIndex = k.dsp.voices[0].brrSampleIndex;
+
+  k.ram[0x1000] = 0xC1;  // shift 12, filter 0, end set and loop clear
+  (void)stepDspSample(k.dsp, ram);
+
+  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(k.dsp.voices[0].envelope, 0);
+  EXPECT_EQ(k.dsp.voices[0].brrSampleIndex, restingIndex);  // the pitch is 0: nothing decoded
+
+  // Voice 0 computes at the last slot of a sample and publishes VxENVX at slot 5
+  // of the next one, so the register carries the released level a sample later.
+  (void)stepDspSample(k.dsp, ram);
+  EXPECT_EQ(envx(k.dsp, 0), 0x00);
+}
+
+TEST(BrrHeaderCheck, AnEndLoopHeaderLeavesAStoppedVoiceAlone) {
+  // Code 3 is End+Loop, which loops without muting (fullsnes 2714); only code 1
+  // releases the voice.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  gain(k.dsp, 0) = 0x7F;
+  keyOnVoice(k.dsp, ram, 0);
+  for (int n = 0; n < 8; ++n) (void)stepDspSample(k.dsp, ram);
+
+  k.ram[0x1000] = 0xC3;  // end set, loop set
+  (void)stepDspSample(k.dsp, ram);
+
+  EXPECT_NE(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(envx(k.dsp, 0), 0x7F);
+}
+
+TEST(BrrHeaderCheck, TheCheckGoesLiveTwoSamplePeriodsAfterTheKeyOnLoad) {
+  // Anomie's numbered startup account has the sample after the load read the
+  // start address and perform "no BRR decoding or header checks" (345-347). The
+  // point the check resumes is two sample periods past the load, and the load
+  // sits at a sample's last slot — which is also where voice 0 reads its header.
+  // So voice 0 crosses that point on its second compute after the load, while a
+  // voice reading earlier in the sample crosses it on its third.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  k.ram[0x1000] = 0xC1;  // End+Mute before either voice is keyed on
+  gain(k.dsp, 0) = 0x7F;
+  gain(k.dsp, 1) = 0x7F;
+  keyOnVoice(k.dsp, ram, 0);
+  keyOnVoice(k.dsp, ram, 1);
+
+  (void)stepDspSample(k.dsp, ram);  // first compute: neither voice checks
+  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Attack);
+  EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Attack);
+
+  (void)stepDspSample(k.dsp, ram);  // second: voice 0 checks, voice 1 does not
+  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Attack);
+
+  (void)stepDspSample(k.dsp, ram);  // third: voice 1 checks
+  EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Release);
+}
+
+TEST(BrrHeaderCheck, TheCheckLeavesEndxToTheDecode) {
+  // ENDX belongs to the decode: the bit is set when the voice reaches a block
+  // carrying the end flag (Anomie 326-328). The header check releases the voice
+  // without decoding anything, so it leaves the bit where the decode left it.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  gain(k.dsp, 0) = 0x7F;
+  keyOnVoice(k.dsp, ram, 0);
+  for (int n = 0; n < 8; ++n) (void)stepDspSample(k.dsp, ram);
+  ASSERT_EQ(k.dsp[kEndx] & 0x01, 0);
+
+  k.ram[0x1000] = 0xC1;
+  (void)stepDspSample(k.dsp, ram);
+
+  ASSERT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0);
 }
 
 }  // namespace

@@ -157,6 +157,17 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
   return step > kMaxPitchStep ? kMaxPitchStep : step;
 }
 
+// The startup countdown a key-on arms. Its first call is the sample after the
+// keying poll's own, which loads the start address and makes no header check.
+inline constexpr std::uint8_t kKeyOnStartupCalls = 4;
+
+// A BRR header's low two bits are its end/loop code. Code 1 — end set, loop clear
+// — is End+Mute: the voice releases and its level drops to 0. Code 3 loops without
+// muting, and codes 0 and 2 run on into the next block.
+[[nodiscard]] bool headerIsEndMute(std::uint8_t header) noexcept {
+  return (header & 0x03) == 0x01;
+}
+
 // Advances the shared noise generator one step: a 15-bit right rotation whose new
 // top bit is bit0 XOR bit1 of the old level. The level is held as the signed
 // sample it outputs (-4000h..+3FFFh), so the step works over its 15-bit pattern.
@@ -195,7 +206,7 @@ bool decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   bool enteredEndMute = false;
   if (v.brrSampleIndex == 0 && (header & 0x01) != 0) {
     dsp[kDspEndx] |= static_cast<std::uint8_t>(1u << voice);
-    enteredEndMute = (header & 0x02) == 0;  // end set, loop clear = code 1
+    enteredEndMute = headerIsEndMute(header);
   }
   const std::uint8_t byte =
       ram[static_cast<std::uint16_t>(v.brrAddress + 1 + v.brrSampleIndex / 2)];
@@ -425,6 +436,20 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   VoiceState& v = dsp.voices[voice];
   const std::uint32_t step = pitchStep(dsp, voice, prevAmplitude);
 
+  // The header byte is loaded from RAM every sample, whatever the pitch counter is
+  // doing, and its end/loop bits are read the same sample. So a block that turns
+  // End+Mute under a voice whose stream has stopped still releases it, which the
+  // decode below cannot see — it reports only a header it reached.
+  //
+  // The check goes live two sample periods after the keying poll loads a key-on.
+  // The poll sits at the last slot of a sample, and that is also where voice 0
+  // reads its header, so voice 0 crosses that point on its second compute after
+  // the load while the voices reading earlier in the sample cross it on their
+  // third. The counter stops at the fifth compute, which is past both.
+  const int computeSinceKeyOn = kKeyOnStartupCalls + 1 - v.konDelay;
+  const bool headerEndMute = computeSinceKeyOn >= (voice == 0 ? 2 : 3) &&
+                             headerIsEndMute(ram[v.brrAddress]);
+
   int amplitude;
   if (softReset) {
     // FLG bit 7 keys every voice off and forces its envelope to 0 each sample. BRR
@@ -440,11 +465,12 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     amplitude = 0;
   } else if (v.konDelay > 0) {
     // Startup: the voice is silent, and neither the stream nor the envelope
-    // advances past the countdown (stepVoiceEnvelope decrements it).
-    stepVoiceEnvelope(dsp, voice, false);
+    // advances past the countdown (stepVoiceEnvelope decrements it). The header
+    // check still runs — the hardware preloads BRR groups through these samples.
+    stepVoiceEnvelope(dsp, voice, headerEndMute);
     amplitude = 0;
   } else {
-    const bool endMute = advanceVoiceStream(dsp, ram, voice, step);
+    const bool endMute = advanceVoiceStream(dsp, ram, voice, step) || headerEndMute;
     // A voice whose NON bit is set outputs the shared noise level in place of its
     // interpolated BRR sample; the stream still advanced above, so decoding and
     // ENDX are unaffected.
@@ -753,7 +779,7 @@ void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // four: four silent calls, then the fifth call after the load takes the first
   // envelope step. A count of five put the first step one sample late, measured
   // against the spc_dsp6 key-on tests.
-  v.konDelay = 4;
+  v.konDelay = kKeyOnStartupCalls;
   // Key-on clears this voice's ENDX bit; a same-sample end-block set does not
   // override the clear, so clearing after the priming decode is correct.
   dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
@@ -789,6 +815,19 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     dsp[voiceRegister(voice, kVoiceEnvx)] = static_cast<std::uint8_t>(v.envelope >> 4);
   };
 
+  // A BRR End+Mute block moves the voice to Release and drops the level to 0
+  // immediately (the documented -0x800 step reaches 0 from any level). It is read
+  // before the startup countdown below, because the header check that raises it
+  // goes live while the countdown still has samples left to run.
+  if (brrEndMute) {
+    v.phase = EnvPhase::Release;
+    v.envelope = 0;
+    v.bentGainRef = 0;
+    if (v.konDelay > 0) --v.konDelay;
+    writeEnvx();
+    return 0;
+  }
+
   // Post-key-on startup: the level holds at 0 (set at key-on) and neither the
   // envelope nor the stream advances while the countdown runs. The call that
   // takes the counter to 0 is itself silent, so a fresh key-on yields four
@@ -797,16 +836,6 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     --v.konDelay;
     writeEnvx();
     return v.envelope;
-  }
-
-  // A BRR End+Mute block moves the voice to Release and drops the level to 0
-  // immediately (the documented -0x800 step reaches 0 from any level).
-  if (brrEndMute) {
-    v.phase = EnvPhase::Release;
-    v.envelope = 0;
-    v.bentGainRef = 0;
-    writeEnvx();
-    return 0;
   }
 
   const std::uint8_t adsr1 = dsp[voiceRegister(voice, kVoiceAdsr1)];
