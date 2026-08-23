@@ -65,6 +65,10 @@ void placeAmplitude1294(DspState& dsp, std::size_t v, std::uint8_t left = 0x40,
   dsp.voices[v].pitchCounter = 0;
   dsp.voices[v].phase = EnvPhase::Sustain;
   dsp.voices[v].konDelay = 0;
+  // The level scaling a sample is the standing one, so a voice placed mid-play
+  // carries its Direct-Gain level from the start rather than reaching it on the
+  // first step.
+  dsp.voices[v].envelope = 0x7F0;
   reg(dsp, v, 0x07) = 0x7F;   // Direct Gain -> envelope 7F0h
   reg(dsp, v, 0x00) = left;
   reg(dsp, v, 0x01) = right;
@@ -143,6 +147,7 @@ TEST(Non, SubstitutesTheNoiseLevelForTheInterpolatedSample) {
   dsp.voices[0].pitchCounter = 0;
   dsp.voices[0].phase = EnvPhase::Sustain;
   dsp.voices[0].konDelay = 0;
+  dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain -> envelope 7F0h
 
   dsp[kNon] = 0x01;  // voice 0 outputs noise
@@ -168,6 +173,7 @@ TEST(Non, IgnoresPitchAndInterpolation) {
   dsp.voices[0].pitchCounter = 0x0400;  // interpolation index 40h, mid-window
   dsp.voices[0].phase = EnvPhase::Sustain;
   dsp.voices[0].konDelay = 0;
+  dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   reg(dsp, 0, 0x07) = 0x7F;
   dsp[kNon] = 0x01;
   step(dsp, ram);
@@ -189,6 +195,7 @@ TEST(Non, EndMuteBlockStillTerminatesNoise) {
   reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain
   dsp.voices[0].phase = EnvPhase::Sustain;
   dsp.voices[0].konDelay = 0;
+  dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   dsp.voices[0].brrAddress = 0x1000;
   dsp.voices[0].brrSampleIndex = 15;  // one step from the block boundary
   reg(dsp, 0, 0x02) = 0x00;  // unity pitch
@@ -199,8 +206,10 @@ TEST(Non, EndMuteBlockStillTerminatesNoise) {
   step(dsp, ram);  // crosses into End+Mute: the envelope terminates at once
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);
-  // Voice 0's VxOUTX becomes readable at a slot that falls in the next sample, so
-  // it reflects the silenced amplitude one sample after the envelope zeroes.
+  // The sample that zeroes the envelope is still scaled by the level standing
+  // when it was taken, so silence reaches the amplitude on the sample after; and
+  // voice 0's VxOUTX becomes readable at a slot falling in the sample after that.
+  step(dsp, ram);
   step(dsp, ram);
   EXPECT_EQ(outx(dsp, 0), 0x00);  // noise silenced with the envelope
 }
@@ -302,6 +311,7 @@ TEST(Master, TheMinus128ProductWraps) {
     dsp.voices[v].pitchCounter = 0;
     dsp.voices[v].phase = EnvPhase::Sustain;
     dsp.voices[v].konDelay = 0;
+    dsp.voices[v].envelope = 0x7F0;  // the standing level this sample is scaled by
     reg(dsp, v, 0x07) = 0x7F;  // Direct Gain -> amplitude 7768
     reg(dsp, v, 0x00) = 0x81;  // VxVOLL -127 -> sum clamps to -8000h
   }
@@ -397,6 +407,7 @@ TEST(SoftReset, IsPolledEverySampleUnlikeKeyOff) {
     dsp.voices[0].pitchCounter = 0;
     dsp.voices[0].phase = EnvPhase::Sustain;
     dsp.voices[0].konDelay = 0;
+    dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
     reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain, sounds every sample
     reg(dsp, 0, 0x00) = 0x7F;
     dsp[kMvolLeft] = 0x7F;

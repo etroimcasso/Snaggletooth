@@ -54,6 +54,9 @@ void placeSteadyVoice(DspState& dsp, std::size_t v, std::uint8_t left = 0x40,
   dsp.voices[v].pitchCounter = 0;
   dsp.voices[v].phase = EnvPhase::Sustain;
   dsp.voices[v].konDelay = 0;
+  // A sample is scaled by the level already standing, so a steady voice carries
+  // its Direct-Gain level from the placement rather than reaching it on step one.
+  dsp.voices[v].envelope = 0x7F0;
   reg(dsp, v, 0x07) = 0x7F;  // Direct Gain
   reg(dsp, v, 0x00) = left;
   reg(dsp, v, 0x01) = right;
@@ -302,6 +305,29 @@ TEST(SampleSchedule, TheKeyingLoadPrecedesVoiceZerosComputeAtTheLastSlot) {
       << "voice 0's compute followed the load in the shared slot";
   EXPECT_EQ(dsp.voices[2].konDelay, 5)
       << "voice 2's first startup call is still ahead of it";
+}
+
+TEST(SampleSchedule, AVoiceIsScaledByTheLevelStandingBeforeItsUpdate) {
+  // A voice's sample is scaled by the level its previous update left behind, and
+  // the update runs after — so a moving envelope reaches the output one sample
+  // after the step producing it. Anomie's V3c applies the volume envelope before
+  // updating it, and his per-sample key-on account states the consequence at #5:
+  // envelope updating begins there, yet "the sample output is still '0000',
+  // because of the order in which voice operations are performed".
+  Ram ram{};
+  DspState dsp;
+  placeClimbingVoice(dsp, 1);  // ADSR Attack at rate 15: +1024 a sample from 0
+  dsp[0x0C] = 0x7F;            // MVOLL = +127
+  dsp[0x1C] = 0x7F;            // MVOLR = +127
+
+  const StereoFrame first = sample(dsp, ram);
+  EXPECT_EQ(first.left, 0) << "scaled by the zero it started from, not by its own step";
+  ASSERT_EQ(dsp.voices[1].envelope, 1024) << "while the step itself ran";
+
+  const StereoFrame second = sample(dsp, ram);
+  EXPECT_EQ(dsp.voiceAmplitude[1], (1305 * 1024) >> 11)
+      << "the next sample carries the level the first one computed";
+  EXPECT_GT(second.left, 0);
 }
 
 TEST(SampleSchedule, TheEchoWriteLandsAtItsOwnSlots) {

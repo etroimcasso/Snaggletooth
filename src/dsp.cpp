@@ -478,8 +478,13 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // ENDX are unaffected.
     const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
     const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
-    const std::uint16_t envelope = stepVoiceEnvelope(dsp, voice, endMute);
-    amplitude = (sample * static_cast<int>(envelope)) >> 11;
+    // The level scaling this sample is the one already standing; the update below
+    // is what the next sample reads. So a voice leaving its startup samples emits
+    // one more silent sample as its envelope begins moving, and a level in motion
+    // reaches the output a sample after the register driving it is read.
+    const auto envelope = static_cast<int>(v.envelope);
+    amplitude = (sample * envelope) >> 11;
+    stepVoiceEnvelope(dsp, voice, endMute);
   }
 
   // VxOUTX returns the high byte of the 15-bit amplitude (-128..+127).

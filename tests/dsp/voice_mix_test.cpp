@@ -80,6 +80,10 @@ void placeAmplitudeVoice(DspState& dsp, std::size_t v, std::int16_t older,
   dsp.voices[v].pitchCounter = 0;   // index 0, and pitch 0 keeps it stationary
   dsp.voices[v].phase = EnvPhase::Sustain;  // any non-Release phase; Direct Gain ignores it
   dsp.voices[v].konDelay = 0;
+  // A mid-play voice already stands at its Direct-Gain level: the level scaling a
+  // sample is the one the previous sample's update left, so the standing level is
+  // part of the placement rather than something the first step establishes.
+  dsp.voices[v].envelope = static_cast<std::uint16_t>((directGain & 0x7F) << 4);
   gain(dsp, v) = directGain;        // bit 7 clear -> Direct Gain, level (gain&7Fh)<<4
   volLeft(dsp, v) = left;
   volRight(dsp, v) = right;
@@ -227,15 +231,19 @@ TEST(OutputStage, EnteringAnEndMuteBlockReleasesTheVoice) {
 
 // ── Key-on startup through the frame loop ───────────────────────────────────
 
-TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
+TEST(OutputStage, KeyOnIsSilentForSixSamplesThenSounds) {
   // "there are 5 'empty' samples before envelope updates and BRR decoding
   // actually begin" (fullsnes line 3053-3055) — the keying load precedes voice
   // 0's compute in the slot they share, so the keying sample itself takes the
   // first of the five silent calls and the following four samples the rest.
-  // The sixth call takes the first envelope step, and voice 0's output rides
-  // one sample behind — its amplitude is computed at the last slot of a sample
-  // and applied at the next sample's start — so its first sounding frame is
-  // the seventh after the keying frame began.
+  // The sixth call takes the first envelope step and still emits silence: the
+  // level scaling a sample is the standing one, which is the zero key-on left
+  // (anomie's per-sample account #5, "the sample output is still '0000',
+  // because of the order in which voice operations are performed"); #6 carries
+  // the first data sample. Voice 0's output rides one sample behind — its
+  // amplitude is computed at the last slot of a sample and applied at the next
+  // sample's start — so its first sounding frame is the eighth after the
+  // keying frame began.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77});
@@ -255,12 +263,12 @@ TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
   const StereoFrame first = stepDspSample(dsp, ram_span);  // poll keys on; startup begins
   EXPECT_EQ(first.left, 0);
   EXPECT_EQ(first.right, 0);
-  for (int sample = 2; sample <= 6; ++sample) {
+  for (int sample = 2; sample <= 7; ++sample) {
     const StereoFrame f = stepDspSample(dsp, ram_span);
     EXPECT_EQ(f.left, 0) << "startup sample " << sample;
     EXPECT_EQ(f.right, 0) << "startup sample " << sample;
   }
-  const StereoFrame sounding = stepDspSample(dsp, ram_span);  // seventh sample sounds
+  const StereoFrame sounding = stepDspSample(dsp, ram_span);  // eighth sample sounds
   EXPECT_GT(sounding.left, 0);
   EXPECT_LT(sounding.right, 0);                                // the inverted right channel
 }

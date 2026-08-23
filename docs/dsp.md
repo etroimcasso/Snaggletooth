@@ -138,10 +138,13 @@ envelope's 11 bits, so one driven below zero and one carried past `$7FF` both re
 and take +8 — a Linear Decrease that runs off the bottom leaves the level at 0, and the Bent Increase
 after it adds 8, not 32.
 
-**Output.** The enveloped sample is the voice's amplitude — an internal signed value in the range
-`-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit set outputs the
-shared noise level here in place of its interpolated sample. The amplitude feeds the output mixer
-(below), and it is also the value the next voice's pitch modulation reads.
+**Output.** A sample is scaled by the level already standing — the one the voice's previous envelope
+update left behind — and this sample's update runs after that scaling. So a level in motion reaches
+the output one sample after the step producing it, and a level that is holding still is
+indistinguishable either way. The scaled sample is the voice's amplitude — an internal signed value
+in the range `-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit
+set outputs the shared noise level here in place of its interpolated sample. The amplitude feeds the
+output mixer (below), and it is also the value the next voice's pitch modulation reads.
 
 ## Key-on and key-off
 
@@ -150,8 +153,10 @@ from the source's start address, and its end flag clears. There are **five empty
 key-on before the envelope and decoding begin. The keying poll runs at a sample's last slot, *before*
 voice 0's envelope compute in that same slot — so voice 0's first silent sample is the poll's own
 while voices 1-7 take theirs starting the next sample, and the sixth envelope call after the load
-takes the first step. That shared-slot asymmetry, together with `VxENVX`'s one-sample read-back lag
-(below), is what makes all eight voices' key-on startup read identically through `VxENVX`.
+takes the first step. That step's own sample is still silent, because a sample is scaled by the level
+standing before the update (above) and that level is the zero the key-on set; the first sounding
+sample is the one after it. The shared-slot asymmetry, together with `VxENVX`'s one-sample read-back
+lag (below), is what makes all eight voices' key-on startup read identically through `VxENVX`.
 
 A key-on takes effect on the write, and happens once. The value written arms the next poll; that poll
 starts the armed voices and disarms itself. So a `KON` bit left set does not start the voice again,

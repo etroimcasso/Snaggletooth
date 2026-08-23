@@ -74,6 +74,9 @@ void soundingVoice(DspState& dsp, std::size_t v, std::uint8_t left, std::uint8_t
   dsp.voices[v].pitchCounter = 0;
   dsp.voices[v].phase = EnvPhase::Sustain;
   dsp.voices[v].konDelay = 0;
+  // Mid-play means the level is already standing: a sample is scaled by the level
+  // the previous sample's update left behind.
+  dsp.voices[v].envelope = 0x7F0;
   dsp[v * 0x10 + 0x07] = 0x7F;  // VxGAIN: Direct Gain, level 7F0h every sample
   dsp[v * 0x10 + 0x00] = left;  // VxVOLL
   dsp[v * 0x10 + 0x01] = right; // VxVOLR
