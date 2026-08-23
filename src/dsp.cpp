@@ -157,9 +157,11 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
   return step > kMaxPitchStep ? kMaxPitchStep : step;
 }
 
-// The startup countdown a key-on arms. Its first call is the sample after the
-// keying poll's own, which loads the start address and makes no header check.
-inline constexpr std::uint8_t kKeyOnStartupCalls = 4;
+// The startup countdown a key-on arms — the documented five empty samples. The
+// keying poll precedes voice 0's compute in the slot they share, so the load's
+// own slot is the keyed voice's first silent startup call for voice 0, while
+// voices 1-7 take theirs in the following samples.
+inline constexpr std::uint8_t kKeyOnStartupCalls = 5;
 
 // A BRR header's low two bits are its end/loop code. Code 1 — end set, loop clear
 // — is End+Mute: the voice releases and its level drops to 0. Code 3 loops without
@@ -442,12 +444,12 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   // decode below cannot see — it reports only a header it reached.
   //
   // The check goes live two sample periods after the keying poll loads a key-on.
-  // The poll sits at the last slot of a sample, and that is also where voice 0
-  // reads its header, so voice 0 crosses that point on its second compute after
-  // the load while the voices reading earlier in the sample cross it on their
-  // third. The counter stops at the fifth compute, which is past both.
+  // With the load preceding voice 0's compute in the slot they share, the load's
+  // slot is every voice's reference compute and the cutoff is a uniform count:
+  // live from the third compute after (and including) the load's own sample.
+  // The counter stops at the sixth compute, which is past it for every voice.
   const int computeSinceKeyOn = kKeyOnStartupCalls + 1 - v.konDelay;
-  const bool headerEndMute = computeSinceKeyOn >= (voice == 0 ? 2 : 3) &&
+  const bool headerEndMute = computeSinceKeyOn >= 3 &&
                              headerIsEndMute(ram[v.brrAddress]);
 
   int amplitude;
@@ -648,13 +650,18 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
   for (std::size_t voice = 1; voice < 8; ++voice)
     if (kVoiceS3Slot[voice] == slot) computeVoiceSlot(dsp, ram, voice, softReset);
 
-  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order; the
-  // computed OUTX/ENVX bytes become readable at the S8/S9 slots.
+  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order. The
+  // computed OUTX byte becomes readable at the S8 slot; ENVX carries one further
+  // pipeline stage — its S9 slot writes the value computed one sample earlier and
+  // stages the fresh one (see DspState::envxStage).
   for (std::size_t voice = 0; voice < 8; ++voice) {
     if (kVoiceS4Slot[voice] == slot) applyVoiceLeft(dsp, voice);
     if (kVoiceS5Slot[voice] == slot) applyVoiceRight(dsp, voice);
     if (kVoiceS8Slot[voice] == slot) dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
-    if (kVoiceS9Slot[voice] == slot) dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.preparedEnvx[voice];
+    if (kVoiceS9Slot[voice] == slot) {
+      dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.envxStage[voice];
+      dsp.envxStage[voice] = dsp.preparedEnvx[voice];
+    }
   }
 
   switch (slot) {
@@ -682,9 +689,15 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       }
       break;
     case 31: {
-      // Voice 0's compute runs before the counter, noise and keying updates that
-      // share this slot, so its envelope/noise/keying inputs are one update older
-      // than voices 1-7's — the hardware's envelope pipeline.
+      // The KON/KOFF load runs BEFORE voice 0's compute in the slot they share
+      // (the poll keeps the even-sample parity — it reads the pre-tick sample
+      // index, as the frame-at-once entry did). A keyed voice 0 therefore takes
+      // this very slot as the first of its five silent startup calls, which is
+      // what makes the eight voices' key-on startup read-uniform through VxENVX
+      // (spc_dsp6 `KON/envx during kon`) while voice 0's counter/noise inputs
+      // stay one update older than voices 1-7's — the hardware's envelope
+      // pipeline.
+      pollKeying(dsp, ram);
       computeVoiceSlot(dsp, ram, 0, softReset);
       // The right echo word lands at its write slot, T31.
       if (dsp.echoWritePending && echoRam != nullptr) {
@@ -692,11 +705,6 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
         echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 3)] = dsp.echoWriteBytes[3];
       }
       dsp.echoWritePending = false;
-      // KON/KOFF load here, keeping the even-sample parity (the poll reads the
-      // pre-tick sample index, as the frame-at-once entry did); the keyed voices'
-      // next compute is the following frame's, so keying lands one frame later
-      // than the frame-at-once model and voice 0 one load behind voices 1-7.
-      pollKeying(dsp, ram);
       if (envelopeRateFires(dsp.globalCounter, dsp[kDspFlg] & kFlgNoiseRate))
         dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
       tickDspSample(dsp);
@@ -772,13 +780,13 @@ void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
   VoiceState& v = dsp.voices[voice];
   v.phase = EnvPhase::Attack;
-  // The startup countdown. The keying poll's own sample is the first of the five
-  // silent startup samples, and it takes no envelope call for the keyed voice
-  // (voice 0's compute at that slot runs before the poll; voices 1-7 compute in
-  // later slots of the following samples), so the counter covers the remaining
-  // four: four silent calls, then the fifth call after the load takes the first
-  // envelope step. A count of five put the first step one sample late, measured
-  // against the spc_dsp6 key-on tests.
+  // The startup countdown — the documented five empty samples, uniform for every
+  // voice. The poll precedes voice 0's compute in the slot they share, so voice
+  // 0's first silent call is the load's own slot and voices 1-7's follow in the
+  // next samples; the count of five plus that shared-slot asymmetry is exactly
+  // what makes the eight voices' startup read-uniform through VxENVX
+  // (spc_dsp6 `KON/envx during kon`) while keeping voice 0's first live compute
+  // at the instant `Envelope/hidden env 0 at kon` pins.
   v.konDelay = kKeyOnStartupCalls;
   // Key-on clears this voice's ENDX bit; a same-sample end-block set does not
   // override the clear, so clearing after the priming decode is correct.
@@ -830,7 +838,7 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
 
   // Post-key-on startup: the level holds at 0 (set at key-on) and neither the
   // envelope nor the stream advances while the countdown runs. The call that
-  // takes the counter to 0 is itself silent, so a fresh key-on yields four
+  // takes the counter to 0 is itself silent, so a fresh key-on yields five
   // silent calls before the first live step (see keyOnVoice for the count).
   if (v.konDelay > 0) {
     --v.konDelay;

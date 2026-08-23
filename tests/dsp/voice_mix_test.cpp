@@ -229,12 +229,13 @@ TEST(OutputStage, EnteringAnEndMuteBlockReleasesTheVoice) {
 
 TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
   // "there are 5 'empty' samples before envelope updates and BRR decoding
-  // actually begin" (fullsnes line 3053-3055) — the keying sample itself is the
-  // first of them, and the countdown covers the remaining four. A KON on an even
-  // sample keys the voice on; the five startup frames are silent. Voice 0's
-  // output rides one sample behind — its amplitude is computed at the last slot
-  // of a sample and applied at the next sample's start — so its first sounding
-  // frame is the sixth after the keying frame.
+  // actually begin" (fullsnes line 3053-3055) — the keying load precedes voice
+  // 0's compute in the slot they share, so the keying sample itself takes the
+  // first of the five silent calls and the following four samples the rest.
+  // The sixth call takes the first envelope step, and voice 0's output rides
+  // one sample behind — its amplitude is computed at the last slot of a sample
+  // and applied at the next sample's start — so its first sounding frame is
+  // the seventh after the keying frame began.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77});
@@ -254,12 +255,12 @@ TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
   const StereoFrame first = stepDspSample(dsp, ram_span);  // poll keys on; startup begins
   EXPECT_EQ(first.left, 0);
   EXPECT_EQ(first.right, 0);
-  for (int sample = 2; sample <= 5; ++sample) {
+  for (int sample = 2; sample <= 6; ++sample) {
     const StereoFrame f = stepDspSample(dsp, ram_span);
     EXPECT_EQ(f.left, 0) << "startup sample " << sample;
     EXPECT_EQ(f.right, 0) << "startup sample " << sample;
   }
-  const StereoFrame sounding = stepDspSample(dsp, ram_span);  // sixth sample sounds
+  const StereoFrame sounding = stepDspSample(dsp, ram_span);  // seventh sample sounds
   EXPECT_GT(sounding.left, 0);
   EXPECT_LT(sounding.right, 0);                                // the inverted right channel
 }

@@ -147,9 +147,11 @@ shared noise level here in place of its interpolated sample. The amplitude feeds
 
 Writing a `KON` bit starts a voice: its envelope resets to zero, it enters Attack, its stream restarts
 from the source's start address, and its end flag clears. There are **five empty samples** at a
-key-on before the envelope and decoding begin — the sample whose poll starts the voice is the first
-of them — so a voice you key on is silent for five samples, then sounds. The fifth sample after the
-poll's own takes the first envelope step.
+key-on before the envelope and decoding begin. The keying poll runs at a sample's last slot, *before*
+voice 0's envelope compute in that same slot — so voice 0's first silent sample is the poll's own
+while voices 1-7 take theirs starting the next sample, and the sixth envelope call after the load
+takes the first step. That shared-slot asymmetry, together with `VxENVX`'s one-sample read-back lag
+(below), is what makes all eight voices' key-on startup read identically through `VxENVX`.
 
 A key-on takes effect on the write, and happens once. The value written arms the next poll; that poll
 starts the armed voices and disarms itself. So a `KON` bit left set does not start the voice again,
@@ -172,8 +174,9 @@ voice whose pitch is zero and which is decoding nothing at all.
 carrying the end flag, which a stopped voice never does.
 
 A freshly keyed-on voice makes no header check until two sample periods after the poll loads the
-key-on. Because the poll sits at a sample's last slot — where voice 0 also reads its header — voice 0
-crosses that point on its second sample after the load and the other voices on their third.
+key-on. The load precedes voice 0's compute in the slot they share, so the load's slot is every
+voice's first compute and the cutoff is a uniform count: the check is live from each voice's third
+compute after (and including) the load's own sample.
 
 ## The output mixer
 
@@ -241,14 +244,16 @@ counter's residue mod 32 numbers them:
 | T24 | The echo unit reads its buffer, filters, and computes its feedback value. |
 | T27 / T28 | The left / right output: `MVOLL`+`EVOLL` then `MVOLR`+`EVOLR`, then the mute gate. |
 | T30 / T31 | The echo write lands: the left word at T30, the right word at T31. |
-| T31 | Voice 0 computes; `KON`/`KOFF` are polled (even samples); the global counter and noise step. |
+| T31 | `KON`/`KOFF` are polled (even samples), then voice 0 computes; the global counter and noise step. |
 
 Three consequences are worth knowing:
 
 - **`VxOUTX` and `VxENVX` lag their compute.** A voice computes its amplitude at its own slot but does
-  not publish `VxOUTX` (and then `VxENVX`) into the register file until a few slots later. A CPU read
-  in between returns the *previous* sample's value, and a CPU write in that window overwrites the
-  pending one — the hardware's read-back delay.
+  not publish `VxOUTX` into the register file until a few slots later; a CPU read in between returns
+  the *previous* sample's value, and a CPU write in that window overwrites the pending one — the
+  hardware's read-back delay. **`VxENVX` lags one sample further:** its publish slot writes the value
+  the envelope computed one sample earlier, so a CPU read of `VxENVX` is always a full sample behind
+  the envelope itself.
 - **Voice 0's output rides one sample behind voices 1–7.** Voice 0 computes at the last slot (T31) and
   its result is applied at the *next* sample's first slots, so its envelope, noise, and keying inputs
   are one update older than the other voices' for the same delivered frame. Its first sample from a
@@ -259,8 +264,9 @@ Three consequences are worth knowing:
   still sees the previous sample there.
 
 This intra-sample schedule is derived from the S-DSP timing charts; the key-on countdown, the last
-slot's placement of the keying poll, and the echo write slots are confirmed against the Blargg DSP
-test ROM, while the `VxENVX`/`VxOUTX` publish slots remain the least-certain part.
+slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
+slot and its one-sample value lag, and the echo write slots are confirmed against the Blargg DSP
+test ROM, while the `VxOUTX` publish slot remains the least-certain part.
 
 ## Inspecting the pipeline directly
 

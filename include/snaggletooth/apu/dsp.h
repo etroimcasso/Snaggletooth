@@ -131,6 +131,13 @@ struct DspState {
   // set. Two writes between polls arm only the second.
   std::uint8_t internalKon = 0;
 
+  // The extra stage of the VxENVX read-back pipeline: each voice's S9 slot writes
+  // the value computed one sample earlier and stages the fresh one, so a CPU read
+  // of VxENVX lags the envelope compute by one sample more than the in-slot
+  // prepared/held split alone gives. Measured against spc_dsp6's `KON/envx
+  // during kon`, whose sync vernier is anchored to voice 0's ENVX publish.
+  std::array<std::uint8_t, 8> envxStage{};
+
   // The one shared noise generator's 15-bit level, in the internal sample range
   // -4000h..+3FFFh, seeded to -4000h at power-on and reset. A voice whose NON bit
   // is set outputs this level in place of its interpolated BRR sample; the level

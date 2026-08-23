@@ -190,10 +190,16 @@ TEST(SampleSchedule, VoiceOutxIsNotReadableUntilItsEighthStepSlot) {
 
 TEST(SampleSchedule, VoiceEnvxIsNotReadableUntilItsNinthStepSlot) {
   // The same for VxENVX, whose visibility slot is T8 (S9), one past OUTX's.
+  // ENVX carries one extra pipeline stage (the S9 slot writes the value
+  // computed a sample earlier), so the stage is warmed with one slot-scheduled
+  // sample before the sentinel round; with a steady envelope the staged value
+  // is the same 7Fh and only the visibility slot is under test here.
   Ram ram{};
   DspState dsp;
   placeSteadyVoice(dsp, 1);  // envelope 7F0h -> VxENVX 7Fh
   sample(dsp, ram);
+  sample(dsp, ram);  // first slot-scheduled sample stages the value...
+  sample(dsp, ram);  // ...and the second publishes it
   ASSERT_EQ(envx(dsp, 1), 0x7F);
 
   std::uint8_t atSeven = 0;
@@ -206,6 +212,30 @@ TEST(SampleSchedule, VoiceEnvxIsNotReadableUntilItsNinthStepSlot) {
   }
   EXPECT_EQ(atSeven, 0x55);
   EXPECT_EQ(atNine, 0x7F);
+}
+
+TEST(SampleSchedule, VoiceEnvxReadsTheValueComputedOneSampleEarlier) {
+  // The ENVX read-back pipeline: each voice's S9 slot writes the value computed
+  // one sample earlier and stages the fresh one, so a CPU read lags the
+  // envelope compute by a full sample beyond the visibility slot. Measured
+  // against spc_dsp6 `KON/envx during kon`, whose sync vernier anchors the
+  // CPU's read phase to voice 0's ENVX publish and whose expected table reads
+  // one step behind a same-sample publish for every voice.
+  Ram ram{};
+  DspState dsp;
+  placeClimbingVoice(dsp, 1);
+  reg(dsp, 1, 0x05) = 0x00;  // ADSR off: custom gain drives the level instead
+  reg(dsp, 1, 0x07) = 0xDF;  // Linear Increase at rate 31: +32 every sample
+  sample(dsp, ram);          // prime (atomic; writes ENVX live)
+  sample(dsp, ram);          // first slot-scheduled sample warms the stage
+
+  // From here each sample's compute raises the envelope by 32 (ENVX by 2); the
+  // register after a sample's S9 slot carries the PREVIOUS sample's value.
+  const std::uint16_t levelBefore = dsp.voices[1].envelope;
+  sample(dsp, ram);
+  EXPECT_EQ(envx(dsp, 1), static_cast<std::uint8_t>(levelBefore >> 4))
+      << "the register carries the value the compute produced one sample ago";
+  EXPECT_EQ(dsp.voices[1].envelope, levelBefore + 32);
 }
 
 // ── The last slot: keying, the global counter and the noise generator ───────
@@ -250,7 +280,28 @@ TEST(SampleSchedule, KeyOnIsPolledAtTheLastSlotOnEvenSamples) {
   sample(dsp, ram);           // an odd sample: the poll does not run
   EXPECT_EQ(dsp.voices[2].konDelay, 0) << "no poll on the odd sample";
   sample(dsp, ram);           // the next (even) sample polls at its T31
-  EXPECT_EQ(dsp.voices[2].konDelay, 4) << "keyed on at the even sample's last slot";
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "keyed on at the even sample's last slot";
+}
+
+TEST(SampleSchedule, TheKeyingLoadPrecedesVoiceZerosComputeAtTheLastSlot) {
+  // The KON/KOFF load and voice 0's compute share T31, and the load runs FIRST:
+  // a keyed voice 0 takes that very slot as its first silent startup call, so
+  // its countdown already reads one lower than a voice computing later in the
+  // next sample. This in-slot order is what makes the eight voices' key-on
+  // startup read-uniform through VxENVX (spc_dsp6 `KON/envx during kon`).
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  sample(dsp, ram);            // sample 0 done; sampleIndex now 1 (odd)
+  ASSERT_EQ(dsp.sampleIndex % 2, 1u);
+  sample(dsp, ram);            // run the odd sample so the next one polls
+
+  dsp.internalKon = 0x05;      // one KON write arms voices 0 and 2
+  sample(dsp, ram);            // the even sample polls at its T31
+  EXPECT_EQ(dsp.voices[0].konDelay, 4)
+      << "voice 0's compute followed the load in the shared slot";
+  EXPECT_EQ(dsp.voices[2].konDelay, 5)
+      << "voice 2's first startup call is still ahead of it";
 }
 
 TEST(SampleSchedule, TheEchoWriteLandsAtItsOwnSlots) {
