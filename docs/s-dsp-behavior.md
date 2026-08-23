@@ -37,16 +37,6 @@ copying a known-good implementation would have skipped the questions entirely an
 | SNESdev Wiki, "Errata" | Secondary, quirks only. |
 | Blargg's DSP test ROMs | **Arbiter.** Where documents conflict or are silent, these decide. |
 
-**Read the prose, not just the register tables.** fullsnes puts load-bearing behavior in trailing
-paragraphs — "Gain Notes", "Misc Notes" — that the register tables never repeat, and Anomie's
-numbered per-sample lists carry rules that appear nowhere else. Several corrections below sat in
-those paragraphs the whole time. Searching for a keyword does not find them: the sentence that
-settles the sustain boundary contains neither "sustain level" nor the register name, and reads
-*"accidently reading a garbage boundary value"*.
-
-**Read both documents on the same question before concluding.** On the sustain boundary, fullsnes had
-the source register and Anomie had the comparison form. Each carried exactly half.
-
 ---
 
 ## The envelope
