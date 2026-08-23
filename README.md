@@ -78,6 +78,7 @@ The table below is kept honest as components land.
 | [spc700-cpu.md](docs/spc700-cpu.md) | The audio CPU core — its surface, usage, and how to run the vector suite |
 | [apu-machine.md](docs/apu-machine.md) | The audio machine — memory map, timers, communication ports, the boot-ROM window, and stepping |
 | [dsp.md](docs/dsp.md) | The S-DSP — voices, the output mixer, the echo unit, and its stereo output |
+| [s-dsp-behavior.md](docs/s-dsp-behavior.md) | Where the published S-DSP documentation is incomplete, ambiguous or wrong, what the hardware does instead, and the measurement that settles each case |
 | [65816-cpu.md](docs/65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 | [snes-machine.md](docs/snes-machine.md) | The machine around it — the LoROM map, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the multiply/divide unit, the PPU register file, the boot handshake, and stepping, running and snapshotting |
 | [spc-rendering.md](docs/spc-rendering.md) | Loading an SPC dump and rendering it to a WAV, and what a dump does and does not carry |

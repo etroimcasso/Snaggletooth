@@ -16,6 +16,11 @@ the exactness — the BRR overflow glitches, the Gaussian table's ROM values, th
 the echo FIR's wrap-then-saturate arithmetic — is deliberate, because a sample-accurate core is the
 point.
 
+Several behaviors on this page are places where the published documentation is incomplete, ambiguous
+or wrong, and where a hardware test ROM settled the question.
+[s-dsp-behavior.md](s-dsp-behavior.md) records each of those: what the sources say, how they
+disagree, and the measurement that decided it.
+
 ## Running the DSP through the machine
 
 You do not step the DSP yourself. It runs as part of the machine: `step()` and `run()` advance it
