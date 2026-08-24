@@ -187,6 +187,24 @@ left set does not start the voice again, and the register keeps its value for re
 read from its register at every poll instead, so it keeps releasing for as long as the bit stands.
 `FLG` bit 7 is polled every sample rather than every other one.
 
+### A key-on landing on a voice mid-startup is absorbed
+
+Both documents state that keying a voice that is already playing restarts it in full — envelope to
+zero, stream to the start, the empty startup samples again, the audible click. Both are silent on
+the narrower case: a key-on consumed by the poll while the voice is still inside that empty-sample
+startup. The test ROM decides it (`KON/kon clears independent`): two `KON` writes ~53 SPC cycles
+apart, deliberately inside one 64-cycle poll period and synchronized so a poll falls between them,
+the first naming voice 0 and the second naming voices 0 and 1. The expected capture shows voice 0
+sounding **alone for exactly two samples** — one poll period — before voice 1 joins, and voice 0
+never restarting. So the second poll's key-on of voice 0 was absorbed: a key-on that lands during
+the startup countdown neither resets the countdown nor restarts the stream.
+
+The alternative reading — that the second write could not re-arm voice 0 because its register bit
+never returned to 0 — fits this capture equally well, but is refuted by `Envelope/hidden env 0 at
+kon`, whose driver re-keys a long-playing voice by rewriting a `KON` value whose bit stood at 1
+throughout, and expects the restart. The register's history does not gate the arm; the voice's own
+startup state gates the action.
+
 ---
 
 ## The intra-sample schedule

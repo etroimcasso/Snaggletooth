@@ -168,6 +168,14 @@ starts the armed voices and disarms itself. So a `KON` bit left set does not sta
 and the register keeps the value for you to read back. Two `KON` writes inside one poll window arm
 only the second one.
 
+Re-keying a voice that is already sounding restarts it in full — envelope to zero, stream back to the
+start, the empty samples again — which is what causes the documented click. But a key-on that lands
+on a voice **still inside its empty-sample startup is absorbed**: the countdown is not reset and the
+stream is not restarted. So two `KON` writes that straddle a poll, each naming the same voice, start
+it once — the first write's poll starts it, the second write's poll finds it mid-startup and lets it
+run. A voice named by the earlier of two straddling writes leads one named only by the later write by
+exactly one poll period, two samples.
+
 Writing a `KOFF` bit releases a voice: its envelope decreases by 8 each sample until it reaches zero,
 regardless of the ADSR or GAIN settings. Decoding does not stop for a released voice — only the
 envelope changes. `KOFF` is read from its register at every poll rather than armed by the write, so a

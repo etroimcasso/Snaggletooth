@@ -816,8 +816,14 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
   for (std::size_t voice = 0; voice < 8; ++voice) {
     const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
     if ((koff & bit) != 0) keyOffVoice(dsp, voice);
-    // KON is applied after KOFF, so a voice with both bits set keys on.
-    if ((kon & bit) != 0) keyOnVoice(dsp, ram, voice);
+    // KON is applied after KOFF, so a voice with both bits set keys on. A
+    // key-on landing on a voice still inside its startup countdown is
+    // absorbed — the countdown is not reset and the stream is not re-primed —
+    // so back-to-back polls each consuming a write that names the same voice
+    // key it once, while a re-key of a voice past its startup restarts it in
+    // full (the documented click/pop case). Measured against spc_dsp6's
+    // `KON/kon clears independent`, whose two writes straddle one poll.
+    if ((kon & bit) != 0 && dsp.voices[voice].konDelay == 0) keyOnVoice(dsp, ram, voice);
   }
   dsp.internalKon = 0;
 }

@@ -307,6 +307,42 @@ TEST(SampleSchedule, TheKeyingLoadPrecedesVoiceZerosComputeAtTheLastSlot) {
       << "voice 2's first startup call is still ahead of it";
 }
 
+TEST(SampleSchedule, AKeyOnDuringTheStartupCountdownIsAbsorbed) {
+  // A key-on consumed by the poll while the voice is still inside its startup
+  // countdown is absorbed: the countdown is not reset and the stream is not
+  // re-primed, so two polls each consuming a write that names the same voice
+  // key it once. A voice past its startup restarts in full — the documented
+  // click/pop case. Measured against spc_dsp6's `KON/kon clears independent`,
+  // whose two KON writes straddle one poll and expect the first voice to lead
+  // the second by exactly the poll period.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  sample(dsp, ram);            // sample 0 done; sampleIndex now 1 (odd)
+  ASSERT_EQ(dsp.sampleIndex % 2, 1u);
+  sample(dsp, ram);            // run the odd sample so the next one polls
+
+  dsp.internalKon = 0x04;      // a KON write arms voice 2
+  sample(dsp, ram);            // the even sample polls: voice 2 keys on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  dsp.internalKon = 0x04;      // a second write names voice 2 again
+  sample(dsp, ram);            // odd sample: the countdown runs, no poll
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  sample(dsp, ram);            // even sample: the poll consumes the arm...
+  EXPECT_EQ(dsp.voices[2].konDelay, 3)
+      << "...and absorbs it — the countdown is not reset";
+  EXPECT_EQ(dsp.internalKon, 0) << "the arm is consumed either way";
+
+  // Voice 1 has been sounding all along with its countdown at 0: the same
+  // write restarts it in full.
+  dsp.internalKon = 0x02;
+  sample(dsp, ram);            // odd sample: no poll
+  sample(dsp, ram);            // even sample: the poll re-keys it
+  EXPECT_EQ(dsp.voices[1].konDelay, 5)
+      << "a re-key past the startup begins a fresh countdown";
+}
+
 TEST(SampleSchedule, AVoiceIsScaledByTheLevelStandingBeforeItsUpdate) {
   // A voice's sample is scaled by the level its previous update left behind, and
   // the update runs after — so a moving envelope reaches the output one sample
