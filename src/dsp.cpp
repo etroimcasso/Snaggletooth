@@ -146,9 +146,18 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 // previous voice gives factor 400h, an unmodulated x1.0, so no special case is
 // needed. The result is capped at the 128 kHz ceiling; the base step never
 // reaches it, so the cap applies only to a modulated voice.
+// The pitch step a voice's stream advance uses this sample — the captured value,
+// never the live register pair (see DspState::pitchLatch). During a capture
+// sample voices 1-7 read the previous capture; voice 0, and every voice on the
+// grid's other samples, reads the latest.
+[[nodiscard]] std::uint32_t latchedPitch(const DspState& dsp, std::size_t voice) noexcept {
+  const bool captureSample = dsp.sampleIndex % 2 == 0;
+  return captureSample && voice != 0 ? dsp.pitchLatchOld[voice] : dsp.pitchLatch[voice];
+}
+
 [[nodiscard]] std::uint32_t pitchStep(const DspState& dsp, std::size_t voice,
                                       int prevAmplitude) noexcept {
-  std::uint32_t step = voicePitch(dsp, voice);
+  std::uint32_t step = latchedPitch(dsp, voice);
   const bool modulate = voice > 0 && ((dsp[kDspPmon] >> voice) & 1) != 0;
   if (modulate) {
     const int factor = (prevAmplitude >> 4) + 0x400;  // -400h..+3FFh -> 000h..7FFh
@@ -162,6 +171,12 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 // own slot is the keyed voice's first silent startup call for voice 0, while
 // voices 1-7 take theirs in the following samples.
 inline constexpr std::uint8_t kKeyOnStartupCalls = 5;
+
+// The voice's silent key-on span in compute calls: the five startup calls plus
+// the first live compute, whose output is still silent because a sample is
+// scaled by the envelope standing before its update. The keying poll absorbs a
+// key-on landing inside this span (see pollKeying).
+inline constexpr std::uint8_t kKeyOnSilentCalls = kKeyOnStartupCalls + 1;
 
 // A BRR header's low two bits are its end/loop code. Code 1 — end set, loop clear
 // — is End+Mute: the voice releases and its level drops to 0. Code 3 loops without
@@ -436,6 +451,7 @@ void tickDspSample(DspState& dsp) noexcept {
 static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                                  std::size_t voice, int prevAmplitude, bool softReset) noexcept {
   VoiceState& v = dsp.voices[voice];
+  if (v.computesSinceKeyOn != 0xFF) ++v.computesSinceKeyOn;
   const std::uint32_t step = pitchStep(dsp, voice, prevAmplitude);
 
   // The header byte is loaded from RAM every sample, whatever the pitch counter is
@@ -466,9 +482,15 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
     amplitude = 0;
   } else if (v.konDelay > 0) {
-    // Startup: the voice is silent, and neither the stream nor the envelope
-    // advances past the countdown (stepVoiceEnvelope decrements it). The header
-    // check still runs — the hardware preloads BRR groups through these samples.
+    // Startup: the voice outputs silence while its stream already advances at
+    // the pitch — except on the first startup call, which performs the
+    // start-address read and decodes nothing. The envelope holds through the
+    // countdown (stepVoiceEnvelope decrements it), and the header check above
+    // still runs. Measured against spc_dsp6's `KON/kon decoding when another
+    // kon`, which freezes the pitch mid-startup and reads where the cursor
+    // stood; both published references instead hold the stream still until the
+    // countdown ends, which that ROM refutes.
+    if (v.konDelay < kKeyOnStartupCalls) advanceVoiceStream(dsp, ram, voice, step);
     stepVoiceEnvelope(dsp, voice, headerEndMute);
     amplitude = 0;
   } else {
@@ -519,6 +541,13 @@ static void applyVoiceRight(DspState& dsp, std::size_t voice) noexcept {
 // read-only caller (the FLG bit 5 case).
 static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                                        std::uint8_t* echoRam) noexcept {
+  // A freshly seeded state holds no pitch captures yet: take both stages from
+  // the registers as they stand, so this frame reads the same values a live
+  // register read would — byte-identical to the frame-at-once model.
+  for (std::size_t v = 0; v < 8; ++v) {
+    dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
+    dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
+  }
   pollKeying(dsp, ram);
 
   const std::uint8_t flg = dsp[kDspFlg];
@@ -644,11 +673,19 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
 
   if (slot == 0) {
     // Frame start: clear the mix the previous frame delivered, then apply voice 0's
-    // amplitude — prepared at the last frame's T31 (the pipeline lag).
+    // amplitude — prepared at the last frame's T31 (the pipeline lag). On the
+    // capture grid's samples, take the pitch capture (see DspState::pitchLatch):
+    // age the standing capture out and read every voice's register pair.
     dsp.mixLeft = 0;
     dsp.mixRight = 0;
     dsp.echoSendLeft = 0;
     dsp.echoSendRight = 0;
+    if (dsp.sampleIndex % 2 == 0) {
+      for (std::size_t v = 0; v < 8; ++v) {
+        dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
+        dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
+      }
+    }
   }
 
   // Voice compute at each voice's S3 slot (voice 0's is T31, handled in the tail).
@@ -793,6 +830,7 @@ void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // (spc_dsp6 `KON/envx during kon`) while keeping voice 0's first live compute
   // at the instant `Envelope/hidden env 0 at kon` pins.
   v.konDelay = kKeyOnStartupCalls;
+  v.computesSinceKeyOn = 0;
   // Key-on clears this voice's ENDX bit; a same-sample end-block set does not
   // override the clear, so clearing after the priming decode is correct.
   dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
@@ -817,13 +855,17 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
     const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
     if ((koff & bit) != 0) keyOffVoice(dsp, voice);
     // KON is applied after KOFF, so a voice with both bits set keys on. A
-    // key-on landing on a voice still inside its startup countdown is
-    // absorbed — the countdown is not reset and the stream is not re-primed —
-    // so back-to-back polls each consuming a write that names the same voice
-    // key it once, while a re-key of a voice past its startup restarts it in
-    // full (the documented click/pop case). Measured against spc_dsp6's
-    // `KON/kon clears independent`, whose two writes straddle one poll.
-    if ((kon & bit) != 0 && dsp.voices[voice].konDelay == 0) keyOnVoice(dsp, ram, voice);
+    // key-on landing on a voice still inside its silent key-on span — the five
+    // startup calls plus the first live compute, whose output is still silent —
+    // is absorbed: the countdown is not reset and the stream is not re-primed.
+    // Back-to-back polls each consuming a write that names the same voice key
+    // it once, while a re-key of a voice past the span restarts it in full (the
+    // documented click/pop case). Measured against spc_dsp6's `KON/kon clears
+    // independent` (two writes straddling one poll) and `KON/kon decoding when
+    // another kon` (a re-key up to six computes after the load leaves the first
+    // generation's stream standing).
+    if ((kon & bit) != 0 && dsp.voices[voice].computesSinceKeyOn > kKeyOnSilentCalls)
+      keyOnVoice(dsp, ram, voice);
   }
   dsp.internalKon = 0;
 }
@@ -847,10 +889,10 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     return 0;
   }
 
-  // Post-key-on startup: the level holds at 0 (set at key-on) and neither the
-  // envelope nor the stream advances while the countdown runs. The call that
-  // takes the counter to 0 is itself silent, so a fresh key-on yields five
-  // silent calls before the first live step (see keyOnVoice for the count).
+  // Post-key-on startup: the level holds at 0 (set at key-on) while the
+  // countdown runs. The call that takes the counter to 0 is itself silent, so a
+  // fresh key-on yields five silent calls before the first live step (see
+  // keyOnVoice for the count).
   if (v.konDelay > 0) {
     --v.konDelay;
     writeEnvx();

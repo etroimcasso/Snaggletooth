@@ -74,13 +74,20 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // block, or jumping to the loop address after an end block) before decoding.
 //
 // The envelope fields carry the 11-bit level (0..0x7FF), its phase, the 5-sample
-// post-key-on startup countdown (during which the voice outputs silence and
-// neither the envelope nor the stream advances), and the Bent-Increase reference
-// — the value the selected mode computed last sample, which the GAIN
+// post-key-on startup countdown (during which the voice outputs silence and the
+// envelope holds still — the stream advances from the countdown's second call
+// on, the first performing only the start-address read), and the Bent-Increase
+// reference — the value the selected mode computed last sample, which the GAIN
 // Bent-Increase mode reads to choose its +32/+8 step. Every mode computes that
 // value every sample, so a rate of 0 supplies one while holding the level still,
 // and it is kept unclipped: a value driven below zero or carried past 0x7FF both
 // read at or past 0x600 and force the +8 branch.
+//
+// computesSinceKeyOn counts the voice's per-sample compute calls since its last
+// key-on load, saturating high. The keying poll reads it to absorb a key-on
+// landing inside the voice's silent key-on span — the five startup calls plus
+// the first live compute, whose output is still silent because a sample is
+// scaled by the envelope standing before its update.
 struct VoiceState {
   std::uint16_t brrAddress = 0;
   std::uint8_t brrSampleIndex = 0;
@@ -89,6 +96,7 @@ struct VoiceState {
   std::uint16_t envelope = 0;
   EnvPhase phase = EnvPhase::Release;
   std::uint8_t konDelay = 0;
+  std::uint8_t computesSinceKeyOn = 0xFF;
   std::uint16_t bentGainRef = 0;
 };
 
@@ -212,6 +220,21 @@ struct DspState {
   std::array<std::uint8_t, 8> preparedOutx{};
   std::array<std::uint8_t, 8> preparedEnvx{};
 
+  // The effective-pitch capture. A voice's stream advance does not read
+  // VxPITCHL/H live: the register pairs are captured for all eight voices at
+  // the first slot of every other sample — the same every-other-sample grid the
+  // KON/KOFF poll runs on — and a capture reaches a voice's advance one full
+  // sample later. Voice 0's T31 compute is the only one late enough to see its
+  // own sample's capture, so during a capture sample voices 1-7 still advance
+  // by the previous capture (pitchLatchOld); on every other sample all eight
+  // read the latest (pitchLatch). A freshly seeded state captures the register
+  // values before its first sample, keeping that frame byte-identical to the
+  // frame-at-once model. Measured against spc_dsp6's `KON/kon decoding when
+  // another kon`: its frozen-pitch cursor readings quantize to this grid, which
+  // no per-sample register read reproduces.
+  std::array<std::uint16_t, 8> pitchLatch{};
+  std::array<std::uint16_t, 8> pitchLatchOld{};
+
   // The echo unit's FIR output for the frame, computed when the buffer is read
   // (slot T24) and added to the master-scaled mix through the echo volume at the
   // left/right output slots (T27/T28); the write-back and ring advance land at
@@ -282,11 +305,13 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept;
 
 // Advances voice `voice` (0-7) by one 32 kHz output sample. The pitch counter
-// gains the voice's 14-bit step (VxPITCHL/H bits 0-13, read live, so a pitch
-// write takes effect on the next step; bits 14-15 are stored but never used),
-// and every sample position the counter passes is decoded through the stream —
-// following block chaining, loop jumps and ENDX on the way. Returns the
-// freshly interpolated 15-bit sample, exactly as interpolatedSample reads it.
+// gains the voice's 14-bit step (VxPITCHL/H bits 0-13; bits 14-15 are stored
+// but never used), and every sample position the counter passes is decoded
+// through the stream — following block chaining, loop jumps and ENDX on the
+// way. Returns the freshly interpolated 15-bit sample, exactly as
+// interpolatedSample reads it. This single-voice call reads the pitch registers
+// live; the whole-DSP sample paths instead read the every-other-sample capture
+// (see DspState::pitchLatch), which this call neither takes nor consumes.
 std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                        std::size_t voice) noexcept;
 
@@ -317,8 +342,10 @@ void tickDspSample(DspState& dsp) noexcept;
 // volume, add the echo unit's FIR output through the echo volume, apply the mute
 // gate, advance the shared noise generator, and tick the per-sample state.
 //
-// A voice in its post-key-on startup outputs silence and neither streams nor
-// advances its envelope past the countdown. Otherwise the voice's sample is its
+// A voice in its post-key-on startup outputs silence and holds its envelope
+// through the countdown; its stream already advances at the pitch from the
+// countdown's second call on (the first performs only the start-address read).
+// Otherwise the voice's sample is its
 // interpolated BRR output, or the shared noise level when its NON bit is set,
 // and the enveloped amplitude is (sample * envelope) >> 11 — the internal
 // -4000h..+3FFFh value that VxOUTX returns the high byte of and the next voice's
@@ -362,7 +389,10 @@ SlotResult stepDspCycle(DspState& dsp, std::span<const std::uint8_t, 65536> ram)
 // KOFF ($5C) registers: a set KON bit latches internal-KON and keys the voice on
 // (envelope 0, Attack, the 5-sample startup, its ENDX bit cleared, its stream
 // primed), and a set KOFF bit moves the voice to Release. On odd samples it does
-// nothing. Voices keyed on two samples ago clear from the internal-KON latch.
+// nothing. Voices keyed on two samples ago clear from the internal-KON latch. A
+// key-on landing on a voice still inside its silent key-on span — the five
+// startup calls plus the first live compute — is absorbed: the voice keeps its
+// countdown and its stream.
 void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept;
 
 // Keys voice `voice` (0-7) on: envelope to 0 and Attack, the 5-sample startup

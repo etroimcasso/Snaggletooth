@@ -155,13 +155,18 @@ output mixer (below), and it is also the value the next voice's pitch modulation
 
 Writing a `KON` bit starts a voice: its envelope resets to zero, it enters Attack, its stream restarts
 from the source's start address, and its end flag clears. There are **five empty samples** at a
-key-on before the envelope and decoding begin. The keying poll runs at a sample's last slot, *before*
+key-on before the envelope begins. The keying poll runs at a sample's last slot, *before*
 voice 0's envelope compute in that same slot — so voice 0's first silent sample is the poll's own
 while voices 1-7 take theirs starting the next sample, and the sixth envelope call after the load
 takes the first step. That step's own sample is still silent, because a sample is scaled by the level
 standing before the update (above) and that level is the zero the key-on set; the first sounding
 sample is the one after it. The shared-slot asymmetry, together with `VxENVX`'s one-sample read-back
 lag (below), is what makes all eight voices' key-on startup read identically through `VxENVX`.
+
+The stream does not wait for the envelope: the decode cursor already advances at the voice's pitch
+through the empty samples, from the second of them on — the first performs the start-address read and
+decodes nothing. Only the *output* is silent during the startup; a voice whose pitch is changed (or
+zeroed) mid-startup carries the position it had walked to.
 
 A key-on takes effect on the write, and happens once. The value written arms the next poll; that poll
 starts the armed voices and disarms itself. So a `KON` bit left set does not start the voice again,
@@ -170,11 +175,14 @@ only the second one.
 
 Re-keying a voice that is already sounding restarts it in full — envelope to zero, stream back to the
 start, the empty samples again — which is what causes the documented click. But a key-on that lands
-on a voice **still inside its empty-sample startup is absorbed**: the countdown is not reset and the
-stream is not restarted. So two `KON` writes that straddle a poll, each naming the same voice, start
-it once — the first write's poll starts it, the second write's poll finds it mid-startup and lets it
-run. A voice named by the earlier of two straddling writes leads one named only by the later write by
-exactly one poll period, two samples.
+on a voice **still inside its silent key-on span is absorbed**: the countdown is not reset and the
+stream is not restarted. The span is the whole silence a key-on produces — the five empty samples
+*plus* the first envelope step's still-silent sample — so a re-key up to six samples after the load
+is swallowed, and only a re-key from the first sounding sample on restarts the voice. Two `KON`
+writes that straddle a poll, each naming the same voice, therefore start it once — the first write's
+poll starts it, the second write's poll finds it mid-startup and lets it run — and a voice named by
+the earlier of two straddling writes leads one named only by the later write by exactly one poll
+period, two samples.
 
 Writing a `KOFF` bit releases a voice: its envelope decreases by 8 each sample until it reaches zero,
 regardless of the ADSR or GAIN settings. Decoding does not stop for a released voice — only the
@@ -280,11 +288,19 @@ Three consequences are worth knowing:
 - **The echo write lags its compute.** The echo unit computes its buffer write at T24 but the bytes
   land at T30 (left word) and T31 (right word), so a program reading the entry between those slots
   still sees the previous sample there.
+- **`VxPITCHL`/`VxPITCHH` are not read per sample.** The pitch a voice's stream advance uses is
+  captured for all eight voices at the first slot of every *other* sample — the same every-other-
+  sample grid the keying poll runs on — and a capture reaches a voice's advance one full sample
+  later. Voice 0's compute at T31 is the only one late enough to see its own sample's capture, so a
+  pitch write reaches voice 0 one sample before voices 1–7, and any write waits at least until the
+  next capture sample regardless of where it lands. Pitch *modulation* is unaffected — `PMON`
+  scales the captured step by the previous voice's current amplitude every sample.
 
 This intra-sample schedule is derived from the S-DSP timing charts; the key-on countdown, the last
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
-slot and its one-sample value lag, and the echo write slots are confirmed against the Blargg DSP
-test ROM, while the `VxOUTX` publish slot remains the least-certain part.
+slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
+silent-span key-on absorption, and the every-other-sample pitch capture are confirmed against the
+Blargg DSP test ROM, while the `VxOUTX` publish slot remains the least-certain part.
 
 ## Inspecting the pipeline directly
 
@@ -309,6 +325,10 @@ snapshot, assign it to restore.
   voice you have keyed off, because its stream is still running.
 - **A stopped voice still reads its header.** Setting `VxPITCH` to zero stops the decode, not the
   per-sample header read, so a block that becomes End+Mute underneath such a voice still releases it.
+- **A pitch write is not instant.** The stream reads a pitch capture taken every other sample, not
+  the register, so a `VxPITCH` write takes effect one to three samples later depending on where it
+  lands against the capture grid — and one sample sooner for voice 0 than for voices 1–7. See
+  [When a register write takes effect](#when-a-register-write-takes-effect).
 - **`VxOUTX` is the high byte of the internal amplitude.** The full amplitude is `-$4000`…`+$3FFF`;
   the register carries `-128`…`+127`.
 - **`FLG` starts at `$E0`.** On reset the DSP boots muted, soft-reset, with echo writes disabled and

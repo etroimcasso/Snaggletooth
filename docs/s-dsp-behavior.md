@@ -165,7 +165,21 @@ not the silent ones. Anomie's numbered account is the precise version:
 So six samples are silent. The fifth-versus-sixth confusion is entirely a consequence of the
 apply-before-update order above.
 
-### The keying poll precedes voice 0's compute in the slot they share
+### The stream advances at the pitch through the silent samples
+
+Both documents hold the decode position still until the startup ends: Anomie's account above has "no
+interpolation update" through `#4` with fixed BRR group preloads in their place, and fullsnes quotes
+the same shape. The test ROM refutes the stillness (`KON/kon decoding when another kon`): it keys a
+voice, freezes its pitch mid-startup by zeroing `VxPITCH`, and reads the voice's output back through
+the echo buffer — a pure function of where the decode cursor stood when the pitch froze. The expected
+table walks: across re-keys frozen at one-sample-later instants, the read moves through the source's
+loud region exactly as a cursor advancing **two stream samples per output sample** (the sub-test's
+pitch) would place it. A cursor holding at its preload prints all zeros; fixed four-sample group
+preloads land the loud readings in the wrong places.
+
+The first silent sample is the exception — it performs the start-address read and decodes nothing,
+so the walk begins on the second. Only the *output* is silent during the startup; the position is
+live throughout.
 
 `KON`/`KOFF` are polled every other sample, at the last slot of the sample — the same slot at which
 voice 0 runs its whole compute. **The keying load runs first.** A keyed voice 0 therefore takes the
@@ -187,23 +201,32 @@ left set does not start the voice again, and the register keeps its value for re
 read from its register at every poll instead, so it keeps releasing for as long as the bit stands.
 `FLG` bit 7 is polled every sample rather than every other one.
 
-### A key-on landing on a voice mid-startup is absorbed
+### A key-on landing on a voice inside its silent span is absorbed
 
 Both documents state that keying a voice that is already playing restarts it in full — envelope to
 zero, stream to the start, the empty startup samples again, the audible click. Both are silent on
-the narrower case: a key-on consumed by the poll while the voice is still inside that empty-sample
-startup. The test ROM decides it (`KON/kon clears independent`): two `KON` writes ~53 SPC cycles
+the narrower case: a key-on consumed by the poll while the voice is still silent from the last one.
+The test ROM decides it (`KON/kon clears independent`): two `KON` writes ~53 SPC cycles
 apart, deliberately inside one 64-cycle poll period and synchronized so a poll falls between them,
 the first naming voice 0 and the second naming voices 0 and 1. The expected capture shows voice 0
 sounding **alone for exactly two samples** — one poll period — before voice 1 joins, and voice 0
 never restarting. So the second poll's key-on of voice 0 was absorbed: a key-on that lands during
-the startup countdown neither resets the countdown nor restarts the stream.
+the startup neither resets the countdown nor restarts the stream.
 
 The alternative reading — that the second write could not re-arm voice 0 because its register bit
 never returned to 0 — fits this capture equally well, but is refuted by `Envelope/hidden env 0 at
 kon`, whose driver re-keys a long-playing voice by rewriting a `KON` value whose bit stood at 1
 throughout, and expects the restart. The register's history does not gate the arm; the voice's own
 startup state gates the action.
+
+**The absorption window is the voice's whole silent span, not the countdown alone.** A key-on
+produces six silent samples — the five empty ones plus the first envelope step's still-silent sample
+— and a key-on consumed anywhere inside those six is absorbed; one consumed from the first sounding
+sample on restarts the voice. `KON/kon decoding when another kon` pins both edges: it re-keys a
+voice at a widening spacing after a first key-on, and its expected table holds a frozen stream
+position through re-keys landing six samples after the load (a restart would zero the readings)
+while `KON/envx during kon` expects a re-key eight computes after a load to restart in full. A
+window one sample narrower or two samples wider than the six fails one ROM or the other.
 
 ---
 
@@ -247,6 +270,27 @@ seventh, each readable two slots later. **Anomie's `VxENVX` slot is confirmed** 
 slots earlier regresses an otherwise-passing sub-test. The `VxOUTX` half of the disagreement is
 untested and remains open.
 
+### The pitch is captured every other sample, in phase with the keying poll
+
+**Neither document mentions this.** Both read `VxPITCHL`/`VxPITCHH` at the voice's own slots every
+sample, which would make a pitch write reach the stream within a sample of landing. It does not: the
+stream advance reads a **capture of the pitch registers taken at the first slot of every other
+sample** — the same every-other-sample grid the `KON`/`KOFF` poll runs on, and in phase with it —
+and the capture reaches a voice's advance one full sample later. Voice 0's compute at the last slot
+is the only one late enough to see its own sample's capture, so a pitch write reaches voice 0 one
+sample before voices 1-7, and any write waits at least until the next capture sample regardless of
+where it lands.
+
+*Derived from `KON/kon decoding when another kon`.* Its ten frozen-pitch readings advance the freeze
+instant by roughly one sample each, yet the expected stream positions move in **pairs** — two
+consecutive readings frozen at the same position, then a two-sample jump — which only a
+two-sample-quantized freeze produces; a per-sample register read yields ten distinct positions and a
+loud region one reading narrower than the ROM prints. The same table pins the grid's phase: captures
+on the poll's opposite parity land the paired readings one position early. The one-sample
+propagation asymmetry is what makes all eight voices' rows identical — a capture consumed at each
+voice's own next compute would split voices around the freeze's landing slot, and the ROM's freeze
+slides across slots without any row changing.
+
 ### The BRR header is read every sample
 
 The header byte is loaded and its end/loop bits are checked **every sample**, not only when the pitch
@@ -257,11 +301,11 @@ data is needed".
 The consequence is easy to miss: a voice whose pitch is zero decodes nothing, yet a block that turns
 End+Mute underneath it still releases the voice.
 
-The check goes live **two sample periods after the key-on load, measured from the load slot** — not
-after a fixed number of the voice's own computes. Because the load sits at T31 and voice 0 computes at
-that same slot while the others compute early in the next sample, one absolute cutoff falls on voice
-0's *second* compute and on the others' *third*. That is the only way the ROM's eight identical
-per-voice rows can hold. Both documents are silent on the distinction.
+The check goes live from **each voice's third compute after a key-on, counting the load's own slot**
+— a uniform per-voice count. The load sits at T31, which is voice 0's own compute slot with the load
+running first, so the load's sample is voice 0's first count while voices 1-7 begin theirs in the
+next sample; that shared-slot asymmetry is what lets one uniform count produce the ROM's eight
+identical per-voice rows. Both documents are silent on when the check goes live at all.
 
 ---
 

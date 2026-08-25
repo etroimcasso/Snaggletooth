@@ -547,6 +547,119 @@ TEST(SampleSchedule, TheMachineDeliversOneScheduledFramePerThirtyTwoCycles) {
   for (const StereoFrame& f : frames) EXPECT_GT(f.left, 0);
 }
 
+TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
+  // A keyed voice's stream already advances at the pitch through the startup
+  // countdown — the voice is silent, but its decode cursor walks — except on
+  // the first startup call, which performs the start-address read and decodes
+  // nothing. Measured against spc_dsp6's `KON/kon decoding when another kon`,
+  // which freezes the pitch mid-startup and reads where the cursor stood.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x03) = 0x20;    // VxPITCHH: two stream samples per output sample
+  sample(dsp, ram);            // sample 0 (atomic); sampleIndex now 1
+  sample(dsp, ram);            // odd sample done, so the next one polls
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;      // a KON write arms voice 2
+  sample(dsp, ram);            // the poll at this sample's T31 keys it on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+  ASSERT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
+
+  sample(dsp, ram);            // first startup call: the start-address sample
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the first call decodes nothing";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  for (int n = 0; n < 4; ++n) sample(dsp, ram);  // the countdown's other calls
+  EXPECT_EQ(dsp.voices[2].konDelay, 0);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 12)
+      << "four advancing startup calls walk the cursor two samples each";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x8000);
+}
+
+TEST(SampleSchedule, APitchWriteReachesTheVoicesThroughTheCaptureGrid) {
+  // A voice's stream advance never reads VxPITCHL/H live: the registers are
+  // captured at the first slot of every other sample — the KON/KOFF poll's grid
+  // — and the capture reaches a voice one full sample later. Voice 0's T31
+  // compute is the only one late enough to see its own sample's capture, so a
+  // write freezes voice 0 one sample before voices 1-7. Measured against
+  // spc_dsp6's `KON/kon decoding when another kon`, whose frozen-pitch cursor
+  // readings quantize to this grid.
+  Ram ram{};
+  DspState dsp;
+  for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+    dsp.voices[v].konDelay = 0;
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].envelope = 0x100;
+    reg(dsp, v, 0x03) = 0x10;  // one stream sample per output sample
+  }
+  sample(dsp, ram);            // sample 0 (atomic) seeds the capture
+  sample(dsp, ram);            // odd sample; the next is on the capture grid
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+  sample(dsp, ram);            // a captured even sample
+  const std::uint16_t v0 = dsp.voices[0].pitchCounter;
+  const std::uint16_t v2 = dsp.voices[2].pitchCounter;
+
+  // Freeze voice 0's pitch at the first slot of the following odd sample and
+  // voice 2's just before the next even sample begins — both land inside the
+  // same capture window. No capture runs on the odd sample, so both voices
+  // still advance through it.
+  sampleWritingAt(dsp, ram, 0, 0 * 0x10 + 0x03, 0x00);
+  dsp[2 * 0x10 + 0x03] = 0x00;
+  EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000));
+  EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x1000));
+
+  // The next even sample captures the frozen value at its first slot: voice 0's
+  // T31 compute already reads it, while voice 2's early compute still advances
+  // by the previous capture.
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000))
+      << "voice 0 reads its own sample's capture";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x2000))
+      << "voices 1-7 still advance by the previous capture";
+
+  // From the following sample the frozen capture has reached every voice.
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000));
+  EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x2000));
+}
+
+TEST(SampleSchedule, AKeyOnInsideTheSilentSpanIsAbsorbedAndAfterItRestarts) {
+  // The absorption window is the voice's whole silent key-on span — the five
+  // startup calls plus the first live compute, whose output is still silent —
+  // not the countdown alone. A key-on consumed at the poll right after the
+  // first live compute is still absorbed; one poll later it restarts the voice.
+  // Measured against spc_dsp6's `KON/kon decoding when another kon` (a re-key
+  // six computes after the load leaves the stream standing) and `KON/envx
+  // during kon` (a re-key past the span restarts).
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  for (int n = 0; n < 5; ++n) sample(dsp, ram);  // the countdown runs out
+  ASSERT_EQ(dsp.voices[2].konDelay, 0);
+
+  // The next sample runs the first live compute (still silent) and then polls:
+  // a key-on consumed there is absorbed.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 0) << "absorbed — the countdown is not re-armed";
+  EXPECT_GT(dsp.voices[2].envelope, 0u) << "the envelope keeps climbing";
+
+  // Two samples later the span is over: the same write restarts the voice.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a re-key past the silent span restarts";
+}
+
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {
   // The cursor is the DSP's own: it advances one slot per stepDspCycle and wraps
   // after 32, delivering exactly one frame per wrap.
