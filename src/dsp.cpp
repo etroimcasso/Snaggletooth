@@ -489,8 +489,12 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // still runs. Measured against spc_dsp6's `KON/kon decoding when another
     // kon`, which freezes the pitch mid-startup and reads where the cursor
     // stood; both published references instead hold the stream still until the
-    // countdown ends, which that ROM refutes.
-    if (v.konDelay < kKeyOnStartupCalls) advanceVoiceStream(dsp, ram, voice, step);
+    // countdown ends, which that ROM refutes. The first-call test reads the
+    // compute count, not the countdown alone, because an in-span re-key
+    // reloads the countdown without re-priming the stream — that reload's next
+    // call advances as normal (`KON/kon then another kon`).
+    if (v.konDelay < kKeyOnStartupCalls || v.computesSinceKeyOn != 1)
+      advanceVoiceStream(dsp, ram, voice, step);
     stepVoiceEnvelope(dsp, voice, headerEndMute);
     amplitude = 0;
   } else {
@@ -857,15 +861,24 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
     // KON is applied after KOFF, so a voice with both bits set keys on. A
     // key-on landing on a voice still inside its silent key-on span — the five
     // startup calls plus the first live compute, whose output is still silent —
-    // is absorbed: the countdown is not reset and the stream is not re-primed.
-    // Back-to-back polls each consuming a write that names the same voice key
-    // it once, while a re-key of a voice past the span restarts it in full (the
-    // documented click/pop case). Measured against spc_dsp6's `KON/kon clears
-    // independent` (two writes straddling one poll) and `KON/kon decoding when
-    // another kon` (a re-key up to six computes after the load leaves the first
-    // generation's stream standing).
-    if ((kon & bit) != 0 && dsp.voices[voice].computesSinceKeyOn > kKeyOnSilentCalls)
-      keyOnVoice(dsp, ram, voice);
+    // splits by which poll takes delivery of it. At the poll immediately after
+    // the one that keyed the voice, it is absorbed outright: countdown, stream
+    // and envelope schedule all stand (`KON/kon clears independent`). At any
+    // later poll inside the span, the stream still stands — the cursor keeps
+    // walking at the pitch, un-re-primed (`KON/kon decoding when another kon`)
+    // — but the silent hold rewinds: the countdown reloads and the envelope
+    // drops to 0, so the level emerges as late as a full restart would place
+    // it (`KON/kon then another kon`). A re-key past the span restarts the
+    // voice in full (the documented click/pop case).
+    if ((kon & bit) != 0) {
+      VoiceState& v = dsp.voices[voice];
+      if (v.computesSinceKeyOn > kKeyOnSilentCalls) {
+        keyOnVoice(dsp, ram, voice);
+      } else if (v.computesSinceKeyOn > 2) {
+        v.konDelay = kKeyOnStartupCalls;
+        v.envelope = 0;
+      }
+    }
   }
   dsp.internalKon = 0;
 }

@@ -624,17 +624,54 @@ TEST(SampleSchedule, APitchWriteReachesTheVoicesThroughTheCaptureGrid) {
   EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x2000));
 }
 
-TEST(SampleSchedule, AKeyOnInsideTheSilentSpanIsAbsorbedAndAfterItRestarts) {
-  // The absorption window is the voice's whole silent key-on span — the five
-  // startup calls plus the first live compute, whose output is still silent —
-  // not the countdown alone. A key-on consumed at the poll right after the
-  // first live compute is still absorbed; one poll later it restarts the voice.
-  // Measured against spc_dsp6's `KON/kon decoding when another kon` (a re-key
-  // six computes after the load leaves the stream standing) and `KON/envx
-  // during kon` (a re-key past the span restarts).
+TEST(SampleSchedule, AKeyOnMidCountdownPastTheFirstPollRewindsTheHold) {
+  // A key-on consumed while the voice is mid-countdown, at any poll past the
+  // one immediately following its keying, rewinds the silent hold: the
+  // countdown re-arms in full and the envelope drops to 0, while the stream
+  // stands where it was — neither re-primed nor stalled. Measured against
+  // spc_dsp6's `KON/kon then another kon` (the level re-emerges as late as a
+  // restart would place it) with `KON/kon decoding when another kon` holding
+  // the cursor's walk (the same re-key leaves the frozen positions standing).
   Ram ram{};
   DspState dsp;
   reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // computes 1-3 run
+  ASSERT_EQ(dsp.voices[2].konDelay, 2);
+
+  // The poll two periods after the keying consumes a fresh arm with the
+  // countdown still running: the hold rewinds, the stream stays put — three
+  // advancing calls' worth of pitch, not a re-primed zero.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "the silent hold re-arms in full";
+  EXPECT_EQ(dsp.voices[2].envelope, 0u);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x3000) << "the cursor is not re-primed";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 7);
+}
+
+TEST(SampleSchedule, AKeyOnLateInTheSilentSpanRewindsTheHoldAndPastItRestarts) {
+  // The one-poll absorption does not cover the voice's whole silent span. A
+  // key-on consumed at the poll right after the first live compute — the last
+  // silent sample — rewinds the hold: countdown re-armed, envelope dropped,
+  // stream standing and still walking at the pitch. One poll later the span is
+  // over and the same write restarts the voice in full, stream re-primed.
+  // Measured against spc_dsp6's `KON/kon then another kon` (the re-key's level
+  // re-emerges restart-late), `KON/kon decoding when another kon` (the cursor
+  // keeps its walk through the re-key), and `KON/envx during kon` (a re-key
+  // past the span restarts).
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
   sample(dsp, ram);
   sample(dsp, ram);
   ASSERT_EQ(dsp.sampleIndex % 2, 0u);
@@ -646,18 +683,29 @@ TEST(SampleSchedule, AKeyOnInsideTheSilentSpanIsAbsorbedAndAfterItRestarts) {
   for (int n = 0; n < 5; ++n) sample(dsp, ram);  // the countdown runs out
   ASSERT_EQ(dsp.voices[2].konDelay, 0);
 
-  // The next sample runs the first live compute (still silent) and then polls:
-  // a key-on consumed there is absorbed.
+  // The next sample runs the first live compute (still silent, and it lifts
+  // the level) and then polls: the consumed key-on rewinds the hold. Computes
+  // 2-6 advanced and decoded five stream samples.
   dsp.internalKon = 0x04;
   sample(dsp, ram);
-  EXPECT_EQ(dsp.voices[2].konDelay, 0) << "absorbed — the countdown is not re-armed";
-  EXPECT_GT(dsp.voices[2].envelope, 0u) << "the envelope keeps climbing";
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "the silent hold re-arms in full";
+  EXPECT_EQ(dsp.voices[2].envelope, 0u) << "the level the live compute lifted drops";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x5000) << "the cursor is not re-primed";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 9);
 
-  // Two samples later the span is over: the same write restarts the voice.
-  dsp.internalKon = 0x04;
+  // The rewound hold is not a fresh key-on: its next call advances the stream
+  // as normal instead of repeating the decode-nothing start-address call.
   sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x6000) << "the re-held span keeps walking";
+
+  // The next poll sits past the silent span: the same write restarts the
+  // voice in full — countdown, envelope, and a re-primed stream.
+  dsp.internalKon = 0x04;
   sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a re-key past the silent span restarts";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
 }
 
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {

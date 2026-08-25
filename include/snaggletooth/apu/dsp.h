@@ -84,10 +84,12 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // read at or past 0x600 and force the +8 branch.
 //
 // computesSinceKeyOn counts the voice's per-sample compute calls since its last
-// key-on load, saturating high. The keying poll reads it to absorb a key-on
+// key-on load, saturating high. The keying poll reads it to grade a key-on
 // landing inside the voice's silent key-on span — the five startup calls plus
 // the first live compute, whose output is still silent because a sample is
-// scaled by the envelope standing before its update.
+// scaled by the envelope standing before its update: absorbed outright at the
+// poll right after the keying, and from the next poll on the countdown re-arms
+// while the stream stands.
 struct VoiceState {
   std::uint16_t brrAddress = 0;
   std::uint8_t brrSampleIndex = 0;
@@ -391,8 +393,10 @@ SlotResult stepDspCycle(DspState& dsp, std::span<const std::uint8_t, 65536> ram)
 // primed), and a set KOFF bit moves the voice to Release. On odd samples it does
 // nothing. Voices keyed on two samples ago clear from the internal-KON latch. A
 // key-on landing on a voice still inside its silent key-on span — the five
-// startup calls plus the first live compute — is absorbed: the voice keeps its
-// countdown and its stream.
+// startup calls plus the first live compute — is absorbed at the poll right
+// after the keying (countdown, stream and envelope schedule all stand), and at
+// any later in-span poll re-arms the countdown and drops the envelope while the
+// stream keeps the position it has walked to.
 void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept;
 
 // Keys voice `voice` (0-7) on: envelope to 0 and Attack, the 5-sample startup

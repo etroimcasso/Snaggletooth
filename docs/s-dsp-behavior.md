@@ -201,7 +201,7 @@ left set does not start the voice again, and the register keeps its value for re
 read from its register at every poll instead, so it keeps releasing for as long as the bit stands.
 `FLG` bit 7 is polled every sample rather than every other one.
 
-### A key-on landing on a voice inside its silent span is absorbed
+### A key-on landing on a voice inside its silent span is absorbed or rewinds the silence
 
 Both documents state that keying a voice that is already playing restarts it in full — envelope to
 zero, stream to the start, the empty startup samples again, the audible click. Both are silent on
@@ -219,14 +219,29 @@ kon`, whose driver re-keys a long-playing voice by rewriting a `KON` value whose
 throughout, and expects the restart. The register's history does not gate the arm; the voice's own
 startup state gates the action.
 
-**The absorption window is the voice's whole silent span, not the countdown alone.** A key-on
-produces six silent samples — the five empty ones plus the first envelope step's still-silent sample
-— and a key-on consumed anywhere inside those six is absorbed; one consumed from the first sounding
-sample on restarts the voice. `KON/kon decoding when another kon` pins both edges: it re-keys a
-voice at a widening spacing after a first key-on, and its expected table holds a frozen stream
-position through re-keys landing six samples after the load (a restart would zero the readings)
-while `KON/envx during kon` expects a re-key eight computes after a load to restart in full. A
-window one sample narrower or two samples wider than the six fails one ROM or the other.
+**Full absorption is only one poll deep; a later in-span key-on rewinds the silence without moving
+the stream.** A key-on produces six silent samples — the five empty ones plus the first envelope
+step's still-silent sample — and what a key-on consumed inside those six does splits by which poll
+takes it:
+
+- **Consumed at the poll immediately after the one that keyed the voice: absorbed outright.**
+  Countdown, stream and envelope schedule all stand — this is the `KON/kon clears independent`
+  case above, and `KON/kon then another kon`'s first two readings confirm the envelope emerges on
+  the original key-on's schedule.
+- **Consumed at a later poll inside the span: the silence rewinds, the stream does not.** The
+  five-sample countdown re-arms in full and the envelope drops to zero, so the level emerges
+  exactly as late as a full restart would place it — but the decode cursor keeps the position it
+  has walked to and keeps advancing at the pitch.
+
+One consumed from the first sounding sample on restarts the voice in full. Three ROMs together pin
+this shape, each blind to what the others measure. `KON/kon decoding when another kon` watches only
+the *stream*: its expected table holds a frozen cursor position through re-keys consumed up to six
+samples after the load, so no in-span key-on re-primes the decode. `KON/kon then another kon`
+watches only the *envelope*: it re-keys a voice at a widening spacing and counts samples until
+`VxENVX` turns non-zero, and its expected counts (`3 2 5 4 5 4 5 4`) read restart-late from the
+second in-span poll on — while a model that fully absorbs those key-ons reads `3 2 1 0 0 0` there,
+and one that also rewinds at the first poll reads `5 4` everywhere. `KON/envx during kon` bounds the
+far edge: a re-key consumed eight computes after the load restarts in full, stream included.
 
 ---
 

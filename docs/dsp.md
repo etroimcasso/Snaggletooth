@@ -174,15 +174,22 @@ and the register keeps the value for you to read back. Two `KON` writes inside o
 only the second one.
 
 Re-keying a voice that is already sounding restarts it in full — envelope to zero, stream back to the
-start, the empty samples again — which is what causes the documented click. But a key-on that lands
-on a voice **still inside its silent key-on span is absorbed**: the countdown is not reset and the
-stream is not restarted. The span is the whole silence a key-on produces — the five empty samples
-*plus* the first envelope step's still-silent sample — so a re-key up to six samples after the load
-is swallowed, and only a re-key from the first sounding sample on restarts the voice. Two `KON`
-writes that straddle a poll, each naming the same voice, therefore start it once — the first write's
-poll starts it, the second write's poll finds it mid-startup and lets it run — and a voice named by
-the earlier of two straddling writes leads one named only by the later write by exactly one poll
-period, two samples.
+start, the empty samples again — which is what causes the documented click. A key-on that lands on a
+voice **still inside its silent key-on span** does less, and how much less depends on which poll
+consumes it:
+
+- **At the poll immediately after the one that started the voice, it is absorbed outright.** Nothing
+  resets — countdown, stream and envelope schedule all stand. Two `KON` writes that straddle a poll,
+  each naming the same voice, therefore start it once, and a voice named by the earlier of two
+  straddling writes leads one named only by the later write by exactly one poll period, two samples.
+- **At any later poll inside the span, it rewinds the silence but not the stream.** The five-sample
+  countdown re-arms in full and the envelope drops back to zero, so the voice's level emerges as
+  late as a full restart would place it — but the decode cursor is not sent back to the start
+  address: it keeps the position it has walked to and keeps advancing at the pitch. The span is the
+  whole silence a key-on produces — the five empty samples *plus* the first envelope step's
+  still-silent sample — so this covers a re-key consumed up to six samples after the load.
+
+Only a re-key consumed from the first sounding sample on restarts the voice in full.
 
 Writing a `KOFF` bit releases a voice: its envelope decreases by 8 each sample until it reaches zero,
 regardless of the ADSR or GAIN settings. Decoding does not stop for a released voice — only the
@@ -299,8 +306,9 @@ Three consequences are worth knowing:
 This intra-sample schedule is derived from the S-DSP timing charts; the key-on countdown, the last
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
 slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
-silent-span key-on absorption, and the every-other-sample pitch capture are confirmed against the
-Blargg DSP test ROM, while the `VxOUTX` publish slot remains the least-certain part.
+two-tier handling of a key-on landing inside the silent span, and the every-other-sample pitch
+capture are confirmed against the Blargg DSP test ROM, while the `VxOUTX` publish slot remains the
+least-certain part.
 
 ## Inspecting the pipeline directly
 
