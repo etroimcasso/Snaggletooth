@@ -802,6 +802,71 @@ TEST(SampleSchedule, AKeyOnLateInTheSilentSpanRewindsTheHoldAndPastItRestarts) {
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
 }
 
+TEST(SampleSchedule, AKeyOnConsumedUnderASoftResetKeepsItsStartup) {
+  // A soft reset standing in the very sample a keying poll consumes a voice's
+  // key-on does not key that voice off: the fresh consumption wins, exactly as
+  // KON applied after KOFF wins at the poll itself, and the startup's whole
+  // ENVX schedule proceeds as if the reset were not standing. Measured against
+  // spc_dsp6's `KON/kon then flg.80`: a one-sample FLG bit-7 pulse over the
+  // consuming poll's sample leaves every voice's ENVX recovery exactly where
+  // an unmolested key-on places it, at both poll-relative compute positions
+  // (voice 0 computes after the poll in its sample; voices 1-7 take their
+  // first startup call the sample after).
+  auto trajectory = [](bool pulsed) {
+    Ram ram{};
+    DspState dsp;
+    reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain: ENVX jumps to 7Fh once live
+    reg(dsp, 2, 0x07) = 0x7F;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    EXPECT_EQ(dsp.sampleIndex % 2, 0u);
+    dsp.internalKon = 0x05;      // a KON write arms voices 0 and 2
+    if (pulsed) dsp[kFlg] = 0x80;
+    sample(dsp, ram);            // the poll consumes under the standing reset
+    if (pulsed) dsp[kFlg] = 0x00;
+    std::array<std::uint8_t, 24> out{};
+    for (std::size_t n = 0; n < 12; ++n) {
+      sample(dsp, ram);
+      out[2 * n] = envx(dsp, 0);
+      out[2 * n + 1] = envx(dsp, 2);
+    }
+    return out;
+  };
+  const auto clean = trajectory(false);
+  const auto shielded = trajectory(true);
+  EXPECT_EQ(shielded, clean) << "the startup's ENVX schedule is untouched";
+  EXPECT_EQ(clean.back(), 0x7F) << "and it is a startup that completes and sounds";
+}
+
+TEST(SampleSchedule, ASoftResetPulseOneSampleLaterKeysTheVoiceOff) {
+  // The consumption sample is the shield's whole width. The same one-sample
+  // reset pulse landing one sample after a voice's key-on is consumed — or
+  // anywhere later in or past the countdown — keys it off like any other
+  // voice: Release, envelope forced to 0, and with nothing re-arming it the
+  // voice never sounds. Measured against spc_dsp6's `KON/kon then flg.80`,
+  // whose readings print the no-recovery mark from its second alignment on.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+  dsp.internalKon = 0x01;
+  sample(dsp, ram);            // a clean consumption; voice 0's startup begins
+  ASSERT_EQ(dsp.voices[0].konDelay, 4);
+  ASSERT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
+
+  dsp[kFlg] = 0x80;
+  sample(dsp, ram);            // the pulse covers only the following sample
+  dsp[kFlg] = 0x00;
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "one sample past the shield";
+
+  for (int n = 0; n < 12; ++n) sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(dsp.voices[0].envelope, 0u);
+  EXPECT_EQ(envx(dsp, 0), 0) << "the keyed-off voice never recovers";
+}
+
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {
   // The cursor is the DSP's own: it advances one slot per stepDspCycle and wraps
   // after 32, delivering exactly one frame per wrap.

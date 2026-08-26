@@ -362,8 +362,9 @@ TEST(Flg, ResetReseedsTheNoiseLevel) {
 
 TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
   // FLG bit 7 keys every voice off and forces envelope 0 each sample. A voice
-  // keyed on while it is set starts and is immediately re-silenced; nothing
-  // sounds until the bit clears and the voice is re-keyed.
+  // keyed on while it is set starts — the consumption sample itself is shielded
+  // from the reset (`KON/kon then flg.80`) — and is re-silenced from the next
+  // sample; nothing sounds until the bit clears and the voice is re-keyed.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77});
@@ -381,10 +382,13 @@ TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
   for (int i = 0; i < 8; ++i) {
     const StereoFrame f = step(dsp, ram);
     EXPECT_EQ(f.left, 0) << "soft-reset sample " << i;
-    // The armed key-on is consumed once, at the first even poll, and voice 0's
-    // soft-reset compute re-silences it within that same sample. Nothing arms it
-    // again, so the voice reads Release throughout and its envelope stays 0.
-    EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "soft-reset sample " << i;
+    // The armed key-on is consumed once, at the first even poll, and its
+    // consumption sample keeps the startup's Attack (the reset does not key a
+    // voice off in the sample its key-on lands — `KON/kon then flg.80`). From
+    // the next sample the standing reset keys it off like any other voice, and
+    // nothing arms it again, so it reads Release and its envelope stays 0.
+    if (i > 0)
+      EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "soft-reset sample " << i;
     EXPECT_EQ(dsp.voices[0].envelope, 0) << "soft-reset sample " << i;
   }
 

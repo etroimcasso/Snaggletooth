@@ -199,6 +199,14 @@ envelope changes. `KOFF` is read from its register at every poll rather than arm
 set bit keeps releasing the voice until you write a new value. `KON` and `KOFF` are polled every
 second sample (16 kHz).
 
+`FLG` bit 7 — the soft reset — keys every voice off and forces its envelope to zero, and unlike
+`KON`/`KOFF` it is applied every sample, per voice, at each voice's own compute slot. One coincidence
+is carved out: a voice whose key-on is consumed that same sample is **not** keyed off — the fresh
+consumption wins, exactly as `KON` applied after `KOFF` wins at the poll itself, and the startup
+proceeds as if the reset were not standing. From the voice's next compute on, a standing reset keys
+it off like any other voice, so a reset pulse as short as one sample landing anywhere later — inside
+the silent span or past it — silences the voice until it is re-keyed.
+
 A voice reads its current block's header from RAM every sample and checks its loop/end bits the same
 sample, whether or not its pitch counter has advanced far enough to decode anything. A header marking
 the block End+Mute releases the voice and drops its envelope to zero; an End+Loop block loops without
@@ -315,9 +323,9 @@ Three consequences are worth knowing:
 This intra-sample schedule is derived from the S-DSP timing charts; the key-on countdown, the last
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
 slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
-two-tier handling of a key-on landing inside the silent span, and the per-sample pitch capture with
-its key-on hold are confirmed against the Blargg DSP test ROM, while the `VxOUTX` publish slot
-remains the least-certain part.
+two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
+its key-on hold, and the soft-reset shield on a key-on's consumption sample are confirmed against
+the Blargg DSP test ROM, while the `VxOUTX` publish slot remains the least-certain part.
 
 ## Inspecting the pipeline directly
 

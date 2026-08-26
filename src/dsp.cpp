@@ -467,8 +467,20 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   const bool headerEndMute = computeSinceKeyOn >= 3 &&
                              headerIsEndMute(ram[v.brrAddress]);
 
+  // A key-on the keying poll consumed THIS sample shields its voice from the
+  // sample's soft reset: the fresh consumption wins, exactly as KON applied
+  // after KOFF wins at the poll itself, and the startup proceeds as if the
+  // reset were not standing. One sample later the reset arm below keys the
+  // voice off like any other (spc_dsp6 `KON/kon then flg.80`: a one-sample
+  // FLG bit-7 pulse over the consuming poll's sample leaves the startup's
+  // ENVX schedule untouched; the same pulse one sample later — or anywhere
+  // else in or past the countdown — silences the voice for good). The
+  // consumption sample is the only one that can see the countdown still at
+  // its armed value: every later compute has decremented it.
+  const bool keyOnConsumedThisSample = v.konDelay == kKeyOnStartupCalls;
+
   int amplitude;
-  if (softReset) {
+  if (softReset && !keyOnConsumedThisSample) {
     // FLG bit 7 keys every voice off and forces its envelope to 0 each sample. BRR
     // decoding keeps running (ENDX and loop transitions still fire); only the
     // emitted amplitude is silenced.

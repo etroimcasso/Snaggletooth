@@ -245,6 +245,31 @@ second in-span poll on — while a model that fully absorbs those key-ons reads 
 and one that also rewinds at the first poll reads `5 4` everywhere. `KON/envx during kon` bounds the
 far edge: a re-key consumed eight computes after the load restarts in full, stream included.
 
+### A key-on's consumption sample is shielded from a soft reset
+
+Both documents describe `FLG` bit 7 the same way: every voice keyed off, its envelope forced to
+zero, applied every sample rather than on the `KON`/`KOFF` poll grid. Neither says what happens when
+the same sample both consumes a voice's key-on and carries a standing soft reset.
+
+The test ROM decides it (`KON/kon then flg.80`): key a voice on, raise `FLG` bit 7 for exactly one
+sample, sliding the pulse one sample later per reading, and count samples until `VxENVX` turns
+non-zero. The expected readings are `06 05 80 80 80 80 80 80 80 80`, uniform across the eight
+voices:
+
+- A pulse over the sample **before** the consuming poll falls on a voice that is not yet keyed —
+  harmless — and the key-on starts on schedule one sample later (six samples to a non-zero read,
+  counted from the pulse).
+- A pulse over the consuming poll's **own** sample leaves the startup's `VxENVX` schedule exactly
+  where an unmolested key-on places it: five samples to a non-zero read, one fewer than the reading
+  before only because the startup began one sample closer to the counting.
+- A pulse over **any later** sample — still inside the silent span or past it — keys the voice off
+  for good: envelope forced to zero, release, and with nothing re-arming it the count never
+  terminates.
+
+So a soft reset does not key a voice off in the sample its key-on is consumed: the fresh consumption
+wins, the same precedence `KON` has over `KOFF` at the poll itself. The shield is exactly one sample
+wide — the same one-sample pulse, slid one sample in each direction, pins both of its edges.
+
 ---
 
 ## The intra-sample schedule
