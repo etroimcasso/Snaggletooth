@@ -480,7 +480,36 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   const bool keyOnConsumedThisSample = v.konDelay == kKeyOnStartupCalls;
 
   int amplitude;
-  if (softReset && !keyOnConsumedThisSample) {
+  if (v.restartPending) {
+    // The final pre-key-on sample. The keying poll consumed a full restart for
+    // this voice and armed its countdown, but the stream, envelope and phase
+    // still stand: this compute advances the old stream once more — the final
+    // pre-key-on decode — and emits its sample under the standing envelope,
+    // and only then applies the restart. The countdown ticks on this very
+    // call, so the ENVX schedule is exactly the armed key-on's; the old
+    // decode's ENDX side effect is erased by the key-on's clear, which is the
+    // suppression `KON/kon stops endx of prev sample` measures. A standing
+    // soft reset does not reach this branch — the fresh consumption wins, as
+    // at the poll itself (`KON/kon then flg.80`). Measured against `KON/kon
+    // unaffected by pitch`: a re-key on a sounding voice emits the old data
+    // once more on the consuming sample, at every pitch.
+    v.restartPending = false;
+    advanceVoiceStream(dsp, ram, voice, step);
+    const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
+    const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
+    amplitude = (sample * static_cast<int>(v.envelope)) >> 11;
+    // The restart proper: wipe and re-prime the stream, envelope from 0,
+    // Attack, ENDX cleared. The counter and the capture hold carry the values
+    // the poll left (keyOnVoice resets them for its direct callers), and the
+    // armed countdown takes this call as the startup's first.
+    const std::uint8_t count = v.computesSinceKeyOn;
+    const std::uint8_t hold = v.pitchCaptureHold;
+    keyOnVoice(dsp, ram, voice);
+    v.computesSinceKeyOn = count;
+    v.pitchCaptureHold = hold;
+    --v.konDelay;
+    dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
+  } else if (softReset && !keyOnConsumedThisSample) {
     // FLG bit 7 keys every voice off and forces its envelope to 0 each sample. BRR
     // decoding keeps running (ENDX and loop transitions still fire); only the
     // emitted amplitude is silenced.
@@ -876,7 +905,11 @@ void keyOffVoice(DspState& dsp, std::size_t voice) noexcept {
   dsp.voices[voice].phase = EnvPhase::Release;
 }
 
-void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept {
+void pollKeying(DspState& dsp,
+                [[maybe_unused]] std::span<const std::uint8_t, 65536> ram) noexcept {
+  // The poll itself touches no RAM: a consumed restart's stream re-prime — the
+  // one RAM-reading key-on action — runs at the voice's own compute (see
+  // computeVoiceAmplitude's restartPending branch).
   // The poll runs on even-indexed samples counted from power-on — a fixed
   // choice that settles the hardware's probabilistic power-on poll phase.
   if (dsp.sampleIndex % 2 != 0) return;
@@ -909,10 +942,20 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
     // consumed on a Released voice restarts it in full even inside the span
     // (`KON/kon then flg.80 then kon`). The same arm is what lets KON win over
     // KOFF when one poll delivers both to an in-span voice.
+    //
+    // The full restart arms its countdown and counter here, but the wipe waits
+    // for the voice's own compute: that compute still prepares one sample from
+    // the standing stream and envelope — the final pre-key-on sample, which
+    // still sounds — before the restart applies (`KON/kon unaffected by
+    // pitch`: a re-key on a sounding voice emits the old data once more on the
+    // consuming sample, at every pitch; Anomie's key-on account places the
+    // final pre-KON decode on that same sample).
     if ((kon & bit) != 0) {
       VoiceState& v = dsp.voices[voice];
       if (v.computesSinceKeyOn > kKeyOnSilentCalls || v.phase == EnvPhase::Release) {
-        keyOnVoice(dsp, ram, voice);
+        v.konDelay = kKeyOnStartupCalls;
+        v.computesSinceKeyOn = 0;
+        v.restartPending = true;
       } else if (v.computesSinceKeyOn > 2) {
         v.konDelay = kKeyOnStartupCalls;
         v.envelope = 0;

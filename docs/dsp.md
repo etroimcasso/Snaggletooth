@@ -176,7 +176,12 @@ and the register keeps the value for you to read back. Two `KON` writes inside o
 only the second one.
 
 Re-keying a voice that is already sounding restarts it in full — envelope to zero, stream back to the
-start, the empty samples again — which is what causes the documented click. A key-on that lands on a
+start, the empty samples again — which is what causes the documented click. The restart is applied by
+the voice's own compute in the consuming poll's sample, and that compute still prepares one sample
+from the standing stream and envelope first: the old stream takes its final decode and advance, and
+its sample sounds — **the final pre-key-on sample**. The silence therefore begins one sample after
+the consuming poll, while the countdown counts from the consuming sample itself, so the first
+sounding sample of the new startup lands where a key-on always places it. A key-on that lands on a
 voice **still inside its silent key-on span** does less, and how much less depends on which poll
 consumes it:
 
@@ -330,9 +335,10 @@ This intra-sample schedule is derived from the S-DSP timing charts; the key-on c
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
 slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
-its key-on hold, the soft-reset shield on a key-on's consumption sample, and the full restart a
-key-on performs on a keyed-off in-span voice are confirmed against the Blargg DSP test ROM, while
-the `VxOUTX` publish slot remains the least-certain part.
+its key-on hold, the soft-reset shield on a key-on's consumption sample, the full restart a
+key-on performs on a keyed-off in-span voice, and the final pre-key-on sample a full restart's
+consuming compute still emits are confirmed against the Blargg DSP test ROM, while the `VxOUTX`
+publish slot remains the least-certain part.
 
 ## Inspecting the pipeline directly
 

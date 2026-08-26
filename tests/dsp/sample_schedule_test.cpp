@@ -561,13 +561,13 @@ TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
   ASSERT_EQ(dsp.sampleIndex % 2, 0u);
 
   dsp.internalKon = 0x04;      // a KON write arms voice 2
-  sample(dsp, ram);            // the poll at this sample's T31 keys it on
+  sample(dsp, ram);            // the poll at this sample's T31 arms the restart
   ASSERT_EQ(dsp.voices[2].konDelay, 5);
-  ASSERT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
 
-  sample(dsp, ram);            // first startup call: the start-address sample
+  sample(dsp, ram);            // the voice's compute applies it: the preload,
+                               // and the startup's first call advances nothing
   EXPECT_EQ(dsp.voices[2].konDelay, 4);
-  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the first call decodes nothing";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
 
   for (int n = 0; n < 4; ++n) sample(dsp, ram);  // the countdown's other calls
@@ -794,10 +794,17 @@ TEST(SampleSchedule, AKeyOnLateInTheSilentSpanRewindsTheHoldAndPastItRestarts) {
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x6000) << "the re-held span keeps walking";
 
   // The next poll sits past the silent span: the same write restarts the
-  // voice in full — countdown, envelope, and a re-primed stream.
+  // voice in full — countdown, envelope, and a re-primed stream. The poll
+  // arms it; the old stream stands through the arming sample (the voice's
+  // compute emits one more sample from it — the final pre-key-on sample —
+  // before the restart applies).
   dsp.internalKon = 0x04;
   sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a re-key past the silent span restarts";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x7000)
+      << "the old stream still stands at the arming poll's sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
 }
@@ -899,15 +906,21 @@ TEST(SampleSchedule, AKeyOnConsumedOnAResetKilledStartupRestartsInFull) {
 
   // The next poll consumes a key-on with the span's samples still counting.
   // On the dead startup it is neither absorbed nor a rewind: the voice
-  // restarts in full, stream re-primed.
+  // restarts in full, stream re-primed. The poll arms it; the dead startup's
+  // state stands through the arming sample and the voice's own compute
+  // applies the restart.
   dsp.internalKon = 0x04;
   sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a key-on on a dead startup restarts";
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Release)
+      << "the killed startup still stands at the arming poll's sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
   EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
 
-  for (int n = 0; n < 8; ++n) sample(dsp, ram);
+  for (int n = 0; n < 7; ++n) sample(dsp, ram);
   EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
 }
 
@@ -941,11 +954,99 @@ TEST(SampleSchedule, AKeyOnConsumedOnAKeyedOffStartupRestartsInFull) {
   dsp.internalKon = 0x04;
   sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a key-on on a keyed-off startup restarts";
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Release)
+      << "the killed startup still stands at the arming poll's sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
   EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
 
-  for (int n = 0; n < 8; ++n) sample(dsp, ram);
+  for (int n = 0; n < 7; ++n) sample(dsp, ram);
   EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
+}
+
+TEST(SampleSchedule, AReKeyOnASoundingVoiceEmitsTheFinalPreKeyOnSample) {
+  // A full restart consumed by the poll silences its voice only from the
+  // sample after the consuming compute: that compute still prepares one sample
+  // from the standing stream and envelope — the final pre-key-on sample — and
+  // the restart applies after it. Measured against spc_dsp6's `KON/kon
+  // unaffected by pitch`, whose echo window records the re-keyed voice's old
+  // data on the consuming sample and the startup's silence only after it,
+  // identically at pitch $3F00 and pitch 0.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  dsp[kMvolLeft] = 0x7F;
+  dsp[kMvolRight] = 0x7F;
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+  const StereoFrame steady = sample(dsp, ram);
+  ASSERT_GT(steady.left, 0);
+  sample(dsp, ram);            // odd sample, so the next one polls
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x02;      // re-key the sounding voice
+  const StereoFrame atThePoll = sample(dsp, ram);  // computed before its T31 poll
+  const StereoFrame consuming = sample(dsp, ram);  // the consuming compute
+  const StereoFrame after = sample(dsp, ram);      // the startup's first silence
+  EXPECT_EQ(atThePoll.left, steady.left);
+  EXPECT_EQ(consuming.left, steady.left) << "the final pre-key-on sample still sounds";
+  EXPECT_EQ(after.left, 0) << "the restart's silence begins the sample after";
+}
+
+TEST(SampleSchedule, TheFinalPreKeyOnSampleIsTheOldStreamsOwnNext) {
+  // The consuming compute does not replay the voice's standing output: the old
+  // stream takes its final decode and advance first (the sample a un-keyed
+  // voice would have emitted), and only then does the restart wipe it. Pinned
+  // against a control machine: a walking voice re-keyed mid-stream matches the
+  // control's frames exactly through the consuming sample and goes silent the
+  // sample after, while the control keeps sounding.
+  Ram ram{};
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: loops over itself
+  for (int n = 0; n < 8; ++n)
+    ram[static_cast<std::size_t>(0x0301 + n)] = static_cast<std::uint8_t>(0x10 * (n + 1) + n);
+
+  const auto place = [](DspState& dsp) {
+    dsp[0x5D] = 0x02;          // DIR -> $0200
+    dsp[kMvolLeft] = 0x7F;
+    dsp[kMvolRight] = 0x7F;
+    dsp.voices[1].phase = EnvPhase::Sustain;
+    dsp.voices[1].konDelay = 0;
+    dsp.voices[1].envelope = 0x7F0;
+    dsp.voices[1].brrAddress = 0x0300;
+    reg(dsp, 1, 0x03) = 0x10;  // pitch $1000: one stream sample per call
+    reg(dsp, 1, 0x07) = 0x7F;  // Direct Gain holds the level
+    reg(dsp, 1, 0x00) = 0x40;
+    reg(dsp, 1, 0x01) = 0x40;
+  };
+  DspState keyed;
+  DspState control;
+  place(keyed);
+  place(control);
+  for (int n = 0; n < 4; ++n) {
+    const StereoFrame a = sample(keyed, ram);
+    const StereoFrame b = sample(control, ram);
+    ASSERT_EQ(a, b);
+  }
+  ASSERT_EQ(keyed.sampleIndex % 2, 0u);
+
+  keyed.internalKon = 0x02;
+  const StereoFrame armA = sample(keyed, ram);
+  const StereoFrame armB = sample(control, ram);
+  EXPECT_EQ(armA, armB) << "computed before the arming poll";
+  const StereoFrame lastA = sample(keyed, ram);
+  const StereoFrame lastB = sample(control, ram);
+  EXPECT_EQ(lastA, lastB) << "the final pre-key-on sample is the advanced one";
+  ASSERT_NE(lastB.left, 0) << "a frame with signal, or the clause pins nothing";
+  const StereoFrame afterA = sample(keyed, ram);
+  const StereoFrame afterB = sample(control, ram);
+  EXPECT_EQ(afterA.left, 0) << "the restart's silence begins here";
+  EXPECT_NE(afterB.left, 0) << "while the control keeps sounding";
 }
 
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {

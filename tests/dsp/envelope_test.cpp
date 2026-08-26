@@ -672,8 +672,9 @@ TEST(Keying, PollRunsOnEvenSamplesOnly) {
 
   k.dsp.sampleIndex = 0;  // even -> polled
   pollKeying(k.dsp, k.ram);
-  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Attack);
   EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
+  EXPECT_TRUE(k.dsp.voices[0].restartPending)
+      << "the poll arms the restart; the voice's own compute applies it";
   EXPECT_EQ(k.dsp.internalKon, 0x00);  // consumed
 }
 
@@ -705,17 +706,24 @@ TEST(Keying, AKeyOnHappensOnceWhileTheKonRegisterStaysSet) {
   pollKeying(k.dsp, k.ram);
   EXPECT_EQ(k.dsp.voices[0].konDelay, 5);
 
-  // Two samples of startup, then the next poll with the register still set.
+  // The poll arms the restart; the voice's own compute applies it and runs the
+  // startup's first call. The whole-sample step ticks the global counter, so
+  // put it back where the attack-fires-at-counter-0 premise needs it.
+  (void)stepDspSample(k.dsp, std::span<const std::uint8_t, 65536>{k.ram});
+  k.dsp.globalCounter = 0;
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 4);
+
+  // Two more startup samples, then the next poll with the register still set.
   stepVoiceEnvelope(k.dsp, 0, false);
   stepVoiceEnvelope(k.dsp, 0, false);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 3);
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 2);
 
   k.dsp.sampleIndex = 2;
   pollKeying(k.dsp, k.ram);
-  EXPECT_EQ(k.dsp.voices[0].konDelay, 3);  // not re-keyed back to 5
+  EXPECT_EQ(k.dsp.voices[0].konDelay, 2);  // not re-keyed back to 5
 
   // The startup runs out and the envelope leaves 0.
-  for (int n = 0; n < 3; ++n) EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0);
+  for (int n = 0; n < 2; ++n) EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0);
   EXPECT_EQ(stepVoiceEnvelope(k.dsp, 0, false), 0x20);
   EXPECT_EQ(k.dsp[kKon], 0x01);  // the register still reads back its value
 }

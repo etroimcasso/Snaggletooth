@@ -303,6 +303,32 @@ release) pass with the same arm that passes `KON/kon then flg.80 then kon`. It i
 `KON` win when a single poll delivers `KON` and `KOFF` together to an in-span voice — the `KOFF`
 releases first within the poll, and the key-on then lands on a keyed-off voice and restarts it.
 
+### A full restart's consuming sample still emits the final pre-key-on sample
+
+A full restart does not silence its voice on the sample whose poll consumes the key-on. The
+voice's own compute in that sample prepares one more sample from the state standing before the
+restart — the old stream takes its final decode and advance, and its sample is emitted under the
+standing envelope — and only then does the restart apply: stream re-primed, envelope to zero,
+Attack, with the startup countdown counting from that same call, so every later sample of the
+startup lands exactly where a key-on always places it.
+
+The test ROM decides it (`KON/kon unaffected by pitch`): a sounding voice — constant full-scale
+sample data, so its live output is a fixed word and pitch cannot change it — is re-keyed, and the
+echo buffer, serving as a per-sample tape of the voice's output, is read back over a seven-frame
+window spanning the re-key. The expected window is `FFFE 0000 0000 0000 0000 0000 FFFE`: the old
+data still sounds on the window's first frame, the restart's silence fills the middle, and the
+new startup's first sounding sample lands at the same frame a from-silence key-on would produce.
+The same window repeats identically with the pitch at `$3F00` and at zero — the sub-test's
+namesake, and the constant-data design that makes the timing the only signal. A model that
+silences the voice on the consuming sample itself prints `0000` in the first frame and misses
+nothing else — a one-frame difference in a fourteen-word row, in both pitch runs.
+
+Anomie's per-sample key-on account states the same rule from the hardware side: "After the final
+pre-KON sample is prepared, the envelope is set to 0 … The final pre-KON BRR decode also occurs
+here." The final decode is real, not an idle detail: it can complete an end block, and the
+key-on's `ENDX` clear then erases that same sample's set — the suppression `KON/kon stops endx
+of prev sample` measures.
+
 ---
 
 ## The intra-sample schedule

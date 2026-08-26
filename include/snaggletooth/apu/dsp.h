@@ -103,6 +103,12 @@ struct VoiceState {
   // armed to seven by every consumed key-on, so the hold is anchored to the
   // poll and uniform across the eight voices (see DspState::pitchLatch).
   std::uint8_t pitchCaptureHold = 0;
+  // A full restart the keying poll consumed, waiting for the voice's own
+  // compute. The poll arms the countdown and the counter at once, but the
+  // stream, envelope and phase stand until that compute has prepared one more
+  // sample from them — the final pre-key-on sample, which still sounds — and
+  // then applies the restart (see pollKeying).
+  bool restartPending = false;
   std::uint16_t bentGainRef = 0;
 };
 
