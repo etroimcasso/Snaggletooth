@@ -15,6 +15,7 @@
 // VxGAIN's own bits 7-5 while a GAIN mode drives the level (fullsnes's "Gain
 // Notes", 2977-2984).
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -828,6 +829,40 @@ TEST(BrrHeaderCheck, TheCheckGoesLiveOnTheThirdComputeAfterTheKeyOnLoad) {
   (void)stepDspSample(k.dsp, ram);  // third: both check
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(k.dsp.voices[1].phase, EnvPhase::Release);
+}
+
+TEST(BrrHeaderCheck, ACrossingIntoAnEndMuteBlockSilencesAtTheNextSamplesCheck) {
+  // The header check reads the header standing at the sample's start — the
+  // hardware checks before it decodes — so a stream crossing into an End+Mute
+  // block mid-sample is silenced one sample later, at the next check. spc_dsp6
+  // `KON/kon when prev sample at end` pins the gap: its sample chains one
+  // silent block into a self-looping End+Mute block, the stream races at pitch
+  // 3F00h and crosses as the startup countdown ends, and the ROM's sync then
+  // spins until VxENVX reads non-zero — so the first live envelope step, whose
+  // own sample is the crossing's, must publish its level before the check
+  // lands. Exactly one published sample carries it. (Its stationary
+  // counterpart, `KON/kon then set sample's end flag`, pins the other half: a
+  // header ALREADY standing at the first live step's start kills before the
+  // step, publishing nothing.)
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  k.ram[0x1000] = 0x00;                // the first block: silent, no end
+  k.ram[0x1009] = 0x01;                // the next: end set, loop clear
+  k.ram[0x02 * 0x100 + 2] = 0x09;      // loop -> 1009h, the End+Mute block itself
+  k.dsp[0x03] = 0x3F;                  // V0PITCHH: ~3.94 samples per call
+  gain(k.dsp, 0) = 0x7F;               // direct gain: the first live step is 7F0h
+  keyOnVoice(k.dsp, ram, 0);
+
+  std::array<std::uint8_t, 12> published{};
+  for (std::uint8_t& sample : published) {
+    (void)stepDspSample(k.dsp, ram);
+    sample = envx(k.dsp, 0);
+  }
+
+  EXPECT_EQ(std::count(published.begin(), published.end(), 0x7F), 1);
+  EXPECT_EQ(std::count(published.begin(), published.end(), 0x00), 11);
+  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(k.dsp.voices[0].envelope, 0);
 }
 
 TEST(BrrHeaderCheck, TheCheckLeavesEndxToTheDecode) {

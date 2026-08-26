@@ -201,9 +201,11 @@ TEST(OutputStage, TheNegativeSumClampsToSignedSixteenBits) {
 
 TEST(OutputStage, EnteringAnEndMuteBlockReleasesTheVoice) {
   // A voice streaming out of a normal block into a code-1 End+Mute block goes to
-  // Release with the envelope at 0 the sample it enters (fullsnes line 2712:
-  // "End+Mute ... Release, Env=000h"). The frame loop derives brrEndMute from
-  // the stream advance and hands it to the envelope step.
+  // Release with the envelope at 0 (fullsnes line 2712: "End+Mute ... Release,
+  // Env=000h") — at the sample AFTER the one that crosses: the per-sample header
+  // check reads the header standing at each sample's start, and the crossing
+  // happens in the same sample's later decode (spc_dsp6 `KON/kon when prev
+  // sample at end` pins the one-sample gap).
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});  // normal
@@ -225,6 +227,9 @@ TEST(OutputStage, EnteringAnEndMuteBlockReleasesTheVoice) {
   ASSERT_GT(dsp.voices[0].envelope, 0);
 
   static_cast<void>(stepDspSample(dsp, ram_span));  // crosses into the End+Mute block
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);  // the crossing sample still sounds
+
+  static_cast<void>(stepDspSample(dsp, ram_span));  // the standing check reads the header
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);
 }

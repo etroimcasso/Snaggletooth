@@ -426,6 +426,30 @@ running first, so the load's sample is voice 0's first count while voices 1-7 be
 next sample; that shared-slot asymmetry is what lets one uniform count produce the ROM's eight
 identical per-voice rows. Both documents are silent on when the check goes live at all.
 
+### The header the check reads is the decoder's block, one sample behind a crossing
+
+The check runs early in the voice's sample and the decode after it — Anomie's V3c carries the 'e'/'l'
+check while V4 decodes and adjusts the BRR pointer — so the header it reads belongs to the block the
+decoder last ran in, never to a block the same sample's advance enters. A stream crossing into an
+End+Mute block sets `ENDX` at once but is released only at the next sample's check.
+
+The gap widens across a key-on's startup, because the decoder idles through it: fullsnes has the five
+empty samples land "before envelope updates and BRR decoding actually begin", even though the cursor
+walks at the pitch the whole time (the section above). A cursor that crosses into an End+Mute block
+during those empty samples is therefore released one sample **after** the first envelope step — the
+step runs and its level reaches `VxENVX` for one sample before the release lands.
+
+`KON/kon when prev sample at end` is what settles this, by refusing to run otherwise: its sample
+chains one silent block into an End+Mute block that loops on itself, its body leaves pitch `$3F00`
+standing where the shared sync keys a rate-15 attack, and the sync then spins until `VxENVX` reads
+non-zero. The racing startup crosses into the End+Mute block as the countdown ends, so a check that
+saw the crossing at the first live step would kill the level at zero and spin forever — on hardware
+the sync exits, on the strength of that one published step. The stationary case is pinned from the
+other side by `KON/kon then set sample's end flag`: a header pulse already standing at the first live
+step's sample reads back as a voice that never sounded, so the kill itself stays ahead of the
+envelope update within the sample — what lags a crossing is the header address, not the check's
+place in the sample.
+
 ---
 
 ## Echo

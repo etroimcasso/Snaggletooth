@@ -202,10 +202,11 @@ inline constexpr std::uint8_t kKeyOnSilentCalls = kKeyOnStartupCalls + 1;
 // decoding the end block, not after it. The decoded sample shifts into the
 // window; the filter's history is the window's two newest taps.
 //
-// Returns whether the sample just entered an End+Mute block (header code 1: end
-// set, loop clear) — the caller silences the voice and drops its envelope to 0.
-// An End+Loop block (code 3) returns false: it loops without muting.
-bool decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+// Entering an End+Mute block (header code 1: end set, loop clear) has no
+// further effect here: the silencing is the per-sample header check's, which
+// reads the header standing at each sample's start — so it lands at the NEXT
+// sample's check, one sample after this decode moved in.
+void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                         std::size_t voice) noexcept {
   VoiceState& v = dsp.voices[voice];
   if (v.brrSampleIndex >= 16) {
@@ -219,11 +220,8 @@ bool decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     v.brrSampleIndex = 0;
   }
   const std::uint8_t header = ram[v.brrAddress];
-  bool enteredEndMute = false;
-  if (v.brrSampleIndex == 0 && (header & 0x01) != 0) {
+  if (v.brrSampleIndex == 0 && (header & 0x01) != 0)
     dsp[kDspEndx] |= static_cast<std::uint8_t>(1u << voice);
-    enteredEndMute = headerIsEndMute(header);
-  }
   const std::uint8_t byte =
       ram[static_cast<std::uint16_t>(v.brrAddress + 1 + v.brrSampleIndex / 2)];
   const int sample = decodeNibble(signedNibble(byte, (v.brrSampleIndex & 1) != 0),
@@ -235,23 +233,19 @@ bool decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   v.window.old = v.window.newest;
   v.window.newest = decoded;
   ++v.brrSampleIndex;
-  return enteredEndMute;
 }
 
 // Advances a voice's stream by the samples this 32 kHz output sample passes: the
 // pitch counter gains `step`, and every whole sample position it crosses is
-// decoded. Returns whether any of those decodes entered an End+Mute block. Shared
-// by stepVoice (which reports the interpolated result) and stepDspSample (which
-// also needs the mute signal, and supplies a pitch-modulated step).
-bool advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+// decoded. Shared by stepVoice (which reports the interpolated result) and
+// stepDspSample (which supplies a pitch-modulated step).
+void advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                         std::size_t voice, std::uint32_t step) noexcept {
   VoiceState& v = dsp.voices[voice];
   const std::uint32_t advanced = v.pitchCounter + step;
   const std::uint32_t passed = (advanced >> 12) - (v.pitchCounter >> 12);
   v.pitchCounter = static_cast<std::uint16_t>(advanced);
-  bool endMute = false;
-  for (std::uint32_t n = 0; n < passed; ++n) endMute |= decodeStreamSample(dsp, ram, voice);
-  return endMute;
+  for (std::uint32_t n = 0; n < passed; ++n) decodeStreamSample(dsp, ram, voice);
 }
 
 // Clamps a mix accumulator to signed 16 bits — the hardware clamps (never wraps)
@@ -410,7 +404,7 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept {
   const BrrSource source =
       readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]);
-  dsp.voices[voice] = VoiceState{.brrAddress = source.start};
+  dsp.voices[voice] = VoiceState{.brrAddress = source.start, .headerAddress = source.start};
   for (int n = 0; n < 4; ++n) decodeStreamSample(dsp, ram, voice);
 }
 
@@ -455,8 +449,12 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
 
   // The header byte is loaded from RAM every sample, whatever the pitch counter is
   // doing, and its end/loop bits are read the same sample. So a block that turns
-  // End+Mute under a voice whose stream has stopped still releases it, which the
-  // decode below cannot see — it reports only a header it reached.
+  // End+Mute under a voice whose stream has stopped still releases it. This check
+  // is the envelope's ONLY End+Mute source, and it reads headerAddress — the
+  // decoder's block as of the samples the decoder actually runs for — so a
+  // startup that carries the stream into an End+Mute block is seen here only
+  // after the first live sample's check has passed (see VoiceState::headerAddress
+  // for the rule and what pins it).
   //
   // The check goes live two sample periods after the keying poll loads a key-on.
   // With the load preceding voice 0's compute in the slot they share, the load's
@@ -465,7 +463,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   // The counter stops at the sixth compute, which is past it for every voice.
   const int computeSinceKeyOn = kKeyOnStartupCalls + 1 - v.konDelay;
   const bool headerEndMute = computeSinceKeyOn >= 3 &&
-                             headerIsEndMute(ram[v.brrAddress]);
+                             headerIsEndMute(ram[v.headerAddress]);
 
   // A key-on the keying poll consumed THIS sample shields its voice from the
   // sample's soft reset: the fresh consumption wins, exactly as KON applied
@@ -514,10 +512,12 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // decoding keeps running (ENDX and loop transitions still fire); only the
     // emitted amplitude is silenced.
     v.phase = EnvPhase::Release;
-    if (v.konDelay > 0)
+    if (v.konDelay > 0) {
       --v.konDelay;
-    else
+    } else {
       advanceVoiceStream(dsp, ram, voice, step);
+      v.headerAddress = v.brrAddress;
+    }
     v.envelope = 0;
     dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
     amplitude = 0;
@@ -538,7 +538,18 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     stepVoiceEnvelope(dsp, voice, headerEndMute);
     amplitude = 0;
   } else {
-    const bool endMute = advanceVoiceStream(dsp, ram, voice, step) || headerEndMute;
+    // The envelope's End+Mute input was read above, before this advance — the
+    // hardware checks the header early in the voice's sample and decodes after
+    // (Anomie's V3c before V4) — and headerAddress takes this advance's block
+    // only now that the check has passed. So a stream crossing into an End+Mute
+    // block sets ENDX at once but silences only at the next sample's check, and
+    // a startup that crossed during its countdown silences one sample after its
+    // first live step. The gap is audible: that step publishes its level, which
+    // is what spc_dsp6's shared sync spins on (`KON/kon when prev sample at
+    // end` races a stream into an End+Mute block mid-startup, then waits for
+    // VxENVX != 0; on hardware the wait exits).
+    advanceVoiceStream(dsp, ram, voice, step);
+    v.headerAddress = v.brrAddress;
     // A voice whose NON bit is set outputs the shared noise level in place of its
     // interpolated BRR sample; the stream still advanced above, so decoding and
     // ENDX are unaffected.
@@ -550,7 +561,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // reaches the output a sample after the register driving it is read.
     const auto envelope = static_cast<int>(v.envelope);
     amplitude = (sample * envelope) >> 11;
-    stepVoiceEnvelope(dsp, voice, endMute);
+    stepVoiceEnvelope(dsp, voice, headerEndMute);
   }
 
   // VxOUTX returns the high byte of the 15-bit amplitude (-128..+127).
@@ -984,10 +995,13 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     dsp[voiceRegister(voice, kVoiceEnvx)] = static_cast<std::uint8_t>(v.envelope >> 4);
   };
 
-  // A BRR End+Mute block moves the voice to Release and drops the level to 0
-  // immediately (the documented -0x800 step reaches 0 from any level). It is read
-  // before the startup countdown below, because the header check that raises it
-  // goes live while the countdown still has samples left to run.
+  // A BRR End+Mute block standing at the sample's start moves the voice to
+  // Release and drops the level to 0 before any envelope operation runs (the
+  // documented -0x800 step reaches 0 from any level), so the kill sample
+  // publishes 0 (spc_dsp6 `KON/kon then set sample's end flag`: an End+Mute
+  // pulse landing on the first live step reads as a voice that never sounded).
+  // It is read before the startup countdown below, because the header check
+  // that raises it goes live while the countdown still has samples left to run.
   if (brrEndMute) {
     v.phase = EnvPhase::Release;
     v.envelope = 0;

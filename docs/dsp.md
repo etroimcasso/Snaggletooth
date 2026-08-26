@@ -224,6 +224,15 @@ the block End+Mute releases the voice and drops its envelope to zero; an End+Loo
 muting. So rewriting a header under a playing voice takes effect on the next sample, including for a
 voice whose pitch is zero and which is decoding nothing at all.
 
+The check runs early in the voice's sample and the decode after it, so "its current block" means the
+block the decoder last ran in — never a block this sample's own advance enters. A stream that crosses
+into an End+Mute block is therefore released at the **next** sample's check, one sample after `ENDX`
+sets. And because the decoder idles through a key-on's five empty samples while the cursor walks on,
+a startup whose cursor crosses into an End+Mute block is released one sample after the first envelope
+step: that step runs and its level reaches `VxENVX` for one sample before the release lands. A header
+already standing End+Mute at the first step's sample, by contrast, releases the voice before the step
+— the level never leaves zero.
+
 `ENDX` belongs to the decode rather than to that check: the bit is set when the voice reaches a block
 carrying the end flag, which a stopped voice never does.
 
@@ -336,9 +345,11 @@ slot's placement of the keying poll and its order against voice 0's compute, the
 slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
 its key-on hold, the soft-reset shield on a key-on's consumption sample, the full restart a
-key-on performs on a keyed-off in-span voice, and the final pre-key-on sample a full restart's
-consuming compute still emits are confirmed against the Blargg DSP test ROM, while the `VxOUTX`
-publish slot remains the least-certain part.
+key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full restart's
+consuming compute still emits, and the one-sample lag between a stream crossing into an End+Mute
+block and its release — including the first envelope step a mid-startup crossing still publishes —
+are confirmed against the Blargg DSP test ROM, while the `VxOUTX` publish slot remains the
+least-certain part.
 
 ## Inspecting the pipeline directly
 

@@ -182,7 +182,10 @@ TEST(Non, IgnoresPitchAndInterpolation) {
 
 TEST(Non, EndMuteBlockStillTerminatesNoise) {
   // Even under NON the BRR decoder runs; an End+Mute block releases the voice
-  // with envelope 0, terminating the noise output (fullsnes 3111-3114).
+  // with envelope 0, terminating the noise output (fullsnes 3111-3114). The
+  // release lands at the sample after the crossing: the header check reads the
+  // header standing at each sample's start, so it sees the entered block at the
+  // next sample's check.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});  // normal
@@ -203,7 +206,8 @@ TEST(Non, EndMuteBlockStillTerminatesNoise) {
 
   step(dsp, ram);  // finishes the normal block, still noising
   ASSERT_GT(dsp.voices[0].envelope, 0);
-  step(dsp, ram);  // crosses into End+Mute: the envelope terminates at once
+  step(dsp, ram);  // crosses into End+Mute; the crossing sample still noises
+  step(dsp, ram);  // the standing check reads the header: the envelope terminates
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);
   // The sample that zeroes the envelope is still scaled by the level standing

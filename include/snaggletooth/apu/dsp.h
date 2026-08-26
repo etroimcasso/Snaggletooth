@@ -92,6 +92,15 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // while the stream stands.
 struct VoiceState {
   std::uint16_t brrAddress = 0;
+  // The block whose header the per-sample end/loop check reads. It follows
+  // brrAddress, but only as of samples the decoder actually runs for: the
+  // documented five empty samples after a key-on advance the cursor without
+  // decoding, so while the countdown runs — and at the first live sample's
+  // check, which precedes that sample's catch-up decode — the check still reads
+  // the block standing when the decoder last ran (the start block, for a fresh
+  // key-on). That gap is what lets a first attack step whose startup crossed
+  // into an End+Mute block publish its level before the check lands.
+  std::uint16_t headerAddress = 0;
   std::uint8_t brrSampleIndex = 0;
   std::uint16_t pitchCounter = 0;
   SampleWindow window{};
