@@ -179,7 +179,9 @@ preloads land the loud readings in the wrong places.
 
 The first silent sample is the exception — it performs the start-address read and decodes nothing,
 so the walk begins on the second. Only the *output* is silent during the startup; the position is
-live throughout.
+live throughout. The pitch the walk uses is the one the key-on itself captured — that sub-test's
+freezes land because each rides a `KON` write of its own; a pitch write with no key-on behind it
+waits out the capture hold (see [the pitch capture](#the-pitch-is-captured-once-per-sample--and-a-key-on-holds-the-capture-for-seven)).
 
 `KON`/`KOFF` are polled every other sample, at the last slot of the sample — the same slot at which
 voice 0 runs its whole compute. **The keying load runs first.** A keyed voice 0 therefore takes the
@@ -285,26 +287,44 @@ seventh, each readable two slots later. **Anomie's `VxENVX` slot is confirmed** 
 slots earlier regresses an otherwise-passing sub-test. The `VxOUTX` half of the disagreement is
 untested and remains open.
 
-### The pitch is captured every other sample, in phase with the keying poll
+### The pitch is captured once per sample — and a key-on holds the capture for seven
 
-**Neither document mentions this.** Both read `VxPITCHL`/`VxPITCHH` at the voice's own slots every
-sample, which would make a pitch write reach the stream within a sample of landing. It does not: the
-stream advance reads a **capture of the pitch registers taken at the first slot of every other
-sample** — the same every-other-sample grid the `KON`/`KOFF` poll runs on, and in phase with it —
-and the capture reaches a voice's advance one full sample later. Voice 0's compute at the last slot
-is the only one late enough to see its own sample's capture, so a pitch write reaches voice 0 one
-sample before voices 1-7, and any write waits at least until the next capture sample regardless of
-where it lands.
+**Neither document mentions any of this.** Both read `VxPITCHL`/`VxPITCHH` at the voice's own slots,
+which would make a pitch write reach each voice's stream within a sample of landing, at a per-voice
+instant. It does not, in two ways.
 
-*Derived from `KON/kon decoding when another kon`.* Its ten frozen-pitch readings advance the freeze
-instant by roughly one sample each, yet the expected stream positions move in **pairs** — two
-consecutive readings frozen at the same position, then a two-sample jump — which only a
-two-sample-quantized freeze produces; a per-sample register read yields ten distinct positions and a
-loud region one reading narrower than the ROM prints. The same table pins the grid's phase: captures
-on the poll's opposite parity land the paired readings one position early. The one-sample
-propagation asymmetry is what makes all eight voices' rows identical — a capture consumed at each
-voice's own next compute would split voices around the freeze's landing slot, and the ROM's freeze
-slides across slots without any row changing.
+**The read is a shared capture with a one-sample pipeline.** The pitch registers are captured for
+all eight voices at the first slot of every sample, and the capture reaches a voice's advance one
+sample deep: voice 0's compute at the last slot is the only one late enough to consume its own
+sample's capture, while voices 1-7 advance by the previous sample's. A pitch value standing for
+exactly one sample is therefore consumed for exactly one advance by every voice, whatever slot its
+writes land on.
+
+**A key-on suspends that capture for seven samples.** Every key-on the poll consumes — including
+one absorbed or rewound inside the silent span — schedules its voice's capture for the first slot
+of the poll-parity sample after the consuming poll, then holds the per-sample capture off for seven
+samples counted from the poll. Through the hold, the startup's stream walk uses the pitch the
+scheduled capture took. A bare pitch write inside the hold never reaches the stream; one landing
+between the poll and the parity sample's first slot does, because it is what the scheduled capture
+reads. The hold is anchored to the poll, so it covers the same samples for every voice.
+
+*Derived from `KON/kon then change pitch`.* The sub-test keys a voice with pitch zero, pulses
+`VxPITCHL` to `$10` for exactly one sample at an offset that grows one sample per reading, and reads
+the cursor's total advance back through the echo buffer. The expected readings are `$0008` for the
+first four offsets and `$0018` — exactly one sample at the pulsed pitch — for the last four, on all
+eight rows alike. Nothing lands while the hold stands, one sample lands after it, and both halves
+hold at *every* alignment: an every-other-sample capture leaves half the visible alignments blind
+(the alternating table this project's earlier model printed), and moving the hold's edge by one
+sample in either direction moves the boundary off the ROM's.
+
+*`KON/kon decoding when another kon` re-read.* That ROM's frozen-pitch readings quantize in pairs,
+which first read as a capture grid two samples wide. Each of its freezes rides nine cycles behind a
+`KON` write, so what its table actually quantizes is the **keying poll's** every-other-sample grid,
+reached through the key-on's scheduled capture — the pairs and the row-uniformity both follow, and
+the two ROMs stop contradicting each other. The nine-cycle gap also pins the scheduled capture's
+instant from the early side: a write that close behind the consumed `KON` is reliably seen, while
+`KON/kon then change pitch`'s earliest pulse — completing about three cycles after the parity
+sample's first slot — is reliably not.
 
 ### The BRR header is read every sample
 

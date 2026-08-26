@@ -147,12 +147,11 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 // needed. The result is capped at the 128 kHz ceiling; the base step never
 // reaches it, so the cap applies only to a modulated voice.
 // The pitch step a voice's stream advance uses this sample — the captured value,
-// never the live register pair (see DspState::pitchLatch). During a capture
-// sample voices 1-7 read the previous capture; voice 0, and every voice on the
-// grid's other samples, reads the latest.
+// never the live register pair (see DspState::pitchLatch). Voice 0's T31 compute
+// is the only one late enough to see its own sample's capture; voices 1-7 read
+// the previous sample's.
 [[nodiscard]] std::uint32_t latchedPitch(const DspState& dsp, std::size_t voice) noexcept {
-  const bool captureSample = dsp.sampleIndex % 2 == 0;
-  return captureSample && voice != 0 ? dsp.pitchLatchOld[voice] : dsp.pitchLatch[voice];
+  return voice != 0 ? dsp.pitchLatchOld[voice] : dsp.pitchLatch[voice];
 }
 
 [[nodiscard]] std::uint32_t pitchStep(const DspState& dsp, std::size_t voice,
@@ -677,18 +676,39 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
 
   if (slot == 0) {
     // Frame start: clear the mix the previous frame delivered, then apply voice 0's
-    // amplitude — prepared at the last frame's T31 (the pipeline lag). On the
-    // capture grid's samples, take the pitch capture (see DspState::pitchLatch):
-    // age the standing capture out and read every voice's register pair.
+    // amplitude — prepared at the last frame's T31 (the pipeline lag). Take the
+    // pitch capture (see DspState::pitchLatch): age the standing capture out and
+    // read every voice's register pair — every sample, except while a voice's
+    // key-on capture hold stands, when its pair keeps the value the key-on's
+    // own scheduled capture loaded.
     dsp.mixLeft = 0;
     dsp.mixRight = 0;
     dsp.echoSendLeft = 0;
     dsp.echoSendRight = 0;
-    if (dsp.sampleIndex % 2 == 0) {
-      for (std::size_t v = 0; v < 8; ++v) {
+    for (std::size_t v = 0; v < 8; ++v) {
+      const std::uint8_t bit = static_cast<std::uint8_t>(1u << v);
+      if (dsp.voices[v].pitchCaptureHold > 0) --dsp.voices[v].pitchCaptureHold;
+      if ((dsp.pitchReloadAge & bit) != 0) {
+        // The sample after a scheduled capture: age the captured value in for
+        // voices 1-7, exactly as a normal capture's propagation would.
         dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
-        dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
+        dsp.pitchReloadAge = static_cast<std::uint8_t>(dsp.pitchReloadAge & ~bit);
+        continue;
       }
+      if ((dsp.pitchReloadPending & bit) != 0) {
+        // The capture a consumed key-on scheduled: on the poll-parity sample
+        // following the poll, read the register pair; it ages in next sample.
+        if (dsp.sampleIndex % 2 == 0) {
+          dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
+          dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
+          dsp.pitchReloadPending = static_cast<std::uint8_t>(dsp.pitchReloadPending & ~bit);
+          dsp.pitchReloadAge |= bit;
+        }
+        continue;
+      }
+      if (dsp.voices[v].pitchCaptureHold > 0) continue;
+      dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
+      dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
     }
   }
 
@@ -878,6 +898,19 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
         v.konDelay = kKeyOnStartupCalls;
         v.envelope = 0;
       }
+      // Every consumed key-on — restarting, rewinding, or absorbed — schedules
+      // a pitch capture for the voice at the next poll-parity sample's start.
+      // That is the only path a pitch write reaches a voice through while the
+      // key-on's capture hold stands (`KON/kon decoding when another kon`'s
+      // freezes ride their key-on; `KON/kon then change pitch`'s bare writes
+      // do not), and its timing is pinned from both sides: a register write
+      // nine cycles behind the KON write must be seen (the freezes), while one
+      // landing three cycles after the parity sample's first slot must not be
+      // (that ROM's earliest pulse). The hold itself is poll-anchored — seven
+      // samples, uniform for the eight voices — which places every voice's
+      // first live capture at the same sample.
+      dsp.pitchReloadPending |= bit;
+      dsp.voices[voice].pitchCaptureHold = 7;
     }
   }
   dsp.internalKon = 0;

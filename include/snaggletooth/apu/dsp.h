@@ -99,6 +99,10 @@ struct VoiceState {
   EnvPhase phase = EnvPhase::Release;
   std::uint8_t konDelay = 0;
   std::uint8_t computesSinceKeyOn = 0xFF;
+  // Samples left before the per-sample pitch capture resumes for this voice —
+  // armed to seven by every consumed key-on, so the hold is anchored to the
+  // poll and uniform across the eight voices (see DspState::pitchLatch).
+  std::uint8_t pitchCaptureHold = 0;
   std::uint16_t bentGainRef = 0;
 };
 
@@ -224,18 +228,31 @@ struct DspState {
 
   // The effective-pitch capture. A voice's stream advance does not read
   // VxPITCHL/H live: the register pairs are captured for all eight voices at
-  // the first slot of every other sample — the same every-other-sample grid the
-  // KON/KOFF poll runs on — and a capture reaches a voice's advance one full
-  // sample later. Voice 0's T31 compute is the only one late enough to see its
-  // own sample's capture, so during a capture sample voices 1-7 still advance
-  // by the previous capture (pitchLatchOld); on every other sample all eight
-  // read the latest (pitchLatch). A freshly seeded state captures the register
+  // the first slot of every sample, and a capture reaches a voice's advance one
+  // full sample later. Voice 0's T31 compute is the only one late enough to see
+  // its own sample's capture (pitchLatch); voices 1-7 advance by the previous
+  // sample's (pitchLatchOld). Every consumed key-on suspends the capture for
+  // seven samples (pitchCaptureHold) and schedules one of its own at the next
+  // poll-parity sample (pitchReloadPending/pitchReloadAge) — so a bare pitch
+  // write during the hold never reaches the stream, while one riding a key-on
+  // lands through that scheduled capture, quantized to the keying poll's
+  // every-other-sample grid. A freshly seeded state captures the register
   // values before its first sample, keeping that frame byte-identical to the
-  // frame-at-once model. Measured against spc_dsp6's `KON/kon decoding when
-  // another kon`: its frozen-pitch cursor readings quantize to this grid, which
-  // no per-sample register read reproduces.
+  // frame-at-once model. Measured against spc_dsp6: `KON/kon then change
+  // pitch`'s bare one-sample pitch pulse leaves nothing during the hold and
+  // exactly one sample's advance after it — every alignment, which an
+  // every-other-sample capture cannot produce — while `KON/kon decoding when
+  // another kon`'s mid-startup freezes, each riding a KON write, land
+  // poll-quantized in pairs.
   std::array<std::uint16_t, 8> pitchLatch{};
   std::array<std::uint16_t, 8> pitchLatchOld{};
+
+  // One bit per voice: a consumed key-on scheduled the voice's pitch capture
+  // for the next poll-parity sample's start (see pollKeying). The capture
+  // propagates like any other: pitchReloadAge marks the sample after it, when
+  // the captured value ages into pitchLatchOld for voices 1-7 to consume.
+  std::uint8_t pitchReloadPending = 0;
+  std::uint8_t pitchReloadAge = 0;
 
   // The echo unit's FIR output for the frame, computed when the buffer is read
   // (slot T24) and added to the master-scaled mix through the echo volume at the
