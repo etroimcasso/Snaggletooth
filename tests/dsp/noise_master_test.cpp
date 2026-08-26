@@ -387,8 +387,9 @@ TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
     // voice off in the sample its key-on lands — `KON/kon then flg.80`). From
     // the next sample the standing reset keys it off like any other voice, and
     // nothing arms it again, so it reads Release and its envelope stays 0.
-    if (i > 0)
+    if (i > 0) {
       EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "soft-reset sample " << i;
+    }
     EXPECT_EQ(dsp.voices[0].envelope, 0) << "soft-reset sample " << i;
   }
 
