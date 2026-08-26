@@ -191,7 +191,13 @@ consumes it:
   whole silence a key-on produces — the five empty samples *plus* the first envelope step's
   still-silent sample — so this covers a re-key consumed up to six samples after the load.
 
-Only a re-key consumed from the first sounding sample on restarts the voice in full.
+Only a re-key consumed from the first sounding sample on restarts the voice in full — with one
+qualification: **both in-span tiers protect a startup that is still standing.** A voice keyed off
+while inside its span — by a soft-reset pulse, a `KOFF` bit, or an End+Mute block header — has no
+startup left to absorb into or rewind, and a key-on consumed on it restarts the voice in full from
+wherever inside the span the kill left it: countdown re-armed, envelope from zero, stream re-primed
+to the start address. The same arm is what lets `KON` win when one poll delivers `KON` and `KOFF`
+together to an in-span voice.
 
 Writing a `KOFF` bit releases a voice: its envelope decreases by 8 each sample until it reaches zero,
 regardless of the ADSR or GAIN settings. Decoding does not stop for a released voice — only the
@@ -324,8 +330,9 @@ This intra-sample schedule is derived from the S-DSP timing charts; the key-on c
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
 slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
-its key-on hold, and the soft-reset shield on a key-on's consumption sample are confirmed against
-the Blargg DSP test ROM, while the `VxOUTX` publish slot remains the least-certain part.
+its key-on hold, the soft-reset shield on a key-on's consumption sample, and the full restart a
+key-on performs on a keyed-off in-span voice are confirmed against the Blargg DSP test ROM, while
+the `VxOUTX` publish slot remains the least-certain part.
 
 ## Inspecting the pipeline directly
 

@@ -235,8 +235,10 @@ takes it:
   exactly as late as a full restart would place it — but the decode cursor keeps the position it
   has walked to and keeps advancing at the pitch.
 
-One consumed from the first sounding sample on restarts the voice in full. Three ROMs together pin
-this shape, each blind to what the others measure. `KON/kon decoding when another kon` watches only
+One consumed from the first sounding sample on restarts the voice in full — and so does one
+consumed on a voice keyed off inside the span, because the tiers presuppose a startup that is
+still standing (the section after the shield, below). Three ROMs together pin the standing-startup
+shape, each blind to what the others measure. `KON/kon decoding when another kon` watches only
 the *stream*: its expected table holds a frozen cursor position through re-keys consumed up to six
 samples after the load, so no in-span key-on re-primes the decode. `KON/kon then another kon`
 watches only the *envelope*: it re-keys a voice at a widening spacing and counts samples until
@@ -269,6 +271,37 @@ voices:
 So a soft reset does not key a voice off in the sample its key-on is consumed: the fresh consumption
 wins, the same precedence `KON` has over `KOFF` at the poll itself. The shield is exactly one sample
 wide — the same one-sample pulse, slid one sample in each direction, pins both of its edges.
+
+### A key-on consumed on a keyed-off in-span voice restarts it in full
+
+The in-span tiers above — absorption one poll deep, the rewind at later polls — describe a key-on
+landing on a startup that is still running. Neither document says what a key-on does to a voice
+that was keyed off *while still inside its span*, where the span's samples are still counting but
+the startup they were counting for is dead.
+
+The test ROM decides it (`KON/kon then flg.80 then kon`): key a voice on, then slide a
+fixed-offset pair — a one-sample `FLG` bit-7 pulse followed a fixed few samples later by a second
+`KON` write held for only a few cycles — one sample later per reading, and count samples until
+`VxENVX` turns non-zero. The expected readings are `04 80 06 80 06 80 06 80`, uniform across the
+eight voices, and the alternation is the poll grid: the second key-on's brief write is visible to
+the every-other-sample poll on even alignments only.
+
+- **Reading 0**: the pulse covers the first key-on's consumption sample — the shield above — and
+  the second key-on is not seen, so the count is the original startup's, already two samples in.
+- **Even readings 2–6**: the pulse kills the startup (release, envelope forced to zero), and the
+  second key-on is consumed two samples later. The count is a full restart's — *identical whether
+  the kill and re-key fall inside the span or past it* — so the consumed key-on neither absorbs
+  into nor rewinds the dead startup: the voice restarts in full, countdown re-armed, envelope from
+  zero, stream re-primed to the start address.
+- **Odd readings**: the poll parity misses the second key-on's brief write, and the reset's
+  key-off stands unanswered — the count never terminates.
+
+The rule is the voice's keyed-off state, not the reset's doing. One release condition on the
+keying poll's in-span tiers carries the whole family: `KON/kon then koff` (a `KOFF` kill inside
+the span, then a re-key) and `KON/kon then set sample's end flag` (an End+Mute block header's
+release) pass with the same arm that passes `KON/kon then flg.80 then kon`. It is also what lets
+`KON` win when a single poll delivers `KON` and `KOFF` together to an in-span voice — the `KOFF`
+releases first within the poll, and the key-on then lands on a keyed-off voice and restarts it.
 
 ---
 

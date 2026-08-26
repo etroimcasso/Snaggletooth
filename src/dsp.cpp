@@ -902,9 +902,16 @@ void pollKeying(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcep
     // drops to 0, so the level emerges as late as a full restart would place
     // it (`KON/kon then another kon`). A re-key past the span restarts the
     // voice in full (the documented click/pop case).
+    //
+    // Both in-span tiers protect a STANDING startup. A voice in Release has no
+    // startup left to absorb into or rewind — a soft reset landing inside the
+    // span keys the voice off and kills the startup for good — so a key-on
+    // consumed on a Released voice restarts it in full even inside the span
+    // (`KON/kon then flg.80 then kon`). The same arm is what lets KON win over
+    // KOFF when one poll delivers both to an in-span voice.
     if ((kon & bit) != 0) {
       VoiceState& v = dsp.voices[voice];
-      if (v.computesSinceKeyOn > kKeyOnSilentCalls) {
+      if (v.computesSinceKeyOn > kKeyOnSilentCalls || v.phase == EnvPhase::Release) {
         keyOnVoice(dsp, ram, voice);
       } else if (v.computesSinceKeyOn > 2) {
         v.konDelay = kKeyOnStartupCalls;

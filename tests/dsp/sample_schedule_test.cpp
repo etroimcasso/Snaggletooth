@@ -867,6 +867,87 @@ TEST(SampleSchedule, ASoftResetPulseOneSampleLaterKeysTheVoiceOff) {
   EXPECT_EQ(envx(dsp, 0), 0) << "the keyed-off voice never recovers";
 }
 
+TEST(SampleSchedule, AKeyOnConsumedOnAResetKilledStartupRestartsInFull) {
+  // The in-span absorption tiers protect a STANDING startup. A soft-reset
+  // pulse landing inside the span keys the voice off and kills its startup for
+  // good, and a key-on consumed after that kill restarts the voice in full —
+  // countdown re-armed, envelope from 0, stream re-primed — even though the
+  // old span's samples have not run out. Measured against spc_dsp6's `KON/kon
+  // then flg.80 then kon`: on the alignments whose second key-on the poll
+  // sees, ENVX recovers with a full restart's count, identical inside and past
+  // the span.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain: ENVX jumps to 7Fh once live
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+  sample(dsp, ram);            // compute 1 runs; the shield's sample is over
+
+  dsp[kFlg] = 0x80;
+  sample(dsp, ram);            // the one-sample pulse kills the startup
+  dsp[kFlg] = 0x00;
+  ASSERT_EQ(dsp.voices[2].phase, EnvPhase::Release);
+  ASSERT_GT(dsp.voices[2].konDelay, 0) << "the kill lands mid-countdown";
+  sample(dsp, ram);
+  ASSERT_NE(dsp.voices[2].pitchCounter, 0u) << "the cursor has moved off the prime";
+
+  // The next poll consumes a key-on with the span's samples still counting.
+  // On the dead startup it is neither absorbed nor a rewind: the voice
+  // restarts in full, stream re-primed.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a key-on on a dead startup restarts";
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
+
+  for (int n = 0; n < 8; ++n) sample(dsp, ram);
+  EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
+}
+
+TEST(SampleSchedule, AKeyOnConsumedOnAKeyedOffStartupRestartsInFull) {
+  // The dead-startup rule is the voice's keyed-off state, not the reset's
+  // doing: a KOFF landing inside the span kills the startup the same way, and
+  // a key-on consumed after it restarts the voice in full from inside the old
+  // span. One Release condition carries both — spc_dsp6's `KON/kon then koff`
+  // and `KON/kon then set sample's end flag` clear with the same arm that
+  // clears `KON/kon then flg.80 then kon`.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+  sample(dsp, ram);            // compute 1 runs
+
+  dsp[0x5C] = 0x04;            // KOFF: the next poll keys the voice off
+  sample(dsp, ram);
+  dsp[0x5C] = 0x00;
+  ASSERT_EQ(dsp.voices[2].phase, EnvPhase::Release);
+  ASSERT_GT(dsp.voices[2].konDelay, 0) << "the kill lands mid-countdown";
+  sample(dsp, ram);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a key-on on a keyed-off startup restarts";
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
+
+  for (int n = 0; n < 8; ++n) sample(dsp, ram);
+  EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
+}
+
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {
   // The cursor is the DSP's own: it advances one slot per stepDspCycle and wraps
   // after 32, delivering exactly one frame per wrap.
