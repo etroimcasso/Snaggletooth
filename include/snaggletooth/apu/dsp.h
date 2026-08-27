@@ -177,14 +177,22 @@ struct DspState {
   std::int16_t noiseLevel = -0x4000;
 
   // The echo unit's state. echoIndex is the ring position (in 4-byte entries) that
-  // walks the echo buffer in APU RAM based at ESA*100h; echoLength is the latched
-  // entry count (EDL<<9), read only when echoIndex is 0, so an EDL change takes up
-  // to a full buffer to take effect. The per-channel FIR history holds the last
-  // eight entries read from the buffer, newest at echoFirPos; the two channels
-  // filter separately with the same coefficients. All plain value fields — the
-  // snapshot carries them; power-on and reset default them to zero.
+  // walks the echo buffer in APU RAM; echoLength is the applied entry count
+  // (EDL<<9), taken only when echoIndex is 0, so an EDL change takes up to a full
+  // buffer to take effect. echoAppliedEsa is the base the unit's reads and writes
+  // address (ESA*100h): the raw ESA and EDL registers are loaded at slot T30 and
+  // applied at T31, so a CPU write to either reaches the buffer one sample later
+  // than the write itself — spc_dsp6 `Misc/$F0-$FF are not ram` calibrates its
+  // echo write bursts to that lag, flipping ESA mid-ring and counting on the
+  // in-flight sample still landing at the old base. The per-channel FIR history
+  // holds the last eight entries read from the buffer, newest at echoFirPos; the
+  // two channels filter separately with the same coefficients. All plain value
+  // fields — the snapshot carries them; power-on and reset default them to zero,
+  // and a seeded state's first (frame-at-once) sample reads the live registers
+  // and warms the applied values at its close.
   std::uint16_t echoIndex = 0;
   std::uint16_t echoLength = 0;
+  std::uint8_t echoAppliedEsa = 0;
   std::array<std::int16_t, 8> echoFirLeft{};
   std::array<std::int16_t, 8> echoFirRight{};
   std::uint8_t echoFirPos = 0;
@@ -273,11 +281,20 @@ struct DspState {
 
   // The echo unit's FIR output for the frame, computed when the buffer is read
   // (slot T24) and added to the master-scaled mix through the echo volume at the
-  // left/right output slots (T27/T28); the write-back and ring advance land at
-  // T31. The ESA base is latched at T30 and applied by the T31 write.
+  // left/right output slots (T27/T28); the write-back lands at T30/T31 and the
+  // ring advance at T31.
   int echoFirOutLeft = 0;
   int echoFirOutRight = 0;
-  std::uint16_t echoWriteBase = 0;
+
+  // The echo unit's one-slot staging: the FLG bit-5 write gate is loaded one slot
+  // ahead of each buffer word it governs (T29 for T30's left word, T30 for T31's
+  // right word), and the raw ESA/EDL registers are loaded at T30 for T31's
+  // ring-advance to apply. Value fields, so a snapshot taken between the load and
+  // its application restores to the same cycle.
+  bool echoGateLeft = false;
+  bool echoGateRight = false;
+  std::uint8_t echoLatchedEsa = 0;
+  std::uint8_t echoLatchedEdl = 0;
 
   [[nodiscard]] std::uint8_t& operator[](std::size_t reg) noexcept { return regs[reg]; }
   [[nodiscard]] const std::uint8_t& operator[](std::size_t reg) const noexcept {

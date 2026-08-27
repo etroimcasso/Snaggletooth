@@ -120,9 +120,15 @@ TEST(EchoWrite, ANonEonVoiceDoesNotFeedTheEchoWrite) {
   EXPECT_EQ(entry16(ram, 0x2002), 0);
 }
 
-TEST(EchoWrite, EsaRelocatesTheBuffer) {
-  // ESA is read every sample, so moving it lands the next write at the new base
-  // (fullsnes 3208-3210, 3223-3226). No FIR/EFB, so each write is the raw send.
+TEST(EchoWrite, EsaRelocatesTheBufferOneSampleAfterTheWrite) {
+  // The raw ESA register is loaded at slot T30 and applied at T31 (Anomie's
+  // access chart, cycles 29-30), so the sample in flight when ESA changes still
+  // reads and writes the old base; the new base takes over from the next sample.
+  // fullsnes's coarser "ESA is accessed during cycle 29" says where the load
+  // happens but not the one-sample lag; spc_dsp6 `Misc/$F0-$FF are not ram`
+  // arbitrates — it flips ESA mid-ring and its echo bursts are calibrated to the
+  // in-flight write landing at the old base. No FIR/EFB, so each write is the
+  // raw send.
   DspState dsp;
   Ram ram{};
   soundingVoice(dsp, 0, 0x40, 0x40);  // send (1294*64)>>6 = 1294
@@ -132,9 +138,14 @@ TEST(EchoWrite, EsaRelocatesTheBuffer) {
   dsp[kEsa] = 0x20;
   step(dsp, ram);
   EXPECT_EQ(entry16(ram, 0x2000), 1294);
+  ram[0x2000] = 0;  // re-arm the old base so the in-flight write is visible
+  ram[0x2001] = 0;
   dsp[kEsa] = 0x30;  // relocate
   step(dsp, ram);
-  EXPECT_EQ(entry16(ram, 0x3000), 1294);  // the new base holds the write
+  EXPECT_EQ(entry16(ram, 0x2000), 1294);  // the in-flight sample still lands at the old base
+  EXPECT_EQ(entry16(ram, 0x3000), 0);     // the new base is untouched this sample
+  step(dsp, ram);
+  EXPECT_EQ(entry16(ram, 0x3000), 1294);  // the applied base holds the next write
 }
 
 TEST(EchoWrite, TheEntryAddressWrapsWithinSixteenBits) {

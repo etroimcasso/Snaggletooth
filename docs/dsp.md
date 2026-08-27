@@ -270,10 +270,14 @@ and writes a new entry built from the enabled voices plus a feedback of the filt
 
 - **The buffer** is a ring of 4-byte entries based at `ESA × $100`: a 16-bit left sample then a 16-bit
   right sample, each holding a 15-bit value left-justified (bit 0 unused). `EDL` sizes the ring at
-  `EDL << 9` entries (`EDL` = 0 gives a single entry); the size is latched only when the ring wraps to
-  its start, so a change to `EDL` takes up to a full buffer to take effect. The buffer address wraps
-  within the 64 KB space, and the unit writes straight into RAM — a buffer placed over code or data
-  overwrites it, exactly as the hardware does.
+  `EDL << 9` entries (`EDL` = 0 gives a single entry); the size is applied only when the ring wraps to
+  its start, so a change to `EDL` takes up to a full buffer to take effect. `ESA` and `EDL` are
+  loaded near the end of each sample and applied as it closes, so a write to either reaches the
+  buffer **one sample after the write** — the sample in flight still reads and writes the old base.
+  The buffer address wraps within the 64 KB space, and the unit writes straight into RAM — a buffer
+  placed over code or data overwrites it, exactly as the hardware does (the RAM beneath the
+  `$F0`–`$FF` registers included; only the `$F8`/`$F9` port bytes the CPU reads are out of its
+  reach — see [the APU machine](apu-machine.md)).
 - **The FIR filter** runs per channel over the last eight entries read: the taps are oldest × `FIR0`
   through newest × `FIR7`, each product shifted right 6. The first seven additions wrap at 16 bits and
   only the final addition saturates — the documented arithmetic. Its result is a 15-bit sample, so the
@@ -313,7 +317,10 @@ counter's residue mod 32 numbers them:
 | a voice's T3/T4 … | That voice folds its left (`VxVOLL`) then right (`VxVOLR`) volume into the mix. |
 | T24 | The echo unit reads its buffer, filters, and computes its feedback value. |
 | T27 / T28 | The left / right output: `MVOLL`+`EVOLL` then `MVOLR`+`EVOLR`, then the mute gate. |
+| T29 / T30 | `FLG` bit 5 is loaded, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo write lands: the left word at T30, the right word at T31. |
+| T30 | The raw `ESA` and `EDL` are loaded for the ring advance to apply. |
+| T31 | The ring advance: the loaded `ESA` becomes the next sample's base, `EDL` resizes at a wrap, the index steps. |
 | T31 | `KON`/`KOFF` are polled (even samples), then voice 0 computes; the global counter and noise step. |
 
 Three consequences are worth knowing:
@@ -332,6 +339,10 @@ Three consequences are worth knowing:
 - **The echo write lags its compute.** The echo unit computes its buffer write at T24 but the bytes
   land at T30 (left word) and T31 (right word), so a program reading the entry between those slots
   still sees the previous sample there.
+- **`ESA` and `EDL` apply one sample late.** The echo unit addresses the base its ring advance
+  applied at the previous sample's close, so a write to `ESA` moves the buffer only from the next
+  sample — the sample in flight still reads and writes the old base — and an `EDL` write resizes the
+  ring at its next wrap.
 - **`VxPITCHL`/`VxPITCHH` are not read at a voice's own compute.** The pitch a voice's stream
   advance uses is captured for all eight voices at the first slot of every sample, and a capture
   reaches a voice's advance one sample deep: voice 0's compute at T31 is the only one late enough to
@@ -355,9 +366,10 @@ its key-on hold, the soft-reset shield on a key-on's consumption sample, the ful
 key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full restart's
 consuming compute still emits, the one-sample lag between a stream crossing into an End+Mute
 block and its release — including the first envelope step a mid-startup crossing still publishes —
-and the fraction-free startup walk that makes the first sounding sample interpolate from index 0
-are confirmed against the Blargg DSP test ROM, while the `VxOUTX` publish slot remains the
-least-certain part.
+the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
+one-sample-late application of `ESA`/`EDL`, and the echo write sweeping the RAM beneath `$F0`–`$FF`
+without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM, while
+the `VxOUTX` publish slot remains the least-certain part.
 
 ## Inspecting the pipeline directly
 

@@ -95,6 +95,10 @@ SpcLoad parseSpc(std::span<const std::uint8_t> bytes) {
     st.inputPorts[i] = st.ram[0xF4 + i];
     st.outputPorts[i] = st.ram[0xF4 + i];
   }
+  // The AUXIO bytes read back what the CPU last wrote, which is what the dump's
+  // RAM image holds at $F8/$F9 (a port write mirrors into the RAM beneath).
+  st.auxPorts[0] = st.ram[0xF8];
+  st.auxPorts[1] = st.ram[0xF9];
 
   return SpcLoad{.state = st, .error = {}};
 }

@@ -67,6 +67,12 @@ struct ApuState {
   DspState dsp{};
   std::array<std::uint8_t, 4> inputPorts{};   // host -> SPC700 (the CPU reads these at $F4-$F7)
   std::array<std::uint8_t, 4> outputPorts{};  // SPC700 -> host (the CPU writes these at $F4-$F7)
+  // The auxiliary port bytes the CPU reads at $F8/$F9 (the S-SMP's unconnected
+  // P4/P5 pins). Storage of their own, not a view of RAM: a CPU write lands here
+  // as well as in the RAM beneath, a CPU read returns this value, and the S-DSP's
+  // echo buffer writes — which reach only the RAM — never alter it. The
+  // unconnected pins read back as written; power-on leaves them high ($FF).
+  std::array<std::uint8_t, 2> auxPorts{0xFF, 0xFF};
   std::uint16_t divider = 0;                  // the master cycle counter: timer ticks and sample boundaries
   std::array<TimerState, 3> timers{};
 };

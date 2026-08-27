@@ -279,24 +279,21 @@ struct EchoOutput {
   int right = 0;
 };
 
-// Advances the echo unit one 32 kHz sample and returns its FIR output for the two
-// channels. It reads the oldest 4-byte ring entry (based at ESA*100h, offset by the
-// ring index) into the per-channel FIR history, runs the 8-tap filter over the last
-// eight entries, and — when echoRam is non-null and FLG bit 5 is clear — mixes the
-// EON send (sendLeft/sendRight, the EON-enabled voices' post-VxVOL sums) with the
-// FIR feedback (EFB) and writes the result back over the entry it read. The ring
-// index and FIR history advance every sample regardless of the write, so a
+// Runs the echo unit's read-and-filter half of one 32 kHz sample and returns its
+// FIR output for the two channels. It reads the oldest 4-byte ring entry (based
+// at baseEsa*100h, offset by the ring index) into the per-channel FIR history,
+// runs the 8-tap filter over the last eight entries, and — when echoRam is
+// non-null — computes the write-back value (the EON send sendLeft/sendRight, the
+// EON-enabled voices' post-VxVOL sums, mixed with the FIR feedback through EFB)
+// and stages it as the pending write. The bytes land at the write slots (left
+// word T30, right word T31), each gated there by the FLG bit-5 value loaded one
+// slot earlier, and the ring index advances at T31 (advanceEchoRing) — so a
 // read-only caller (echoRam null) sees the static-buffer behaviour FLG bit 5
 // produces. The two channels filter separately with the same coefficients.
 EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                    std::uint8_t* echoRam, int sendLeft, int sendRight) noexcept {
-  // EDL is consulted only when the ring index is 0: latch the entry count there.
-  // EDL<<9 entries; EDL 0 latches a count of 0, which the wrap rule below turns
-  // into a single reused entry, and an EDL change is not seen until the next wrap.
-  if (dsp.echoIndex == 0)
-    dsp.echoLength = static_cast<std::uint16_t>((dsp[kDspEdl] & 0x0F) << 9);
-
-  const std::uint16_t base = static_cast<std::uint16_t>(dsp[kDspEsa] * 0x100);
+                    std::uint8_t* echoRam, std::uint8_t baseEsa, int sendLeft,
+                    int sendRight) noexcept {
+  const std::uint16_t base = static_cast<std::uint16_t>(baseEsa * 0x100);
   const std::uint16_t entry = static_cast<std::uint16_t>(base + dsp.echoIndex * 4);
   const auto at = [&](int offset) -> std::uint16_t {
     return static_cast<std::uint16_t>(entry + offset);  // wraps within the 64KB space
@@ -331,18 +328,17 @@ EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   const int firRight = filter(dsp.echoFirRight);
 
   // Feedback: the EON send plus fir*EFB SAR 7, clamped, bit 0 cleared, written back
-  // over the entry — unless echo writes are disabled or the caller passed no
-  // writable RAM. The entry holds a 15-bit sample, so the write drops the low bit
-  // the volume multiply can reintroduce.
-  const bool writeEnabled = echoRam != nullptr && (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
-  if (writeEnabled) {
+  // over the entry — when the caller passed writable RAM. The entry holds a 15-bit
+  // sample, so the write drops the low bit the volume multiply can reintroduce.
+  if (echoRam != nullptr) {
     const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
     const int writeLeft = clampSigned16(sendLeft + ((firLeft * efb) >> 7)) & ~1;
     const int writeRight = clampSigned16(sendRight + ((firRight * efb) >> 7)) & ~1;
     // The bytes do not land here: the buffer writes have their own slots — the
     // left word at T30, the right word at T31 (both references' access charts) —
     // so the value computed now is latched and the slot runner (or the
-    // frame-at-once caller) performs the write when its slot arrives.
+    // frame-at-once caller) performs the write when its slot arrives, each word
+    // under the FLG bit-5 gate loaded one slot before it.
     dsp.echoWritePending = true;
     dsp.echoWriteEntry = entry;
     dsp.echoWriteBytes[0] = static_cast<std::uint8_t>(writeLeft & 0xFF);
@@ -351,13 +347,26 @@ EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     dsp.echoWriteBytes[3] = static_cast<std::uint8_t>((writeRight >> 8) & 0xFF);
   }
 
-  // Advance the FIR history cursor and the ring index; wrap the index at the
-  // latched length (a count of 0 collapses to the single-entry buffer).
+  // Advance the FIR history cursor. The ring index advances at T31, not here.
   dsp.echoFirPos = static_cast<std::uint8_t>((dsp.echoFirPos + 1) & 7);
-  dsp.echoIndex = static_cast<std::uint16_t>(dsp.echoIndex + 1);
-  if (dsp.echoIndex >= dsp.echoLength) dsp.echoIndex = 0;
 
   return EchoOutput{.left = firLeft, .right = firRight};
+}
+
+// The end-of-sample echo ring advance (slot T31): applies the ESA and EDL values
+// loaded at T30, then steps the ring index. EDL is applied only when the index is
+// 0 — the entry count is EDL<<9, and a count of 0 collapses to the single-entry
+// buffer — so a mid-ring EDL change waits for the next wrap, while the applied
+// base is what the following sample's read and write address. A CPU write to ESA
+// therefore reaches the buffer one sample after the write (anomie's access chart,
+// cycles 29-30; spc_dsp6 `Misc/$F0-$FF are not ram` flips ESA mid-ring and its
+// echo burst is calibrated to the in-flight sample landing at the old base).
+void advanceEchoRing(DspState& dsp, std::uint8_t rawEsa, std::uint8_t rawEdl) noexcept {
+  dsp.echoAppliedEsa = rawEsa;
+  if (dsp.echoIndex == 0)
+    dsp.echoLength = static_cast<std::uint16_t>((rawEdl & 0x0F) << 9);
+  dsp.echoIndex = static_cast<std::uint16_t>(dsp.echoIndex + 1);
+  if (dsp.echoIndex >= dsp.echoLength) dsp.echoIndex = 0;
 }
 
 }  // namespace
@@ -660,14 +669,18 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
   left = static_cast<std::int16_t>((left * mvolLeft) >> 7);
   right = static_cast<std::int16_t>((right * mvolRight) >> 7);
 
-  const EchoOutput echo = stepEcho(dsp, ram, echoRam, echoLeft, echoRight);
-  // The frame-at-once path delivers a whole sample in one call, so the latched
-  // echo write lands now — within-sample slot timing has no meaning here.
-  if (dsp.echoWritePending && echoRam != nullptr) {
+  // The frame-at-once path has no slot interleave, so the echo unit reads the
+  // live ESA, the write lands within the call under the live FLG bit-5 gate, and
+  // the ring advance applies the live registers — which warms the applied base
+  // for the slot-scheduled samples that follow the seed frame.
+  const EchoOutput echo = stepEcho(dsp, ram, echoRam, dsp[kDspEsa], echoLeft, echoRight);
+  if (dsp.echoWritePending && echoRam != nullptr &&
+      (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0) {
     for (int b = 0; b < 4; ++b)
       echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + b)] = dsp.echoWriteBytes[b];
   }
   dsp.echoWritePending = false;
+  advanceEchoRing(dsp, dsp[kDspEsa], dsp[kDspEdl]);
   const int evolLeft = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
   const int evolRight = static_cast<std::int8_t>(dsp[kDspEvolRight]);
   left = clampSigned16(left + ((echo.left * evolLeft) >> 7));
@@ -803,10 +816,12 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
 
   switch (slot) {
     case 24: {
-      // The echo unit reads its buffer, filters, and writes back its feedback —
-      // the EON sends are all folded by T22, so the whole unit runs here and its
-      // FIR output is held for the output slots.
-      const EchoOutput echo = stepEcho(dsp, ram, echoRam, dsp.echoSendLeft, dsp.echoSendRight);
+      // The echo unit reads its buffer and filters — the EON sends are all folded
+      // by T22, so the read-and-filter half runs here, addressing the APPLIED
+      // base (the ESA the previous sample's T31 applied), and its FIR output is
+      // held for the output slots.
+      const EchoOutput echo =
+          stepEcho(dsp, ram, echoRam, dsp.echoAppliedEsa, dsp.echoSendLeft, dsp.echoSendRight);
       dsp.echoFirOutLeft = echo.left;
       dsp.echoFirOutRight = echo.right;
       break;
@@ -817,13 +832,23 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
     case 28:
       finalizeRight(dsp);
       break;
+    case 29:
+      // The write gate for T30's left word: FLG bit 5 is loaded one slot before
+      // the word it governs.
+      dsp.echoGateLeft = (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
+      break;
     case 30:
-      // The left echo word lands at its write slot, T30 — the value was computed
-      // when the echo unit ran at T24 and held since.
-      if (dsp.echoWritePending && echoRam != nullptr) {
+      // The left echo word lands at its write slot, T30, under the gate loaded at
+      // T29 — the value was computed when the echo unit ran at T24 and held since.
+      if (dsp.echoWritePending && echoRam != nullptr && dsp.echoGateLeft) {
         echoRam[dsp.echoWriteEntry] = dsp.echoWriteBytes[0];
         echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 1)] = dsp.echoWriteBytes[1];
       }
+      // Load the raw ESA/EDL for T31's ring advance to apply, and the right
+      // word's own FLG bit-5 gate.
+      dsp.echoLatchedEsa = dsp[kDspEsa];
+      dsp.echoLatchedEdl = dsp[kDspEdl];
+      dsp.echoGateRight = (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
       break;
     case 31: {
       // The KON/KOFF load runs BEFORE voice 0's compute in the slot they share
@@ -836,12 +861,14 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       // pipeline.
       pollKeying(dsp, ram);
       computeVoiceSlot(dsp, ram, 0, softReset);
-      // The right echo word lands at its write slot, T31.
-      if (dsp.echoWritePending && echoRam != nullptr) {
+      // The right echo word lands at its write slot, T31, under the gate loaded
+      // at T30; then the ring advance applies the T30-loaded ESA/EDL.
+      if (dsp.echoWritePending && echoRam != nullptr && dsp.echoGateRight) {
         echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 2)] = dsp.echoWriteBytes[2];
         echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 3)] = dsp.echoWriteBytes[3];
       }
       dsp.echoWritePending = false;
+      advanceEchoRing(dsp, dsp.echoLatchedEsa, dsp.echoLatchedEdl);
       if (envelopeRateFires(dsp.globalCounter, dsp[kDspFlg] & kFlgNoiseRate))
         dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
       tickDspSample(dsp);

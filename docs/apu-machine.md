@@ -75,7 +75,9 @@ The sixteen bytes `$F0`–`$FF` are hardware registers laid over RAM. From the C
 - A write to a register address updates the register **and** the RAM byte beneath it.
 - A read of a register address returns the register, never the RAM behind it.
 - Write-only registers (TEST, CONTROL, the timer targets) read back `0`.
-- `$F8` and `$F9` are plain RAM with no register attached.
+- `$F8` and `$F9` are the auxiliary ports (the S-SMP's unconnected P4/P5 pins): storage of their
+  own that reads back what the CPU wrote. The RAM beneath them takes the same write, but a DSP echo
+  buffer sweeping the region writes only that RAM — the port bytes the CPU reads never change.
 
 The registers:
 
@@ -86,7 +88,7 @@ The registers:
 | `$F2` | DSPADDR | The DSP register address latch. |
 | `$F3` | DSPDATA | Reads/writes the selected DSP register. |
 | `$F4`–`$F7` | Ports 0–3 | The communication latches (see below). |
-| `$F8`, `$F9` | — | Plain RAM. |
+| `$F8`, `$F9` | AUXIO | Port bytes of their own; read back the last CPU write, untouched by echo writes to the RAM beneath. Power-on `$FF` (the unconnected pins). |
 | `$FA`–`$FC` | T0–T2 TARGET | Write-only timer targets. |
 | `$FD`–`$FF` | T0–T2 OUT | Read-only 4-bit timer outputs; a read clears the value. |
 

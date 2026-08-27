@@ -218,8 +218,8 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
     case 0xF3: return state_.dsp[state_.dspAddr & 0x7Fu];   // DSPDATA masks the address with $7F
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:             // input ports: what the host last wrote
       return state_.inputPorts[reg - 0xF4u];
-    case 0xF8: case 0xF9:                                   // scratch registers behave as RAM
-      return state_.ram[reg];
+    case 0xF8: case 0xF9:                                   // AUXIO: the port's own byte, not the RAM beneath
+      return state_.auxPorts[reg - 0xF8u];
     case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
       TimerState& t = state_.timers[reg - 0xFDu];
       const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
@@ -277,8 +277,12 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
       state_.ram[reg] = value;
       state_.timers[reg - 0xFAu].target = value;
       return;
-    // $F8/$F9 are plain RAM, and a write to a TnOUT register ($FD-$FF) lands in
-    // RAM but drives nothing. Both need only the RAM write above.
+    case 0xF8: case 0xF9:  // AUXIO: the port keeps its own byte beside the RAM's
+      state_.ram[reg] = value;
+      state_.auxPorts[reg - 0xF8u] = value;
+      return;
+    // A write to a TnOUT register ($FD-$FF) lands in RAM but drives nothing, so
+    // it needs only the RAM write.
     default:
       state_.ram[reg] = value;
       return;

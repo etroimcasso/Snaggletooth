@@ -363,7 +363,9 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
 | T23 / T24 | Echo reads; the echo value is computed here. |
 | T27 / T28 | Left then right output finalize — master and echo volume, then the mute gate. |
+| T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo buffer's left word, then its right word. |
+| T30 → T31 | Raw `ESA`/`EDL` load, then the ring advance applies them and steps the index. |
 | T31 | Voice 0's whole compute; the global counter; the noise step; the `KON`/`KOFF` load. |
 
 Voice 0 computes at the last slot and applies at the following sample's first slots, so its output
@@ -375,6 +377,34 @@ Both documents say so — fullsnes as explicit chart rows, Anomie at his cycles 
 easy to lump the write in with the echo *read* at T23/T24, six or seven slots early. It is
 CPU-visible: a driver reading the buffer at a fixed offset from its own key-on races the write, and
 the six-slot error changes which side of the race it lands on.
+
+### `ESA` and `EDL` apply one sample after the write
+
+Anomie's chart carries both halves — the raw registers are loaded at his cycle 29 "for future use"
+and applied at cycle 30, `EDL` only when the ring index is 0 — while fullsnes says only that "ESA is
+accessed during cycle 29", which does not distinguish the load from its application. The lag is the
+half that matters: the sample in flight when `ESA` changes still reads **and writes** the old base,
+and the new base takes over from the next sample.
+
+*Derived from `Misc/$F0-$FF are not ram`.* The sub-test parks a single-entry echo buffer at `$F000`,
+writes `EDL`=1 so the ring index starts climbing, then — a counted number of one-sample wait loops
+later — flips `ESA` to `$00` and opens `FLG` bit 5 for exactly seven samples. On hardware the
+in-flight sample's write lands at the old `$F0xx` base (the ROM seeds guard bytes around it), and
+the `$00`-based burst begins at entry `$EC` — one entry past the driver's own 16-bit wait counter at
+`$EA`/`$EB`. Applying `ESA` on the sample of the write starts the burst one entry early, at `$E8`:
+the echo overwrites the wait counter, the disable write never runs, and the ring sweeps its whole
+2 KB over the zero page, the stack page, and the driver — the CPU ends in a `STOP` with no verdict.
+The mirrored second half of the sub-test flips `ESA` the other way (`$00` → `$F0`) and reads both
+regions back, pinning the lag in both directions.
+
+### The `$F8`/`$F9` port bytes are out of the echo's reach
+
+The same sub-test sweeps its echo burst across the RAM beneath the `$F0`–`$FF` register overlay and
+then reads the sixteen addresses back through the CPU. The echo bytes land in that RAM — the DSP
+addresses memory directly, below the overlay — but the CPU's reads return register values, and at
+`$F8`/`$F9` the value is the port's own byte: Anomie marks the pair "normal RAM, except … not
+altered by S-DSP echo buffer writes". A CPU write still mirrors into the RAM beneath, so the two
+stores agree until an echo write splits them.
 
 ### `VxENVX` carries an extra sample of read-back pipeline
 
