@@ -196,7 +196,28 @@ read slot.
 The startup counter is **five, uniform across all eight voices**. The shared-slot asymmetry, not a
 per-voice count, is what makes the eight voices read alike.
 
-### Key-on takes effect on the write; key-off exerts itself continuously
+### The startup walk keeps no interpolation fraction
+
+The walk above is a whole-sample walk. Sample positions cross and decode exactly as the pitch
+dictates, but the fractional remainder does not accumulate: when the first sounding sample
+interpolates, its Gaussian index is 0 — the exact start of the position the walk reached — and the
+fraction begins climbing only with the advance after it. Neither document says anything about the
+fraction during the startup; the accounts that hold the position still imply nothing to discard, and
+the walk the previous section establishes leaves the question open.
+
+*Derived from `KON/pitch at kon`.* The sub-test keys a voice at pitch `$0010` — one Gaussian index
+per sample, never crossing a sample position — over a ramp block, and reads the first twenty audible
+samples back through the echo buffer. The expected readings walk the interpolation kernel from index
+0 upward: `0000 0008 0018 0026 0036 …`. A walk that banks its startup fraction starts six indices
+deep instead — the five advancing silent samples plus the first sounding sample's own advance — and
+plays `0000 0064 0074 0084 …`, which is exactly the sequence the fraction-free rule forbids. The
+silence's length is identical either way, so the sub-test isolates the fraction alone: the sound
+begins at the same sample in both models and differs only in where the kernel's walk starts.
+
+The two rules compose rather than conflict: `KON/kon decoding when another kon` measures the
+cursor's whole-sample positions and is blind to the fraction (its pitch is a whole-sample step);
+`KON/pitch at kon` measures the fraction and never crosses a position. What the pair establishes
+jointly is a startup that decodes at the pitch while discarding the sub-sample remainder.
 
 A `KON` write arms the next poll, which starts the armed voices and then disarms itself — so a bit
 left set does not start the voice again, and the register keeps its value for read-back. `KOFF` is

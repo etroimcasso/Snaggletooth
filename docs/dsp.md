@@ -170,6 +170,13 @@ capture for seven samples (see [When a register write takes effect](#when-a-regi
 a later key-on landing mid-startup re-captures the register and the walk carries its position, while
 a bare pitch write waits out the hold. Only the *output* is silent during the startup.
 
+The walk carries no interpolation fraction: whole sample positions cross and decode, but the
+fractional remainder is discarded through the silent span, so the first sounding sample interpolates
+from the exact start of its stream position — Gaussian index 0 — and the fraction begins
+accumulating with the advance after it. At a low pitch the difference is audible as where the
+kernel's walk starts: `$0010` plays the kernel from index 0, 1, 2, …, not from the six indices the
+empty samples would have banked.
+
 A key-on takes effect on the write, and happens once. The value written arms the next poll; that poll
 starts the armed voices and disarms itself. So a `KON` bit left set does not start the voice again,
 and the register keeps the value for you to read back. Two `KON` writes inside one poll window arm
@@ -346,8 +353,9 @@ slot and its one-sample value lag, the echo write slots, the mid-startup stream 
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
 its key-on hold, the soft-reset shield on a key-on's consumption sample, the full restart a
 key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full restart's
-consuming compute still emits, and the one-sample lag between a stream crossing into an End+Mute
+consuming compute still emits, the one-sample lag between a stream crossing into an End+Mute
 block and its release — including the first envelope step a mid-startup crossing still publishes —
+and the fraction-free startup walk that makes the first sounding sample interpolate from index 0
 are confirmed against the Blargg DSP test ROM, while the `VxOUTX` publish slot remains the
 least-certain part.
 

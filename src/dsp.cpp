@@ -177,6 +177,23 @@ inline constexpr std::uint8_t kKeyOnStartupCalls = 5;
 // key-on landing inside this span (see pollKeying).
 inline constexpr std::uint8_t kKeyOnSilentCalls = kKeyOnStartupCalls + 1;
 
+// A key-on's stream walk carries no interpolation fraction. From the load
+// through the first sounding compute, the pitch counter's fractional bits are
+// cleared after each advance: whole-sample crossings stand, so the cursor
+// still walks at the pitch through the startup (`KON/kon decoding when
+// another kon`), while the first audible sample interpolates from index 0 and
+// the fraction begins accumulating only with the advance after it
+// (`KON/pitch at kon`: at pitch $0010 the audible ramp reads the Gaussian
+// kernel at indices 0, 1, 2, … — a retained startup fraction starts it six
+// indices deep). The window is one call longer than the silent span because
+// the advance precedes the interpolation within a compute, so the first
+// sounding call's own advance still contributes no fraction. It is counted
+// from the load, so an in-span rewind does not reopen it — the rewound
+// stream keeps walking with its fraction intact.
+[[nodiscard]] bool keyOnPinsFraction(const VoiceState& v) noexcept {
+  return v.computesSinceKeyOn <= kKeyOnSilentCalls + 1;
+}
+
 // A BRR header's low two bits are its end/loop code. Code 1 — end set, loop clear
 // — is End+Mute: the voice releases and its level drops to 0. Code 3 loops without
 // muting, and codes 0 and 2 run on into the next block.
@@ -535,6 +552,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // call advances as normal (`KON/kon then another kon`).
     if (v.konDelay < kKeyOnStartupCalls || v.computesSinceKeyOn != 1)
       advanceVoiceStream(dsp, ram, voice, step);
+    if (keyOnPinsFraction(v)) v.pitchCounter &= 0xF000;
     stepVoiceEnvelope(dsp, voice, headerEndMute);
     amplitude = 0;
   } else {
@@ -549,6 +567,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // end` races a stream into an End+Mute block mid-startup, then waits for
     // VxENVX != 0; on hardware the wait exits).
     advanceVoiceStream(dsp, ram, voice, step);
+    if (keyOnPinsFraction(v)) v.pitchCounter &= 0xF000;
     v.headerAddress = v.brrAddress;
     // A voice whose NON bit is set outputs the shared noise level in place of its
     // interpolated BRR sample; the stream still advanced above, so decoding and

@@ -11,6 +11,7 @@
 // first slots, so its output rides one sample behind — the hardware's envelope
 // pipeline (fullsnes/anomie, provisional pending the Blargg DSP ROMs).
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -1047,6 +1048,60 @@ TEST(SampleSchedule, TheFinalPreKeyOnSampleIsTheOldStreamsOwnNext) {
   const StereoFrame afterB = sample(control, ram);
   EXPECT_EQ(afterA.left, 0) << "the restart's silence begins here";
   EXPECT_NE(afterB.left, 0) << "while the control keeps sounding";
+}
+
+TEST(SampleSchedule, TheFirstSoundingSampleInterpolatesFromIndexZero) {
+  // A key-on's stream walk carries no interpolation fraction: the pitch
+  // counter's fractional bits are cleared through the silent span and the
+  // first sounding compute, so the first audible sample reads the Gaussian
+  // kernel at index 0 and the fraction begins accumulating only with the
+  // advance after it. Measured against spc_dsp6's `KON/pitch at kon`: a voice
+  // keyed at pitch $0010 over a ramp block plays the kernel walked from index
+  // 0, 1, 2, … — a retained startup fraction starts the walk six indices deep.
+  Ram ram{};
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  // The ROM's own ramp block: shift 12, filter 0, end+loop over itself.
+  const std::array<std::uint8_t, 9> block = {0xC3, 0x10, 0xFE, 0xDC, 0xBA,
+                                             0x98, 0x76, 0x54, 0x32};
+  std::copy(block.begin(), block.end(), ram.begin() + 0x0300);
+
+  DspState dsp;
+  dsp[0x5D] = 0x02;          // DIR -> $0200
+  reg(dsp, 2, 0x02) = 0x10;  // VxPITCHL: one interpolation index per sample
+  reg(dsp, 2, 0x07) = 0x7F;  // Direct Gain 7F0h
+  reg(dsp, 2, 0x00) = 0x40;
+  reg(dsp, 2, 0x01) = 0x40;
+  sample(dsp, ram);  // sample 0 (atomic); sampleIndex now 1
+  sample(dsp, ram);  // odd sample done, so the next one polls
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;  // a KON write arms voice 2
+  sample(dsp, ram);        // the poll at this sample's T31 arms the restart
+
+  int silent = 0;
+  while (dsp.voiceAmplitude[2] == 0 && silent < 16) {
+    sample(dsp, ram);
+    ++silent;
+  }
+  ASSERT_LT(silent, 16) << "the voice never sounded";
+  EXPECT_EQ(silent, 7) << "the restart-apply call plus six silent computes";
+
+  // The stream never crosses a sample position over this span, so the window
+  // stands still and every audible value is the kernel alone.
+  const snaggletooth::SampleWindow window = dsp.voices[2].window;
+  const auto at = [&](std::uint8_t index) {
+    return (snaggletooth::gaussInterpolate(window, index) * 0x7F0) >> 11;
+  };
+  ASSERT_NE(at(0), at(6)) << "index 0 and a retained fraction differ, or "
+                             "the clause pins nothing";
+  EXPECT_EQ(dsp.voiceAmplitude[2], at(0)) << "the first audible sample reads index 0";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voiceAmplitude[2], at(1)) << "the fraction accumulates from here";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voiceAmplitude[2], at(2));
 }
 
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {

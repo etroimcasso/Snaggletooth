@@ -76,7 +76,9 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // The envelope fields carry the 11-bit level (0..0x7FF), its phase, the 5-sample
 // post-key-on startup countdown (during which the voice outputs silence and the
 // envelope holds still — the stream advances from the countdown's second call
-// on, the first performing only the start-address read), and the Bent-Increase
+// on, the first performing only the start-address read, crossing whole sample
+// positions while the fractional remainder is discarded, so the first sounding
+// sample interpolates from index 0), and the Bent-Increase
 // reference — the value the selected mode computed last sample, which the GAIN
 // Bent-Increase mode reads to choose its +32/+8 step. Every mode computes that
 // value every sample, so a rate of 0 supplies one while holding the level still,
@@ -378,7 +380,9 @@ void tickDspSample(DspState& dsp) noexcept;
 //
 // A voice in its post-key-on startup outputs silence and holds its envelope
 // through the countdown; its stream already advances at the pitch from the
-// countdown's second call on (the first performs only the start-address read).
+// countdown's second call on (the first performs only the start-address read),
+// crossing whole sample positions while the fractional remainder is discarded,
+// so the first sounding sample interpolates from index 0.
 // Otherwise the voice's sample is its
 // interpolated BRR output, or the shared noise level when its NON bit is set,
 // and the enveloped amplitude is (sample * envelope) >> 11 — the internal
