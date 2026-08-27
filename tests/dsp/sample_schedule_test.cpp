@@ -549,13 +549,19 @@ TEST(SampleSchedule, TheMachineDeliversOneScheduledFramePerThirtyTwoCycles) {
 }
 
 TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
-  // A keyed voice's stream already advances at the pitch through the startup
-  // countdown — the voice is silent, but its decode cursor walks — except on
-  // the first startup call, which performs the start-address read and decodes
-  // nothing. Measured against spc_dsp6's `KON/kon decoding when another kon`,
-  // which freezes the pitch mid-startup and reads where the cursor stood.
+  // A key-on that interrupts a sounding voice advances its fresh stream at the
+  // pitch through the startup countdown — the voice is silent, but its decode
+  // cursor walks — except on the first startup call, which performs the
+  // start-address read and decodes nothing. Measured against spc_dsp6's
+  // `KON/kon decoding when another kon`, which freezes the pitch mid-startup of
+  // a re-keyed sounding voice and reads where the cursor stood. (A key-on of a
+  // SILENT voice holds its stream instead — `Misc/brr addr wrap-around` — so
+  // the voice here sounds before the key-on.)
   Ram ram{};
   DspState dsp;
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain holds the level above zero
   reg(dsp, 2, 0x03) = 0x20;    // VxPITCHH: two stream samples per output sample
   sample(dsp, ram);            // sample 0 (atomic); sampleIndex now 1
   sample(dsp, ram);            // odd sample done, so the next one polls
@@ -576,6 +582,46 @@ TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 12)
       << "four advancing startup calls walk the cursor two samples each";
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x8000);
+}
+
+TEST(SampleSchedule, AKeyOnOfASilentVoiceHoldsItsStreamThroughTheFirstLiveSample) {
+  // A key-on of a silent voice — envelope at 0 as the restart applies — holds
+  // its fresh stream at the primed start through the whole silent span AND the
+  // first live compute: that sample interpolates the stream's first four
+  // samples at fraction 0, and advancing begins the sample after. Measured
+  // against spc_dsp6's `Misc/brr addr wrap-around`, whose first half-envelope
+  // sample interpolates the wrapped block's first four samples and whose rows
+  // then step one stream sample per output sample.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;      // a KON write arms voice 2, long silent
+  sample(dsp, ram);            // the poll arms the restart
+  sample(dsp, ram);            // the voice's compute applies it: the preload
+  ASSERT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
+
+  for (int n = 0; n < 4; ++n) sample(dsp, ram);  // the countdown's other calls
+  ASSERT_EQ(dsp.voices[2].konDelay, 0);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the silent span leaves the stream standing";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  // The countdown's end still emits one silent sample (the envelope's first
+  // move reaches the output a sample late), and the first sounding sample then
+  // reads the primed window: both are inside the hold.
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4)
+      << "the first sounding sample interpolates the primed window";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  sample(dsp, ram);            // advancing begins the sample after
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 5);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000);
 }
 
 TEST(SampleSchedule, ALivePitchWriteLandsPerSampleWhateverTheParity) {
@@ -633,6 +679,11 @@ TEST(SampleSchedule, AKeyOnCapturesThePitchAtTheNextPollParitySample) {
   Ram ram{};
   DspState dsp;
   for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+    // Sounding voices, so the re-key's startup walks (a key-on of a silent
+    // voice holds its stream — `Misc/brr addr wrap-around`).
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].envelope = 0x100;
+    reg(dsp, v, 0x07) = 0x7F;  // Direct Gain holds the level above zero
     reg(dsp, v, 0x03) = 0x20;  // two stream samples per output sample
   }
   sample(dsp, ram);            // sample 0 (atomic); the idle captures track
@@ -667,6 +718,11 @@ TEST(SampleSchedule, ABarePitchWriteDuringTheKeyOnHoldNeverLands) {
   Ram ram{};
   DspState dsp;
   for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+    // Sounding voices, so the re-key's startup walks (a key-on of a silent
+    // voice holds its stream — `Misc/brr addr wrap-around`).
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].envelope = 0x100;
+    reg(dsp, v, 0x07) = 0x7F;  // Direct Gain holds the level above zero
     reg(dsp, v, 0x03) = 0x20;  // two stream samples per output sample
   }
   sample(dsp, ram);
@@ -729,6 +785,10 @@ TEST(SampleSchedule, AKeyOnMidCountdownPastTheFirstPollRewindsTheHold) {
   // the cursor's walk (the same re-key leaves the frozen positions standing).
   Ram ram{};
   DspState dsp;
+  // A sounding voice, so the key-on's startup walks (a key-on of a silent
+  // voice holds its stream — `Misc/brr addr wrap-around`).
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
   reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
   reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
   sample(dsp, ram);
@@ -765,6 +825,10 @@ TEST(SampleSchedule, AKeyOnLateInTheSilentSpanRewindsTheHoldAndPastItRestarts) {
   // past the span restarts).
   Ram ram{};
   DspState dsp;
+  // A sounding voice, so the key-on's startup walks (a key-on of a silent
+  // voice holds its stream — `Misc/brr addr wrap-around`).
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
   reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
   reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
   sample(dsp, ram);
@@ -886,6 +950,10 @@ TEST(SampleSchedule, AKeyOnConsumedOnAResetKilledStartupRestartsInFull) {
   // the span.
   Ram ram{};
   DspState dsp;
+  // A sounding voice, so the key-on's startup walks (a key-on of a silent
+  // voice holds its stream — `Misc/brr addr wrap-around`).
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
   reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain: ENVX jumps to 7Fh once live
   reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
   sample(dsp, ram);

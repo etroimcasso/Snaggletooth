@@ -165,22 +165,37 @@ not the silent ones. Anomie's numbered account is the precise version:
 So six samples are silent. The fifth-versus-sixth confusion is entirely a consequence of the
 apply-before-update order above.
 
-### The stream advances at the pitch through the silent samples
+### Whether the silent samples advance the stream depends on the voice the key-on lands on
 
-Both documents hold the decode position still until the startup ends: Anomie's account above has "no
-interpolation update" through `#4` with fixed BRR group preloads in their place, and fullsnes quotes
-the same shape. The test ROM refutes the stillness (`KON/kon decoding when another kon`): it keys a
-voice, freezes its pitch mid-startup by zeroing `VxPITCH`, and reads the voice's output back through
-the echo buffer — a pure function of where the decode cursor stood when the pitch froze. The expected
-table walks: across re-keys frozen at one-sample-later instants, the read moves through the source's
-loud region exactly as a cursor advancing **two stream samples per output sample** (the sub-test's
-pitch) would place it. A cursor holding at its preload prints all zeros; fixed four-sample group
-preloads land the loud readings in the wrong places.
+Anomie's account above holds the decode position still until the startup ends — "no interpolation
+update" through `#4` with fixed BRR group preloads in their place — and fullsnes quotes the same
+shape. The test ROMs split the question by the state of the voice being keyed:
 
-The first silent sample is the exception — it performs the start-address read and decodes nothing,
-so the walk begins on the second. Only the *output* is silent during the startup; the position is
-live throughout. The pitch the walk uses is the one the key-on itself captured — that sub-test's
-freezes land because each rides a `KON` write of its own; a pitch write with no key-on behind it
+- **A key-on that interrupts a sounding voice walks.** `KON/kon decoding when another kon` re-keys a
+  voice its driver keyed 21 samples earlier — sounding when the re-key lands — freezes its pitch
+  mid-startup by zeroing `VxPITCH`, and reads the voice's output back through the echo buffer — a
+  pure function of where the decode cursor stood when the pitch froze. The expected table walks:
+  across re-keys frozen at one-sample-later instants, the read moves through the source's loud
+  region exactly as a cursor advancing **two stream samples per output sample** (the sub-test's
+  pitch) would place it. A cursor holding at its preload prints all zeros; fixed four-sample group
+  preloads land the loud readings in the wrong places.
+- **A key-on of a silent voice holds, exactly as the documents describe.** `Misc/brr addr
+  wrap-around` keys a long-released voice (envelope at 0) at pitch `$1000` and records its first
+  samples through the echo buffer. The expected rows have the first sounding sample interpolating
+  the stream's **first four samples** at Gaussian index 0 — the primed window, unmoved through the
+  whole silent span *and* that first sounding sample — with the position advancing one stream
+  sample per output sample only from the sample after. A stream that walks through the silence
+  starts six samples deep and prints a different table.
+
+The discriminator the two ROMs pin is the envelope standing as the restart applies: at 0 the
+startup holds, above 0 it walks. (Both sub-tests agree with a phase-based reading too — a fading
+Release voice with a level still above 0 is unarbitrated.)
+
+In the walking case the first silent sample is the exception — it performs the start-address read
+and decodes nothing, so the walk begins on the second. Only the *output* is silent during the
+startup; the position is live throughout. The pitch the walk uses is the one the key-on itself
+captured — that sub-test's freezes land because each rides a `KON` write of its own; a pitch write
+with no key-on behind it
 waits out the capture hold (see [the pitch capture](#the-pitch-is-captured-once-per-sample--and-a-key-on-holds-the-capture-for-seven)).
 
 `KON`/`KOFF` are polled every other sample, at the last slot of the sample — the same slot at which
@@ -198,11 +213,12 @@ per-voice count, is what makes the eight voices read alike.
 
 ### The startup walk keeps no interpolation fraction
 
-The walk above is a whole-sample walk. Sample positions cross and decode exactly as the pitch
-dictates, but the fractional remainder does not accumulate: when the first sounding sample
-interpolates, its Gaussian index is 0 — the exact start of the position the walk reached — and the
-fraction begins climbing only with the advance after it. Neither document says anything about the
-fraction during the startup; the accounts that hold the position still imply nothing to discard, and
+The walk above (the sounding-voice case) is a whole-sample walk. Sample positions cross and decode
+exactly as the pitch dictates, but the fractional remainder does not accumulate: when the first
+sounding sample interpolates, its Gaussian index is 0 — the exact start of the position the walk
+reached — and the fraction begins climbing only with the advance after it. A held startup has no
+fraction to discard: its position never moves. Neither document says anything about the fraction
+during the startup; the accounts that hold the position still imply nothing to discard, and
 the walk the previous section establishes leaves the question open.
 
 *Derived from `KON/pitch at kon`.* The sub-test keys a voice at pitch `$0010` — one Gaussian index

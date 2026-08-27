@@ -95,13 +95,13 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 struct VoiceState {
   std::uint16_t brrAddress = 0;
   // The block whose header the per-sample end/loop check reads. It follows
-  // brrAddress, but only as of samples the decoder actually runs for: the
-  // documented five empty samples after a key-on advance the cursor without
-  // decoding, so while the countdown runs — and at the first live sample's
-  // check, which precedes that sample's catch-up decode — the check still reads
-  // the block standing when the decoder last ran (the start block, for a fresh
-  // key-on). That gap is what lets a first attack step whose startup crossed
-  // into an End+Mute block publish its level before the check lands.
+  // brrAddress, but only as of the voice's live samples: a key-on's silent
+  // span leaves it standing — whether the startup walks the cursor or holds it
+  // (startupWalks below) — so while the countdown runs, and at the first live
+  // sample's check, the check still reads the block standing when the voice
+  // last ran live (the start block, for a fresh key-on). That gap is what lets
+  // a first attack step whose startup crossed into an End+Mute block publish
+  // its level before the check lands.
   std::uint16_t headerAddress = 0;
   std::uint8_t brrSampleIndex = 0;
   std::uint16_t pitchCounter = 0;
@@ -120,6 +120,14 @@ struct VoiceState {
   // sample from them — the final pre-key-on sample, which still sounds — and
   // then applies the restart (see pollKeying).
   bool restartPending = false;
+  // Whether this key-on's silent span advances the stream. A key-on that
+  // interrupts a sounding voice (envelope above 0 when the restart applies)
+  // walks its fresh stream through the silent span and the first live compute
+  // at the captured pitch (`KON/kon decoding when another kon`); a key-on of a
+  // silent voice holds the stream at the primed start until the first live
+  // compute has read it, so that sample interpolates the stream's first four
+  // samples at fraction 0 (`Misc/brr addr wrap-around`).
+  bool startupWalks = false;
   std::uint16_t bentGainRef = 0;
 };
 

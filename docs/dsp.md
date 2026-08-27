@@ -163,19 +163,24 @@ standing before the update (above) and that level is the zero the key-on set; th
 sample is the one after it. The shared-slot asymmetry, together with `VxENVX`'s one-sample read-back
 lag (below), is what makes all eight voices' key-on startup read identically through `VxENVX`.
 
-The stream does not wait for the envelope: the decode cursor already advances through the empty
-samples, from the second of them on — the first performs the start-address read and decodes nothing.
-The pitch it advances at is the one the key-on itself captured, because a key-on suspends the pitch
-capture for seven samples (see [When a register write takes effect](#when-a-register-write-takes-effect)):
+Whether the stream waits for the envelope depends on the voice the key-on lands on. A key-on that
+interrupts a **sounding** voice — its envelope above zero as the restart applies — walks: the fresh
+stream's decode cursor advances through the empty samples, from the second of them on (the first
+performs the start-address read and decodes nothing). The pitch it advances at is the one the
+key-on itself captured, because a key-on suspends the pitch capture for seven samples (see
+[When a register write takes effect](#when-a-register-write-takes-effect)):
 a later key-on landing mid-startup re-captures the register and the walk carries its position, while
-a bare pitch write waits out the hold. Only the *output* is silent during the startup.
+a bare pitch write waits out the hold. Only the *output* is silent during the startup. A key-on of a
+**silent** voice — envelope at zero — holds instead: the stream stands at its primed start through
+the whole silent span *and* the first sounding sample, which interpolates the stream's first four
+samples at Gaussian index 0, and advancing begins the sample after.
 
 The walk carries no interpolation fraction: whole sample positions cross and decode, but the
 fractional remainder is discarded through the silent span, so the first sounding sample interpolates
 from the exact start of its stream position — Gaussian index 0 — and the fraction begins
 accumulating with the advance after it. At a low pitch the difference is audible as where the
 kernel's walk starts: `$0010` plays the kernel from index 0, 1, 2, …, not from the six indices the
-empty samples would have banked.
+empty samples would have banked. A held startup has no fraction to discard.
 
 A key-on takes effect on the write, and happens once. The value written arms the next poll; that poll
 starts the armed voices and disarms itself. So a `KON` bit left set does not start the voice again,
@@ -199,7 +204,8 @@ consumes it:
 - **At any later poll inside the span, it rewinds the silence but not the stream.** The five-sample
   countdown re-arms in full and the envelope drops back to zero, so the voice's level emerges as
   late as a full restart would place it — but the decode cursor is not sent back to the start
-  address: it keeps the position it has walked to and keeps advancing at the pitch. The span is the
+  address: a walking startup keeps the position it has walked to and keeps advancing at the pitch,
+  and a held one keeps holding at its primed start. The span is the
   whole silence a key-on produces — the five empty samples *plus* the first envelope step's
   still-silent sample — so this covers a re-key consumed up to six samples after the load.
 
@@ -234,7 +240,9 @@ voice whose pitch is zero and which is decoding nothing at all.
 The check runs early in the voice's sample and the decode after it, so "its current block" means the
 block the decoder last ran in — never a block this sample's own advance enters. A stream that crosses
 into an End+Mute block is therefore released at the **next** sample's check, one sample after `ENDX`
-sets. And because the decoder idles through a key-on's five empty samples while the cursor walks on,
+sets. And because the decoder idles through a key-on's five empty samples while a walking startup's
+cursor moves on (a re-key of a sounding voice — a silent voice's startup holds its cursor at the
+start, [above](#key-on-and-key-off)),
 a startup whose cursor crosses into an End+Mute block is released one sample after the first envelope
 step: that step runs and its level reaches `VxENVX` for one sample before the release lands. A header
 already standing End+Mute at the first step's sample, by contrast, releases the voice before the step
@@ -353,14 +361,15 @@ Three consequences are worth knowing:
 - **A key-on holds the pitch capture for seven samples.** Each consumed key-on — including one
   absorbed or rewound inside the silent span — schedules its voice's capture for the first slot of
   the poll-parity sample after the consuming poll, and suspends the per-sample capture for seven
-  samples from that poll. Through the hold the startup walks at the pitch that scheduled capture
-  took; a bare `VxPITCH` write inside the hold never reaches the stream, while one landing between
+  samples from that poll. Through the hold a walking startup advances at the pitch that scheduled
+  capture took; a bare `VxPITCH` write inside the hold never reaches the stream, while one landing between
   the poll and the parity sample's first slot does — it is what the scheduled capture reads. The
   hold is anchored to the poll, so it covers the same samples for every voice.
 
 This intra-sample schedule is derived from the S-DSP timing charts; the key-on countdown, the last
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
-slot and its one-sample value lag, the echo write slots, the mid-startup stream advance, the
+slot and its one-sample value lag, the echo write slots, the sounding-voice startup walk and the
+silent-voice startup hold, the
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
 its key-on hold, the soft-reset shield on a key-on's consumption sample, the full restart a
 key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full restart's

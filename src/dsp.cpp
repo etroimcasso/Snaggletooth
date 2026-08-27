@@ -177,19 +177,23 @@ inline constexpr std::uint8_t kKeyOnStartupCalls = 5;
 // key-on landing inside this span (see pollKeying).
 inline constexpr std::uint8_t kKeyOnSilentCalls = kKeyOnStartupCalls + 1;
 
-// A key-on's stream walk carries no interpolation fraction. From the load
-// through the first sounding compute, the pitch counter's fractional bits are
-// cleared after each advance: whole-sample crossings stand, so the cursor
-// still walks at the pitch through the startup (`KON/kon decoding when
-// another kon`), while the first audible sample interpolates from index 0 and
-// the fraction begins accumulating only with the advance after it
-// (`KON/pitch at kon`: at pitch $0010 the audible ramp reads the Gaussian
-// kernel at indices 0, 1, 2, … — a retained startup fraction starts it six
-// indices deep). The window is one call longer than the silent span because
-// the advance precedes the interpolation within a compute, so the first
-// sounding call's own advance still contributes no fraction. It is counted
-// from the load, so an in-span rewind does not reopen it — the rewound
-// stream keeps walking with its fraction intact.
+// A key-on's startup keeps no interpolation fraction, and this window is
+// where that holds: from the load through the first sounding compute. For a
+// walking startup (a sounding voice re-keyed — see VoiceState::startupWalks)
+// the pitch counter's fractional bits are cleared after each advance:
+// whole-sample crossings stand, so the cursor still walks at the pitch
+// (`KON/kon decoding when another kon`), while the first audible sample
+// interpolates from index 0 and the fraction begins accumulating only with
+// the advance after it (`KON/pitch at kon`: at pitch $0010 the audible ramp
+// reads the Gaussian kernel at indices 0, 1, 2, … — a retained startup
+// fraction starts it six indices deep). For a held startup the same window
+// bounds the stream hold itself — the advance is skipped outright, so there
+// is no fraction to clear (`Misc/brr addr wrap-around`). The window is one
+// call longer than the silent span because the advance precedes the
+// interpolation within a compute, so the first sounding call's own advance
+// still contributes no fraction. It is counted from the load, so an in-span
+// rewind does not reopen it — the rewound stream keeps walking with its
+// fraction intact.
 [[nodiscard]] bool keyOnPinsFraction(const VoiceState& v) noexcept {
   return v.computesSinceKeyOn <= kKeyOnSilentCalls + 1;
 }
@@ -548,18 +552,22 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
     amplitude = 0;
   } else if (v.konDelay > 0) {
-    // Startup: the voice outputs silence while its stream already advances at
-    // the pitch — except on the first startup call, which performs the
-    // start-address read and decodes nothing. The envelope holds through the
-    // countdown (stepVoiceEnvelope decrements it), and the header check above
-    // still runs. Measured against spc_dsp6's `KON/kon decoding when another
-    // kon`, which freezes the pitch mid-startup and reads where the cursor
-    // stood; both published references instead hold the stream still until the
-    // countdown ends, which that ROM refutes. The first-call test reads the
+    // Startup: the voice outputs silence, and whether its stream advances is
+    // the key-on's walk split (VoiceState::startupWalks). A walking startup —
+    // a sounding voice re-keyed — advances at the pitch, except on the first
+    // startup call, which performs the start-address read and decodes nothing;
+    // measured against spc_dsp6's `KON/kon decoding when another kon`, which
+    // freezes the pitch mid-startup of a re-keyed sounding voice and reads
+    // where the cursor stood — both published references hold every startup's
+    // stream still, which that ROM refutes for this case. A held startup — a
+    // silent voice keyed on — stands at its primed start, exactly as those
+    // references describe (`Misc/brr addr wrap-around`). The envelope holds
+    // through the countdown either way (stepVoiceEnvelope decrements it), and
+    // the header check above still runs. The first-call test reads the
     // compute count, not the countdown alone, because an in-span re-key
     // reloads the countdown without re-priming the stream — that reload's next
     // call advances as normal (`KON/kon then another kon`).
-    if (v.konDelay < kKeyOnStartupCalls || v.computesSinceKeyOn != 1)
+    if (v.startupWalks && (v.konDelay < kKeyOnStartupCalls || v.computesSinceKeyOn != 1))
       advanceVoiceStream(dsp, ram, voice, step);
     if (keyOnPinsFraction(v)) v.pitchCounter &= 0xF000;
     stepVoiceEnvelope(dsp, voice, headerEndMute);
@@ -575,12 +583,15 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // is what spc_dsp6's shared sync spins on (`KON/kon when prev sample at
     // end` races a stream into an End+Mute block mid-startup, then waits for
     // VxENVX != 0; on hardware the wait exits).
-    advanceVoiceStream(dsp, ram, voice, step);
+    // A non-walking startup's hold extends through this, the first live
+    // compute: the sample interpolates the primed stream's first four samples
+    // at fraction 0, and advancing begins the sample after.
+    if (v.startupWalks || !keyOnPinsFraction(v)) advanceVoiceStream(dsp, ram, voice, step);
     if (keyOnPinsFraction(v)) v.pitchCounter &= 0xF000;
     v.headerAddress = v.brrAddress;
     // A voice whose NON bit is set outputs the shared noise level in place of its
-    // interpolated BRR sample; the stream still advanced above, so decoding and
-    // ENDX are unaffected.
+    // interpolated BRR sample; the stream's advance above is untouched by the
+    // substitution, so decoding and ENDX are unaffected.
     const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
     const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
     // The level scaling this sample is the one already standing; the update below
@@ -941,8 +952,13 @@ StereoFrame stepDspSample(DspState& dsp,
 
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept {
+  // Whether the startup walks is decided by the envelope standing as the
+  // restart applies: a key-on that interrupts a sounding voice walks, one that
+  // starts a silent voice holds (see VoiceState::startupWalks).
+  const bool walks = dsp.voices[voice].envelope != 0;
   startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
   VoiceState& v = dsp.voices[voice];
+  v.startupWalks = walks;
   v.phase = EnvPhase::Attack;
   // The startup countdown — the documented five empty samples, uniform for every
   // voice. The poll precedes voice 0's compute in the slot they share, so voice
