@@ -949,15 +949,21 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       dsp.echoGateRight = (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
       break;
     case 31: {
-      // The KON/KOFF load runs BEFORE voice 0's compute in the slot they share
-      // (the poll keeps the even-sample parity — it reads the pre-tick sample
-      // index, as the frame-at-once entry did). A keyed voice 0 therefore takes
-      // this very slot as the first of its five silent startup calls, which is
-      // what makes the eight voices' key-on startup read-uniform through VxENVX
-      // (spc_dsp6 `KON/envx during kon`) while voice 0's counter/noise inputs
-      // stay one update older than voices 1-7's — the hardware's envelope
-      // pipeline.
+      // The KON/KOFF load runs first (the poll keeps the even-sample parity —
+      // it reads the pre-tick sample index, as the frame-at-once entry did),
+      // then the global counter advances, and only then does voice 0 compute:
+      // its envelope check — and the noise step below — read the value this
+      // slot just produced, the same value voices 1-7 read at their compute
+      // slots in the following frame. So all eight voices' checks between two
+      // advances see one counter value (measured against spc_dsp6
+      // `Misc/counter rate synchronizations`, which locks the counter phase
+      // through a voice-4 gadget and measures voice 0's time-to-first-step at
+      // every rate). A keyed voice 0 takes this very slot as the first of its
+      // five silent startup calls, which is what makes the eight voices'
+      // key-on startup read-uniform through VxENVX (spc_dsp6 `KON/envx during
+      // kon`).
       pollKeying(dsp, ram);
+      tickDspSample(dsp);
       computeVoiceSlot(dsp, ram, 0, softReset);
       // The right echo word lands at its write slot, T31, under the gate loaded
       // at T30; then the ring advance applies the T30-loaded ESA/EDL.
@@ -969,7 +975,6 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       advanceEchoRing(dsp, dsp.echoLatchedEsa, dsp.echoLatchedEdl);
       if (envelopeRateFires(dsp.globalCounter, dsp[kDspFlg] & kFlgNoiseRate))
         dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
-      tickDspSample(dsp);
       break;
     }
     default:

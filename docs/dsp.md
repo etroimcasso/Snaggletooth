@@ -342,7 +342,7 @@ counter's residue mod 32 numbers them:
 | T30 / T31 | The echo write lands: the left word at T30, the right word at T31. |
 | T30 | The raw `ESA` and `EDL` are loaded for the ring advance to apply. |
 | T31 | The ring advance: the loaded `ESA` becomes the next sample's base, `EDL` resizes at a wrap, the index steps. |
-| T31 | `KON`/`KOFF` are polled (even samples), then voice 0 computes; the global counter and noise step. |
+| T31 | `KON`/`KOFF` are polled (even samples), the global counter advances, then voice 0 computes and the noise steps. |
 
 Three consequences are worth knowing:
 
@@ -353,10 +353,14 @@ Three consequences are worth knowing:
   the envelope computed one sample earlier, so a CPU read of `VxENVX` is always a full sample behind
   the envelope itself.
 - **Voice 0's output rides one sample behind voices 1–7.** Voice 0 computes at the last slot (T31) and
-  its result is applied at the *next* sample's first slots, so its envelope, noise, and keying inputs
-  are one update older than the other voices' for the same delivered frame. Its first sample from a
+  its result is applied at the *next* sample's first slots, so its keying input is one update older
+  than the other voices' for the same delivered frame. Its first sample from a
   seed is the exception — a freshly seeded state computes its whole first sample at once, so voice 0 is
   heard in it immediately, and the one-sample pipeline begins only afterward.
+- **The counter advances ahead of every check that reads it.** The global counter's T31 advance runs
+  before voice 0's compute and the noise step in that same slot, so voice 0's envelope-rate check,
+  the noise step, and voices 1–7's checks in the following frame's slots all read one counter value —
+  a rate fires for all eight voices on the same 32 kHz sample.
 - **The echo write lags its compute.** The echo unit computes its buffer write at T24 but the bytes
   land at T30 (left word) and T31 (right word), so a program reading the entry between those slots
   still sees the previous sample there.
@@ -390,7 +394,8 @@ consuming compute still emits, the decoder's eight-sample lead over the cursor w
 sample behind it — including the first envelope steps a mid-startup crossing still publishes —
 the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
 group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach, the
-one-sample-late application of `ESA`/`EDL`, and the echo write sweeping the RAM beneath `$F0`–`$FF`
+one-sample-late application of `ESA`/`EDL`, the counter's advance ahead of the checks that share
+its slot, and the echo write sweeping the RAM beneath `$F0`–`$FF`
 without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM, while
 the `VxOUTX` publish slot remains the least-certain part.
 

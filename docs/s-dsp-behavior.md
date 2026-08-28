@@ -382,10 +382,36 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo buffer's left word, then its right word. |
 | T30 → T31 | Raw `ESA`/`EDL` load, then the ring advance applies them and steps the index. |
-| T31 | Voice 0's whole compute; the global counter; the noise step; the `KON`/`KOFF` load. |
+| T31 | The `KON`/`KOFF` load, the global counter's advance, then voice 0's whole compute and the noise step. |
 
 Voice 0 computes at the last slot and applies at the following sample's first slots, so its output
 rides one sample behind the others while its state trajectory stays in step.
+
+### The counter advances ahead of the checks that share its slot
+
+The global counter's once-per-sample advance runs at T31 **before** voice 0's compute and the noise
+step in that same slot. Every rate check therefore reads the just-advanced value: voice 0's envelope
+check and the noise step at T31 itself, and voices 1-7's checks at their compute slots in the frame
+that follows. Between two advances all eight voices read one counter value, so a rate fires for all
+eight on the same 32 kHz sample.
+
+Anomie's cycle-30 listing carries the opposite order for the envelope half — it names voice 0's V3c
+first and "update global counter" after it (with the noise update after the counter, which the ROM
+agrees with). The listing's within-cycle sequence is not the execution order: an implementation that
+lets voice 0's check read the pre-advance value measures every envelope step one sample late against
+a phase reference taken through another voice.
+
+*Derived from `Misc/counter rate synchronizations`.* The sub-test locks itself to the counter's
+absolute phase through voice 4 — GAIN linear increase at rate 1 until its `ENVX` moves, then two
+windows in which rate 2 and rate 3 must *not* fire, restarting until the phase fits — and then, for
+each GAIN value `$C1`–`$DF` (rates 1–31), keys voice 0 on and counts polling iterations until
+`V0ENVX` first moves, checksumming the 31 recorded counts. The lock and the measurement deliberately
+sit on different voices, and that cross-reference is the whole discriminator: rates 2–31 are each
+timed from the previous measurement's own exit, so a uniform one-sample shift of voice 0's fires
+cancels row to row, while rate 1 alone is timed from the voice-4 lock. The two orders differ in
+exactly that one word of the 31 — the pre-advance read measures rate 1 one poll longer — and the
+driver's checksum pins it: with the advance ahead of voice 0's compute the table hits the expected
+accumulator exactly and the ROM advances.
 
 ### The echo buffer writes land at T30/T31
 

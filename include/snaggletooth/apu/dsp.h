@@ -183,7 +183,10 @@ struct DspState {
   // The global counter that gates every envelope/noise rate. It powers on at 0,
   // decrements once per 32 kHz sample, and wraps to 0x77FF when it would pass
   // below 0 (the first sample after reset wraps). A rate fires this sample when
-  // (globalCounter + offset[rate]) % period[rate] == 0.
+  // (globalCounter + offset[rate]) % period[rate] == 0. The advance runs at
+  // slot T31 ahead of the checks that read it there — voice 0's envelope and
+  // the noise step read the just-advanced value, the same value voices 1-7
+  // read at their compute slots in the following frame.
   std::uint16_t globalCounter = 0;
 
   // DSP samples elapsed since power-on. Only its parity is load-bearing: the
@@ -420,9 +423,11 @@ std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 [[nodiscard]] bool envelopeRateFires(std::uint16_t counter, std::uint8_t rate) noexcept;
 
 // Advances the DSP's per-sample global state to the next 32 kHz sample: the
-// global counter and the power-on sample index. Called at the end of a sample,
-// after that sample's KON/KOFF poll and per-voice envelope steps — so the first
-// sample after power-on carries index 0 (even) and polls.
+// global counter and the power-on sample index. The slot schedule runs it at
+// T31 after that sample's KON/KOFF poll and before voice 0's compute and the
+// noise step, so those checks — and voices 1-7's in the following frame —
+// read the advanced counter. The poll reads the pre-tick sample index, so the
+// first sample after power-on carries index 0 (even) and polls.
 void tickDspSample(DspState& dsp) noexcept;
 
 // Generates one 32 kHz stereo output sample and advances the whole DSP by it.

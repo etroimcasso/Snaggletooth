@@ -271,6 +271,55 @@ TEST(SampleSchedule, TheNoiseGeneratorStepsAtTheLastSlot) {
   EXPECT_NE(dsp.noiseLevel, level) << "the noise generator stepped at T31";
 }
 
+TEST(SampleSchedule, VoiceZeroEnvelopeReadsTheCounterTheLastSlotJustAdvanced) {
+  // The counter advances at T31 before voice 0's compute in the same slot, so
+  // voice 0's envelope-rate check reads the advanced value — the value voices
+  // 1-7 read at their compute slots in the following frame. GAIN $D8 (linear
+  // increase, rate 24) fires when (counter + 536) % 10 == 0, i.e. at counter
+  // ≡ 4 (mod 10): a sample whose advance lands ON a firing value steps the
+  // envelope, and a sample entered AT a firing value does not — the advance
+  // has moved the counter off it before the check runs. Measured against
+  // spc_dsp6 `Misc/counter rate synchronizations`, which locks the counter
+  // phase through one voice and measures another's time-to-first-step.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  placeSteadyVoice(dsp, 0);
+  dsp.voices[0].envelope = 0x100;
+  reg(dsp, 0, 0x07) = 0xD8;  // GAIN: linear increase, rate 24
+  sample(dsp, ram);  // prime
+
+  dsp.globalCounter = 15;  // T31 advances to 14 ≡ 4 (mod 10): the check fires
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].envelope, 0x120) << "the advanced value fires the check";
+
+  dsp.globalCounter = 14;  // ≡ 4 pre-advance; T31 moves it to 13: no fire
+  const int held = dsp.voices[0].envelope;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].envelope, held) << "the pre-advance value is never read";
+}
+
+TEST(SampleSchedule, TheNoiseStepReadsTheCounterTheLastSlotJustAdvanced) {
+  // The noise step at T31 follows the counter's advance in the same slot, so
+  // its rate check reads the advanced value, exactly as voice 0's envelope
+  // check does. Noise rate 24 in FLG fires at counter ≡ 4 (mod 10).
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  dsp[kFlg] = 0x18;  // noise rate 24
+  sample(dsp, ram);  // prime
+
+  dsp.globalCounter = 15;  // T31 advances to 14 ≡ 4 (mod 10): the step runs
+  const std::int16_t before = dsp.noiseLevel;
+  sample(dsp, ram);
+  EXPECT_NE(dsp.noiseLevel, before) << "the advanced value fires the step";
+
+  dsp.globalCounter = 14;  // ≡ 4 pre-advance; the advance moves off it: no step
+  const std::int16_t held = dsp.noiseLevel;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.noiseLevel, held) << "the pre-advance value is never read";
+}
+
 TEST(SampleSchedule, KeyOnIsPolledAtTheLastSlotOnEvenSamples) {
   // A KON bit is read at T31, so the voice it keys does not begin its startup
   // until that slot; and the poll runs only on even samples.
