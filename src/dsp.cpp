@@ -32,10 +32,16 @@ constexpr std::uint8_t kFlgSoftReset = 0x80;
 // $0F, $1F, ... $7F (tap*10h + this), each a signed 8-bit coefficient.
 constexpr std::uint8_t kFirCoeff = 0x0F;
 
-// The pitch step's 128 kHz ceiling: the counter advances at most four source
-// samples (four times the 32 kHz output rate) per output sample. The base 14-bit
-// step tops out at 3FFFh, so only a PMON-scaled step reaches the cap.
-constexpr std::uint32_t kMaxPitchStep = 0x3FFF;
+// The pitch counter's in-group position ceiling. The low fourteen bits of the
+// counter place the interpolation cursor within the four-sample group it is
+// consuming (bits 12-13 the sample, bits 0-11 the fraction); a step is added to
+// that position and the sum clamps here before the crossed positions are
+// counted, so one output sample consumes at most four source samples (128 kHz)
+// and a position that hit the ceiling stands at 3FFFh — sample 3 of its group
+// at the maximum fraction — once the group turns. The base 14-bit step tops out
+// at 3FFFh, so only a PMON-scaled step reaches the ceiling.
+constexpr std::uint32_t kMaxGroupPosition = 0x7FFF;
+constexpr std::uint32_t kGroupPositionMask = 0x3FFF;
 constexpr std::uint8_t kVoiceVolLeft = 0x00;
 constexpr std::uint8_t kVoiceVolRight = 0x01;
 constexpr std::uint8_t kVoicePitchLow = 0x02;
@@ -144,8 +150,9 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 // current-sample amplitude: factor = (prevAmplitude SAR 4) + 400h (the range
 // 000h..7FFh, i.e. 0.00..1.99), and step = (base * factor) SAR 10. A silent
 // previous voice gives factor 400h, an unmodulated x1.0, so no special case is
-// needed. The result is capped at the 128 kHz ceiling; the base step never
-// reaches it, so the cap applies only to a modulated voice.
+// needed. The step itself is never capped (a modulated step reaches 7FEEh); the
+// 128 kHz ceiling is applied to the position the step is added to, in
+// advanceVoiceStream.
 // The pitch step a voice's stream advance uses this sample — the captured value,
 // never the live register pair (see DspState::pitchLatch). Voice 0's T31 compute
 // is the only one late enough to see its own sample's capture; voices 1-7 read
@@ -162,7 +169,7 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
     const int factor = (prevAmplitude >> 4) + 0x400;  // -400h..+3FFh -> 000h..7FFh
     step = static_cast<std::uint32_t>((static_cast<int>(step) * factor) >> 10);
   }
-  return step > kMaxPitchStep ? kMaxPitchStep : step;
+  return step;
 }
 
 // The startup countdown a key-on arms — the documented five empty samples. The
@@ -319,15 +326,22 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 }
 
 // Advances a voice's stream by the samples this 32 kHz output sample passes: the
-// pitch counter gains `step`, and every whole sample position it crosses is
-// decoded. Shared by stepVoice (which reports the interpolated result) and
-// stepDspSample (which supplies a pitch-modulated step).
+// counter's in-group position gains `step`, the sum clamps at
+// kMaxGroupPosition, and every whole sample position the clamped sum crosses is
+// decoded. The clamp is what bounds the advance at four source samples per
+// output sample; a step that would carry the position past the ceiling leaves
+// it at 3FFFh within the next group, where a later step of even 1 crosses the
+// group boundary at once (`Misc/interp pos clamped at $7FFF`). Shared by
+// stepVoice (which reports the interpolated result) and stepDspSample (which
+// supplies a pitch-modulated step).
 void advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                         std::size_t voice, std::uint32_t step) noexcept {
   VoiceState& v = dsp.voices[voice];
-  const std::uint32_t advanced = v.pitchCounter + step;
-  const std::uint32_t passed = (advanced >> 12) - (v.pitchCounter >> 12);
-  v.pitchCounter = static_cast<std::uint16_t>(advanced);
+  const std::uint32_t position = v.pitchCounter & kGroupPositionMask;
+  std::uint32_t advanced = position + step;
+  if (advanced > kMaxGroupPosition) advanced = kMaxGroupPosition;
+  const std::uint32_t passed = (advanced >> 12) - (position >> 12);
+  v.pitchCounter = static_cast<std::uint16_t>((v.pitchCounter & ~kGroupPositionMask) + advanced);
   for (std::uint32_t n = 0; n < passed; ++n) decodeStreamSample(dsp, ram, voice);
 }
 

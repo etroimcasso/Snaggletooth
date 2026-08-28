@@ -6,8 +6,11 @@
 //  * Noise LFSR + seed -4000h: fullsnes 3097-3110; Anomie 826-837.
 //  * NON substitution is pre-envelope, no pitch/Gauss, BRR keeps decoding:
 //    fullsnes 3103-3116; Anomie 826-844.
-//  * PMON step = (base * ((amp(x-1) SAR 4) + 400h)) SAR 10, voices 1-7, capped
-//    at 128 kHz: fullsnes 2771-2794; Anomie 813-824, 372-374.
+//  * PMON step = (base * ((amp(x-1) SAR 4) + 400h)) SAR 10, voices 1-7, the
+//    step itself uncapped: fullsnes 2771-2794; Anomie 813-824. The 128 kHz
+//    ceiling is a clamp on the counter's in-group position after the step is
+//    added (Anomie 372-374; fullsnes 2793 leaves its placement open), decided
+//    by spc_dsp6 `Misc/interp pos clamped at $7FFF`.
 //  * Output Mixer sum*MVOL SAR 7 (truncating; -128 wraps), then mute:
 //    fullsnes 3005-3033; Anomie 40-54, 657-682.
 //  * FLG reset value E0h; bit 7 keys off + envelope 0, polled every sample:
@@ -272,12 +275,10 @@ TEST(Pmon, Bit0AndVoice0AreNeverModulated) {
   EXPECT_EQ(dsp.voices[0].pitchCounter, 0x1000);
 }
 
-TEST(Pmon, TheStepIsCappedAt128kHz) {
-  // A modulated step is capped at 3FFFh (128 kHz, four source samples per output
-  // sample). Voice 0 amplitude 1294 (factor 1104) against base pitch 3FFFh would
-  // give (16383*1104)>>10 = 17663; the cap holds the counter to 3FFFh instead.
-  DspState dsp;
-  Ram ram{};
+// Voice 1 modulated by voice 0's amplitude 1294 (factor 1104) against base pitch
+// 3FFFh: a step of (16383*1104)>>10 = 17662 (44FEh), above the four-sample
+// group — the only way a step past 3FFFh arises.
+void modulateVoice1AtFullPitch(DspState& dsp) {
   dsp[kFlg] = 0x00;
   placeAmplitude1294(dsp, 0);
   dsp.voices[1] = {};
@@ -285,8 +286,91 @@ TEST(Pmon, TheStepIsCappedAt128kHz) {
   reg(dsp, 1, 0x02) = 0xFF;
   reg(dsp, 1, 0x03) = 0x3F;  // base pitch 3FFFh
   dsp[kPmon] = 0x02;
+}
+
+TEST(Pmon, TheModulatedStepIsNotCapped) {
+  // The whole 44FEh step lands on the counter from position 0: the 128 kHz
+  // ceiling is on the position a step lands on, not on the step (spc_dsp6
+  // `Misc/interp pos clamped at $7FFF`).
+  DspState dsp;
+  Ram ram{};
+  modulateVoice1AtFullPitch(dsp);
   step(dsp, ram);
-  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x3FFF);  // capped, not 17663 (44FFh)
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x44FE);
+}
+
+TEST(Pmon, TheInGroupPositionClampsAt7FFFh) {
+  // The counter's low fourteen bits are the position within the four-sample
+  // group being consumed; the step is added to that position and the sum
+  // clamps at 7FFFh (Anomie 372-374). From position 3B02h (counter 7B02h: block
+  // bit 14 set, so the clamp is shown to spare the bits above the position) the
+  // step would reach 8000h; it lands at 7FFFh instead — counter BFFFh, sample 3
+  // of the next group at fraction FFFh. The next step starts from that parked
+  // 3FFFh and clamps again (counter FFFFh): the position stays pinned at the
+  // maximum for as long as the step exceeds the group. The bound is exact: from
+  // 3B01h the sum is 7FFFh itself (no clamp needed, the same landing); from
+  // 3B00h it is 7FFEh and lands unclamped.
+  DspState dsp;
+  Ram ram{};
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].pitchCounter = 0x7B02;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xFFFF);
+
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].pitchCounter = 0x7B01;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].pitchCounter = 0x7B00;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFE);
+}
+
+TEST(Pmon, AClampedStepPassesFourSamplesAndAParkedPositionCrossesAtOnce) {
+  // A clamped step still consumes four stream samples — the ceiling's rate —
+  // and a position parked at the group's last fraction crosses into the next
+  // group on the very next step, however small: the sub-test parks a voice this
+  // way, sets its pitch to 0 and then to 1, and reads the crossing on the
+  // sample the step of 1 lands. The stream is a chained pair of blocks so the
+  // four-sample passes decode real positions; the voice is seeded mid-stream
+  // (no primed ring), which decodes at consumption. Voices 1-7 advance by the
+  // pitch captured the previous sample, so each register write reaches the
+  // stream one step late.
+  DspState dsp;
+  Ram ram{};
+  writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
+  writeBlock(ram, 0x1009, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
+  writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
+  dsp[kDir] = 0x02;
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].brrAddress = 0x1000;
+  dsp.voices[1].decoderAddress = 0x1000;
+  dsp.voices[1].headerAddress = 0x1000;
+  dsp.voices[1].brrSampleIndex = 3;
+  dsp.voices[1].pitchCounter = 0x3B02;  // position 3B02h, block sample 3
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x7FFF);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 7);  // 3B02h -> 7FFFh crosses four positions
+
+  reg(dsp, 1, 0x02) = 0x00;  // pitch 0
+  reg(dsp, 1, 0x03) = 0x00;
+  step(dsp, ram);  // the previous capture still applies: parked at 3FFFh, four more
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 11);
+  step(dsp, ram);  // pitch 0: the position holds
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 11);
+
+  reg(dsp, 1, 0x02) = 0x01;  // pitch 1 (modulated: (1 * 1104) >> 10 = 1)
+  step(dsp, ram);  // the previous capture (0) still applies
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xC000);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 12);  // one step of 1 crosses the group
 }
 
 // ── Master volume and mute ──────────────────────────────────────────────────

@@ -240,6 +240,34 @@ left set does not start the voice again, and the register keeps its value for re
 read from its register at every poll instead, so it keeps releasing for as long as the bit stands.
 `FLG` bit 7 is polled every sample rather than every other one.
 
+### The 128 kHz ceiling is a clamp on the position, not a cap on the step
+
+A voice's pitch step is added to the low fourteen bits of its pitch counter — its position within
+the four-sample group it is consuming — and the sum clamps at `$7FFF` before the crossed sample
+positions are counted. The step itself is never capped: a pitch-modulated step reaches `$7FEE`.
+The clamp is what holds the advance to four source samples per output sample, and it has a
+consequence a step cap does not: a position the clamp catches lands on the group's last fraction
+(`$3FFF` once the group turns) and stays pinned there for as long as the step exceeds the group,
+so the first smaller step afterwards — even a step of `1` — crosses into the next group at once.
+A step cap would leave the fraction free to drift, and a later step of `1` would need up to `$1000`
+samples to cross.
+
+fullsnes states that the step or the counter result "is cropped to 128kHz max" and marks the
+placement unknown (its line 2793, "XXX somewhere here"). Anomie places it concretely: the
+interpolation index gains the pitch and is clamped to `$7FFF` (lines 372–374). Only the clamp on
+the position produces the parking behaviour; a cap on the step does not, and the two are otherwise
+indistinguishable at any base pitch, since a base step cannot exceed `$3FFF`.
+
+*Derived from `Misc/interp pos clamped at $7FFF`.* The sub-test modulates voice 2 by a stationary
+voice 1 (a constant `+$3800` block at pitch 0, direct gain `$13`) with base pitch `$3FBA`, so the
+modulated step is about `$4800` — past the group — and lets the voice run for a few samples; then
+it sets the pitch to `0`, then to `1`, and reads twenty echo-buffer words of voice 2's output. Under
+the position clamp the voice's position parks at `$3FFF` within a few samples and the step of `1`
+crosses on its first sample; under a step cap the fraction drifts (`$3FFF`, `$7FFE`, `$BFFD`, …)
+and the step of `1` crosses nine samples later, so the two models play different samples into the
+buffer. The clamped model's twenty words reproduce the driver's compare constant exactly, and the
+ROM ratifies by advancing.
+
 ### A key-on landing on a voice inside its silent span is absorbed or rewinds the silence
 
 Both documents state that keying a voice that is already playing restarts it in full — envelope to
@@ -636,8 +664,6 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   `VxENVX` and untested for `VxOUTX`.
 - **Echo reads, and the `ESA`/`EDL` latch and ring-index advance**, are modeled together at T24.
   Anomie places the latch and advance at his cycle 30. No measurement distinguishes them yet.
-- **The 128 kHz pitch crop.** fullsnes marks its own placement uncertain; Anomie's clamp on the
-  post-add interpolation index is concrete and is what is implemented.
 - **Register-order edge cases** — writing `VxADSR2` or `VxGAIN` before `VxADSR1` within a sample — are
   noted in the Errata and not modeled at slot granularity.
 

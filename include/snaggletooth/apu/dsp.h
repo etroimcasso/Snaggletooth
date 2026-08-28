@@ -447,7 +447,10 @@ void tickDspSample(DspState& dsp) noexcept;
 // and the enveloped amplitude is (sample * envelope) >> 11 — the internal
 // -4000h..+3FFFh value that VxOUTX returns the high byte of and the next voice's
 // PMON reads. When PMON is enabled for a voice (bits 1-7), its pitch step is
-// scaled by the previous voice's amplitude and capped at the 128 kHz rate. Each
+// scaled by the previous voice's amplitude; the step is not capped, but the
+// counter's in-group position it is added to clamps at 7FFFh, which bounds the
+// advance at four source samples per output sample and parks a position the
+// clamp caught at the group's last fraction (advanceVoiceStream). Each
 // channel adds (amplitude * VxVOL) >> 6 (the signed 8-bit volume with the
 // BRR-dropped low bit recovered), and the sum is clamped to signed 16 bits after
 // every addition. The summed mix is scaled by the signed master volume

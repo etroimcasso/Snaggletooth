@@ -104,7 +104,11 @@ top four bits index the sample within the block, its next eight bits index a 4-p
 over the four most recently decoded samples. The kernel is the hardware's 512-entry ROM table with
 its exact partial-overflow arithmetic, so interpolated output matches the chip bit for bit — a step
 of `$1000` plays at the source rate, larger steps play higher and skip samples, smaller steps play
-lower and interpolate between them.
+lower and interpolate between them. The step is added to the counter's low fourteen bits — the
+position within the four-sample group being consumed — and the sum clamps at `$7FFF` before the
+crossed positions are counted, so one output sample consumes at most four source samples. A base
+step never reaches the clamp; a pitch-modulated one can (see [Noise and pitch
+modulation](#noise-and-pitch-modulation)).
 
 **Envelope.** The interpolated sample is scaled by an 11-bit volume envelope. In ADSR mode the
 envelope rises on key-on (Attack), falls to a sustain level (Decay), holds and decays (Sustain), and
@@ -322,8 +326,13 @@ apply to noise, though the voice keeps decoding its BRR data, so an End+Mute blo
 
 **Pitch modulation.** With a voice's `PMON` bit set (voices 1–7 only), its pitch step is scaled by the
 previous voice's current amplitude, so voice *x*−1 frequency-modulates voice *x*. A silent previous
-voice leaves the step unmodulated. The modulated step is capped at four source samples per output
-sample (128 kHz).
+voice leaves the step unmodulated. The modulated step itself is not capped (it reaches `$7FEE` at
+the extremes); what bounds it is the clamp on the counter's in-group position, at `$7FFF` after the
+step is added. A step the clamp catches consumes exactly four source samples and leaves the position
+parked at the group's last fraction (`$3FFF` once the group turns) — pinned there for as long as the
+step exceeds the group, and crossing into the next group on the first smaller step, however small.
+A voice modulated past the ceiling and then dropped to pitch `1` therefore advances one sample on
+the very next step, not after `$1000` of them.
 
 ## When a register write takes effect
 
@@ -395,7 +404,8 @@ sample behind it — including the first envelope steps a mid-startup crossing s
 the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
 group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach, the
 one-sample-late application of `ESA`/`EDL`, the counter's advance ahead of the checks that share
-its slot, and the echo write sweeping the RAM beneath `$F0`–`$FF`
+its slot, the in-group position clamp at `$7FFF` on an uncapped pitch step, and the echo write
+sweeping the RAM beneath `$F0`–`$FF`
 without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM, while
 the `VxOUTX` publish slot remains the least-certain part.
 
@@ -435,6 +445,10 @@ snapshot, assign it to restore.
   register, so a `VxPITCH` write takes effect one or two samples later — one sample sooner for
   voice 0 than for voices 1–7 — and on a freshly keyed voice not until its key-on's capture hold
   runs out. See [When a register write takes effect](#when-a-register-write-takes-effect).
+- **A modulated voice can park.** Pitch modulation can push a step past four source samples; the
+  counter's in-group position then clamps at `$7FFF` and parks at the group's last fraction, and the
+  next smaller step crosses a sample position at once. A voice driven past the ceiling and then set to
+  a low pitch moves one sample on the first step rather than accumulating from zero.
 - **`VxOUTX` is the high byte of the internal amplitude.** The full amplitude is `-$4000`…`+$3FFF`;
   the register carries `-128`…`+127`.
 - **`FLG` starts at `$E0`.** On reset the DSP boots muted, soft-reset, with echo writes disabled and
