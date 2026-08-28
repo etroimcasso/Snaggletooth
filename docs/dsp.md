@@ -247,6 +247,14 @@ all. The check itself runs early in the voice's sample and trails the decoder by
 whose advance carries the decoder into an End+Mute block still sounds, and the release lands at the
 next sample's check, one sample after `ENDX` sets.
 
+The sample data is read ahead of the sound too, a group of four samples at a time: a key-on decodes
+the first three groups — twelve samples — as it primes the voice, and each group of four consumed
+thereafter decodes the next group, always eight stream samples ahead of the one being consumed. The
+bytes behind a sample are therefore read from RAM well before it sounds, and rewriting them after
+that read changes nothing already decoded. A voice parked at pitch zero is the limiting case: it
+consumes nothing, so it decodes nothing — rewrite its entire block and it still plays all twelve
+primed samples when it moves again. Only the header check reads RAM every sample.
+
 Around a key-on the check's view stands still a little longer. It keeps reading the block standing
 before the key-on through the five empty samples and the first two live samples — so a startup
 whose decoder crosses into an End+Mute block on the way publishes its first envelope steps, and
@@ -381,6 +389,7 @@ key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full
 consuming compute still emits, the decoder's eight-sample lead over the cursor with the check one
 sample behind it — including the first envelope steps a mid-startup crossing still publishes —
 the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
+group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach, the
 one-sample-late application of `ESA`/`EDL`, and the echo write sweeping the RAM beneath `$F0`–`$FF`
 without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM, while
 the `VxOUTX` publish slot remains the least-certain part.
@@ -412,6 +421,11 @@ snapshot, assign it to restore.
   `DIR`/`VxSRCN` read all happen at the decoder's entry, ahead of the sound by the same distance.
 - **A stopped voice still reads its header.** Setting `VxPITCH` to zero stops the decode, not the
   per-sample header read, so a block that becomes End+Mute underneath such a voice still releases it.
+- **Rewriting sample data is not instant.** BRR bytes are read when their group is decoded, eight to
+  twelve samples ahead of the one playing, and a key-on reads twelve up front — so a data write
+  reaches the output that many samples late, and never reaches the samples already decoded. A voice
+  parked at pitch zero keeps its primed samples whatever happens to the RAM under it; the header
+  check is the one live read (above).
 - **A pitch write is not instant.** The stream reads a pitch capture taken each sample, not the
   register, so a `VxPITCH` write takes effect one or two samples later — one sample sooner for
   voice 0 than for voices 1–7 — and on a freshly keyed voice not until its key-on's capture hold

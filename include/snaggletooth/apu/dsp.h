@@ -117,6 +117,24 @@ struct VoiceState {
   std::uint8_t brrSampleIndex = 0;
   std::uint16_t pitchCounter = 0;
   SampleWindow window{};
+  // The decoded-sample ring between the decoder and the window. BRR data is
+  // decoded four samples at a time, ahead of the cursor: a key-on primes the
+  // first three groups — twelve samples — and each group-aligned consume
+  // decodes the group eight stream samples ahead, so the bytes behind a sample
+  // were read from RAM eight to twelve samples before it sounds, and a RAM
+  // write after that read does not reach the samples already decoded
+  // (`Misc/brr not always decoding` rewrites a parked voice's block and the
+  // voice still plays its twelve primed samples). The ring holds the decoded,
+  // not-yet-consumed samples; a state seeded without priming (count 0) decodes
+  // at consumption instead — the hardware never runs unprimed, but
+  // directly-seeded mid-stream states have no ring to pop.
+  std::array<std::int16_t, 12> pending{};
+  std::uint8_t pendingHead = 0;
+  std::uint8_t pendingCount = 0;
+  // The decoder's filter history — the two most recently DECODED samples,
+  // which run ahead of the window's consumed taps.
+  std::int16_t decodePrev1 = 0;
+  std::int16_t decodePrev2 = 0;
   std::uint16_t envelope = 0;
   EnvPhase phase = EnvPhase::Release;
   std::uint8_t konDelay = 0;

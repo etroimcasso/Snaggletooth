@@ -535,6 +535,52 @@ at the first live step's sample reads back as a voice that never sounded, so the
 ahead of the envelope update within the sample — what lags a crossing is the header address, not
 the check's place in the sample.
 
+### BRR data is read in groups of four, ahead of the sound — twelve samples at the key-on
+
+The decoder's lead is not only an address: the sample **data** is read from RAM ahead of the
+sound too. Anomie describes the structure — a twelve-sample ring of three four-sample groups,
+the key-on decoding three groups before the voice sounds, a new group turned in "when the
+interpolation index passes 0x4000" — and his V4 note says this sub-test's name out loud:
+decoding a group "is definately not done when not necessary" [sic]. What neither reference
+states is the observable consequence: how much already-read data a RAM rewrite cannot reach.
+
+`Misc/brr not always decoding` measures exactly that, using the echo buffer as an oscilloscope.
+It keys two voices at pitch zero — parked cursors — under direct gain, voice 0 on a block whose
+own data goes quiet four samples early, voice 1 on a block loud to its sixteenth sample, both
+chained to a silent loop. While both voices are parked, the driver rewrites voice 1's block to
+silence. It then points the echo unit at free RAM (`ESA` `$F0`, `EDL` `$01`, both voices in
+`EON`, writes enabled), sets both pitches to `$1000` so the voices move, and freezes the buffer
+twenty-odd samples later — leaving a recording of twenty stereo samples of the voices' own
+outputs, voice 0 on the left channel, voice 1 on the right, which the driver checksums.
+
+The expected table — recovered closed-form from the driver's compare constant (`$A0CBCF78`) as
+the unique fit over the two channels' roll-off positions, then ratified by the ROM advancing —
+holds both channels at the parked level for exactly twelve samples, roll-offs aligned. Voice 0's
+twelve are its own data. Voice 1's block held sixteen loud samples and was rewritten to silence
+while the voice was parked: the twelve it still plays are the twelve its key-on primed, read
+from RAM before the rewrite. A machine that reads data at consumption plays four — the
+interpolation window primed at the key-on — and rolls off eight samples early, which is the
+failing row this machine produced. One that buffers the whole first block plays sixteen and
+rolls off four late. The ROM pins twelve: three groups, read at the key-on, immune to everything
+RAM does afterward.
+
+The group reads compose with the block-level facts already pinned: with the prime covering
+stream samples 0–11, the group a moving voice needs at each group-aligned consume is the one
+eight stream samples on — and that group always lies in the decoder's block, which
+`Misc/brr early end at many pitches` pins as entered at the eighth consume of the block before.
+The parked voice is the limiting case: it consumes nothing, so it decodes nothing — its primed
+samples play untouched whenever it moves again — while its header check still reads RAM every
+sample (the section above).
+
+Unarbitrated residue: the exact sample at which a moving voice reads each later group. The ROM
+rewrites RAM only while both voices are parked, so any schedule that reads a group after the
+rewrite and before the group's consumption fits its table. The implementation reads a group at
+the group-aligned consume eight samples ahead of it — the schedule Anomie's ring structure
+implies; distinguishing that from a read at first consumption for the later groups would need a
+rewrite landing mid-motion, between the two moments.
+
+*Arbitrated by `Misc/brr not always decoding`.*
+
 ---
 
 ## Echo

@@ -301,6 +301,27 @@ TEST(VoiceStream, ChainedBlocksCarryTheFilterHistory) {
   EXPECT_EQ(s.dsp.voices[0].window.old, b.samples[0]);
 }
 
+TEST(VoiceStream, ARamRewriteAfterKeyOnDoesNotReachThePrimedSamples) {
+  // BRR bytes are read ahead of consumption: the key-on primes the first
+  // three groups — twelve samples — and later groups are decoded only when
+  // the stream requires them (Anomie's V4: decoding a group "is definately
+  // not done when not necessary"). So a RAM write after the key-on reaches
+  // only samples not yet decoded: spc_dsp6 `Misc/brr not always decoding`
+  // rewrites a parked voice's block to silence and the voice still plays all
+  // twelve primed samples when it moves, with the rewrite audible from stream
+  // sample 12 on. Both bounds matter: one fewer primed sample reddens the
+  // sample-11 read, one more reddens the sample-12 read.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  writeBlock(s.ram, 0x1000, 0xC0, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  for (int sample = 4; sample <= 11; ++sample) {
+    stepVoice(s.dsp, s.ram, 0);
+    EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(sample)) << "sample " << sample;
+  }
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: decoded after the rewrite
+  EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
+}
+
 TEST(VoiceStream, EndxSetsAtTheStartOfDecodingTheEndBlock) {
   // "the bit is set at the START of decoding the BRR block, not at the end"
   // (lines 3092-3093) — and the DECODER starts a block while the cursor is

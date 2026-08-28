@@ -225,6 +225,39 @@ inline constexpr std::uint8_t kKeyOnSilentCalls = kKeyOnStartupCalls + 1;
 // it from the other side).
 inline constexpr std::uint8_t kDecoderLead = 8;
 
+// Shifts one consumed sample into a voice's interpolation window.
+void shiftWindow(VoiceState& v, std::int16_t sample) noexcept {
+  v.window.oldest = v.window.older;
+  v.window.older = v.window.old;
+  v.window.old = v.window.newest;
+  v.window.newest = sample;
+}
+
+// Decodes one group of four BRR samples from the decoder's block into a
+// voice's pending ring. `offset` is the group's first in-block sample index.
+// This is where the BRR bytes are READ: the header's shift and filter and the
+// data bytes come from RAM now, ahead of the samples' consumption, so a RAM
+// write between this read and the consume does not reach them. The filter
+// history is the decoder's own — the two samples decoded before these, which
+// run ahead of the window's consumed taps.
+void decodeGroupAhead(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                      std::size_t voice, int offset) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  const std::uint8_t header = ram[v.decoderAddress];
+  for (int k = 0; k < 4; ++k) {
+    const int index = offset + k;
+    const std::uint8_t byte =
+        ram[static_cast<std::uint16_t>(v.decoderAddress + 1 + index / 2)];
+    const int sample = decodeNibble(signedNibble(byte, (index & 1) != 0), header >> 4);
+    const std::int16_t decoded = clampAndClip(
+        applyFilter((header >> 2) & 0x03, sample, v.decodePrev1, v.decodePrev2));
+    v.decodePrev2 = v.decodePrev1;
+    v.decodePrev1 = decoded;
+    v.pending[(v.pendingHead + v.pendingCount) % 12] = decoded;
+    ++v.pendingCount;
+  }
+}
+
 // Advances a voice's decode cursor by one sample; the DECODER — the read that
 // fills the voice's sample buffer — runs a group of four samples ahead of it.
 // When the cursor consumes a block's kDecoderLead-th sample, the decoder
@@ -233,8 +266,16 @@ inline constexpr std::uint8_t kDecoderLead = 8;
 // is how a DIR or VxSRCN change takes effect at the next loop and not before
 // — and entering a block whose header carries the end flag sets the voice's
 // ENDX bit then, ahead of the cursor. The exhausted cursor follows the
-// address the decoder resolved. The decoded sample shifts into the window;
-// the filter's history is the window's two newest taps.
+// address the decoder resolved.
+//
+// The consumed sample comes from the pending ring, decoded ahead of time: the
+// key-on primed the first three groups, and each group-aligned consume here
+// decodes the group eight stream samples on — always inside the decoder's
+// block, at in-block offset (index + 8) & 15 — so the ring holds eight to
+// twelve decoded samples and RAM writes cannot reach the samples already in
+// it. A state seeded mid-stream without priming has an empty ring and decodes
+// at consumption, from the cursor's own block with the window as filter
+// history — the pre-ring arithmetic, unreachable from a machine-driven voice.
 //
 // The decoder entering an End+Mute block (header code 1: end set, loop clear)
 // has no further effect here: the silencing is the per-sample header check's,
@@ -247,20 +288,26 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     v.brrAddress = v.decoderAddress;
     v.brrSampleIndex = 0;
   }
-  const std::uint8_t header = ram[v.brrAddress];
-  const std::uint8_t byte =
-      ram[static_cast<std::uint16_t>(v.brrAddress + 1 + v.brrSampleIndex / 2)];
-  const int sample = decodeNibble(signedNibble(byte, (v.brrSampleIndex & 1) != 0),
-                                  header >> 4);
-  const std::int16_t decoded =
-      clampAndClip(applyFilter((header >> 2) & 0x03, sample, v.window.newest, v.window.old));
-  v.window.oldest = v.window.older;
-  v.window.older = v.window.old;
-  v.window.old = v.window.newest;
-  v.window.newest = decoded;
+  std::int16_t consumed;
+  if (v.pendingCount == 0) {
+    const std::uint8_t header = ram[v.brrAddress];
+    const std::uint8_t byte =
+        ram[static_cast<std::uint16_t>(v.brrAddress + 1 + v.brrSampleIndex / 2)];
+    const int sample = decodeNibble(signedNibble(byte, (v.brrSampleIndex & 1) != 0),
+                                    header >> 4);
+    consumed = clampAndClip(
+        applyFilter((header >> 2) & 0x03, sample, v.decodePrev1, v.decodePrev2));
+  } else {
+    if (v.brrSampleIndex % 4 == 0)
+      decodeGroupAhead(dsp, ram, voice, (v.brrSampleIndex + 8) & 15);
+    consumed = v.pending[v.pendingHead];
+    v.pendingHead = static_cast<std::uint8_t>((v.pendingHead + 1) % 12);
+    --v.pendingCount;
+  }
+  shiftWindow(v, consumed);
   ++v.brrSampleIndex;
   if (v.brrSampleIndex == kDecoderLead) {
-    if ((header & 0x01) != 0) {
+    if ((ram[v.brrAddress] & 0x01) != 0) {
       v.decoderAddress =
           readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).loop;
     } else {
@@ -452,7 +499,19 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   dsp.voices[voice] = VoiceState{.brrAddress = source.start,
                                  .decoderAddress = source.start,
                                  .headerAddress = source.start};
-  for (int n = 0; n < 4; ++n) decodeStreamSample(dsp, ram, voice);
+  // The prime decodes the start block's first three groups — twelve samples —
+  // into the ring, reading their bytes from RAM now, and shifts the first four
+  // into the window. A write to those bytes after this read does not reach the
+  // primed samples (`Misc/brr not always decoding` rewrites a parked voice's
+  // block and the voice still plays all twelve when it moves).
+  VoiceState& v = dsp.voices[voice];
+  for (int group = 0; group < 3; ++group) decodeGroupAhead(dsp, ram, voice, group * 4);
+  for (int n = 0; n < 4; ++n) {
+    shiftWindow(v, v.pending[v.pendingHead]);
+    v.pendingHead = static_cast<std::uint8_t>((v.pendingHead + 1) % 12);
+    --v.pendingCount;
+  }
+  v.brrSampleIndex = 4;
   // Priming reaches the start block's end code the way any decode does, so a
   // start block carrying the end flag sets ENDX here. A key-on's clear runs
   // after this priming and wins (see keyOnVoice).
