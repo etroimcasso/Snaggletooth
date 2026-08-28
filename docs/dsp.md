@@ -237,19 +237,24 @@ the block End+Mute releases the voice and drops its envelope to zero; an End+Loo
 muting. So rewriting a header under a playing voice takes effect on the next sample, including for a
 voice whose pitch is zero and which is decoding nothing at all.
 
-The check runs early in the voice's sample and the decode after it, so "its current block" means the
-block the decoder last ran in — never a block this sample's own advance enters. A stream that crosses
-into an End+Mute block is therefore released at the **next** sample's check, one sample after `ENDX`
-sets. And because the decoder idles through a key-on's five empty samples while a walking startup's
-cursor moves on (a re-key of a sounding voice — a silent voice's startup holds its cursor at the
-start, [above](#key-on-and-key-off)),
-a startup whose cursor crosses into an End+Mute block is released one sample after the first envelope
-step: that step runs and its level reaches `VxENVX` for one sample before the release lands. A header
-already standing End+Mute at the first step's sample, by contrast, releases the voice before the step
-— the level never leaves zero.
+"Its current block" means the **decoder's** block, and the decoder runs ahead of the sound: the
+key-on primes a voice's whole first block before it sounds, and from then on the decoder enters
+each following block — resolving where the chain goes, and setting `ENDX` if the entered block
+carries the end flag — while the interpolation cursor is still eight samples back in the block
+before. A voice therefore goes quiet **early**: an End+Mute block releases it while the last eight
+samples of the block before are still unplayed, and the End+Mute block's own samples never sound at
+all. The check itself runs early in the voice's sample and trails the decoder by one: a sample
+whose advance carries the decoder into an End+Mute block still sounds, and the release lands at the
+next sample's check, one sample after `ENDX` sets.
 
-`ENDX` belongs to the decode rather than to that check: the bit is set when the voice reaches a block
-carrying the end flag, which a stopped voice never does.
+Around a key-on the check's view stands still a little longer. It keeps reading the block standing
+before the key-on through the five empty samples and the first two live samples — so a startup
+whose decoder crosses into an End+Mute block on the way publishes its first envelope steps, and
+their level reaches `VxENVX`, before the release lands. A header already standing End+Mute at the
+first step's sample, by contrast, releases the voice before the step — the level never leaves zero.
+
+`ENDX` belongs to the decoder rather than to that check: the bit is set when the decoder reaches a
+block carrying the end flag, which a stopped voice's decoder never does.
 
 A freshly keyed-on voice makes no header check until two sample periods after the poll loads the
 key-on. The load precedes voice 0's compute in the slot they share, so the load's slot is every
@@ -373,8 +378,8 @@ silent-voice startup hold, the
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
 its key-on hold, the soft-reset shield on a key-on's consumption sample, the full restart a
 key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full restart's
-consuming compute still emits, the one-sample lag between a stream crossing into an End+Mute
-block and its release — including the first envelope step a mid-startup crossing still publishes —
+consuming compute still emits, the decoder's eight-sample lead over the cursor with the check one
+sample behind it — including the first envelope steps a mid-startup crossing still publishes —
 the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
 one-sample-late application of `ESA`/`EDL`, and the echo write sweeping the RAM beneath `$F0`–`$FF`
 without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM, while
@@ -401,6 +406,10 @@ snapshot, assign it to restore.
   back one sample behind, and voice 0's output rides one sample behind the others.
 - **A released voice keeps decoding.** Key-off changes only the envelope. `ENDX` bits can be set by a
   voice you have keyed off, because its stream is still running.
+- **A voice ends early.** The decoder runs eight samples ahead of the interpolation cursor, so an
+  End+Mute block releases the voice while the last eight samples of the block before are still
+  unplayed — and the End+Mute block's own samples never sound. `ENDX`, the loop jump, and the
+  `DIR`/`VxSRCN` read all happen at the decoder's entry, ahead of the sound by the same distance.
 - **A stopped voice still reads its header.** Setting `VxPITCH` to zero stops the decode, not the
   per-sample header read, so a block that becomes End+Mute underneath such a voice still releases it.
 - **A pitch write is not instant.** The stream reads a pitch capture taken each sample, not the

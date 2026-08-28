@@ -183,9 +183,10 @@ TEST(Non, IgnoresPitchAndInterpolation) {
 TEST(Non, EndMuteBlockStillTerminatesNoise) {
   // Even under NON the BRR decoder runs; an End+Mute block releases the voice
   // with envelope 0, terminating the noise output (fullsnes 3111-3114). The
-  // release lands at the sample after the crossing: the header check reads the
-  // header standing at each sample's start, so it sees the entered block at the
-  // next sample's check.
+  // release lands at the sample after the DECODER enters the block — eight
+  // cursor samples before the block itself (spc_dsp6 `Misc/brr early end at
+  // many pitches`): the header check reads the header standing at each
+  // sample's start, so it sees the entered block at the next sample's check.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});  // normal
@@ -200,13 +201,15 @@ TEST(Non, EndMuteBlockStillTerminatesNoise) {
   dsp.voices[0].konDelay = 0;
   dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   dsp.voices[0].brrAddress = 0x1000;
-  dsp.voices[0].brrSampleIndex = 15;  // one step from the block boundary
+  dsp.voices[0].decoderAddress = 0x1000;
+  dsp.voices[0].headerAddress = 0x1000;
+  dsp.voices[0].brrSampleIndex = 6;  // one step from the decoder's move onward
   reg(dsp, 0, 0x02) = 0x00;  // unity pitch
   reg(dsp, 0, 0x03) = 0x10;
 
-  step(dsp, ram);  // finishes the normal block, still noising
+  step(dsp, ram);  // one step short, still noising
   ASSERT_GT(dsp.voices[0].envelope, 0);
-  step(dsp, ram);  // crosses into End+Mute; the crossing sample still noises
+  step(dsp, ram);  // the decoder enters End+Mute; the entering sample still noises
   step(dsp, ram);  // the standing check reads the header: the envelope terminates
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);

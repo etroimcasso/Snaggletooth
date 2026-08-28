@@ -833,17 +833,17 @@ TEST(BrrHeaderCheck, TheCheckGoesLiveOnTheThirdComputeAfterTheKeyOnLoad) {
 
 TEST(BrrHeaderCheck, ACrossingIntoAnEndMuteBlockSilencesAtTheNextSamplesCheck) {
   // The header check reads the header standing at the sample's start — the
-  // hardware checks before it decodes — so a stream crossing into an End+Mute
-  // block mid-sample is silenced one sample later, at the next check. spc_dsp6
-  // `KON/kon when prev sample at end` pins the gap: its sample chains one
-  // silent block into a self-looping End+Mute block, the stream races at pitch
-  // 3F00h and crosses as the startup countdown ends, and the ROM's sync then
-  // spins until VxENVX reads non-zero — so the first live envelope step, whose
-  // own sample is the crossing's, must publish its level before the check
-  // lands. Exactly one published sample carries it. (Its stationary
-  // counterpart, `KON/kon then set sample's end flag`, pins the other half: a
-  // header ALREADY standing at the first live step's start kills before the
-  // step, publishing nothing.)
+  // hardware checks before it decodes — so the decoder entering an End+Mute
+  // block mid-sample silences the voice one sample later, at the next check;
+  // and the check's view stands one sample past the countdown, so an entry
+  // during the startup is seen only from the second live sample's check.
+  // spc_dsp6 `KON/kon when prev sample at end` pins that the first live
+  // envelope step publishes its level before the check lands, and `KON/kon as
+  // prev sample ends` reads that level after each of its swept key-ons —
+  // two published samples carry it, the kill landing on the third. (The
+  // stationary counterpart, `KON/kon then set sample's end flag`, pins the
+  // other half: a header ALREADY standing at the first live step's start
+  // kills before the step, publishing nothing.)
   Keyable k;
   const std::span<const std::uint8_t, 65536> ram{k.ram};
   k.ram[0x1000] = 0x00;                // the first block: silent, no end
@@ -863,8 +863,8 @@ TEST(BrrHeaderCheck, ACrossingIntoAnEndMuteBlockSilencesAtTheNextSamplesCheck) {
     sample = envx(k.dsp, 0);
   }
 
-  EXPECT_EQ(std::count(published.begin(), published.end(), 0x7F), 1);
-  EXPECT_EQ(std::count(published.begin(), published.end(), 0x00), 11);
+  EXPECT_EQ(std::count(published.begin(), published.end(), 0x7F), 2);
+  EXPECT_EQ(std::count(published.begin(), published.end(), 0x00), 10);
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(k.dsp.voices[0].envelope, 0);
 }
@@ -885,6 +885,44 @@ TEST(BrrHeaderCheck, TheCheckLeavesEndxToTheDecode) {
 
   ASSERT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(k.dsp[kEndx] & 0x01, 0);
+}
+
+TEST(BrrHeaderCheck, TheDecoderMeetsAnEndMuteBlockEightSamplesBeforeTheStream) {
+  // The decoder that fills a voice's sample buffer runs eight samples ahead of
+  // the interpolation cursor, so an End+Mute block silences the voice while
+  // the cursor is still eight samples back in the block before. spc_dsp6
+  // `Misc/brr early end at many pitches` pins the lead exactly: two silent
+  // blocks chained to an End+Mute block, keyed silent at one stream sample
+  // per output sample, dies with its twentieth walked sample — the block
+  // sits thirty-two samples in, but the decoder is there twelve early
+  // (its own full-block priming plus the eight-sample lead), and the check
+  // lands one sample after the entry. One count narrower or wider fails the
+  // ROM's per-pitch table.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  k.ram[0x1000] = 0x00;  // two silent blocks, then End+Mute
+  k.ram[0x1009] = 0x00;
+  k.ram[0x1012] = 0x01;
+  k.dsp[0x03] = 0x10;    // V0PITCHH: one stream sample per output sample
+  gain(k.dsp, 0) = 0x7F;
+  keyOnVoice(k.dsp, ram, 0);  // envelope 0: a held startup, walking from call 8
+
+  // Five countdown calls, two held live calls, then nineteen walked samples:
+  // the decoder is still in the second block and the voice still sounds.
+  for (int n = 1; n <= 26; ++n) (void)stepDspSample(k.dsp, ram);
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0);
+  ASSERT_GT(k.dsp.voices[0].envelope, 0);
+
+  // The twentieth walked sample: the decoder enters the End+Mute block —
+  // ENDX sets — while the voice's own sample still sounds.
+  (void)stepDspSample(k.dsp, ram);
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0x01);
+  EXPECT_GT(k.dsp.voices[0].envelope, 0);
+
+  // The next sample's check reads the entered block: Release, envelope 0.
+  (void)stepDspSample(k.dsp, ram);
+  EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(k.dsp.voices[0].envelope, 0);
 }
 
 }  // namespace

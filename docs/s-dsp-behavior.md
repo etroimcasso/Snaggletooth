@@ -493,29 +493,47 @@ running first, so the load's sample is voice 0's first count while voices 1-7 be
 next sample; that shared-slot asymmetry is what lets one uniform count produce the ROM's eight
 identical per-voice rows. Both documents are silent on when the check goes live at all.
 
-### The header the check reads is the decoder's block, one sample behind a crossing
+### The decoder runs eight samples ahead of the cursor, and the check trails it by one
 
-The check runs early in the voice's sample and the decode after it — Anomie's V3c carries the 'e'/'l'
-check while V4 decodes and adjusts the BRR pointer — so the header it reads belongs to the block the
-decoder last ran in, never to a block the same sample's advance enters. A stream crossing into an
-End+Mute block sets `ENDX` at once but is released only at the next sample's check.
+The header the per-sample check reads is the **decoder's** block — and the decoder is not where the
+sound is. A key-on primes the voice's whole first block before the voice sounds, and from then on
+the decoder enters each following block while the interpolation cursor is still eight samples back
+in the block before: it resolves there where the chain goes (the next block, or the loop address
+for an end block, which is when `DIR`/`VxSRCN` are read) and sets `ENDX` there if the entered block
+carries the end flag. Neither reference states the lead — Anomie describes a twelve-sample ring
+turned "when the interpolation index passes 0x4000" without fixing the decoder's distance ahead,
+and fullsnes does not mention the buffer at all. The ROM measures it.
 
-The gap widens across a key-on's startup, because the decoder idles through it: fullsnes has the five
-empty samples land "before envelope updates and BRR decoding actually begin", even though the cursor
-walks at the pitch the whole time (the section above). A cursor that crosses into an End+Mute block
-during those empty samples is therefore released one sample **after** the first envelope step — the
-step runs and its level reaches `VxENVX` for one sample before the release lands.
+`Misc/brr early end at many pitches` is the measurement: two silent blocks chained to an End+Mute
+block, keyed from silence once per pitch `$0000, $0200 … $3E00` under direct gain, counting driver
+polls of `VxENVX` until it reads zero. The expected per-pitch table — recovered closed-form from
+the driver's CRC-32 compare constant (`$08396832`) as the unique fit over the walk-anchor ×
+lead-distance plane, then ratified by the ROM advancing — has every count land exactly where the
+release publishes two samples after the cursor's twentieth walked sample: the End+Mute block sits
+thirty-two samples in, and the decoder is there twelve samples early — its full-block priming plus
+the eight-sample lead. The voice dies with the last eight samples of the middle block unplayed, and
+the End+Mute block's own samples never sound — "the samples in the final block will never be
+output" (Anomie), at every pitch, by a fixed sample distance.
 
-`KON/kon when prev sample at end` is what settles this, by refusing to run otherwise: its sample
-chains one silent block into an End+Mute block that loops on itself, its body leaves pitch `$3F00`
-standing where the shared sync keys a rate-15 attack, and the sync then spins until `VxENVX` reads
-non-zero. The racing startup crosses into the End+Mute block as the countdown ends, so a check that
-saw the crossing at the first live step would kill the level at zero and spin forever — on hardware
-the sync exits, on the strength of that one published step. The stationary case is pinned from the
-other side by `KON/kon then set sample's end flag`: a header pulse already standing at the first live
-step's sample reads back as a voice that never sounded, so the kill itself stays ahead of the
-envelope update within the sample — what lags a crossing is the header address, not the check's
-place in the sample.
+The check itself trails the decoder by one sample: Anomie's V3c carries the 'e'/'l' check early in
+the voice's sample while V4 decodes after it, so a sample whose advance carries the decoder into an
+End+Mute block still sounds, and the release lands at the next sample's check, one sample after
+`ENDX` sets.
+
+Around a key-on the check's view stands still longer — through the five empty samples and the first
+two live samples. `KON/kon as prev sample ends` bounds this from below: it parks a voice at pitch
+zero over a sixteen-sample silent block chained to an End+Mute block, starts the stream at `$1800`,
+then re-keys at twenty swept phases and reads `VxENVX` nine samples after each key-on. The re-keyed
+startup walks four samples through its countdown and crosses the decoder into the End+Mute block on
+its first live advance — yet every one of the twenty reads returns the full direct-gain level, so
+that advance cannot reach the check until the second live sample has passed. `KON/kon when prev
+sample at end` pins the same window from the envelope's side: its racing startup publishes its
+first attack step and the ROM's sync spins until `VxENVX` reads non-zero — a check that saw the
+decoder's crossing at the first live step would kill the level at zero and spin forever. The
+stationary case is pinned by `KON/kon then set sample's end flag`: a header pulse already standing
+at the first live step's sample reads back as a voice that never sounded, so the kill itself stays
+ahead of the envelope update within the sample — what lags a crossing is the header address, not
+the check's place in the sample.
 
 ---
 

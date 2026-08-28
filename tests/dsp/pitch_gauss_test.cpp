@@ -303,15 +303,17 @@ TEST(VoiceStream, ChainedBlocksCarryTheFilterHistory) {
 
 TEST(VoiceStream, EndxSetsAtTheStartOfDecodingTheEndBlock) {
   // "the bit is set at the START of decoding the BRR block, not at the end"
-  // (lines 3092-3093). The decode cursor runs three samples ahead of the
-  // position, so with the end block second, the bit appears when the cursor
-  // enters it — at position 13, three before the position itself would.
+  // (lines 3092-3093) — and the DECODER starts a block while the cursor is
+  // still eight samples back in the block before (spc_dsp6 `Misc/brr early
+  // end at many pitches`). With the end block second, the bit appears when
+  // the decoder enters it: the step that consumes the first block's eighth
+  // sample, four steps past the primed window.
   Stream s;
   writeBlock(s.ram, 0x1009, 0xC3, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
   startVoice(s.dsp, s.ram, 0);
-  for (int n = 1; n <= 12; ++n) stepVoice(s.dsp, s.ram, 0);
+  for (int n = 1; n <= 3; ++n) stepVoice(s.dsp, s.ram, 0);
   EXPECT_EQ(s.dsp[kEndx], 0);
-  stepVoice(s.dsp, s.ram, 0);  // the cursor decodes the end block's sample 0
+  stepVoice(s.dsp, s.ram, 0);  // the decoder moves on to the end block
   EXPECT_EQ(s.dsp[kEndx], 0x01);
 }
 
@@ -348,7 +350,10 @@ TEST(VoiceStream, AnEndMuteBlockAlsoJumpsToTheLoopAddress) {
 TEST(VoiceStream, EndxReSetsWhenTheDecoderReachesTheEndAgain) {
   // ENDX re-arms after its acknowledge: "bits may get set ... once when the
   // BRR decoder reaches an End-code" (lines 3087-3090). A self-looping end
-  // block sets its bit at the prime, again on every loop pass.
+  // block sets its bit at the prime, again on every pass — and the decoder
+  // reaches it again eight cursor samples in, when it resolves the loop and
+  // finds the same end block waiting (spc_dsp6 `Misc/brr early end at many
+  // pitches` pins the decoder's lead).
   Ram ram{};
   DspState dsp;
   writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
@@ -358,9 +363,9 @@ TEST(VoiceStream, EndxReSetsWhenTheDecoderReachesTheEndAgain) {
   startVoice(dsp, ram, 0);
   EXPECT_EQ(dsp[kEndx], 0x01);  // the first block is itself an end block
   dsp[kEndx] = 0;               // the CPU's write-acknowledge cleared it
-  for (int n = 1; n <= 12; ++n) stepVoice(dsp, ram, 0);
+  for (int n = 1; n <= 3; ++n) stepVoice(dsp, ram, 0);
   EXPECT_EQ(dsp[kEndx], 0);
-  stepVoice(dsp, ram, 0);  // the loop re-enters the same end block
+  stepVoice(dsp, ram, 0);  // the decoder resolves the loop back into the end
   EXPECT_EQ(dsp[kEndx], 0x01);
   EXPECT_EQ(dsp.voices[0].brrAddress, 0x1000);
 }

@@ -94,14 +94,25 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // while the stream stands.
 struct VoiceState {
   std::uint16_t brrAddress = 0;
+  // The block the DECODER is in. The decoder fills the voice's sample buffer a
+  // group of four samples ahead of the interpolation cursor, so it enters each
+  // block while the cursor is still eight samples back in the block before —
+  // and it is the decoder that resolves where a block chains (the next block,
+  // or the loop address for an end block) and that sets ENDX on entering a
+  // block whose header carries the end flag. brrAddress follows this value
+  // when the cursor exhausts its block; the two agree except over the tail of
+  // each block, where the decoder has moved on.
+  std::uint16_t decoderAddress = 0;
   // The block whose header the per-sample end/loop check reads. It follows
-  // brrAddress, but only as of the voice's live samples: a key-on's silent
-  // span leaves it standing — whether the startup walks the cursor or holds it
-  // (startupWalks below) — so while the countdown runs, and at the first live
-  // sample's check, the check still reads the block standing when the voice
-  // last ran live (the start block, for a fresh key-on). That gap is what lets
-  // a first attack step whose startup crossed into an End+Mute block publish
-  // its level before the check lands.
+  // decoderAddress, but only as of the voice's live samples — and one sample
+  // behind them: a key-on's silent span leaves it standing — whether the
+  // startup walks the cursor or holds it (startupWalks below) — and the first
+  // live compute's movement reaches it only at the second live sample's
+  // check. So while the countdown runs, and at the first two live samples'
+  // checks, the check still reads the block standing when the voice last ran
+  // live (the start block, for a fresh key-on). That gap is what lets a
+  // startup whose decoder crossed into an End+Mute block publish its first
+  // attack steps before the check lands.
   std::uint16_t headerAddress = 0;
   std::uint8_t brrSampleIndex = 0;
   std::uint16_t pitchCounter = 0;
