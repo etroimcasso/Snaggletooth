@@ -729,6 +729,31 @@ seven samples) has both groups served at the next sample.
 
 *Arbitrated by `Order/pitch after brr`.*
 
+### Pitch modulation reads the previous voice's output from the previous sample
+
+fullsnes's pitch-counter listing scales the step by `VxOUTX(x-1)` (line 2790) and Anomie's V3c
+marks the enveloped sample as "the value used for modulating the next voice's pitch" (lines 83–85);
+neither says which sample's. The slot map answers it: voice *x*−1 computes three slots ahead of voice
+*x* in every sample (voice 0 at T31 of the sample before), so a modulator reading the fresh value
+would see the same sample's output. The hardware does not. Voice *x*'s step is scaled by the
+amplitude voice *x*−1 produced one sample earlier — the value that stood before the compute three
+slots back replaced it — for every pair, voice 0 → 1 included. A change in the modulating voice's
+output therefore reaches the modulated voice's pitch one sample after it reaches the mix.
+
+`Order/pitch mod uses prev sample` measures it with an impulse. Voice 1 plays a self-looping block
+with a single `+7` nibble among zeros (header `$C3`, shift 12) under direct gain `$7F` at pitch
+`$2000`, so its output is one loud sample every eight; voice 2 plays a block of alternating `+7`/`-8`
+nibbles at the same pitch under direct gain `$01` and `VOLL` `$20` with `EON` set, so at an even
+position it reads one polarity and at an odd one the other — its output is its phase. With `PMON`
+bit 2 set the two are keyed on together and, after 23 samples, the ten left echo words from
+`$F030` (frames 12–21) are checksummed. Each impulse kicks voice 2's step by the modulation factor
+(`$3800 → $77C`, a step of `$EF80` clamped by the position ceiling), which flips its phase; the
+frame on which the flip shows is the frame the impulse reached the modulator. A machine that reads
+the same sample's amplitude prints `0000 ×4, FFFE ×6` and fails; one that reads the previous
+sample's passes.
+
+*Arbitrated by `Order/pitch mod uses prev sample`.*
+
 ### `ENDX` is set when the decoder leaves the end block, and reads back three slots after the compute
 
 Anomie says it both ways. His BRR section: the bit "is set when the block is complete and the next

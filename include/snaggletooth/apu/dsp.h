@@ -304,8 +304,15 @@ struct DspState {
   // Each voice's amplitude, computed at the voice's S3 slot and applied at its
   // S4/S5 volume slots. Voice 0's is prepared at slot T31 for the following frame
   // — the one-update pipeline lag — while voices 1-7 compute and apply within one
-  // frame. voice n's S3 reads voice n-1's stored amplitude for pitch modulation.
+  // frame.
   std::array<int, 8> voiceAmplitude{};
+
+  // Each voice's amplitude from the sample BEFORE the one in voiceAmplitude —
+  // the value the next voice's pitch modulation reads. A voice's compute moves
+  // its standing amplitude here before overwriting it, so voice n's S3 scales its
+  // step by voice n-1's output one sample back, never by the amplitude voice n-1
+  // computed three slots earlier in the same sample.
+  std::array<int, 8> modulatorAmplitude{};
 
   // VxOUTX and VxENVX are computed at a voice's S3 slot but do not become readable
   // in the register file until its later output slots (S8/S9). These hold the

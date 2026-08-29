@@ -153,7 +153,8 @@ the output one sample after the step producing it, and a level that is holding s
 indistinguishable either way. The scaled sample is the voice's amplitude — an internal signed value
 in the range `-$4000`…`+$3FFF`, of which `VxOUTX` reports the high byte. A voice with its `NON` bit
 set outputs the shared noise level here in place of its interpolated sample. The amplitude feeds the
-output mixer (below), and it is also the value the next voice's pitch modulation reads.
+output mixer (below), and it is also the value the next voice's pitch modulation reads — on the
+following sample, not this one.
 
 ## Key-on and key-off
 
@@ -342,8 +343,11 @@ the current noise level in place of its interpolated sample — pitch and Gaussi
 apply to noise, though the voice keeps decoding its BRR data, so an End+Mute block still releases it.
 
 **Pitch modulation.** With a voice's `PMON` bit set (voices 1–7 only), its pitch step is scaled by the
-previous voice's current amplitude, so voice *x*−1 frequency-modulates voice *x*. A silent previous
-voice leaves the step unmodulated. The modulated step itself is not capped (it reaches `$7FEE` at
+previous voice's amplitude, so voice *x*−1 frequency-modulates voice *x*. The amplitude read is the
+one voice *x*−1 produced on the **previous** sample: voice *x*−1 computes three slots ahead of voice
+*x* within a sample, but the modulator does not see that fresh value until the sample after, so a
+change in the modulating voice reaches the modulated voice's step one sample later than it reaches the
+mix. A silent previous voice leaves the step unmodulated. The modulated step itself is not capped (it reaches `$7FEE` at
 the extremes); what bounds it is the clamp on the counter's in-group position, at `$7FFF` after the
 step is added. A step the clamp catches consumes exactly four source samples and leaves the position
 parked at the group's last fraction (`$3FFF` once the group turns) — pinned there for as long as the
@@ -428,7 +432,8 @@ the fraction-free startup walk that makes the first sounding sample interpolate 
 group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach — and whose
 later groups are read one sample after the crossing that calls for them — the
 one-sample-late application of `ESA`/`EDL`, the counter's advance ahead of the checks that share
-its slot, the in-group position clamp at `$7FFF` on an uncapped pitch step, the `ENDX` set at the
+its slot, the in-group position clamp at `$7FFF` on an uncapped pitch step, the one-sample lag on
+the amplitude pitch modulation reads, the `ENDX` set at the
 decoder's exit from an end block — readable three slots after the voice's compute, in the next
 sample for voice 0 — the re-key's walk-or-hold decision read after the consuming compute's own
 envelope update, and the echo write sweeping the RAM beneath `$F0`–`$FF`

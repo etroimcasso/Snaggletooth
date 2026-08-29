@@ -142,7 +142,7 @@ Result runRom(const std::vector<std::uint8_t>& rom) {
   Snes machine(SnesConfig{.rom = rom, .bootRom = configuredBootRom()});
 
   constexpr std::uint64_t kChunk = 6'000'000u;  // master cycles per step (~0.3 s emulated)
-  constexpr int kMaxChunks = 200;               // ~1.2 G master cycles, ~1 min emulated
+  constexpr int kMaxChunks = 300;               // ~1.8 G master cycles, ~1.5 min emulated
 
   // The shell prints "Running tests:" and then holds the screen unchanged while the
   // audio-side test runs, so a stable screen is not a completion signal — only the

@@ -10,7 +10,9 @@
 //    step itself uncapped: fullsnes 2771-2794; Anomie 813-824. The 128 kHz
 //    ceiling is a clamp on the counter's in-group position after the step is
 //    added (Anomie 372-374; fullsnes 2793 leaves its placement open), decided
-//    by spc_dsp6 `Misc/interp pos clamped at $7FFF`.
+//    by spc_dsp6 `Misc/interp pos clamped at $7FFF`. The modulator is the
+//    previous voice's amplitude from the PREVIOUS sample (spc_dsp6
+//    `Order/pitch mod uses prev sample`).
 //  * Output Mixer sum*MVOL SAR 7 (truncating; -128 wraps), then mute:
 //    fullsnes 3005-3033; Anomie 40-54, 657-682.
 //  * FLG reset value E0h; bit 7 keys off + envelope 0, polled every sample:
@@ -73,6 +75,9 @@ void placeAmplitude1294(DspState& dsp, std::size_t v, std::uint8_t left = 0x40,
   // carries its Direct-Gain level from the start rather than reaching it on the
   // first step.
   dsp.voices[v].envelope = 0x7F0;
+  // The amplitude the voice produced on its previous sample: pitch modulation
+  // of the next voice reads this, not the amplitude computed this sample.
+  dsp.voiceAmplitude[v] = 1294;
   reg(dsp, v, 0x07) = 0x7F;   // Direct Gain -> envelope 7F0h
   reg(dsp, v, 0x00) = left;
   reg(dsp, v, 0x01) = right;
@@ -273,6 +278,54 @@ TEST(Pmon, ScalesTheStepByThePreviousVoiceAmplitude) {
   dsp[kPmon] = 0x02;  // modulate voice 1 by voice 0
   step(dsp, ram);
   EXPECT_EQ(dsp.voices[1].pitchCounter, 4416);
+}
+
+TEST(Pmon, TheModulatorIsThePreviousVoiceAmplitudeOfThePreviousSample) {
+  // Voice 2's step is scaled by the amplitude voice 1 produced one sample
+  // earlier, not the one it computes three slots ahead of voice 2 in the same
+  // sample (spc_dsp6 `Order/pitch mod uses prev sample`, the same pair). Voice
+  // 1 is placed at 1294 but has produced nothing yet: the first step modulates
+  // by unity (1000h). It then falls silent; the second step still reads the
+  // 1294 that sample 1 produced (+4416), and only the third reads the silence
+  // (+1000h).
+  DspState dsp;
+  Ram ram{};
+  dsp[kFlg] = 0x00;
+  placeAmplitude1294(dsp, 1);
+  dsp.voiceAmplitude[1] = 0;  // nothing produced before the first sample
+  dsp.voices[2] = {};
+  dsp.voices[2].phase = EnvPhase::Release;
+  reg(dsp, 2, 0x02) = 0x00;  // base pitch 1000h
+  reg(dsp, 2, 0x03) = 0x10;
+  dsp[kPmon] = 0x04;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000);
+  dsp.voices[1].window = {};  // voice 1 silent from this sample on
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000 + 4416);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000 + 4416 + 0x1000);
+}
+
+TEST(Pmon, VoiceZeroModulatesVoiceOneBySampleOneAcrossTheSeedFrame) {
+  // The same one-sample lag from voice 0, whose compute sits at the last slot:
+  // the amplitude it produces on the seed frame is what voice 1 reads on the
+  // second sample, the first slot-scheduled one. Voice 0 has produced nothing
+  // before sample 1, so sample 1 modulates by unity and sample 2 by 1294.
+  DspState dsp;
+  Ram ram{};
+  dsp[kFlg] = 0x00;
+  placeAmplitude1294(dsp, 0);
+  dsp.voiceAmplitude[0] = 0;
+  dsp.voices[1] = {};
+  dsp.voices[1].phase = EnvPhase::Release;
+  reg(dsp, 1, 0x02) = 0x00;  // base pitch 1000h
+  reg(dsp, 1, 0x03) = 0x10;
+  dsp[kPmon] = 0x02;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x1000);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x1000 + 4416);
 }
 
 TEST(Pmon, ASilentPreviousVoiceModulatesByUnity) {

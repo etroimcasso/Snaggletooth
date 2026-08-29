@@ -147,7 +147,7 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 
 // The pitch step this output sample, including pitch modulation. For a voice in
 // 1..7 with its PMON bit set, the base step is scaled by the previous voice's
-// current-sample amplitude: factor = (prevAmplitude SAR 4) + 400h (the range
+// amplitude from the previous sample: factor = (prevAmplitude SAR 4) + 400h (the range
 // 000h..7FFh, i.e. 0.00..1.99), and step = (base * factor) SAR 10. A silent
 // previous voice gives factor 400h, an unmodulated x1.0, so no special case is
 // needed. The step itself is never capped (a modulated step reaches 7FEEh); the
@@ -587,8 +587,9 @@ void tickDspSample(DspState& dsp) noexcept {
 
 // One voice's per-sample body: advance it by one 32 kHz output sample and return
 // its enveloped amplitude — the internal -4000h..+3FFFh value VxOUTX reports and
-// the next voice's PMON reads. `prevAmplitude` is the previous voice's amplitude
-// this sample (for pitch modulation); `softReset` is FLG bit 7. Writes VxOUTX;
+// the next voice's PMON reads one sample later. `prevAmplitude` is the previous
+// voice's amplitude from the previous sample (for pitch modulation); `softReset`
+// is FLG bit 7. Writes VxOUTX;
 // advances the stream and the envelope (or the key-on countdown). Extracted so the
 // frame-at-once path and the per-slot schedule compute a voice bit-for-bit alike.
 static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
@@ -802,8 +803,11 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
   std::int32_t right = 0;
   std::int32_t echoLeft = 0;
   std::int32_t echoRight = 0;
-  int prevAmplitude = 0;
   for (std::size_t voice = 0; voice < 8; ++voice) {
+    // Pitch modulation reads the previous voice's amplitude from the previous
+    // sample, exactly as the slot schedule does.
+    const int prevAmplitude = dsp.modulatorAmplitude[(voice + 7) & 7];
+    dsp.modulatorAmplitude[voice] = dsp.voiceAmplitude[voice];
     const int amplitude = computeVoiceAmplitude(dsp, ram, voice, prevAmplitude, softReset);
     // Record each voice's amplitude: voice 0's becomes the value the following
     // slot-scheduled frame applies (its output rides one frame behind), so the
@@ -813,7 +817,6 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
     dsp.voiceAmplitude[voice] = amplitude;
     dsp.preparedOutx[voice] = dsp[voiceRegister(voice, kVoiceOutx)];
     dsp.preparedEnvx[voice] = dsp[voiceRegister(voice, kVoiceEnvx)];
-    prevAmplitude = amplitude;
     const int volLeft = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolLeft)]);
     const int volRight = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolRight)]);
     const int sendLeft = (amplitude * volLeft) >> 6;
@@ -825,6 +828,10 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
       echoRight = clampSigned16(echoRight + sendRight);
     }
   }
+  // Voice 0's next compute is at T31 of the following frame, after voice 1's
+  // S3 has read the modulator there; this sample's amplitude is what that read
+  // must see, so it is published once every voice of this frame has read.
+  dsp.modulatorAmplitude[0] = dsp.voiceAmplitude[0];
 
   const int mvolLeft = static_cast<std::int8_t>(dsp[kDspMvolLeft]);
   const int mvolRight = static_cast<std::int8_t>(dsp[kDspMvolRight]);
@@ -879,16 +886,20 @@ constexpr std::array<std::uint8_t, 8> kVoiceS8Slot = {4, 7, 10, 13, 16, 19, 22, 
 constexpr std::array<std::uint8_t, 8> kVoiceS9Slot = {5, 8, 11, 14, 17, 20, 23, 26};
 
 // Computes voice `voice` at its S3 slot, storing the amplitude the S4/S5 slots
-// apply. voice n reads voice n-1's stored amplitude for pitch modulation; voice 0
-// reads voice 7's (from this frame — it does not modulate, so the value is inert).
+// apply. voice n's pitch modulation reads voice n-1's amplitude from the
+// PREVIOUS sample — the value standing before voice n-1's compute three slots
+// earlier in this sample replaced it (voice 0 reads voice 7's; it does not
+// modulate, so the value is inert). The voice's own standing amplitude moves to
+// modulatorAmplitude as it is replaced, which is what the following voice reads.
 // VxOUTX and VxENVX are computed here but held back from the register file until
 // the voice's S8/S9 slots — a CPU read before then sees the previous sample's
 // value, the overwrite window the hardware exposes.
 static void computeVoiceSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                              std::size_t voice, bool softReset) noexcept {
-  const int prev = dsp.voiceAmplitude[(voice + 7) & 7];
+  const int prev = dsp.modulatorAmplitude[(voice + 7) & 7];
   const std::uint8_t heldOutx = dsp[voiceRegister(voice, kVoiceOutx)];
   const std::uint8_t heldEnvx = dsp[voiceRegister(voice, kVoiceEnvx)];
+  dsp.modulatorAmplitude[voice] = dsp.voiceAmplitude[voice];
   dsp.voiceAmplitude[voice] = computeVoiceAmplitude(dsp, ram, voice, prev, softReset);
   dsp.preparedOutx[voice] = dsp[voiceRegister(voice, kVoiceOutx)];
   dsp.preparedEnvx[voice] = dsp[voiceRegister(voice, kVoiceEnvx)];
