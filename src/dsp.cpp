@@ -1023,6 +1023,18 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       // kon`).
       pollKeying(dsp, ram);
       tickDspSample(dsp);
+      // The noise step precedes voice 0's compute as well: the rate in FLG
+      // bits 0-4 is read here and the level advances before voice 0 takes it,
+      // so all eight voices' amplitudes for one delivered sample carry the
+      // same noise level — voice 0's from this slot, voices 1-7's from their
+      // compute slots in the frame that follows. A voice 0 that read the
+      // pre-step level would trail the others by one step (spc_dsp6
+      // `Order/noise rate flg.1F` spins on the echo tape until voice 0's noise
+      // sample reads back as zero, then stops the rate: the level it leaves
+      // standing, and the frame the next stepped level reaches the tape on,
+      // are both one sample earlier than a trailing voice 0 produces).
+      if (envelopeRateFires(dsp.globalCounter, dsp[kDspFlg] & kFlgNoiseRate))
+        dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
       computeVoiceSlot(dsp, ram, 0, softReset);
       // The right echo word lands at its write slot, T31, under the gate loaded
       // at T30; then the ring advance applies the T30-loaded ESA/EDL.
@@ -1032,8 +1044,6 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       }
       dsp.echoWritePending = false;
       advanceEchoRing(dsp, dsp.echoLatchedEsa, dsp.echoLatchedEdl);
-      if (envelopeRateFires(dsp.globalCounter, dsp[kDspFlg] & kFlgNoiseRate))
-        dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
       break;
     }
     default:

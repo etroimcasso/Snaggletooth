@@ -496,10 +496,14 @@ TEST(SampleSchedule, VoiceZeroOutputLagsVoiceOneByOneFrame) {
     EXPECT_EQ(v0[i + 1], v1[i]) << "voice 0 frame " << (i + 1) << " matches voice 1 frame " << i;
 }
 
-TEST(SampleSchedule, VoiceZeroReadsTheNoiseLevelBeforeTheLastSlotStep) {
-  // Voice 0 computes at the last slot, before that slot's noise step, so a NON
-  // voice 0 reads the noise level from before this sample's step — one update
-  // older than a within-sample voice reads it.
+TEST(SampleSchedule, VoiceZeroReadsTheNoiseLevelAfterTheLastSlotStep) {
+  // The last slot steps the noise before voice 0 computes, so a NON voice 0
+  // reads the level this sample's step produced — the same level voices 1-7
+  // read at their compute slots in the frame that follows. Measured against
+  // spc_dsp6's `Order/noise rate flg.1F`: the ROM spins on the echo tape until
+  // voice 0's noise sample reads back as zero, then stops the rate, and the
+  // level left standing is one step short of what a voice 0 reading the
+  // pre-step level leaves.
   Ram ram{};
   DspState dsp;
   dsp.voices[0].phase = EnvPhase::Sustain;
@@ -512,9 +516,9 @@ TEST(SampleSchedule, VoiceZeroReadsTheNoiseLevelBeforeTheLastSlotStep) {
 
   while (dsp.slotCursor != 31) stepDspCycle(dsp, view(ram));
   const std::int16_t preStep = dsp.noiseLevel;
-  stepDspCycle(dsp, view(ram));  // the last slot: voice 0 computes, then the noise steps
-  EXPECT_EQ(dsp.voiceAmplitude[0], (preStep * 0x7F0) >> 11);  // used the pre-step level
-  EXPECT_NE(dsp.noiseLevel, preStep);                          // and the step then ran
+  stepDspCycle(dsp, view(ram));  // the last slot: the noise steps, then voice 0 computes
+  EXPECT_NE(dsp.noiseLevel, preStep);                                 // the step ran
+  EXPECT_EQ(dsp.voiceAmplitude[0], (dsp.noiseLevel * 0x7F0) >> 11);  // and voice 0 used it
 }
 
 TEST(SampleSchedule, TheFirstSampleFromASeedSoundsVoiceZeroInFrame) {

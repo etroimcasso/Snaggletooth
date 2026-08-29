@@ -449,7 +449,7 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo buffer's left word, then its right word. |
 | T30 → T31 | Raw `ESA`/`EDL` load, then the ring advance applies them and steps the index. |
-| T31 | The `KON`/`KOFF` load, the global counter's advance, then voice 0's whole compute and the noise step. |
+| T31 | The `KON`/`KOFF` load, the global counter's advance, the noise step, then voice 0's whole compute. |
 
 Voice 0 computes at the last slot and applies at the following sample's first slots, so its output
 rides one sample behind the others while its state trajectory stays in step.
@@ -466,7 +466,8 @@ Anomie's cycle-30 listing carries the opposite order for the envelope half — i
 first and "update global counter" after it (with the noise update after the counter, which the ROM
 agrees with). The listing's within-cycle sequence is not the execution order: an implementation that
 lets voice 0's check read the pre-advance value measures every envelope step one sample late against
-a phase reference taken through another voice.
+a phase reference taken through another voice. The noise step sits on the same side of voice 0's
+compute as the counter (next section).
 
 *Derived from `Misc/counter rate synchronizations`.* The sub-test locks itself to the counter's
 absolute phase through voice 4 — GAIN linear increase at rate 1 until its `ENVX` moves, then two
@@ -479,6 +480,27 @@ cancels row to row, while rate 1 alone is timed from the voice-4 lock. The two o
 exactly that one word of the 31 — the pre-advance read measures rate 1 one poll longer — and the
 driver's checksum pins it: with the advance ahead of voice 0's compute the table hits the expected
 accumulator exactly and the ROM advances.
+
+### The noise steps ahead of voice 0's compute in the same slot
+
+The T31 noise step — the `FLG` bits 0–4 read and the LFSR advance — runs **before** voice 0's compute,
+so voice 0 outputs the level this sample's step produced, the same level voices 1–7 read at their
+compute slots in the frame that follows. One noise level reaches the output per delivered frame,
+whichever voice carries it. Anomie's cycle 30 lists voice 0's V3c ahead of "load FLG bits 0-4 and
+update noise sample"; as with the counter, the listing's order is not the execution order — a voice 0
+reading the pre-step level trails the other seven by one step for as long as the noise runs.
+
+*Derived from `Order/noise rate flg.1F`.* The sub-test runs voice 0 alone on noise (`NON`, `EON`,
+direct gain `$7F`, `VOLL` −128) into a one-entry echo buffer at `$0000`, sets rate 31 and spins on
+the entry until voice 0's noise sample reads back as zero — the LFSR walking down to level 1, which
+the envelope scales to nothing — then stops the rate in the next few cycles. The level left standing
+depends on how many steps fit between the sample that read as zero and the rate write: the ROM's
+expected table (recovered from the driver's CRC constant as the unique walk along the LFSR) is
+`$2000` — two steps, `1 → $4000 → $2000` — where a voice 0 reading the pre-step level publishes its
+zero one sample later, the CPU exits one iteration later, and three steps fit. The sub-test then
+moves the buffer to `$F000`, re-enables the rate and freezes the buffer eleven samples on; the first
+stepped level lands on frame 6 of the tape, one frame earlier than the trailing model puts it. Both
+halves of the row move by the single reordering.
 
 ### The echo buffer writes land at T30/T31
 

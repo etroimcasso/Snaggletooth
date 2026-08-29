@@ -183,6 +183,37 @@ TEST(Non, IgnoresPitchAndInterpolation) {
   EXPECT_EQ(outx(dsp, 0), 0x3F);  // the noise-derived amplitude, not the window's
 }
 
+TEST(Non, VoiceZeroCarriesTheSameNoiseLevelAsVoiceOneInEveryFrame) {
+  // One noise level per delivered frame, whichever voice outputs it. Voice 0
+  // computes at the last slot of the frame before, after that slot's noise step;
+  // voice 1 computes inside the frame, after the same step. So a stepping noise
+  // on voice 0 alone and on voice 1 alone produce identical frames — not frames
+  // shifted by one step. The first two frames are the seed's exception (voice 0's
+  // first amplitude is computed at once and re-applied once by the schedule).
+  // Measured against spc_dsp6's `Order/noise rate flg.1F`.
+  Ram ram{};
+  auto frames = [&](std::size_t v) {
+    DspState dsp;
+    dsp[kFlg] = 0x1F;  // the noise steps every sample
+    dsp[kNon] = static_cast<std::uint8_t>(1u << v);
+    dsp.voices[v].pitchCounter = 0;
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].konDelay = 0;
+    dsp.voices[v].envelope = 0x7F0;
+    reg(dsp, v, 0x07) = 0x7F;  // Direct Gain -> envelope 7F0h
+    reg(dsp, v, 0x00) = 0x7F;
+    dsp[kMvolLeft] = 0x7F;
+    std::array<std::int16_t, 10> out{};
+    for (auto& o : out) o = step(dsp, ram).left;
+    return out;
+  };
+  const auto v0 = frames(0);
+  const auto v1 = frames(1);
+  EXPECT_NE(v1[2], v1[3]);  // the level moves every frame, so a shift would show
+  for (std::size_t i = 2; i < v0.size(); ++i)
+    EXPECT_EQ(v0[i], v1[i]) << "frame " << i;
+}
+
 TEST(Non, EndMuteBlockStillTerminatesNoise) {
   // Even under NON the BRR decoder runs; an End+Mute block releases the voice
   // with envelope 0, terminating the noise output (fullsnes 3111-3114). The

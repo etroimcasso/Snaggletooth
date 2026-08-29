@@ -330,7 +330,9 @@ repeats, and the `FIRx` coefficients (summing near `$80`) for its tone.
 ## Noise and pitch modulation
 
 **Noise.** One 15-bit LFSR is shared by every voice. It advances at the rate in `FLG` bits 0–4 (rate 0
-holds it), gated by the same global counter the envelopes use. A voice with its `NON` bit set outputs
+holds it), gated by the same global counter the envelopes use; the rate is read and the step taken at
+the last slot of every sample, just before voice 0 computes, so all eight voices see one level per
+delivered frame. A voice with its `NON` bit set outputs
 the current noise level in place of its interpolated sample — pitch and Gaussian interpolation do not
 apply to noise, though the voice keeps decoding its BRR data, so an End+Mute block still releases it.
 
@@ -361,7 +363,7 @@ counter's residue mod 32 numbers them:
 | T30 / T31 | The echo write lands: the left word at T30, the right word at T31. |
 | T30 | The raw `ESA` and `EDL` are loaded for the ring advance to apply. |
 | T31 | The ring advance: the loaded `ESA` becomes the next sample's base, `EDL` resizes at a wrap, the index steps. |
-| T31 | `KON`/`KOFF` are polled (even samples), the global counter advances, then voice 0 computes and the noise steps. |
+| T31 | `KON`/`KOFF` are polled (even samples), the global counter advances, the noise steps, then voice 0 computes. |
 
 Three consequences are worth knowing:
 
@@ -380,6 +382,11 @@ Three consequences are worth knowing:
   before voice 0's compute and the noise step in that same slot, so voice 0's envelope-rate check,
   the noise step, and voices 1–7's checks in the following frame's slots all read one counter value —
   a rate fires for all eight voices on the same 32 kHz sample.
+- **The noise steps ahead of voice 0's compute in the same slot.** Voice 0 reads the level the T31
+  step just produced, and voices 1–7 read that same level at their compute slots in the frame that
+  follows, so every voice outputting noise carries one noise level per delivered frame. A `FLG`
+  noise-rate write is read at T31: one landing before that slot changes whether the sample's step
+  fires; one landing after waits for the next sample.
 - **The echo write lags its compute.** The echo unit computes its buffer write at T24 but the bytes
   land at T30 (left word) and T31 (right word), so a program reading the entry between those slots
   still sees the previous sample there.
