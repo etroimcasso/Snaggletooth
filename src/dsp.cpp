@@ -240,7 +240,7 @@ void shiftWindow(VoiceState& v, std::int16_t sample) noexcept {
   v.window.newest = sample;
 }
 
-// Decodes one group of four BRR samples from the decoder's block into a
+// Decodes one group of four BRR samples from the block at `address` into a
 // voice's pending ring. `offset` is the group's first in-block sample index.
 // This is where the BRR bytes are READ: the header's shift and filter and the
 // data bytes come from RAM now, ahead of the samples' consumption, so a RAM
@@ -248,13 +248,12 @@ void shiftWindow(VoiceState& v, std::int16_t sample) noexcept {
 // history is the decoder's own — the two samples decoded before these, which
 // run ahead of the window's consumed taps.
 void decodeGroupAhead(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                      std::size_t voice, int offset) noexcept {
+                      std::size_t voice, std::uint16_t address, int offset) noexcept {
   VoiceState& v = dsp.voices[voice];
-  const std::uint8_t header = ram[v.decoderAddress];
+  const std::uint8_t header = ram[address];
   for (int k = 0; k < 4; ++k) {
     const int index = offset + k;
-    const std::uint8_t byte =
-        ram[static_cast<std::uint16_t>(v.decoderAddress + 1 + index / 2)];
+    const std::uint8_t byte = ram[static_cast<std::uint16_t>(address + 1 + index / 2)];
     const int sample = decodeNibble(signedNibble(byte, (index & 1) != 0), header >> 4);
     const std::int16_t decoded = clampAndClip(
         applyFilter((header >> 2) & 0x03, sample, v.decodePrev1, v.decodePrev2));
@@ -281,12 +280,21 @@ void decodeGroupAhead(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 //
 // The consumed sample comes from the pending ring, decoded ahead of time: the
 // key-on primed the first three groups, and each group-aligned consume here
-// decodes the group eight stream samples on — always inside the decoder's
-// block, at in-block offset (index + 8) & 15 — so the ring holds eight to
-// twelve decoded samples and RAM writes cannot reach the samples already in
-// it. A state seeded mid-stream without priming has an empty ring and decodes
-// at consumption, from the cursor's own block with the window as filter
-// history — the pre-ring arithmetic, unreachable from a machine-driven voice.
+// schedules the decode of the group eight stream samples on — always inside
+// the decoder's block, at in-block offset (index + 8) & 15 — which
+// advanceVoiceStream performs at the voice's next sample, before the cursor
+// moves again (a modulated step can cross two boundaries in one sample, and
+// both groups are scheduled). The hardware decodes a group in its sample's V4 step and only
+// then advances the position (Anomie's V4 order), so a crossing's group is
+// read from RAM one sample after the crossing: spc_dsp6 `Order/pitch after
+// brr` rewrites a moving voice's header shift sample by sample and reads,
+// through the echo tape, that the group crossed into under one header takes
+// the shift of the header standing one sample later. The ring therefore holds
+// four to twelve decoded samples and RAM writes cannot reach the samples
+// already in it. A state seeded mid-stream without priming has an empty ring
+// and decodes at consumption, from the cursor's own block with the window as
+// filter history — the pre-ring arithmetic, unreachable from a machine-driven
+// voice.
 //
 // The decoder entering an End+Mute block (header code 1: end set, loop clear)
 // has no further effect here: the silencing is the per-sample header check's,
@@ -309,8 +317,12 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     consumed = clampAndClip(
         applyFilter((header >> 2) & 0x03, sample, v.decodePrev1, v.decodePrev2));
   } else {
-    if (v.brrSampleIndex % 4 == 0)
-      decodeGroupAhead(dsp, ram, voice, (v.brrSampleIndex + 8) & 15);
+    if (v.brrSampleIndex % 4 == 0 && v.scheduledDecodeCount < v.scheduledDecodes.size()) {
+      v.scheduledDecodes[v.scheduledDecodeCount] = VoiceState::GroupDecode{
+          .address = v.decoderAddress,
+          .offset = static_cast<std::uint8_t>((v.brrSampleIndex + 8) & 15)};
+      ++v.scheduledDecodeCount;
+    }
     consumed = v.pending[v.pendingHead];
     v.pendingHead = static_cast<std::uint8_t>((v.pendingHead + 1) % 12);
     --v.pendingCount;
@@ -336,10 +348,15 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 // it at 3FFFh within the next group, where a later step of even 1 crosses the
 // group boundary at once (`Misc/interp pos clamped at $7FFF`). Shared by
 // stepVoice (which reports the interpolated result) and stepDspSample (which
-// supplies a pitch-modulated step).
+// supplies a pitch-modulated step). The group decodes the previous advance's
+// crossings scheduled run first, reading RAM now — the decode-then-advance
+// order of the hardware's V4 step (see decodeStreamSample).
 void advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                         std::size_t voice, std::uint32_t step) noexcept {
   VoiceState& v = dsp.voices[voice];
+  for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n)
+    decodeGroupAhead(dsp, ram, voice, v.scheduledDecodes[n].address, v.scheduledDecodes[n].offset);
+  v.scheduledDecodeCount = 0;
   const std::uint32_t position = v.pitchCounter & kGroupPositionMask;
   std::uint32_t advanced = position + step;
   if (advanced > kMaxGroupPosition) advanced = kMaxGroupPosition;
@@ -524,7 +541,8 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // primed samples (`Misc/brr not always decoding` rewrites a parked voice's
   // block and the voice still plays all twelve when it moves).
   VoiceState& v = dsp.voices[voice];
-  for (int group = 0; group < 3; ++group) decodeGroupAhead(dsp, ram, voice, group * 4);
+  for (int group = 0; group < 3; ++group)
+    decodeGroupAhead(dsp, ram, voice, v.decoderAddress, group * 4);
   for (int n = 0; n < 4; ++n) {
     shiftWindow(v, v.pending[v.pendingHead]);
     v.pendingHead = static_cast<std::uint8_t>((v.pendingHead + 1) % 12);

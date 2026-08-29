@@ -35,6 +35,7 @@ using snaggletooth::Apu;
 using snaggletooth::ApuState;
 using snaggletooth::DspState;
 using snaggletooth::EnvPhase;
+using snaggletooth::startVoice;
 using snaggletooth::stepDspSample;
 using snaggletooth::StereoFrame;
 
@@ -402,6 +403,39 @@ TEST(Pmon, AClampedStepPassesFourSamplesAndAParkedPositionCrossesAtOnce) {
   step(dsp, ram);
   EXPECT_EQ(dsp.voices[1].pitchCounter, 0xC000);
   EXPECT_EQ(dsp.voices[1].brrSampleIndex, 12);  // one step of 1 crosses the group
+}
+
+TEST(Pmon, AStepCrossingTwoBoundariesDecodesBothGroups) {
+  // A group's decode runs one sample after the crossing that calls for it,
+  // and a modulated step can cross two boundaries in one sample: from
+  // position 0EFAh the 44FEh step lands at 53F8h, five stream samples on, and
+  // the ring turns twice. Both groups are read the next sample, so the stream
+  // stays intact through it. Two blocks with distinct samples — a rising
+  // sixteen-step ramp, then a falling one — make a dropped group read as the
+  // wrong sample.
+  DspState dsp;
+  Ram ram{};
+  writeBlock(ram, 0x1000, 0xC0, {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF});
+  writeBlock(ram, 0x1009, 0xC0, {0x76, 0x54, 0x32, 0x10, 0xFE, 0xDC, 0xBA, 0x98});
+  writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
+  dsp[kDir] = 0x02;
+  modulateVoice1AtFullPitch(dsp);
+  startVoice(dsp, view(ram), 1);  // primed: samples 0-3 in the window, 4-11 decoded
+  const auto rising = [](int k) { return (k < 8 ? k : k - 16) * 2048; };
+  const auto falling = [](int j) { return (7 - j) * 2048; };
+  step(dsp, ram);  // samples 4-7
+  EXPECT_EQ(dsp.voices[1].window.newest, rising(7));
+  step(dsp, ram);  // samples 8-11
+  EXPECT_EQ(dsp.voices[1].window.newest, rising(11));
+  step(dsp, ram);  // samples 12-15
+  EXPECT_EQ(dsp.voices[1].window.newest, rising(15));
+  step(dsp, ram);  // samples 16-20: two crossings, at 16 and at 20
+  EXPECT_EQ(dsp.voices[1].pitchCounter & 0x3FFF, 0x13F8);
+  EXPECT_EQ(dsp.voices[1].window.newest, falling(4));
+  step(dsp, ram);  // samples 21-24: the group at 24-27 was the first of the two
+  EXPECT_EQ(dsp.voices[1].window.newest, falling(8));
+  step(dsp, ram);  // samples 25-28: the second
+  EXPECT_EQ(dsp.voices[1].window.newest, falling(12));
 }
 
 // ── Master volume and mute ──────────────────────────────────────────────────

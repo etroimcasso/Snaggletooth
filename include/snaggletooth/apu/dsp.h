@@ -120,17 +120,33 @@ struct VoiceState {
   // The decoded-sample ring between the decoder and the window. BRR data is
   // decoded four samples at a time, ahead of the cursor: a key-on primes the
   // first three groups — twelve samples — and each group-aligned consume
-  // decodes the group eight stream samples ahead, so the bytes behind a sample
-  // were read from RAM eight to twelve samples before it sounds, and a RAM
-  // write after that read does not reach the samples already decoded
-  // (`Misc/brr not always decoding` rewrites a parked voice's block and the
-  // voice still plays its twelve primed samples). The ring holds the decoded,
+  // schedules the decode of the group eight stream samples ahead, performed
+  // at the voice's NEXT sample (the schedule below carries it). So the
+  // bytes behind a sample are read from RAM seven to eleven samples before
+  // it sounds, and a RAM write after that read does not reach the samples
+  // already decoded (`Misc/brr not always decoding` rewrites a parked voice's
+  // block and the voice still plays its twelve primed samples; `Order/pitch
+  // after brr` rewrites the header sample by sample under a moving voice and
+  // reads which shift each group took). The ring holds the decoded,
   // not-yet-consumed samples; a state seeded without priming (count 0) decodes
   // at consumption instead — the hardware never runs unprimed, but
   // directly-seeded mid-stream states have no ring to pop.
   std::array<std::int16_t, 12> pending{};
   std::uint8_t pendingHead = 0;
   std::uint8_t pendingCount = 0;
+  // The group decodes the cursor's last advance scheduled — one per group
+  // boundary it crossed, each naming the block the group lies in and its
+  // first in-block sample index. They run at the start of the voice's next
+  // advance, reading the header and data bytes from RAM then — one sample
+  // after the crossing, and before the cursor moves again. A modulated step
+  // can carry the cursor across two boundaries in one sample (the position
+  // clamps at 7FFFh, seven samples on), so the schedule holds two.
+  struct GroupDecode {
+    std::uint16_t address = 0;
+    std::uint8_t offset = 0;
+  };
+  std::array<GroupDecode, 2> scheduledDecodes{};
+  std::uint8_t scheduledDecodeCount = 0;
   // The decoder's filter history — the two most recently DECODED samples,
   // which run ahead of the window's consumed taps.
   std::int16_t decodePrev1 = 0;

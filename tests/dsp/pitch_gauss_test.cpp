@@ -322,6 +322,43 @@ TEST(VoiceStream, ARamRewriteAfterKeyOnDoesNotReachThePrimedSamples) {
   EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
 }
 
+TEST(VoiceStream, AGroupIsReadOneSampleAfterTheCrossingThatNeedsIt) {
+  // A group is decoded in its sample's V4 step, and the position advances
+  // only after (Anomie's V4 order) — so the group a crossing calls for is read
+  // from RAM at the NEXT sample, not at the crossing itself. spc_dsp6
+  // `Order/pitch after brr` rewrites a moving voice's header shift once per
+  // sample and reads on the echo tape that the group crossed into under one
+  // shift takes the shift standing one sample later. At unity pitch the first
+  // step consumes sample 4 and crosses into its group, which calls for
+  // samples 12-15; a rewrite of their bytes after that step still reaches
+  // them, because the read is the second step's.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the crossing
+  s.ram[0x1007] = 0x00;        // samples 12-13
+  s.ram[0x1008] = 0x00;        // samples 14-15
+  for (int sample = 5; sample <= 11; ++sample) {
+    stepVoice(s.dsp, s.ram, 0);
+    EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(sample)) << "sample " << sample;
+  }
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: read at sample 5's step, after the rewrite
+  EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
+}
+
+TEST(VoiceStream, AGroupIsNotReadTwoSamplesAfterTheCrossing) {
+  // The other bound of the same read: the second step performs the decode,
+  // so a rewrite after it no longer reaches samples 12-15.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the crossing
+  stepVoice(s.dsp, s.ram, 0);  // sample 5: the read
+  s.ram[0x1007] = 0x00;
+  s.ram[0x1008] = 0x00;
+  for (int sample = 6; sample <= 11; ++sample) stepVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: already decoded
+  EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(12));
+}
+
 TEST(VoiceStream, EndxSetsWhenTheDecoderLeavesTheEndBlock) {
   // The bit is set "when the block is complete and the next block will be
   // that pointed to by the loop pointer" (Anomie 326-328) — the decoder's

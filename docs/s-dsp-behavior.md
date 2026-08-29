@@ -688,14 +688,46 @@ The parked voice is the limiting case: it consumes nothing, so it decodes nothin
 samples play untouched whenever it moves again — while its header check still reads RAM every
 sample (the section above).
 
-Unarbitrated residue: the exact sample at which a moving voice reads each later group. The ROM
-rewrites RAM only while both voices are parked, so any schedule that reads a group after the
-rewrite and before the group's consumption fits its table. The implementation reads a group at
-the group-aligned consume eight samples ahead of it — the schedule Anomie's ring structure
-implies; distinguishing that from a read at first consumption for the later groups would need a
-rewrite landing mid-motion, between the two moments.
+The exact sample at which a moving voice reads each later group is settled by the next section:
+this ROM rewrites RAM only while both voices are parked, so any schedule that reads a group after
+the rewrite and before the group's consumption fits its table, and `Order/pitch after brr` is the
+one that lands a rewrite mid-motion.
 
 *Arbitrated by `Misc/brr not always decoding`.*
+
+### A later group is read one sample after the crossing that calls for it
+
+Anomie's V4 lists the two operations in one order — decode the group "if a new group of BRR
+samples is required", then "increment interpolation sample position as specified by pitch values"
+(lines 94–100) — and that order is the execution order: the requirement an advance creates is
+served at the following sample's V4, one sample after the crossing, and the header and data bytes
+are read from RAM then.
+
+`Order/pitch after brr` measures it with a header that changes once per sample. Its block is eight
+`$44` bytes — every nibble `+4` — under header `$C3` (shift 12, filter 0, end+loop on itself), so
+every decoded sample is `(4 << shift) >> 1` and a voice's output reads as the shift its groups were
+decoded with: `$2000` at shift 12, `$1000` at 11, `$0800` at 10, `$0400` at 9. Each of the eight
+voices in turn is keyed on at pitch zero under direct gain `$20` and `VOLL` `$20` with `EON` set,
+held nine units, then given `VxPITCHH=$20` — a step of `$2000`, two source samples per output
+sample — and, exactly 32 cycles later, the header rewritten `$B3`, 32 cycles later `$A3`, and 32
+cycles later `$93`: each shift stands for exactly one sample. Seven left echo words from `$F03C`
+(frames 15–21) are checksummed after the voice number, high byte first.
+
+The expected row, recovered from the driver's compare constant (`$57A05856`) as the unique fit over
+every non-increasing walk of the four levels through a four-tap window moving zero or two samples a
+frame, is `0400 0400 0374 0100 00E8 0080 0080`; a machine that decodes at the crossing produces
+`0400 0400 03A2 0200 01BA 0080 0080`. The transitions land on the same frames in both — the
+crossings themselves are not displaced — but the group crossed into while `$B3` stood is decoded
+at shift **10** on the hardware (`$0374` is a window of `$2000 $2000 $0800 …`, `$0100` a pure
+shift-10 group, `$00E8` the mix into shift 9), one header later than the shift 11 a decode at the
+crossing reads. The following group, crossed into under `$A3`, is decoded under `$93` either way.
+
+Two consequences. The bytes behind a sample are read seven to eleven samples ahead of it rather
+than eight to twelve; the twelve-sample prime at the key-on is unchanged. And a modulated step that
+crosses two boundaries in one sample (the position clamp at `$7FFF` lets an advance pass up to
+seven samples) has both groups served at the next sample.
+
+*Arbitrated by `Order/pitch after brr`.*
 
 ### `ENDX` is set when the decoder leaves the end block, and reads back three slots after the compute
 

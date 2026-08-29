@@ -257,9 +257,14 @@ trails the decoder by one: a sample whose advance carries the decoder into an En
 sounds, and the release lands at the next sample's check, one sample after the decoder moved in.
 
 The sample data is read ahead of the sound too, a group of four samples at a time: a key-on decodes
-the first three groups — twelve samples — as it primes the voice, and each group of four consumed
-thereafter decodes the next group, always eight stream samples ahead of the one being consumed. The
-bytes behind a sample are therefore read from RAM well before it sounds, and rewriting them after
+the first three groups — twelve samples — as it primes the voice, and each group boundary the cursor
+crosses thereafter calls for the next group, the one eight stream samples ahead of the crossing. That
+group is decoded — its header and data bytes read from RAM — in the voice's **next** sample, not the
+sample of the crossing: within a sample the decode comes first and the position advance after it, so
+the group an advance calls for is served one sample later, under whatever header stands then. A
+header rewritten every sample under a moving voice shows it directly: the group crossed into under
+one shift takes the shift of the header standing one sample later. The bytes behind a sample are
+still read from RAM well before it sounds — seven to eleven samples ahead — and rewriting them after
 that read changes nothing already decoded. A voice parked at pitch zero is the limiting case: it
 consumes nothing, so it decodes nothing — rewrite its entire block and it still plays all twelve
 primed samples when it moves again. Only the header check reads RAM every sample.
@@ -420,7 +425,8 @@ key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full
 consuming compute still emits, the decoder's eight-sample lead over the cursor with the check one
 sample behind it — including the first envelope steps a mid-startup crossing still publishes —
 the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
-group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach, the
+group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach — and whose
+later groups are read one sample after the crossing that calls for them — the
 one-sample-late application of `ESA`/`EDL`, the counter's advance ahead of the checks that share
 its slot, the in-group position clamp at `$7FFF` on an uncapped pitch step, the `ENDX` set at the
 decoder's exit from an end block — readable three slots after the voice's compute, in the next
@@ -464,11 +470,13 @@ snapshot, assign it to restore.
   a held startup, exactly as a key-on from silence would.
 - **A stopped voice still reads its header.** Setting `VxPITCH` to zero stops the decode, not the
   per-sample header read, so a block that becomes End+Mute underneath such a voice still releases it.
-- **Rewriting sample data is not instant.** BRR bytes are read when their group is decoded, eight to
-  twelve samples ahead of the one playing, and a key-on reads twelve up front — so a data write
-  reaches the output that many samples late, and never reaches the samples already decoded. A voice
-  parked at pitch zero keeps its primed samples whatever happens to the RAM under it; the header
-  check is the one live read (above).
+- **Rewriting sample data is not instant.** BRR bytes are read when their group is decoded — the
+  sample after the cursor crosses into the group two ahead of it, seven to eleven samples ahead of
+  the one playing — and a key-on reads twelve up front. So a data write reaches the output that
+  many samples late, and never reaches the samples already decoded; a header shift rewritten under
+  a moving voice reaches the group crossed into one sample earlier, not that one. A voice parked at
+  pitch zero keeps its primed samples whatever happens to the RAM under it; the header check is the
+  one live read (above).
 - **A pitch write is not instant.** The stream reads a pitch capture taken each sample, not the
   register, so a `VxPITCH` write takes effect one or two samples later — one sample sooner for
   voice 0 than for voices 1–7 — and on a freshly keyed voice not until its key-on's capture hold
