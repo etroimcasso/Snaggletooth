@@ -700,7 +700,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   } else if (v.konDelay > 0) {
     // Startup: the voice outputs silence, and whether its stream advances is
     // the key-on's walk split (VoiceState::startupWalks). A walking startup —
-    // a sounding voice re-keyed — advances at the pitch, except on the first
+    // a young sounding voice re-keyed — advances at the pitch, except on the first
     // startup call, which performs the start-address read and decodes nothing;
     // measured against spc_dsp6's `KON/kon decoding when another kon`, which
     // freezes the pitch mid-startup of a re-keyed sounding voice and reads
@@ -1142,10 +1142,14 @@ StereoFrame stepDspSample(DspState& dsp,
 
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept {
-  // Whether the startup walks is decided by the envelope standing as the
-  // restart applies: a key-on that interrupts a sounding voice walks, one that
-  // starts a silent voice holds (see VoiceState::startupWalks).
-  const bool walks = dsp.voices[voice].envelope != 0;
+  // Whether the startup walks is decided by the voice the key-on lands on, as
+  // the restart applies: it walks only when it interrupts a voice that is
+  // sounding AND still young — keyed on within the compute count's range. A
+  // silent voice's key-on holds, and so does a re-key of a voice that has
+  // sounded for longer than the count can hold (see VoiceState::startupWalks
+  // and VoiceState::computesAtRestart).
+  const bool walks =
+      dsp.voices[voice].envelope != 0 && dsp.voices[voice].computesAtRestart != 0xFF;
   startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
   VoiceState& v = dsp.voices[voice];
   v.startupWalks = walks;
@@ -1218,6 +1222,10 @@ void pollKeying(DspState& dsp,
       VoiceState& v = dsp.voices[voice];
       if (v.computesSinceKeyOn > kKeyOnSilentCalls || v.phase == EnvPhase::Release) {
         v.konDelay = kKeyOnStartupCalls;
+        // The count the poll found is what decides the restart's walk — the
+        // counter itself restarts here, a sample before the voice's compute
+        // applies the key-on and reads it (keyOnVoice).
+        v.computesAtRestart = v.computesSinceKeyOn;
         v.computesSinceKeyOn = 0;
         v.restartPending = true;
       } else if (v.computesSinceKeyOn > 2) {

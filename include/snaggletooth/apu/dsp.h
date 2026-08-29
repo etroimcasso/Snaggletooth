@@ -155,6 +155,13 @@ struct VoiceState {
   EnvPhase phase = EnvPhase::Release;
   std::uint8_t konDelay = 0;
   std::uint8_t computesSinceKeyOn = 0xFF;
+  // The compute count the keying poll found on this voice when it armed a full
+  // restart — read by the restart to decide whether the startup walks (below),
+  // since the counter itself restarts at the poll, a sample before the voice's
+  // compute applies the key-on. 0xFF is the saturated count: a voice that has
+  // played for longer than the counter can hold, or was never keyed. A state
+  // keyed directly (keyOnVoice) leaves it at 0, a young voice.
+  std::uint8_t computesAtRestart = 0;
   // Samples left before the per-sample pitch capture resumes for this voice —
   // armed to seven by every consumed key-on, so the hold is anchored to the
   // poll and uniform across the eight voices (see DspState::pitchLatch).
@@ -166,12 +173,17 @@ struct VoiceState {
   // then applies the restart (see pollKeying).
   bool restartPending = false;
   // Whether this key-on's silent span advances the stream. A key-on that
-  // interrupts a sounding voice (envelope above 0 when the restart applies)
-  // walks its fresh stream through the silent span and the first live compute
-  // at the captured pitch (`KON/kon decoding when another kon`); a key-on of a
-  // silent voice holds the stream at the primed start until the first live
-  // compute has read it, so that sample interpolates the stream's first four
-  // samples at fraction 0 (`Misc/brr addr wrap-around`).
+  // interrupts a sounding voice keyed on recently — envelope above 0 when the
+  // restart applies, and computesAtRestart not yet saturated — walks its fresh
+  // stream through the silent span and the first live compute at the captured
+  // pitch (`KON/kon decoding when another kon`: a voice re-keyed 21 samples
+  // after its key-on). A key-on of a silent voice holds the stream at the
+  // primed start until the first live compute has read it, so that sample
+  // interpolates the stream's first four samples at fraction 0 (`Misc/brr addr
+  // wrap-around`) — and so does a re-key of a voice that has sounded for about
+  // a second (`Random/brr before playing`: seven re-keys of a voice at direct
+  // gain $7F0, every one held). The ROMs bound the window between those two
+  // ages; the saturating count is where this model draws it.
   bool startupWalks = false;
   std::uint16_t bentGainRef = 0;
 };

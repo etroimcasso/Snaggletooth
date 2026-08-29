@@ -852,9 +852,11 @@ TEST(BrrHeaderCheck, ACrossingIntoAnEndMuteBlockSilencesAtTheNextSamplesCheck) {
   k.ram[0x02 * 0x100 + 2] = 0x09;      // loop -> 1009h, the End+Mute block itself
   k.dsp[0x03] = 0x3F;                  // V0PITCHH: ~3.94 samples per call
   gain(k.dsp, 0) = 0x7F;               // direct gain: the first live step is 7F0h
-  // A sounding voice, so the key-on's startup walks and the crossing happens
-  // mid-countdown (a key-on of a silent voice holds its stream —
-  // `Misc/brr addr wrap-around`).
+  // A sounding voice keyed directly — a young one, its computesAtRestart at
+  // 0 — so the key-on's startup walks and the crossing happens mid-countdown
+  // (a key-on of a silent voice holds its stream — `Misc/brr addr
+  // wrap-around` — and so does a re-key of a long-sounding voice —
+  // `Random/brr before playing`).
   k.dsp.voices[0].envelope = 0x100;
   keyOnVoice(k.dsp, ram, 0);
 

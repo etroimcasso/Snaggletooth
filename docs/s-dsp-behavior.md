@@ -187,13 +187,28 @@ shape. The test ROMs split the question by the state of the voice being keyed:
   sample per output sample only from the sample after. A stream that walks through the silence
   starts six samples deep and prints a different table.
 
-The discriminator the two ROMs pin is the envelope standing as the restart applies: at 0 the
-startup holds, above 0 it walks. (Both sub-tests agree with a phase-based reading too — a fading
-Release voice with a level still above 0 is unarbitrated.) "As the restart applies" means after the
-consuming compute has run the standing envelope's own update once more — see [the final
-pre-key-on sample](#a-full-restarts-consuming-sample-still-emits-the-final-pre-key-on-sample) —
-so a register write that drops the level to zero on the consuming sample gives a sounding voice a
-held startup.
+- **A key-on that interrupts a voice that has sounded for long holds too.** `Random/brr before
+  playing` fills RAM with random BRR blocks, keys voice 0 over them at pitch `$1000` and direct gain
+  `$7F0`, and hashes a 30 KB echo tape of its output — eight times over, the later seven key-ons
+  landing on the voice while it is still playing the previous pass's data, about a second after its
+  own key-on. The hash the ROM expects is reproduced only when every pass's tape has the same
+  alignment as the first — the pass that keys the voice from silence: the first sounding sample
+  interpolates the stream's first four samples at index 0. A model that walks the seven re-keys
+  lands their data six frames early and hashes to a different constant.
+
+Two conditions therefore gate the walk, both read as the restart applies. The envelope: at 0 the
+startup holds (`Misc/brr addr wrap-around`; a register write that drops the level to zero on the
+consuming sample gives a sounding voice a held startup — see [the final pre-key-on
+sample](#a-full-restarts-consuming-sample-still-emits-the-final-pre-key-on-sample), after which
+the standing envelope has run its own update once more). And how long the voice has sounded: a
+re-key 21 samples after the voice's own key-on walks (`KON/kon decoding when another kon`), one
+about a second after it holds (`Random/brr before playing`), level notwithstanding — the hardware
+keeps some record of a recent key-on beyond the six-sample silent span. Where between 21 samples
+and a second the window closes is not pinned; this implementation closes it at 255 samples. The
+level rule alone was the earlier reading and is refuted by the third ROM: `$010` walks, `$7F0`
+holds, and a level-0 voice holds, so no threshold on the level separates the cases. Nor does the
+envelope phase: the `$7F0` voice stands in Attack, as `Envelope/attack->decay during gain`'s
+seventh block shows for a direct-gain level set above `$7E0`.
 
 In the walking case the first silent sample is the exception — it performs the start-address read
 and decodes nothing, so the walk begins on the second. Only the *output* is silent during the
