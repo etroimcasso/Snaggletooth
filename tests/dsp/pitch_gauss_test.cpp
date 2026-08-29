@@ -322,19 +322,22 @@ TEST(VoiceStream, ARamRewriteAfterKeyOnDoesNotReachThePrimedSamples) {
   EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
 }
 
-TEST(VoiceStream, EndxSetsAtTheStartOfDecodingTheEndBlock) {
-  // "the bit is set at the START of decoding the BRR block, not at the end"
-  // (lines 3092-3093) — and the DECODER starts a block while the cursor is
-  // still eight samples back in the block before (spc_dsp6 `Misc/brr early
-  // end at many pitches`). With the end block second, the bit appears when
-  // the decoder enters it: the step that consumes the first block's eighth
-  // sample, four steps past the primed window.
+TEST(VoiceStream, EndxSetsWhenTheDecoderLeavesTheEndBlock) {
+  // The bit is set "when the block is complete and the next block will be
+  // that pointed to by the loop pointer" (Anomie 326-328) — the decoder's
+  // jump out of the end block, not its entry (fullsnes's "set at the START of
+  // decoding the BRR block", lines 3092-3093, is what spc_dsp6 `Order/endx
+  // after final brr decode` refutes). With the end block second, the decoder
+  // enters it at step 4 — the step that consumes the first block's eighth
+  // sample — and leaves it sixteen steps later.
   Stream s;
   writeBlock(s.ram, 0x1009, 0xC3, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
   startVoice(s.dsp, s.ram, 0);
-  for (int n = 1; n <= 3; ++n) stepVoice(s.dsp, s.ram, 0);
-  EXPECT_EQ(s.dsp[kEndx], 0);
-  stepVoice(s.dsp, s.ram, 0);  // the decoder moves on to the end block
+  for (int n = 1; n <= 19; ++n) {
+    stepVoice(s.dsp, s.ram, 0);
+    EXPECT_EQ(s.dsp[kEndx], 0) << "step " << n;
+  }
+  stepVoice(s.dsp, s.ram, 0);  // the decoder jumps out of the end block
   EXPECT_EQ(s.dsp[kEndx], 0x01);
 }
 
@@ -371,10 +374,11 @@ TEST(VoiceStream, AnEndMuteBlockAlsoJumpsToTheLoopAddress) {
 TEST(VoiceStream, EndxReSetsWhenTheDecoderReachesTheEndAgain) {
   // ENDX re-arms after its acknowledge: "bits may get set ... once when the
   // BRR decoder reaches an End-code" (lines 3087-3090). A self-looping end
-  // block sets its bit at the prime, again on every pass — and the decoder
-  // reaches it again eight cursor samples in, when it resolves the loop and
-  // finds the same end block waiting (spc_dsp6 `Misc/brr early end at many
-  // pitches` pins the decoder's lead).
+  // block sets its bit every time the decoder leaves it for the loop address
+  // — once per pass, sixteen cursor samples apart. The prime itself sets
+  // nothing; the first set is at step 4, when the decoder resolves the loop
+  // out of the start block (spc_dsp6 `Misc/brr early end at many pitches`
+  // pins the decoder's lead, `Order/endx after final brr decode` the exit).
   Ram ram{};
   DspState dsp;
   writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
@@ -382,11 +386,15 @@ TEST(VoiceStream, EndxReSetsWhenTheDecoderReachesTheEndAgain) {
   dsp[kDir] = 0x02;
   setPitch(dsp, 0, 0x1000);
   startVoice(dsp, ram, 0);
-  EXPECT_EQ(dsp[kEndx], 0x01);  // the first block is itself an end block
-  dsp[kEndx] = 0;               // the CPU's write-acknowledge cleared it
+  EXPECT_EQ(dsp[kEndx], 0);  // the prime enters the end block; no set yet
   for (int n = 1; n <= 3; ++n) stepVoice(dsp, ram, 0);
   EXPECT_EQ(dsp[kEndx], 0);
-  stepVoice(dsp, ram, 0);  // the decoder resolves the loop back into the end
+  stepVoice(dsp, ram, 0);  // the decoder leaves the end block for the loop
+  EXPECT_EQ(dsp[kEndx], 0x01);
+  dsp[kEndx] = 0;  // the CPU's write-acknowledge cleared it
+  for (int n = 1; n <= 15; ++n) stepVoice(dsp, ram, 0);
+  EXPECT_EQ(dsp[kEndx], 0);
+  stepVoice(dsp, ram, 0);  // the next pass leaves it again
   EXPECT_EQ(dsp[kEndx], 0x01);
   EXPECT_EQ(dsp.voices[0].brrAddress, 0x1000);
 }

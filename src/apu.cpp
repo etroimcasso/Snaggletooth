@@ -164,7 +164,10 @@ std::vector<StereoFrame> Apu::takeFrames() {
 
 void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
   if (reg == kDspEndx) {
-    state_.dsp[kDspEndx] = 0;  // ENDX: any write acknowledges all end flags
+    // ENDX: any write acknowledges all end flags, a set still staged for its
+    // voice's visibility slot included.
+    state_.dsp[kDspEndx] = 0;
+    state_.dsp.preparedEndx = 0;
     return;
   }
   state_.dsp[reg] = value;

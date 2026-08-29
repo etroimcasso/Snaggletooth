@@ -189,7 +189,11 @@ shape. The test ROMs split the question by the state of the voice being keyed:
 
 The discriminator the two ROMs pin is the envelope standing as the restart applies: at 0 the
 startup holds, above 0 it walks. (Both sub-tests agree with a phase-based reading too — a fading
-Release voice with a level still above 0 is unarbitrated.)
+Release voice with a level still above 0 is unarbitrated.) "As the restart applies" means after the
+consuming compute has run the standing envelope's own update once more — see [the final
+pre-key-on sample](#a-full-restarts-consuming-sample-still-emits-the-final-pre-key-on-sample) —
+so a register write that drops the level to zero on the consuming sample gives a sounding voice a
+held startup.
 
 In the walking case the first silent sample is the exception — it performs the start-address read
 and decodes nothing, so the walk begins on the second. Only the *output* is silent during the
@@ -394,6 +398,16 @@ here." The final decode is real, not an idle detail: it can complete an end bloc
 key-on's `ENDX` clear then erases that same sample's set — the suppression `KON/kon stops endx
 of prev sample` measures.
 
+The standing envelope, too, takes its own update on that compute before the restart reads it.
+What the restart reads decides whether the new startup walks or holds (the split above), and it
+is the level the voice would have carried into the next sample, not the one the final pre-key-on
+sample was emitted with. `Order/endx after final brr decode` forces this: its sync gadget leaves
+voice 4 sounding at full level, restores the voice's `ADSR1` to zero — direct gain, level zero — on
+the compute just before the poll that consumes the test's own key-on of that voice, and the
+expected row for voice 4 is a held startup's, identical to the seven voices keyed from silence. A
+restart reading the level before the update walks that voice and prints its `ENDX` six samples
+early.
+
 ---
 
 ## The intra-sample schedule
@@ -405,6 +419,7 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | Slot | Work |
 |---|---|
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
+| T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` set becomes readable, three slots after its compute — voice 0's at T3 of the following sample. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
 | T27 / T28 | Left then right output finalize — master and echo volume, then the mute gate. |
 | T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
@@ -553,8 +568,9 @@ The header the per-sample check reads is the **decoder's** block — and the dec
 sound is. A key-on primes the voice's whole first block before the voice sounds, and from then on
 the decoder enters each following block while the interpolation cursor is still eight samples back
 in the block before: it resolves there where the chain goes (the next block, or the loop address
-for an end block, which is when `DIR`/`VxSRCN` are read) and sets `ENDX` there if the entered block
-carries the end flag. Neither reference states the lead — Anomie describes a twelve-sample ring
+for an end block, which is when `DIR`/`VxSRCN` are read — and, for an end block, when `ENDX` is
+set; see [below](#endx-is-set-when-the-decoder-leaves-the-end-block-and-reads-back-three-slots-after-the-compute)).
+Neither reference states the lead — Anomie describes a twelve-sample ring
 turned "when the interpolation index passes 0x4000" without fixing the decoder's distance ahead,
 and fullsnes does not mention the buffer at all. The ROM measures it.
 
@@ -572,7 +588,7 @@ output" (Anomie), at every pitch, by a fixed sample distance.
 The check itself trails the decoder by one sample: Anomie's V3c carries the 'e'/'l' check early in
 the voice's sample while V4 decodes after it, so a sample whose advance carries the decoder into an
 End+Mute block still sounds, and the release lands at the next sample's check, one sample after
-`ENDX` sets.
+the decoder moved in.
 
 Around a key-on the check's view stands still longer — through the five empty samples and the first
 two live samples. `KON/kon as prev sample ends` bounds this from below: it parks a voice at pitch
@@ -635,6 +651,50 @@ rewrite landing mid-motion, between the two moments.
 
 *Arbitrated by `Misc/brr not always decoding`.*
 
+### `ENDX` is set when the decoder leaves the end block, and reads back three slots after the compute
+
+Anomie says it both ways. His BRR section: the bit "is set when the block is complete and the next
+block will be that pointed to by the loop pointer" — the decoder's exit from the end block. His
+`$7C` entry: "the bit is set at the START of decoding the BRR block, not at the end" — its entry,
+sixteen stream samples earlier. fullsnes carries the second wording verbatim. The two differ by a
+whole block, and the sub-test's name says which is under test: *endx after final brr decode*.
+
+`Order/endx after final brr decode` measures it per voice. Each voice in turn is keyed at pitch
+`$1000` — one stream sample per output sample — over a plain block chained to an End+Mute block,
+left alone for twenty-four samples in a 32-cycle loop, and `ENDX` is then read three times exactly
+one sample apart, the reads landing on the twenty-sixth, twenty-seventh and twenty-eighth samples
+after the key-on. The expected row — recovered from the driver's compare constant (`$9FAF237D`) as
+the unique fit over every monotone clear-then-set pattern, then ratified by the ROM advancing — is
+**clear, set, set for every one of the eight voices**. The decoder enters the end block on the
+eleventh sample after the key-on (its eight-sample lead plus the startup) and leaves it on the
+twenty-seventh: the bit appears at the exit. A machine that sets it at the entry reads set on all
+three samples; one that sets it when the end block's last group is decoded, four samples before
+the exit, reads set on the first as well.
+
+Two of the eight rows carry more than the placement:
+
+- **Voice 0** computes at the sample's last slot, and the driver's reads sit at the sample
+  boundary. A set made readable at the compute itself is seen by the first read; the ROM says it is
+  not. The bit is staged and reaches the register three slots after the compute — Anomie's V7,
+  "cycles: 0:2 1:5 2:8 …", one ahead of the slot numbering here — which for voice 0 is the following
+  sample's fourth slot. Voices 1-7 land inside their own sample either way; voice 0 is the row that
+  fixes the stage.
+- **Voice 4** is the sync gadget's voice, still sounding at full level when the test re-keys it —
+  and its row is a held startup's. The gadget's `ADSR1` restore to zero (direct gain, level zero)
+  lands on the compute just before the consuming poll, so the level is zero by the time the restart
+  reads it: the restart reads the envelope *after* the consuming compute's own update (the section
+  above). Read before it, the voice walks its startup and its bit comes six samples early.
+
+**Anomie's BRR wording is right; his and fullsnes's `$7C` wording is wrong.** The bit says a
+sample has finished, not that its final block has begun.
+
+Unarbitrated residue: the acknowledge write's reach into a set still staged. Anomie has a write
+"up to 2 cycles earlier" overwriting the new value; here any acknowledge drops a staged set along
+with the readable bits. A sub-test that acknowledges within the three slots between a voice's
+compute and its publish would settle it.
+
+*Arbitrated by `Order/endx after final brr decode`.*
+
 ---
 
 ## Echo
@@ -666,6 +726,8 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   Anomie places the latch and advance at his cycle 30. No measurement distinguishes them yet.
 - **Register-order edge cases** — writing `VxADSR2` or `VxGAIN` before `VxADSR1` within a sample — are
   noted in the Errata and not modeled at slot granularity.
+- **An `ENDX` acknowledge landing between a voice's compute and its publish slot.** Modeled as
+  dropping the staged set; Anomie bounds the overwrite window at two cycles. Untested.
 
 ## How a contested claim gets settled here
 

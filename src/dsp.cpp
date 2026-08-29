@@ -268,12 +268,16 @@ void decodeGroupAhead(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 // Advances a voice's decode cursor by one sample; the DECODER — the read that
 // fills the voice's sample buffer — runs a group of four samples ahead of it.
 // When the cursor consumes a block's kDecoderLead-th sample, the decoder
-// enters the next block: the chain is resolved there — the following block,
-// or for an end block the loop address read live from DIR and VxSRCN, which
-// is how a DIR or VxSRCN change takes effect at the next loop and not before
-// — and entering a block whose header carries the end flag sets the voice's
-// ENDX bit then, ahead of the cursor. The exhausted cursor follows the
-// address the decoder resolved.
+// leaves that block for the next: the chain is resolved there — the following
+// block, or for an end block the loop address read live from DIR and VxSRCN,
+// which is how a DIR or VxSRCN change takes effect at the next loop and not
+// before. Leaving a block whose header carries the end flag is what sets the
+// voice's ENDX bit: the bit is staged when the decoder has decoded the end
+// block through and jumps to the loop address, not when it enters the end
+// block (`Order/endx after final brr decode` reads the bit clear at the
+// cursor's seventh sample of the end block and set at its eighth), and it
+// reaches the register at the voice's S7 slot (DspState::preparedEndx). The
+// exhausted cursor follows the address the decoder resolved.
 //
 // The consumed sample comes from the pending ring, decoded ahead of time: the
 // key-on primed the first three groups, and each group-aligned consume here
@@ -317,11 +321,10 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     if ((ram[v.brrAddress] & 0x01) != 0) {
       v.decoderAddress =
           readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).loop;
+      dsp.preparedEndx |= static_cast<std::uint8_t>(1u << voice);
     } else {
       v.decoderAddress = static_cast<std::uint16_t>(v.brrAddress + 9);
     }
-    if ((ram[v.decoderAddress] & 0x01) != 0)
-      dsp[kDspEndx] |= static_cast<std::uint8_t>(1u << voice);
   }
 }
 
@@ -451,6 +454,8 @@ void advanceEchoRing(DspState& dsp, std::uint8_t rawEsa, std::uint8_t rawEdl) no
 
 }  // namespace
 
+static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept;
+
 BrrSource readBrrSource(std::span<const std::uint8_t, 65536> ram, std::uint8_t dir,
                         std::uint8_t srcn) noexcept {
   const int base = dir * 0x100 + srcn * 4;
@@ -526,16 +531,18 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     --v.pendingCount;
   }
   v.brrSampleIndex = 4;
-  // Priming reaches the start block's end code the way any decode does, so a
-  // start block carrying the end flag sets ENDX here. A key-on's clear runs
-  // after this priming and wins (see keyOnVoice).
-  if ((ram[source.start] & 0x01) != 0)
-    dsp[kDspEndx] |= static_cast<std::uint8_t>(1u << voice);
+  // Priming leaves ENDX alone: the bit is set when the decoder LEAVES an
+  // end block (decodeStreamSample), so a start block carrying the end flag
+  // sets it four cursor samples on, when the decoder resolves its loop.
 }
 
 std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                        std::size_t voice) noexcept {
   advanceVoiceStream(dsp, ram, voice, voicePitch(dsp, voice));
+  // The single-voice call has no slot schedule to stage against: an end-block
+  // exit's ENDX set is readable as soon as the call returns.
+  dsp[kDspEndx] |= dsp.preparedEndx;
+  dsp.preparedEndx = 0;
   return interpolatedSample(dsp, voice);
 }
 
@@ -621,6 +628,20 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
     const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
     amplitude = (sample * static_cast<int>(v.envelope)) >> 11;
+    // The standing envelope takes this sample's own update before the restart
+    // reads it — a header standing End+Mute kills it, otherwise the selected
+    // mode runs once — so whether the startup walks or holds is decided by
+    // the level the voice would have carried into the next sample, not the
+    // one it emitted with. `Order/endx after final brr decode` re-keys its
+    // sync gadget's voice 4 with the gadget's direct-gain-0 restore landing
+    // on the compute before the poll: the gadget's full level stands at the
+    // emission and is 0 by the restart, and the ROM's row for that voice is a
+    // held startup's, identical to the seven fresh key-ons.
+    if (headerEndMute) {
+      v.envelope = 0;
+    } else {
+      runEnvelopeMode(dsp, voice);
+    }
     // The restart proper: wipe and re-prime the stream, envelope from 0,
     // Attack, ENDX cleared. The counter and the capture hold carry the values
     // the poll left (keyOnVoice resets them for its direct callers), and the
@@ -805,6 +826,10 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
 
   if (envelopeRateFires(dsp.globalCounter, flg & kFlgNoiseRate))
     dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
+  // The frame-at-once sample has no slots for a staged ENDX set to land on:
+  // every voice's set is readable when the sample is complete.
+  dsp[kDspEndx] |= dsp.preparedEndx;
+  dsp.preparedEndx = 0;
   tickDspSample(dsp);
   return StereoFrame{.left = static_cast<std::int16_t>(left),
                      .right = static_cast<std::int16_t>(right)};
@@ -817,7 +842,10 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
 constexpr std::array<std::uint8_t, 8> kVoiceS3Slot = {31, 2, 5, 8, 11, 14, 17, 20};
 constexpr std::array<std::uint8_t, 8> kVoiceS4Slot = {0, 3, 6, 9, 12, 15, 18, 21};
 constexpr std::array<std::uint8_t, 8> kVoiceS5Slot = {1, 4, 7, 10, 13, 16, 19, 22};
-// The two-phase visibility slots: VxOUTX becomes readable at S8, VxENVX at S9.
+// The visibility slots: a voice's ENDX set becomes readable at S7, VxOUTX at S8,
+// VxENVX at S9 — three, four and five slots after the compute, so voice 0's
+// land in the following sample.
+constexpr std::array<std::uint8_t, 8> kVoiceS7Slot = {3, 6, 9, 12, 15, 18, 21, 24};
 constexpr std::array<std::uint8_t, 8> kVoiceS8Slot = {4, 7, 10, 13, 16, 19, 22, 25};
 constexpr std::array<std::uint8_t, 8> kVoiceS9Slot = {5, 8, 11, 14, 17, 20, 23, 26};
 
@@ -912,13 +940,19 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
   for (std::size_t voice = 1; voice < 8; ++voice)
     if (kVoiceS3Slot[voice] == slot) computeVoiceSlot(dsp, ram, voice, softReset);
 
-  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order. The
-  // computed OUTX byte becomes readable at the S8 slot; ENVX carries one further
-  // pipeline stage — its S9 slot writes the value computed one sample earlier and
-  // stages the fresh one (see DspState::envxStage).
+  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order. A
+  // staged ENDX set reaches the register at the S7 slot; the computed OUTX byte
+  // becomes readable at the S8 slot; ENVX carries one further pipeline stage —
+  // its S9 slot writes the value computed one sample earlier and stages the
+  // fresh one (see DspState::envxStage).
   for (std::size_t voice = 0; voice < 8; ++voice) {
+    const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
     if (kVoiceS4Slot[voice] == slot) applyVoiceLeft(dsp, voice);
     if (kVoiceS5Slot[voice] == slot) applyVoiceRight(dsp, voice);
+    if (kVoiceS7Slot[voice] == slot && (dsp.preparedEndx & bit) != 0) {
+      dsp[kDspEndx] |= bit;
+      dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+    }
     if (kVoiceS8Slot[voice] == slot) dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
     if (kVoiceS9Slot[voice] == slot) {
       dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.envxStage[voice];
@@ -1075,9 +1109,10 @@ void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // at the instant `Envelope/hidden env 0 at kon` pins.
   v.konDelay = kKeyOnStartupCalls;
   v.computesSinceKeyOn = 0;
-  // Key-on clears this voice's ENDX bit; a same-sample end-block set does not
-  // override the clear, so clearing after the priming decode is correct.
+  // Key-on clears this voice's ENDX bit, staged or readable: a same-sample
+  // end-block set does not override the clear.
   dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
+  dsp.preparedEndx &= static_cast<std::uint8_t>(~(1u << voice));
 }
 
 void keyOffVoice(DspState& dsp, std::size_t voice) noexcept {
@@ -1189,6 +1224,18 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
     return v.envelope;
   }
 
+  runEnvelopeMode(dsp, voice);
+  writeEnvx();
+  return v.envelope;
+}
+
+// Runs the selected envelope mode once for voice `voice`: the candidate level,
+// the rate counter's decision, the phase switches and the Bent-Increase
+// reference. The countdown and End+Mute cases around it are stepVoiceEnvelope's;
+// a consumed restart runs this alone to settle the standing envelope before the
+// restart reads it.
+static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
   const std::uint8_t adsr1 = dsp[voiceRegister(voice, kVoiceAdsr1)];
   const std::uint8_t adsr2 = dsp[voiceRegister(voice, kVoiceAdsr2)];
   const std::uint8_t gain = dsp[voiceRegister(voice, kVoiceGain)];
@@ -1273,9 +1320,6 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
   v.bentGainRef = static_cast<std::uint16_t>(newLevel);
   if (decayToSustain) v.phase = EnvPhase::Sustain;
   if (attackToDecay) v.phase = EnvPhase::Decay;
-
-  writeEnvx();
-  return v.envelope;
 }
 
 }  // namespace snaggletooth

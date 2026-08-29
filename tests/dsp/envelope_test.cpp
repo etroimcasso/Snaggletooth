@@ -34,6 +34,7 @@ using snaggletooth::keyOffVoice;
 using snaggletooth::keyOnVoice;
 using snaggletooth::nextGlobalCounter;
 using snaggletooth::pollKeying;
+using snaggletooth::stepDspCycle;
 using snaggletooth::stepDspSample;
 using snaggletooth::stepVoiceEnvelope;
 using snaggletooth::tickDspSample;
@@ -913,16 +914,106 @@ TEST(BrrHeaderCheck, TheDecoderMeetsAnEndMuteBlockEightSamplesBeforeTheStream) {
   EXPECT_EQ(k.dsp[kEndx] & 0x01, 0);
   ASSERT_GT(k.dsp.voices[0].envelope, 0);
 
-  // The twentieth walked sample: the decoder enters the End+Mute block —
-  // ENDX sets — while the voice's own sample still sounds.
+  // The twentieth walked sample: the decoder enters the End+Mute block while
+  // the voice's own sample still sounds. ENDX does not move — it belongs to
+  // the decoder LEAVING the end block (see the case after this one).
   (void)stepDspSample(k.dsp, ram);
-  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0x01);
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0);
   EXPECT_GT(k.dsp.voices[0].envelope, 0);
 
   // The next sample's check reads the entered block: Release, envelope 0.
   (void)stepDspSample(k.dsp, ram);
   EXPECT_EQ(k.dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(k.dsp.voices[0].envelope, 0);
+}
+
+TEST(BrrHeaderCheck, EndxSetsWhenTheDecoderLeavesTheEndBlock) {
+  // ENDX is set when the decoder has decoded an end block through and jumps
+  // to the loop address — "when the block is complete and the next block will
+  // be that pointed to by the loop pointer" (Anomie 326-328) — not when it
+  // enters the block. spc_dsp6 `Order/endx after final brr decode` measures
+  // it: a plain block chained to an End+Mute block, keyed at one stream sample
+  // per output sample, ENDX read on three consecutive samples from the
+  // twenty-sixth after the key-on — clear, set, set, for every voice. The
+  // decoder enters the end block at sample 11 (its lead, eight samples ahead
+  // of the cursor) and leaves it sixteen samples later, at voice 0's compute
+  // in the slot that closes sample 27; the set becomes readable at the
+  // voice's S7 slot, which for voice 0 is the third slot of sample 28 — the
+  // boundary crossing that keeps the ROM's first read clear.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  k.ram[0x1000] = 0x00;  // a plain block, then End+Mute
+  k.ram[0x1009] = 0x01;
+  k.dsp[0x03] = 0x10;    // V0PITCHH: one stream sample per output sample
+  gain(k.dsp, 0) = 0x7F;
+  keyOnVoice(k.dsp, ram, 0);
+
+  for (int n = 1; n <= 27; ++n) {
+    (void)stepDspSample(k.dsp, ram);
+    EXPECT_EQ(k.dsp[kEndx] & 0x01, 0) << "sample " << n;
+  }
+  EXPECT_EQ(k.dsp.preparedEndx & 0x01, 0x01);  // staged at the closing slot
+  (void)stepDspSample(k.dsp, ram);  // sample 28: readable from its third slot
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0x01);
+  (void)stepDspSample(k.dsp, ram);
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0x01);
+}
+
+TEST(BrrHeaderCheck, AStagedEndxSetBecomesReadableAtTheVoicesS7Slot) {
+  // A voice's end-flag set is computed at its S3 slot and reaches the register
+  // three slots later, at S7 — voice 0's S3 is the sample's last slot, so its
+  // set lands in the following sample's fourth slot (Anomie: ENDX "is updated
+  // during voice processing step V7, cycles: 0:2 1:5 …", one ahead of this
+  // machine's slot numbering). spc_dsp6 `Order/endx after final brr decode`
+  // reads voice 0's bit at the sample boundary and sees the old value: a set
+  // readable at the compute itself fails its row. Same setup as the case
+  // above; the bit is staged when sample 27 closes.
+  Keyable k;
+  const std::span<const std::uint8_t, 65536> ram{k.ram};
+  k.ram[0x1000] = 0x00;
+  k.ram[0x1009] = 0x01;
+  k.dsp[0x03] = 0x10;
+  gain(k.dsp, 0) = 0x7F;
+  keyOnVoice(k.dsp, ram, 0);
+  for (int n = 1; n <= 27; ++n) (void)stepDspSample(k.dsp, ram);
+  ASSERT_EQ(k.dsp.preparedEndx & 0x01, 0x01);
+  ASSERT_EQ(k.dsp.slotCursor, 0);
+
+  for (int slot = 0; slot < 3; ++slot) {
+    (void)stepDspCycle(k.dsp, ram);  // T0, T1, T2
+    EXPECT_EQ(k.dsp[kEndx] & 0x01, 0) << "after slot T" << slot;
+  }
+  (void)stepDspCycle(k.dsp, ram);  // T3: voice 0's S7
+  EXPECT_EQ(k.dsp[kEndx] & 0x01, 0x01);
+  EXPECT_EQ(k.dsp.preparedEndx & 0x01, 0);
+}
+
+TEST(Keying, ARestartReadsTheEnvelopeAfterTheConsumingComputesOwnUpdate) {
+  // Whether a re-key's startup walks or holds is decided by the level the
+  // voice would have carried into the next sample: the consuming compute
+  // emits the final pre-key-on sample under the standing envelope, runs the
+  // selected mode once more, and only then applies the restart. spc_dsp6
+  // `Order/endx after final brr decode` re-keys its sync gadget's voice —
+  // sounding at full level — with direct gain restored to 0 on the compute
+  // before the poll, and reads the same ENDX timing as a fresh key-on: a held
+  // startup. A restart reading the level the sample emitted with walks.
+  const auto rekey = [](std::uint8_t gainAtRekey) {
+    Keyable k;
+    const std::span<const std::uint8_t, 65536> ram{k.ram};
+    k.dsp[0x03] = 0x10;
+    gain(k.dsp, 0) = 0x7F;  // direct gain, full level
+    keyOnVoice(k.dsp, ram, 0);
+    for (int n = 1; n <= 12; ++n) (void)stepDspSample(k.dsp, ram);
+    EXPECT_EQ(k.dsp.voices[0].envelope, 0x7F0);
+    gain(k.dsp, 0) = gainAtRekey;
+    k.dsp.internalKon = 0x01;
+    for (int n = 1; n <= 4; ++n) (void)stepDspSample(k.dsp, ram);
+    EXPECT_FALSE(k.dsp.voices[0].restartPending);
+    EXPECT_EQ(k.dsp.voices[0].konDelay, 1);  // the restart applied, countdown running
+    return k.dsp.voices[0].startupWalks;
+  };
+  EXPECT_FALSE(rekey(0x00));  // level 0 by the restart: the startup holds
+  EXPECT_TRUE(rekey(0x7F));   // level still standing: it walks
 }
 
 }  // namespace

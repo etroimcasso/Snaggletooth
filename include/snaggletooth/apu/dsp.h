@@ -98,7 +98,7 @@ struct VoiceState {
   // group of four samples ahead of the interpolation cursor, so it enters each
   // block while the cursor is still eight samples back in the block before —
   // and it is the decoder that resolves where a block chains (the next block,
-  // or the loop address for an end block) and that sets ENDX on entering a
+  // or the loop address for an end block) and that sets ENDX as it leaves a
   // block whose header carries the end flag. brrAddress follows this value
   // when the cursor exhausts its block; the two agree except over the tail of
   // each block, where the decoder has moved on.
@@ -208,6 +208,15 @@ struct DspState {
   // prepared/held split alone gives. Measured against spc_dsp6's `KON/envx
   // during kon`, whose sync vernier is anchored to voice 0's ENVX publish.
   std::array<std::uint8_t, 8> envxStage{};
+
+  // ENDX bits computed but not yet readable, one per voice. A voice's compute
+  // stages its end-flag set here and the bit reaches the register at the
+  // voice's S7 slot, three slots on — for voice 0 that is the following
+  // sample's T3, so a CPU read at the sample boundary still sees the old value
+  // (spc_dsp6 `Order/endx after final brr decode` reads every voice's bit
+  // clear on one sample and set on the next, voice 0 included). A key-on's
+  // clear and the register's acknowledge write both drop a staged set.
+  std::uint8_t preparedEndx = 0;
 
   // The one shared noise generator's 15-bit level, in the internal sample range
   // -4000h..+3FFFh, seeded to -4000h at power-on and reset. A voice whose NON bit
@@ -393,15 +402,16 @@ struct BrrBlock {
 // zero and the first four samples are decoded, so the window holds stream
 // samples 3..0 as newest..oldest. The filter history enters as zeros, so a
 // first block using a filter other than 0 still decodes deterministically.
-// Entering an end block sets the voice's ENDX bit immediately.
+// ENDX is untouched: a start block carrying the end flag sets the bit when
+// the decoder leaves it, four cursor samples on.
 void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept;
 
 // Advances voice `voice` (0-7) by one 32 kHz output sample. The pitch counter
 // gains the voice's 14-bit step (VxPITCHL/H bits 0-13; bits 14-15 are stored
 // but never used), and every sample position the counter passes is decoded
-// through the stream — following block chaining, loop jumps and ENDX on the
-// way. Returns the freshly interpolated 15-bit sample, exactly as
+// through the stream — following block chaining and loop jumps, and setting
+// ENDX as the decoder leaves an end block. Returns the freshly interpolated 15-bit sample, exactly as
 // interpolatedSample reads it. This single-voice call reads the pitch registers
 // live; the whole-DSP sample paths instead read the every-other-sample capture
 // (see DspState::pitchLatch), which this call neither takes nor consumes.
