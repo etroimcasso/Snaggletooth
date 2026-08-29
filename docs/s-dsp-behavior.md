@@ -341,6 +341,30 @@ So a soft reset does not key a voice off in the sample its key-on is consumed: t
 wins, the same precedence `KON` has over `KOFF` at the poll itself. The shield is exactly one sample
 wide — the same one-sample pulse, slid one sample in each direction, pins both of its edges.
 
+### A soft reset silences the sample after the one it lands on
+
+Both documents describe what `FLG` bit 7 does — key-off, envelope to zero, every sample — without
+saying whether the sample it lands on is itself silent. Anomie's per-voice list carries the answer
+implicitly: the envelope is applied and `VxOUTX` formed, *then* bit 7 is checked, *then* the
+envelope is updated (his V3c), which puts the reset in the same position as any other envelope
+update — one sample behind the output.
+
+The test ROM decides it (`Order/flg.80 after env used`): voice 0 is keyed on over a self-looping
+full-scale block at Direct Gain `$01` with `VxVOLL` at −1 and its echo send on, so every live sample
+writes `$FFFE` to the echo tape and every silent one `$0000`; nine samples after the key-on `FLG`
+bit 7 is raised, and the tape's frames 7–16 are checksummed:
+
+```
+hardware     FFFE FFFE FFFE FFFE FFFE 0000 0000 0000 0000 0000
+reset-sample silent
+             FFFE FFFE FFFE FFFE 0000 0000 0000 0000 0000 0000
+```
+
+One frame more of sound. The sample the reset lands on is emitted in full under the level the voice
+carried in; the zeroed level is what the next sample scales by. It is the "applied before it is
+updated" displacement above, seen from the reset rather than from a gain write, and the tape shows
+it directly because the voice's level is at full scale when the reset arrives.
+
 ### A key-on consumed on a keyed-off in-span voice restarts it in full
 
 The in-span tiers above — absorption one poll deep, the rewind at later polls — describe a key-on

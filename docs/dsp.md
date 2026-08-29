@@ -232,8 +232,10 @@ set bit keeps releasing the voice until you write a new value. `KON` and `KOFF` 
 second sample (16 kHz).
 
 `FLG` bit 7 — the soft reset — keys every voice off and forces its envelope to zero, and unlike
-`KON`/`KOFF` it is applied every sample, per voice, at each voice's own compute slot. One coincidence
-is carved out: a voice whose key-on is consumed that same sample is **not** keyed off — the fresh
+`KON`/`KOFF` it is applied every sample, per voice, at each voice's own compute slot. It is read
+after the sample's amplitude is formed, so a live voice still emits the sample the reset lands on
+under the level it carried in, and its silence begins the sample after — the same one-sample lag
+every envelope update has. One coincidence is carved out: a voice whose key-on is consumed that same sample is **not** keyed off — the fresh
 consumption wins, exactly as `KON` applied after `KOFF` wins at the poll itself, and the startup
 proceeds as if the reset were not standing. From the voice's next compute on, a standing reset keys
 it off like any other voice, so a reset pulse as short as one sample landing anywhere later — inside
@@ -405,7 +407,8 @@ slot's placement of the keying poll and its order against voice 0's compute, the
 slot and its one-sample value lag, the echo write slots, the sounding-voice startup walk and the
 silent-voice startup hold, the
 two-tier handling of a key-on landing inside the silent span, the per-sample pitch capture with
-its key-on hold, the soft-reset shield on a key-on's consumption sample, the full restart a
+its key-on hold, the soft-reset shield on a key-on's consumption sample, the reset sample's own
+emission under the level it carried in, the full restart a
 key-on performs on a keyed-off in-span voice, the final pre-key-on sample a full restart's
 consuming compute still emits, the decoder's eight-sample lead over the cursor with the check one
 sample behind it — including the first envelope steps a mid-startup crossing still publishes —

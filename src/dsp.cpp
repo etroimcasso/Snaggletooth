@@ -655,18 +655,29 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
   } else if (softReset && !keyOnConsumedThisSample) {
     // FLG bit 7 keys every voice off and forces its envelope to 0 each sample. BRR
-    // decoding keeps running (ENDX and loop transitions still fire); only the
-    // emitted amplitude is silenced.
+    // decoding keeps running (ENDX and loop transitions still fire). The reset
+    // is read AFTER the sample's amplitude is formed, so a live voice still
+    // emits this sample under the level it carried in; the zeroed level is
+    // what the next sample scales by, the same one-sample lag every envelope
+    // update has (Anomie's V3c: the envelope is applied, VxOUTX formed, and
+    // FLG bit 7 checked before the update). spc_dsp6's `Order/flg.80 after
+    // env used` measures it on the echo tape: a voice keyed on and reset nine
+    // samples later writes one more full-scale frame than a model that
+    // silences the reset sample itself. A voice still inside its startup
+    // countdown emits silence either way.
     v.phase = EnvPhase::Release;
     if (v.konDelay > 0) {
       --v.konDelay;
+      amplitude = 0;
     } else {
       advanceVoiceStream(dsp, ram, voice, step);
       v.headerAddress = v.decoderAddress;
+      const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
+      const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
+      amplitude = (sample * static_cast<int>(v.envelope)) >> 11;
     }
     v.envelope = 0;
     dsp[voiceRegister(voice, kVoiceEnvx)] = 0;
-    amplitude = 0;
   } else if (v.konDelay > 0) {
     // Startup: the voice outputs silence, and whether its stream advances is
     // the key-on's walk split (VoiceState::startupWalks). A walking startup —

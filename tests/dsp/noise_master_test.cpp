@@ -531,4 +531,45 @@ TEST(SoftReset, IsPolledEverySampleUnlikeKeyOff) {
   EXPECT_GT(keyOff.voices[0].envelope, 0);  // KOFF not polled yet on the odd sample
 }
 
+TEST(SoftReset, TheResetSampleStillEmitsUnderTheStandingEnvelope) {
+  // The soft reset is read after the sample's amplitude is formed: a live voice
+  // emits the sample it is reset on under the level it carried in, and the
+  // zeroed level is what the NEXT sample scales by — the same one-sample lag
+  // every envelope update has. Measured against spc_dsp6's `Order/flg.80 after
+  // env used`: a voice keyed on and reset nine samples later leaves five
+  // full-scale frames on the echo tape, not four. Voice 1 applies its volume
+  // within its own sample, so the frame shows it directly.
+  auto sounding = [] {
+    DspState dsp;
+    dsp.voices[1].window = {.newest = 0, .old = 0, .older = 0x0800, .oldest = 0};
+    dsp.voices[1].pitchCounter = 0;
+    dsp.voices[1].phase = EnvPhase::Sustain;
+    dsp.voices[1].konDelay = 0;
+    dsp.voices[1].envelope = 0x7F0;
+    reg(dsp, 1, 0x07) = 0x7F;  // Direct Gain, sounds every sample
+    reg(dsp, 1, 0x00) = 0x7F;
+    dsp[kMvolLeft] = 0x7F;
+    return dsp;
+  };
+  Ram ram{};
+
+  DspState control = sounding();
+  static_cast<void>(step(control, ram));
+  const StereoFrame undisturbed = step(control, ram);
+  ASSERT_GT(undisturbed.left, 0);
+
+  DspState reset = sounding();
+  static_cast<void>(step(reset, ram));
+  reset[kFlg] = 0x80;
+  const StereoFrame resetSample = step(reset, ram);
+  EXPECT_EQ(resetSample.left, undisturbed.left) << "the reset sample is emitted in full";
+  EXPECT_NE(outx(reset, 1), 0) << "and VxOUTX carries it";
+  EXPECT_EQ(reset.voices[1].envelope, 0) << "the level is zeroed for the next sample";
+  EXPECT_EQ(reset.voices[1].phase, EnvPhase::Release);
+
+  const StereoFrame afterReset = step(reset, ram);
+  EXPECT_EQ(afterReset.left, 0) << "the sample after the reset is silent";
+  EXPECT_EQ(outx(reset, 1), 0);
+}
+
 }  // namespace
