@@ -604,8 +604,9 @@ TEST(SampleSchedule, TheMachineDeliversOneScheduledFramePerThirtyTwoCycles) {
 TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
   // A key-on that interrupts a sounding voice advances its fresh stream at the
   // pitch through the startup countdown — the voice is silent, but its decode
-  // cursor walks — except on the first startup call, which performs the
-  // start-address read and decodes nothing. Measured against spc_dsp6's
+  // cursor walks — except on the first startup call, which decodes nothing:
+  // the start pointer is read and the stream primed at the next sample's
+  // directory and load slots. Measured against spc_dsp6's
   // `KON/kon decoding when another kon`, which freezes the pitch mid-startup of
   // a voice re-keyed 21 samples after its own key-on and reads where the
   // cursor stood. (A key-on of a SILENT voice holds its stream instead —
@@ -627,13 +628,19 @@ TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
   sample(dsp, ram);            // the poll at this sample's T31 arms the restart
   ASSERT_EQ(dsp.voices[2].konDelay, 5);
 
-  sample(dsp, ram);            // the voice's compute applies it: the preload,
-                               // and the startup's first call advances nothing
+  sample(dsp, ram);            // the voice's compute applies it: the startup's
+                               // first call, which reads and decodes nothing
   EXPECT_EQ(dsp.voices[2].konDelay, 4);
-  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "the prime waits for the next sample";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 0);
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
 
-  for (int n = 0; n < 4; ++n) sample(dsp, ram);  // the countdown's other calls
+  sample(dsp, ram);            // the load slot primes four samples; the second
+                               // call walks two
+  EXPECT_FALSE(dsp.voices[2].startPending);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 6) << "the prime's four, then the walk's two";
+
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // the countdown's other calls
   EXPECT_EQ(dsp.voices[2].konDelay, 0);
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 12)
       << "four advancing startup calls walk the cursor two samples each";
@@ -657,11 +664,13 @@ TEST(SampleSchedule, AKeyOnOfASilentVoiceHoldsItsStreamThroughTheFirstLiveSample
 
   dsp.internalKon = 0x04;      // a KON write arms voice 2, long silent
   sample(dsp, ram);            // the poll arms the restart
-  sample(dsp, ram);            // the voice's compute applies it: the preload
+  sample(dsp, ram);            // the voice's compute applies it
   ASSERT_EQ(dsp.voices[2].konDelay, 4);
-  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "the prime waits for the next sample";
+  sample(dsp, ram);            // the next sample's load slot primes four samples
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on prime decodes four samples";
 
-  for (int n = 0; n < 4; ++n) sample(dsp, ram);  // the countdown's other calls
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // the countdown's other calls
   ASSERT_EQ(dsp.voices[2].konDelay, 0);
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the silent span leaves the stream standing";
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
@@ -702,12 +711,14 @@ TEST(SampleSchedule, AReKeyOfALongSoundingVoiceHoldsItsStream) {
   reg(dsp, 2, 0x03) = 0x10;    // pitch $1000 for the fresh stream
   dsp.internalKon = 0x04;      // a KON write arms voice 2, sounding
   sample(dsp, ram);            // the poll arms the restart
-  sample(dsp, ram);            // the voice's compute applies it: the preload
+  sample(dsp, ram);            // the voice's compute applies it
   ASSERT_EQ(dsp.voices[2].konDelay, 4);
   EXPECT_FALSE(dsp.voices[2].startupWalks);
-  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on preload decodes four samples";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "the prime waits for the next sample";
+  sample(dsp, ram);            // the next sample's load slot primes four samples
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on prime decodes four samples";
 
-  for (int n = 0; n < 4; ++n) sample(dsp, ram);  // the countdown's other calls
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // the countdown's other calls
   ASSERT_EQ(dsp.voices[2].konDelay, 0);
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the silent span leaves the stream standing";
   EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
@@ -978,8 +989,12 @@ TEST(SampleSchedule, AKeyOnLateInTheSilentSpanRewindsTheHoldAndPastItRestarts) {
       << "the old stream still stands at the arming poll's sample";
   sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].konDelay, 4);
-  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
-  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is wiped";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "and re-primed at the next sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 3);
+  EXPECT_TRUE(dsp.voices[2].startupWalks) << "the interrupted startup had not sounded";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 5) << "the prime's four, then the walk's one";
 }
 
 TEST(SampleSchedule, AKeyOnConsumedUnderASoftResetKeepsItsStartup) {
@@ -1097,10 +1112,12 @@ TEST(SampleSchedule, AKeyOnConsumedOnAResetKilledStartupRestartsInFull) {
   sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].konDelay, 4);
   EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
-  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is wiped";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "and re-primed at the next sample";
+  sample(dsp, ram);
   EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
 
-  for (int n = 0; n < 7; ++n) sample(dsp, ram);
+  for (int n = 0; n < 6; ++n) sample(dsp, ram);
   EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
 }
 
@@ -1364,6 +1381,89 @@ TEST(SampleSchedule, TheLoopAddressIsReadAtTheVoicesDirectorySlot) {
   pin(0, 22);
   pin(1, 1);
   pin(7, 19);
+}
+
+// A voice keyed on: the poll at one sample's T31 arms the restart, the voice's
+// compute applies it — voice 0's in that same slot, the others' in the next
+// sample — and the sample after that compute reads the start pointer and
+// primes the stream. Returns the state standing at the start of that sample.
+DspState keyedVoiceAwaitingItsPrime(Ram& ram, std::size_t voice) {
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: nibble 4 decodes to 8192
+  ram[0x0400] = 0xC3;  // a second block a rewritten entry points at
+  for (int n = 0; n < 8; ++n) {
+    ram[static_cast<std::size_t>(0x0301 + n)] = 0x44;
+    ram[static_cast<std::size_t>(0x0401 + n)] = 0x22;  // nibble 2 decodes to 4096
+  }
+  DspState dsp;
+  dsp[0x5D] = 0x02;              // DIR -> $0200
+  reg(dsp, voice, 0x03) = 0x10;  // pitch $1000
+  reg(dsp, voice, 0x07) = 0x7F;  // Direct Gain 7F0h
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.sampleIndex % 2, 0u);
+  dsp.internalKon = static_cast<std::uint8_t>(1u << voice);
+  sample(dsp, ram);                    // the poll at this sample's T31 arms the
+                                       // restart; voice 0's compute follows at once
+  if (voice != 0) sample(dsp, ram);    // the other voices' computes apply it
+  EXPECT_TRUE(dsp.voices[voice].startPending);
+  EXPECT_EQ(dsp.voices[voice].brrSampleIndex, 0u);
+  return dsp;
+}
+
+TEST(SampleSchedule, TheStartPointerIsReadAtTheDirectorySlotOfTheSampleAfterTheConsumingCompute) {
+  // A key-on's start pointer is read from the directory at the voice's
+  // directory slot — T22 for voice 0, T(3v-2) for voices 1-7 — of the sample
+  // AFTER the compute that applied the restart, not at that compute. Measured
+  // against spc_dsp6's `Timing/Voice/V2 dir.start.lsb`/`.msb`: a five-cycle
+  // pulse into either start byte is caught by every voice at exactly that
+  // slot, one sample after its consuming compute.
+  const auto pin = [](std::size_t voice, int dirSlot) {
+    Ram ram{};
+    const DspState dsp = keyedVoiceAwaitingItsPrime(ram, voice);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    Ram seenRam = ram;
+    Ram missedRam = ram;
+    sampleWritingRamAt(seen, seenRam, dirSlot, 0x0201, 0x04);      // start -> $0400
+    sampleWritingRamAt(missed, missedRam, dirSlot + 1, 0x0201, 0x04);
+    EXPECT_EQ(seen.voices[voice].brrAddress, 0x0400u)
+        << "voice " << voice << ": a write before the directory slot reaches the start read";
+    EXPECT_EQ(missed.voices[voice].brrAddress, 0x0300u)
+        << "voice " << voice << ": a write after the directory slot does not";
+    EXPECT_FALSE(seen.voices[voice].startPending);
+    EXPECT_EQ(seen.voices[voice].brrSampleIndex, 4u) << "the prime lands the same sample";
+  };
+  pin(0, 22);
+  pin(1, 1);
+  pin(7, 19);
+}
+
+TEST(SampleSchedule, TheStartBlockIsReadAtTheLoadSlotOfTheSampleAfterTheConsumingCompute) {
+  // The start block's bytes are read at the voice's BRR load slot of the
+  // sample the start pointer was read in — T26 for voice 0, the compute slot
+  // itself for voices 1-7 — so a write to the block landing before that slot
+  // reaches the primed samples and one landing after it does not.
+  const auto pin = [](std::size_t voice, int loadSlot) {
+    Ram ram{};
+    const DspState dsp = keyedVoiceAwaitingItsPrime(ram, voice);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    Ram seenRam = ram;
+    Ram missedRam = ram;
+    sampleWritingRamAt(seen, seenRam, loadSlot, 0x0300, 0x03);      // shift 12 -> 0
+    sampleWritingRamAt(missed, missedRam, loadSlot + 1, 0x0300, 0x03);
+    EXPECT_EQ(seen.voices[voice].window.newest, 2)
+        << "voice " << voice << ": a header write before the load slot reaches the prime";
+    EXPECT_EQ(missed.voices[voice].window.newest, 8192)
+        << "voice " << voice << ": a header write after the load slot does not";
+  };
+  pin(0, 26);
+  pin(1, 2);
+  pin(7, 20);
 }
 
 }  // namespace

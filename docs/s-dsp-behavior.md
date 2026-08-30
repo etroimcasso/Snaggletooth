@@ -245,8 +245,10 @@ a level-0 voice holds. Nor the envelope phase: the `$7F0` voice stands in Attack
 `Envelope/attack->decay during gain`'s seventh block shows for a direct-gain level set above
 `$7E0`.
 
-In the walking case the first silent sample is the exception — it performs the start-address read
-and decodes nothing, so the walk begins on the second. Only the *output* is silent during the
+In the walking case the first silent sample is the exception — it decodes nothing (the start
+pointer is read at the next sample's directory slot; see
+[below](#the-start-pointer-is-read-at-the-voices-directory-slot-one-sample-after-the-consuming-compute)),
+so the walk begins on the second. Only the *output* is silent during the
 startup; the position is live throughout. The pitch the walk uses is the one the key-on itself
 captured — that sub-test's freezes land because each rides a `KON` write of its own; a pitch write
 with no key-on behind it
@@ -492,7 +494,7 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 
 | Slot | Work |
 |---|---|
-| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its). |
+| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. |
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
 | T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` set becomes readable, three slots after its compute — voice 0's at T3 of the following sample. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
@@ -809,6 +811,30 @@ The consequence is narrow but exact: a directory write that lands after the dire
 before the compute reaches the next sample's read, not this jump.
 
 *Arbitrated by `Timing/Voice/V2 dir.loop.lsb`/`.msb`.*
+
+### The start pointer is read at the voice's directory slot, one sample after the consuming compute
+
+A key-on's start address is read from the directory at the same directory slot — T22 for voice 0,
+T(3v−2) for voices 1-7 — in the sample **after** the compute that applied the key-on, the compute
+that emits the voice's final pre-key-on sample. The start block's header and data bytes follow at
+that sample's BRR load slot, ahead of its compute, so the countdown's first silent call reads
+nothing at all. That is Anomie's order — the key-on taken at V3c, "load the sample pointer" at the
+next V2, the header at that sample's V3b — and fullsnes's `VxSRCN/DIR.lsb/msb` rows on the same
+slots.
+
+`Timing/Voice/V2 dir.start.lsb` and `.msb` measure it as the loop pair does: per row a five-cycle
+pulse into one start byte, at a per-row offset from that row's own key-on write, points the entry at
+a silent block, and the hash records whether the voice went quiet. The recovered read cycles — the
+same constant as the loop pair, one structured solution per voice, both bytes identical — sit 56
+slots after voice 0's key-on write and 67 + 3(v−1) after the others': one sample after the
+consuming compute, at the directory slot. A read at the consuming compute itself catches no row at
+all for voices 0-5 and the wrong rows for voices 6 and 7.
+
+The consequence: a `DIR` or `VxSRCN` write that lands after the key-on's consuming compute and
+before the next sample's directory slot is what the started voice plays from; one landing after
+that slot reaches only the voice's next loop.
+
+*Arbitrated by `Timing/Voice/V2 dir.start.lsb`/`.msb`.*
 
 ### Pitch modulation reads the previous voice's output from the previous sample
 

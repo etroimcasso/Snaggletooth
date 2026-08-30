@@ -179,8 +179,9 @@ lag (below), is what makes all eight voices' key-on startup read identically thr
 Whether the stream waits for the envelope depends on the voice the key-on lands on. A key-on that
 interrupts a voice whose **level stands above zero while its old output is silent** — a voice still
 inside an earlier startup's silence — walks: the fresh stream's decode cursor advances through the
-empty samples, from the second of them on (the first performs the start-address read and decodes
-nothing). The pitch it advances at is the one the key-on itself captured, because a key-on suspends
+empty samples, from the second of them on (the first decodes nothing: the start pointer is read
+at the voice's directory slot of the following sample, and the start block's bytes at that sample's
+BRR load slot — see below). The pitch it advances at is the one the key-on itself captured, because a key-on suspends
 the pitch capture for seven samples (see
 [When a register write takes effect](#when-a-register-write-takes-effect)):
 a later key-on landing mid-startup re-captures the register and the walk carries its position, while
@@ -286,7 +287,11 @@ The sample directory has its own slot too. The loop address the decoder takes as
 block is read from the directory entry (`DIR × $100 + VxSRCN × 4 + 2`) at the voice's directory
 slot — T22 for voice 0, nine slots before its compute, and the slot before the compute for voices
 1-7 — so a directory write landing between that slot and the compute reaches the next sample's
-read, not this jump.
+read, not this jump. A key-on's start pointer is read at the same slot, in the sample **after** the
+compute that applied the key-on (the compute that emits the voice's final pre-key-on sample); the
+start block's first three groups are then read at that sample's BRR load slot. So the countdown's
+first silent call reads nothing at all, and a `DIR` or `VxSRCN` write that lands after the
+consuming compute but before the next directory slot is what the started voice plays from.
 
 Around a key-on the check's view stands still a little longer. It keeps reading the block standing
 before the key-on through the five empty samples and the first two live samples — so a startup

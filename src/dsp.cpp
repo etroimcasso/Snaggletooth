@@ -615,6 +615,8 @@ void advanceEchoRing(DspState& dsp, std::uint8_t rawEsa, std::uint8_t rawEdl) no
 }  // namespace
 
 static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept;
+static void keyOnVoiceImpl(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                           std::size_t voice, bool primeNow) noexcept;
 
 BrrSource readBrrSource(std::span<const std::uint8_t, 65536> ram, std::uint8_t dir,
                         std::uint8_t srcn) noexcept {
@@ -671,18 +673,38 @@ std::int16_t gaussInterpolate(SampleWindow window, std::uint8_t index) noexcept 
   return static_cast<std::int16_t>(out >> 1);
 }
 
-void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                std::size_t voice) noexcept {
-  const BrrSource source =
-      readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]);
-  dsp.voices[voice] = VoiceState{.brrAddress = source.start,
-                                 .decoderAddress = source.start,
-                                 .headerAddress = source.start};
-  // The prime decodes the start block's first three groups — twelve samples —
-  // into the ring, reading their bytes from RAM now, and shifts the first four
-  // into the window. A write to those bytes after this read does not reach the
-  // primed samples (`Misc/brr not always decoding` rewrites a parked voice's
-  // block and the voice still plays all twelve when it moves).
+// Wipes a voice's stream state for a key-on, reading no RAM: the addresses
+// are taken when the start pointer is read (loadStartPointer) and the ring
+// filled when the stream is primed (primeVoiceStream).
+static void resetVoiceForStart(DspState& dsp, std::size_t voice) noexcept {
+  dsp.voices[voice] = VoiceState{};
+}
+
+// Reads a keyed voice's start pointer from its directory entry. On the slot
+// schedule this runs at the voice's directory slot of the sample after the
+// key-on's consuming compute — T22 for voice 0, T(3v-2) for voices 1-7 — the
+// slot `Timing/Voice/V2 dir.start.lsb`/`.msb` measure: a five-cycle pulse into
+// either start byte is caught only when it covers that slot. The entry's loop
+// address is the directory slot's own per-sample read (loadLoopPointer).
+static void loadStartPointer(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                             std::size_t voice) noexcept {
+  const std::uint16_t start =
+      readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).start;
+  VoiceState& v = dsp.voices[voice];
+  v.brrAddress = start;
+  v.decoderAddress = start;
+  v.headerAddress = start;
+}
+
+// Primes a keyed voice's stream from its start block: decodes the block's
+// first three groups — twelve samples — into the ring, reading their bytes
+// from RAM now, and shifts the first four into the window. A write to those
+// bytes after this read does not reach the primed samples (`Misc/brr not
+// always decoding` rewrites a parked voice's block and the voice still plays
+// all twelve when it moves). On the slot schedule this runs at the voice's
+// BRR load slot of the sample the start pointer was read in.
+static void primeVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                             std::size_t voice) noexcept {
   VoiceState& v = dsp.voices[voice];
   for (int group = 0; group < 3; ++group)
     decodeGroupAhead(dsp, ram, voice,
@@ -698,6 +720,13 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // Priming leaves ENDX alone: the bit is set when the decoder LEAVES an
   // end block (decodeStreamSample), so a start block carrying the end flag
   // sets it four cursor samples on, when the decoder resolves its loop.
+}
+
+void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                std::size_t voice) noexcept {
+  resetVoiceForStart(dsp, voice);
+  loadStartPointer(dsp, ram, voice);
+  primeVoiceStream(dsp, ram, voice);
 }
 
 std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
@@ -812,9 +841,12 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // Attack, ENDX cleared. The counter and the capture hold carry the values
     // the poll left (keyOnVoice resets them for its direct callers), and the
     // armed countdown takes this call as the startup's first.
+    // On the slot schedule the start pointer is read at the voice's directory
+    // slot of the NEXT sample and the stream primed at that sample's load
+    // slot, ahead of its compute; the frame-at-once path reads both here.
     const std::uint8_t count = v.computesSinceKeyOn;
     const std::uint8_t hold = v.pitchCaptureHold;
-    keyOnVoice(dsp, ram, voice);
+    keyOnVoiceImpl(dsp, ram, voice, !dsp.primed);
     v.computesSinceKeyOn = count;
     v.pitchCaptureHold = hold;
     --v.konDelay;
@@ -848,7 +880,8 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // Startup: the voice outputs silence, and whether its stream advances is
     // the key-on's walk split (VoiceState::startupWalks). A walking startup —
     // a young sounding voice re-keyed — advances at the pitch, except on the first
-    // startup call, which performs the start-address read and decodes nothing;
+    // startup call, which decodes nothing (the start pointer is read and the
+    // stream primed at the next sample's directory and load slots);
     // measured against spc_dsp6's `KON/kon decoding when another kon`, which
     // freezes the pitch mid-startup of a re-keyed sounding voice and reads
     // where the cursor stood — both published references hold every startup's
@@ -1124,14 +1157,25 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
   }
 
   // The directory read at each voice's directory slot: the loop address the
-  // compute's loop jump takes, read ahead of it.
-  for (std::size_t voice = 0; voice < 8; ++voice)
-    if (kVoiceDirSlot[voice] == slot) loadLoopPointer(dsp, ram, voice);
+  // compute's loop jump takes, read ahead of it — and, for a voice whose
+  // key-on the previous compute applied, the entry's start pointer.
+  for (std::size_t voice = 0; voice < 8; ++voice) {
+    if (kVoiceDirSlot[voice] != slot) continue;
+    if (dsp.voices[voice].startPending) loadStartPointer(dsp, ram, voice);
+    loadLoopPointer(dsp, ram, voice);
+  }
 
-  // The BRR load at each voice's load slot: the header and first data byte of
-  // the group decodes the voice's compute will perform, read ahead of it.
-  for (std::size_t voice = 0; voice < 8; ++voice)
-    if (kVoiceBrrLoadSlot[voice] == slot) loadScheduledGroupBytes(dsp.voices[voice], ram);
+  // The BRR load at each voice's load slot: a keyed voice's prime, then the
+  // header and first data byte of the group decodes the voice's compute will
+  // perform, read ahead of it.
+  for (std::size_t voice = 0; voice < 8; ++voice) {
+    if (kVoiceBrrLoadSlot[voice] != slot) continue;
+    if (dsp.voices[voice].startPending) {
+      primeVoiceStream(dsp, ram, voice);
+      dsp.voices[voice].startPending = false;
+    }
+    loadScheduledGroupBytes(dsp.voices[voice], ram);
+  }
 
   // Voice compute at each voice's S3 slot (voice 0's is T31, handled in the tail).
   for (std::size_t voice = 1; voice < 8; ++voice)
@@ -1300,15 +1344,25 @@ StereoFrame stepDspSample(DspState& dsp,
   return stepDspSampleLoop(dsp, ram, nullptr);
 }
 
-void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                std::size_t voice) noexcept {
+// The key-on's restart. `primeNow` reads the start pointer and primes the
+// stream at once — the single-voice call and a state without a slot schedule;
+// the slot-scheduled restart (computeVoiceAmplitude's restartPending branch)
+// leaves the voice startPending, and the next sample's directory and load
+// slots read the pointer and prime.
+static void keyOnVoiceImpl(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                           std::size_t voice, bool primeNow) noexcept {
   // Whether the startup walks is decided by the voice the key-on lands on, as
   // the restart applies: it walks only when it interrupts a voice whose level
   // stands above zero while its old OUTPUT is silent. A re-key of a sounding
   // voice holds its stream, whatever its age or level, and so does a key-on
   // at level zero (see VoiceState::startupWalks).
   const bool walks = dsp.voices[voice].envelope != 0 && dsp.voiceAmplitude[voice] == 0;
-  startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
+  if (primeNow) {
+    startVoice(dsp, ram, voice);  // reads the pointer, primes, resets the voice state
+  } else {
+    resetVoiceForStart(dsp, voice);
+    dsp.voices[voice].startPending = true;
+  }
   VoiceState& v = dsp.voices[voice];
   v.startupWalks = walks;
   v.phase = EnvPhase::Attack;
@@ -1325,6 +1379,11 @@ void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // end-block set does not override the clear.
   dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
   dsp.preparedEndx &= static_cast<std::uint8_t>(~(1u << voice));
+}
+
+void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                std::size_t voice) noexcept {
+  keyOnVoiceImpl(dsp, ram, voice, true);
 }
 
 void keyOffVoice(DspState& dsp, std::size_t voice) noexcept {

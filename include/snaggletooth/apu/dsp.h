@@ -76,7 +76,8 @@ enum class EnvPhase : std::uint8_t { Attack, Decay, Sustain, Release };
 // The envelope fields carry the 11-bit level (0..0x7FF), its phase, the 5-sample
 // post-key-on startup countdown (during which the voice outputs silence and the
 // envelope holds still — the stream advances from the countdown's second call
-// on, the first performing only the start-address read, crossing whole sample
+// on, the first decoding nothing while the start pointer and the prime wait
+// for the next sample's directory and load slots, crossing whole sample
 // positions while the fractional remainder is discarded, so the first sounding
 // sample interpolates from index 0), and the Bent-Increase
 // reference — the value the selected mode computed last sample, which the GAIN
@@ -204,6 +205,13 @@ struct VoiceState {
   // sample from them — the final pre-key-on sample, which still sounds — and
   // then applies the restart (see pollKeying).
   bool restartPending = false;
+  // A restart the voice's compute applied, whose stream has not been read
+  // yet: the start pointer is read at the voice's directory slot of the next
+  // sample — T22 for voice 0, T(3v-2) for voices 1-7 (`Timing/Voice/V2
+  // dir.start.lsb`/`.msb`) — and the start block's first three groups at that
+  // sample's BRR load slot, ahead of its compute. Clear on a state without a
+  // slot schedule, which reads both at the restart.
+  bool startPending = false;
   // Whether this key-on's silent span advances the stream. A key-on that
   // interrupts a voice whose level stands above zero while its old OUTPUT is
   // silent walks its fresh stream through the silent span and the first live
