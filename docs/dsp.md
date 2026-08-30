@@ -68,7 +68,7 @@ Global registers the voices use:
 | `$4C` | KON | Key-on flags — writing a set bit starts that voice, once. |
 | `$5C` | KOFF | Key-off flags — a set bit releases that voice. |
 | `$5D` | DIR | High byte of the sample directory's address (`DIR × $100`). |
-| `$7C` | ENDX | Per-voice end flags; the DSP sets a bit when a voice's decoder leaves an end block for its loop address, readable three slots after that voice's compute. Any write clears all bits, a set still on its way included. |
+| `$7C` | ENDX | Per-voice end flags; the DSP sets a bit when a voice's decoder leaves an end block for its loop address, and clears it when the voice is keyed on — both written four slots after that voice's compute. Any write clears all bits; a set still on its way lands anyway, unless the write came in the two cycles before it. |
 
 Global mixer, control, and echo registers:
 
@@ -85,8 +85,10 @@ Global mixer, control, and echo registers:
 | `$7D` | EDL | Echo buffer size — `EDL << 9` 4-byte entries (`EDL` = 0 gives one entry). |
 | `$xF` | FIRx | The eight echo FIR coefficients, signed 8-bit, at `$0F`, `$1F`, … `$7F`. |
 
-VxENVX and VxOUTX are written by the DSP every sample; a value the CPU writes to them is overwritten
-at the next sample.
+VxENVX and VxOUTX are written by the DSP every sample, each at the voice's own slot; a value the CPU
+writes to them is overwritten at that slot — unless the CPU wrote in the two cycles before it, in
+which case the CPU's byte stands for the sample (see
+[When a register write takes effect](#when-a-register-write-takes-effect)).
 
 ## How a voice makes sound
 
@@ -393,6 +395,9 @@ counter's residue mod 32 numbers them:
 |---|---|
 | T2, T5, …, T20 | Voices 1–7 each run their whole compute (stream, noise, envelope, amplitude). |
 | a voice's T3/T4 … | That voice folds its left (`VxVOLL`) then right (`VxVOLR`) volume into the mix. |
+| T3, T6, …, T24 | Each voice's `ENDX` bit is written: a key-on's clear, or the set its decode staged. |
+| T4, T7, …, T25 | Each voice's `VxOUTX` is published. |
+| T5, T8, …, T26 | Each voice's `VxENVX` is published. |
 | T24 | The echo unit reads its buffer, filters, and computes its feedback value. |
 | T27 / T28 | The left / right output: `MVOLL`+`EVOLL` then `MVOLR`+`EVOLR`, then the mute gate. |
 | T29 / T30 | `FLG` bit 5 is loaded, one slot ahead of each echo word it gates. |
@@ -405,10 +410,13 @@ Three consequences are worth knowing:
 
 - **`VxOUTX` and `VxENVX` lag their compute.** A voice computes its amplitude at its own slot but does
   not publish `VxOUTX` into the register file until a few slots later; a CPU read in between returns
-  the *previous* sample's value, and a CPU write in that window overwrites the pending one — the
-  hardware's read-back delay. **`VxENVX` lags one sample further:** its publish slot writes the value
-  the envelope computed one sample earlier, so a CPU read of `VxENVX` is always a full sample behind
-  the envelope itself.
+  the *previous* sample's value — the hardware's read-back delay. **`VxENVX` lags one sample
+  further:** its publish slot writes the value the envelope computed one sample earlier, so a CPU
+  read of `VxENVX` is always a full sample behind the envelope itself.
+- **A CPU write in the two cycles before a DSP write survives it.** `VxOUTX`, `VxENVX` and `ENDX`
+  are the registers the DSP writes; a `DSPDATA` write to one of them issued in the two cycles before
+  the voice's publish slot keeps the register — the DSP's value for that sample is dropped. A write
+  three or more cycles ahead is overwritten at the slot as usual.
 - **Voice 0's output rides one sample behind voices 1–7.** Voice 0 computes at the last slot (T31) and
   its result is applied at the *next* sample's first slots, so its keying input is one update older
   than the other voices' for the same delivered frame. Its first sample from a
@@ -465,11 +473,11 @@ bytes at the load and post-compute slots one sample later — the
 one-sample-late application of `ESA`/`EDL`, the counter's advance ahead of the checks that share
 its slot, the in-group position clamp at `$7FFF` on an uncapped pitch step, the one-sample lag on
 the amplitude pitch modulation reads, the `ENDX` set at the
-decoder's exit from an end block — readable three slots after the voice's compute, in the next
-sample for voice 0 — the re-key's walk-or-hold decision read after the consuming compute's own
-envelope update, and the echo write sweeping the RAM beneath `$F0`–`$FF`
-without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM, while
-the `VxOUTX` publish slot remains the least-certain part.
+decoder's exit from an end block and the key-on's clear — both written four slots after the voice's
+compute, in the next sample for voice 0 — the `VxOUTX` and `VxENVX` publish slots and the two-cycle
+window in which a CPU write outlives the DSP's, the re-key's walk-or-hold decision read after the
+consuming compute's own envelope update, and the echo write sweeping the RAM beneath `$F0`–`$FF`
+without touching the `$F8`/`$F9` port bytes are confirmed against the Blargg DSP test ROM.
 
 ## Inspecting the pipeline directly
 

@@ -471,8 +471,8 @@ nothing else — a one-frame difference in a fourteen-word row, in both pitch ru
 Anomie's per-sample key-on account states the same rule from the hardware side: "After the final
 pre-KON sample is prepared, the envelope is set to 0 … The final pre-KON BRR decode also occurs
 here." The final decode is real, not an idle detail: it can complete an end block, and the
-key-on's `ENDX` clear then erases that same sample's set — the suppression `KON/kon stops endx
-of prev sample` measures.
+key-on's `ENDX` clear — written at the voice's S7 slot, where that set would land — erases it,
+the suppression `KON/kon stops endx of prev sample` measures.
 
 The standing envelope, too, takes its own update on that compute before the restart reads it.
 What the restart reads decides whether the new startup walks or holds (the split above), and it
@@ -498,7 +498,9 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. The entry is the one the source read selected. `VxPITCHL` and `VxADSR1` are read in the same slot. |
 | T2, T5, T8, T11, T14, T17, T20; T23 | Each voice's `VxPITCHH` read, one after its directory slot — the compute slot itself for voices 1-7, read before the compute runs in it. The pair steps the next sample's advance. |
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
-| T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` set becomes readable, three slots after its compute — voice 0's at T3 of the following sample. |
+| T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` bit is written, four slots after its compute — voice 0's at T3 of the following sample: a key-on's clear, or else the set the compute staged. |
+| T4, T7, T10, T13, T16, T19, T22, T25 | Each voice's `VxOUTX` is published. |
+| T5, T8, T11, T14, T17, T20, T23, T26 | Each voice's `VxENVX` is published — the value computed one sample earlier. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
 | T27 / T28 | Left then right output finalize — master and echo volume, then the mute gate. |
 | T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
@@ -604,9 +606,11 @@ earlier instant. The two only reconcile through a value lag in the register.
 
 The publish slots themselves are contested: fullsnes's array column reads `VxENVX` at each voice's
 sixth step slot and `VxOUTX` at the seventh; Anomie prepares `VxOUTX` at the sixth and `VxENVX` at the
-seventh, each readable two slots later. **Anomie's `VxENVX` slot is confirmed** — moving it three
-slots earlier regresses an otherwise-passing sub-test. The `VxOUTX` half of the disagreement is
-untested and remains open.
+seventh, each readable two slots later. **Anomie is right on both.** `VxENVX` first: moving it three
+slots earlier regresses an otherwise-passing sub-test. Then `Timing/Voice/V8 outx` and `V9 envx`
+place both to the cycle — `VxOUTX` at T4 for voice 0 and T(3v+4) for voices 1-7, `VxENVX` one slot
+later — by the write-versus-write measurement described under
+[the DSP's register writes](#the-dsps-own-register-writes-lose-to-a-cpu-write-issued-in-the-two-cycles-before-them).
 
 ### The pitch pair is read at the voice's own slots and steps the next advance — a key-on holds the reads for its silent span
 
@@ -941,12 +945,41 @@ Two of the eight rows carry more than the placement:
 **Anomie's BRR wording is right; his and fullsnes's `$7C` wording is wrong.** The bit says a
 sample has finished, not that its final block has begun.
 
-Unarbitrated residue: the acknowledge write's reach into a set still staged. Anomie has a write
-"up to 2 cycles earlier" overwriting the new value; here any acknowledge drops a staged set along
-with the readable bits. A sub-test that acknowledges within the three slots between a voice's
-compute and its publish would settle it.
+The acknowledge write does not reach a set still staged: the set lands at S7 regardless, unless the
+acknowledge was issued in the two cycles before that slot — then it is the DSP's write that is
+lost, the same rule every DSP-written register follows (the next section).
 
-*Arbitrated by `Order/endx after final brr decode`.*
+*Arbitrated by `Order/endx after final brr decode` and `Timing/Voice/V7 endx set`.*
+
+### The DSP's own register writes lose to a CPU write issued in the two cycles before them
+
+The DSP writes three kinds of register itself: each voice's `ENDX` bit at its S7 slot (T3 for voice
+0, T(3v+3) for voices 1-7), `VxOUTX` at S8 one slot later, and `VxENVX` at S9 one slot after that.
+Anomie gives every one of those a caveat — "a write up to 2 cycles earlier will overwrite the new
+value" — and the ROM measures it to the cycle: **a CPU write to the register issued in the two
+cycles before the DSP's slot survives the slot; the register keeps the CPU's byte and the DSP's
+value for that sample is dropped.** A write three or more cycles ahead is overwritten at the slot
+as expected.
+
+`Timing/Voice/V8 outx` and `V9 envx` are one driver with the register changed: the voice sits
+silent, and each of 26 rows per voice writes `$FF` into the register at one slot later than the
+last row — the write phase-locked to the sample by the `V0ENVX` sync gadget — then reads it back
+five cycles later, hashing `X` when the read returned the DSP's zero. With a 5-cycle window the DSP's
+write would show for five consecutive rows; the expected constant (`$936D07A2`, shared by both
+drivers and by `V7 endx set`) fits **exactly three rows per voice**, and the CRC solution places
+them so that the last surviving CPU write is one cycle before the publish slot — S8 at T4, T7, …
+T25 for `VxOUTX`, one slot later for `VxENVX`, both to the cycle. `V7 endx set` runs the same probe
+as an acknowledge write against a voice whose end block is about to be reached: the same
+three-row window, ending one cycle before S7.
+
+`Timing/Voice/V7 endx cleared` measures the key-on side of `ENDX` with a bare read per row: the
+voice is keyed, and the bit reads set through the compute slot that applies the key-on and clear
+from S7 on, for every voice — **a key-on's clear is written at the voice's S7 slot, four slots
+after the compute, the same slot its decode's set lands on**, not at the compute itself. The
+expected constant (`$89A7E835`) fits exactly one monotone table, and its boundaries sit four rows
+past the compute-slot clear's for all eight voices.
+
+*Arbitrated by `Timing/Voice/V7 endx cleared`, `V7 endx set`, `V8 outx` and `V9 envx`.*
 
 ---
 
@@ -973,14 +1006,10 @@ reintroduce the low bit.
 
 Stated plainly, because a reference that hides its soft spots is worth less than one that marks them:
 
-- **The `VxOUTX` publish slot.** The fullsnes / Anomie disagreement described above is settled for
-  `VxENVX` and untested for `VxOUTX`.
 - **Echo reads, and the `ESA`/`EDL` latch and ring-index advance**, are modeled together at T24.
   Anomie places the latch and advance at his cycle 30. No measurement distinguishes them yet.
 - **Register-order edge cases** — writing `VxADSR2` or `VxGAIN` before `VxADSR1` within a sample — are
   noted in the Errata and not modeled at slot granularity.
-- **An `ENDX` acknowledge landing between a voice's compute and its publish slot.** Modeled as
-  dropping the staged set; Anomie bounds the overwrite window at two cycles. Untested.
 
 ## How a contested claim gets settled here
 

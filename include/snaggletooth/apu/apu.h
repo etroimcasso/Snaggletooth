@@ -167,8 +167,9 @@ class Apu {
   std::uint8_t readRegister(std::uint8_t reg);
   void writeRegister(std::uint8_t reg, std::uint8_t value);
 
-  // Writes a DSP register through DSPDATA. Most registers are a RAM-like byte;
-  // ENDX ($7C) is a real register whose bits any write acknowledges (clears).
+  // Writes a DSP register through DSPDATA: cpuWriteDspRegister, which owns the
+  // write's semantics (ENDX's acknowledge, KON's arming, the stamp a
+  // DSP-written register carries).
   void writeDspRegister(std::uint8_t reg, std::uint8_t value);
 
   // One machine cycle. The master counter advances, the timer ticks and the DSP

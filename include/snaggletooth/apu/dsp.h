@@ -265,6 +265,15 @@ struct StereoFrame {
   [[nodiscard]] bool operator==(const StereoFrame&) const noexcept = default;
 };
 
+// The stamp a DSP-written register carries before the CPU has ever written it
+// (see DspState::cycleCount).
+inline constexpr std::uint64_t kNoCpuWrite = ~std::uint64_t{0};
+[[nodiscard]] constexpr std::array<std::uint64_t, 8> noCpuWrites() noexcept {
+  std::array<std::uint64_t, 8> stamps{};
+  stamps.fill(kNoCpuWrite);
+  return stamps;
+}
+
 // The S-DSP's state as a value: snapshot by copy, restore by assignment. The
 // 128-byte register file the CPU reaches through DSPADDR/DSPDATA lives here
 // (ApuState carries only the DSPADDR latch beside it). Indexing or
@@ -311,8 +320,36 @@ struct DspState {
   // sample's T3, so a CPU read at the sample boundary still sees the old value
   // (spc_dsp6 `Order/endx after final brr decode` reads every voice's bit
   // clear on one sample and set on the next, voice 0 included). A key-on's
-  // clear and the register's acknowledge write both drop a staged set.
+  // clear, landing at the same slot, drops a staged set; the register's
+  // acknowledge write does not — the set still lands, unless the acknowledge
+  // was issued in the two cycles before the slot (endxWriteCycle), in which
+  // case the DSP's write is the one lost.
   std::uint8_t preparedEndx = 0;
+
+  // ENDX clears a key-on has scheduled, one bit per voice: a slot-scheduled
+  // restart clears the voice's bit at its S7 slot — four slots after the
+  // compute that applied it — not at the compute itself. spc_dsp6
+  // `Timing/Voice/V7 endx cleared` reads the bit per cycle after a key-on and
+  // sees it standing through the compute slot, clear from S7 on, for every
+  // voice. A clear pending at S7 wins over a set staged for the same slot.
+  std::uint8_t pendingEndxClear = 0;
+
+  // DSP clock cycles run — one per stepDspCycle call, counted before the slot
+  // runs — and, per DSP-written register, the count at the CPU's last write to
+  // it (kNoCpuWrite until one lands; cpuWriteDspRegister stamps them). The
+  // DSP writes VxOUTX at S8, VxENVX at S9 and ENDX at S7, but a CPU write to
+  // the register issued in the two cycles before that slot survives it: the
+  // DSP's write is lost and the register keeps the CPU's byte. spc_dsp6
+  // `Timing/Voice/V8 outx`, `V9 envx` and `V7 endx set` each write the
+  // register at one slot per row and read it five cycles later; the DSP's
+  // value shows for exactly three consecutive rows, ending two slots short
+  // of its write slot (Anomie: "a write up to 2 cycles earlier will overwrite
+  // the new value"). A write three or more cycles ahead is overwritten as
+  // before. Plain values — a snapshot carries a write still standing.
+  std::uint64_t cycleCount = 0;
+  std::array<std::uint64_t, 8> outxWriteCycle = noCpuWrites();
+  std::array<std::uint64_t, 8> envxWriteCycle = noCpuWrites();
+  std::uint64_t endxWriteCycle = kNoCpuWrite;
 
   // The one shared noise generator's 15-bit level, in the internal sample range
   // -4000h..+3FFFh, seeded to -4000h at power-on and reset. A voice whose NON bit
@@ -397,9 +434,10 @@ struct DspState {
   // VxOUTX and VxENVX are computed at a voice's S3 slot but do not become readable
   // in the register file until its later output slots (S8/S9). These hold the
   // computed-but-not-yet-visible bytes; a CPU read before the visibility slot sees
-  // the previous sample's value, and a CPU write up to that slot overwrites the
-  // pending one. Voice 0's visibility slots fall in the following frame, so its
-  // OUTX/ENVX ride one frame behind, matching its output.
+  // the previous sample's value, and a CPU write issued up to two cycles
+  // before that slot outlives the slot's own write (cycleCount below). Voice
+  // 0's visibility slots fall in the following frame, so its OUTX/ENVX ride
+  // one frame behind, matching its output.
   std::array<std::uint8_t, 8> preparedOutx{};
   std::array<std::uint8_t, 8> preparedEnvx{};
 
@@ -599,6 +637,18 @@ struct SlotResult {
 };
 SlotResult stepDspCycle(DspState& dsp, std::span<std::uint8_t, 65536> ram) noexcept;
 SlotResult stepDspCycle(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept;
+
+// A CPU write to DSP register `reg` through DSPDATA (a `reg` above $7F is
+// ignored, as the machine ignores it). The value is
+// stored; an ENDX ($7C) write stores nothing and acknowledges every end flag
+// instead (a set still staged for its voice's S7 slot is left to land); a KON
+// ($4C) write also arms the internal key-on the next poll consumes. A write to
+// a register the DSP itself writes — VxOUTX, VxENVX, ENDX — is stamped with
+// the DSP clock (DspState::cycleCount), so the DSP's own write at the voice's
+// S8/S9/S7 slot in the following two cycles loses to it. The machine routes
+// every DSPDATA write here; a direct `dsp[reg] = value` store neither arms nor
+// stamps.
+void cpuWriteDspRegister(DspState& dsp, std::uint8_t reg, std::uint8_t value) noexcept;
 
 // Runs the KON/KOFF poll. On even-indexed samples it reads the KON ($4C) and
 // KOFF ($5C) registers: a set KON bit latches internal-KON and keys the voice on

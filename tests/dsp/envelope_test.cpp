@@ -27,6 +27,7 @@
 
 namespace {
 
+using snaggletooth::cpuWriteDspRegister;
 using snaggletooth::DspState;
 using snaggletooth::EnvPhase;
 using snaggletooth::envelopeRateFires;
@@ -1029,6 +1030,38 @@ TEST(BrrHeaderCheck, AStagedEndxSetBecomesReadableAtTheVoicesS7Slot) {
   (void)stepDspCycle(k.dsp, ram);  // T3: voice 0's S7
   EXPECT_EQ(k.dsp[kEndx] & 0x01, 0x01);
   EXPECT_EQ(k.dsp.preparedEndx & 0x01, 0);
+}
+
+TEST(BrrHeaderCheck, AnAcknowledgeInTheTwoCyclesBeforeS7LosesTheStagedSet) {
+  // The acknowledge write does not reach a set still staged: issued three or
+  // more cycles before the voice's S7 slot it clears the readable bits and the
+  // set lands at S7 as usual. Issued in the two cycles before S7 it is the
+  // DSP's write that is lost — the bit stays clear and the staged set is
+  // dropped (spc_dsp6 `Timing/Voice/V7 endx set`: the ROM acknowledges at one
+  // slot per row and reads the bit five cycles later; the set shows for
+  // exactly three rows, ending two slots short of S7). Same setup as the case
+  // above, the set staged when sample 27 closes at voice 0's T31; a write at
+  // cursor k is the CPU's write of cycle k-1, so cursor 1 is three cycles
+  // ahead of T3 and cursors 2 and 3 are the two before it.
+  for (int cursor : {1, 2, 3}) {
+    Keyable k;
+    const std::span<const std::uint8_t, 65536> ram{k.ram};
+    k.ram[0x1000] = 0x00;
+    k.ram[0x1009] = 0x01;
+    k.dsp[0x03] = 0x10;
+    gain(k.dsp, 0) = 0x7F;
+    keyOnVoice(k.dsp, ram, 0);
+    for (int n = 1; n <= 27; ++n) (void)stepDspSample(k.dsp, ram);
+    ASSERT_EQ(k.dsp.preparedEndx & 0x01, 0x01);
+    ASSERT_EQ(k.dsp.slotCursor, 0);
+    for (int slot = 0; slot < 4; ++slot) {
+      if (k.dsp.slotCursor == cursor) cpuWriteDspRegister(k.dsp, kEndx, 0x00);
+      (void)stepDspCycle(k.dsp, ram);  // T0..T3
+    }
+    const bool stands = cursor >= 2;
+    EXPECT_EQ(k.dsp[kEndx] & 0x01, stands ? 0 : 0x01) << "acknowledge at cursor " << cursor;
+    EXPECT_EQ(k.dsp.preparedEndx & 0x01, 0) << "the set was landed or dropped, never kept";
+  }
 }
 
 TEST(Keying, ARestartReadsTheEnvelopeAfterTheConsumingComputesOwnUpdate) {

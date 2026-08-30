@@ -24,6 +24,7 @@
 
 namespace {
 
+using snaggletooth::cpuWriteDspRegister;
 using snaggletooth::DspState;
 using snaggletooth::EnvPhase;
 using snaggletooth::SlotResult;
@@ -240,6 +241,113 @@ TEST(SampleSchedule, VoiceEnvxReadsTheValueComputedOneSampleEarlier) {
   EXPECT_EQ(envx(dsp, 1), static_cast<std::uint8_t>(levelBefore >> 4))
       << "the register carries the value the compute produced one sample ago";
   EXPECT_EQ(dsp.voices[1].envelope, levelBefore + 32);
+}
+
+TEST(SampleSchedule, ADspOutxWriteLosesToACpuWriteIssuedInTheTwoCyclesBeforeIt) {
+  // Voice 1 publishes VxOUTX at T7 (S8). A CPU write to the register issued in
+  // the two cycles before that slot outlives it — the register keeps the CPU's
+  // byte and the DSP's value for the sample is dropped — while one issued three
+  // cycles before is overwritten at the slot as usual. spc_dsp6 `Timing/Voice/
+  // V8 outx` writes the register at one slot per row and reads it back five
+  // cycles later: the DSP's byte shows for exactly three consecutive rows,
+  // ending two slots short of the publish slot (Anomie: "a write up to 2
+  // cycles earlier will overwrite the new value"). The write goes through
+  // cpuWriteDspRegister, which stamps it; the harness writes just before the
+  // cursor's slot runs, so a write at cursor k is the CPU's write of cycle k-1.
+  for (int cursor : {7, 6, 5}) {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);  // constant VxOUTX = 0Ah
+    sample(dsp, ram);          // prime
+    sample(dsp, ram);
+    ASSERT_EQ(outx(dsp, 1), 0x0A);
+    std::uint8_t afterS8 = 0;
+    for (int n = 0; n < 32; ++n) {
+      if (dsp.slotCursor == cursor) cpuWriteDspRegister(dsp, 0x19, 0x55);
+      if (dsp.slotCursor == 8) afterS8 = outx(dsp, 1);  // T7 has run
+      stepDspCycle(dsp, view(ram));
+    }
+    const bool stands = cursor >= 6;  // issued one or two cycles before T7
+    EXPECT_EQ(afterS8, stands ? 0x55 : 0x0A) << "write at cursor " << cursor;
+    EXPECT_EQ(outx(dsp, 1), afterS8) << "nothing later in the sample republishes it";
+    sample(dsp, ram);
+    EXPECT_EQ(outx(dsp, 1), 0x0A) << "the next sample's S8 publishes again";
+  }
+}
+
+TEST(SampleSchedule, ADspEnvxWriteLosesToACpuWriteIssuedInTheTwoCyclesBeforeIt) {
+  // The same at VxENVX's slot, T8 (S9) for voice 1: a CPU write in the two
+  // cycles before it stands, one three cycles before is overwritten
+  // (spc_dsp6 `Timing/Voice/V9 envx`, the outx driver with its probe one cycle
+  // later — the same three-row window, one slot on). The pipeline stage still
+  // advances under a lost write, so the next sample publishes as usual.
+  for (int cursor : {8, 7, 6}) {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);  // envelope 7F0h -> VxENVX 7Fh
+    sample(dsp, ram);
+    sample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(envx(dsp, 1), 0x7F);
+    std::uint8_t afterS9 = 0;
+    for (int n = 0; n < 32; ++n) {
+      if (dsp.slotCursor == cursor) cpuWriteDspRegister(dsp, 0x18, 0x55);
+      if (dsp.slotCursor == 9) afterS9 = envx(dsp, 1);  // T8 has run
+      stepDspCycle(dsp, view(ram));
+    }
+    const bool stands = cursor >= 7;  // issued one or two cycles before T8
+    EXPECT_EQ(afterS9, stands ? 0x55 : 0x7F) << "write at cursor " << cursor;
+    sample(dsp, ram);
+    EXPECT_EQ(envx(dsp, 1), 0x7F) << "the next sample's S9 publishes again";
+  }
+}
+
+TEST(SampleSchedule, AKeyOnsEndxClearLandsAtTheVoicesS7Slot) {
+  // A slot-scheduled restart clears the voice's ENDX bit at its S7 slot, four
+  // slots after the compute that applied the key-on — voice 1's compute at T2
+  // clears at T6, voice 0's compute at T31 clears at the next sample's T3 — not
+  // at the compute itself. spc_dsp6 `Timing/Voice/V7 endx cleared` keys each
+  // voice and reads ENDX one cycle later per row: the bit stands through the
+  // compute slot and reads clear from S7 on, for every voice.
+  {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);
+    dsp.voices[1].computesSinceKeyOn = 0xFF;  // long past any startup: a full restart
+    sample(dsp, ram);                          // sampleIndex 1 (odd)
+    sample(dsp, ram);                          // the next sample polls
+    dsp[0x7C] = 0xFF;                          // every end flag standing
+    dsp.internalKon = 0x02;                    // a KON write arms voice 1
+    sample(dsp, ram);                          // polled at T31; the restart waits for T2
+    ASSERT_EQ(dsp[0x7C], 0xFF);
+    std::array<std::uint8_t, 8> after{};
+    for (int t = 0; t < 8; ++t) {
+      stepDspCycle(dsp, view(ram));
+      after[static_cast<std::size_t>(t)] = dsp[0x7C];
+    }
+    for (int t = 0; t <= 5; ++t) EXPECT_EQ(after[static_cast<std::size_t>(t)], 0xFF) << "after T" << t;
+    EXPECT_EQ(after[6], 0xFD) << "T6 is voice 1's S7";
+    EXPECT_EQ(after[7], 0xFD);
+  }
+  {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 0);
+    dsp.voices[0].computesSinceKeyOn = 0xFF;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    dsp[0x7C] = 0xFF;
+    dsp.internalKon = 0x01;                    // arms voice 0
+    sample(dsp, ram);                          // polled and applied at T31
+    ASSERT_EQ(dsp[0x7C], 0xFF) << "voice 0's compute ran; the clear is still four slots out";
+    std::array<std::uint8_t, 4> after{};
+    for (int t = 0; t < 4; ++t) {
+      stepDspCycle(dsp, view(ram));
+      after[static_cast<std::size_t>(t)] = dsp[0x7C];
+    }
+    for (int t = 0; t <= 2; ++t) EXPECT_EQ(after[static_cast<std::size_t>(t)], 0xFF) << "after T" << t;
+    EXPECT_EQ(after[3], 0xFE) << "T3 is voice 0's S7";
+  }
 }
 
 // ── The last slot: keying, the global counter and the noise generator ───────

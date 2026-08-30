@@ -14,6 +14,7 @@ constexpr std::uint8_t kDspEvolRight = 0x3C;
 constexpr std::uint8_t kDspPmon = 0x2D;
 constexpr std::uint8_t kDspNon = 0x3D;
 constexpr std::uint8_t kDspEon = 0x4D;
+constexpr std::uint8_t kDspKon = 0x4C;
 constexpr std::uint8_t kDspKoff = 0x5C;
 constexpr std::uint8_t kDspDir = 0x5D;
 constexpr std::uint8_t kDspFlg = 0x6C;
@@ -867,8 +868,9 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // pre-key-on decode — and emits its sample under the standing envelope,
     // and only then applies the restart. The countdown ticks on this very
     // call, so the ENVX schedule is exactly the armed key-on's; the old
-    // decode's ENDX side effect is erased by the key-on's clear, which is the
-    // suppression `KON/kon stops endx of prev sample` measures. A standing
+    // decode's ENDX side effect is erased by the key-on's clear at the voice's
+    // S7 slot, which is the suppression `KON/kon stops endx of prev sample`
+    // measures. A standing
     // soft reset does not reach this branch — the fresh consumption wins, as
     // at the poll itself (`KON/kon then flg.80`). Measured against `KON/kon
     // unaffected by pitch`: a re-key on a sounding voice emits the old data
@@ -1095,13 +1097,24 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
 
   if (envelopeRateFires(dsp.globalCounter, flg & kFlgNoiseRate))
     dsp.noiseLevel = nextNoiseLevel(dsp.noiseLevel);
-  // The frame-at-once sample has no slots for a staged ENDX set to land on:
-  // every voice's set is readable when the sample is complete.
+  // The frame-at-once sample has no slots for a staged ENDX set or a scheduled
+  // clear to land on: every voice's clear applies and every set is readable
+  // when the sample is complete.
+  dsp[kDspEndx] &= static_cast<std::uint8_t>(~dsp.pendingEndxClear);
+  dsp.preparedEndx &= static_cast<std::uint8_t>(~dsp.pendingEndxClear);
+  dsp.pendingEndxClear = 0;
   dsp[kDspEndx] |= dsp.preparedEndx;
   dsp.preparedEndx = 0;
   tickDspSample(dsp);
   return StereoFrame{.left = static_cast<std::int16_t>(left),
                      .right = static_cast<std::int16_t>(right)};
+}
+
+// Whether a CPU write stamped `stamp` was issued in the two cycles before the
+// cycle now running — the window in which it survives the DSP's own write to
+// the same register (see DspState::cycleCount).
+static bool cpuWriteStands(const DspState& dsp, std::uint64_t stamp) noexcept {
+  return stamp != kNoCpuWrite && dsp.cycleCount >= stamp && dsp.cycleCount - stamp <= 2;
 }
 
 // The per-voice schedule. s3Slot is where a voice runs its whole compute body;
@@ -1126,7 +1139,8 @@ constexpr std::array<std::uint8_t, 8> kVoiceS9Slot = {5, 8, 11, 14, 17, 20, 23, 
 // modulatorAmplitude as it is replaced, which is what the following voice reads.
 // VxOUTX and VxENVX are computed here but held back from the register file until
 // the voice's S8/S9 slots — a CPU read before then sees the previous sample's
-// value, the overwrite window the hardware exposes.
+// value, and a CPU write up to two cycles before the slot outlives the slot's
+// own write (see DspState::cycleCount).
 static void computeVoiceSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                              std::size_t voice, bool softReset) noexcept {
   const int prev = dsp.modulatorAmplitude[(voice + 7) & 7];
@@ -1246,11 +1260,14 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
   for (std::size_t voice = 1; voice < 8; ++voice)
     if (kVoiceS3Slot[voice] == slot) computeVoiceSlot(dsp, ram, voice, softReset);
 
-  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order. A
-  // staged ENDX set reaches the register at the S7 slot; the computed OUTX byte
-  // becomes readable at the S8 slot; ENVX carries one further pipeline stage —
-  // its S9 slot writes the value computed one sample earlier and stages the
-  // fresh one (see DspState::envxStage).
+  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order.
+  // The voice's ENDX bit is written at the S7 slot — a key-on's clear, or else
+  // a staged set; the computed OUTX byte becomes readable at the S8 slot; ENVX
+  // carries one further pipeline stage — its S9 slot writes the value computed
+  // one sample earlier and stages the fresh one (see DspState::envxStage).
+  // Each of those three register writes loses to a CPU write issued in the two
+  // cycles before it (see DspState::cycleCount): the register keeps the CPU's
+  // byte and the DSP's value for the slot is dropped.
   for (std::size_t voice = 0; voice < 8; ++voice) {
     const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
     if (kVoiceS4Slot[voice] == slot) {
@@ -1258,13 +1275,21 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       applyVoiceLeft(dsp, voice);
     }
     if (kVoiceS5Slot[voice] == slot) applyVoiceRight(dsp, voice);
-    if (kVoiceS7Slot[voice] == slot && (dsp.preparedEndx & bit) != 0) {
-      dsp[kDspEndx] |= bit;
-      dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+    if (kVoiceS7Slot[voice] == slot) {
+      if ((dsp.pendingEndxClear & bit) != 0) {
+        dsp[kDspEndx] &= static_cast<std::uint8_t>(~bit);
+        dsp.pendingEndxClear = static_cast<std::uint8_t>(dsp.pendingEndxClear & ~bit);
+        dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+      } else if ((dsp.preparedEndx & bit) != 0) {
+        if (!cpuWriteStands(dsp, dsp.endxWriteCycle)) dsp[kDspEndx] |= bit;
+        dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+      }
     }
-    if (kVoiceS8Slot[voice] == slot) dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
+    if (kVoiceS8Slot[voice] == slot && !cpuWriteStands(dsp, dsp.outxWriteCycle[voice]))
+      dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
     if (kVoiceS9Slot[voice] == slot) {
-      dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.envxStage[voice];
+      if (!cpuWriteStands(dsp, dsp.envxWriteCycle[voice]))
+        dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.envxStage[voice];
       dsp.envxStage[voice] = dsp.preparedEnvx[voice];
     }
   }
@@ -1356,6 +1381,7 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
 static SlotResult stepDspCycleImpl(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                                    std::uint8_t* echoRam) noexcept {
   const std::uint8_t slot = dsp.slotCursor;
+  ++dsp.cycleCount;  // the clock a CPU write's stamp is measured against
 
   if (!dsp.primed) {
     if (slot == 31) {
@@ -1441,9 +1467,39 @@ static void keyOnVoiceImpl(DspState& dsp, std::span<const std::uint8_t, 65536> r
   v.konDelay = kKeyOnStartupCalls;
   v.computesSinceKeyOn = 0;
   // Key-on clears this voice's ENDX bit, staged or readable: a same-sample
-  // end-block set does not override the clear.
-  dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
-  dsp.preparedEndx &= static_cast<std::uint8_t>(~(1u << voice));
+  // end-block set does not override the clear. On the slot schedule the clear
+  // is written at the voice's S7 slot, four slots after this compute, like the
+  // set it can erase (see DspState::pendingEndxClear); the direct call and the
+  // frame-at-once path clear at once.
+  if (primeNow) {
+    dsp[kDspEndx] &= static_cast<std::uint8_t>(~(1u << voice));
+    dsp.preparedEndx &= static_cast<std::uint8_t>(~(1u << voice));
+  } else {
+    dsp.pendingEndxClear |= static_cast<std::uint8_t>(1u << voice);
+  }
+}
+
+void cpuWriteDspRegister(DspState& dsp, std::uint8_t reg, std::uint8_t value) noexcept {
+  if (reg > 0x7F) return;  // DSPDATA writes beyond $7F are ignored
+  if (reg == kDspEndx) {
+    // ENDX: any write acknowledges all end flags. A set still staged for its
+    // voice's S7 slot is left to land there — unless this write is what the
+    // slot's write then loses to.
+    dsp[kDspEndx] = 0;
+    dsp.endxWriteCycle = dsp.cycleCount;
+    return;
+  }
+  dsp[reg] = value;
+  // A KON write also arms the internal key-on the poll consumes. The value
+  // replaces whatever was pending, so of two writes between polls only the
+  // second one keys anything on.
+  if (reg == kDspKon) dsp.internalKon = value;
+  // The DSP-written voice registers carry the write's cycle, for the S8/S9
+  // write that may have to yield to it.
+  const std::size_t voice = reg >> 4;
+  const std::uint8_t offset = reg & 0x0F;
+  if (offset == kVoiceOutx) dsp.outxWriteCycle[voice] = dsp.cycleCount;
+  if (offset == kVoiceEnvx) dsp.envxWriteCycle[voice] = dsp.cycleCount;
 }
 
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,

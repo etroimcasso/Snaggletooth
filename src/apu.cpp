@@ -12,17 +12,9 @@ namespace {
 // reads (see Apu::mapIplRom); writes to the window always reach the RAM beneath.
 constexpr std::uint8_t kControlIplRom = 0x80;
 
-// ENDX ($7C) is the one DSP register whose write clears the register rather than
-// storing the value: any write acknowledges (clears) all voice end flags.
-constexpr std::uint8_t kDspEndx = 0x7C;
-
 // FLG ($6C) resets to $E0: soft reset set, amplifier muted, echo writes disabled,
 // noise stopped. A driver clears it once it has set up the DSP.
 constexpr std::uint8_t kDspFlg = 0x6C;
-
-// KON ($4C) takes effect on the write: the value written becomes the internal
-// key-on the next poll acts on, beside the register byte the write also stores.
-constexpr std::uint8_t kDspKon = 0x4C;
 
 // The seeded post-IPL power-on state: what the machine looks like once the boot
 // ROM has cleared zero page, posted the ready bytes, and handed control over.
@@ -163,18 +155,9 @@ std::vector<StereoFrame> Apu::takeFrames() {
 }
 
 void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
-  if (reg == kDspEndx) {
-    // ENDX: any write acknowledges all end flags, a set still staged for its
-    // voice's visibility slot included.
-    state_.dsp[kDspEndx] = 0;
-    state_.dsp.preparedEndx = 0;
-    return;
-  }
-  state_.dsp[reg] = value;
-  // A KON write also arms the internal key-on the poll consumes. The value
-  // replaces whatever was pending, so of two writes between polls only the
-  // second one keys anything on.
-  if (reg == kDspKon) state_.dsp.internalKon = value;
+  // The DSP owns the write's semantics — ENDX's acknowledge, KON's arming, the
+  // stamp a DSP-written register carries (see cpuWriteDspRegister).
+  cpuWriteDspRegister(state_.dsp, reg, value);
 }
 
 void Apu::reset() {
