@@ -288,12 +288,14 @@ header check reads RAM every sample.
 The sample directory has its own slot too. The loop address the decoder takes as it leaves an end
 block is read from the directory entry (`DIR × $100 + VxSRCN × 4 + 2`) at the voice's directory
 slot — T22 for voice 0, nine slots before its compute, and the slot before the compute for voices
-1-7 — so a directory write landing between that slot and the compute reaches the next sample's
-read, not this jump. A key-on's start pointer is read at the same slot, in the sample **after** the
-compute that applied the key-on (the compute that emits the voice's final pre-key-on sample); the
-start block's first three groups are then read at that sample's BRR load slot. So the countdown's
-first silent call reads nothing at all, and a `DIR` write that lands after the consuming compute but
-before the next directory slot is what the started voice plays from. `VxSRCN` is read one step
+1-7 — so a write to those RAM bytes landing between that slot and the compute reaches the next
+sample's read, not this jump. A key-on's start pointer is read at the same slot, in the sample
+**after** the compute that applied the key-on (the compute that emits the voice's final pre-key-on
+sample); the start block's first three groups are then read at that sample's BRR load slot. So the
+countdown's first silent call reads nothing at all. Which *table* those reads address is a separate
+question: the `DIR` register itself is read at T29, once for all eight voices, and every directory
+slot in a sample is earlier than that, so both reads use the value standing at the previous
+sample's T29. `VxSRCN` is read one step
 earlier still, at the voice's source slot — four slots before its directory slot (T18 for voice 0,
 T(3v−6) for voices 2-7), and for voice 1 T21 of the previous sample — so both directory reads select
 the entry with the source standing there, and a `VxSRCN` write landing between the two slots reaches
@@ -400,13 +402,22 @@ counter's residue mod 32 numbers them:
 | T5, T8, …, T26 | Each voice's `VxENVX` is published. |
 | T24 | The echo unit reads its buffer, filters, and computes its feedback value. |
 | T27 / T28 | The left / right output: `MVOLL`+`EVOLL` then `MVOLR`+`EVOLR`, then the mute gate. |
+| T28 | `PMON` is read, once, for all eight voices. |
+| T29 | `NON`, `EON` and `DIR` are read, once, for all eight voices. |
 | T29 / T30 | `FLG` bit 5 is loaded, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo write lands: the left word at T30, the right word at T31. |
 | T30 | The raw `ESA` and `EDL` are loaded for the ring advance to apply. |
 | T31 | The ring advance: the loaded `ESA` becomes the next sample's base, `EDL` resizes at a wrap, the index steps. |
 | T31 | `KON`/`KOFF` are polled (even samples), the global counter advances, the noise steps, then voice 0 computes. |
 
-Three consequences are worth knowing:
+Four consequences are worth knowing:
+
+- **The four voice-wide registers are read once, not per voice.** `PMON` at T28 and `NON`, `EON` and
+  `DIR` at T29 are read for all eight voices together, and the voice work that uses them takes what
+  that read held. A write landing between two voices' computes is taken by neither until the next
+  T28/T29 — there is no sample in which one voice has the new bit and another has the old one — and
+  because voice 0 computes at T31, after the read, it acts on a write a whole sample before voices
+  1–7 do.
 
 - **`VxOUTX` and `VxENVX` lag their compute.** A voice computes its amplitude at its own slot but does
   not publish `VxOUTX` into the register file until a few slots later; a CPU read in between returns

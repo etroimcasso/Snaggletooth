@@ -503,6 +503,8 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | T5, T8, T11, T14, T17, T20, T23, T26 | Each voice's `VxENVX` is published — the value computed one sample earlier. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
 | T27 / T28 | Left then right output finalize — master and echo volume, then the mute gate. |
+| T28 | `PMON` is read, once, for all eight voices. |
+| T29 | `NON`, `EON` and `DIR` are read, once, for all eight voices. |
 | T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo buffer's left word, then its right word. |
 | T30 → T31 | Raw `ESA`/`EDL` load, then the ring advance applies them and steps the index. |
@@ -882,6 +884,33 @@ the next sample's directory read, not this one — a loop already resolved, or a
 keeps the old source.
 
 *Arbitrated by `Timing/Voice/V1 srcn.start`/`.loop`.*
+
+### `PMON`, `NON`, `EON` and `DIR` are read once a sample, not by the voices that use them
+
+The four registers that carry a bit or an address for every voice at once are read on their own
+slots and nowhere else: `PMON` at T28, then `NON`, `EON` and `DIR` together at T29. The voice work
+that consumes them — a modulated advance, a noise substitution, an echo send, a directory read —
+takes what that read held rather than reading the register itself. So one CPU write reaches all
+eight voices on the same sample, and because every voice but 0 computes before T28, seven of them
+carry the value into the *next* sample while voice 0, computing at T31, takes it in this one.
+
+Both references place them there. fullsnes's register-array column reads `PMON` on its T28 row and
+`NON`, `EON` and `DIR` on its T29 row; Anomie loads `PMON` at his cycle 27 and "NON, EON, and DIR"
+in one step at cycle 28 — the same slots in his numbering.
+
+`Timing/Misc/27 pmon`, `28 non`, `28 eon` and `28 dir` measure it. Each pulses its register for
+five cycles at one slot per row, a slot later each row, and hashes whether the pulse changed what
+the voice did — a modulated step, a noise sample, an echo send, a loop into a second directory.
+The recovered read is **one slot for all eight voices**: a search over every slot and every pulse
+width finds exactly one, at T28 for `pmon` and T29 for `non` and `eon`, and a per-voice read fits
+those rows at no slot and no width at all. A machine reading each register at the voice's own work
+produces a staircase three slots wide per voice instead, which is what these four rows reject.
+
+The consequence worth knowing: a write landing between two voices' computes is taken by neither
+until the next T28/T29. There is no window in which one voice has seen a new `NON` bit and its
+neighbour has not.
+
+*Arbitrated by `Timing/Misc/27 pmon`, `28 non`, `28 eon`, `28 dir`.*
 
 ### Pitch modulation reads the previous voice's output from the previous sample
 

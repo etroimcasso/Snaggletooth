@@ -307,6 +307,21 @@ struct DspState {
   // set. Two writes between polls arm only the second.
   std::uint8_t internalKon = 0;
 
+  // The four registers that describe every voice at once, each read once a
+  // sample at its own slot rather than by the voice work that consumes it:
+  // PMON at T28, and NON, EON and DIR together at T29. So one CPU write reaches
+  // all eight voices on the same sample, and the voices whose compute precedes
+  // the read — every voice but 0 — carry the previous sample's value into it.
+  // spc_dsp6 `Timing/Misc/27 pmon`, `28 non` and `28 eon` pulse the register
+  // for five cycles at one slot per row: the ROM's rows are the same for all
+  // eight voices, and a per-voice read fits them at no slot and no pulse width.
+  // `28 dir` is the same act one register on — fullsnes reads NON, EON and DIR
+  // in one line of its register array and Anomie loads the three in one step.
+  std::uint8_t latchedPmon = 0;
+  std::uint8_t latchedNon = 0;
+  std::uint8_t latchedEon = 0;
+  std::uint8_t latchedDir = 0;
+
   // The extra stage of the VxENVX read-back pipeline: each voice's S9 slot writes
   // the value computed one sample earlier and stages the fresh one, so a CPU read
   // of VxENVX lags the envelope compute by one sample more than the in-slot

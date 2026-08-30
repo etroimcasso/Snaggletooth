@@ -153,9 +153,13 @@ TEST(SampleSchedule, AVoiceLeftVolumeIsConsumedAtItsFourthStepSlot) {
   EXPECT_GT(missed.left, 0);      // the write one slot late did not
 }
 
-TEST(SampleSchedule, NoiseSubstitutionReadsNonAtTheVoiceComputeSlot) {
-  // Voice 1 computes at slot T2 and reads its NON bit there. Enabling NON before
-  // T2 swaps the noise level in this frame; after T2 it waits for the next.
+// ── The voice-wide registers, each read once a sample at its own slot ────────
+
+TEST(SampleSchedule, TheNoiseEnableIsReadAtItsOwnSlotAheadOfTheComputesThatTakeIt) {
+  // NON is read at T29, for all eight voices at once, and voice 1's compute at
+  // T2 of the sample that follows substitutes on what that read held. So a write
+  // landing before T29 reaches the next sample's voices; one landing after it
+  // waits a whole sample more, and the two runs part on their second frame.
   Ram ram{};
   DspState base;
   placeSteadyVoice(base, 1);
@@ -164,9 +168,112 @@ TEST(SampleSchedule, NoiseSubstitutionReadsNonAtTheVoiceComputeSlot) {
 
   DspState seenState = base;
   DspState missedState = base;
-  const StereoFrame seen = sampleWritingAt(seenState, ram, 2, kNon, 0x02);   // NON voice 1
-  const StereoFrame missed = sampleWritingAt(missedState, ram, 3, kNon, 0x02);
+  sampleWritingAt(seenState, ram, 29, kNon, 0x02);   // NON voice 1, before its read
+  sampleWritingAt(missedState, ram, 30, kNon, 0x02);  // one slot late
+  const StereoFrame seen = sample(seenState, ram);
+  const StereoFrame missed = sample(missedState, ram);
   EXPECT_NE(seen.left, missed.left);
+}
+
+TEST(SampleSchedule, TheEchoEnableIsReadAtItsOwnSlotAheadOfTheFoldsThatTakeIt) {
+  // EON rides the same read: voice 1's left fold at T3 of the sample after the
+  // read sends into the echo buffer, and the entry lands at T30 of that sample.
+  // A write before T29 reaches the fold one sample on; a write after it does not.
+  Ram ram{};
+  const std::span<std::uint8_t, 65536> wram{ram};
+  DspState base;
+  placeSteadyVoice(base, 1);
+  for (int n = 0; n < 32; ++n) stepDspCycle(base, wram);  // the first (atomic) frame
+
+  DspState seenState = base;
+  Ram seenRam = ram;
+  DspState missedState = base;
+  Ram missedRam = ram;
+  const std::span<std::uint8_t, 65536> seenView{seenRam};
+  const std::span<std::uint8_t, 65536> missedView{missedRam};
+  for (int n = 0; n < 32; ++n) {
+    if (seenState.slotCursor == 29) seenState[0x4D] = 0x02;
+    if (missedState.slotCursor == 30) missedState[0x4D] = 0x02;
+    stepDspCycle(seenState, seenView);
+    stepDspCycle(missedState, missedView);
+  }
+  for (int n = 0; n < 32; ++n) {  // the sample whose folds take the read
+    stepDspCycle(seenState, seenView);
+    stepDspCycle(missedState, missedView);
+  }
+  const auto word = [](const Ram& r) { return r[0] | (r[1] << 8); };
+  EXPECT_NE(word(seenRam), 0) << "the voice reached the echo buffer";
+  EXPECT_EQ(word(missedRam), 0) << "the write one slot late had not been read yet";
+}
+
+TEST(SampleSchedule, ThePitchModulationEnableIsReadOneSlotAheadOfTheOthers) {
+  // PMON is read at T28, one slot before NON, EON and DIR. Voice 1's advance at
+  // T2 of the next sample scales its step by voice 0's amplitude only if that
+  // read held the bit, so a write at T28 moves the voice's counter a sample
+  // sooner than a write at T29 does.
+  Ram ram{};
+  DspState base;
+  placeSteadyVoice(base, 0);  // the modulator: a constant amplitude
+  placeSteadyVoice(base, 1);
+  reg(base, 1, 0x02) = 0x00;  // voice 1 pitch 0400h: a step modulation can scale
+  reg(base, 1, 0x03) = 0x04;
+  sample(base, ram);
+  sample(base, ram);
+
+  DspState seenState = base;
+  DspState missedState = base;
+  sampleWritingAt(seenState, ram, 28, 0x2D, 0x02);   // PMON voice 1, before its read
+  sampleWritingAt(missedState, ram, 29, 0x2D, 0x02);  // one slot late
+  sample(seenState, ram);
+  sample(missedState, ram);
+  EXPECT_NE(seenState.voices[1].pitchCounter, missedState.voices[1].pitchCounter);
+}
+
+TEST(SampleSchedule, TheDirectoryRegisterIsReadAtItsOwnSlotAheadOfTheDirectoryReads) {
+  // DIR is read at T29 with NON and EON, and the directory reads that follow —
+  // here voice 1's loop-address read at T1 — address the table that read named.
+  // Two tables, one entry each: a write before T29 moves the next sample's read
+  // to the second table, a write after it leaves the read where it was.
+  Ram ram{};
+  ram[0x0F02] = 0x34;  // table 0Fh, entry 0, loop address 1234h
+  ram[0x0F03] = 0x12;
+  ram[0x2002] = 0x78;  // table 20h, entry 0, loop address 5678h
+  ram[0x2003] = 0x56;
+  DspState base;
+  placeSteadyVoice(base, 1);
+  base[0x5D] = 0x0F;
+  sample(base, ram);
+
+  DspState seenState = base;
+  DspState missedState = base;
+  sampleWritingAt(seenState, ram, 29, 0x5D, 0x20);
+  sampleWritingAt(missedState, ram, 30, 0x5D, 0x20);
+  sample(seenState, ram);
+  sample(missedState, ram);
+  EXPECT_EQ(seenState.voices[1].loopPointer, 0x5678);
+  EXPECT_EQ(missedState.voices[1].loopPointer, 0x1234);
+}
+
+TEST(SampleSchedule, OneReadOfTheVoiceWideRegistersServesEveryVoice) {
+  // The read is not per voice: a write landing between two voices' computes is
+  // taken by neither until the next T29. Voices 1 and 7 compute at T2 and T20,
+  // so a NON write at T10 — after voice 1's compute, before voice 7's — reaches
+  // both on the sample after next, and neither substitutes before then.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  placeSteadyVoice(dsp, 7);
+  sample(dsp, ram);
+
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == 10) dsp[kNon] = 0x82;  // NON voices 1 and 7
+    stepDspCycle(dsp, view(ram));
+  }
+  EXPECT_EQ(dsp.latchedNon, 0x82) << "this sample's T29 read took the write";
+  const int steady = dsp.voiceAmplitude[7];
+  sample(dsp, ram);
+  EXPECT_NE(dsp.voiceAmplitude[1], steady) << "voice 1 substituted on the next sample";
+  EXPECT_NE(dsp.voiceAmplitude[7], steady) << "and voice 7 on the same one";
 }
 
 // ── Two-phase VxOUTX / VxENVX visibility ────────────────────────────────────

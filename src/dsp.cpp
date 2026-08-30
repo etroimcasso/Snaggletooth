@@ -163,7 +163,7 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 [[nodiscard]] std::uint32_t pitchStep(const DspState& dsp, std::size_t voice,
                                       int prevAmplitude) noexcept {
   std::uint32_t step = latchedPitch(dsp, voice);
-  const bool modulate = voice > 0 && ((dsp[kDspPmon] >> voice) & 1) != 0;
+  const bool modulate = voice > 0 && ((dsp.latchedPmon >> voice) & 1) != 0;
   if (modulate) {
     const int factor = (prevAmplitude >> 4) + 0x400;  // -400h..+3FFh -> 000h..7FFh
     step = static_cast<std::uint32_t>((static_cast<int>(step) * factor) >> 10);
@@ -314,12 +314,30 @@ static void loadPitchHigh(DspState& dsp, std::size_t voice) noexcept {
   v.pitchPendingValid = true;
 }
 
+// Reads PMON at slot T28, and NON, EON and DIR together at T29 — the four
+// registers that speak for all eight voices, each read once a sample at its own
+// slot (see DspState::latchedPmon). A schedule without those slots reads them
+// as it enters, so a single-voice call and the frame-at-once sample see the
+// registers as they stand.
+static void loadPitchModulation(DspState& dsp) noexcept { dsp.latchedPmon = dsp[kDspPmon]; }
+
+static void loadVoiceWideRegisters(DspState& dsp) noexcept {
+  dsp.latchedNon = dsp[kDspNon];
+  dsp.latchedEon = dsp[kDspEon];
+  dsp.latchedDir = dsp[kDspDir];
+}
+
+static void latchGlobalRegisters(DspState& dsp) noexcept {
+  loadPitchModulation(dsp);
+  loadVoiceWideRegisters(dsp);
+}
+
 // Reads, at a voice's directory slot, the loop address of its directory entry
 // for the loop jump the compute may make this sample.
 void loadLoopPointer(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                      std::size_t voice) noexcept {
   VoiceState& v = dsp.voices[voice];
-  v.loopPointer = readBrrSource(ram, dsp[kDspDir], voiceSourceNumber(dsp, voice)).loop;
+  v.loopPointer = readBrrSource(ram, dsp.latchedDir, voiceSourceNumber(dsp, voice)).loop;
   v.loopPointerLoaded = true;
 }
 
@@ -745,7 +763,7 @@ static void resetVoiceForStart(DspState& dsp, std::size_t voice) noexcept {
 static void loadStartPointer(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                              std::size_t voice) noexcept {
   const std::uint16_t start =
-      readBrrSource(ram, dsp[kDspDir], voiceSourceNumber(dsp, voice)).start;
+      readBrrSource(ram, dsp.latchedDir, voiceSourceNumber(dsp, voice)).start;
   VoiceState& v = dsp.voices[voice];
   v.brrAddress = start;
   v.decoderAddress = start;
@@ -780,6 +798,9 @@ static void primeVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536>
 
 void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept {
+  // The single-voice call has no T29 to read the directory register at, so it
+  // reads it here and the pointer read below takes that value.
+  loadVoiceWideRegisters(dsp);
   resetVoiceForStart(dsp, voice);
   loadStartPointer(dsp, ram, voice);
   primeVoiceStream(dsp, ram, voice);
@@ -877,7 +898,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // once more on the consuming sample, at every pitch.
     v.restartPending = false;
     advanceVoiceStream(dsp, ram, voice, step);
-    const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
+    const bool noise = ((dsp.latchedNon >> voice) & 1) != 0;
     const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
     amplitude = (sample * static_cast<int>(v.envelope)) >> 11;
     // The standing envelope takes this sample's own update before the restart
@@ -927,7 +948,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     } else {
       advanceVoiceStream(dsp, ram, voice, step);
       v.headerAddress = v.decoderAddress;
-      const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
+      const bool noise = ((dsp.latchedNon >> voice) & 1) != 0;
       const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
       amplitude = (sample * static_cast<int>(v.envelope)) >> 11;
     }
@@ -981,7 +1002,7 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
     // A voice whose NON bit is set outputs the shared noise level in place of its
     // interpolated BRR sample; the stream's advance above is untouched by the
     // substitution, so decoding and ENDX are unaffected.
-    const bool noise = ((dsp[kDspNon] >> voice) & 1) != 0;
+    const bool noise = ((dsp.latchedNon >> voice) & 1) != 0;
     const int sample = noise ? dsp.noiseLevel : interpolatedSample(dsp, voice);
     // The level scaling this sample is the one already standing; the update below
     // is what the next sample reads. So a voice leaving its startup samples emits
@@ -1003,7 +1024,7 @@ static void applyVoiceLeft(DspState& dsp, std::size_t voice) noexcept {
   const int vol = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolLeft)]);
   const int send = (dsp.voiceAmplitude[voice] * vol) >> 6;
   dsp.mixLeft = clampSigned16(dsp.mixLeft + send);
-  if (((dsp[kDspEon] >> voice) & 1) != 0)
+  if (((dsp.latchedEon >> voice) & 1) != 0)
     dsp.echoSendLeft = clampSigned16(dsp.echoSendLeft + send);
 }
 
@@ -1012,7 +1033,7 @@ static void applyVoiceRight(DspState& dsp, std::size_t voice) noexcept {
   const int vol = static_cast<std::int8_t>(dsp[voiceRegister(voice, kVoiceVolRight)]);
   const int send = (dsp.voiceAmplitude[voice] * vol) >> 6;
   dsp.mixRight = clampSigned16(dsp.mixRight + send);
-  if (((dsp[kDspEon] >> voice) & 1) != 0)
+  if (((dsp.latchedEon >> voice) & 1) != 0)
     dsp.echoSendRight = clampSigned16(dsp.echoSendRight + send);
 }
 
@@ -1029,6 +1050,9 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
   // register read would — byte-identical to the frame-at-once model.
   for (std::size_t v = 0; v < 8; ++v)
     dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
+  // The voice-wide registers likewise: this frame has no T28/T29 to read them
+  // at, so it takes them as they stand.
+  latchGlobalRegisters(dsp);
   pollKeying(dsp, ram);
 
   const std::uint8_t flg = dsp[kDspFlg];
@@ -1058,7 +1082,7 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
     const int sendRight = (amplitude * volRight) >> 6;
     left = clampSigned16(left + sendLeft);
     right = clampSigned16(right + sendRight);
-    if (((dsp[kDspEon] >> voice) & 1) != 0) {
+    if (((dsp.latchedEon >> voice) & 1) != 0) {
       echoLeft = clampSigned16(echoLeft + sendLeft);
       echoRight = clampSigned16(echoRight + sendRight);
     }
@@ -1311,11 +1335,15 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       break;
     case 28:
       finalizeRight(dsp);
+      // PMON is read here, for every voice at once.
+      loadPitchModulation(dsp);
       break;
     case 29:
       // The write gate for T30's left word: FLG bit 5 is loaded one slot before
       // the word it governs.
       dsp.echoGateLeft = (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
+      // NON, EON and DIR are read here, in one act, for every voice at once.
+      loadVoiceWideRegisters(dsp);
       break;
     case 30:
       // The left echo word lands at its write slot, T30, under the gate loaded at
