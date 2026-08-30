@@ -250,6 +250,24 @@ void shiftWindow(VoiceState& v, std::int16_t sample) noexcept {
 // caught it.
 constexpr std::array<std::uint8_t, 8> kVoiceBrrLoadSlot = {26, 2, 5, 8, 11, 14, 17, 20};
 
+// The slot of each voice's directory read — where the sample directory entry
+// `DIR`/`VxSRCN` select is read from RAM: T22 for voice 0, nine slots before
+// its compute, and one slot before the compute for voices 1-7. The loop
+// address read there is the one the decoder's loop jump at the compute takes.
+// Measured against spc_dsp6's `Timing/Voice/V2 dir.loop.lsb` and
+// `dir.loop.msb`, which pulse the entry's loop bytes for five cycles at every
+// offset and hash which voices looped through the pulsed value.
+constexpr std::array<std::uint8_t, 8> kVoiceDirSlot = {22, 1, 4, 7, 10, 13, 16, 19};
+
+// Reads, at a voice's directory slot, the loop address of its directory entry
+// for the loop jump the compute may make this sample.
+void loadLoopPointer(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                     std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  v.loopPointer = readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).loop;
+  v.loopPointerLoaded = true;
+}
+
 // The in-group sample index whose consumption schedules the decode of the
 // group two on: the third sample, so the group's first data byte lands at the
 // load slot two samples after the group boundary's own consumption and its
@@ -391,8 +409,12 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   ++v.brrSampleIndex;
   if (v.brrSampleIndex == kDecoderLead) {
     if ((ram[v.brrAddress] & 0x01) != 0) {
+      // The loop jump takes the address the voice's directory slot read this
+      // sample; a schedule without that slot reads the directory here.
       v.decoderAddress =
-          readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).loop;
+          v.loopPointerLoaded
+              ? v.loopPointer
+              : readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).loop;
       dsp.preparedEndx |= static_cast<std::uint8_t>(1u << voice);
     } else {
       v.decoderAddress = static_cast<std::uint16_t>(v.brrAddress + 9);
@@ -1100,6 +1122,11 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
     }
   }
+
+  // The directory read at each voice's directory slot: the loop address the
+  // compute's loop jump takes, read ahead of it.
+  for (std::size_t voice = 0; voice < 8; ++voice)
+    if (kVoiceDirSlot[voice] == slot) loadLoopPointer(dsp, ram, voice);
 
   // The BRR load at each voice's load slot: the header and first data byte of
   // the group decodes the voice's compute will perform, read ahead of it.

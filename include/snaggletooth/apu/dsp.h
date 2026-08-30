@@ -176,6 +176,16 @@ struct VoiceState {
   // frame-at-once sample and the single-voice call read RAM at the check).
   std::uint8_t loadedHeader = 0;
   bool headerLoaded = false;
+  // The loop address the voice's directory slot read this sample — the entry
+  // `DIR`/`VxSRCN` select, read at T22 for voice 0 and one slot before the
+  // compute for voices 1-7 — which the decoder's loop jump at the compute then
+  // takes. A write to the directory landing after that slot reaches the next
+  // sample's read, not this jump (`Timing/Voice/V2 dir.loop.lsb`/`.msb`).
+  // loopPointerLoaded is clear while no directory slot has run (a state's
+  // first, frame-at-once sample and the single-voice call read the directory
+  // at the jump).
+  std::uint16_t loopPointer = 0;
+  bool loopPointerLoaded = false;
   // The decoder's filter history — the two most recently DECODED samples,
   // which run ahead of the window's consumed taps.
   std::int16_t decodePrev1 = 0;

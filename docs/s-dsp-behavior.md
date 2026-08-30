@@ -492,6 +492,7 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 
 | Slot | Work |
 |---|---|
+| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its). |
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
 | T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` set becomes readable, three slots after its compute — voice 0's at T3 of the following sample. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
@@ -664,7 +665,9 @@ The header the per-sample check reads is the **decoder's** block — and the dec
 sound is. A key-on primes the voice's whole first block before the voice sounds, and from then on
 the decoder enters each following block while the interpolation cursor is still eight samples back
 in the block before: it resolves there where the chain goes (the next block, or the loop address
-for an end block, which is when `DIR`/`VxSRCN` are read — and, for an end block, when `ENDX` is
+for an end block — read from the directory at the voice's directory slot earlier in that sample,
+see [below](#the-loop-address-is-read-at-the-voices-directory-slot-ahead-of-the-compute) — and,
+for an end block, when `ENDX` is
 set; see [below](#endx-is-set-when-the-decoder-leaves-the-end-block-and-reads-back-three-slots-after-the-compute)).
 Neither reference states the lead — Anomie describes a twelve-sample ring
 turned "when the interpolation index passes 0x4000" without fixing the decoder's distance ahead,
@@ -783,6 +786,29 @@ the second byte's usual place.
 
 *Arbitrated by `Order/pitch after brr` with `Timing/Voice/V3 BRR.sample.lsb`/`.msb`, the timing
 pair run from two arrival phases.*
+
+### The loop address is read at the voice's directory slot, ahead of the compute
+
+The loop jump the decoder makes as it leaves an end block takes an address read earlier in the
+same sample: the directory entry `DIR`/`VxSRCN` select is read at the voice's **directory slot** —
+T22 for voice 0, nine slots before its compute, and the slot before the compute for voices 1-7
+(T1, T4 … T19). Both references place it there: fullsnes's chart carries a `VxSRCN/DIR.lsb/msb` RAM
+access on exactly those rows, and Anomie's V2 step "loads the sample pointer" one step ahead of the
+header read, his V4 having "flagged the loop address for loading next step V2".
+
+`Timing/Voice/V2 dir.loop.lsb` and `.msb` measure the slot to the cycle. Each keys the eight
+voices in turn at pitch `$3000` over a looping block, with the entry's loop address at the block
+itself; per row it pulses one loop byte to a value that points at a silent block for five cycles at
+a per-row offset from that row's own key-on, and hashes whether the voice went quiet — thirty-six
+rows a voice, one character each, behind the voice's index. The recovered read cycles — one
+structured solution per hash, both bytes identical — put the read nine slots before voice 0's
+compute and one before each other voice's; a read at the compute itself catches a different set of
+rows for every voice.
+
+The consequence is narrow but exact: a directory write that lands after the directory slot and
+before the compute reaches the next sample's read, not this jump.
+
+*Arbitrated by `Timing/Voice/V2 dir.loop.lsb`/`.msb`.*
 
 ### Pitch modulation reads the previous voice's output from the previous sample
 

@@ -1296,4 +1296,74 @@ TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {
   EXPECT_EQ(dsp.slotCursor, 0u);     // back at the start of a sample
 }
 
+// Advances one whole sample, writing ram[addr]=value the instant the cursor
+// reaches `atSlot` (just before that slot runs).
+void sampleWritingRamAt(DspState& dsp, Ram& ram, int atSlot, std::uint16_t addr,
+                        std::uint8_t value) {
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == atSlot) ram[addr] = value;
+    stepDspCycle(dsp, view(ram));
+  }
+}
+
+TEST(SampleSchedule, TheLoopAddressIsReadAtTheVoicesDirectorySlot) {
+  // The loop jump the decoder makes as it leaves an end block takes the loop
+  // address the voice's directory slot read — T22 for voice 0, the slot before
+  // the compute for voices 1-7 — not the directory as it stands at the compute.
+  // Measured against spc_dsp6's `Timing/Voice/V2 dir.loop.lsb`/`.msb`: a
+  // five-cycle pulse into either loop byte is caught by voice 0 nine slots
+  // before its compute and by voices 1-7 one slot before theirs.
+  const auto pin = [](std::size_t voice, int dirSlot) {
+    Ram ram{};
+    ram[0x0200] = 0x00;  // directory entry 0: start $0300
+    ram[0x0201] = 0x03;
+    ram[0x0202] = 0x00;  // loop -> $0300
+    ram[0x0203] = 0x03;
+    ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: loops over itself
+    ram[0x0400] = 0xC3;  // a second looping block the rewritten entry points at
+    for (int n = 0; n < 8; ++n) {
+      ram[static_cast<std::size_t>(0x0301 + n)] = 0x44;
+      ram[static_cast<std::size_t>(0x0401 + n)] = 0x44;
+    }
+    DspState dsp;
+    dsp[0x5D] = 0x02;              // DIR -> $0200
+    reg(dsp, voice, 0x03) = 0x10;  // pitch $1000: one stream sample per call
+    reg(dsp, voice, 0x07) = 0x7F;  // Direct Gain 7F0h
+    reg(dsp, voice, 0x00) = 0x40;
+    reg(dsp, voice, 0x01) = 0x40;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+    dsp.internalKon = static_cast<std::uint8_t>(1u << voice);
+    sample(dsp, ram);  // the poll at this sample's T31 arms the restart
+
+    // Walk the stream to the sample before the decoder leaves the block: the
+    // next compute's advance is the one that resolves the loop.
+    int n = 0;
+    while (dsp.voices[voice].brrSampleIndex != 7 && n < 40) {
+      sample(dsp, ram);
+      ++n;
+    }
+    ASSERT_LT(n, 40) << "the stream never reached the jump";
+    ASSERT_EQ(dsp.voices[voice].decoderAddress, 0x0300u);
+
+    // Point the entry's loop at $0400 one slot before the directory slot, and
+    // one slot after it: only the earlier write reaches this sample's jump.
+    DspState seen = dsp;
+    DspState missed = dsp;
+    Ram seenRam = ram;
+    Ram missedRam = ram;
+    sampleWritingRamAt(seen, seenRam, dirSlot, 0x0203, 0x04);
+    sampleWritingRamAt(missed, missedRam, dirSlot + 1, 0x0203, 0x04);
+    EXPECT_EQ(seen.voices[voice].brrSampleIndex, 8u) << "the jump's sample";
+    EXPECT_EQ(seen.voices[voice].decoderAddress, 0x0400u)
+        << "voice " << voice << ": a write before the directory slot reaches the jump";
+    EXPECT_EQ(missed.voices[voice].decoderAddress, 0x0300u)
+        << "voice " << voice << ": a write after the directory slot does not";
+  };
+  pin(0, 22);
+  pin(1, 1);
+  pin(7, 19);
+}
+
 }  // namespace

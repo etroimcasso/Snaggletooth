@@ -282,6 +282,12 @@ voice parked at pitch zero is the limiting case: it consumes nothing, so it deco
 rewrite its entire block and it still plays all twelve primed samples when it moves again. Only the
 header check reads RAM every sample.
 
+The sample directory has its own slot too. The loop address the decoder takes as it leaves an end
+block is read from the directory entry (`DIR × $100 + VxSRCN × 4 + 2`) at the voice's directory
+slot — T22 for voice 0, nine slots before its compute, and the slot before the compute for voices
+1-7 — so a directory write landing between that slot and the compute reaches the next sample's
+read, not this jump.
+
 Around a key-on the check's view stands still a little longer. It keeps reading the block standing
 before the key-on through the five empty samples and the first two live samples — so a startup
 whose decoder crosses into an End+Mute block on the way publishes its first envelope steps, and
@@ -476,9 +482,9 @@ snapshot, assign it to restore.
   voice you have keyed off, because its stream is still running.
 - **A voice ends early.** The decoder runs eight samples ahead of the interpolation cursor, so an
   End+Mute block releases the voice while the last eight samples of the block before are still
-  unplayed — and the End+Mute block's own samples never sound. The loop jump and the
-  `DIR`/`VxSRCN` read happen at the decoder's entry to the next block, ahead of the sound by the
-  same distance.
+  unplayed — and the End+Mute block's own samples never sound. The loop jump happens at the
+  decoder's entry to the next block, ahead of the sound by the same distance, and the loop address
+  it takes was read at the voice's directory slot earlier in that sample.
 - **`ENDX` comes late, not early.** The bit marks the decoder leaving the end block, a full block
   after it entered — for a voice an End+Mute block silenced, sixteen stream samples after it went
   quiet. Poll `ENDX` to learn that a sample has ended, not to learn that it is about to.
