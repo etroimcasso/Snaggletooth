@@ -252,7 +252,7 @@ so the walk begins on the second. Only the *output* is silent during the
 startup; the position is live throughout. The pitch the walk uses is the one the key-on itself
 captured — that sub-test's freezes land because each rides a `KON` write of its own; a pitch write
 with no key-on behind it
-waits out the capture hold (see [the pitch capture](#the-pitch-is-captured-once-per-sample--and-a-key-on-holds-the-capture-for-seven)).
+waits out the hold (see [the pitch reads](#the-pitch-pair-is-read-at-the-voices-own-slots-and-steps-the-next-advance--a-key-on-holds-the-reads-for-its-silent-span)).
 
 `KON`/`KOFF` are polled every other sample, at the last slot of the sample — the same slot at which
 voice 0 runs its whole compute. **The keying load runs first.** A keyed voice 0 therefore takes the
@@ -495,7 +495,8 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | Slot | Work |
 |---|---|
 | T18; T21; T0, T3, T6, T9, T12, T15 | Each voice's source read — `VxSRCN`, four slots ahead of the voice's directory read (voice 0 at T18, voices 2-7 at T(3v−6)); voice 1's at T21, twelve ahead of its directory read in the next sample. |
-| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. The entry is the one the source read selected. |
+| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. The entry is the one the source read selected. `VxPITCHL` and `VxADSR1` are read in the same slot. |
+| T2, T5, T8, T11, T14, T17, T20; T23 | Each voice's `VxPITCHH` read, one after its directory slot — the compute slot itself for voices 1-7, read before the compute runs in it. The pair steps the next sample's advance. |
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
 | T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` set becomes readable, three slots after its compute — voice 0's at T3 of the following sample. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
@@ -607,35 +608,52 @@ seventh, each readable two slots later. **Anomie's `VxENVX` slot is confirmed** 
 slots earlier regresses an otherwise-passing sub-test. The `VxOUTX` half of the disagreement is
 untested and remains open.
 
-### The pitch is captured once per sample — and a key-on holds the capture for seven
+### The pitch pair is read at the voice's own slots and steps the next advance — a key-on holds the reads for its silent span
 
-**Neither document mentions any of this.** Both read `VxPITCHL`/`VxPITCHH` at the voice's own slots,
-which would make a pitch write reach each voice's stream within a sample of landing, at a per-voice
-instant. It does not, in two ways.
+**Both documents place the reads, and the ROM confirms them to the cycle.** `VxPITCHL` is read at
+the voice's directory slot — T22 for voice 0, T(3v−2) for voices 1-7 — and `VxPITCHH` one slot
+later, T23 and T(3v−1): for voices 1-7 the compute slot itself, read before the compute runs in it.
+fullsnes's register-array column has `V0PITCHL` at T22 and `V0PITCHH` at T23; Anomie reads
+`VxPITCHL` at V2 (`0:21 1:0 2:3 …`) and `VxPITCHH` at V3a (`0:22 1:1 2:4 …`). `VxADSR1` is read
+at the directory slot too (`V0ADSR1` T22; Anomie's V2), while `VxADSR2` and `VxGAIN` are read at
+the compute (V3c). `Timing/Voice/V2 pitchl`, `V3 pitchh` and `V2 adsr0.0F`/`.70`/`.80` measure the
+three registers the way the `dir.*` and `srcn.*` pairs measure theirs: per row a five-cycle pulse
+into the register at a per-row offset, and the hash records which voices took it. The recovered
+read cycles — one structured solution per constant — are exactly those slots; the three tests
+sharing one constant pulse `VxPITCHL` and `VxADSR1` at the same offsets and `VxPITCHH` one slot
+later, which is the column itself.
 
-**The read is a shared capture with a one-sample pipeline.** The pitch registers are captured for
-all eight voices at the first slot of every sample, and the capture reaches a voice's advance one
-sample deep: voice 0's compute at the last slot is the only one late enough to consume its own
-sample's capture, while voices 1-7 advance by the previous sample's. A pitch value standing for
-exactly one sample is therefore consumed for exactly one advance by every voice, whatever slot its
-writes land on.
+**The pair a sample reads steps the advance of the sample after it.** The slot measurement cannot
+say which sample's advance a read serves; the documents' step order does. V4 increments the
+position *after* V3c has formed the sample's output, one step after the pair was read, and this
+model advances before it interpolates — so a compute takes the pair read at the voice's pitch
+slots of the sample before, for every voice alike, voice 0 included. A pitch write landing after a
+voice's pitch slots reaches the advance two computes on; a value standing for exactly one sample is
+consumed for exactly one advance by every voice, whatever slot its writes land on. The same-sample
+form — the read stepping the compute it precedes — fails `Order/pitch added before interp`,
+`Order/pitch after brr`, `Misc/interp pos clamped at $7FFF`, `Random/pitch mod` and `KON/kon then
+change pitch`; the lagged form passes all five. `VxADSR1` has no such lag: the directory slot's
+read drives the compute that follows it.
 
-**A key-on suspends that capture for seven samples.** Every key-on the poll consumes — including
-one absorbed or rewound inside the silent span — schedules its voice's capture for the first slot
-of the poll-parity sample after the consuming poll, then holds the per-sample capture off for seven
-samples counted from the poll. Through the hold, the startup's stream walk uses the pitch the
-scheduled capture took. A bare pitch write inside the hold never reaches the stream; one landing
-between the poll and the parity sample's first slot does, because it is what the scheduled capture
-reads. The hold is anchored to the poll, so it covers the same samples for every voice.
+**A key-on suspends the reads for the voice's silent span.** Every key-on the poll consumes —
+including one absorbed or rewound inside the silent span — schedules a capture of the pair at the
+first slot of the poll-parity sample after the consuming poll (voice 0's compute takes it that
+sample, voices 1-7's the sample after), then holds the slot reads off for six computes, the silent
+span. The seventh compute's reads are the first live ones and the eighth compute the first advance
+at a live pitch — uniform across the eight voices, because voice 0's first compute follows the poll
+in the slot they share and the others' come a sample later. Through the hold, the startup's stream
+walk uses the pitch the scheduled capture took. A bare pitch write inside the hold never reaches
+the stream; one landing between the poll and the parity sample's first slot does, because it is
+what the scheduled capture reads.
 
 *Derived from `KON/kon then change pitch`.* The sub-test keys a voice with pitch zero, pulses
 `VxPITCHL` to `$10` for exactly one sample at an offset that grows one sample per reading, and reads
 the cursor's total advance back through the echo buffer. The expected readings are `$0008` for the
 first four offsets and `$0018` — exactly one sample at the pulsed pitch — for the last four, on all
 eight rows alike. Nothing lands while the hold stands, one sample lands after it, and both halves
-hold at *every* alignment: an every-other-sample capture leaves half the visible alignments blind
-(the alternating table this project's earlier model printed), and moving the hold's edge by one
-sample in either direction moves the boundary off the ROM's.
+hold at *every* alignment: an every-other-sample read leaves half the visible alignments blind, and
+moving the hold's edge by one compute in either direction — or anchoring it to the poll's sample
+rather than the voice's computes — moves the boundary off the ROM's.
 
 *`KON/kon decoding when another kon` re-read.* That ROM's frozen-pitch readings quantize in pairs,
 which first read as a capture grid two samples wide. Each of its freezes rides nine cycles behind a

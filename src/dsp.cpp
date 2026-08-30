@@ -153,12 +153,10 @@ constexpr std::array<std::int16_t, 512> kGaussTable = {
 // needed. The step itself is never capped (a modulated step reaches 7FEEh); the
 // 128 kHz ceiling is applied to the position the step is added to, in
 // advanceVoiceStream.
-// The pitch step a voice's stream advance uses this sample — the captured value,
-// never the live register pair (see DspState::pitchLatch). Voice 0's T31 compute
-// is the only one late enough to see its own sample's capture; voices 1-7 read
-// the previous sample's.
+// The pitch step a voice's stream advance uses this sample — the value its
+// pitch slots read, never the live register pair (see DspState::pitchLatch).
 [[nodiscard]] std::uint32_t latchedPitch(const DspState& dsp, std::size_t voice) noexcept {
-  return voice != 0 ? dsp.pitchLatchOld[voice] : dsp.pitchLatch[voice];
+  return dsp.pitchLatch[voice];
 }
 
 [[nodiscard]] std::uint32_t pitchStep(const DspState& dsp, std::size_t voice,
@@ -281,6 +279,38 @@ static void loadSourceNumber(DspState& dsp, std::size_t voice) noexcept {
 static std::uint8_t voiceSourceNumber(const DspState& dsp, std::size_t voice) noexcept {
   const VoiceState& v = dsp.voices[voice];
   return v.srcnLoaded ? v.srcn : dsp[voiceRegister(voice, kVoiceSrcn)];
+}
+
+// The slot of each voice's `VxPITCHH` read — one after the directory slot,
+// where `VxPITCHL` is read: T23 for voice 0 and the compute slot itself for
+// voices 1-7, read before the compute runs in it. The pair joined there is the
+// step that compute's advance takes. Measured against spc_dsp6's
+// `Timing/Voice/V2 pitchl` and `V3 pitchh`, which pulse each byte for five
+// cycles at every offset and hash which voices advanced through it.
+constexpr std::array<std::uint8_t, 8> kVoicePitchHighSlot = {23, 2, 5, 8, 11, 14, 17, 20};
+
+// Reads, at a voice's directory slot, the `VxPITCHL` byte its pitch-high slot
+// joins into the compute's step, and the `VxADSR1` the compute's envelope step
+// runs under (`Timing/Voice/V2 adsr0.0F`/`.70`/`.80` pulse the register for
+// five cycles at every offset and hash which voices' envelopes took it). A
+// voice inside its key-on hold keeps the step the key-on's scheduled capture
+// loaded (see DspState::pitchLatch); the `VxADSR1` read has no such hold.
+static void loadDirectorySlotRegisters(DspState& dsp, std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  if (v.pitchCaptureHold == 0) v.pitchLow = dsp[voiceRegister(voice, kVoicePitchLow)];
+  v.adsr1 = dsp[voiceRegister(voice, kVoiceAdsr1)];
+  v.adsr1Loaded = true;
+}
+
+// Reads, at a voice's pitch-high slot, the `VxPITCHH` byte and joins it with
+// the directory slot's `VxPITCHL` into the pair the next sample's advance
+// takes (VoiceState::pitchPending).
+static void loadPitchHigh(DspState& dsp, std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  if (v.pitchCaptureHold != 0) return;
+  const std::uint32_t high = dsp[voiceRegister(voice, kVoicePitchHigh)];
+  v.pitchPending = static_cast<std::uint16_t>(((high << 8) | v.pitchLow) & 0x3FFF);
+  v.pitchPendingValid = true;
 }
 
 // Reads, at a voice's directory slot, the loop address of its directory entry
@@ -992,13 +1022,11 @@ static void applyVoiceRight(DspState& dsp, std::size_t voice) noexcept {
 // read-only caller (the FLG bit 5 case).
 static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                                        std::uint8_t* echoRam) noexcept {
-  // A freshly seeded state holds no pitch captures yet: take both stages from
-  // the registers as they stand, so this frame reads the same values a live
+  // A freshly seeded state holds no pitch captures yet: take them from the
+  // registers as they stand, so this frame reads the same values a live
   // register read would — byte-identical to the frame-at-once model.
-  for (std::size_t v = 0; v < 8; ++v) {
+  for (std::size_t v = 0; v < 8; ++v)
     dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
-    dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
-  }
   pollKeying(dsp, ram);
 
   const std::uint8_t flg = dsp[kDspFlg];
@@ -1106,6 +1134,16 @@ static void computeVoiceSlot(DspState& dsp, std::span<const std::uint8_t, 65536>
   const std::uint8_t heldEnvx = dsp[voiceRegister(voice, kVoiceEnvx)];
   dsp.modulatorAmplitude[voice] = dsp.voiceAmplitude[voice];
   dsp.voiceAmplitude[voice] = computeVoiceAmplitude(dsp, ram, voice, prev, softReset);
+  // The pair this sample's pitch slots read is the next advance's step: the
+  // hardware advances after the output is formed, one step after the read
+  // (see DspState::pitchLatch). A key-on's hold on those reads counts down
+  // one compute at a time.
+  VoiceState& v = dsp.voices[voice];
+  if (v.pitchPendingValid) {
+    dsp.pitchLatch[voice] = v.pitchPending;
+    v.pitchPendingValid = false;
+  }
+  if (v.pitchCaptureHold > 0) --v.pitchCaptureHold;
   dsp.preparedOutx[voice] = dsp[voiceRegister(voice, kVoiceOutx)];
   dsp.preparedEnvx[voice] = dsp[voiceRegister(voice, kVoiceEnvx)];
   dsp[voiceRegister(voice, kVoiceOutx)] = heldOutx;
@@ -1145,39 +1183,29 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
 
   if (slot == 0) {
     // Frame start: clear the mix the previous frame delivered, then apply voice 0's
-    // amplitude — prepared at the last frame's T31 (the pipeline lag). Take the
-    // pitch capture (see DspState::pitchLatch): age the standing capture out and
-    // read every voice's register pair — every sample, except while a voice's
-    // key-on capture hold stands, when its pair keeps the value the key-on's
-    // own scheduled capture loaded.
+    // amplitude — prepared at the last frame's T31 (the pipeline lag). Take a
+    // key-on's scheduled pitch capture (see DspState::pitchLatch); a live
+    // voice's pair is read at its own pitch slots later in the sample.
     dsp.mixLeft = 0;
     dsp.mixRight = 0;
     dsp.echoSendLeft = 0;
     dsp.echoSendRight = 0;
     for (std::size_t v = 0; v < 8; ++v) {
       const std::uint8_t bit = static_cast<std::uint8_t>(1u << v);
-      if (dsp.voices[v].pitchCaptureHold > 0) --dsp.voices[v].pitchCaptureHold;
-      if ((dsp.pitchReloadAge & bit) != 0) {
-        // The sample after a scheduled capture: age the captured value in for
-        // voices 1-7, exactly as a normal capture's propagation would.
-        dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
-        dsp.pitchReloadAge = static_cast<std::uint8_t>(dsp.pitchReloadAge & ~bit);
-        continue;
-      }
-      if ((dsp.pitchReloadPending & bit) != 0) {
+      if ((dsp.pitchReloadPending & bit) != 0 && dsp.sampleIndex % 2 == 0) {
         // The capture a consumed key-on scheduled: on the poll-parity sample
-        // following the poll, read the register pair; it ages in next sample.
-        if (dsp.sampleIndex % 2 == 0) {
-          dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
-          dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
-          dsp.pitchReloadPending = static_cast<std::uint8_t>(dsp.pitchReloadPending & ~bit);
-          dsp.pitchReloadAge |= bit;
+        // following the poll, read the register pair — voice 0's compute takes
+        // it this sample, voices 1-7's the next (their pending pair lands
+        // once this sample's compute has run, as a slot read's does).
+        const auto pair = static_cast<std::uint16_t>(voicePitch(dsp, v));
+        if (v == 0) {
+          dsp.pitchLatch[v] = pair;
+        } else {
+          dsp.voices[v].pitchPending = pair;
+          dsp.voices[v].pitchPendingValid = true;
         }
-        continue;
+        dsp.pitchReloadPending = static_cast<std::uint8_t>(dsp.pitchReloadPending & ~bit);
       }
-      if (dsp.voices[v].pitchCaptureHold > 0) continue;
-      dsp.pitchLatchOld[v] = dsp.pitchLatch[v];
-      dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
     }
   }
 
@@ -1188,12 +1216,19 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
 
   // The directory read at each voice's directory slot: the loop address the
   // compute's loop jump takes, read ahead of it — and, for a voice whose
-  // key-on the previous compute applied, the entry's start pointer.
+  // key-on the previous compute applied, the entry's start pointer. The
+  // `VxPITCHL` and `VxADSR1` registers are read in the same slot.
   for (std::size_t voice = 0; voice < 8; ++voice) {
     if (kVoiceDirSlot[voice] != slot) continue;
     if (dsp.voices[voice].startPending) loadStartPointer(dsp, ram, voice);
     loadLoopPointer(dsp, ram, voice);
+    loadDirectorySlotRegisters(dsp, voice);
   }
+
+  // The `VxPITCHH` read at each voice's pitch-high slot, one after the
+  // directory slot, completing the step the compute's advance takes.
+  for (std::size_t voice = 0; voice < 8; ++voice)
+    if (kVoicePitchHighSlot[voice] == slot) loadPitchHigh(dsp, voice);
 
   // The BRR load at each voice's load slot: a keyed voice's prime, then the
   // header and first data byte of the group decodes the voice's compute will
@@ -1483,11 +1518,14 @@ void pollKeying(DspState& dsp,
       // do not), and its timing is pinned from both sides: a register write
       // nine cycles behind the KON write must be seen (the freezes), while one
       // landing three cycles after the parity sample's first slot must not be
-      // (that ROM's earliest pulse). The hold itself is poll-anchored — seven
-      // samples, uniform for the eight voices — which places every voice's
-      // first live capture at the same sample.
+      // (that ROM's earliest pulse). The hold itself is counted in the voice's
+      // own computes — the six of its silent span — so the seventh compute's
+      // slot reads are the first live ones and the eighth compute the first
+      // advance at a live pitch, uniform for the eight voices: voice 0's
+      // first compute follows this poll in the slot they share, the others'
+      // come in the next sample.
       dsp.pitchReloadPending |= bit;
-      dsp.voices[voice].pitchCaptureHold = 7;
+      dsp.voices[voice].pitchCaptureHold = kKeyOnSilentCalls;
     }
   }
   dsp.internalKon = 0;
@@ -1537,7 +1575,9 @@ std::uint16_t stepVoiceEnvelope(DspState& dsp, std::size_t voice, bool brrEndMut
 // restart reads it.
 static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept {
   VoiceState& v = dsp.voices[voice];
-  const std::uint8_t adsr1 = dsp[voiceRegister(voice, kVoiceAdsr1)];
+  // `VxADSR1` is the directory slot's read (see VoiceState::adsr1); `VxADSR2`
+  // and `VxGAIN` are read here, at the compute.
+  const std::uint8_t adsr1 = v.adsr1Loaded ? v.adsr1 : dsp[voiceRegister(voice, kVoiceAdsr1)];
   const std::uint8_t adsr2 = dsp[voiceRegister(voice, kVoiceAdsr2)];
   const std::uint8_t gain = dsp[voiceRegister(voice, kVoiceGain)];
   const int level = v.envelope;

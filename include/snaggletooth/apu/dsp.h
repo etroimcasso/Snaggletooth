@@ -197,6 +197,23 @@ struct VoiceState {
   // single-voice call and the un-slotted restart read the register live).
   std::uint8_t srcn = 0;
   bool srcnLoaded = false;
+  // The `VxPITCHL` byte the voice's directory slot read this sample — T22 for
+  // voice 0, T(3v-2) for voices 1-7 — joined at the next slot by `VxPITCHH`
+  // into pitchPending (`Timing/Voice/V2 pitchl`, `V3 pitchh`).
+  std::uint8_t pitchLow = 0;
+  // The pair the voice's pitch slots read this sample, or a key-on's scheduled
+  // capture: it becomes DspState::pitchLatch — the step the compute's advance
+  // takes — once this sample's compute has run, so it reaches the NEXT
+  // sample's advance (see DspState::pitchLatch).
+  std::uint16_t pitchPending = 0;
+  bool pitchPendingValid = false;
+  // The `VxADSR1` the voice's directory slot read this sample, which the
+  // compute's envelope step runs under: a write landing after that slot
+  // reaches the next sample's step (`Timing/Voice/V2 adsr0.0F`/`.70`/`.80`).
+  // adsr1Loaded is clear while no directory slot has run (a state's first,
+  // frame-at-once sample and the single-voice call read the register live).
+  std::uint8_t adsr1 = 0;
+  bool adsr1Loaded = false;
   // The decoder's filter history — the two most recently DECODED samples,
   // which run ahead of the window's consumed taps.
   std::int16_t decodePrev1 = 0;
@@ -205,9 +222,10 @@ struct VoiceState {
   EnvPhase phase = EnvPhase::Release;
   std::uint8_t konDelay = 0;
   std::uint8_t computesSinceKeyOn = 0xFF;
-  // Samples left before the per-sample pitch capture resumes for this voice —
-  // armed to seven by every consumed key-on, so the hold is anchored to the
-  // poll and uniform across the eight voices (see DspState::pitchLatch).
+  // Computes left before the voice's pitch slots read the register pair again
+  // — armed to the six of the silent span by every consumed key-on and counted
+  // down at each compute, so the seventh compute's reads are the first live
+  // ones for every voice (see DspState::pitchLatch).
   std::uint8_t pitchCaptureHold = 0;
   // A full restart the keying poll consumed, waiting for the voice's own
   // compute. The poll arms the countdown and the counter at once, but the
@@ -385,33 +403,35 @@ struct DspState {
   std::array<std::uint8_t, 8> preparedOutx{};
   std::array<std::uint8_t, 8> preparedEnvx{};
 
-  // The effective-pitch capture. A voice's stream advance does not read
-  // VxPITCHL/H live: the register pairs are captured for all eight voices at
-  // the first slot of every sample, and a capture reaches a voice's advance one
-  // full sample later. Voice 0's T31 compute is the only one late enough to see
-  // its own sample's capture (pitchLatch); voices 1-7 advance by the previous
-  // sample's (pitchLatchOld). Every consumed key-on suspends the capture for
-  // seven samples (pitchCaptureHold) and schedules one of its own at the next
-  // poll-parity sample (pitchReloadPending/pitchReloadAge) — so a bare pitch
-  // write during the hold never reaches the stream, while one riding a key-on
-  // lands through that scheduled capture, quantized to the keying poll's
-  // every-other-sample grid. A freshly seeded state captures the register
-  // values before its first sample, keeping that frame byte-identical to the
-  // frame-at-once model. Measured against spc_dsp6: `KON/kon then change
-  // pitch`'s bare one-sample pitch pulse leaves nothing during the hold and
-  // exactly one sample's advance after it — every alignment, which an
-  // every-other-sample capture cannot produce — while `KON/kon decoding when
-  // another kon`'s mid-startup freezes, each riding a KON write, land
-  // poll-quantized in pairs.
+  // The step each voice's next compute advances by. A voice's stream advance
+  // does not read VxPITCHL/H at the compute: a live voice reads them at its
+  // own slots each sample — VxPITCHL at the directory slot (T22 for voice 0,
+  // T(3v-2) for voices 1-7) and VxPITCHH one slot later (T23; the compute
+  // slot itself for voices 1-7, read before the compute runs in it) — and
+  // the pair read in one sample is the step of the NEXT sample's advance: the
+  // hardware advances the position after the sample's output is formed, one
+  // step after the read, and this model advances before it interpolates. So a
+  // write landing after a voice's pitch slots reaches the advance two
+  // computes on (`Timing/Voice/V2 pitchl`, `V3 pitchh`: a five-cycle pulse is
+  // caught by each voice at exactly those slots). Every consumed key-on
+  // suspends the voice's slot reads for seven samples
+  // (VoiceState::pitchCaptureHold) and schedules one capture of its own at
+  // the next poll-parity sample's first slot (pitchReloadPending) — landing
+  // in voice 0's compute that sample and in voices 1-7's the sample after —
+  // so a bare pitch write during the hold never reaches the stream, while one
+  // riding a key-on lands through that scheduled capture, quantized to the
+  // keying poll's every-other-sample grid. A freshly seeded state captures
+  // the register values before its first sample, keeping that frame
+  // byte-identical to the frame-at-once model. Measured against spc_dsp6:
+  // `KON/kon then change pitch`'s bare one-sample pitch pulse leaves nothing
+  // during the hold and exactly one sample's advance after it — every
+  // alignment — while `KON/kon decoding when another kon`'s mid-startup
+  // freezes, each riding a KON write, land poll-quantized in pairs.
   std::array<std::uint16_t, 8> pitchLatch{};
-  std::array<std::uint16_t, 8> pitchLatchOld{};
 
   // One bit per voice: a consumed key-on scheduled the voice's pitch capture
-  // for the next poll-parity sample's start (see pollKeying). The capture
-  // propagates like any other: pitchReloadAge marks the sample after it, when
-  // the captured value ages into pitchLatchOld for voices 1-7 to consume.
+  // for the next poll-parity sample's start (see pollKeying).
   std::uint8_t pitchReloadPending = 0;
-  std::uint8_t pitchReloadAge = 0;
 
   // The echo unit's FIR output for the frame, computed when the buffer is read
   // (slot T24) and added to the master-scaled mix through the echo volume at the
@@ -498,8 +518,8 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 // through the stream — following block chaining and loop jumps, and setting
 // ENDX as the decoder leaves an end block. Returns the freshly interpolated 15-bit sample, exactly as
 // interpolatedSample reads it. This single-voice call reads the pitch registers
-// live; the whole-DSP sample paths instead read the every-other-sample capture
-// (see DspState::pitchLatch), which this call neither takes nor consumes.
+// live; the whole-DSP sample paths instead read the pair at the voice's pitch
+// slots (see DspState::pitchLatch), which this call neither takes nor consumes.
 std::int16_t stepVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                        std::size_t voice) noexcept;
 

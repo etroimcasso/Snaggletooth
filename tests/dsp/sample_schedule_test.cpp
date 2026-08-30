@@ -733,14 +733,15 @@ TEST(SampleSchedule, AReKeyOfALongSoundingVoiceHoldsItsStream) {
 
 TEST(SampleSchedule, ALivePitchWriteLandsPerSampleWhateverTheParity) {
   // A live voice's stream advance never reads VxPITCHL/H at its own compute:
-  // the registers are captured for all eight voices at the first slot of EVERY
-  // sample, and the capture reaches a voice one sample deep — voice 0's T31
-  // compute is the only one late enough to see its own sample's capture, while
-  // voices 1-7 advance by the previous sample's. The cadence carries no
-  // parity: a write frozen before a sample behaves identically whichever
-  // sample it lands on. Measured against spc_dsp6's `KON/kon then change
-  // pitch`, whose one-sample pitch pulse is seen at every alignment — an
-  // every-other-sample capture leaves half of them invisible.
+  // each voice reads the pair at its own pitch slots every sample, and the
+  // pair read in one sample is the step of the NEXT sample's advance — for
+  // every voice alike, voice 0 included. The cadence carries no parity: a
+  // write frozen before a sample behaves identically whichever sample it
+  // lands on. Measured against spc_dsp6's `KON/kon then change pitch`, whose
+  // one-sample pitch pulse is seen at every alignment — an every-other-sample
+  // read leaves half of them invisible — and `Order/pitch added before
+  // interp`, `Order/pitch after brr`, `Misc/interp pos clamped at $7FFF` and
+  // `Random/pitch mod`, which the same-sample form fails.
   for (int phase = 0; phase < 2; ++phase) {
     Ram ram{};
     DspState dsp;
@@ -750,29 +751,121 @@ TEST(SampleSchedule, ALivePitchWriteLandsPerSampleWhateverTheParity) {
       dsp.voices[v].envelope = 0x100;
       reg(dsp, v, 0x03) = 0x10;  // one stream sample per output sample
     }
-    sample(dsp, ram);            // sample 0 (atomic) seeds the capture
+    sample(dsp, ram);            // sample 0 (atomic) seeds the step
     for (int n = 0; n < phase; ++n) sample(dsp, ram);  // stagger the parity
     sample(dsp, ram);
     const std::uint16_t v0 = dsp.voices[0].pitchCounter;
     const std::uint16_t v2 = dsp.voices[2].pitchCounter;
 
-    // Freeze both voices' pitch before the next sample begins. Its first-slot
-    // capture reads the zero: voice 0's T31 compute consumes it this sample,
-    // voice 2's early compute still advances by the previous capture and
-    // consumes it the sample after.
+    // Freeze both voices' pitch before the next sample begins. Each voice's
+    // pitch slots read the zero that sample, but its compute still advances
+    // by the pair read the sample before; the zero lands on the sample after.
     dsp[0 * 0x10 + 0x03] = 0x00;
     dsp[2 * 0x10 + 0x03] = 0x00;
     sample(dsp, ram);
-    EXPECT_EQ(dsp.voices[0].pitchCounter, v0)
-        << "voice 0 reads its own sample's capture (phase " << phase << ")";
+    EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000))
+        << "voice 0 advances once more by the previous sample's read (phase " << phase << ")";
     EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x1000))
-        << "voices 1-7 still advance by the previous capture (phase " << phase << ")";
+        << "voices 1-7 advance once more by the previous sample's read (phase " << phase << ")";
 
     sample(dsp, ram);
     sample(dsp, ram);
-    EXPECT_EQ(dsp.voices[0].pitchCounter, v0);
+    EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000));
     EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x1000));
   }
+}
+
+TEST(SampleSchedule, ThePitchPairIsReadAtTheVoicesPitchSlotsForTheNextAdvance) {
+  // VxPITCHL is read at the voice's directory slot — T22 for voice 0,
+  // T(3v-2) for voices 1-7 — and VxPITCHH one slot later, T23 and T(3v-1),
+  // the compute slot itself for voices 1-7. A write before its slot is in the
+  // pair that sample reads; one after waits for the next sample's read. The
+  // pair read in a sample steps the advance of the sample AFTER it. Measured
+  // against spc_dsp6's `Timing/Voice/V2 pitchl` and `V3 pitchh`: a five-cycle
+  // pulse into each byte is caught by each voice at exactly those slots.
+  const auto pin = [](std::size_t voice, int lowSlot, int highSlot) {
+    Ram ram{};
+    DspState dsp;
+    dsp.voices[voice].konDelay = 0;
+    dsp.voices[voice].phase = EnvPhase::Sustain;
+    dsp.voices[voice].envelope = 0x100;
+    sample(dsp, ram);  // pitch $0000: the stream stands still
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.voices[voice].pitchCounter, 0u);
+
+    const std::uint8_t low = static_cast<std::uint8_t>(voice * 0x10 + 0x02);
+    const std::uint8_t high = static_cast<std::uint8_t>(voice * 0x10 + 0x03);
+    DspState seenHigh = dsp;
+    DspState missedHigh = dsp;
+    DspState seenLow = dsp;
+    DspState missedLow = dsp;
+    sampleWritingAt(seenHigh, ram, highSlot, high, 0x10);        // pitch $1000
+    sampleWritingAt(missedHigh, ram, highSlot + 1, high, 0x10);
+    sampleWritingAt(seenLow, ram, lowSlot, low, 0x10);           // pitch $0010
+    sampleWritingAt(missedLow, ram, lowSlot + 1, low, 0x10);
+    for (DspState* s : {&seenHigh, &missedHigh, &seenLow, &missedLow})
+      EXPECT_EQ(s->voices[voice].pitchCounter, 0u)
+          << "voice " << voice << ": the writing sample's advance takes the pair read before it";
+
+    sample(seenHigh, ram);
+    sample(missedHigh, ram);
+    sample(seenLow, ram);
+    sample(missedLow, ram);
+    EXPECT_EQ(seenHigh.voices[voice].pitchCounter, 0x1000u)
+        << "voice " << voice << ": a VxPITCHH write before its slot steps the next advance";
+    EXPECT_EQ(missedHigh.voices[voice].pitchCounter, 0u)
+        << "voice " << voice << ": a VxPITCHH write after its slot waits a sample";
+    EXPECT_EQ(seenLow.voices[voice].pitchCounter, 0x0010u)
+        << "voice " << voice << ": a VxPITCHL write before the directory slot steps the next advance";
+    EXPECT_EQ(missedLow.voices[voice].pitchCounter, 0u)
+        << "voice " << voice << ": a VxPITCHL write after the directory slot waits a sample";
+
+    sample(missedHigh, ram);
+    sample(missedLow, ram);
+    EXPECT_EQ(missedHigh.voices[voice].pitchCounter, 0x1000u);
+    EXPECT_EQ(missedLow.voices[voice].pitchCounter, 0x0010u);
+  };
+  pin(0, 22, 23);
+  pin(2, 4, 5);
+  pin(7, 19, 20);
+}
+
+TEST(SampleSchedule, VoiceAdsr1IsReadAtTheVoicesDirectorySlot) {
+  // VxADSR1 is read at the voice's directory slot — T22 for voice 0, T(3v-2)
+  // for voices 1-7 — and the compute's envelope step runs under that value:
+  // a write before the slot drives this sample's step, one after it drives
+  // the next sample's. VxADSR2 and VxGAIN are read at the compute itself.
+  // Measured against spc_dsp6's `Timing/Voice/V2 adsr0.0F`, `adsr0.70` and
+  // `adsr0.80`: a five-cycle pulse into the register is caught by each voice
+  // at exactly that slot.
+  const auto pin = [](std::size_t voice, int slot) {
+    Ram ram{};
+    DspState dsp;
+    dsp.voices[voice].konDelay = 0;
+    dsp.voices[voice].phase = EnvPhase::Attack;
+    dsp.voices[voice].envelope = 0;
+    reg(dsp, voice, 0x05) = 0x00;  // direct gain 0: the level stands at 0
+    reg(dsp, voice, 0x07) = 0x00;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.voices[voice].envelope, 0u);
+
+    const std::uint8_t adsr1 = static_cast<std::uint8_t>(voice * 0x10 + 0x05);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    sampleWritingAt(seen, ram, slot, adsr1, 0x8F);        // attack rate 15: +1024 every sample
+    sampleWritingAt(missed, ram, slot + 1, adsr1, 0x8F);
+    EXPECT_EQ(seen.voices[voice].envelope, 1024u)
+        << "voice " << voice << ": a write before the directory slot drives this sample's step";
+    EXPECT_EQ(missed.voices[voice].envelope, 0u)
+        << "voice " << voice << ": a write after the directory slot does not";
+    sample(missed, ram);
+    EXPECT_EQ(missed.voices[voice].envelope, 1024u)
+        << "voice " << voice << ": it drives the next sample's step";
+  };
+  pin(0, 22);
+  pin(2, 4);
+  pin(7, 19);
 }
 
 TEST(SampleSchedule, AKeyOnCapturesThePitchAtTheNextPollParitySample) {

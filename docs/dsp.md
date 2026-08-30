@@ -182,7 +182,7 @@ inside an earlier startup's silence — walks: the fresh stream's decode cursor 
 empty samples, from the second of them on (the first decodes nothing: the start pointer is read
 at the voice's directory slot of the following sample, and the start block's bytes at that sample's
 BRR load slot — see below). The pitch it advances at is the one the key-on itself captured, because a key-on suspends
-the pitch capture for seven samples (see
+the pitch reads for the silent span (see
 [When a register write takes effect](#when-a-register-write-takes-effect)):
 a later key-on landing mid-startup re-captures the register and the walk carries its position, while
 a bare pitch write waits out the hold. Only the *output* is silent during the startup. A key-on of a
@@ -430,20 +430,23 @@ Three consequences are worth knowing:
   applied at the previous sample's close, so a write to `ESA` moves the buffer only from the next
   sample — the sample in flight still reads and writes the old base — and an `EDL` write resizes the
   ring at its next wrap.
-- **`VxPITCHL`/`VxPITCHH` are not read at a voice's own compute.** The pitch a voice's stream
-  advance uses is captured for all eight voices at the first slot of every sample, and a capture
-  reaches a voice's advance one sample deep: voice 0's compute at T31 is the only one late enough to
-  see its own sample's capture, while voices 1–7 advance by the previous sample's. A pitch value
-  standing for exactly one sample is therefore consumed for exactly one advance by every voice,
-  whatever slot its writes land on. Pitch *modulation* is unaffected — `PMON` scales the captured
+- **`VxPITCHL`/`VxPITCHH` are read at the voice's own slots, one sample ahead of the advance they
+  step.** `VxPITCHL` is read at the voice's directory slot (T22 for voice 0, T(3v−2) for voices
+  1–7) and `VxPITCHH` one slot later, and the pair a sample reads is the step of the *next* sample's
+  advance, for every voice alike. A write landing after the slots reaches the advance two computes
+  on; a pitch value standing for exactly one sample is consumed for exactly one advance by every
+  voice, whatever slot its writes land on. Pitch *modulation* is unaffected — `PMON` scales the
   step by the previous voice's current amplitude every sample.
-- **A key-on holds the pitch capture for seven samples.** Each consumed key-on — including one
-  absorbed or rewound inside the silent span — schedules its voice's capture for the first slot of
-  the poll-parity sample after the consuming poll, and suspends the per-sample capture for seven
-  samples from that poll. Through the hold a walking startup advances at the pitch that scheduled
-  capture took; a bare `VxPITCH` write inside the hold never reaches the stream, while one landing between
-  the poll and the parity sample's first slot does — it is what the scheduled capture reads. The
-  hold is anchored to the poll, so it covers the same samples for every voice.
+- **`VxADSR1` is read at the directory slot too;** `VxADSR2` and `VxGAIN` are read at the compute.
+  An `ADSR1` write landing after the slot drives the next sample's envelope step, not this one's.
+- **A key-on holds the pitch reads for the voice's silent span.** Each consumed key-on — including
+  one absorbed or rewound inside the silent span — schedules a capture of the pair at the first slot
+  of the poll-parity sample after the consuming poll, and suspends the slot reads for six computes,
+  so the eighth compute is the first advance at a live pitch — for every voice, since voice 0's
+  first compute follows the poll in the slot they share and the others' come a sample later.
+  Through the hold a walking startup advances at the pitch that scheduled capture took; a bare
+  `VxPITCH` write inside the hold never reaches the stream, while one landing between the poll and
+  the parity sample's first slot does — it is what the scheduled capture reads.
 
 This intra-sample schedule is derived from the S-DSP timing charts; the key-on countdown, the last
 slot's placement of the keying poll and its order against voice 0's compute, the `VxENVX` publish
