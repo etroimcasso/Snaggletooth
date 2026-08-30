@@ -96,6 +96,38 @@ reaches the boundary.
 
 *Arbitrated by `Envelope/decay->sustain during gain`.*
 
+### A decay whose level already sits in the sustain band sustains without a step
+
+Under ADSR, a voice in Decay whose stored level's upper three bits already equal the sustain level
+is in Sustain before its step: the phase changes and the level holds, whatever the decay rate does
+on that sample. The case that shows it is a decay entered from the top — ADSR `$EF/$E0`: attack rate
+31 takes the level to `$7FF`, the sustain level is 7, so the level is in band the sample Decay
+begins, and the sustain rate is 0. A model that runs the decay step first stores `$7F7` when rate 28
+(period 4) fires, one sample in four; the tape carries `$7FF` from every counter phase.
+
+Everywhere the level is still above the band, the documented order stands: the step is computed,
+stored if the decay rate fires, and the candidate is what the boundary check reads. And the
+stored-level check is ADSR's alone — under a GAIN mode `Envelope/attack->decay during gain` reads
+the candidate, not the stored level.
+
+The driver of `Random/voice volumes` is what makes the phase visible: its sync gadget locks the CPU
+to the sample and to the key-on poll's parity, which is a lock modulo 2, while rate 28 fires modulo
+4 — so two arrivals of the same driver at the same in-sample phase can sit on different counter
+phases. On hardware the arrival phase is not under the driver's control (the SNES-side upload
+crosses two unrelated clocks), so a test that hashes the tape has to read the same envelope from
+every phase, and it does.
+
+Attack→Decay is not the same switch: its store stays under the attack rate. Gating it by the decay
+rate regresses `Envelope/envelope rates` and `Envelope/hidden env after adsr`.
+
+Two other forms fit the same evidence — the sample that detects the switch storing nothing under
+ADSR, or its store gated by the sustain rate instead of the decay rate — because the one ADSR arbiter
+has a sustain rate of 0 and a level already in band. Both would also hold a decay arriving at the
+boundary from above, where the documented order stores the step; a sub-test that decays into the band
+from above with a firing sustain rate would separate them.
+
+*Arbitrated by `Random/voice volumes`, run from two arrival phases two samples apart.*
+
 ### The Bent-Increase reference is saved every sample and is not clipped
 
 Bent Increase adds +32 below `$600` and +8 at or above it. The value it compares is a reference saved

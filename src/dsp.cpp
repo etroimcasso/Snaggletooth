@@ -1366,8 +1366,24 @@ static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept {
   const bool decayToSustain = (v.phase == EnvPhase::Decay) && ((newLevel & ~0x7FF) == 0) &&
                               ((newLevel >> 8) == sustainBoundary);
 
+  // Under ADSR, a decay whose stored level already sits in the sustain band is
+  // in Sustain before its step: the phase changes and the level holds, whatever
+  // the decay rate does this sample. spc_dsp6 `Random/voice volumes` keys eight
+  // voices at ADSR $EF/$E0 — the attack ends at 0x7FF, sustain level 7, sustain
+  // rate 0, decay rate 28 firing one sample in four — from two arrival phases
+  // two samples apart, and its tape carries no -8 step from either; a store
+  // gated by the decay rate steps on one of them. The stored-level check is
+  // ADSR's alone: under a GAIN mode the ROM's `Envelope/attack->decay during
+  // gain` reads the candidate, not the stored level. The ROM does not separate
+  // this form from two others — the detecting sample storing nothing, or its
+  // store gated by the sustain rate — since its one ADSR arbiter has a sustain
+  // rate of 0 and a level already in band; this form alone keeps the documented
+  // step-then-check order everywhere the level is still above the band.
+  const bool alreadySustaining = (v.phase == EnvPhase::Decay) && (adsr1 & 0x80) != 0 &&
+                                 (level >> 8) == sustainBoundary;
+
   // The counter decides only whether the level takes the candidate.
-  if (fires) v.envelope = clampEnvelope(newLevel);
+  if (fires && !alreadySustaining) v.envelope = clampEnvelope(newLevel);
 
   // The Bent-Increase reference is the value the mode computes, saved every
   // sample whether or not the counter fires — so a voice parked in a rate-0
@@ -1376,7 +1392,7 @@ static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept {
   // below zero and one carried past 0x7FF both read at or past 0x600 and take
   // the +8 branch.
   v.bentGainRef = static_cast<std::uint16_t>(newLevel);
-  if (decayToSustain) v.phase = EnvPhase::Sustain;
+  if (decayToSustain || alreadySustaining) v.phase = EnvPhase::Sustain;
   if (attackToDecay) v.phase = EnvPhase::Decay;
 }
 

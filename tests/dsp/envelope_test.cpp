@@ -474,6 +474,46 @@ TEST(PhaseMachine, DecayToSustainIgnoresACandidateOutsideTheRange) {
   EXPECT_EQ(dsp.voices[0].envelope, 0x1F);
 }
 
+// ── Decay->Sustain: a level already in the band sustains without a step ─────
+//
+// Under ADSR, a decay whose stored level already sits in the sustain band is in
+// Sustain before its step: the phase changes and the level holds whatever the
+// decay rate does. The case that shows it: ADSR $EF/$E0 — decay rate 28, which
+// fires one sample in four, sustain level 7, sustain rate 0 — entering Decay at
+// 0x7FF, already in band 7. Whichever of the four counter phases the entry
+// lands on, the level stays 0x7FF and the voice is in Sustain (spc_dsp6
+// `Random/voice volumes` keys eight such voices from whatever counter phase the
+// driver arrives at and hashes a tape with no -8 step in it). The control: the
+// same entries under sustain level 6 are still a band above it, stay in Decay
+// and take the step on exactly the firing phase.
+
+TEST(SustainBoundary, ALevelAlreadyInTheBandHoldsOnEveryCounterPhase) {
+  for (std::uint16_t counter = 0; counter < 4; ++counter) {
+    DspState dsp;
+    adsr1(dsp, 0) = 0xEF;  // ADSR, decay rate index 6 -> rate 28 (period 4)
+    adsr2(dsp, 0) = 0xE0;  // sustain level 7
+    placeEnvelope(dsp, 0, EnvPhase::Decay, 0x7FF);
+    dsp.globalCounter = counter;
+    EXPECT_EQ(stepVoiceEnvelope(dsp, 0, false), 0x7FF) << "counter " << counter;
+    EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain) << "counter " << counter;
+  }
+}
+
+TEST(SustainBoundary, ADecayStillInsideItsBandTakesTheStepOnTheFiringPhase) {
+  int steps = 0;
+  for (std::uint16_t counter = 0; counter < 4; ++counter) {
+    DspState dsp;
+    adsr1(dsp, 0) = 0xEF;
+    adsr2(dsp, 0) = 0xC0;  // sustain level 6: 0x7F7 is still a band above it
+    placeEnvelope(dsp, 0, EnvPhase::Decay, 0x7FF);
+    dsp.globalCounter = counter;
+    const int level = stepVoiceEnvelope(dsp, 0, false);
+    EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Decay) << "counter " << counter;
+    if (level == 0x7F7) ++steps; else EXPECT_EQ(level, 0x7FF) << "counter " << counter;
+  }
+  EXPECT_EQ(steps, 1);
+}
+
 // ── Decay->Sustain: the boundary comes from the register in charge ───────────
 //
 // Under ADSR the boundary is VxADSR2's sustain level. Under a GAIN mode the

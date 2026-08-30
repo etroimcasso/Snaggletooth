@@ -138,6 +138,14 @@ rate of 0: a voice parked at `$420` under Linear Decrease never moves, yet its s
 and the voice enters Sustain, while the same mode parked one lower at `$41F` computes `$3FF` and stays
 in Decay — even though `$41F`'s own upper three bits are the boundary.
 
+Under ADSR, a decay whose stored level already sits in the sustain band is in Sustain before its
+step: the phase changes and the level holds. A decay entered from the top — `ADSR1 = $EF`,
+`ADSR2 = $E0`, where the attack ends at `$7FF`, the sustain level is 7 and the sustain rate is 0 —
+never takes the `$7F7` step, from any phase of the global counter. A decay still above the band
+follows the order above: the step is stored when the decay rate fires, and the candidate is what
+the boundary check reads. The stored-level check is ADSR's alone; under a GAIN mode the check reads
+the candidate.
+
 **Bent Increase reads that value too.** Its step — +32 below `$600`, +8 at or past it — is chosen from
 the value the selected mode computed on the *previous* sample, never from the current level. Since
 every mode computes that value every sample, a mode parked at a rate of 0 still supplies one: a voice
