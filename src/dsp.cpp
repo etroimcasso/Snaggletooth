@@ -240,20 +240,65 @@ void shiftWindow(VoiceState& v, std::int16_t sample) noexcept {
   v.window.newest = sample;
 }
 
-// Decodes one group of four BRR samples from the block at `address` into a
-// voice's pending ring. `offset` is the group's first in-block sample index.
-// This is where the BRR bytes are READ: the header's shift and filter and the
-// data bytes come from RAM now, ahead of the samples' consumption, so a RAM
-// write between this read and the consume does not reach them. The filter
-// history is the decoder's own — the two samples decoded before these, which
-// run ahead of the window's consumed taps.
+// The slot of each voice's BRR load — where the header and the first data
+// byte of a group decode are read from RAM: T26 for voice 0, five slots before
+// its compute, and the compute slot itself (kVoiceS3Slot) for voices 1-7, read
+// before the compute runs in it. The second data byte is read at the decode,
+// one slot after the compute (kVoiceS4Slot). Measured against spc_dsp6's
+// `Timing/Voice/V3 BRR.header.03`, `BRR.sample.lsb` and `BRR.sample.msb`,
+// which pulse each byte for five cycles at every offset and hash which voices
+// caught it.
+constexpr std::array<std::uint8_t, 8> kVoiceBrrLoadSlot = {26, 2, 5, 8, 11, 14, 17, 20};
+
+// The in-group sample index whose consumption schedules the decode of the
+// group two on: the third sample, so the group's first data byte lands at the
+// load slot two samples after the group boundary's own consumption and its
+// second at that sample's S4 — where `Timing/Voice/V3 BRR.sample.lsb/msb`
+// measure the hardware reading them — while the header is read at the
+// scheduling itself, the sample `Order/pitch after brr` pins.
+constexpr std::uint8_t kDecodeTriggerIndex = 2;
+
+// Loads, at a voice's BRR load slot, the header the sample's end/loop check
+// reads and the header and first data byte of every group decode the voice
+// has scheduled.
+void loadScheduledGroupBytes(VoiceState& v, std::span<const std::uint8_t, 65536> ram) noexcept {
+  v.loadedHeader = ram[v.headerAddress];
+  v.headerLoaded = true;
+  for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n) {
+    VoiceState::GroupDecode& g = v.scheduledDecodes[n];
+    if (g.bytesLoaded) continue;
+    if (!g.headerCaptured) g.header = ram[g.address];
+    g.firstByte = ram[static_cast<std::uint16_t>(g.address + 1 + g.offset / 2)];
+    g.bytesLoaded = true;
+  }
+}
+
+// Decodes samples [from, to) of one scheduled group into a voice's pending
+// ring. The header's shift and filter and the group's first data byte are the
+// ones the voice's BRR load slot captured (or, for a decode the slot schedule
+// has not loaded, read from RAM now); the second data byte is read from RAM at
+// the call decoding its samples. The samples are decoded ahead of their
+// consumption, so a RAM write after these reads does not reach them. The
+// filter history is the decoder's own — the two samples decoded before these,
+// which run ahead of the window's consumed taps; halves of one group must
+// therefore decode in order with nothing between them, which the split
+// schedule guarantees (the S4 half lands before the next compute can decode
+// or consume anything newer).
 void decodeGroupAhead(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                      std::size_t voice, std::uint16_t address, int offset) noexcept {
+                      std::size_t voice, const VoiceState::GroupDecode& group, int from,
+                      int to) noexcept {
   VoiceState& v = dsp.voices[voice];
-  const std::uint8_t header = ram[address];
-  for (int k = 0; k < 4; ++k) {
+  const std::uint16_t address = group.address;
+  const int offset = group.offset;
+  const std::uint8_t header =
+      (group.bytesLoaded || group.headerCaptured) ? group.header : ram[address];
+  const std::uint8_t firstByte = group.bytesLoaded
+                                     ? group.firstByte
+                                     : ram[static_cast<std::uint16_t>(address + 1 + offset / 2)];
+  const std::uint8_t secondByte = ram[static_cast<std::uint16_t>(address + 2 + offset / 2)];
+  for (int k = from; k < to; ++k) {
     const int index = offset + k;
-    const std::uint8_t byte = ram[static_cast<std::uint16_t>(address + 1 + index / 2)];
+    const std::uint8_t byte = k < 2 ? firstByte : secondByte;
     const int sample = decodeNibble(signedNibble(byte, (index & 1) != 0), header >> 4);
     const std::int16_t decoded = clampAndClip(
         applyFilter((header >> 2) & 0x03, sample, v.decodePrev1, v.decodePrev2));
@@ -317,12 +362,28 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
     consumed = clampAndClip(
         applyFilter((header >> 2) & 0x03, sample, v.decodePrev1, v.decodePrev2));
   } else {
-    if (v.brrSampleIndex % 4 == 0 && v.scheduledDecodeCount < v.scheduledDecodes.size()) {
-      v.scheduledDecodes[v.scheduledDecodeCount] = VoiceState::GroupDecode{
-          .address = v.decoderAddress,
-          .offset = static_cast<std::uint8_t>((v.brrSampleIndex + 8) & 15)};
-      ++v.scheduledDecodeCount;
-    }
+    // The group scheduled is always the one two on from the cursor's — the
+    // in-group offset formula is the same for every index inside the group,
+    // so both scheduling modes share it.
+    const auto scheduleNextGroup = [&v, &ram]() {
+      const auto offset = static_cast<std::uint8_t>(((v.brrSampleIndex & ~3) + 8) & 15);
+      for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n)
+        if (v.scheduledDecodes[n].address == v.decoderAddress &&
+            v.scheduledDecodes[n].offset == offset)
+          return;  // this group is already on the schedule
+      if (v.scheduledDecodeCount < v.scheduledDecodes.size()) {
+        VoiceState::GroupDecode g{.address = v.decoderAddress, .offset = offset};
+        if (kDecodeTriggerIndex == 2) {
+          // The trigger-2 form reads the group's header at the scheduling
+          // itself; the load slot one sample on supplies the first data byte.
+          g.header = ram[g.address];
+          g.headerCaptured = true;
+        }
+        v.scheduledDecodes[v.scheduledDecodeCount] = g;
+        ++v.scheduledDecodeCount;
+      }
+    };
+    if (v.brrSampleIndex % 4 == kDecodeTriggerIndex) scheduleNextGroup();
     consumed = v.pending[v.pendingHead];
     v.pendingHead = static_cast<std::uint8_t>((v.pendingHead + 1) % 12);
     --v.pendingCount;
@@ -340,6 +401,23 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   }
 }
 
+// Finishes, at a voice's S4 slot, the group decode the compute halved this
+// sample — its last two samples, the second data byte read from RAM now — and
+// keeps anything the compute scheduled since for the next sample's load.
+void performLoadedDecodes(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                          std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  std::uint8_t kept = 0;
+  for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n) {
+    if (v.scheduledDecodes[n].decodedSamples == 2) {
+      decodeGroupAhead(dsp, ram, voice, v.scheduledDecodes[n], 2, 4);
+    } else {
+      v.scheduledDecodes[kept++] = v.scheduledDecodes[n];
+    }
+  }
+  v.scheduledDecodeCount = kept;
+}
+
 // Advances a voice's stream by the samples this 32 kHz output sample passes: the
 // counter's in-group position gains `step`, the sum clamps at
 // kMaxGroupPosition, and every whole sample position the clamped sum crosses is
@@ -354,13 +432,57 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
 void advanceVoiceStream(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                         std::size_t voice, std::uint32_t step) noexcept {
   VoiceState& v = dsp.voices[voice];
-  for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n)
-    decodeGroupAhead(dsp, ram, voice, v.scheduledDecodes[n].address, v.scheduledDecodes[n].offset);
-  v.scheduledDecodeCount = 0;
+  if (!dsp.primed) {
+    // The frame-at-once and single-voice paths have no slot schedule: decode
+    // everything scheduled in full now, every byte read from RAM here.
+    for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n)
+      decodeGroupAhead(dsp, ram, voice, v.scheduledDecodes[n], 0, 4);
+    v.scheduledDecodeCount = 0;
+  } else {
+    // The slot-scheduled path decodes the groups whose bytes this sample's
+    // load slot captured — two load slots after their trigger. The ordinary
+    // case is one group: its first two samples decode now, ahead of this
+    // advance, and the S4 slot finishes it, reading the second data byte
+    // there — the measured read slots — still ahead of anything the next
+    // advance can consume even through the position clamp. A double
+    // crossing's pair decodes in full now, in stream order; a group still
+    // waiting for its load stays.
+    std::uint8_t loaded = 0;
+    for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n)
+      if (v.scheduledDecodes[n].bytesLoaded && v.scheduledDecodes[n].decodedSamples == 0) ++loaded;
+    if (loaded == 1) {
+      for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n) {
+        VoiceState::GroupDecode& g = v.scheduledDecodes[n];
+        if (g.bytesLoaded && g.decodedSamples == 0) {
+          decodeGroupAhead(dsp, ram, voice, g, 0, 2);
+          g.decodedSamples = 2;
+        }
+      }
+    } else if (loaded > 1) {
+      std::uint8_t kept = 0;
+      for (std::uint8_t n = 0; n < v.scheduledDecodeCount; ++n) {
+        VoiceState::GroupDecode& g = v.scheduledDecodes[n];
+        if (g.bytesLoaded && g.decodedSamples == 0) {
+          decodeGroupAhead(dsp, ram, voice, g, 0, 4);
+        } else {
+          v.scheduledDecodes[kept++] = g;
+        }
+      }
+      v.scheduledDecodeCount = kept;
+    }
+  }
   const std::uint32_t position = v.pitchCounter & kGroupPositionMask;
   std::uint32_t advanced = position + step;
   if (advanced > kMaxGroupPosition) advanced = kMaxGroupPosition;
   const std::uint32_t passed = (advanced >> 12) - (position >> 12);
+  if (passed > v.pendingCount) {
+    // A clamp-grade drain can reach a group's second pair one advance after
+    // its scheduling, before the S4 slot decodes it. The hardware cannot
+    // starve — its decode and advance share that slot, decode first — so the
+    // outstanding halves are finished here, their second data byte read one
+    // slot early, only when this advance would otherwise outrun the ring.
+    performLoadedDecodes(dsp, ram, voice);
+  }
   v.pitchCounter = static_cast<std::uint16_t>((v.pitchCounter & ~kGroupPositionMask) + advanced);
   for (std::uint32_t n = 0; n < passed; ++n) decodeStreamSample(dsp, ram, voice);
 }
@@ -542,7 +664,10 @@ void startVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
   // block and the voice still plays all twelve when it moves).
   VoiceState& v = dsp.voices[voice];
   for (int group = 0; group < 3; ++group)
-    decodeGroupAhead(dsp, ram, voice, v.decoderAddress, group * 4);
+    decodeGroupAhead(dsp, ram, voice,
+                     VoiceState::GroupDecode{.address = v.decoderAddress,
+                                             .offset = static_cast<std::uint8_t>(group * 4)},
+                     0, 4);
   for (int n = 0; n < 4; ++n) {
     shiftWindow(v, v.pending[v.pendingHead]);
     v.pendingHead = static_cast<std::uint8_t>((v.pendingHead + 1) % 12);
@@ -614,7 +739,8 @@ static int computeVoiceAmplitude(DspState& dsp, std::span<const std::uint8_t, 65
   // The counter stops at the sixth compute, which is past it for every voice.
   const int computeSinceKeyOn = kKeyOnStartupCalls + 1 - v.konDelay;
   const bool headerEndMute = computeSinceKeyOn >= 3 &&
-                             headerIsEndMute(ram[v.headerAddress]);
+                             headerIsEndMute(v.headerLoaded ? v.loadedHeader
+                                                            : ram[v.headerAddress]);
 
   // A key-on the keying poll consumed THIS sample shields its voice from the
   // sample's soft reset: the fresh consumption wins, exactly as KON applied
@@ -976,6 +1102,11 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
     }
   }
 
+  // The BRR load at each voice's load slot: the header and first data byte of
+  // the group decodes the voice's compute will perform, read ahead of it.
+  for (std::size_t voice = 0; voice < 8; ++voice)
+    if (kVoiceBrrLoadSlot[voice] == slot) loadScheduledGroupBytes(dsp.voices[voice], ram);
+
   // Voice compute at each voice's S3 slot (voice 0's is T31, handled in the tail).
   for (std::size_t voice = 1; voice < 8; ++voice)
     if (kVoiceS3Slot[voice] == slot) computeVoiceSlot(dsp, ram, voice, softReset);
@@ -987,7 +1118,10 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
   // fresh one (see DspState::envxStage).
   for (std::size_t voice = 0; voice < 8; ++voice) {
     const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
-    if (kVoiceS4Slot[voice] == slot) applyVoiceLeft(dsp, voice);
+    if (kVoiceS4Slot[voice] == slot) {
+      performLoadedDecodes(dsp, ram, voice);
+      applyVoiceLeft(dsp, voice);
+    }
     if (kVoiceS5Slot[voice] == slot) applyVoiceRight(dsp, voice);
     if (kVoiceS7Slot[voice] == slot && (dsp.preparedEndx & bit) != 0) {
       dsp[kDspEndx] |= bit;
@@ -1143,13 +1277,11 @@ StereoFrame stepDspSample(DspState& dsp,
 void keyOnVoice(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                 std::size_t voice) noexcept {
   // Whether the startup walks is decided by the voice the key-on lands on, as
-  // the restart applies: it walks only when it interrupts a voice that is
-  // sounding AND still young — keyed on within the compute count's range. A
-  // silent voice's key-on holds, and so does a re-key of a voice that has
-  // sounded for longer than the count can hold (see VoiceState::startupWalks
-  // and VoiceState::computesAtRestart).
-  const bool walks =
-      dsp.voices[voice].envelope != 0 && dsp.voices[voice].computesAtRestart != 0xFF;
+  // the restart applies: it walks only when it interrupts a voice whose level
+  // stands above zero while its old OUTPUT is silent. A re-key of a sounding
+  // voice holds its stream, whatever its age or level, and so does a key-on
+  // at level zero (see VoiceState::startupWalks).
+  const bool walks = dsp.voices[voice].envelope != 0 && dsp.voiceAmplitude[voice] == 0;
   startVoice(dsp, ram, voice);  // primes the stream and resets the voice state
   VoiceState& v = dsp.voices[voice];
   v.startupWalks = walks;
@@ -1222,10 +1354,6 @@ void pollKeying(DspState& dsp,
       VoiceState& v = dsp.voices[voice];
       if (v.computesSinceKeyOn > kKeyOnSilentCalls || v.phase == EnvPhase::Release) {
         v.konDelay = kKeyOnStartupCalls;
-        // The count the poll found is what decides the restart's walk — the
-        // counter itself restarts here, a sample before the voice's compute
-        // applies the key-on and reads it (keyOnVoice).
-        v.computesAtRestart = v.computesSinceKeyOn;
         v.computesSinceKeyOn = 0;
         v.restartPending = true;
       } else if (v.computesSinceKeyOn > 2) {

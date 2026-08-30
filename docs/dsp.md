@@ -177,20 +177,18 @@ sample is the one after it. The shared-slot asymmetry, together with `VxENVX`'s 
 lag (below), is what makes all eight voices' key-on startup read identically through `VxENVX`.
 
 Whether the stream waits for the envelope depends on the voice the key-on lands on. A key-on that
-interrupts a **sounding voice keyed on recently** — its envelope above zero as the restart applies,
-and its own key-on fewer than 255 samples back — walks: the fresh stream's decode cursor advances
-through the empty samples, from the second of them on (the first performs the start-address read
-and decodes nothing). The pitch it advances at is the one the key-on itself captured, because a
-key-on suspends the pitch capture for seven samples (see
+interrupts a voice whose **level stands above zero while its old output is silent** — a voice still
+inside an earlier startup's silence — walks: the fresh stream's decode cursor advances through the
+empty samples, from the second of them on (the first performs the start-address read and decodes
+nothing). The pitch it advances at is the one the key-on itself captured, because a key-on suspends
+the pitch capture for seven samples (see
 [When a register write takes effect](#when-a-register-write-takes-effect)):
 a later key-on landing mid-startup re-captures the register and the walk carries its position, while
 a bare pitch write waits out the hold. Only the *output* is silent during the startup. A key-on of a
-**silent** voice — envelope at zero — holds instead, and so does a re-key of a voice that has
-**sounded for long**: the stream stands at its primed start through the whole silent span *and* the
-first sounding sample, which interpolates the stream's first four samples at Gaussian index 0, and
-advancing begins the sample after. The hardware measurements bound the walk's window between a
-re-key 21 samples after the voice's key-on (walks) and one about a second after it (holds); the
-255-sample count is where this implementation draws the line between them.
+**silent** voice — envelope at zero — holds instead, and so does a re-key of a voice whose old
+output was **sounding**, whatever its age or level: the stream stands at its primed start through
+the whole silent span *and* the first sounding sample, which interpolates the stream's first four
+samples at Gaussian index 0, and advancing begins the sample after.
 
 The walk carries no interpolation fraction: whole sample positions cross and decode, but the
 fractional remainder is discarded through the silent span, so the first sounding sample interpolates
@@ -271,16 +269,18 @@ sounds, and the release lands at the next sample's check, one sample after the d
 
 The sample data is read ahead of the sound too, a group of four samples at a time: a key-on decodes
 the first three groups — twelve samples — as it primes the voice, and each group boundary the cursor
-crosses thereafter calls for the next group, the one eight stream samples ahead of the crossing. That
-group is decoded — its header and data bytes read from RAM — in the voice's **next** sample, not the
-sample of the crossing: within a sample the decode comes first and the position advance after it, so
-the group an advance calls for is served one sample later, under whatever header stands then. A
-header rewritten every sample under a moving voice shows it directly: the group crossed into under
-one shift takes the shift of the header standing one sample later. The bytes behind a sample are
-still read from RAM well before it sounds — seven to eleven samples ahead — and rewriting them after
-that read changes nothing already decoded. A voice parked at pitch zero is the limiting case: it
-consumes nothing, so it decodes nothing — rewrite its entire block and it still plays all twelve
-primed samples when it moves again. Only the header check reads RAM every sample.
+crosses thereafter calls for the next group, the one eight stream samples ahead of the boundary. The
+reads spread over two samples: the consumption of the current group's **third** stream sample — two
+past the boundary — schedules the decode and reads the group's **header** there, and the **data
+bytes** are read the next sample, the first at the voice's BRR load slot and the second one slot
+after its compute. A header rewritten every sample under a two-samples-per-output-sample voice shows
+the header's place directly: the group crossed into under one shift takes the shift of the header
+standing one frame later, and a five-cycle pulse into either data byte is caught only at that byte's
+own slot, one sample later still. The bytes behind a sample are read from RAM six to ten stream
+samples before it sounds, and rewriting them after their read changes nothing already decoded. A
+voice parked at pitch zero is the limiting case: it consumes nothing, so it decodes nothing —
+rewrite its entire block and it still plays all twelve primed samples when it moves again. Only the
+header check reads RAM every sample.
 
 Around a key-on the check's view stands still a little longer. It keeps reading the block standing
 before the key-on through the five empty samples and the first two live samples — so a startup
@@ -442,7 +442,8 @@ consuming compute still emits, the decoder's eight-sample lead over the cursor w
 sample behind it — including the first envelope steps a mid-startup crossing still publishes —
 the fraction-free startup walk that makes the first sounding sample interpolate from index 0, the
 group-ahead data decode whose twelve key-on-primed samples a RAM rewrite cannot reach — and whose
-later groups are read one sample after the crossing that calls for them — the
+later groups read their header at the scheduling two samples past the boundary and their data
+bytes at the load and post-compute slots one sample later — the
 one-sample-late application of `ESA`/`EDL`, the counter's advance ahead of the checks that share
 its slot, the in-group position clamp at `$7FFF` on an uncapped pitch step, the one-sample lag on
 the amplitude pitch modulation reads, the `ENDX` set at the

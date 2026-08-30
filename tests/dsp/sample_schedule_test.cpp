@@ -681,28 +681,26 @@ TEST(SampleSchedule, AKeyOnOfASilentVoiceHoldsItsStreamThroughTheFirstLiveSample
 }
 
 TEST(SampleSchedule, AReKeyOfALongSoundingVoiceHoldsItsStream) {
-  // A re-key of a voice that has sounded for longer than the compute count
-  // can hold — its counter saturated — holds its fresh stream exactly as a
-  // key-on from silence does, level notwithstanding. Measured against
-  // spc_dsp6's `Random/brr before playing`: seven of its eight passes re-key a
-  // voice at direct gain $7F0 that has played random data for about a second,
-  // and the tape the ROM hashes has every pass's first sounding sample
-  // interpolating the stream's first four samples at index 0 — the same
-  // alignment as the pass that keys the voice from silence. (`KON/kon
-  // decoding when another kon`'s walking re-key lands 21 samples after the
-  // voice's own key-on; the count is where this model draws the line.)
+  // A re-key of a voice whose old stream was SOUNDING — its output nonzero —
+  // holds its fresh stream exactly as a key-on from silence does, whatever
+  // its age or level. Measured against spc_dsp6's `Random/brr before
+  // playing` (seven of its eight passes re-key a voice at direct gain $7F0
+  // that has played random data for about a second, every pass's first
+  // sounding sample interpolating the stream's first four samples at index 0)
+  // and `Timing/Voice/V3 BRR.sample.lsb/msb` (thirty-four rows per voice each
+  // re-key it young and loud, and every row's data reads land on the held
+  // cadence). `KON/kon decoding when another kon`'s walking re-key is of a
+  // voice whose old output is SILENT — that is the discriminator, not age.
   Ram ram{};
   DspState dsp;
-  dsp.voices[2].phase = EnvPhase::Sustain;
-  dsp.voices[2].envelope = 0x7F0;
-  ASSERT_EQ(dsp.voices[2].computesSinceKeyOn, 0xFF) << "a placed voice's count is saturated";
-  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain $7F0, the ROM's level
-  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  placeSteadyVoice(dsp, 2);    // the old stream: stationary and SOUNDING
   sample(dsp, ram);
-  sample(dsp, ram);
+  sample(dsp, ram);            // its amplitude stands nonzero at the re-key
+  ASSERT_NE(dsp.voiceAmplitude[2], 0) << "the old output must be sounding";
   ASSERT_EQ(dsp.sampleIndex % 2, 0u);
 
-  dsp.internalKon = 0x04;      // a KON write arms voice 2, long sounding
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000 for the fresh stream
+  dsp.internalKon = 0x04;      // a KON write arms voice 2, sounding
   sample(dsp, ram);            // the poll arms the restart
   sample(dsp, ram);            // the voice's compute applies it: the preload
   ASSERT_EQ(dsp.voices[2].konDelay, 4);

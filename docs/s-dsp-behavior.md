@@ -232,15 +232,18 @@ Two conditions therefore gate the walk, both read as the restart applies. The en
 startup holds (`Misc/brr addr wrap-around`; a register write that drops the level to zero on the
 consuming sample gives a sounding voice a held startup — see [the final pre-key-on
 sample](#a-full-restarts-consuming-sample-still-emits-the-final-pre-key-on-sample), after which
-the standing envelope has run its own update once more). And how long the voice has sounded: a
-re-key 21 samples after the voice's own key-on walks (`KON/kon decoding when another kon`), one
-about a second after it holds (`Random/brr before playing`), level notwithstanding — the hardware
-keeps some record of a recent key-on beyond the six-sample silent span. Where between 21 samples
-and a second the window closes is not pinned; this implementation closes it at 255 samples. The
-level rule alone was the earlier reading and is refuted by the third ROM: `$010` walks, `$7F0`
-holds, and a level-0 voice holds, so no threshold on the level separates the cases. Nor does the
-envelope phase: the `$7F0` voice stands in Attack, as `Envelope/attack->decay during gain`'s
-seventh block shows for a direct-gain level set above `$7E0`.
+the standing envelope has run its own update once more). And the old OUTPUT: a voice whose output
+was sounding holds, one whose level stands above zero while its output is still silent — a voice
+inside an earlier startup's own silence — walks. The 21-samples-later re-key that walks (`KON/kon
+decoding when another kon`) lands on exactly such a voice; the re-keys that hold land on voices
+whose old streams were audibly playing — about a second old at `$7F0` (`Random/brr before
+playing`) and some sixty samples old, loud, at direct gain `$400` (`Timing/Voice/V3 BRR.sample.*`,
+whose thirty-four rows per voice each re-key it and read every row's data bytes on the held
+cadence). No age window separates the cases — sixty samples holds and no record of the key-on
+need outlast the silence — and no threshold on the level does either: `$010` walks, `$7F0` holds,
+a level-0 voice holds. Nor the envelope phase: the `$7F0` voice stands in Attack, as
+`Envelope/attack->decay during gain`'s seventh block shows for a direct-gain level set above
+`$7E0`.
 
 In the walking case the first silent sample is the exception — it performs the start-address read
 and decodes nothing, so the walk begins on the second. Only the *output* is silent during the
@@ -742,39 +745,44 @@ one that lands a rewrite mid-motion.
 
 *Arbitrated by `Misc/brr not always decoding`.*
 
-### A later group is read one sample after the crossing that calls for it
+### A later group's header is read at its scheduling, its data bytes one sample later
 
-Anomie's V4 lists the two operations in one order — decode the group "if a new group of BRR
-samples is required", then "increment interpolation sample position as specified by pitch values"
-(lines 94–100) — and that order is the execution order: the requirement an advance creates is
-served at the following sample's V4, one sample after the crossing, and the header and data bytes
-are read from RAM then.
+The group a boundary crossing calls for is not served at the crossing. Its decode is scheduled by
+the consumption of the current group's THIRD stream sample — two stream samples after the boundary
+— and the reads split across two samples from there: the **header** is read at the scheduling
+itself, and the **data bytes** at the next sample, the first at the voice's BRR load slot and the
+second one slot after its compute. Each read sits where the timing tests measure it, and every
+byte is captured when read: a RAM write landing after a byte's slot no longer reaches the group.
 
-`Order/pitch after brr` measures it with a header that changes once per sample. Its block is eight
-`$44` bytes — every nibble `+4` — under header `$C3` (shift 12, filter 0, end+loop on itself), so
-every decoded sample is `(4 << shift) >> 1` and a voice's output reads as the shift its groups were
-decoded with: `$2000` at shift 12, `$1000` at 11, `$0800` at 10, `$0400` at 9. Each of the eight
-voices in turn is keyed on at pitch zero under direct gain `$20` and `VOLL` `$20` with `EON` set,
-held nine units, then given `VxPITCHH=$20` — a step of `$2000`, two source samples per output
-sample — and, exactly 32 cycles later, the header rewritten `$B3`, 32 cycles later `$A3`, and 32
-cycles later `$93`: each shift stands for exactly one sample. Seven left echo words from `$F03C`
-(frames 15–21) are checksummed after the voice number, high byte first.
+`Order/pitch after brr` pins the header's sample with a header that changes once per sample. Its
+block is eight `$44` bytes — every nibble `+4` — under header `$C3` (shift 12, filter 0, end+loop
+on itself), so a voice's output reads as the shift its groups were decoded with: `$2000` at shift
+12, `$1000` at 11, `$0800` at 10, `$0400` at 9. Each of the eight voices in turn is keyed at pitch
+zero under direct gain `$20` and `VOLL` `$20` with `EON` set, given a step of `$2000` — two stream
+samples per output sample, so the scheduling's sample is the frame after the boundary's — and the
+header rewritten `$B3`, `$A3`, `$93` at one-sample spacing. The expected row, recovered from the
+driver's compare constant (`$57A05856`) as the unique fit over every non-increasing walk of the
+four levels through a four-tap window moving zero or two samples a frame, is
+`0400 0400 0374 0100 00E8 0080 0080`: the group crossed into while `$B3` stood decodes at shift
+**10** — the header standing one frame after the crossing, the scheduling's — where a decode at
+the crossing reads 11 (`… 03A2 0200 01BA …`).
 
-The expected row, recovered from the driver's compare constant (`$57A05856`) as the unique fit over
-every non-increasing walk of the four levels through a four-tap window moving zero or two samples a
-frame, is `0400 0400 0374 0100 00E8 0080 0080`; a machine that decodes at the crossing produces
-`0400 0400 03A2 0200 01BA 0080 0080`. The transitions land on the same frames in both — the
-crossings themselves are not displaced — but the group crossed into while `$B3` stood is decoded
-at shift **10** on the hardware (`$0374` is a window of `$2000 $2000 $0800 …`, `$0100` a pure
-shift-10 group, `$00E8` the mix into shift 9), one header later than the shift 11 a decode at the
-crossing reads. The following group, crossed into under `$A3`, is decoded under `$93` either way.
+`Timing/Voice/V3 BRR.sample.lsb` and `.msb` pin the data bytes to the cycle. Each keys one voice
+at a time at pitch `$1000` over one looping block, pulses the group's first or second data byte to
+zero for five cycles at a per-row offset from that row's own key-on, and hashes which rows the
+voice's output caught. The recovered read cycles — one structured solution per hash — put the
+first data byte at the voice's BRR load slot (`T26` for voice 0, its compute slot for voices 1-7)
+of the sample after the scheduling, and the second one slot after that sample's compute (`T0` of
+the following sample for voice 0).
 
-Two consequences. The bytes behind a sample are read seven to eleven samples ahead of it rather
-than eight to twelve; the twelve-sample prime at the key-on is unchanged. And a modulated step that
-crosses two boundaries in one sample (the position clamp at `$7FFF` lets an advance pass up to
-seven samples) has both groups served at the next sample.
+Two consequences. The bytes behind a sample are read six to ten stream samples ahead of it; the
+twelve-sample prime at the key-on is unchanged. And a modulated step that crosses two boundaries
+in one sample (the position clamp at `$7FFF` lets an advance pass up to seven) has both groups'
+bytes read in full before the cursor can touch them — under a drain that steep, one slot ahead of
+the second byte's usual place.
 
-*Arbitrated by `Order/pitch after brr`.*
+*Arbitrated by `Order/pitch after brr` with `Timing/Voice/V3 BRR.sample.lsb`/`.msb`, the timing
+pair run from two arrival phases.*
 
 ### Pitch modulation reads the previous voice's output from the previous sample
 

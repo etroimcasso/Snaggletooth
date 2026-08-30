@@ -322,40 +322,63 @@ TEST(VoiceStream, ARamRewriteAfterKeyOnDoesNotReachThePrimedSamples) {
   EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
 }
 
-TEST(VoiceStream, AGroupIsReadOneSampleAfterTheCrossingThatNeedsIt) {
-  // A group is decoded in its sample's V4 step, and the position advances
-  // only after (Anomie's V4 order) — so the group a crossing calls for is read
-  // from RAM at the NEXT sample, not at the crossing itself. spc_dsp6
-  // `Order/pitch after brr` rewrites a moving voice's header shift once per
-  // sample and reads on the echo tape that the group crossed into under one
-  // shift takes the shift standing one sample later. At unity pitch the first
-  // step consumes sample 4 and crosses into its group, which calls for
-  // samples 12-15; a rewrite of their bytes after that step still reaches
-  // them, because the read is the second step's.
+TEST(VoiceStream, AGroupsDataIsStillWritableAtItsScheduling) {
+  // A group's decode is scheduled by the consumption of the group before
+  // last's THIRD sample — two samples after the boundary — and its data bytes
+  // are read one sample after that (spc_dsp6 `Timing/Voice/V3
+  // BRR.sample.lsb/msb` pulse each byte per row and hash which rows the
+  // hardware caught; the reads land at the load slot and S4 of the sample
+  // after the scheduling). At unity pitch the third step consumes sample 6
+  // and schedules the group holding samples 12-15; a rewrite of their bytes
+  // after that step still reaches them, because the read is the fourth
+  // step's.
   Stream s;
   startVoice(s.dsp, s.ram, 0);
-  stepVoice(s.dsp, s.ram, 0);  // sample 4: the crossing
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the boundary
+  stepVoice(s.dsp, s.ram, 0);  // sample 5
+  stepVoice(s.dsp, s.ram, 0);  // sample 6: the scheduling
   s.ram[0x1007] = 0x00;        // samples 12-13
   s.ram[0x1008] = 0x00;        // samples 14-15
-  for (int sample = 5; sample <= 11; ++sample) {
+  for (int sample = 7; sample <= 11; ++sample) {
     stepVoice(s.dsp, s.ram, 0);
     EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(sample)) << "sample " << sample;
   }
-  stepVoice(s.dsp, s.ram, 0);  // sample 12: read at sample 5's step, after the rewrite
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: read at sample 7's step, after the rewrite
   EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
 }
 
-TEST(VoiceStream, AGroupIsNotReadTwoSamplesAfterTheCrossing) {
-  // The other bound of the same read: the second step performs the decode,
+TEST(VoiceStream, AGroupsDataIsNotReadTwoSamplesAfterItsScheduling) {
+  // The other bound of the same read: the fourth step performs the decode,
   // so a rewrite after it no longer reaches samples 12-15.
   Stream s;
   startVoice(s.dsp, s.ram, 0);
-  stepVoice(s.dsp, s.ram, 0);  // sample 4: the crossing
-  stepVoice(s.dsp, s.ram, 0);  // sample 5: the read
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the boundary
+  stepVoice(s.dsp, s.ram, 0);  // sample 5
+  stepVoice(s.dsp, s.ram, 0);  // sample 6: the scheduling
+  stepVoice(s.dsp, s.ram, 0);  // sample 7: the read
   s.ram[0x1007] = 0x00;
   s.ram[0x1008] = 0x00;
-  for (int sample = 6; sample <= 11; ++sample) stepVoice(s.dsp, s.ram, 0);
+  for (int sample = 8; sample <= 11; ++sample) stepVoice(s.dsp, s.ram, 0);
   stepVoice(s.dsp, s.ram, 0);  // sample 12: already decoded
+  EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(12));
+}
+
+TEST(VoiceStream, AGroupsShiftIsTheHeaderStandingAtItsScheduling) {
+  // The header is read at the SCHEDULING itself, one sample before the data:
+  // spc_dsp6 `Order/pitch after brr` rewrites a moving voice's header shift
+  // once per sample and its tape carries the group crossed into under one
+  // shift decoded under the shift standing one sample later — the scheduling
+  // sample under a two-samples-per-step pitch. A header rewrite AFTER the
+  // scheduling does not reach the group: its samples decode under the
+  // captured shift while the data read is still one sample away.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the boundary
+  stepVoice(s.dsp, s.ram, 0);  // sample 5
+  stepVoice(s.dsp, s.ram, 0);  // sample 6: the scheduling reads the header
+  s.ram[0x1000] = 0xB0;        // shift 12 -> 11: halves every later decode
+  for (int sample = 7; sample <= 11; ++sample) stepVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: decoded under the captured header
   EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(12));
 }
 
