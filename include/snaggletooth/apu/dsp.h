@@ -187,6 +187,16 @@ struct VoiceState {
   // at the jump).
   std::uint16_t loopPointer = 0;
   bool loopPointerLoaded = false;
+  // The `VxSRCN` value the voice's source slot read this sample — T18 for
+  // voice 0, T21 for voice 1, T(3v-6) for voices 2-7, four slots before the
+  // directory slot (twelve for voice 1, whose source slot is in the previous
+  // sample) — which both directory reads select the entry with. A `VxSRCN`
+  // write landing after that slot reaches the next sample's read
+  // (`Timing/Voice/V1 srcn.start`/`.loop`). srcnLoaded is clear while no
+  // source slot has run (a state's first, frame-at-once sample, the
+  // single-voice call and the un-slotted restart read the register live).
+  std::uint8_t srcn = 0;
+  bool srcnLoaded = false;
   // The decoder's filter history — the two most recently DECODED samples,
   // which run ahead of the window's consumed taps.
   std::int16_t decodePrev1 = 0;

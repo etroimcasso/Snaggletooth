@@ -494,7 +494,8 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 
 | Slot | Work |
 |---|---|
-| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. |
+| T18; T21; T0, T3, T6, T9, T12, T15 | Each voice's source read — `VxSRCN`, four slots ahead of the voice's directory read (voice 0 at T18, voices 2-7 at T(3v−6)); voice 1's at T21, twelve ahead of its directory read in the next sample. |
+| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. The entry is the one the source read selected. |
 | T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
 | T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` set becomes readable, three slots after its compute — voice 0's at T3 of the following sample. |
 | T23 / T24 | Echo reads; the echo value is computed here. |
@@ -835,6 +836,30 @@ before the next sample's directory slot is what the started voice plays from; on
 that slot reaches only the voice's next loop.
 
 *Arbitrated by `Timing/Voice/V2 dir.start.lsb`/`.msb`.*
+
+### The source number is read at its own slot, four ahead of the directory read
+
+`VxSRCN` is not read with the directory entry it selects. It has its own **source slot**, four slots
+before the voice's directory slot — T18 for voice 0, T0 for voice 2, T(3v−6) for voices 3-7 — and
+for voice 1, whose directory slot is T1, the source slot is T21 of the *previous* sample. Both
+directory reads, the per-sample loop read and a key-on's start read, select the entry with the value
+that slot captured. Both references have it: fullsnes's chart carries `V0SRCN` at T18, `V1SRCN` at
+T21 and `V2SRCN` at T0 in its register-array column, and Anomie's V1 step "loads the current value of
+the VxSRCN register" at cycles `0:17 1:20 2:31 3:2 …`, one step before V2 loads the pointer.
+
+`Timing/Voice/V1 srcn.start` and `srcn.loop` measure it exactly as the `V2 dir.*` pairs do, with the
+pulse moved from a directory byte to the register: per row a five-cycle `VxSRCN` pulse to an entry
+that points at a silent block, at a per-row offset from that row's own key-on write, and the hash
+records whether the voice started or looped into silence. The recovered read cycles — one structured
+solution per constant, the same constant for both tests — sit four slots ahead of the directory read
+for every voice but voice 1, and twelve ahead for it; a read at the directory slot itself catches a
+later set of rows for every voice.
+
+The consequence: a `VxSRCN` write that lands between the source slot and the directory slot reaches
+the next sample's directory read, not this one — a loop already resolved, or a start already read,
+keeps the old source.
+
+*Arbitrated by `Timing/Voice/V1 srcn.start`/`.loop`.*
 
 ### Pitch modulation reads the previous voice's output from the previous sample
 

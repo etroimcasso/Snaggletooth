@@ -259,12 +259,36 @@ constexpr std::array<std::uint8_t, 8> kVoiceBrrLoadSlot = {26, 2, 5, 8, 11, 14, 
 // offset and hash which voices looped through the pulsed value.
 constexpr std::array<std::uint8_t, 8> kVoiceDirSlot = {22, 1, 4, 7, 10, 13, 16, 19};
 
+// The slot of each voice's source read — where `VxSRCN` is read from the
+// register array for the directory reads that follow: T18 for voice 0 and
+// T21 for voice 1 (four and twelve slots before their directory slots, voice
+// 1's in the previous sample), T(3v-6) for voices 2-7, four before theirs.
+// Measured against spc_dsp6's `Timing/Voice/V1 srcn.start` and `srcn.loop`,
+// which pulse the register for five cycles at every offset and hash which
+// voices started or looped through the pulsed source.
+constexpr std::array<std::uint8_t, 8> kVoiceSrcnSlot = {18, 21, 0, 3, 6, 9, 12, 15};
+
+// Reads, at a voice's source slot, the `VxSRCN` its next directory reads
+// select the entry with.
+static void loadSourceNumber(DspState& dsp, std::size_t voice) noexcept {
+  VoiceState& v = dsp.voices[voice];
+  v.srcn = dsp[voiceRegister(voice, kVoiceSrcn)];
+  v.srcnLoaded = true;
+}
+
+// The source number a directory read selects the entry with: the source
+// slot's capture, or the live register on a state no source slot has run on.
+static std::uint8_t voiceSourceNumber(const DspState& dsp, std::size_t voice) noexcept {
+  const VoiceState& v = dsp.voices[voice];
+  return v.srcnLoaded ? v.srcn : dsp[voiceRegister(voice, kVoiceSrcn)];
+}
+
 // Reads, at a voice's directory slot, the loop address of its directory entry
 // for the loop jump the compute may make this sample.
 void loadLoopPointer(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                      std::size_t voice) noexcept {
   VoiceState& v = dsp.voices[voice];
-  v.loopPointer = readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).loop;
+  v.loopPointer = readBrrSource(ram, dsp[kDspDir], voiceSourceNumber(dsp, voice)).loop;
   v.loopPointerLoaded = true;
 }
 
@@ -684,12 +708,13 @@ static void resetVoiceForStart(DspState& dsp, std::size_t voice) noexcept {
 // schedule this runs at the voice's directory slot of the sample after the
 // key-on's consuming compute — T22 for voice 0, T(3v-2) for voices 1-7 — the
 // slot `Timing/Voice/V2 dir.start.lsb`/`.msb` measure: a five-cycle pulse into
-// either start byte is caught only when it covers that slot. The entry's loop
+// either start byte is caught only when it covers that slot. The entry is
+// selected by the source slot's `VxSRCN` capture (loadSourceNumber); its loop
 // address is the directory slot's own per-sample read (loadLoopPointer).
 static void loadStartPointer(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                              std::size_t voice) noexcept {
   const std::uint16_t start =
-      readBrrSource(ram, dsp[kDspDir], dsp[voiceRegister(voice, kVoiceSrcn)]).start;
+      readBrrSource(ram, dsp[kDspDir], voiceSourceNumber(dsp, voice)).start;
   VoiceState& v = dsp.voices[voice];
   v.brrAddress = start;
   v.decoderAddress = start;
@@ -1155,6 +1180,11 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       dsp.pitchLatch[v] = static_cast<std::uint16_t>(voicePitch(dsp, v));
     }
   }
+
+  // The source read at each voice's source slot: the `VxSRCN` the directory
+  // reads that follow select the entry with.
+  for (std::size_t voice = 0; voice < 8; ++voice)
+    if (kVoiceSrcnSlot[voice] == slot) loadSourceNumber(dsp, voice);
 
   // The directory read at each voice's directory slot: the loop address the
   // compute's loop jump takes, read ahead of it — and, for a voice whose

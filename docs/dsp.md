@@ -290,8 +290,12 @@ slot — T22 for voice 0, nine slots before its compute, and the slot before the
 read, not this jump. A key-on's start pointer is read at the same slot, in the sample **after** the
 compute that applied the key-on (the compute that emits the voice's final pre-key-on sample); the
 start block's first three groups are then read at that sample's BRR load slot. So the countdown's
-first silent call reads nothing at all, and a `DIR` or `VxSRCN` write that lands after the
-consuming compute but before the next directory slot is what the started voice plays from.
+first silent call reads nothing at all, and a `DIR` write that lands after the consuming compute but
+before the next directory slot is what the started voice plays from. `VxSRCN` is read one step
+earlier still, at the voice's source slot — four slots before its directory slot (T18 for voice 0,
+T(3v−6) for voices 2-7), and for voice 1 T21 of the previous sample — so both directory reads select
+the entry with the source standing there, and a `VxSRCN` write landing between the two slots reaches
+the next sample's read.
 
 Around a key-on the check's view stands still a little longer. It keeps reading the block standing
 before the key-on through the five empty samples and the first two live samples — so a startup

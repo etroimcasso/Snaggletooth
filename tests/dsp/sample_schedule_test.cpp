@@ -1466,4 +1466,118 @@ TEST(SampleSchedule, TheStartBlockIsReadAtTheLoadSlotOfTheSampleAfterTheConsumin
   pin(7, 20);
 }
 
+// A looping voice on directory entry 0 ($0300, loops over itself) with entry 1
+// pointing at a second block ($0400), walked until its stream index reaches
+// `stopIndex` — 7 is the sample before the decoder leaves its block, so the
+// next compute's advance resolves the loop jump.
+DspState loopingVoiceOnEntryZero(Ram& ram, std::size_t voice, unsigned stopIndex = 7) {
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  ram[0x0204] = 0x00;  // directory entry 1: start $0400
+  ram[0x0205] = 0x04;
+  ram[0x0206] = 0x00;  // loop -> $0400
+  ram[0x0207] = 0x04;
+  ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: loops over itself
+  ram[0x0400] = 0xC3;
+  for (int n = 0; n < 8; ++n) {
+    ram[static_cast<std::size_t>(0x0301 + n)] = 0x44;
+    ram[static_cast<std::size_t>(0x0401 + n)] = 0x44;
+  }
+  DspState dsp;
+  dsp[0x5D] = 0x02;              // DIR -> $0200
+  reg(dsp, voice, 0x03) = 0x10;  // pitch $1000: one stream sample per call
+  reg(dsp, voice, 0x07) = 0x7F;  // Direct Gain 7F0h
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.sampleIndex % 2, 0u);
+  dsp.internalKon = static_cast<std::uint8_t>(1u << voice);
+  sample(dsp, ram);  // the poll at this sample's T31 arms the restart
+  int n = 0;
+  while (dsp.voices[voice].brrSampleIndex != stopIndex && n < 40) {
+    sample(dsp, ram);
+    ++n;
+  }
+  EXPECT_LT(n, 40) << "the stream never reached index " << stopIndex;
+  EXPECT_EQ(dsp.voices[voice].decoderAddress, 0x0300u);
+  return dsp;
+}
+
+TEST(SampleSchedule, TheSourceNumberIsReadAtTheVoicesSourceSlotAheadOfTheLoopRead) {
+  // The directory read that a loop jump takes selects the entry with the
+  // `VxSRCN` read at the voice's source slot — T18 for voice 0, T21 for
+  // voice 1 in the PREVIOUS sample, T(3v-6) for voices 2-7 — four slots
+  // before the directory slot, not the register as it stands there. Measured
+  // against spc_dsp6's `Timing/Voice/V1 srcn.loop`: a five-cycle pulse into
+  // the register is caught by each voice at exactly that slot.
+  const auto pin = [](std::size_t voice, int srcnSlot) {
+    Ram ram{};
+    const DspState dsp = loopingVoiceOnEntryZero(ram, voice);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    const std::uint8_t srcn = static_cast<std::uint8_t>(voice * 0x10 + 0x04);
+    sampleWritingAt(seen, ram, srcnSlot, srcn, 0x01);
+    sampleWritingAt(missed, ram, srcnSlot + 1, srcn, 0x01);
+    EXPECT_EQ(seen.voices[voice].brrSampleIndex, 8u) << "the jump's sample";
+    EXPECT_EQ(seen.voices[voice].decoderAddress, 0x0400u)
+        << "voice " << voice << ": a write before the source slot reaches the jump";
+    EXPECT_EQ(missed.voices[voice].decoderAddress, 0x0300u)
+        << "voice " << voice << ": a write after the source slot does not";
+  };
+  pin(0, 18);
+  pin(2, 0);
+  pin(7, 15);
+
+  // Voice 1's source slot is T21 of the sample BEFORE its directory slot at
+  // T1: the write lands in the sample that brings the stream to index 7, and
+  // the following sample's compute makes the jump.
+  {
+    Ram ram{};
+    const DspState dsp = loopingVoiceOnEntryZero(ram, 1, 6);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    sampleWritingAt(seen, ram, 21, 0x14, 0x01);
+    sampleWritingAt(missed, ram, 22, 0x14, 0x01);
+    ASSERT_EQ(seen.voices[1].brrSampleIndex, 7u);
+    sample(seen, ram);
+    sample(missed, ram);
+    EXPECT_EQ(seen.voices[1].brrSampleIndex, 8u) << "the jump's sample";
+    EXPECT_EQ(seen.voices[1].decoderAddress, 0x0400u)
+        << "voice 1: a write before T21 of the previous sample reaches the jump";
+    EXPECT_EQ(missed.voices[1].decoderAddress, 0x0300u)
+        << "voice 1: a write after it does not";
+  }
+}
+
+TEST(SampleSchedule, TheSourceNumberForAStartIsReadAtTheSourceSlotAheadOfThePointerRead) {
+  // A key-on's start pointer is read from the entry the source slot's
+  // `VxSRCN` selects — the slot four before the directory slot in the sample
+  // after the consuming compute — so a register write landing between the
+  // two slots reaches only the voice's next loop. Measured against
+  // spc_dsp6's `Timing/Voice/V1 srcn.start`: the same rows as `srcn.loop`,
+  // one V1 step ahead of the start-pointer read.
+  const auto pin = [](std::size_t voice, int srcnSlot) {
+    Ram ram{};
+    DspState dsp = keyedVoiceAwaitingItsPrime(ram, voice);
+    ram[0x0204] = 0x00;  // directory entry 1: start $0400
+    ram[0x0205] = 0x04;
+    ram[0x0206] = 0x00;  // loop -> $0400
+    ram[0x0207] = 0x04;
+    DspState seen = dsp;
+    DspState missed = dsp;
+    const std::uint8_t srcn = static_cast<std::uint8_t>(voice * 0x10 + 0x04);
+    sampleWritingAt(seen, ram, srcnSlot, srcn, 0x01);
+    sampleWritingAt(missed, ram, srcnSlot + 1, srcn, 0x01);
+    EXPECT_EQ(seen.voices[voice].brrAddress, 0x0400u)
+        << "voice " << voice << ": a write before the source slot reaches the start read";
+    EXPECT_EQ(missed.voices[voice].brrAddress, 0x0300u)
+        << "voice " << voice << ": a write after the source slot does not";
+    EXPECT_FALSE(seen.voices[voice].startPending);
+  };
+  pin(0, 18);
+  pin(2, 0);
+  pin(7, 15);
+}
+
 }  // namespace
