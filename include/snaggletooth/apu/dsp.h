@@ -119,37 +119,41 @@ struct VoiceState {
   SampleWindow window{};
   // The decoded-sample ring between the decoder and the window. BRR data is
   // decoded four samples at a time, ahead of the cursor: a key-on primes the
-  // first three groups — twelve samples — and each group-aligned consume
-  // schedules the decode of the group eight stream samples ahead, performed
-  // at the voice's NEXT sample (the schedule below carries it). So the
-  // bytes behind a sample are read from RAM seven to eleven samples before
-  // it sounds, and a RAM write after that read does not reach the samples
-  // already decoded (`Misc/brr not always decoding` rewrites a parked voice's
-  // block and the voice still plays its twelve primed samples; `Order/pitch
-  // after brr` rewrites the header sample by sample under a moving voice and
-  // reads which shift each group took). The ring holds the decoded,
-  // not-yet-consumed samples; a state seeded without priming (count 0) decodes
-  // at consumption instead — the hardware never runs unprimed, but
-  // directly-seeded mid-stream states have no ring to pop.
+  // first three groups — twelve samples, every byte read at the prime — and
+  // the consumption of a group's third sample schedules the decode of the
+  // group two on (the schedule below carries it), so a group's bytes are read
+  // from RAM several samples before its first sample sounds, and a RAM write
+  // after that read does not reach the samples already decoded (`Misc/brr not
+  // always decoding` rewrites a parked voice's block and the voice still plays
+  // its twelve primed samples; `Order/pitch after brr` rewrites the header
+  // sample by sample under a moving voice and reads which shift each group
+  // took). The ring holds the decoded, not-yet-consumed samples; a state
+  // seeded without priming (count 0) decodes at consumption instead — the
+  // hardware never runs unprimed, but directly-seeded mid-stream states have
+  // no ring to pop.
   std::array<std::int16_t, 12> pending{};
   std::uint8_t pendingHead = 0;
   std::uint8_t pendingCount = 0;
-  // The group decodes the cursor's last advance scheduled — one per group
-  // boundary it crossed, each naming the block the group lies in and its
-  // first in-block sample index. They run at the start of the voice's next
-  // advance — one sample after the crossing, and before the cursor moves
-  // again — and the bytes are read from RAM in two slots of that sample: the
-  // header and the group's first data byte at the voice's BRR load slot (six
-  // slots before voice 0's compute, one before every other voice's), held
-  // here, and the second data byte at the compute itself. A CPU write to the
-  // header or first byte that lands between the two slots does not reach the
-  // group; one to the second byte does. Both published slot tables place the
-  // reads this way; no test ROM has yet arbitrated it.
+  // The group decodes the cursor's advances have scheduled, each naming the
+  // block the group lies in and its first in-block sample index. A group's
+  // three bytes are read from RAM in three slots: the header at the
+  // scheduling itself (the compute that consumed the third sample of the
+  // group two back), held here; the first data byte at the voice's BRR load
+  // slot in the next sample (five slots before voice 0's compute, the compute
+  // slot itself for the other voices), also held here; and the second data
+  // byte at the voice's S4 slot of that sample, one after the compute. The
+  // first two samples decode at that compute and the last two at the S4 —
+  // unless the advance would otherwise consume past the ring, when the S4
+  // half decodes at the compute too. A CPU write that lands between a byte's
+  // read and the next reaches the later byte and not the earlier one
+  // (`Timing/Voice/V3 BRR.header.03`, `BRR.sample.lsb`, `BRR.sample.msb` and
+  // `Order/pitch after brr` measure the three slots).
   // A modulated step can carry the cursor across two boundaries in one
   // sample (the position clamps at 7FFFh, seven samples on), so the schedule
-  // holds two. bytesLoaded is clear for a decode the slot schedule has not
-  // loaded — a state's first, frame-at-once sample and the single-voice
-  // call — which read all three bytes at the decode.
+  // holds two; a pair scheduled together decodes in full at the compute.
+  // bytesLoaded is clear for a decode the slot schedule has not loaded — a
+  // state's first, frame-at-once sample and the single-voice call — which
+  // read the data bytes at the decode.
   struct GroupDecode {
     std::uint16_t address = 0;
     std::uint8_t offset = 0;

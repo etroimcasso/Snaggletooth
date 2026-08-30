@@ -372,14 +372,13 @@ void decodeStreamSample(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
             v.scheduledDecodes[n].offset == offset)
           return;  // this group is already on the schedule
       if (v.scheduledDecodeCount < v.scheduledDecodes.size()) {
-        VoiceState::GroupDecode g{.address = v.decoderAddress, .offset = offset};
-        if (kDecodeTriggerIndex == 2) {
-          // The trigger-2 form reads the group's header at the scheduling
-          // itself; the load slot one sample on supplies the first data byte.
-          g.header = ram[g.address];
-          g.headerCaptured = true;
-        }
-        v.scheduledDecodes[v.scheduledDecodeCount] = g;
+        // The group's header is read at the scheduling itself; the load slot
+        // one sample on supplies the first data byte.
+        v.scheduledDecodes[v.scheduledDecodeCount] =
+            VoiceState::GroupDecode{.address = v.decoderAddress,
+                                    .offset = offset,
+                                    .header = ram[v.decoderAddress],
+                                    .headerCaptured = true};
         ++v.scheduledDecodeCount;
       }
     };
