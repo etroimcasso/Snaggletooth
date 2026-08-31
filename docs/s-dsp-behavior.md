@@ -1010,6 +1010,44 @@ past the compute-slot clear's for all eight voices.
 
 *Arbitrated by `Timing/Voice/V7 endx cleared`, `V7 endx set`, `V8 outx` and `V9 envx`.*
 
+### The internal key-on is cleared one slot before the poll, and takes a write from the two cycles before it
+
+Anomie puts a step at cycle 29, one before the poll's own load: "clear internal KON bits for any
+channels keyed on in the previous 2 cycles", with the note that the bits "are not cleared until 63
+cycles after they are loaded". Read as a blanket clear of everything standing 63 cycles on, it is
+wrong twice over — it would erase the arm of any program that writes `KON` once per poll period, and
+the ROM refuses it. Read literally, the two-cycle clause is the whole rule.
+
+**The clear takes the bits the previous poll started, and only from a `KON` write issued in the two
+cycles before the clear's own slot.** A write at T28 or T29 of a polling sample, naming a voice that
+poll's predecessor started, starts nothing at all. A write at T30 lands after the clear and the poll
+one cycle later takes it. A write older than those two cycles stands — including one at the same
+slots of the sample *between* two polls, which is 32 cycles clear.
+
+`Timing/Misc/29 kon cleared` is the measurement. Each of its 32 rows keys all eight voices, waits a
+row-dependent number of cycles, writes `KON` again, and then counts its own polls until the left
+echo word turns non-zero, folding that count and the word. The second write walks one cycle later
+per row, from T28 of the polling sample onward. Recovered from the driver's CRC-32 constant
+(`$3BE4805C`) as the unique three-plateau fit — one solution across every boundary pair and every
+count under 64 — the expected table reads **3, 3, 5, then 7 for the remaining 29 rows**: the T28 and
+T29 rows behave as though the second write never happened, the T30 row is served by the poll one
+cycle later, and every row from T31 on is served by the poll after that.
+
+The middle row also settles what such a key-on does. A key-on landing on a voice inside its silent
+span is normally absorbed at the first poll after the one that started it (above). The T30 row is
+taken by exactly that poll and is *not* absorbed: its count of 5 sits between the 3 of a write that
+never arrived and the 7 of one the next poll serves, which is the rewind a later in-span key-on
+produces. So the same two-cycle window governs the arm twice — the clear takes a write inside it,
+and a key-on the poll takes from a write inside it rewinds the silence instead of vanishing into it.
+
+Two neighbouring sub-tests hold the reading in place. `KON/kon decoding when another kon` writes
+`KON` at T30 of the sample between two polls — 32 cycles ahead of the clear — and a blanket clear
+loses that write; `KON/kon clears independent` writes at T29 naming a voice the previous poll did
+not start, and a clear without the bit mask loses that one.
+
+*Arbitrated by `Timing/Misc/29 kon cleared`, with `KON/kon decoding when another kon` and
+`KON/kon clears independent` bounding it.*
+
 ---
 
 ## Echo

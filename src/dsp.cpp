@@ -1357,6 +1357,11 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       dsp.echoLatchedEsa = dsp[kDspEsa];
       dsp.echoLatchedEdl = dsp[kDspEdl];
       dsp.echoGateRight = (dsp[kDspFlg] & kFlgEchoWriteDisable) == 0;
+      // The internal key-on loses the bits the previous poll took, one slot
+      // before this sample's own poll reads it, and a KON write issued in the
+      // two cycles before this slot goes with them.
+      if (dsp.sampleIndex % 2 == 0 && cpuWriteStands(dsp, dsp.konWriteCycle))
+        dsp.internalKon = static_cast<std::uint8_t>(dsp.internalKon & ~dsp.consumedKon);
       break;
     case 31: {
       // The KON/KOFF load runs first (the poll keeps the even-sample parity —
@@ -1520,8 +1525,12 @@ void cpuWriteDspRegister(DspState& dsp, std::uint8_t reg, std::uint8_t value) no
   dsp[reg] = value;
   // A KON write also arms the internal key-on the poll consumes. The value
   // replaces whatever was pending, so of two writes between polls only the
-  // second one keys anything on.
-  if (reg == kDspKon) dsp.internalKon = value;
+  // second one keys anything on. The write carries its cycle: the T30 strike
+  // and the poll each ask whether it landed in the two cycles before them.
+  if (reg == kDspKon) {
+    dsp.internalKon = value;
+    dsp.konWriteCycle = dsp.cycleCount;
+  }
   // The DSP-written voice registers carry the write's cycle, for the S8/S9
   // write that may have to yield to it.
   const std::size_t voice = reg >> 4;
@@ -1570,6 +1579,12 @@ void pollKeying(DspState& dsp,
     // it (`KON/kon then another kon`). A re-key past the span restarts the
     // voice in full (the documented click/pop case).
     //
+    // Absorption covers a write that was standing before the poll's slot came
+    // round. One issued in the two cycles before the poll rewinds the hold
+    // instead, at the poll that takes it: `Timing/Misc/29 kon cleared`'s T30
+    // row reads its voices reaching the tape later than the rows whose write
+    // the strike took, and earlier than the rows the next poll serves.
+    //
     // Both in-span tiers protect a STANDING startup. A voice in Release has no
     // startup left to absorb into or rewind — a soft reset landing inside the
     // span keys the voice off and kills the startup for good — so a key-on
@@ -1590,7 +1605,7 @@ void pollKeying(DspState& dsp,
         v.konDelay = kKeyOnStartupCalls;
         v.computesSinceKeyOn = 0;
         v.restartPending = true;
-      } else if (v.computesSinceKeyOn > 2) {
+      } else if (v.computesSinceKeyOn > 2 || cpuWriteStands(dsp, dsp.konWriteCycle)) {
         v.konDelay = kKeyOnStartupCalls;
         v.envelope = 0;
       }
@@ -1612,6 +1627,9 @@ void pollKeying(DspState& dsp,
       dsp.voices[voice].pitchCaptureHold = kKeyOnSilentCalls;
     }
   }
+  // The poll disarms itself, and records what it took for the next sample's
+  // strike to remove from a value written since.
+  dsp.consumedKon = kon;
   dsp.internalKon = 0;
 }
 

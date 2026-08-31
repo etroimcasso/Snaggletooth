@@ -205,6 +205,15 @@ starts the armed voices and disarms itself. So a `KON` bit left set does not sta
 and the register keeps the value for you to read back. Two `KON` writes inside one poll window arm
 only the second one.
 
+There is a second disarm, and it is the reason a `KON` write can go missing. One slot before each
+poll — T30 — the arm is struck: it loses the bits *that poll's predecessor started*, and a `KON`
+write issued in the two cycles before that slot is taken with them. So a write landing at T28 or T29 of a polling
+sample, naming a voice the previous poll already started, starts nothing at all; a write at T30
+lands after the strike and the poll one cycle later takes it. A write older than those two cycles
+stands whatever it names — including one at the same slots of the sample *between* two polls, which
+is 32 cycles clear of the strike. Nothing else about the arm is time-sensitive: writes anywhere else
+in the poll period behave identically.
+
 Re-keying a voice that is already sounding restarts it in full — envelope to zero, stream back to the
 start, the empty samples again — which is what causes the documented click. The restart is applied by
 the voice's own compute in the consuming poll's sample, and that compute still prepares one sample
@@ -223,6 +232,9 @@ consumes it:
   resets — countdown, stream and envelope schedule all stand. Two `KON` writes that straddle a poll,
   each naming the same voice, therefore start it once, and a voice named by the earlier of two
   straddling writes leads one named only by the later write by exactly one poll period, two samples.
+  Absorption covers a write that was already standing when the poll's slot came round; the one write
+  it does not cover is the T30 write above, issued in the two cycles before the poll, which rewinds
+  the silence as a later key-on does.
 - **At any later poll inside the span, it rewinds the silence but not the stream.** The five-sample
   countdown re-arms in full and the envelope drops back to zero, so the voice's level emerges as
   late as a full restart would place it — but the decode cursor is not sent back to the start
@@ -407,10 +419,11 @@ counter's residue mod 32 numbers them:
 | T29 / T30 | `FLG` bit 5 is loaded, one slot ahead of each echo word it gates. |
 | T30 / T31 | The echo write lands: the left word at T30, the right word at T31. |
 | T30 | The raw `ESA` and `EDL` are loaded for the ring advance to apply. |
+| T30 | The internal key-on loses the bits the previous poll started (even samples). |
 | T31 | The ring advance: the loaded `ESA` becomes the next sample's base, `EDL` resizes at a wrap, the index steps. |
 | T31 | `KON`/`KOFF` are polled (even samples), the global counter advances, the noise steps, then voice 0 computes. |
 
-Four consequences are worth knowing:
+Five consequences are worth knowing:
 
 - **The four voice-wide registers are read once, not per voice.** `PMON` at T28 and `NON`, `EON` and
   `DIR` at T29 are read for all eight voices together, and the voice work that uses them takes what
@@ -418,6 +431,11 @@ Four consequences are worth knowing:
   T28/T29 — there is no sample in which one voice has the new bit and another has the old one — and
   because voice 0 computes at T31, after the read, it acts on a write a whole sample before voices
   1–7 do.
+
+- **A `KON` write has two cycles it must avoid.** The strike at T30 takes a write issued in the two
+  cycles before it, so a write at T28 or T29 of a polling sample naming an already-started voice
+  starts nothing; one at T30 lands after the strike and the poll takes it a cycle later. See
+  *Key-on and key-off* above.
 
 - **`VxOUTX` and `VxENVX` lag their compute.** A voice computes its amplitude at its own slot but does
   not publish `VxOUTX` into the register file until a few slots later; a CPU read in between returns

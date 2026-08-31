@@ -38,6 +38,7 @@ constexpr std::uint8_t kMvolLeft = 0x0C;
 constexpr std::uint8_t kMvolRight = 0x1C;
 constexpr std::uint8_t kNon = 0x3D;
 constexpr std::uint8_t kFlg = 0x6C;
+constexpr std::uint8_t kKon = 0x4C;
 
 std::uint8_t& reg(DspState& dsp, std::size_t v, std::uint8_t off) { return dsp[v * 0x10 + off]; }
 std::uint8_t outx(const DspState& dsp, std::size_t v) { return dsp[v * 0x10 + 0x09]; }
@@ -606,6 +607,100 @@ TEST(SampleSchedule, AKeyOnDuringTheStartupCountdownIsAbsorbed) {
   sample(dsp, ram);            // even sample: the poll re-keys it
   EXPECT_EQ(dsp.voices[1].konDelay, 5)
       << "a re-key past the startup begins a fresh countdown";
+}
+
+// Runs one sample, issuing a KON write through cpuWriteDspRegister the instant
+// the cursor reaches `atCursor`. A write at cursor k is the CPU's write of cycle
+// k-1, so the clear at T30 sees a write issued at cursor 29 or 30, and the poll
+// at T31 sees one issued at cursor 30 or 31.
+void sampleWritingKonAt(DspState& dsp, const Ram& ram, int atCursor, std::uint8_t value) {
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == atCursor) cpuWriteDspRegister(dsp, kKon, value);
+    stepDspCycle(dsp, view(ram));
+  }
+}
+
+// Keys voice 0 on at a polling sample, leaving its bit standing as the value the
+// next clear strikes. Returns with the cursor at the top of the sample between
+// that poll and the next.
+void keyVoiceZeroAtAPollingSample(DspState& dsp, const Ram& ram) {
+  sample(dsp, ram);
+  if (dsp.sampleIndex % 2 != 0) sample(dsp, ram);
+  cpuWriteDspRegister(dsp, kKon, 0x01);
+  sample(dsp, ram);
+}
+
+TEST(SampleSchedule, AKeyOnArmedInTheTwoCyclesBeforeTheClearIsStruck) {
+  // The internal key-on is cleared of the bits the previous poll took at T30,
+  // one slot before the poll that reads it, and a KON write issued in the two
+  // cycles before that slot goes with them: it never reaches the poll and keys
+  // nothing on. A write issued at T30 itself lands after the clear and is read
+  // by that sample's own poll. spc_dsp6 `Timing/Misc/29 kon cleared` keys all
+  // eight voices, writes KON again one cycle later per row, and reads how long
+  // the voices take to reach the echo tape: the rows whose write lands at T28
+  // and T29 read as though the second write never happened, and the row that
+  // writes at T30 reads the key-on the poll one cycle later took.
+  for (int cursor : {29, 30, 31}) {
+    Ram ram{};
+    DspState dsp;
+    keyVoiceZeroAtAPollingSample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.consumedKon, 0x01) << "cursor " << cursor;
+    sampleWritingKonAt(dsp, ram, cursor, 0x01);
+    const bool reachesThePoll = cursor == 31;
+    EXPECT_EQ(dsp.voices[0].pitchCaptureHold, reachesThePoll ? 5 : 3)
+        << "write at cursor " << cursor;
+  }
+}
+
+TEST(SampleSchedule, TheClearTakesOnlyTheBitsThePreviousPollConsumed) {
+  // The clear is not a wipe: it takes the bits that poll keyed on. A write in
+  // the same two cycles naming a different voice stands, and the poll one slot
+  // later keys that voice on — at its own countdown, since every voice but 0
+  // computes before the poll and takes its first startup call in the sample
+  // after it.
+  Ram ram{};
+  DspState dsp;
+  keyVoiceZeroAtAPollingSample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.consumedKon, 0x01);
+  sampleWritingKonAt(dsp, ram, 29, 0x02);
+  EXPECT_EQ(dsp.voices[1].konDelay, 5) << "voice 1 was keyed on";
+  EXPECT_EQ(dsp.voices[0].pitchCaptureHold, 3) << "voice 0 was not keyed again";
+}
+
+TEST(SampleSchedule, TheClearTakesNoWriteOlderThanItsTwoCycles) {
+  // The clear guards two cycles, not the whole poll period, and it rides the
+  // poll's own every-other-sample step. A write naming the voice that poll keyed
+  // — issued at the same slots, but in the sample between the two polls — stands
+  // through the clear and the next poll takes it. `KON/kon decoding when another
+  // kon` arms a voice exactly there, 32 cycles ahead of the clear.
+  Ram ram{};
+  DspState dsp;
+  keyVoiceZeroAtAPollingSample(dsp, ram);
+  ASSERT_EQ(dsp.consumedKon, 0x01);
+  sampleWritingKonAt(dsp, ram, 29, 0x01);  // the sample between the polls
+  sample(dsp, ram);                        // the next poll takes it
+  EXPECT_EQ(dsp.voices[0].pitchCaptureHold, 5) << "the write survived to this poll";
+  EXPECT_EQ(dsp.voices[0].konDelay, 2) << "and is absorbed into the standing startup";
+}
+
+TEST(SampleSchedule, AKeyOnTakenFromAWriteInTheTwoCyclesBeforeThePollRewindsTheHold) {
+  // A key-on the poll takes from a write issued in the two cycles before it is
+  // not absorbed into the standing startup the way an earlier write is: the
+  // countdown re-arms and the level drops, as a key-on later in the silent span
+  // does. In `Timing/Misc/29 kon cleared` the row writing at T30 reads its
+  // voices reaching the tape later than the rows whose write was struck, and
+  // earlier than the rows whose write the next poll takes.
+  for (int cursor : {20, 31}) {
+    Ram ram{};
+    DspState dsp;
+    keyVoiceZeroAtAPollingSample(dsp, ram);
+    sample(dsp, ram);
+    sampleWritingKonAt(dsp, ram, cursor, 0x01);
+    ASSERT_EQ(dsp.voices[0].pitchCaptureHold, 5) << "cursor " << cursor << ": the poll took it";
+    EXPECT_EQ(dsp.voices[0].konDelay, cursor == 31 ? 4 : 2) << "write at cursor " << cursor;
+  }
 }
 
 TEST(SampleSchedule, AVoiceIsScaledByTheLevelStandingBeforeItsUpdate) {

@@ -307,6 +307,17 @@ struct DspState {
   // set. Two writes between polls arm only the second.
   std::uint8_t internalKon = 0;
 
+  // The bits the last poll keyed on. They are struck from internalKon at T30 of
+  // the next polling sample — one slot before that poll reads — and the strike
+  // takes a CPU write issued in the two cycles before it with them, so a KON
+  // write at T28 or T29 of a polling sample keys nothing on while one at T30
+  // reaches the poll a slot later. A write older than those two cycles stands,
+  // whichever sample it landed in. spc_dsp6 `Timing/Misc/29 kon cleared` keys
+  // all eight voices and writes KON again one cycle later per row, reading how
+  // long each row takes to reach the echo tape; `KON/kon decoding when another
+  // kon` writes a whole sample ahead of the strike and is untouched by it.
+  std::uint8_t consumedKon = 0;
+
   // The four registers that describe every voice at once, each read once a
   // sample at its own slot rather than by the voice work that consumes it:
   // PMON at T28, and NON, EON and DIR together at T29. So one CPU write reaches
@@ -365,6 +376,11 @@ struct DspState {
   std::array<std::uint64_t, 8> outxWriteCycle = noCpuWrites();
   std::array<std::uint64_t, 8> envxWriteCycle = noCpuWrites();
   std::uint64_t endxWriteCycle = kNoCpuWrite;
+  // The same two-cycle window governs the internal key-on twice over: the T30
+  // strike takes a KON write issued inside it (see consumedKon), and a key-on
+  // the poll takes from a write issued inside it is never absorbed into a
+  // standing startup.
+  std::uint64_t konWriteCycle = kNoCpuWrite;
 
   // The one shared noise generator's 15-bit level, in the internal sample range
   // -4000h..+3FFFh, seeded to -4000h at power-on and reset. A voice whose NON bit
