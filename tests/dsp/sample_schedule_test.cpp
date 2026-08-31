@@ -102,6 +102,47 @@ StereoFrame sampleWritingAt(DspState& dsp, const Ram& ram, int atSlot, std::uint
   return frame;
 }
 
+// Advances one whole sample, poking a byte into APU RAM just before `atSlot` runs.
+// The read-only overload drives the sample, so the echo unit reads and filters
+// while its write stays disabled and nothing lands back over the poke.
+StereoFrame samplePokingRamAt(DspState& dsp, Ram& ram, int atSlot, std::uint16_t addr,
+                              std::uint8_t value) {
+  StereoFrame frame{};
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == atSlot) ram[addr] = value;
+    const SlotResult r = stepDspCycle(dsp, view(ram));
+    if (r.delivered) frame = r.frame;
+  }
+  return frame;
+}
+
+// A state whose output is the echo unit alone: no voice sounds, ESA and EDL are 0
+// so the ring is the single entry at $0000, the FIR history and the entry carry
+// one value throughout, and the eight coefficients are equal, so every tap
+// contributes and dropping any one of them moves the frame. The echo volumes pass
+// the filter's output to the DAC.
+void placeEchoOnlyState(DspState& dsp, Ram& ram, std::uint8_t coefficient = 0x08) {
+  constexpr std::uint8_t kEntryLowByte = 0x00;
+  constexpr std::uint8_t kEntryHighByte = 0x10;  // both words 1000h
+  ram[0] = kEntryLowByte;
+  ram[1] = kEntryHighByte;
+  ram[2] = kEntryLowByte;
+  ram[3] = kEntryHighByte;
+  dsp.echoFirLeft.fill(0x0800);  // the stored word's 15-bit value
+  dsp.echoFirRight.fill(0x0800);
+  for (std::size_t tap = 0; tap < 8; ++tap) dsp[tap * 0x10 + 0x0F] = coefficient;
+  dsp[0x2C] = 0x7F;  // EVOLL
+  dsp[0x3C] = 0x7F;  // EVOLR
+}
+
+// The slot each FIR coefficient is read at: FIR0 at T23, FIR1 and FIR2 at T24,
+// FIR3 to FIR5 at T25, FIR6 and FIR7 at T26.
+constexpr std::array<int, 8> kFirCoefficientSlot = {23, 24, 24, 25, 25, 25, 26, 26};
+
+std::uint8_t firRegister(std::size_t tap) {
+  return static_cast<std::uint8_t>(tap * 0x10 + 0x0F);
+}
+
 // ── Where each register is consumed ─────────────────────────────────────────
 
 TEST(SampleSchedule, MasterLeftVolumeIsConsumedAtSlotTwentySeven) {
@@ -253,6 +294,107 @@ TEST(SampleSchedule, TheDirectoryRegisterIsReadAtItsOwnSlotAheadOfTheDirectoryRe
   sample(missedState, ram);
   EXPECT_EQ(seenState.voices[1].loopPointer, 0x5678);
   EXPECT_EQ(missedState.voices[1].loopPointer, 0x1234);
+}
+
+// ── The echo unit's ladder (T23 to T27) ─────────────────────────────────────
+
+TEST(SampleSchedule, TheEchoBufferWordsAreReadAtTheirOwnSlots) {
+  // The ring entry's two words leave the buffer one slot apart — the left at T23
+  // and the right at T24 (fullsnes rows RdEchoLeft/RdEchoRight; anomie's cycles
+  // 22-23) — so a byte poked into the entry between the two slots reaches this
+  // sample's right channel and misses its left. spc_dsp6 `Timing/Echo/22-23 echo
+  // read` walks a poke of each word across the sample and folds both back.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  sample(base, ram);  // the first (atomic) frame primes the schedule
+
+  Ram seenRam = ram;
+  Ram missedRam = ram;
+  DspState seenState = base;
+  DspState missedState = base;
+  const StereoFrame seenLeft = samplePokingRamAt(seenState, seenRam, 23, 0x0000, 0x40);
+  const StereoFrame missedLeft = samplePokingRamAt(missedState, missedRam, 24, 0x0000, 0x40);
+  EXPECT_NE(seenLeft.left, missedLeft.left) << "the left word is read at T23";
+  EXPECT_EQ(seenLeft.right, missedLeft.right) << "and only the left word";
+
+  Ram seenRightRam = ram;
+  Ram missedRightRam = ram;
+  DspState seenRightState = base;
+  DspState missedRightState = base;
+  const StereoFrame seenRight =
+      samplePokingRamAt(seenRightState, seenRightRam, 24, 0x0002, 0x40);
+  const StereoFrame missedRight =
+      samplePokingRamAt(missedRightState, missedRightRam, 25, 0x0002, 0x40);
+  EXPECT_NE(seenRight.right, missedRight.right) << "the right word is read at T24";
+  EXPECT_EQ(seenRight.left, missedRight.left) << "one slot after the left word";
+}
+
+TEST(SampleSchedule, EachFirCoefficientIsReadAtItsOwnSlot) {
+  // The eight coefficients are read across four slots — FIR0 at T23, FIR1 and
+  // FIR2 at T24, FIR3 to FIR5 at T25, FIR6 and FIR7 at T26 (both references'
+  // access charts) — so zeroing one reaches this sample's filter only if the
+  // write lands before that coefficient's own slot. spc_dsp6
+  // `Timing/Echo/22-25 fir` walks such a write across the sample for each of the
+  // eight in turn.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  sample(base, ram);
+
+  for (std::size_t tap = 0; tap < 8; ++tap) {
+    const int slot = kFirCoefficientSlot[tap];
+    DspState untouchedState = base;
+    DspState seenState = base;
+    DspState missedState = base;
+    const StereoFrame untouched = sample(untouchedState, ram);
+    const StereoFrame seen = sampleWritingAt(seenState, ram, slot, firRegister(tap), 0x00);
+    const StereoFrame missed = sampleWritingAt(missedState, ram, slot + 1, firRegister(tap), 0x00);
+    EXPECT_NE(seen.left, untouched.left) << "FIR" << tap << " is read at T" << slot;
+    EXPECT_EQ(missed.left, untouched.left) << "FIR" << tap << " was already read by T" << slot + 1;
+  }
+}
+
+TEST(SampleSchedule, TheFilterRunsOnTheCoefficientsTheSampleCaptured) {
+  // Each coefficient is captured at its own slot rather than read where the
+  // filter runs: a write to FIR0 landing after T23 but before T26 — the slot the
+  // last two coefficients arrive at and the filter runs — does not reach this
+  // sample. Read live at the filter, the same write would.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  sample(base, ram);
+
+  DspState untouchedState = base;
+  DspState lateState = base;
+  const StereoFrame untouched = sample(untouchedState, ram);
+  const StereoFrame late = sampleWritingAt(lateState, ram, 25, firRegister(0), 0x00);
+  EXPECT_EQ(late.left, untouched.left) << "FIR0 was captured at T23, two slots before";
+}
+
+TEST(SampleSchedule, TheEchoFeedbackIsReadAtItsOwnSlot) {
+  // EFB is read at T27, where the write-back value is formed — not where the
+  // buffer is read — so a write landing before T27 scales the feedback this
+  // sample stages, and one landing after it waits for the next. spc_dsp6
+  // `Timing/Echo/26 efb` notches EFB across the sample and folds the entry back.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  base[0x0D] = 0x40;  // EFB: the entry feeds back into itself
+  const std::span<std::uint8_t, 65536> wram{ram};
+  for (int n = 0; n < 32; ++n) stepDspCycle(base, wram);  // the first (atomic) frame
+
+  const auto runWritingEfbAt = [&](int atSlot) {
+    DspState dsp = base;
+    Ram own = ram;
+    const std::span<std::uint8_t, 65536> ownView{own};
+    for (int n = 0; n < 32; ++n) {
+      if (dsp.slotCursor == atSlot) dsp[0x0D] = 0x00;
+      stepDspCycle(dsp, ownView);
+    }
+    return own[0] | (own[1] << 8);
+  };
+  EXPECT_NE(runWritingEfbAt(27), runWritingEfbAt(28)) << "EFB is read at T27";
 }
 
 TEST(SampleSchedule, OneReadOfTheVoiceWideRegistersServesEveryVoice) {
@@ -727,10 +869,10 @@ TEST(SampleSchedule, AVoiceIsScaledByTheLevelStandingBeforeItsUpdate) {
 }
 
 TEST(SampleSchedule, TheEchoWriteLandsAtItsOwnSlots) {
-  // The echo unit computes its buffer write when it runs at T24, but the bytes
+  // The echo unit forms its buffer write at T27, where EFB is read, but the bytes
   // land at the write slots — the left word at T30, the right word at T31
   // (fullsnes chart rows WrEchoLeft/WrEchoRight; anomie's cycles 29-30) — so a
-  // read of the entry between T24 and T30 still sees the previous sample.
+  // read of the entry between T27 and T30 still sees the previous sample.
   Ram ram{};
   DspState dsp;
   placeClimbingVoice(dsp, 1);  // a changing amplitude, so each frame's write differs

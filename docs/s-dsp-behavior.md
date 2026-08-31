@@ -501,7 +501,10 @@ fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is
 | T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` bit is written, four slots after its compute — voice 0's at T3 of the following sample: a key-on's clear, or else the set the compute staged. |
 | T4, T7, T10, T13, T16, T19, T22, T25 | Each voice's `VxOUTX` is published. |
 | T5, T8, T11, T14, T17, T20, T23, T26 | Each voice's `VxENVX` is published — the value computed one sample earlier. |
-| T23 / T24 | Echo reads; the echo value is computed here. |
+| T23 / T24 | The echo buffer's left word leaves the ring, then its right word. |
+| T23, T24, T25, T26 | The eight FIR coefficients are read — `FIR0` at T23, `FIR1` and `FIR2` at T24, `FIR3` to `FIR5` at T25, `FIR6` and `FIR7` at T26. |
+| T26 | The FIR filter runs, on the coefficients the sample captured. |
+| T27 | `EFB` is read and the buffer's write-back value is formed. |
 | T27 / T28 | Left then right output finalize — master and echo volume, then the mute gate. |
 | T28 | `PMON` is read, once, for all eight voices. |
 | T29 | `NON`, `EON` and `DIR` are read, once, for all eight voices. |
@@ -560,6 +563,27 @@ zero one sample later, the CPU exits one iteration later, and three steps fit. T
 moves the buffer to `$F000`, re-enables the rate and freezes the buffer eleven samples on; the first
 stepped level lands on frame 6 of the tape, one frame earlier than the trailing model puts it. Both
 halves of the row move by the single reordering.
+
+### The echo unit reads across five slots, not in one act
+
+The unit's read half is a ladder. The ring entry's left word leaves the buffer at T23 and its right
+word at T24; `FIR0` is read at T23, `FIR1` and `FIR2` at T24, `FIR3` to `FIR5` at T25, and `FIR6`
+and `FIR7` at T26, where the filter runs on the eight values the sample captured. `EFB` is read
+later still, at T27, where the write-back value is formed. Both references carry the whole ladder —
+fullsnes as chart rows `RdEchoLeft`/`RdEchoRight` and a register-array column, Anomie as his cycles
+22 to 26 — and they agree slot for slot.
+
+Two consequences are CPU-visible. A write to the echo buffer between T23 and T24 reaches the right
+channel of the sample in flight and misses its left. And a write to a FIR coefficient reaches that
+sample only if it lands before that coefficient's own slot: `FIR0` closes three slots before
+`FIR7` does, so one store can reach some taps and miss others.
+
+*Derived from `Timing/Echo/22-23 echo read`, `Timing/Echo/22-25 fir` and `Timing/Echo/26 efb`.* The
+first walks a poke of each buffer word across the sample and folds both words back, which separates
+the two reads. The second walks a store to one coefficient across the sample, once for each of the
+eight in turn, and folds a bit per row — so all eight slots ride one checksum. The third notches
+`EFB` to zero for a few cycles at a walking offset, freezes the buffer with `FLG` bit 5, and folds
+the entry: the notch changes the write-back only while it covers T27.
 
 ### The echo buffer writes land at T30/T31
 
@@ -1073,8 +1097,6 @@ reintroduce the low bit.
 
 Stated plainly, because a reference that hides its soft spots is worth less than one that marks them:
 
-- **Echo reads, and the `ESA`/`EDL` latch and ring-index advance**, are modeled together at T24.
-  Anomie places the latch and advance at his cycle 30. No measurement distinguishes them yet.
 - **Register-order edge cases** — writing `VxADSR2` or `VxGAIN` before `VxADSR1` within a sample — are
   noted in the Errata and not modeled at slot granularity.
 

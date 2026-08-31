@@ -367,6 +367,12 @@ and writes a new entry built from the enabled voices plus a feedback of the filt
   only the final addition saturates — the documented arithmetic. Its result is a 15-bit sample, so the
   low bit is dropped before `EVOL` and `EFB` read it. Left and right filter separately with the same
   coefficients.
+- **The reads are spread across five slots**, so a write racing them can reach part of a sample. The
+  entry's left word leaves the ring one slot before its right word, and the coefficients arrive in
+  four groups — `FIR0`, then `FIR1`–`FIR2`, then `FIR3`–`FIR5`, then `FIR6`–`FIR7`, the filter
+  running once the last pair lands. `EFB` is read later still, where the write-back value is formed,
+  not where the buffer is read. See [the intra-sample schedule](s-dsp-behavior.md#the-intra-sample-schedule)
+  for the slot each one sits on.
 - **Output and feedback.** The filtered signal is added to the main mix through `EVOL`. Separately, the
   voices enabled in `EON` are summed (after their per-voice volume) and added to the filtered signal
   scaled by `EFB`; the result, with bit 0 cleared, is written back over the entry that was read.
@@ -412,7 +418,10 @@ counter's residue mod 32 numbers them:
 | T3, T6, …, T24 | Each voice's `ENDX` bit is written: a key-on's clear, or the set its decode staged. |
 | T4, T7, …, T25 | Each voice's `VxOUTX` is published. |
 | T5, T8, …, T26 | Each voice's `VxENVX` is published. |
-| T24 | The echo unit reads its buffer, filters, and computes its feedback value. |
+| T23 / T24 | The echo buffer's left word leaves the ring, then its right word. |
+| T23, T24, T25, T26 | The FIR coefficients are read: `FIR0`, then `FIR1`–`FIR2`, then `FIR3`–`FIR5`, then `FIR6`–`FIR7`. |
+| T26 | The FIR filter runs, on the coefficients the sample captured. |
+| T27 | `EFB` is read and the buffer's write-back value is formed. |
 | T27 / T28 | The left / right output: `MVOLL`+`EVOLL` then `MVOLR`+`EVOLR`, then the mute gate. |
 | T28 | `PMON` is read, once, for all eight voices. |
 | T29 | `NON`, `EON` and `DIR` are read, once, for all eight voices. |
@@ -460,7 +469,7 @@ Five consequences are worth knowing:
   follows, so every voice outputting noise carries one noise level per delivered frame. A `FLG`
   noise-rate write is read at T31: one landing before that slot changes whether the sample's step
   fires; one landing after waits for the next sample.
-- **The echo write lags its compute.** The echo unit computes its buffer write at T24 but the bytes
+- **The echo write lags its compute.** The echo unit forms its buffer write at T27 but the bytes
   land at T30 (left word) and T31 (right word), so a program reading the entry between those slots
   still sees the previous sample there.
 - **`ESA` and `EDL` apply one sample late.** The echo unit addresses the base its ring advance

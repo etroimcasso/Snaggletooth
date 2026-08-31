@@ -399,7 +399,11 @@ struct DspState {
   // echo write bursts to that lag, flipping ESA mid-ring and counting on the
   // in-flight sample still landing at the old base. The per-channel FIR history
   // holds the last eight entries read from the buffer, newest at echoFirPos; the
-  // two channels filter separately with the same coefficients. All plain value
+  // two channels filter separately with the same coefficients. echoFirCoeff holds
+  // the eight coefficients as the sample captured them — FIR0 at T23, FIR1 and
+  // FIR2 at T24, FIR3 to FIR5 at T25, FIR6 and FIR7 at T26 — so a CPU write to
+  // one of them reaches this sample's filter only if it lands before that
+  // coefficient's own slot. All plain value
   // fields — the snapshot carries them; power-on and reset default them to zero,
   // and a seeded state's first (frame-at-once) sample reads the live registers
   // and warms the applied values at its close.
@@ -408,6 +412,7 @@ struct DspState {
   std::uint8_t echoAppliedEsa = 0;
   std::array<std::int16_t, 8> echoFirLeft{};
   std::array<std::int16_t, 8> echoFirRight{};
+  std::array<std::int8_t, 8> echoFirCoeff{};
   std::uint8_t echoFirPos = 0;
 
   // The eight voices' streaming state, beside the register file.
@@ -440,11 +445,13 @@ struct DspState {
   std::int32_t echoSendRight = 0;
   StereoFrame slotFrame{};
 
-  // The echo write in flight: the echo unit computes its feedback value when it
-  // runs at T24, but the buffer bytes land at the write slots — the left word at
-  // T30, the right word at T31 — so a CPU read of the entry between those slots
-  // still sees the old sample. Plain values: the snapshot carries a write caught
-  // between its compute and its slots.
+  // The echo write in flight. echoWriteEntry is the ring entry this sample owns,
+  // fixed when the left word is read at T23 and addressed by the right read, by
+  // the feedback, and by the write itself. The feedback value is computed at T27,
+  // where EFB is read, but the buffer bytes land at the write slots — the left
+  // word at T30, the right word at T31 — so a CPU read of the entry between those
+  // slots still sees the old sample. Plain values: the snapshot carries a write
+  // caught between its compute and its slots.
   bool echoWritePending = false;
   std::uint16_t echoWriteEntry = 0;
   std::array<std::uint8_t, 4> echoWriteBytes{};
@@ -502,10 +509,10 @@ struct DspState {
   // for the next poll-parity sample's start (see pollKeying).
   std::uint8_t pitchReloadPending = 0;
 
-  // The echo unit's FIR output for the frame, computed when the buffer is read
-  // (slot T24) and added to the master-scaled mix through the echo volume at the
-  // left/right output slots (T27/T28); the write-back lands at T30/T31 and the
-  // ring advance at T31.
+  // The echo unit's FIR output for the frame, filtered at T26 once the last two
+  // coefficients are captured and added to the master-scaled mix through the echo
+  // volume at the left/right output slots (T27/T28); the feedback is computed at
+  // T27, the write-back lands at T30/T31 and the ring advance at T31.
   int echoFirOutLeft = 0;
   int echoFirOutRight = 0;
 

@@ -595,78 +595,105 @@ struct EchoOutput {
   int right = 0;
 };
 
-// Runs the echo unit's read-and-filter half of one 32 kHz sample and returns its
-// FIR output for the two channels. It reads the oldest 4-byte ring entry (based
-// at baseEsa*100h, offset by the ring index) into the per-channel FIR history,
-// runs the 8-tap filter over the last eight entries, and — when echoRam is
-// non-null — computes the write-back value (the EON send sendLeft/sendRight, the
-// EON-enabled voices' post-VxVOL sums, mixed with the FIR feedback through EFB)
-// and stages it as the pending write. The bytes land at the write slots (left
-// word T30, right word T31), each gated there by the FLG bit-5 value loaded one
-// slot earlier, and the ring index advances at T31 (advanceEchoRing) — so a
-// read-only caller (echoRam null) sees the static-buffer behaviour FLG bit 5
-// produces. The two channels filter separately with the same coefficients.
-EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
-                    std::uint8_t* echoRam, std::uint8_t baseEsa, int sendLeft,
-                    int sendRight) noexcept {
-  const std::uint16_t base = static_cast<std::uint16_t>(baseEsa * 0x100);
-  const std::uint16_t entry = static_cast<std::uint16_t>(base + dsp.echoIndex * 4);
+// Reads one 16-bit little-endian word of a ring entry. Echo samples are 15 bits
+// stored left-justified, so the arithmetic SAR 1 recovers the value the filter
+// takes. The address wraps within the 64KB space.
+std::int16_t readEchoWord(std::span<const std::uint8_t, 65536> ram, std::uint16_t entry,
+                          int lowByte) noexcept {
   const auto at = [&](int offset) -> std::uint16_t {
-    return static_cast<std::uint16_t>(entry + offset);  // wraps within the 64KB space
+    return static_cast<std::uint16_t>(entry + offset);
   };
+  const int word = static_cast<std::int16_t>(ram[at(lowByte)] | (ram[at(lowByte + 1)] << 8));
+  return static_cast<std::int16_t>(word >> 1);
+}
 
-  // Read the entry: a 16-bit little-endian left sample then right, each stored with
-  // bit 0 cleared; the arithmetic SAR 1 recovers the 15-bit value into the FIR
-  // history's newest slot.
-  const auto sample16 = [&](int lowByte) -> int {
-    return static_cast<std::int16_t>(ram[at(lowByte)] | (ram[at(lowByte + 1)] << 8));
-  };
-  dsp.echoFirLeft[dsp.echoFirPos] = static_cast<std::int16_t>(sample16(0) >> 1);
-  dsp.echoFirRight[dsp.echoFirPos] = static_cast<std::int16_t>(sample16(2) >> 1);
+// Captures a run of FIR coefficients into the sample's own copies. Each lands at
+// its own slot, so a CPU write reaches this sample's filter only while its
+// coefficient is still ahead.
+void latchFirCoefficients(DspState& dsp, std::size_t first, std::size_t count) noexcept {
+  for (std::size_t tap = first; tap < first + count; ++tap)
+    dsp.echoFirCoeff[tap] = static_cast<std::int8_t>(dsp[voiceRegister(tap, kFirCoeff)]);
+}
 
-  // FIR: taps oldest*FIR0 ... newest*FIR7, each product SAR 6. The first seven
-  // additions wrap at 16 bits; only the final (newest) addition saturates. The
-  // newest history slot is echoFirPos, so tap k reads slot (echoFirPos+1+k) & 7.
-  // The output is a 15-bit sample left-aligned in 16 bits, so the sum's low bit
-  // is dropped before EVOL and EFB read it.
+// Slot T23: the left channel's word comes out of the ring, and FIR0 with it. The
+// entry this sample reads and writes is fixed here — the ring index only moves at
+// T31, so the right read, the feedback and the write-back all address it.
+void loadEchoLeft(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                  std::uint8_t baseEsa) noexcept {
+  const std::uint16_t base = static_cast<std::uint16_t>(baseEsa * 0x100);
+  dsp.echoWriteEntry = static_cast<std::uint16_t>(base + dsp.echoIndex * 4);
+  dsp.echoFirLeft[dsp.echoFirPos] = readEchoWord(ram, dsp.echoWriteEntry, 0);
+  latchFirCoefficients(dsp, 0, 1);
+}
+
+// Slot T24: the right channel's word, and FIR1 and FIR2.
+void loadEchoRight(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noexcept {
+  dsp.echoFirRight[dsp.echoFirPos] = readEchoWord(ram, dsp.echoWriteEntry, 2);
+  latchFirCoefficients(dsp, 1, 2);
+}
+
+// Slot T26: the last two coefficients arrive and the filter runs, leaving each
+// channel's output for the output slots and the feedback to take.
+//
+// FIR: taps oldest*FIR0 ... newest*FIR7, each product SAR 6. The first seven
+// additions wrap at 16 bits; only the final (newest) addition saturates. The
+// newest history slot is echoFirPos, so tap k reads slot (echoFirPos+1+k) & 7.
+// The output is a 15-bit sample left-aligned in 16 bits, so the sum's low bit is
+// dropped before EVOL and EFB read it. The two channels filter separately with
+// the same coefficients.
+void filterEcho(DspState& dsp) noexcept {
+  latchFirCoefficients(dsp, 6, 2);
   const auto filter = [&](const std::array<std::int16_t, 8>& history) -> int {
     int sum = 0;
     for (int tap = 0; tap < 8; ++tap) {
       const std::uint8_t slot = static_cast<std::uint8_t>((dsp.echoFirPos + 1 + tap) & 7);
-      const int coeff =
-          static_cast<std::int8_t>(dsp[voiceRegister(static_cast<std::size_t>(tap), kFirCoeff)]);
-      const int product = (history[slot] * coeff) >> 6;
+      const int product = (history[slot] * dsp.echoFirCoeff[static_cast<std::size_t>(tap)]) >> 6;
       sum = tap < 7 ? static_cast<std::int16_t>(sum + product) : clampSigned16(sum + product);
     }
     return sum & ~1;
   };
-  const int firLeft = filter(dsp.echoFirLeft);
-  const int firRight = filter(dsp.echoFirRight);
-
-  // Feedback: the EON send plus fir*EFB SAR 7, clamped, bit 0 cleared, written back
-  // over the entry — when the caller passed writable RAM. The entry holds a 15-bit
-  // sample, so the write drops the low bit the volume multiply can reintroduce.
-  if (echoRam != nullptr) {
-    const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
-    const int writeLeft = clampSigned16(sendLeft + ((firLeft * efb) >> 7)) & ~1;
-    const int writeRight = clampSigned16(sendRight + ((firRight * efb) >> 7)) & ~1;
-    // The bytes do not land here: the buffer writes have their own slots — the
-    // left word at T30, the right word at T31 (both references' access charts) —
-    // so the value computed now is latched and the slot runner (or the
-    // frame-at-once caller) performs the write when its slot arrives, each word
-    // under the FLG bit-5 gate loaded one slot before it.
-    dsp.echoWritePending = true;
-    dsp.echoWriteEntry = entry;
-    dsp.echoWriteBytes[0] = static_cast<std::uint8_t>(writeLeft & 0xFF);
-    dsp.echoWriteBytes[1] = static_cast<std::uint8_t>((writeLeft >> 8) & 0xFF);
-    dsp.echoWriteBytes[2] = static_cast<std::uint8_t>(writeRight & 0xFF);
-    dsp.echoWriteBytes[3] = static_cast<std::uint8_t>((writeRight >> 8) & 0xFF);
-  }
+  dsp.echoFirOutLeft = filter(dsp.echoFirLeft);
+  dsp.echoFirOutRight = filter(dsp.echoFirRight);
 
   // Advance the FIR history cursor. The ring index advances at T31, not here.
   dsp.echoFirPos = static_cast<std::uint8_t>((dsp.echoFirPos + 1) & 7);
+}
 
-  return EchoOutput{.left = firLeft, .right = firRight};
+// Slot T27: EFB is read and the write-back value formed — the EON send
+// (sendLeft/sendRight, the EON-enabled voices' post-VxVOL sums) plus fir*EFB
+// SAR 7, clamped, bit 0 cleared, because the entry holds a 15-bit sample and the
+// volume multiply can reintroduce the low bit.
+//
+// The bytes do not land here: the buffer writes have their own slots — the left
+// word at T30, the right word at T31 — so the value is staged and the slot runner
+// (or the frame-at-once caller) performs the write when its slot arrives, each
+// word under the FLG bit-5 gate loaded one slot before it. A read-only caller
+// (echoRam null) stages nothing and sees the static buffer FLG bit 5 produces.
+void stageEchoWrite(DspState& dsp, std::uint8_t* echoRam, int sendLeft, int sendRight) noexcept {
+  if (echoRam == nullptr) return;
+  const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
+  const int writeLeft = clampSigned16(sendLeft + ((dsp.echoFirOutLeft * efb) >> 7)) & ~1;
+  const int writeRight = clampSigned16(sendRight + ((dsp.echoFirOutRight * efb) >> 7)) & ~1;
+  dsp.echoWritePending = true;
+  dsp.echoWriteBytes[0] = static_cast<std::uint8_t>(writeLeft & 0xFF);
+  dsp.echoWriteBytes[1] = static_cast<std::uint8_t>((writeLeft >> 8) & 0xFF);
+  dsp.echoWriteBytes[2] = static_cast<std::uint8_t>(writeRight & 0xFF);
+  dsp.echoWriteBytes[3] = static_cast<std::uint8_t>((writeRight >> 8) & 0xFF);
+}
+
+// Runs the echo unit's read-and-filter half of one 32 kHz sample in one act, for
+// the frame-at-once path that has no slots to spread it over, and returns the FIR
+// output for the two channels. The slot-scheduled path calls the same steps at
+// the slots they belong to (T23, T24, T25, T26, T27).
+EchoOutput stepEcho(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
+                    std::uint8_t* echoRam, std::uint8_t baseEsa, int sendLeft,
+                    int sendRight) noexcept {
+  loadEchoLeft(dsp, ram, baseEsa);
+  loadEchoRight(dsp, ram);
+  latchFirCoefficients(dsp, 3, 3);
+  filterEcho(dsp);
+  stageEchoWrite(dsp, echoRam, sendLeft, sendRight);
+  return EchoOutput{.left = dsp.echoFirOutLeft, .right = dsp.echoFirOutRight};
 }
 
 // The end-of-sample echo ring advance (slot T31): applies the ESA and EDL values
@@ -1319,19 +1346,31 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
   }
 
   switch (slot) {
-    case 24: {
-      // The echo unit reads its buffer and filters — the EON sends are all folded
-      // by T22, so the read-and-filter half runs here, addressing the APPLIED
-      // base (the ESA the previous sample's T31 applied), and its FIR output is
-      // held for the output slots.
-      const EchoOutput echo =
-          stepEcho(dsp, ram, echoRam, dsp.echoAppliedEsa, dsp.echoSendLeft, dsp.echoSendRight);
-      dsp.echoFirOutLeft = echo.left;
-      dsp.echoFirOutRight = echo.right;
+    case 23:
+      // The echo unit's ladder opens: the left channel's word leaves the ring —
+      // addressing the APPLIED base, the ESA the previous sample's T31 applied —
+      // and FIR0 is captured with it. The EON sends are all folded by T22, so
+      // nothing the voices owe the echo is still outstanding.
+      loadEchoLeft(dsp, ram, dsp.echoAppliedEsa);
       break;
-    }
+    case 24:
+      // The right channel's word, and FIR1 and FIR2.
+      loadEchoRight(dsp, ram);
+      break;
+    case 25:
+      // FIR3, FIR4 and FIR5.
+      latchFirCoefficients(dsp, 3, 3);
+      break;
+    case 26:
+      // FIR6 and FIR7 complete the set, and the filter runs over the eight
+      // captured coefficients, leaving each channel's output for the slots below.
+      filterEcho(dsp);
+      break;
     case 27:
       finalizeLeft(dsp);
+      // EFB is read here, and the feedback it scales is staged for the write
+      // slots.
+      stageEchoWrite(dsp, echoRam, dsp.echoSendLeft, dsp.echoSendRight);
       break;
     case 28:
       finalizeRight(dsp);
@@ -1347,7 +1386,7 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
       break;
     case 30:
       // The left echo word lands at its write slot, T30, under the gate loaded at
-      // T29 — the value was computed when the echo unit ran at T24 and held since.
+      // T29 — the value was formed at T27, where EFB is read, and held since.
       if (dsp.echoWritePending && echoRam != nullptr && dsp.echoGateLeft) {
         echoRam[dsp.echoWriteEntry] = dsp.echoWriteBytes[0];
         echoRam[static_cast<std::uint16_t>(dsp.echoWriteEntry + 1)] = dsp.echoWriteBytes[1];
