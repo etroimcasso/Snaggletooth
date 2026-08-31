@@ -231,14 +231,16 @@ TEST(EchoFir, TheLeftAndRightChannelsFilterSeparately) {
   EXPECT_EQ(frame.right, 512);
 }
 
-TEST(EchoFir, TheFirstSevenAddsWrapAndTheFinalAddSaturates) {
-  // "these additions are done without overflow handling" for FIR0..FIR6, and "with
-  // overflow handling" — saturating — for the final FIR7 add (fullsnes 3271-3279;
-  // Anomie 929-939). Eight history slots of 3FFFh (16383) through eight 40h taps
-  // (each contributing the value) accumulate: 16383, 32766, 49149->wrap -16387, -4,
-  // 16379, 32762, 49145->wrap -16391, then the saturating final add -16391+16383 =
-  // -8. A saturate-every-add filter would instead reach and hold 7FFFh. EVOLL 40h
+TEST(EchoFir, TheFirstSevenAddsWrap) {
+  // "these additions are done without overflow handling" for FIR0..FIR6 (fullsnes
+  // 3271-3279; Anomie 929-939). Eight history slots of 3FFFh (16383) through eight
+  // 40h taps (each contributing the value) accumulate: 16383, 32766, 49149->wrap
+  // -16387, -4, 16379, 32762, 49145->wrap -16391, then a final add of -16391+16383
+  // = -8. A saturate-every-add filter would instead reach and hold 7FFFh. EVOLL 40h
   // maps fir -8 to (-8*64)>>7 = -4; the wrong 7FFFh would give 16383.
+  //
+  // The final add lands inside the range here, so this case says nothing about
+  // whether it saturates — that half is TheFinalAddSaturatesRatherThanWrapping's.
   DspState dsp;
   Ram ram{};
   staticBuffer(dsp, ram, 0x3FFF);       // the read keeps the newest slot at 16383
@@ -256,6 +258,49 @@ TEST(EchoFir, TheFirstSevenAddsWrapAndTheFinalAddSaturates) {
   EXPECT_EQ(frame.left, -4);  // fir = -8 (wrapping mid-sum), not 7FFFh (all-saturate)
 }
 
+TEST(EchoFir, TheFinalAddSaturatesRatherThanWrapping) {
+  // The newest tap's addition is the one "with overflow handling" — "saturate to
+  // min/max = -8000h/+7FFFh" (fullsnes 3279-3280), Anomie's clamp16 at 938-939.
+  // Eight history slots of 3FFFh through unity taps on FIR5, FIR6 and FIR7 (40h
+  // each) give 16383 after the sixth tap, 32766 after the seventh, and a final add
+  // of 32766+16383 = 49149 — past the range, so it holds at 7FFFh, which the
+  // output mask takes to 7FFEh. A wrapping final add would give -16387, masked to
+  // -16388. EVOLL 40h maps 7FFEh to 16383 and -16388 to -8194.
+  DspState dsp;
+  Ram ram{};
+  staticBuffer(dsp, ram, 0x3FFF);  // the read keeps the newest slot at 16383
+  dsp.echoFirLeft.fill(16383);
+  dsp[0x5F] = 0x40;  // FIR5
+  dsp[0x6F] = 0x40;  // FIR6
+  dsp[kFir7] = 0x40;
+  dsp[kEvolLeft] = 0x40;
+  const StereoFrame frame = step(dsp, ram);
+  EXPECT_EQ(frame.left, 16383);
+}
+
+TEST(EchoFir, TheFinalTapsProductWrapsBeforeTheSaturatingAdd) {
+  // A tap's product is a 16-bit value and wraps. fullsnes 3260-3261 warns off
+  // FIR -128 "to avoid multiply overflows"; -128 is the only coefficient that can
+  // reach one, and only against the most negative sample. An entry of 8000h reads
+  // as -4000h, and (-4000h * -128) SAR 6 = +8000h, one past the range, which the
+  // wrap takes to -8000h. Every other coefficient is zero, so the saturating final
+  // add sees 0 + -8000h = -8000h and passes it through; a saturating product would
+  // instead give 7FFFh, which the output mask takes to 7FFEh. EFB 40h carries the
+  // difference into the buffer in range for both: -8000h to -4000h, 7FFEh to 3FFEh.
+  DspState dsp;
+  Ram ram{};
+  ram[0x2000] = 0x00;  // the entry's left word is 8000h: the sample -4000h
+  ram[0x2001] = 0x80;
+  dsp[kEsa] = 0x20;
+  dsp[kEdl] = 0x00;    // one entry
+  dsp[kFlg] = 0x00;    // echo writes enabled, so the buffer shows the result
+  dsp[kFir7] = 0x80;   // -128 on the newest tap, where the add saturates
+  dsp[kEfb] = 0x40;
+  dsp[kEon] = 0x00;    // no voice send, so the write is feedback alone
+  step(dsp, ram);
+  EXPECT_EQ(entry16(ram, 0x2000), -16384);
+}
+
 TEST(EchoFir, TheOutputDropsItsLowBitBeforeTheEchoVolume) {
   // The filter's output is a 15-bit sample (Anomie 46-47, 940-942), so an odd sum
   // reaches EVOL one lower. A newest sample of 7Fh through a unity tap (FIR7 40h)
@@ -268,6 +313,25 @@ TEST(EchoFir, TheOutputDropsItsLowBitBeforeTheEchoVolume) {
   dsp[kEvolLeft] = 0x7F;
   const StereoFrame frame = step(dsp, ram);
   EXPECT_EQ(frame.left, 125);
+}
+
+TEST(EchoFir, TheEchoVolumeProductWrapsAtSixteenBits) {
+  // "Adjust the FIR sample by the EVOL registers (16-bit stereo sample). Mix the
+  // adjusted FIR into the total, and clamp to 16 bits" (Anomie 51-53): the
+  // multiply is 16 bits wide and the add is what saturates. Eight history slots
+  // of -4000h through unity taps on FIR6 and FIR7 (40h each) give -4000h after the
+  // sixth and -8000h after the saturating seventh, and EVOLL 80h then takes
+  // (-8000h * -128) SAR 7 = +8000h to -8000h. A saturating multiply would leave
+  // 7FFFh in the frame instead. MVOLL is 0, so the frame is the echo alone.
+  DspState dsp;
+  Ram ram{};
+  staticBuffer(dsp, ram, -16384);
+  dsp.echoFirLeft.fill(-16384);
+  dsp[0x6F] = 0x40;  // FIR6
+  dsp[kFir7] = 0x40;
+  dsp[kEvolLeft] = 0x80;
+  const StereoFrame frame = step(dsp, ram);
+  EXPECT_EQ(frame.left, -32768);
 }
 
 // ── The feedback write path ──────────────────────────────────────────────────
@@ -290,6 +354,30 @@ TEST(EchoFeedback, TheOutputDropsItsLowBitBeforeTheFeedbackMultiply) {
   dsp[kEon] = 0x00;    // no voice send, so the write is feedback alone
   step(dsp, ram);
   EXPECT_EQ(entry16(ram, 0x2000), 0);
+}
+
+TEST(EchoFeedback, TheFeedbackProductWrapsAtSixteenBits) {
+  // "Adjust the FIR sample by EFB (16-bit stereo sample). Mix the adjusted FIR
+  // into the total, and clamp to 16 bits" (Anomie 57-59) — the same rule the echo
+  // volume obeys, on the write path. The FIR output is driven to -8000h (eight
+  // history slots of -4000h through unity taps on FIR6 and FIR7), and EFB 80h
+  // takes (-8000h * -128) SAR 7 = +8000h to -8000h; with no EON send the clamped
+  // add passes it through and the entry reads back 8000h. A saturating multiply
+  // would write 7FFEh, the mask's version of 7FFFh.
+  DspState dsp;
+  Ram ram{};
+  ram[0x2000] = 0x00;  // the entry's left word is 8000h: the sample -4000h
+  ram[0x2001] = 0x80;
+  dsp[kEsa] = 0x20;
+  dsp[kEdl] = 0x00;    // one entry
+  dsp[kFlg] = 0x00;    // echo writes enabled
+  dsp.echoFirLeft.fill(-16384);
+  dsp[0x6F] = 0x40;    // FIR6
+  dsp[kFir7] = 0x40;
+  dsp[kEfb] = 0x80;
+  dsp[kEon] = 0x00;    // no voice send, so the write is feedback alone
+  step(dsp, ram);
+  EXPECT_EQ(entry16(ram, 0x2000), -32768);
 }
 
 TEST(EchoFeedback, TheFirOutputDecaysThroughEfbAcrossPasses) {

@@ -1091,6 +1091,39 @@ reintroduce the low bit.
 
 *Arbitrated by `Echo/echo calc`.*
 
+### Every volume multiply is 16 bits wide and wraps
+
+The chain saturates at its additions, not at its multiplies. `MVOL`, `EVOL`, `EFB` and each `FIRx`
+coefficient each produce a 16-bit result, and a product that leaves the range comes back around.
+
+Only one coefficient value can get there. A product is `operand × coefficient` shifted right — 6 for a
+FIR tap, 7 for a volume — so the largest magnitude it can reach is the operand's own full scale, and
+it exceeds `+7FFFh` only at `-128` against the most negative operand. `-4000h × -128 >> 6` and
+`-8000h × -128 >> 7` are both `+8000h`, and both come back as `-8000h`: a full-scale swing in the
+opposite direction, where a saturating multiply would give `+7FFFh`.
+
+fullsnes names the hazard without resolving it — `-128` "should not be used for any of the FIRx
+registers (to avoid multiply overflows)" — and Anomie resolves it by typing: every adjusted value in
+his mixer chain is a "16-bit stereo sample", and the clamps he writes are on the mixes that follow.
+
+**The two echo sites are coupled, which is what makes them hard to separate.** With the feedback
+product saturating, the largest entry the unit can write is `7FFEh`; with it wrapping, the entry can
+be `8000h` — and `8000h` read back out of the buffer is `-4000h`, exactly the sample whose product
+with a `-128` coefficient overflows. So the FIR tap's wrap is unreachable until the feedback's is in
+place: correcting the feedback alone changes the stream and still gets it wrong, and correcting the
+tap alone changes nothing at all.
+
+Two sub-tests hold this. `Random/echo data` fills the whole 30 KB echo buffer with pseudorandom bytes,
+sets all eight `FIRx` and `EFB` to `-128`, opens the write gate for one sweep of the ring, and folds
+the result; `Random/echo fir` is the randomized stress over the coefficients themselves. Both fold a
+CRC-32 over a stream the hardware built, so each is a 32-bit match — and neither passes unless both
+multiplies wrap.
+
+The echo volume is not exercised by either: both drivers leave `EVOL` at zero. It is carried on the
+sources' authority, which types it identically to `EFB` in the same list.
+
+*Arbitrated by `Random/echo data` and `Random/echo fir`.*
+
 ---
 
 ## What remains open
@@ -1099,6 +1132,9 @@ Stated plainly, because a reference that hides its soft spots is worth less than
 
 - **Register-order edge cases** — writing `VxADSR2` or `VxGAIN` before `VxADSR1` within a sample — are
   noted in the Errata and not modeled at slot granularity.
+- **The echo volume's overflow** is modeled the way `EFB`'s is, on the sources' typing rather than on
+  a test: no sub-test sets `EVOL` to `-128` against a full-scale filter output, so the wrap is
+  reasoned from the mixer chain both documents describe, not measured.
 
 ## How a contested claim gets settled here
 

@@ -641,13 +641,20 @@ void loadEchoRight(DspState& dsp, std::span<const std::uint8_t, 65536> ram) noex
 // The output is a 15-bit sample left-aligned in 16 bits, so the sum's low bit is
 // dropped before EVOL and EFB read it. The two channels filter separately with
 // the same coefficients.
+//
+// Each product is itself a 16-bit value and wraps. A coefficient of -128 against
+// a sample of -4000h gives +8000h, one past the range, and the wrap makes it
+// -8000h. Only the saturating final add can tell the two apart: for the seven
+// wrapping adds, truncating the product and truncating the running sum are the
+// same arithmetic modulo 2^16.
 void filterEcho(DspState& dsp) noexcept {
   latchFirCoefficients(dsp, 6, 2);
   const auto filter = [&](const std::array<std::int16_t, 8>& history) -> int {
     int sum = 0;
     for (int tap = 0; tap < 8; ++tap) {
       const std::uint8_t slot = static_cast<std::uint8_t>((dsp.echoFirPos + 1 + tap) & 7);
-      const int product = (history[slot] * dsp.echoFirCoeff[static_cast<std::size_t>(tap)]) >> 6;
+      const int product = static_cast<std::int16_t>(
+          (history[slot] * dsp.echoFirCoeff[static_cast<std::size_t>(tap)]) >> 6);
       sum = tap < 7 ? static_cast<std::int16_t>(sum + product) : clampSigned16(sum + product);
     }
     return sum & ~1;
@@ -664,6 +671,10 @@ void filterEcho(DspState& dsp) noexcept {
 // SAR 7, clamped, bit 0 cleared, because the entry holds a 15-bit sample and the
 // volume multiply can reintroduce the low bit.
 //
+// The volume multiply is 16 bits wide and wraps; the add onto the send is what
+// saturates. EFB 80h against a FIR output of -8000h gives +8000h, which the wrap
+// takes to -8000h where a saturating product would give 7FFFh.
+//
 // The bytes do not land here: the buffer writes have their own slots — the left
 // word at T30, the right word at T31 — so the value is staged and the slot runner
 // (or the frame-at-once caller) performs the write when its slot arrives, each
@@ -672,8 +683,10 @@ void filterEcho(DspState& dsp) noexcept {
 void stageEchoWrite(DspState& dsp, std::uint8_t* echoRam, int sendLeft, int sendRight) noexcept {
   if (echoRam == nullptr) return;
   const int efb = static_cast<std::int8_t>(dsp[kDspEfb]);
-  const int writeLeft = clampSigned16(sendLeft + ((dsp.echoFirOutLeft * efb) >> 7)) & ~1;
-  const int writeRight = clampSigned16(sendRight + ((dsp.echoFirOutRight * efb) >> 7)) & ~1;
+  const int writeLeft =
+      clampSigned16(sendLeft + static_cast<std::int16_t>((dsp.echoFirOutLeft * efb) >> 7)) & ~1;
+  const int writeRight =
+      clampSigned16(sendRight + static_cast<std::int16_t>((dsp.echoFirOutRight * efb) >> 7)) & ~1;
   dsp.echoWritePending = true;
   dsp.echoWriteBytes[0] = static_cast<std::uint8_t>(writeLeft & 0xFF);
   dsp.echoWriteBytes[1] = static_cast<std::uint8_t>((writeLeft >> 8) & 0xFF);
@@ -1138,8 +1151,8 @@ static StereoFrame stepDspSampleAtomic(DspState& dsp, std::span<const std::uint8
   advanceEchoRing(dsp, dsp[kDspEsa], dsp[kDspEdl]);
   const int evolLeft = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
   const int evolRight = static_cast<std::int8_t>(dsp[kDspEvolRight]);
-  left = clampSigned16(left + ((echo.left * evolLeft) >> 7));
-  right = clampSigned16(right + ((echo.right * evolRight) >> 7));
+  left = clampSigned16(left + static_cast<std::int16_t>((echo.left * evolLeft) >> 7));
+  right = clampSigned16(right + static_cast<std::int16_t>((echo.right * evolRight) >> 7));
 
   if ((flg & kFlgMute) != 0) {
     left = 0;
@@ -1218,12 +1231,13 @@ static void computeVoiceSlot(DspState& dsp, std::span<const std::uint8_t, 65536>
 // Finalizes the left output (slot T27): the dry mix scaled by MVOLL, the echo FIR
 // output added through EVOLL, and the mute gate — the same arithmetic the
 // frame-at-once path runs, split by channel so MVOLL is consumed one slot before
-// MVOLR.
+// MVOLR. Both volume multiplies are 16 bits wide and wrap; only the add onto the
+// dry mix saturates.
 static void finalizeLeft(DspState& dsp) noexcept {
   const int mvol = static_cast<std::int8_t>(dsp[kDspMvolLeft]);
   const int evol = static_cast<std::int8_t>(dsp[kDspEvolLeft]);
   std::int32_t out = static_cast<std::int16_t>((dsp.mixLeft * mvol) >> 7);
-  out = clampSigned16(out + ((dsp.echoFirOutLeft * evol) >> 7));
+  out = clampSigned16(out + static_cast<std::int16_t>((dsp.echoFirOutLeft * evol) >> 7));
   if ((dsp[kDspFlg] & kFlgMute) != 0) out = 0;
   dsp.slotFrame.left = static_cast<std::int16_t>(out);
 }
@@ -1233,7 +1247,7 @@ static void finalizeRight(DspState& dsp) noexcept {
   const int mvol = static_cast<std::int8_t>(dsp[kDspMvolRight]);
   const int evol = static_cast<std::int8_t>(dsp[kDspEvolRight]);
   std::int32_t out = static_cast<std::int16_t>((dsp.mixRight * mvol) >> 7);
-  out = clampSigned16(out + ((dsp.echoFirOutRight * evol) >> 7));
+  out = clampSigned16(out + static_cast<std::int16_t>((dsp.echoFirOutRight * evol) >> 7));
   if ((dsp[kDspFlg] & kFlgMute) != 0) out = 0;
   dsp.slotFrame.right = static_cast<std::int16_t>(out);
 }

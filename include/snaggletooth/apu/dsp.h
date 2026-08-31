@@ -22,11 +22,16 @@
 // is set — is scaled by the voice's 11-bit envelope into the internal
 // -4000h..+3FFFh amplitude, then by its signed per-voice left/right volume, and
 // the eight results are summed with a 16-bit clamp after every addition. The
-// summed mix is then scaled by the signed master volume (MVOLL/MVOLR, a
-// truncating multiply where the -128 product wraps), the echo unit's output is
-// added through the echo volume (EVOLL/EVOLR), and, when FLG bit 6 is set, the
-// frame is muted to silence — mute stops the emitted frame only; every voice, the
-// noise generator, the envelopes and the echo unit keep advancing.
+// summed mix is then scaled by the signed master volume (MVOLL/MVOLR), the echo
+// unit's output is added through the echo volume (EVOLL/EVOLR), and, when FLG
+// bit 6 is set, the frame is muted to silence — mute stops the emitted frame
+// only; every voice, the noise generator, the envelopes and the echo unit keep
+// advancing.
+//
+// Every volume multiply — MVOL, EVOL, EFB, and each FIR coefficient — yields a
+// 16-bit result and wraps. A coefficient of -128 is the one value whose product
+// can leave that range, which is why the additions, not the products, are where
+// the chain saturates.
 //
 // The echo unit is a delay line in APU RAM: each sample it reads the oldest 4-byte
 // entry of a ring buffer based at ESA*100h, runs a per-channel 8-tap FIR filter

@@ -339,10 +339,15 @@ The eight voices become a frame through a fixed chain, in this order:
 1. **Per-voice volume.** Each voice's amplitude is scaled by its signed `VxVOL` for each channel and
    added into the running sum, which is clamped to signed 16 bits after every voice.
 2. **Master volume.** The sum is scaled by the signed `MVOL` for each channel (`sum × MVOL >> 7`). A
-   negative master volume inverts the phase; the one value that overflows, `MVOL = -128` against a
-   full-scale sum, wraps rather than clamping — the hardware's behavior.
+   negative master volume inverts the phase.
 3. **Echo.** The echo unit's filtered output is scaled by the signed `EVOL` and added to the
    master-scaled mix, clamped to signed 16 bits (see below).
+
+Every volume multiply in the chain — `MVOL`, `EVOL`, `EFB`, and each `FIRx` coefficient — produces a
+16-bit result, and that result **wraps**. Only the additions clamp. A coefficient of `-128` is the
+one value whose product can leave the range: against a full-scale operand it reaches `+8000h`, which
+comes back as `-8000h` — a full-scale swing in the opposite direction, not a ceiling. That is why
+`-128` is the value to keep out of `FIRx`.
 4. **Mute.** When `FLG` bit 6 is set, the emitted frame is zeroed. Mute stops only the output — every
    voice, the envelopes, the noise generator, and the echo unit keep running.
 
@@ -363,10 +368,11 @@ and writes a new entry built from the enabled voices plus a feedback of the filt
   `$F0`–`$FF` registers included; only the `$F8`/`$F9` port bytes the CPU reads are out of its
   reach — see [the APU machine](apu-machine.md)).
 - **The FIR filter** runs per channel over the last eight entries read: the taps are oldest × `FIR0`
-  through newest × `FIR7`, each product shifted right 6. The first seven additions wrap at 16 bits and
-  only the final addition saturates — the documented arithmetic. Its result is a 15-bit sample, so the
-  low bit is dropped before `EVOL` and `EFB` read it. Left and right filter separately with the same
-  coefficients.
+  through newest × `FIR7`, each product shifted right 6 and taken as 16 bits. The first seven
+  additions wrap at 16 bits and only the final addition saturates — the documented arithmetic. Its
+  result is a 15-bit sample, so the low bit is dropped before `EVOL` and `EFB` read it. Left and right
+  filter separately with the same coefficients. A coefficient of `-128` makes the product itself
+  overflow and wrap, which is why the register's usable range stops one short of it.
 - **The reads are spread across five slots**, so a write racing them can reach part of a sample. The
   entry's left word leaves the ring one slot before its right word, and the coefficients arrive in
   four groups — `FIR0`, then `FIR1`–`FIR2`, then `FIR3`–`FIR5`, then `FIR6`–`FIR7`, the filter
@@ -375,7 +381,9 @@ and writes a new entry built from the enabled voices plus a feedback of the filt
   for the slot each one sits on.
 - **Output and feedback.** The filtered signal is added to the main mix through `EVOL`. Separately, the
   voices enabled in `EON` are summed (after their per-voice volume) and added to the filtered signal
-  scaled by `EFB`; the result, with bit 0 cleared, is written back over the entry that was read.
+  scaled by `EFB`; the result, with bit 0 cleared, is written back over the entry that was read. Both
+  scalings are 16-bit multiplies that wrap; the additions onto the mix and onto the send are what
+  clamp.
   `FLG` bit 5 disables the write — reads and output continue, so the buffer becomes a static loop that
   keeps feeding the filter.
 
