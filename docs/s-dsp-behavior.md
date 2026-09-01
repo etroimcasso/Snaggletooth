@@ -126,14 +126,22 @@ has a sustain rate of 0 and a level already in band. Both would also hold a deca
 boundary from above, where the documented order stores the step; a sub-test that decays into the band
 from above with a firing sustain rate would separate them.
 
-**Two of the three are settled, and the third has a sub-test after all.** Letting the detecting
-sample store like any other regresses `Random/voice volumes`, and dropping the stored-level check
-regresses `Random/pitch mod` as well — so the suppression and the check are both real, and the first
-form is right. Gating that one store by the sustain rate instead of the decay rate regresses
-**nothing anywhere in the ROM**, and it moves `Random/envelope` — which is exactly the sub-test the
-paragraph above asks for, decaying into the band from above with a rate that fires. That sub-test
-does not currently reproduce under either form, so it does not decide between them yet; but it is the
-only thing in the ROM that is not blind to the question.
+**Two of the three are settled; the third is free.** Letting the detecting sample store like any
+other regresses `Random/voice volumes`, and dropping the stored-level check regresses
+`Random/pitch mod` as well — so the suppression and the check are both real, and the first form is
+right. **Which rate gates that one store is free.** Gating it by the sustain rate instead of the
+decay rate leaves every passing sub-test in the ROM green and every hardware-derived assertion in
+this implementation's own suite green; it moves `Random/envelope` and nothing else, and that sub-test
+is reproduced under neither reading. Gating it by both rates at once is byte-identical to suppressing
+it, so the two rates never both fire on such a sample here. Sweeping the question to exhaustion —
+those readings and a gain-rate one, each crossed with the other envelope rules, with the key-on
+machinery, and with every rate-table entry they newly consult — moves that sub-test's checksum 3'729
+distinct ways across 5'272 readings and matches its expected value under none of them.
+
+**And the store is the only half of it any sub-test can see.** Gating the phase change with the
+store, gating it by the sustain rate while the store stays suppressed, and leaving the
+Bent-Increase reference standing on a suppressed store each leave every byte this ROM checksums
+unchanged.
 
 *Arbitrated by `Random/voice volumes`, run from two arrival phases two samples apart, with
 `Random/pitch mod` bounding it.*
@@ -1243,6 +1251,14 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   register at `FFh` rather than `00h` leaves every sub-test's accumulator in that ROM unchanged — the
   ones that already fail included. Both readings sit equally well with everything measurable there.
   This implementation starts it clear.
+- **Which rate gates the store on a decay already inside the sustain band is unconstrained.** That
+  sample stores nothing here. Gating its store by the sustain rate instead leaves **every passing
+  sub-test in `spc_dsp6` green**, and the one sub-test sensitive to the choice is reproduced by
+  neither reading; gating it by both rates at once is byte-identical to suppressing it. Neither
+  reference describes the case: both state the store under the phase's own rate, and neither says
+  what happens when the level is already in band as the phase begins. The section above carries the
+  sweep behind this. Letting that sample store like any other is a different question and is
+  **settled** — it regresses `Random/voice volumes`.
 - **Which key-ons clear a voice's `ENDX` bit is unconstrained by every passing sub-test.** Both
   references state the clear without qualification — the bit goes to zero when the voice is keyed on,
   successfully or not — and this implementation follows them: a key-on the poll consumes clears the

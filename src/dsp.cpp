@@ -1821,11 +1821,13 @@ static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept {
   // two samples apart, and its tape carries no -8 step from either; a store
   // gated by the decay rate steps on one of them. The stored-level check is
   // ADSR's alone: under a GAIN mode the ROM's `Envelope/attack->decay during
-  // gain` reads the candidate, not the stored level. The ROM does not separate
-  // this form from two others — the detecting sample storing nothing, or its
-  // store gated by the sustain rate — since its one ADSR arbiter has a sustain
-  // rate of 0 and a level already in band; this form alone keeps the documented
-  // step-then-check order everywhere the level is still above the band.
+  // gain` reads the candidate, not the stored level. Which rate gates that one
+  // store is unconstrained: gating it by the sustain rate instead leaves every
+  // passing sub-test green and every assertion here green, and the single
+  // sub-test sensitive to the choice is reproduced by neither reading; gating it
+  // by both rates at once is byte-identical to suppressing it. Suppressing it
+  // keeps the documented step-then-check order everywhere the level is still
+  // above the band.
   const bool alreadySustaining = (v.phase == EnvPhase::Decay) && (adsr1 & 0x80) != 0 &&
                                  (level >> 8) == sustainBoundary;
 
