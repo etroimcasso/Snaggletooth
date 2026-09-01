@@ -1211,8 +1211,16 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   in either pair order, the interpolation window's own taps, and one half carried with the other
   zeroed — leaves **every passing sub-test in `spc_dsp6` green in all of them**, so nothing that
   passes distinguishes one from another. Two sub-tests are sensitive to the choice and neither is
-  reproduced by any of the readings, which is enough to say the axis is not by itself what separates
+  reproduced by any of the readings, which is enough to say the values alone are not what separates
   them. A reimplementation is free here, and should know that it is.
+
+  **Where the history lives is equally free, and neither source says.** The filter's two previous
+  samples are held per voice here, but holding them in the decoder instead — one pair every voice's
+  decode reads and writes — also leaves **every passing sub-test green**, whether or not a key-on
+  clears the pair. Both of the sensitive sub-tests move under it, and they are the only two that do;
+  no sub-test that passes has two voices decoding through a non-Direct filter at once, which is the
+  condition that would tell the two shapes apart. The readings above were all swept against the
+  per-voice shape, so the pairing of a value with a location is unexplored.
 - **What `ENDX` holds at power-on is contested, and no test ROM decides it.** One reference has every
   bit clear at reset; the other has the status registers come up with all eight set, a few cycles
   after it. Every driver in `spc_dsp6` acknowledges `ENDX` before it reads one, so starting the
