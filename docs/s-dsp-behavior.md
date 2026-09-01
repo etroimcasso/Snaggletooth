@@ -372,7 +372,10 @@ takes it:
 - **Consumed at a later poll inside the span: the silence rewinds, the stream does not.** The
   five-sample countdown re-arms in full and the envelope drops to zero, so the level emerges
   exactly as late as a full restart would place it — but the decode cursor keeps the position it
-  has walked to and keeps advancing at the pitch.
+  has walked to and keeps advancing at the pitch. The span itself keeps counting from the key-on
+  that opened it: re-arming it with the countdown regresses `KON/kon decoding when another kon`,
+  whose frozen-cursor table sees the extra held call a re-armed span's first-call exception would
+  insert. The rewind re-arms the silence, not the span.
 
 One consumed from the first sounding sample on restarts the voice in full — and so does one
 consumed on a voice keyed off inside the span, because the tiers presuppose a startup that is
@@ -1267,6 +1270,17 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   restarting key-on alone instead leaves **every passing sub-test in `spc_dsp6` green** and moves one
   that already fails, so nothing that passes tells the two apart. The documents are the only thing
   deciding this one, and they agree.
+- **Which sample the walk decision's silence clause reads — and through what — is unconstrained by
+  everything that passes.** The two-clause gate itself is pinned from every side (the level alone,
+  always-walk and always-hold each redden passing sub-tests), but its "old output is silent" operand
+  is not. This implementation reads the enveloped amplitude of the sample before the consuming
+  compute, tested for exact zero. Reading the consuming compute's own final pre-key-on sample
+  instead — its amplitude, or its pre-envelope interpolated value — or reading either sample through
+  the `VxOUTX` high byte, under which an amplitude of 1 to 127 counts as silent, leaves **every
+  passing sub-test in `spc_dsp6` green**, and the consuming-sample amplitude reading holds the whole
+  device-free suite green as well. The two sub-tests sensitive to the walk both move under nearly
+  every alternative — one is blind to the previous sample's `VxOUTX` projection alone — and neither
+  is reproduced by any of them. A reimplementation is free here, and should know that it is.
 
 ## How a contested claim gets settled here
 

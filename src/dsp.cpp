@@ -1532,7 +1532,11 @@ static void keyOnVoiceImpl(DspState& dsp, std::span<const std::uint8_t, 65536> r
   // the restart applies: it walks only when it interrupts a voice whose level
   // stands above zero while its old OUTPUT is silent. A re-key of a sounding
   // voice holds its stream, whatever its age or level, and so does a key-on
-  // at level zero (see VoiceState::startupWalks).
+  // at level zero (see VoiceState::startupWalks). Which sample the silence is
+  // read from — this compute's predecessor here, through voiceAmplitude — and
+  // whether the test sees the full amplitude or its OUTX byte is constrained
+  // by nothing that passes; the two sub-tests sensitive to the walk fail
+  // under every reading (docs/s-dsp-behavior.md, "What remains open").
   const bool walks = dsp.voices[voice].envelope != 0 && dsp.voiceAmplitude[voice] == 0;
   if (primeNow) {
     startVoice(dsp, ram, voice);  // reads the pointer, primes, resets the voice state
