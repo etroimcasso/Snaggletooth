@@ -126,7 +126,17 @@ has a sustain rate of 0 and a level already in band. Both would also hold a deca
 boundary from above, where the documented order stores the step; a sub-test that decays into the band
 from above with a firing sustain rate would separate them.
 
-*Arbitrated by `Random/voice volumes`, run from two arrival phases two samples apart.*
+**Two of the three are settled, and the third has a sub-test after all.** Letting the detecting
+sample store like any other regresses `Random/voice volumes`, and dropping the stored-level check
+regresses `Random/pitch mod` as well — so the suppression and the check are both real, and the first
+form is right. Gating that one store by the sustain rate instead of the decay rate regresses
+**nothing anywhere in the ROM**, and it moves `Random/envelope` — which is exactly the sub-test the
+paragraph above asks for, decaying into the band from above with a rate that fires. That sub-test
+does not currently reproduce under either form, so it does not decide between them yet; but it is the
+only thing in the ROM that is not blind to the question.
+
+*Arbitrated by `Random/voice volumes`, run from two arrival phases two samples apart, with
+`Random/pitch mod` bounding it.*
 
 ### The Bent-Increase reference is saved every sample and is not clipped
 
@@ -1219,8 +1229,14 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   decode reads and writes — also leaves **every passing sub-test green**, whether or not a key-on
   clears the pair. Both of the sensitive sub-tests move under it, and they are the only two that do;
   no sub-test that passes has two voices decoding through a non-Direct filter at once, which is the
-  condition that would tell the two shapes apart. The readings above were all swept against the
-  per-voice shape, so the pairing of a value with a location is unexplored.
+  condition that would tell the two shapes apart.
+
+  **The pairing has since been swept and it is empty.** Every reading above was re-scored against the
+  decoder-held shape — twenty-nine of them, each giving a distinct result, none reproducing either
+  sensitive sub-test and none disturbing anything that passes. With the twenty-eight per-voice
+  readings that is fifty-seven in total across both shapes. Both sensitive sub-tests move under every
+  single one, so the axis has full resolving power on them and simply has no reading that lands: it
+  is free, and it is **not** what separates them.
 - **What `ENDX` holds at power-on is contested, and no test ROM decides it.** One reference has every
   bit clear at reset; the other has the status registers come up with all eight set, a few cycles
   after it. Every driver in `spc_dsp6` acknowledges `ENDX` before it reads one, so starting the
