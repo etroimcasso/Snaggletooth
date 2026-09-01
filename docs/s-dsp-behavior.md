@@ -797,7 +797,14 @@ this ROM rewrites RAM only while both voices are parked, so any schedule that re
 the rewrite and before the group's consumption fits its table, and `Order/pitch after brr` is the
 one that lands a rewrite mid-motion.
 
-*Arbitrated by `Misc/brr not always decoding`.*
+The three groups are read at **one moment**, not one per silent sample. One reference spreads them
+across the startup's samples `#2`, `#3` and `#4`, which is a different arrangement with the same
+twelve-sample result whenever RAM holds still — and `KON/kon decoding when another kon`, which keys a
+voice again while an earlier key-on's startup is still running, separates the two: the spread
+arrangement regresses it.
+
+*Arbitrated by `Misc/brr not always decoding`, with the prime's single moment pinned by
+`KON/kon decoding when another kon`.*
 
 ### A later group's header is read at its scheduling, its data bytes one sample later
 
@@ -1074,6 +1081,48 @@ not start, and a clear without the bit mask loses that one.
 
 ---
 
+## Sample arithmetic
+
+### The interpolation kernel wraps on two additions and clamps on the third
+
+A voice's output sample is its four-tap window read through the Gaussian table at the index in the
+pitch counter's bits 11-4. The four taps are taken against table entries `$0FF - i`, `$1FF - i`,
+`$100 + i` and `$000 + i`, applied to the window's oldest, older, old and newest samples, each tap
+scaled `(entry × sample) >> 10`. The order the taps are summed in is observable, because the sum is
+not taken at full width:
+
+| step | width |
+|---|---|
+| the first tap | fits 16 bits on its own |
+| adding the second | **wraps** at 16 bits |
+| adding the third | **wraps** at 16 bits |
+| adding the fourth | **clamps** to `-8000h`…`7FFFh` |
+| the sum | arithmetic-shifted right one |
+
+The two references prescribe different arithmetic here, and the difference is behavioral rather than
+representational: they round at different points, so they disagree on odd sums. The alternative
+scales each tap `>> 11`, folds the first three additions at 15 bits with a final clip to 15 bits, and
+does not shift the sum. Both forms reproduce the glitch case the documentation works through
+(`+3FF8h` from a run of `-4000h` samples at index 0), so that case does not separate them.
+
+`Random/brr before playing` does. It passes under the wrapping-then-clamping form tabulated above and
+fails under the per-tap `>> 11` form.
+
+*Arbitrated by `Random/brr before playing`.*
+
+### A shift of 13 to 15 decodes as shift 12 over the nibble shifted right three
+
+A BRR header's shift field is four bits, but only 0 through 12 are ordinary. A block declaring 13, 14
+or 15 does not scale further: decoding proceeds as though the shift were 12, over the nibble
+arithmetic-shifted right three — which takes `-8`…`-1` to `-1` and `0`…`+7` to `0`, so every sample
+in such a block is either `-1000h` or zero before the filter.
+
+One reference states this in a single sentence and the other is silent, which leaves the substitution
+resting on one source. `Random/brr before playing` exercises it: decoding a shift of 13 to 15 as an
+ordinary scale regresses that sub-test.
+
+*Arbitrated by `Random/brr before playing`.*
+
 ## Echo
 
 ### The FIR output is 15 bits
@@ -1135,6 +1184,16 @@ Stated plainly, because a reference that hides its soft spots is worth less than
 - **The echo volume's overflow** is modeled the way `EFB`'s is, on the sources' typing rather than on
   a test: no sub-test sets `EVOL` to `-128` against a full-scale filter output, so the wrap is
   reasoned from the mixer chain both documents describe, not measured.
+- **What a voice's BRR filter history holds at a key-on is unconstrained by every sub-test that
+  passes.** The two samples the filter reads before a restarted voice has decoded any of its own are
+  zeroed here. One reference takes them from the physical end of the twelve-sample ring, whose write
+  index resets to zero at the key-on; the other calls them uninitialized. Sweeping the readings —
+  zeroed, the two most recently decoded carried, the ring's physical end at each of its twelve phases
+  in either pair order, the interpolation window's own taps, and one half carried with the other
+  zeroed — leaves **every passing sub-test in `spc_dsp6` green in all of them**, so nothing that
+  passes distinguishes one from another. Two sub-tests are sensitive to the choice and neither is
+  reproduced by any of the readings, which is enough to say the axis is not by itself what separates
+  them. A reimplementation is free here, and should know that it is.
 
 ## How a contested claim gets settled here
 
