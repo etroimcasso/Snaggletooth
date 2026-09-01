@@ -1125,6 +1125,25 @@ ordinary scale regresses that sub-test.
 
 ## Echo
 
+### The mix clamps at every addition, not once at the end
+
+The dry mix and the echo send both accumulate voice by voice, and each addition saturates to 16 bits
+before the next is made. Anomie types it that way — "mix all voices selected in `EON` in order,
+clamping to 16 bits after each addition" — while fullsnes writes the send as a single term,
+`echo_input = EchoVoices + ((sum × EFB) SAR 7)`, and says nothing about how `EchoVoices` accumulates.
+Plain 16-bit arithmetic wraps, and a running total that leaves the range and comes back ends
+somewhere else entirely: three voices at −20000, +20000, −20000 saturate to −32768, then −12768,
+then −32768, where a wrapping sum arrives at −27232.
+
+**Anomie is right.** Letting each addition wrap regresses `Misc/voice sums clamped each time`, whose
+name is the rule itself, and `Random/voice volumes`.
+
+The difference is only reachable when several voices are enabled at once. The two sub-tests that
+stress the echo unit hardest run with `EON` clear, so neither of them sees this at all — it belongs
+to the mix, not to the echo, and it is arbitrated by the rows that drive many voices together.
+
+*Arbitrated by `Misc/voice sums clamped each time` and `Random/voice volumes`.*
+
 ### The FIR output is 15 bits
 
 Anomie masks the FIR output's low bit before echo volume and feedback consume it; fullsnes feeds the
