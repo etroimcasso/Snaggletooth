@@ -1676,6 +1676,15 @@ void pollKeying(DspState& dsp,
       // advance at a live pitch, uniform for the eight voices: voice 0's
       // first compute follows this poll in the slot they share, the others'
       // come in the next sample.
+      // A consumed key-on clears the voice's ENDX bit — restarting the voice,
+      // rewinding a standing startup, or absorbed into one alike. Both
+      // references state the clear for every key-on the poll takes, without
+      // qualification. It is written at the voice's S7 slot, where a
+      // same-sample end-block set cannot override it (see
+      // DspState::pendingEndxClear). No spc_dsp6 row that passes distinguishes
+      // this from clearing on a restart alone; `Random/kon pitch` is the one
+      // row that moves, and it fails either way.
+      dsp.pendingEndxClear |= bit;
       dsp.pitchReloadPending |= bit;
       dsp.voices[voice].pitchCaptureHold = kKeyOnSilentCalls;
     }

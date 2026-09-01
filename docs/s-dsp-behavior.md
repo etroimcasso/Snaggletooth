@@ -1194,6 +1194,20 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   passes distinguishes one from another. Two sub-tests are sensitive to the choice and neither is
   reproduced by any of the readings, which is enough to say the axis is not by itself what separates
   them. A reimplementation is free here, and should know that it is.
+- **What `ENDX` holds at power-on is contested, and no test ROM decides it.** One reference has every
+  bit clear at reset; the other has the status registers come up with all eight set, a few cycles
+  after it. Every driver in `spc_dsp6` acknowledges `ENDX` before it reads one, so starting the
+  register at `FFh` rather than `00h` leaves every sub-test's accumulator in that ROM unchanged — the
+  ones that already fail included. Both readings sit equally well with everything measurable there.
+  This implementation starts it clear.
+- **Which key-ons clear a voice's `ENDX` bit is unconstrained by every passing sub-test.** Both
+  references state the clear without qualification — the bit goes to zero when the voice is keyed on,
+  successfully or not — and this implementation follows them: a key-on the poll consumes clears the
+  bit whether it restarts the voice or lands inside that voice's own silent span, absorbed at the
+  poll after the one that keyed it or rewinding the silence at a later one. Clearing it on a
+  restarting key-on alone instead leaves **every passing sub-test in `spc_dsp6` green** and moves one
+  that already fails, so nothing that passes tells the two apart. The documents are the only thing
+  deciding this one, and they agree.
 
 ## How a contested claim gets settled here
 

@@ -600,6 +600,41 @@ TEST(SampleSchedule, AKeyOnsEndxClearLandsAtTheVoicesS7Slot) {
   }
 }
 
+TEST(SampleSchedule, AKeyOnInsideTheSilentSpanClearsEndxAtTheSameSlotARestartDoes) {
+  // Every key-on the poll consumes clears the voice's ENDX bit, not only one
+  // that restarts the voice. A key-on landing inside a voice's own silent span
+  // rewinds the hold or is absorbed into it, and clears the bit either way, at
+  // the voice's S7 slot — T6 for voice 1, the same slot a restart's clear lands
+  // on. Both references state the clear for a consumed key-on without
+  // qualification; no spc_dsp6 row that passes distinguishes it from clearing on
+  // a restart alone.
+  const auto clearAtS7 = [](std::uint8_t computesBeforeThePollingSample) {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);
+    sample(dsp, ram);  // sampleIndex 1 (odd)
+    sample(dsp, ram);  // the next sample polls
+    // Voice 1 computes at T2, before the poll at T31, so the poll reads one more
+    // than this: 4 rewinds the standing hold, 2 is absorbed into it.
+    dsp.voices[1].computesSinceKeyOn = computesBeforeThePollingSample;
+    dsp[0x7C] = 0xFF;      // every end flag standing
+    dsp.internalKon = 0x02;  // a KON write arms voice 1
+    sample(dsp, ram);
+    EXPECT_EQ(dsp[0x7C], 0xFF) << "the poll ran; the clear is still slots out";
+    std::array<std::uint8_t, 8> after{};
+    for (int t = 0; t < 8; ++t) {
+      stepDspCycle(dsp, view(ram));
+      after[static_cast<std::size_t>(t)] = dsp[0x7C];
+    }
+    for (int t = 0; t <= 5; ++t)
+      EXPECT_EQ(after[static_cast<std::size_t>(t)], 0xFF) << "after T" << t;
+    EXPECT_EQ(after[6], 0xFD) << "T6 is voice 1's S7";
+    EXPECT_EQ(after[7], 0xFD);
+  };
+  clearAtS7(3);  // the poll sees 4 — a rewinding key-on
+  clearAtS7(1);  // the poll sees 2 — an absorbed key-on
+}
+
 // ── The last slot: keying, the global counter and the noise generator ───────
 
 TEST(SampleSchedule, TheGlobalCounterAdvancesAtTheLastSlot) {
