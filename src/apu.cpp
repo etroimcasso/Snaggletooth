@@ -1,5 +1,6 @@
 #include "snaggletooth/apu/apu.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <utility>
 
@@ -7,9 +8,9 @@ namespace snaggletooth {
 
 namespace {
 
-// ENDX ($7C) is the one DSP register whose write clears the register rather than
-// storing the value: any write acknowledges (clears) all voice end flags.
-constexpr std::uint8_t kDspEndx = 0x7C;
+// CONTROL ($F1) bit 7 maps the boot-ROM image over the $FFC0 window for SPC700
+// reads (see Apu::mapIplRom); writes to the window always reach the RAM beneath.
+constexpr std::uint8_t kControlIplRom = 0x80;
 
 // FLG ($6C) resets to $E0: soft reset set, amplifier muted, echo writes disabled,
 // noise stopped. A driver clears it once it has set up the DSP.
@@ -21,7 +22,7 @@ ApuState powerOnState() {
   ApuState s{};
   s.cpu.sp = 0xEF;  // the stack lives in page $01; the first push lands at $01EF
   s.test = 0x0A;
-  s.control = 0xB0;               // bit 7 (IPL mapping) is carried but gates nothing
+  s.control = 0xB0;               // bit 7 maps the $FFC0 window when an image is mapped
   s.outputPorts = {0xAA, 0xBB, 0x00, 0x00};  // the ready bytes a host polls for
   s.dsp[kDspFlg] = 0xE0;          // FLG's documented reset value
   for (TimerState& t : s.timers) {
@@ -71,6 +72,12 @@ void Apu::loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) no
 void Apu::setPc(std::uint16_t pc) {
   state_.cpu.pc = pc;
   cpu_.restore(state_.cpu);
+}
+
+void Apu::mapIplRom(std::span<const std::uint8_t, kIplWindowBytes> image) {
+  std::array<std::uint8_t, kIplWindowBytes> copy{};
+  std::copy(image.begin(), image.end(), copy.begin());
+  iplImage_ = copy;
 }
 
 void Apu::machineCycle() {
@@ -148,11 +155,9 @@ std::vector<StereoFrame> Apu::takeFrames() {
 }
 
 void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
-  if (reg == kDspEndx) {
-    state_.dsp[kDspEndx] = 0;  // ENDX: any write acknowledges all end flags
-    return;
-  }
-  state_.dsp[reg] = value;
+  // The DSP owns the write's semantics — ENDX's acknowledge, KON's arming, the
+  // stamp a DSP-written register carries (see cpuWriteDspRegister).
+  cpuWriteDspRegister(state_.dsp, reg, value);
 }
 
 void Apu::reset() {
@@ -176,6 +181,12 @@ void Apu::reset() {
 std::uint8_t Apu::busRead(std::uint16_t address) {
   if (address >= 0x00F0u && address <= 0x00FFu)
     return readRegister(static_cast<std::uint8_t>(address));
+  // The boot-ROM window: with an image mapped and CONTROL bit 7 set, an SPC700 read
+  // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
+  // (busWrite always hits RAM), so a driver can scratch the window and still read the
+  // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
+  if (iplImage_ && address >= kIplWindowBase && (state_.control & kControlIplRom) != 0u)
+    return (*iplImage_)[address - kIplWindowBase];
   return state_.ram[address];
 }
 
@@ -193,8 +204,8 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
     case 0xF3: return state_.dsp[state_.dspAddr & 0x7Fu];   // DSPDATA masks the address with $7F
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:             // input ports: what the host last wrote
       return state_.inputPorts[reg - 0xF4u];
-    case 0xF8: case 0xF9:                                   // scratch registers behave as RAM
-      return state_.ram[reg];
+    case 0xF8: case 0xF9:                                   // AUXIO: the port's own byte, not the RAM beneath
+      return state_.auxPorts[reg - 0xF8u];
     case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
       TimerState& t = state_.timers[reg - 0xFDu];
       const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
@@ -252,8 +263,12 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
       state_.ram[reg] = value;
       state_.timers[reg - 0xFAu].target = value;
       return;
-    // $F8/$F9 are plain RAM, and a write to a TnOUT register ($FD-$FF) lands in
-    // RAM but drives nothing. Both need only the RAM write above.
+    case 0xF8: case 0xF9:  // AUXIO: the port keeps its own byte beside the RAM's
+      state_.ram[reg] = value;
+      state_.auxPorts[reg - 0xF8u] = value;
+      return;
+    // A write to a TnOUT register ($FD-$FF) lands in RAM but drives nothing, so
+    // it needs only the RAM write.
     default:
       state_.ram[reg] = value;
       return;

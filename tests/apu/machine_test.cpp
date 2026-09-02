@@ -61,12 +61,22 @@ TEST(ApuOverlay, WriteOnlyRegisterReadsBackZero) {
   EXPECT_EQ(apu.readRam(0x00FA), 0x77);
 }
 
-TEST(ApuOverlay, ScratchRegistersBehaveAsRam) {
-  // $F8/$F9 read back what was written.
-  Apu apu = run({0x8F, 0x9A, 0xF8,   // MOV $F8,#$9A
-                 0xE4, 0xF8}, 2);    // MOV A,$F8
-  EXPECT_EQ(apu.state().cpu.a, 0x9A);
-  EXPECT_EQ(apu.readRam(0x00F8), 0x9A);
+TEST(ApuOverlay, AuxPortsReadBackWritesAndIgnoreTheRamBeneath) {
+  // $F8/$F9 read back what was written — port bytes of their own, not a view of
+  // the RAM beneath. An S-DSP echo-buffer write reaches only the RAM, so it
+  // never changes what the CPU reads back (anomie-spc700 $00f8/$00f9: "not
+  // altered by S-DSP echo buffer writes"; spc_dsp6 `Misc/$F0-$FF are not ram`
+  // pins it by sweeping an echo write burst across the ports).
+  Apu apu;
+  apu.writeRam(0x0200, 0x8F); apu.writeRam(0x0201, 0x9A); apu.writeRam(0x0202, 0xF8);  // MOV $F8,#$9A
+  apu.writeRam(0x0203, 0xE4); apu.writeRam(0x0204, 0xF8);  // MOV A,$F8
+  apu.setPc(0x0200);
+  apu.step();                    // port := $9A, RAM[$F8] := $9A
+  EXPECT_EQ(apu.readRam(0x00F8), 0x9A);  // a CPU port write mirrors into the RAM beneath
+  apu.writeRam(0x00F8, 0xFE);    // what an echo-buffer write does: the RAM alone
+  apu.step();                    // MOV A,$F8 reads the port
+  EXPECT_EQ(apu.state().cpu.a, 0x9A);    // the port byte, not the echo's
+  EXPECT_EQ(apu.readRam(0x00F8), 0xFE);  // the RAM beneath keeps the echo byte
 }
 
 // ── TEST register ($F0) ─────────────────────────────────────────────────────
@@ -110,6 +120,26 @@ TEST(ApuDsp, WriteBeyondLimitIsIgnored) {
                  0xE4, 0xF3}, 3);    // read masks to $7F, still empty
   EXPECT_EQ(apu.state().dsp[0x7F], 0x00);
   EXPECT_EQ(apu.state().cpu.a, 0x00);
+}
+
+TEST(ApuDsp, KonWriteSetsThePendingKeyOn) {
+  // KON takes effect on the write: the written value becomes the internal KON
+  // the next poll acts on, while the register itself keeps the value for
+  // read-back (Anomie 720-727, fullsnes 3141-3150).
+  Apu apu = run({0x8F, 0x4C, 0xF2,   // select KON
+                 0x8F, 0x01, 0xF3}, 2);
+  EXPECT_EQ(apu.state().dsp[0x4C], 0x01);
+  EXPECT_EQ(apu.state().dsp.internalKon, 0x01);
+}
+
+TEST(ApuDsp, ASecondKonWriteReplacesThePendingKeyOn) {
+  // Anomie's worked example (706-708): writing KON=1 then KON=2 in close
+  // succession usually keys on voice 2 only, so the second write replaces the
+  // pending value rather than accumulating into it.
+  Apu apu = run({0x8F, 0x4C, 0xF2,   // select KON
+                 0x8F, 0x01, 0xF3,   // KON := 1
+                 0x8F, 0x02, 0xF3}, 3);
+  EXPECT_EQ(apu.state().dsp.internalKon, 0x02);
 }
 
 TEST(ApuDsp, ReadMasksAddressWith7F) {

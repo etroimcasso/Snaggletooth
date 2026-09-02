@@ -293,15 +293,15 @@ class Spc700 {
   // What an instruction that reaches a destination does on the cycles between settling
   // its address and writing. Most forms read the byte once: a modify needs it, and a
   // plain write discards it but still makes the access, so a register that clears when
-  // read sees it. The two test-and-set instructions read it twice; the bit store reads
-  // it and then spends a cycle inside the chip; one store spends its only such cycle
-  // inside the chip; and the two-operand moves have no such cycle at all.
+  // read sees it. The two test-and-set instructions and the bit store read it and then
+  // spend a cycle inside the chip; one store spends its only such cycle inside the chip;
+  // and the two-operand moves have no such cycle at all.
   enum class DestinationCycle : std::uint8_t {
     None,
     Internal,
     Read,
-    ReadTwice,
     ReadThenWait,
+    ReadThenRead,
   };
 
   // How many cycles a form spends between settling its address and writing.
@@ -311,8 +311,8 @@ class Spc700 {
       case DestinationCycle::None: return 0;
       case DestinationCycle::Internal:
       case DestinationCycle::Read: return 1;
-      case DestinationCycle::ReadTwice:
-      case DestinationCycle::ReadThenWait: return 2;
+      case DestinationCycle::ReadThenWait:
+      case DestinationCycle::ReadThenRead: return 2;
     }
     return 0;
   }
@@ -742,10 +742,10 @@ constexpr bool Spc700::memoryForm(std::uint8_t opcode, MemForm& form) noexcept {
       return true;
 
     // ---- test and set or clear the bits of an absolute byte ----
-    case 0x0E: case 0x4E:             // TSET1 / TCLR1 !abs — the byte is read, and
-      form = MemForm{.mode = AddrMode::Abs,             // then read a second time
-                     .access = MemAccess::Modify,
-                     .destination = DestinationCycle::ReadTwice};
+    case 0x0E: case 0x4E:             // TSET1 / TCLR1 !abs — the operand is reached
+      form = MemForm{.mode = AddrMode::Abs,             // twice and the first byte kept,
+                     .access = MemAccess::Modify,        // then the changed byte is written
+                     .destination = DestinationCycle::ReadThenRead};
       return true;
 
     // ---- the carry flag against one bit of an absolute byte ----
@@ -1053,15 +1053,22 @@ bool Spc700::executeMemoryCycle(B& bus, const MemForm& form) {
 
   // The cycles between the settled address and the write. Most forms read the byte
   // there once — a modify needs it, a plain store discards it but still makes the
-  // access. The test-and-set pair reads it twice, MOV1 m.b,C reads it and then spends a
-  // cycle inside the chip, MOV (X)+,A spends its one such cycle inside the chip, and
-  // the two-operand moves have no such cycle at all.
+  // access. The test-and-set pair and MOV1 m.b,C read it and then spend a cycle inside
+  // the chip, MOV (X)+,A spends its one such cycle inside the chip, and the two-operand
+  // moves have no such cycle at all.
   if (step <= destinationCycles(form.destination)) {
     const bool reachesMemory =
         form.destination == DestinationCycle::Read ||
-        form.destination == DestinationCycle::ReadTwice ||
+        form.destination == DestinationCycle::ReadThenRead ||
         (form.destination == DestinationCycle::ReadThenWait && step == 1);
-    if (reachesMemory) state_.tmp = bus.read(state_.ea);
+    // The test-and-set pair reaches its operand on both of these cycles and keeps
+    // the first byte: the second access drives the bus and its value is discarded.
+    const bool keepsValue =
+        !(form.destination == DestinationCycle::ReadThenRead && step == 2);
+    if (reachesMemory) {
+      const std::uint8_t value = bus.read(state_.ea);
+      if (keepsValue) state_.tmp = value;
+    }
     return false;
   }
 

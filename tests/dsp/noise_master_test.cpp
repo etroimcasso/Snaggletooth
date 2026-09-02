@@ -6,8 +6,13 @@
 //  * Noise LFSR + seed -4000h: fullsnes 3097-3110; Anomie 826-837.
 //  * NON substitution is pre-envelope, no pitch/Gauss, BRR keeps decoding:
 //    fullsnes 3103-3116; Anomie 826-844.
-//  * PMON step = (base * ((amp(x-1) SAR 4) + 400h)) SAR 10, voices 1-7, capped
-//    at 128 kHz: fullsnes 2771-2794; Anomie 813-824, 372-374.
+//  * PMON step = (base * ((amp(x-1) SAR 4) + 400h)) SAR 10, voices 1-7, the
+//    step itself uncapped: fullsnes 2771-2794; Anomie 813-824. The 128 kHz
+//    ceiling is a clamp on the counter's in-group position after the step is
+//    added (Anomie 372-374; fullsnes 2793 leaves its placement open), decided
+//    by spc_dsp6 `Misc/interp pos clamped at $7FFF`. The modulator is the
+//    previous voice's amplitude from the PREVIOUS sample (spc_dsp6
+//    `Order/pitch mod uses prev sample`).
 //  * Output Mixer sum*MVOL SAR 7 (truncating; -128 wraps), then mute:
 //    fullsnes 3005-3033; Anomie 40-54, 657-682.
 //  * FLG reset value E0h; bit 7 keys off + envelope 0, polled every sample:
@@ -32,6 +37,7 @@ using snaggletooth::Apu;
 using snaggletooth::ApuState;
 using snaggletooth::DspState;
 using snaggletooth::EnvPhase;
+using snaggletooth::startVoice;
 using snaggletooth::stepDspSample;
 using snaggletooth::StereoFrame;
 
@@ -42,7 +48,6 @@ constexpr std::uint8_t kMvolLeft = 0x0C;
 constexpr std::uint8_t kMvolRight = 0x1C;
 constexpr std::uint8_t kPmon = 0x2D;
 constexpr std::uint8_t kNon = 0x3D;
-constexpr std::uint8_t kKon = 0x4C;
 constexpr std::uint8_t kDir = 0x5D;
 constexpr std::uint8_t kFlg = 0x6C;
 
@@ -66,6 +71,13 @@ void placeAmplitude1294(DspState& dsp, std::size_t v, std::uint8_t left = 0x40,
   dsp.voices[v].pitchCounter = 0;
   dsp.voices[v].phase = EnvPhase::Sustain;
   dsp.voices[v].konDelay = 0;
+  // The level scaling a sample is the standing one, so a voice placed mid-play
+  // carries its Direct-Gain level from the start rather than reaching it on the
+  // first step.
+  dsp.voices[v].envelope = 0x7F0;
+  // The amplitude the voice produced on its previous sample: pitch modulation
+  // of the next voice reads this, not the amplitude computed this sample.
+  dsp.voiceAmplitude[v] = 1294;
   reg(dsp, v, 0x07) = 0x7F;   // Direct Gain -> envelope 7F0h
   reg(dsp, v, 0x00) = left;
   reg(dsp, v, 0x01) = right;
@@ -144,6 +156,7 @@ TEST(Non, SubstitutesTheNoiseLevelForTheInterpolatedSample) {
   dsp.voices[0].pitchCounter = 0;
   dsp.voices[0].phase = EnvPhase::Sustain;
   dsp.voices[0].konDelay = 0;
+  dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain -> envelope 7F0h
 
   dsp[kNon] = 0x01;  // voice 0 outputs noise
@@ -169,15 +182,51 @@ TEST(Non, IgnoresPitchAndInterpolation) {
   dsp.voices[0].pitchCounter = 0x0400;  // interpolation index 40h, mid-window
   dsp.voices[0].phase = EnvPhase::Sustain;
   dsp.voices[0].konDelay = 0;
+  dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   reg(dsp, 0, 0x07) = 0x7F;
   dsp[kNon] = 0x01;
   step(dsp, ram);
   EXPECT_EQ(outx(dsp, 0), 0x3F);  // the noise-derived amplitude, not the window's
 }
 
+TEST(Non, VoiceZeroCarriesTheSameNoiseLevelAsVoiceOneInEveryFrame) {
+  // One noise level per delivered frame, whichever voice outputs it. Voice 0
+  // computes at the last slot of the frame before, after that slot's noise step;
+  // voice 1 computes inside the frame, after the same step. So a stepping noise
+  // on voice 0 alone and on voice 1 alone produce identical frames — not frames
+  // shifted by one step. The first two frames are the seed's exception (voice 0's
+  // first amplitude is computed at once and re-applied once by the schedule).
+  // Measured against spc_dsp6's `Order/noise rate flg.1F`.
+  Ram ram{};
+  auto frames = [&](std::size_t v) {
+    DspState dsp;
+    dsp[kFlg] = 0x1F;  // the noise steps every sample
+    dsp[kNon] = static_cast<std::uint8_t>(1u << v);
+    dsp.voices[v].pitchCounter = 0;
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].konDelay = 0;
+    dsp.voices[v].envelope = 0x7F0;
+    reg(dsp, v, 0x07) = 0x7F;  // Direct Gain -> envelope 7F0h
+    reg(dsp, v, 0x00) = 0x7F;
+    dsp[kMvolLeft] = 0x7F;
+    std::array<std::int16_t, 10> out{};
+    for (auto& o : out) o = step(dsp, ram).left;
+    return out;
+  };
+  const auto v0 = frames(0);
+  const auto v1 = frames(1);
+  EXPECT_NE(v1[2], v1[3]);  // the level moves every frame, so a shift would show
+  for (std::size_t i = 2; i < v0.size(); ++i)
+    EXPECT_EQ(v0[i], v1[i]) << "frame " << i;
+}
+
 TEST(Non, EndMuteBlockStillTerminatesNoise) {
   // Even under NON the BRR decoder runs; an End+Mute block releases the voice
-  // with envelope 0, terminating the noise output (fullsnes 3111-3114).
+  // with envelope 0, terminating the noise output (fullsnes 3111-3114). The
+  // release lands at the sample after the DECODER enters the block — eight
+  // cursor samples before the block itself (spc_dsp6 `Misc/brr early end at
+  // many pitches`): the header check reads the header standing at each
+  // sample's start, so it sees the entered block at the next sample's check.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});  // normal
@@ -190,18 +239,24 @@ TEST(Non, EndMuteBlockStillTerminatesNoise) {
   reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain
   dsp.voices[0].phase = EnvPhase::Sustain;
   dsp.voices[0].konDelay = 0;
+  dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
   dsp.voices[0].brrAddress = 0x1000;
-  dsp.voices[0].brrSampleIndex = 15;  // one step from the block boundary
+  dsp.voices[0].decoderAddress = 0x1000;
+  dsp.voices[0].headerAddress = 0x1000;
+  dsp.voices[0].brrSampleIndex = 6;  // one step from the decoder's move onward
   reg(dsp, 0, 0x02) = 0x00;  // unity pitch
   reg(dsp, 0, 0x03) = 0x10;
 
-  step(dsp, ram);  // finishes the normal block, still noising
+  step(dsp, ram);  // one step short, still noising
   ASSERT_GT(dsp.voices[0].envelope, 0);
-  step(dsp, ram);  // crosses into End+Mute: the envelope terminates at once
+  step(dsp, ram);  // the decoder enters End+Mute; the entering sample still noises
+  step(dsp, ram);  // the standing check reads the header: the envelope terminates
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);
-  // Voice 0's VxOUTX becomes readable at a slot that falls in the next sample, so
-  // it reflects the silenced amplitude one sample after the envelope zeroes.
+  // The sample that zeroes the envelope is still scaled by the level standing
+  // when it was taken, so silence reaches the amplitude on the sample after; and
+  // voice 0's VxOUTX becomes readable at a slot falling in the sample after that.
+  step(dsp, ram);
   step(dsp, ram);
   EXPECT_EQ(outx(dsp, 0), 0x00);  // noise silenced with the envelope
 }
@@ -223,6 +278,54 @@ TEST(Pmon, ScalesTheStepByThePreviousVoiceAmplitude) {
   dsp[kPmon] = 0x02;  // modulate voice 1 by voice 0
   step(dsp, ram);
   EXPECT_EQ(dsp.voices[1].pitchCounter, 4416);
+}
+
+TEST(Pmon, TheModulatorIsThePreviousVoiceAmplitudeOfThePreviousSample) {
+  // Voice 2's step is scaled by the amplitude voice 1 produced one sample
+  // earlier, not the one it computes three slots ahead of voice 2 in the same
+  // sample (spc_dsp6 `Order/pitch mod uses prev sample`, the same pair). Voice
+  // 1 is placed at 1294 but has produced nothing yet: the first step modulates
+  // by unity (1000h). It then falls silent; the second step still reads the
+  // 1294 that sample 1 produced (+4416), and only the third reads the silence
+  // (+1000h).
+  DspState dsp;
+  Ram ram{};
+  dsp[kFlg] = 0x00;
+  placeAmplitude1294(dsp, 1);
+  dsp.voiceAmplitude[1] = 0;  // nothing produced before the first sample
+  dsp.voices[2] = {};
+  dsp.voices[2].phase = EnvPhase::Release;
+  reg(dsp, 2, 0x02) = 0x00;  // base pitch 1000h
+  reg(dsp, 2, 0x03) = 0x10;
+  dsp[kPmon] = 0x04;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000);
+  dsp.voices[1].window = {};  // voice 1 silent from this sample on
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000 + 4416);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000 + 4416 + 0x1000);
+}
+
+TEST(Pmon, VoiceZeroModulatesVoiceOneBySampleOneAcrossTheSeedFrame) {
+  // The same one-sample lag from voice 0, whose compute sits at the last slot:
+  // the amplitude it produces on the seed frame is what voice 1 reads on the
+  // second sample, the first slot-scheduled one. Voice 0 has produced nothing
+  // before sample 1, so sample 1 modulates by unity and sample 2 by 1294.
+  DspState dsp;
+  Ram ram{};
+  dsp[kFlg] = 0x00;
+  placeAmplitude1294(dsp, 0);
+  dsp.voiceAmplitude[0] = 0;
+  dsp.voices[1] = {};
+  dsp.voices[1].phase = EnvPhase::Release;
+  reg(dsp, 1, 0x02) = 0x00;  // base pitch 1000h
+  reg(dsp, 1, 0x03) = 0x10;
+  dsp[kPmon] = 0x02;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x1000);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x1000 + 4416);
 }
 
 TEST(Pmon, ASilentPreviousVoiceModulatesByUnity) {
@@ -257,12 +360,10 @@ TEST(Pmon, Bit0AndVoice0AreNeverModulated) {
   EXPECT_EQ(dsp.voices[0].pitchCounter, 0x1000);
 }
 
-TEST(Pmon, TheStepIsCappedAt128kHz) {
-  // A modulated step is capped at 3FFFh (128 kHz, four source samples per output
-  // sample). Voice 0 amplitude 1294 (factor 1104) against base pitch 3FFFh would
-  // give (16383*1104)>>10 = 17663; the cap holds the counter to 3FFFh instead.
-  DspState dsp;
-  Ram ram{};
+// Voice 1 modulated by voice 0's amplitude 1294 (factor 1104) against base pitch
+// 3FFFh: a step of (16383*1104)>>10 = 17662 (44FEh), above the four-sample
+// group — the only way a step past 3FFFh arises.
+void modulateVoice1AtFullPitch(DspState& dsp) {
   dsp[kFlg] = 0x00;
   placeAmplitude1294(dsp, 0);
   dsp.voices[1] = {};
@@ -270,8 +371,124 @@ TEST(Pmon, TheStepIsCappedAt128kHz) {
   reg(dsp, 1, 0x02) = 0xFF;
   reg(dsp, 1, 0x03) = 0x3F;  // base pitch 3FFFh
   dsp[kPmon] = 0x02;
+}
+
+TEST(Pmon, TheModulatedStepIsNotCapped) {
+  // The whole 44FEh step lands on the counter from position 0: the 128 kHz
+  // ceiling is on the position a step lands on, not on the step (spc_dsp6
+  // `Misc/interp pos clamped at $7FFF`).
+  DspState dsp;
+  Ram ram{};
+  modulateVoice1AtFullPitch(dsp);
   step(dsp, ram);
-  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x3FFF);  // capped, not 17663 (44FFh)
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x44FE);
+}
+
+TEST(Pmon, TheInGroupPositionClampsAt7FFFh) {
+  // The counter's low fourteen bits are the position within the four-sample
+  // group being consumed; the step is added to that position and the sum
+  // clamps at 7FFFh (Anomie 372-374). From position 3B02h (counter 7B02h: block
+  // bit 14 set, so the clamp is shown to spare the bits above the position) the
+  // step would reach 8000h; it lands at 7FFFh instead — counter BFFFh, sample 3
+  // of the next group at fraction FFFh. The next step starts from that parked
+  // 3FFFh and clamps again (counter FFFFh): the position stays pinned at the
+  // maximum for as long as the step exceeds the group. The bound is exact: from
+  // 3B01h the sum is 7FFFh itself (no clamp needed, the same landing); from
+  // 3B00h it is 7FFEh and lands unclamped.
+  DspState dsp;
+  Ram ram{};
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].pitchCounter = 0x7B02;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xFFFF);
+
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].pitchCounter = 0x7B01;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].pitchCounter = 0x7B00;
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFE);
+}
+
+TEST(Pmon, AClampedStepPassesFourSamplesAndAParkedPositionCrossesAtOnce) {
+  // A clamped step still consumes four stream samples — the ceiling's rate —
+  // and a position parked at the group's last fraction crosses into the next
+  // group on the very next step, however small: the sub-test parks a voice this
+  // way, sets its pitch to 0 and then to 1, and reads the crossing on the
+  // sample the step of 1 lands. The stream is a chained pair of blocks so the
+  // four-sample passes decode real positions; the voice is seeded mid-stream
+  // (no primed ring), which decodes at consumption. Voices 1-7 advance by the
+  // pitch captured the previous sample, so each register write reaches the
+  // stream one step late.
+  DspState dsp;
+  Ram ram{};
+  writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
+  writeBlock(ram, 0x1009, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
+  writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
+  dsp[kDir] = 0x02;
+  modulateVoice1AtFullPitch(dsp);
+  dsp.voices[1].brrAddress = 0x1000;
+  dsp.voices[1].decoderAddress = 0x1000;
+  dsp.voices[1].headerAddress = 0x1000;
+  dsp.voices[1].brrSampleIndex = 3;
+  dsp.voices[1].pitchCounter = 0x3B02;  // position 3B02h, block sample 3
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0x7FFF);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 7);  // 3B02h -> 7FFFh crosses four positions
+
+  reg(dsp, 1, 0x02) = 0x00;  // pitch 0
+  reg(dsp, 1, 0x03) = 0x00;
+  step(dsp, ram);  // the previous capture still applies: parked at 3FFFh, four more
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 11);
+  step(dsp, ram);  // pitch 0: the position holds
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 11);
+
+  reg(dsp, 1, 0x02) = 0x01;  // pitch 1 (modulated: (1 * 1104) >> 10 = 1)
+  step(dsp, ram);  // the previous capture (0) still applies
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xBFFF);
+  step(dsp, ram);
+  EXPECT_EQ(dsp.voices[1].pitchCounter, 0xC000);
+  EXPECT_EQ(dsp.voices[1].brrSampleIndex, 12);  // one step of 1 crosses the group
+}
+
+TEST(Pmon, AStepCrossingTwoBoundariesDecodesBothGroups) {
+  // A group's decode runs one sample after the crossing that calls for it,
+  // and a modulated step can cross two boundaries in one sample: from
+  // position 0EFAh the 44FEh step lands at 53F8h, five stream samples on, and
+  // the ring turns twice. Both groups are read the next sample, so the stream
+  // stays intact through it. Two blocks with distinct samples — a rising
+  // sixteen-step ramp, then a falling one — make a dropped group read as the
+  // wrong sample.
+  DspState dsp;
+  Ram ram{};
+  writeBlock(ram, 0x1000, 0xC0, {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF});
+  writeBlock(ram, 0x1009, 0xC0, {0x76, 0x54, 0x32, 0x10, 0xFE, 0xDC, 0xBA, 0x98});
+  writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
+  dsp[kDir] = 0x02;
+  modulateVoice1AtFullPitch(dsp);
+  startVoice(dsp, view(ram), 1);  // primed: samples 0-3 in the window, 4-11 decoded
+  const auto rising = [](int k) { return (k < 8 ? k : k - 16) * 2048; };
+  const auto falling = [](int j) { return (7 - j) * 2048; };
+  step(dsp, ram);  // samples 4-7
+  EXPECT_EQ(dsp.voices[1].window.newest, rising(7));
+  step(dsp, ram);  // samples 8-11
+  EXPECT_EQ(dsp.voices[1].window.newest, rising(11));
+  step(dsp, ram);  // samples 12-15
+  EXPECT_EQ(dsp.voices[1].window.newest, rising(15));
+  step(dsp, ram);  // samples 16-20: two crossings, at 16 and at 20
+  EXPECT_EQ(dsp.voices[1].pitchCounter & 0x3FFF, 0x13F8);
+  EXPECT_EQ(dsp.voices[1].window.newest, falling(4));
+  step(dsp, ram);  // samples 21-24: the group at 24-27 was the first of the two
+  EXPECT_EQ(dsp.voices[1].window.newest, falling(8));
+  step(dsp, ram);  // samples 25-28: the second
+  EXPECT_EQ(dsp.voices[1].window.newest, falling(12));
 }
 
 // ── Master volume and mute ──────────────────────────────────────────────────
@@ -303,6 +520,7 @@ TEST(Master, TheMinus128ProductWraps) {
     dsp.voices[v].pitchCounter = 0;
     dsp.voices[v].phase = EnvPhase::Sustain;
     dsp.voices[v].konDelay = 0;
+    dsp.voices[v].envelope = 0x7F0;  // the standing level this sample is scaled by
     reg(dsp, v, 0x07) = 0x7F;  // Direct Gain -> amplitude 7768
     reg(dsp, v, 0x00) = 0x81;  // VxVOLL -127 -> sum clamps to -8000h
   }
@@ -353,8 +571,9 @@ TEST(Flg, ResetReseedsTheNoiseLevel) {
 
 TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
   // FLG bit 7 keys every voice off and forces envelope 0 each sample. A voice
-  // keyed on while it is set starts and is immediately re-silenced; nothing
-  // sounds until the bit clears and the voice is re-keyed.
+  // keyed on while it is set starts — the consumption sample itself is shielded
+  // from the reset (`KON/kon then flg.80`) — and is re-silenced from the next
+  // sample; nothing sounds until the bit clears and the voice is re-keyed.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77});
@@ -366,27 +585,26 @@ TEST(SoftReset, SilencesAKeyedOnVoiceUntilItClears) {
   reg(dsp, 0, 0x00) = 0x7F;  // VxVOLL
   dsp[kMvolLeft] = 0x7F;
   dsp[kMvolRight] = 0x7F;
-  dsp[kFlg] = 0x80;   // soft reset
-  dsp[kKon] = 0x01;   // key voice 0 on at the first (even) poll
+  dsp[kFlg] = 0x80;        // soft reset
+  dsp.internalKon = 0x01;  // a KON write arms voice 0 for the first (even) poll
 
   for (int i = 0; i < 8; ++i) {
     const StereoFrame f = step(dsp, ram);
     EXPECT_EQ(f.left, 0) << "soft-reset sample " << i;
-    // Voice 0's compute runs at a sample's last slot, just before that sample's
-    // KON/KOFF poll. On an even sample the poll re-keys the voice (Attack) after
-    // its soft-reset compute has already silenced it, so it reads Attack until the
-    // next compute re-silences it; every odd sample and the first (which polls
-    // before it computes) reads Release. The envelope stays 0 throughout.
-    const EnvPhase expected =
-        (i >= 2 && i % 2 == 0) ? EnvPhase::Attack : EnvPhase::Release;
-    EXPECT_EQ(dsp.voices[0].phase, expected) << "soft-reset sample " << i;
+    // The armed key-on is consumed once, at the first even poll, and its
+    // consumption sample keeps the startup's Attack (the reset does not key a
+    // voice off in the sample its key-on lands — `KON/kon then flg.80`). From
+    // the next sample the standing reset keys it off like any other voice, and
+    // nothing arms it again, so it reads Release and its envelope stays 0.
+    if (i > 0) {
+      EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "soft-reset sample " << i;
+    }
     EXPECT_EQ(dsp.voices[0].envelope, 0) << "soft-reset sample " << i;
   }
 
-  dsp[kFlg] = 0x00;   // release the soft reset
-  dsp[kKon] = 0x01;   // re-key at the next (even) poll
-  step(dsp, ram);     // the poll keys the voice on
-  dsp[kKon] = 0x00;   // a driver clears KON after writing it
+  dsp[kFlg] = 0x00;        // release the soft reset
+  dsp.internalKon = 0x01;  // a second KON write re-arms it
+  step(dsp, ram);          // the next even poll keys the voice on
   bool sounded = false;
   for (int i = 0; i < 8; ++i)
     if (step(dsp, ram).left != 0) { sounded = true; break; }
@@ -403,6 +621,7 @@ TEST(SoftReset, IsPolledEverySampleUnlikeKeyOff) {
     dsp.voices[0].pitchCounter = 0;
     dsp.voices[0].phase = EnvPhase::Sustain;
     dsp.voices[0].konDelay = 0;
+    dsp.voices[0].envelope = 0x7F0;  // the standing level this sample is scaled by
     reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain, sounds every sample
     reg(dsp, 0, 0x00) = 0x7F;
     dsp[kMvolLeft] = 0x7F;
@@ -428,6 +647,47 @@ TEST(SoftReset, IsPolledEverySampleUnlikeKeyOff) {
   keyOff[0x5C] = 0x01;  // KOFF voice 0, written before the odd sample
   static_cast<void>(stepDspSample(keyOff, view(ram)));
   EXPECT_GT(keyOff.voices[0].envelope, 0);  // KOFF not polled yet on the odd sample
+}
+
+TEST(SoftReset, TheResetSampleStillEmitsUnderTheStandingEnvelope) {
+  // The soft reset is read after the sample's amplitude is formed: a live voice
+  // emits the sample it is reset on under the level it carried in, and the
+  // zeroed level is what the NEXT sample scales by — the same one-sample lag
+  // every envelope update has. Measured against spc_dsp6's `Order/flg.80 after
+  // env used`: a voice keyed on and reset nine samples later leaves five
+  // full-scale frames on the echo tape, not four. Voice 1 applies its volume
+  // within its own sample, so the frame shows it directly.
+  auto sounding = [] {
+    DspState dsp;
+    dsp.voices[1].window = {.newest = 0, .old = 0, .older = 0x0800, .oldest = 0};
+    dsp.voices[1].pitchCounter = 0;
+    dsp.voices[1].phase = EnvPhase::Sustain;
+    dsp.voices[1].konDelay = 0;
+    dsp.voices[1].envelope = 0x7F0;
+    reg(dsp, 1, 0x07) = 0x7F;  // Direct Gain, sounds every sample
+    reg(dsp, 1, 0x00) = 0x7F;
+    dsp[kMvolLeft] = 0x7F;
+    return dsp;
+  };
+  Ram ram{};
+
+  DspState control = sounding();
+  static_cast<void>(step(control, ram));
+  const StereoFrame undisturbed = step(control, ram);
+  ASSERT_GT(undisturbed.left, 0);
+
+  DspState reset = sounding();
+  static_cast<void>(step(reset, ram));
+  reset[kFlg] = 0x80;
+  const StereoFrame resetSample = step(reset, ram);
+  EXPECT_EQ(resetSample.left, undisturbed.left) << "the reset sample is emitted in full";
+  EXPECT_NE(outx(reset, 1), 0) << "and VxOUTX carries it";
+  EXPECT_EQ(reset.voices[1].envelope, 0) << "the level is zeroed for the next sample";
+  EXPECT_EQ(reset.voices[1].phase, EnvPhase::Release);
+
+  const StereoFrame afterReset = step(reset, ram);
+  EXPECT_EQ(afterReset.left, 0) << "the sample after the reset is silent";
+  EXPECT_EQ(outx(reset, 1), 0);
 }
 
 }  // namespace

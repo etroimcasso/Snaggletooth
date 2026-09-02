@@ -80,6 +80,10 @@ void placeAmplitudeVoice(DspState& dsp, std::size_t v, std::int16_t older,
   dsp.voices[v].pitchCounter = 0;   // index 0, and pitch 0 keeps it stationary
   dsp.voices[v].phase = EnvPhase::Sustain;  // any non-Release phase; Direct Gain ignores it
   dsp.voices[v].konDelay = 0;
+  // A mid-play voice already stands at its Direct-Gain level: the level scaling a
+  // sample is the one the previous sample's update left, so the standing level is
+  // part of the placement rather than something the first step establishes.
+  dsp.voices[v].envelope = static_cast<std::uint16_t>((directGain & 0x7F) << 4);
   gain(dsp, v) = directGain;        // bit 7 clear -> Direct Gain, level (gain&7Fh)<<4
   volLeft(dsp, v) = left;
   volRight(dsp, v) = right;
@@ -196,10 +200,13 @@ TEST(OutputStage, TheNegativeSumClampsToSignedSixteenBits) {
 // ── End+Mute through the frame loop ─────────────────────────────────────────
 
 TEST(OutputStage, EnteringAnEndMuteBlockReleasesTheVoice) {
-  // A voice streaming out of a normal block into a code-1 End+Mute block goes to
-  // Release with the envelope at 0 the sample it enters (fullsnes line 2712:
-  // "End+Mute ... Release, Env=000h"). The frame loop derives brrEndMute from
-  // the stream advance and hands it to the envelope step.
+  // A voice streaming toward a code-1 End+Mute block goes to Release with the
+  // envelope at 0 (fullsnes line 2712: "End+Mute ... Release, Env=000h") — at
+  // the sample AFTER the DECODER enters the block, which it does while the
+  // cursor is still eight samples back in the block before (spc_dsp6 `Misc/brr
+  // early end at many pitches` pins the lead; the per-sample header check
+  // reads the header standing at each sample's start, so the entry lands at
+  // the next check).
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});  // normal
@@ -207,33 +214,44 @@ TEST(OutputStage, EnteringAnEndMuteBlockReleasesTheVoice) {
   dsp[kDir] = 0x02;
   writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
 
-  // Mid-play at the last sample of the normal block, one unity-pitch step from
-  // the boundary, sounding via Direct Gain.
+  // Mid-play in the normal block, one unity-pitch step from the decoder's
+  // move into the next block, sounding via Direct Gain.
   placeAmplitudeVoice(dsp, 0, 0x0800, 0x7F, 0x40, 0x40);
   dsp.voices[0].brrAddress = 0x1000;
-  dsp.voices[0].brrSampleIndex = 15;
+  dsp.voices[0].decoderAddress = 0x1000;
+  dsp.voices[0].headerAddress = 0x1000;
+  dsp.voices[0].brrSampleIndex = 6;
   dsp[0x02] = 0x00;  // VxPITCHL/H = 1000h: one stream sample per output sample
   dsp[0x03] = 0x10;
 
   const std::span<const std::uint8_t, 65536> ram_span{ram};
-  static_cast<void>(stepDspSample(dsp, ram_span));  // finishes the normal block, still sounding
+  static_cast<void>(stepDspSample(dsp, ram_span));  // one step short, still sounding
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);
   ASSERT_GT(dsp.voices[0].envelope, 0);
 
-  static_cast<void>(stepDspSample(dsp, ram_span));  // crosses into the End+Mute block
+  static_cast<void>(stepDspSample(dsp, ram_span));  // the decoder enters the End+Mute block
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Sustain);  // the entering sample still sounds
+
+  static_cast<void>(stepDspSample(dsp, ram_span));  // the standing check reads the header
   EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
   EXPECT_EQ(dsp.voices[0].envelope, 0);
 }
 
 // ── Key-on startup through the frame loop ───────────────────────────────────
 
-TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
+TEST(OutputStage, KeyOnIsSilentForSixSamplesThenSounds) {
   // "there are 5 'empty' samples before envelope updates and BRR decoding
-  // actually begin" (fullsnes line 3053-3055). A KON on an even sample keys the
-  // voice on; the five startup samples are silent. Voice 0's output rides one
-  // sample behind — its amplitude is computed at the last slot of a sample and
-  // applied at the next sample's start — so the first sounding frame it produces
-  // is the seventh, one past the sixth a within-sample voice would sound on.
+  // actually begin" (fullsnes line 3053-3055) — the keying load precedes voice
+  // 0's compute in the slot they share, so the keying sample itself takes the
+  // first of the five silent calls and the following four samples the rest.
+  // The sixth call takes the first envelope step and still emits silence: the
+  // level scaling a sample is the standing one, which is the zero key-on left
+  // (anomie's per-sample account #5, "the sample output is still '0000',
+  // because of the order in which voice operations are performed"); #6 carries
+  // the first data sample. Voice 0's output rides one sample behind — its
+  // amplitude is computed at the last slot of a sample and applied at the next
+  // sample's start — so its first sounding frame is the eighth after the
+  // keying frame began.
   DspState dsp;
   Ram ram{};
   writeBlock(ram, 0x1000, 0xC0, {0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77});
@@ -246,19 +264,19 @@ TEST(OutputStage, KeyOnIsSilentForFiveSamplesThenSounds) {
   volRight(dsp, 0) = 0x81;  // inverted right channel
   dsp[0x0C] = 0x7F;         // MVOLL = +127
   dsp[0x1C] = 0x7F;         // MVOLR = +127
-  dsp[kKon] = 0x01;         // key voice 0 on at the first (even) poll
+  dsp[kKon] = 0x01;          // the register a driver wrote, kept for read-back
+  dsp.internalKon = 0x01;    // and the key-on it armed, for the first (even) poll
 
   const std::span<const std::uint8_t, 65536> ram_span{ram};
   const StereoFrame first = stepDspSample(dsp, ram_span);  // poll keys on; startup begins
-  dsp[kKon] = 0x00;                                        // a driver clears KON after writing it
   EXPECT_EQ(first.left, 0);
   EXPECT_EQ(first.right, 0);
-  for (int sample = 2; sample <= 6; ++sample) {
+  for (int sample = 2; sample <= 7; ++sample) {
     const StereoFrame f = stepDspSample(dsp, ram_span);
     EXPECT_EQ(f.left, 0) << "startup sample " << sample;
     EXPECT_EQ(f.right, 0) << "startup sample " << sample;
   }
-  const StereoFrame sounding = stepDspSample(dsp, ram_span);  // seventh sample sounds
+  const StereoFrame sounding = stepDspSample(dsp, ram_span);  // eighth sample sounds
   EXPECT_GT(sounding.left, 0);
   EXPECT_LT(sounding.right, 0);                                // the inverted right channel
 }

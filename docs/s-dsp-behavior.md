@@ -1,0 +1,1310 @@
+# S-DSP behavior and provenance
+
+A reference for the parts of the SNES S-DSP where the published hardware documentation is
+incomplete, ambiguous, or wrong — and for what settles each case.
+
+`dsp.md` is the usage guide: what Snaggletooth's DSP surface is and how to drive it. This page is the
+evidence behind it. Every claim below names where it comes from, and where two sources disagree it
+names the disagreement and what decided it.
+
+## The evidentiary standard
+
+Three kinds of claim appear here, and they are not equally strong:
+
+- **Documented and corroborated.** Two independent published sources agree. Taken as given.
+- **Documented but contested.** The published sources disagree, or one is self-contradictory. Decided
+  by a hardware test ROM, and the decision is recorded with the measurement that forced it.
+- **Undocumented.** No published source states it. Derived from a test ROM's expected output, which
+  means the claim is only as good as the reconstruction behind it — so the reconstruction is
+  described, not just asserted.
+
+Where a test ROM decides a question, it outranks both documents. A document describes what someone
+understood; a test ROM's expected output is what the hardware actually produced when the ROM's author
+measured it.
+
+**Nothing here is derived from another emulator.** Snaggletooth is a clean-room implementation: the
+contract is public hardware documentation plus the observable behavior of test ROMs. That constraint
+is what makes this page publishable, and it is also why the corrections below took real work —
+copying a known-good implementation would have skipped the questions entirely and taught nothing.
+
+## Sources
+
+| Source | Role |
+|---|---|
+| Martin Korth's fullsnes, "SNES APU DSP" | Primary. Register tables, the per-cycle access chart, the BRR and Gaussian arithmetic. |
+| Anomie's S-DSP Doc (Rev 1157) | Cross-check. The per-sample voice loop, the envelope update list, the key-on account. |
+| SNESdev Wiki, "DSP envelopes" | Secondary. Counter period/offset tables and the counter fire rule. Cites Anomie as its only source, so it is a restatement rather than an independent third derivation. |
+| SNESdev Wiki, "Errata" | Secondary, quirks only. |
+| Blargg's DSP test ROMs | **Arbiter.** Where documents conflict or are silent, these decide. |
+
+---
+
+## The envelope
+
+### The update runs every sample; the counter gates only the store
+
+Anomie's numbered list is precise and easy to misread. Per sample, the selected mode computes a
+candidate level, and then:
+
+1. **If the rate counter fires**, the envelope takes the candidate, clamped to 11 bits.
+2. If the mode is Decay and the sustain boundary is matched, enter Sustain.
+3. If the mode is Attack and the candidate exceeds `$7FF`, enter Decay.
+4. Save the candidate as the reference the next Bent-Increase step reads.
+
+**The counter condition sits on step 1 alone.** Steps 2, 3 and 4 happen whether or not it fires. An
+implementation that returns early when the counter has not fired cannot change phase while a rate
+holds a level still — and a rate of 0 holds it still forever.
+
+*Arbitrated by `Envelope/attack->decay during gain`.* Its blocks end on a rate of 0 and still leave
+Attack, which is what the sub-test's name means.
+
+### Attack ends when the step leaves the 11-bit range, not at a fixed level
+
+fullsnes says Attack switches to Decay at `Level >= $7E0`. That is **refuted**. The switch fires when
+the candidate leaves the unsigned 11-bit range — in either direction.
+
+The test ROM brackets each mode around the boundary, and the pairs only fit the range rule:
+
+| Mode | Step | Stays in Attack | Leaves Attack |
+|---|---|---|---|
+| Linear Increase | +32 | `$7DF` | `$7E0` |
+| Bent Increase | +8 | `$7F7` | `$7F8` |
+| Linear Decrease | −32 | `$020` | `$01F` |
+
+fullsnes's `$7E0` coincides with the Linear-Increase pair only because `$7E0 + 32 = $800`; the
+Bent-Increase pair sits `$18` higher, and the Linear-Decrease pair is driven *below zero*
+(`$1F − 32 = −1`). The boundary is the step, not a level. Anomie's model — pretend Linear Increase,
+overshoot, clip — is the coherent one, and his note that "a negative value for the new value will
+result in the clipped version being greater than 0x600" already implies the comparison sees an
+unclamped value.
+
+Implemented as: the candidate is outside the unsigned 11-bit range.
+
+### Decay reads its sustain boundary from whichever register is driving the envelope
+
+Under ADSR the boundary is `VxADSR2` bits 7-5. **Under a GAIN mode it is `VxGAIN` bits 7-5** — which
+are the gain mode and its enable bit, not a sustain level at all, so a voice keyed on under GAIN
+reaches Sustain at a boundary its author never chose. fullsnes states this in "Gain Notes" and calls
+it what it is: "accidently reading a garbage boundary value".
+
+The comparison is on the upper 3 bits (Anomie's form), against fullsnes's `Level <= Boundary`. The two
+differ only when a decay lands exactly on a `$100` boundary, and Anomie's is the exact one.
+
+The comparison reads the **candidate the mode computes, every sample**, rather than a counter-gated
+stored level — so a voice parked at rate 0 still changes phase when the value its mode computes
+reaches the boundary.
+
+*Arbitrated by `Envelope/decay->sustain during gain`.*
+
+### A decay whose level already sits in the sustain band sustains without a step
+
+Under ADSR, a voice in Decay whose stored level's upper three bits already equal the sustain level
+is in Sustain before its step: the phase changes and the level holds, whatever the decay rate does
+on that sample. The case that shows it is a decay entered from the top — ADSR `$EF/$E0`: attack rate
+31 takes the level to `$7FF`, the sustain level is 7, so the level is in band the sample Decay
+begins, and the sustain rate is 0. A model that runs the decay step first stores `$7F7` when rate 28
+(period 4) fires, one sample in four; the tape carries `$7FF` from every counter phase.
+
+Everywhere the level is still above the band, the documented order stands: the step is computed,
+stored if the decay rate fires, and the candidate is what the boundary check reads. And the
+stored-level check is ADSR's alone — under a GAIN mode `Envelope/attack->decay during gain` reads
+the candidate, not the stored level.
+
+The driver of `Random/voice volumes` is what makes the phase visible: its sync gadget locks the CPU
+to the sample and to the key-on poll's parity, which is a lock modulo 2, while rate 28 fires modulo
+4 — so two arrivals of the same driver at the same in-sample phase can sit on different counter
+phases. On hardware the arrival phase is not under the driver's control (the SNES-side upload
+crosses two unrelated clocks), so a test that hashes the tape has to read the same envelope from
+every phase, and it does.
+
+Attack→Decay is not the same switch: its store stays under the attack rate. Gating it by the decay
+rate regresses `Envelope/envelope rates` and `Envelope/hidden env after adsr`.
+
+Two other forms fit the same evidence — the sample that detects the switch storing nothing under
+ADSR, or its store gated by the sustain rate instead of the decay rate — because the one ADSR arbiter
+has a sustain rate of 0 and a level already in band. Both would also hold a decay arriving at the
+boundary from above, where the documented order stores the step; a sub-test that decays into the band
+from above with a firing sustain rate would separate them.
+
+**Two of the three are settled; the third is free.** Letting the detecting sample store like any
+other regresses `Random/voice volumes`, and dropping the stored-level check regresses
+`Random/pitch mod` as well — so the suppression and the check are both real, and the first form is
+right. **Which rate gates that one store is free.** Gating it by the sustain rate instead of the
+decay rate leaves every passing sub-test in the ROM green and every hardware-derived assertion in
+this implementation's own suite green; it moves `Random/envelope` and nothing else, and that sub-test
+is reproduced under neither reading. Gating it by both rates at once is byte-identical to suppressing
+it, so the two rates never both fire on such a sample here. Sweeping the question to exhaustion —
+those readings and a gain-rate one, each crossed with the other envelope rules, with the key-on
+machinery, and with every rate-table entry they newly consult — moves that sub-test's checksum 3'729
+distinct ways across 5'272 readings and matches its expected value under none of them.
+
+**And the store is the only half of it any sub-test can see.** Gating the phase change with the
+store, gating it by the sustain rate while the store stays suppressed, and leaving the
+Bent-Increase reference standing on a suppressed store each leave every byte this ROM checksums
+unchanged.
+
+*Arbitrated by `Random/voice volumes`, run from two arrival phases two samples apart, with
+`Random/pitch mod` bounding it.*
+
+### The Bent-Increase reference is saved every sample and is not clipped
+
+Bent Increase adds +32 below `$600` and +8 at or above it. The value it compares is a reference saved
+the previous sample. Both documents describe that reference as "the new value, *clipped* to 11 bits".
+Two corrections:
+
+- **It is saved outside the counter gate.** A mode parked at rate 0 computes a value every sample and
+  supplies it as the reference while the level stands still. The ROM's pair proves it: `$5E0` under a
+  rate-0 Linear Increase computes `$600`, and the following Bent Increase takes **+8** from a level
+  *below* the boundary; `$606` under a rate-0 Exponential Decrease computes `$5FF` and takes **+32**
+  from a level *above* it. Only a reference read from the parked mode's own computed value inverts
+  those two.
+- **It is not 11 bits.** `$7E0 + 32 = $800` leaves the range and the hardware still takes **+8**;
+  masked to 11 bits it would read `$000` and take +32. Its bracket `$7DF + 32 = $7FF` stays inside and
+  also takes +8, so the pair differs by one in the level and not in the step. **Exactly 11 bits is
+  refuted**; 12 or more satisfies every measurement.
+
+Both documents are wrong about the width. They are right about the negative case, which is the half
+they illustrate.
+
+*Arbitrated by `Envelope/gain $E0 threshold`.*
+
+### The envelope is applied before it is updated
+
+**A sample is scaled by the level already standing — the one the previous sample's update left — and
+this sample's update runs afterwards.** So a level in motion reaches the output one sample after the
+step that produced it, and a level holding still is indistinguishable either way.
+
+Anomie's voice loop applies the volume envelope early and updates it last, and his key-on account
+states the consequence outright: at the sample where envelope updating begins, "the sample output is
+still '0000', because of the order in which voice operations are performed".
+
+*Arbitrated by `KON/gain used on last kon sample`.* Its driver keys a voice on, walks Direct Gain
+through `$20`/`$30`/`$40`/`$50`/`$60` at one-sample intervals, and captures the voice through the echo
+buffer, so the captured row is the envelope trajectory. Expected against scale-by-the-new-level:
+
+```
+hardware     0000 0000 0400 0500 0600 0600 0600 0600
+new level    0000 0400 0500 0600 0600 0600 0600 0600
+```
+
+Identical values, displaced by exactly one sample. That displacement can only come from the apply /
+update order: a change in *when* the envelope goes live would change *which* `VxGAIN` the first live
+step reads, and so would change the values themselves.
+
+**Why this is easy to miss:** a level that is not moving gives the same answer under either order, and
+most envelope measurements read a level at rest. It takes a case where the level is moving at the
+instant it is read.
+
+---
+
+## Key-on and key-off
+
+### A key-on is followed by six silent samples, not five
+
+The documented figure is five empty samples "before envelope updates and BRR decoding actually
+begin", and that is accurate as stated — but it counts the samples *before* the first envelope step,
+not the silent ones. Anomie's numbered account is the precise version:
+
+| Sample | What happens |
+|---|---|
+| `#0` | The key-on itself. Envelope set to 0, state set to Attack, interpolation index reset. No envelope update. |
+| `#1`–`#4` | No envelope update, no interpolation update. BRR groups preload. |
+| `#5` | **Envelope updating begins — and the output is still `0000`**, because the level scaling this sample is the zero the key-on set. |
+| `#6` | The first data sample. |
+
+So six samples are silent. The fifth-versus-sixth confusion is entirely a consequence of the
+apply-before-update order above.
+
+### Whether the silent samples advance the stream depends on the voice the key-on lands on
+
+Anomie's account above holds the decode position still until the startup ends — "no interpolation
+update" through `#4` with fixed BRR group preloads in their place — and fullsnes quotes the same
+shape. The test ROMs split the question by the state of the voice being keyed:
+
+- **A key-on that interrupts a sounding voice walks.** `KON/kon decoding when another kon` re-keys a
+  voice its driver keyed 21 samples earlier — sounding when the re-key lands — freezes its pitch
+  mid-startup by zeroing `VxPITCH`, and reads the voice's output back through the echo buffer — a
+  pure function of where the decode cursor stood when the pitch froze. The expected table walks:
+  across re-keys frozen at one-sample-later instants, the read moves through the source's loud
+  region exactly as a cursor advancing **two stream samples per output sample** (the sub-test's
+  pitch) would place it. A cursor holding at its preload prints all zeros; fixed four-sample group
+  preloads land the loud readings in the wrong places.
+- **A key-on of a silent voice holds, exactly as the documents describe.** `Misc/brr addr
+  wrap-around` keys a long-released voice (envelope at 0) at pitch `$1000` and records its first
+  samples through the echo buffer. The expected rows have the first sounding sample interpolating
+  the stream's **first four samples** at Gaussian index 0 — the primed window, unmoved through the
+  whole silent span *and* that first sounding sample — with the position advancing one stream
+  sample per output sample only from the sample after. A stream that walks through the silence
+  starts six samples deep and prints a different table.
+
+- **A key-on that interrupts a voice that has sounded for long holds too.** `Random/brr before
+  playing` fills RAM with random BRR blocks, keys voice 0 over them at pitch `$1000` and direct gain
+  `$7F0`, and hashes a 30 KB echo tape of its output — eight times over, the later seven key-ons
+  landing on the voice while it is still playing the previous pass's data, about a second after its
+  own key-on. The hash the ROM expects is reproduced only when every pass's tape has the same
+  alignment as the first — the pass that keys the voice from silence: the first sounding sample
+  interpolates the stream's first four samples at index 0. A model that walks the seven re-keys
+  lands their data six frames early and hashes to a different constant.
+
+Two conditions therefore gate the walk, both read as the restart applies. The envelope: at 0 the
+startup holds (`Misc/brr addr wrap-around`; a register write that drops the level to zero on the
+consuming sample gives a sounding voice a held startup — see [the final pre-key-on
+sample](#a-full-restarts-consuming-sample-still-emits-the-final-pre-key-on-sample), after which
+the standing envelope has run its own update once more). And the old OUTPUT: a voice whose output
+was sounding holds, one whose level stands above zero while its output is still silent — a voice
+inside an earlier startup's own silence — walks. The 21-samples-later re-key that walks (`KON/kon
+decoding when another kon`) lands on exactly such a voice; the re-keys that hold land on voices
+whose old streams were audibly playing — about a second old at `$7F0` (`Random/brr before
+playing`) and some sixty samples old, loud, at direct gain `$400` (`Timing/Voice/V3 BRR.sample.*`,
+whose thirty-four rows per voice each re-key it and read every row's data bytes on the held
+cadence). No age window separates the cases — sixty samples holds and no record of the key-on
+need outlast the silence — and no threshold on the level does either: `$010` walks, `$7F0` holds,
+a level-0 voice holds. Nor the envelope phase: the `$7F0` voice stands in Attack, as
+`Envelope/attack->decay during gain`'s seventh block shows for a direct-gain level set above
+`$7E0`.
+
+In the walking case the first silent sample is the exception — it decodes nothing (the start
+pointer is read at the next sample's directory slot; see
+[below](#the-start-pointer-is-read-at-the-voices-directory-slot-one-sample-after-the-consuming-compute)),
+so the walk begins on the second. Only the *output* is silent during the
+startup; the position is live throughout. The pitch the walk uses is the one the key-on itself
+captured — that sub-test's freezes land because each rides a `KON` write of its own; a pitch write
+with no key-on behind it
+waits out the hold (see [the pitch reads](#the-pitch-pair-is-read-at-the-voices-own-slots-and-steps-the-next-advance--a-key-on-holds-the-reads-for-its-silent-span)).
+
+`KON`/`KOFF` are polled every other sample, at the last slot of the sample — the same slot at which
+voice 0 runs its whole compute. **The keying load runs first.** A keyed voice 0 therefore takes the
+load's own slot as the first of its silent startup calls, while voices 1-7 take theirs beginning in
+the following sample.
+
+Anomie is the only source that orders the events inside that slot, so this was single-sourced until a
+test ROM settled it. *Arbitrated by `KON/envx during kon`*, whose expected table has all eight voices'
+key-on startup reading identically — which the opposite order cannot produce for voice 0, under any
+read slot.
+
+The startup counter is **five, uniform across all eight voices**. The shared-slot asymmetry, not a
+per-voice count, is what makes the eight voices read alike.
+
+### The startup walk keeps no interpolation fraction
+
+The walk above (the sounding-voice case) is a whole-sample walk. Sample positions cross and decode
+exactly as the pitch dictates, but the fractional remainder does not accumulate: when the first
+sounding sample interpolates, its Gaussian index is 0 — the exact start of the position the walk
+reached — and the fraction begins climbing only with the advance after it. A held startup has no
+fraction to discard: its position never moves. Neither document says anything about the fraction
+during the startup; the accounts that hold the position still imply nothing to discard, and
+the walk the previous section establishes leaves the question open.
+
+*Derived from `KON/pitch at kon`.* The sub-test keys a voice at pitch `$0010` — one Gaussian index
+per sample, never crossing a sample position — over a ramp block, and reads the first twenty audible
+samples back through the echo buffer. The expected readings walk the interpolation kernel from index
+0 upward: `0000 0008 0018 0026 0036 …`. A walk that banks its startup fraction starts six indices
+deep instead — the five advancing silent samples plus the first sounding sample's own advance — and
+plays `0000 0064 0074 0084 …`, which is exactly the sequence the fraction-free rule forbids. The
+silence's length is identical either way, so the sub-test isolates the fraction alone: the sound
+begins at the same sample in both models and differs only in where the kernel's walk starts.
+
+The two rules compose rather than conflict: `KON/kon decoding when another kon` measures the
+cursor's whole-sample positions and is blind to the fraction (its pitch is a whole-sample step);
+`KON/pitch at kon` measures the fraction and never crosses a position. What the pair establishes
+jointly is a startup that decodes at the pitch while discarding the sub-sample remainder.
+
+A `KON` write arms the next poll, which starts the armed voices and then disarms itself — so a bit
+left set does not start the voice again, and the register keeps its value for read-back. `KOFF` is
+read from its register at every poll instead, so it keeps releasing for as long as the bit stands.
+`FLG` bit 7 is polled every sample rather than every other one.
+
+### The 128 kHz ceiling is a clamp on the position, not a cap on the step
+
+A voice's pitch step is added to the low fourteen bits of its pitch counter — its position within
+the four-sample group it is consuming — and the sum clamps at `$7FFF` before the crossed sample
+positions are counted. The step itself is never capped: a pitch-modulated step reaches `$7FEE`.
+The clamp is what holds the advance to four source samples per output sample, and it has a
+consequence a step cap does not: a position the clamp catches lands on the group's last fraction
+(`$3FFF` once the group turns) and stays pinned there for as long as the step exceeds the group,
+so the first smaller step afterwards — even a step of `1` — crosses into the next group at once.
+A step cap would leave the fraction free to drift, and a later step of `1` would need up to `$1000`
+samples to cross.
+
+fullsnes states that the step or the counter result "is cropped to 128kHz max" and marks the
+placement unknown (its line 2793, "XXX somewhere here"). Anomie places it concretely: the
+interpolation index gains the pitch and is clamped to `$7FFF` (lines 372–374). Only the clamp on
+the position produces the parking behaviour; a cap on the step does not, and the two are otherwise
+indistinguishable at any base pitch, since a base step cannot exceed `$3FFF`.
+
+*Derived from `Misc/interp pos clamped at $7FFF`.* The sub-test modulates voice 2 by a stationary
+voice 1 (a constant `+$3800` block at pitch 0, direct gain `$13`) with base pitch `$3FBA`, so the
+modulated step is about `$4800` — past the group — and lets the voice run for a few samples; then
+it sets the pitch to `0`, then to `1`, and reads twenty echo-buffer words of voice 2's output. Under
+the position clamp the voice's position parks at `$3FFF` within a few samples and the step of `1`
+crosses on its first sample; under a step cap the fraction drifts (`$3FFF`, `$7FFE`, `$BFFD`, …)
+and the step of `1` crosses nine samples later, so the two models play different samples into the
+buffer. The clamped model's twenty words reproduce the driver's compare constant exactly, and the
+ROM ratifies by advancing.
+
+### A key-on landing on a voice inside its silent span is absorbed or rewinds the silence
+
+Both documents state that keying a voice that is already playing restarts it in full — envelope to
+zero, stream to the start, the empty startup samples again, the audible click. Both are silent on
+the narrower case: a key-on consumed by the poll while the voice is still silent from the last one.
+The test ROM decides it (`KON/kon clears independent`): two `KON` writes ~53 SPC cycles
+apart, deliberately inside one 64-cycle poll period and synchronized so a poll falls between them,
+the first naming voice 0 and the second naming voices 0 and 1. The expected capture shows voice 0
+sounding **alone for exactly two samples** — one poll period — before voice 1 joins, and voice 0
+never restarting. So the second poll's key-on of voice 0 was absorbed: a key-on that lands during
+the startup neither resets the countdown nor restarts the stream.
+
+The alternative reading — that the second write could not re-arm voice 0 because its register bit
+never returned to 0 — fits this capture equally well, but is refuted by `Envelope/hidden env 0 at
+kon`, whose driver re-keys a long-playing voice by rewriting a `KON` value whose bit stood at 1
+throughout, and expects the restart. The register's history does not gate the arm; the voice's own
+startup state gates the action.
+
+**Full absorption is only one poll deep; a later in-span key-on rewinds the silence without moving
+the stream.** A key-on produces six silent samples — the five empty ones plus the first envelope
+step's still-silent sample — and what a key-on consumed inside those six does splits by which poll
+takes it:
+
+- **Consumed at the poll immediately after the one that keyed the voice: absorbed outright.**
+  Countdown, stream and envelope schedule all stand — this is the `KON/kon clears independent`
+  case above, and `KON/kon then another kon`'s first two readings confirm the envelope emerges on
+  the original key-on's schedule.
+- **Consumed at a later poll inside the span: the silence rewinds, the stream does not.** The
+  five-sample countdown re-arms in full and the envelope drops to zero, so the level emerges
+  exactly as late as a full restart would place it — but the decode cursor keeps the position it
+  has walked to and keeps advancing at the pitch. The span itself keeps counting from the key-on
+  that opened it: re-arming it with the countdown regresses `KON/kon decoding when another kon`,
+  whose frozen-cursor table sees the extra held call a re-armed span's first-call exception would
+  insert. The rewind re-arms the silence, not the span.
+
+One consumed from the first sounding sample on restarts the voice in full — and so does one
+consumed on a voice keyed off inside the span, because the tiers presuppose a startup that is
+still standing (the section after the shield, below). Three ROMs together pin the standing-startup
+shape, each blind to what the others measure. `KON/kon decoding when another kon` watches only
+the *stream*: its expected table holds a frozen cursor position through re-keys consumed up to six
+samples after the load, so no in-span key-on re-primes the decode. `KON/kon then another kon`
+watches only the *envelope*: it re-keys a voice at a widening spacing and counts samples until
+`VxENVX` turns non-zero, and its expected counts (`3 2 5 4 5 4 5 4`) read restart-late from the
+second in-span poll on — while a model that fully absorbs those key-ons reads `3 2 1 0 0 0` there,
+and one that also rewinds at the first poll reads `5 4` everywhere. `KON/envx during kon` bounds the
+far edge: a re-key consumed eight computes after the load restarts in full, stream included.
+
+### A key-on's consumption sample is shielded from a soft reset
+
+Both documents describe `FLG` bit 7 the same way: every voice keyed off, its envelope forced to
+zero, applied every sample rather than on the `KON`/`KOFF` poll grid. Neither says what happens when
+the same sample both consumes a voice's key-on and carries a standing soft reset.
+
+The test ROM decides it (`KON/kon then flg.80`): key a voice on, raise `FLG` bit 7 for exactly one
+sample, sliding the pulse one sample later per reading, and count samples until `VxENVX` turns
+non-zero. The expected readings are `06 05 80 80 80 80 80 80 80 80`, uniform across the eight
+voices:
+
+- A pulse over the sample **before** the consuming poll falls on a voice that is not yet keyed —
+  harmless — and the key-on starts on schedule one sample later (six samples to a non-zero read,
+  counted from the pulse).
+- A pulse over the consuming poll's **own** sample leaves the startup's `VxENVX` schedule exactly
+  where an unmolested key-on places it: five samples to a non-zero read, one fewer than the reading
+  before only because the startup began one sample closer to the counting.
+- A pulse over **any later** sample — still inside the silent span or past it — keys the voice off
+  for good: envelope forced to zero, release, and with nothing re-arming it the count never
+  terminates.
+
+So a soft reset does not key a voice off in the sample its key-on is consumed: the fresh consumption
+wins, the same precedence `KON` has over `KOFF` at the poll itself. The shield is exactly one sample
+wide — the same one-sample pulse, slid one sample in each direction, pins both of its edges.
+
+### A soft reset silences the sample after the one it lands on
+
+Both documents describe what `FLG` bit 7 does — key-off, envelope to zero, every sample — without
+saying whether the sample it lands on is itself silent. Anomie's per-voice list carries the answer
+implicitly: the envelope is applied and `VxOUTX` formed, *then* bit 7 is checked, *then* the
+envelope is updated (his V3c), which puts the reset in the same position as any other envelope
+update — one sample behind the output.
+
+The test ROM decides it (`Order/flg.80 after env used`): voice 0 is keyed on over a self-looping
+full-scale block at Direct Gain `$01` with `VxVOLL` at −1 and its echo send on, so every live sample
+writes `$FFFE` to the echo tape and every silent one `$0000`; nine samples after the key-on `FLG`
+bit 7 is raised, and the tape's frames 7–16 are checksummed:
+
+```
+hardware     FFFE FFFE FFFE FFFE FFFE 0000 0000 0000 0000 0000
+reset-sample silent
+             FFFE FFFE FFFE FFFE 0000 0000 0000 0000 0000 0000
+```
+
+One frame more of sound. The sample the reset lands on is emitted in full under the level the voice
+carried in; the zeroed level is what the next sample scales by. It is the "applied before it is
+updated" displacement above, seen from the reset rather than from a gain write, and the tape shows
+it directly because the voice's level is at full scale when the reset arrives.
+
+### A key-on consumed on a keyed-off in-span voice restarts it in full
+
+The in-span tiers above — absorption one poll deep, the rewind at later polls — describe a key-on
+landing on a startup that is still running. Neither document says what a key-on does to a voice
+that was keyed off *while still inside its span*, where the span's samples are still counting but
+the startup they were counting for is dead.
+
+The test ROM decides it (`KON/kon then flg.80 then kon`): key a voice on, then slide a
+fixed-offset pair — a one-sample `FLG` bit-7 pulse followed a fixed few samples later by a second
+`KON` write held for only a few cycles — one sample later per reading, and count samples until
+`VxENVX` turns non-zero. The expected readings are `04 80 06 80 06 80 06 80`, uniform across the
+eight voices, and the alternation is the poll grid: the second key-on's brief write is visible to
+the every-other-sample poll on even alignments only.
+
+- **Reading 0**: the pulse covers the first key-on's consumption sample — the shield above — and
+  the second key-on is not seen, so the count is the original startup's, already two samples in.
+- **Even readings 2–6**: the pulse kills the startup (release, envelope forced to zero), and the
+  second key-on is consumed two samples later. The count is a full restart's — *identical whether
+  the kill and re-key fall inside the span or past it* — so the consumed key-on neither absorbs
+  into nor rewinds the dead startup: the voice restarts in full, countdown re-armed, envelope from
+  zero, stream re-primed to the start address.
+- **Odd readings**: the poll parity misses the second key-on's brief write, and the reset's
+  key-off stands unanswered — the count never terminates.
+
+The rule is the voice's keyed-off state, not the reset's doing. One release condition on the
+keying poll's in-span tiers carries the whole family: `KON/kon then koff` (a `KOFF` kill inside
+the span, then a re-key) and `KON/kon then set sample's end flag` (an End+Mute block header's
+release) pass with the same arm that passes `KON/kon then flg.80 then kon`. It is also what lets
+`KON` win when a single poll delivers `KON` and `KOFF` together to an in-span voice — the `KOFF`
+releases first within the poll, and the key-on then lands on a keyed-off voice and restarts it.
+
+### A full restart's consuming sample still emits the final pre-key-on sample
+
+A full restart does not silence its voice on the sample whose poll consumes the key-on. The
+voice's own compute in that sample prepares one more sample from the state standing before the
+restart — the old stream takes its final decode and advance, and its sample is emitted under the
+standing envelope — and only then does the restart apply: stream re-primed, envelope to zero,
+Attack, with the startup countdown counting from that same call, so every later sample of the
+startup lands exactly where a key-on always places it.
+
+The test ROM decides it (`KON/kon unaffected by pitch`): a sounding voice — constant full-scale
+sample data, so its live output is a fixed word and pitch cannot change it — is re-keyed, and the
+echo buffer, serving as a per-sample tape of the voice's output, is read back over a seven-frame
+window spanning the re-key. The expected window is `FFFE 0000 0000 0000 0000 0000 FFFE`: the old
+data still sounds on the window's first frame, the restart's silence fills the middle, and the
+new startup's first sounding sample lands at the same frame a from-silence key-on would produce.
+The same window repeats identically with the pitch at `$3F00` and at zero — the sub-test's
+namesake, and the constant-data design that makes the timing the only signal. A model that
+silences the voice on the consuming sample itself prints `0000` in the first frame and misses
+nothing else — a one-frame difference in a fourteen-word row, in both pitch runs.
+
+Anomie's per-sample key-on account states the same rule from the hardware side: "After the final
+pre-KON sample is prepared, the envelope is set to 0 … The final pre-KON BRR decode also occurs
+here." The final decode is real, not an idle detail: it can complete an end block, and the
+key-on's `ENDX` clear — written at the voice's S7 slot, where that set would land — erases it,
+the suppression `KON/kon stops endx of prev sample` measures.
+
+The standing envelope, too, takes its own update on that compute before the restart reads it.
+What the restart reads decides whether the new startup walks or holds (the split above), and it
+is the level the voice would have carried into the next sample, not the one the final pre-key-on
+sample was emitted with. `Order/endx after final brr decode` forces this: its sync gadget leaves
+voice 4 sounding at full level, restores the voice's `ADSR1` to zero — direct gain, level zero — on
+the compute just before the poll that consumes the test's own key-on of that voice, and the
+expected row for voice 4 is a held startup's, identical to the seven voices keyed from silence. A
+restart reading the level before the update walks that voice and prints its `ENDX` six samples
+early.
+
+---
+
+## The intra-sample schedule
+
+Each 32 kHz sample is built over 32 clock slots, and register reads land on documented slots — so a
+CPU write lands where the hardware takes it rather than at a sample boundary. The map below merges
+fullsnes's per-cycle access chart with Anomie's voice loop; Anomie's slot *k* is fullsnes's T*(k+1)*.
+
+| Slot | Work |
+|---|---|
+| T18; T21; T0, T3, T6, T9, T12, T15 | Each voice's source read — `VxSRCN`, four slots ahead of the voice's directory read (voice 0 at T18, voices 2-7 at T(3v−6)); voice 1's at T21, twelve ahead of its directory read in the next sample. |
+| T1, T4, T7, T10, T13, T16, T19; T22 | Each voice's directory read — the loop address its compute's loop jump takes (voices 1-7 one slot before their compute; voice 0 at T22, nine before its), and a keyed voice's start pointer, in the sample after the compute that applied the key-on. The entry is the one the source read selected. `VxPITCHL` and `VxADSR1` are read in the same slot. |
+| T2, T5, T8, T11, T14, T17, T20; T23 | Each voice's `VxPITCHH` read, one after its directory slot — the compute slot itself for voices 1-7, read before the compute runs in it. The pair steps the next sample's advance. |
+| T2, T5, T8, T11, T14, T17, T20 | Voices 1-7 each run a whole compute (stream, noise, envelope, amplitude). |
+| T3, T6, T9, T12, T15, T18, T21, T24 | Each voice's `ENDX` bit is written, four slots after its compute — voice 0's at T3 of the following sample: a key-on's clear, or else the set the compute staged. |
+| T4, T7, T10, T13, T16, T19, T22, T25 | Each voice's `VxOUTX` is published. |
+| T5, T8, T11, T14, T17, T20, T23, T26 | Each voice's `VxENVX` is published — the value computed one sample earlier. |
+| T23 / T24 | The echo buffer's left word leaves the ring, then its right word. |
+| T23, T24, T25, T26 | The eight FIR coefficients are read — `FIR0` at T23, `FIR1` and `FIR2` at T24, `FIR3` to `FIR5` at T25, `FIR6` and `FIR7` at T26. |
+| T26 | The FIR filter runs, on the coefficients the sample captured. |
+| T27 | `EFB` is read and the buffer's write-back value is formed. |
+| T27 / T28 | Left then right output finalize — master and echo volume, then the mute gate. |
+| T28 | `PMON` is read, once, for all eight voices. |
+| T29 | `NON`, `EON` and `DIR` are read, once, for all eight voices. |
+| T29 / T30 | `FLG` bit 5 loads, one slot ahead of each echo word it gates. |
+| T30 / T31 | The echo buffer's left word, then its right word. |
+| T30 → T31 | Raw `ESA`/`EDL` load, then the ring advance applies them and steps the index. |
+| T31 | The `KON`/`KOFF` load, the global counter's advance, the noise step, then voice 0's whole compute. |
+
+Voice 0 computes at the last slot and applies at the following sample's first slots, so its output
+rides one sample behind the others while its state trajectory stays in step.
+
+### The counter advances ahead of the checks that share its slot
+
+The global counter's once-per-sample advance runs at T31 **before** voice 0's compute and the noise
+step in that same slot. Every rate check therefore reads the just-advanced value: voice 0's envelope
+check and the noise step at T31 itself, and voices 1-7's checks at their compute slots in the frame
+that follows. Between two advances all eight voices read one counter value, so a rate fires for all
+eight on the same 32 kHz sample.
+
+Anomie's cycle-30 listing carries the opposite order for the envelope half — it names voice 0's V3c
+first and "update global counter" after it (with the noise update after the counter, which the ROM
+agrees with). The listing's within-cycle sequence is not the execution order: an implementation that
+lets voice 0's check read the pre-advance value measures every envelope step one sample late against
+a phase reference taken through another voice. The noise step sits on the same side of voice 0's
+compute as the counter (next section).
+
+*Derived from `Misc/counter rate synchronizations`.* The sub-test locks itself to the counter's
+absolute phase through voice 4 — GAIN linear increase at rate 1 until its `ENVX` moves, then two
+windows in which rate 2 and rate 3 must *not* fire, restarting until the phase fits — and then, for
+each GAIN value `$C1`–`$DF` (rates 1–31), keys voice 0 on and counts polling iterations until
+`V0ENVX` first moves, checksumming the 31 recorded counts. The lock and the measurement deliberately
+sit on different voices, and that cross-reference is the whole discriminator: rates 2–31 are each
+timed from the previous measurement's own exit, so a uniform one-sample shift of voice 0's fires
+cancels row to row, while rate 1 alone is timed from the voice-4 lock. The two orders differ in
+exactly that one word of the 31 — the pre-advance read measures rate 1 one poll longer — and the
+driver's checksum pins it: with the advance ahead of voice 0's compute the table hits the expected
+accumulator exactly and the ROM advances.
+
+### The noise steps ahead of voice 0's compute in the same slot
+
+The T31 noise step — the `FLG` bits 0–4 read and the LFSR advance — runs **before** voice 0's compute,
+so voice 0 outputs the level this sample's step produced, the same level voices 1–7 read at their
+compute slots in the frame that follows. One noise level reaches the output per delivered frame,
+whichever voice carries it. Anomie's cycle 30 lists voice 0's V3c ahead of "load FLG bits 0-4 and
+update noise sample"; as with the counter, the listing's order is not the execution order — a voice 0
+reading the pre-step level trails the other seven by one step for as long as the noise runs.
+
+*Derived from `Order/noise rate flg.1F`.* The sub-test runs voice 0 alone on noise (`NON`, `EON`,
+direct gain `$7F`, `VOLL` −128) into a one-entry echo buffer at `$0000`, sets rate 31 and spins on
+the entry until voice 0's noise sample reads back as zero — the LFSR walking down to level 1, which
+the envelope scales to nothing — then stops the rate in the next few cycles. The level left standing
+depends on how many steps fit between the sample that read as zero and the rate write: the ROM's
+expected table (recovered from the driver's CRC constant as the unique walk along the LFSR) is
+`$2000` — two steps, `1 → $4000 → $2000` — where a voice 0 reading the pre-step level publishes its
+zero one sample later, the CPU exits one iteration later, and three steps fit. The sub-test then
+moves the buffer to `$F000`, re-enables the rate and freezes the buffer eleven samples on; the first
+stepped level lands on frame 6 of the tape, one frame earlier than the trailing model puts it. Both
+halves of the row move by the single reordering.
+
+### The echo unit reads across five slots, not in one act
+
+The unit's read half is a ladder. The ring entry's left word leaves the buffer at T23 and its right
+word at T24; `FIR0` is read at T23, `FIR1` and `FIR2` at T24, `FIR3` to `FIR5` at T25, and `FIR6`
+and `FIR7` at T26, where the filter runs on the eight values the sample captured. `EFB` is read
+later still, at T27, where the write-back value is formed. Both references carry the whole ladder —
+fullsnes as chart rows `RdEchoLeft`/`RdEchoRight` and a register-array column, Anomie as his cycles
+22 to 26 — and they agree slot for slot.
+
+Two consequences are CPU-visible. A write to the echo buffer between T23 and T24 reaches the right
+channel of the sample in flight and misses its left. And a write to a FIR coefficient reaches that
+sample only if it lands before that coefficient's own slot: `FIR0` closes three slots before
+`FIR7` does, so one store can reach some taps and miss others.
+
+*Derived from `Timing/Echo/22-23 echo read`, `Timing/Echo/22-25 fir` and `Timing/Echo/26 efb`.* The
+first walks a poke of each buffer word across the sample and folds both words back, which separates
+the two reads. The second walks a store to one coefficient across the sample, once for each of the
+eight in turn, and folds a bit per row — so all eight slots ride one checksum. The third notches
+`EFB` to zero for a few cycles at a walking offset, freezes the buffer with `FLG` bit 5, and folds
+the entry: the notch changes the write-back only while it covers T27.
+
+### The echo buffer writes land at T30/T31
+
+Both documents say so — fullsnes as explicit chart rows, Anomie at his cycles 29 and 30 — but it is
+easy to lump the write in with the echo *read* at T23/T24, six or seven slots early. It is
+CPU-visible: a driver reading the buffer at a fixed offset from its own key-on races the write, and
+the six-slot error changes which side of the race it lands on.
+
+### `ESA` and `EDL` apply one sample after the write
+
+Anomie's chart carries both halves — the raw registers are loaded at his cycle 29 "for future use"
+and applied at cycle 30, `EDL` only when the ring index is 0 — while fullsnes says only that "ESA is
+accessed during cycle 29", which does not distinguish the load from its application. The lag is the
+half that matters: the sample in flight when `ESA` changes still reads **and writes** the old base,
+and the new base takes over from the next sample.
+
+*Derived from `Misc/$F0-$FF are not ram`.* The sub-test parks a single-entry echo buffer at `$F000`,
+writes `EDL`=1 so the ring index starts climbing, then — a counted number of one-sample wait loops
+later — flips `ESA` to `$00` and opens `FLG` bit 5 for exactly seven samples. On hardware the
+in-flight sample's write lands at the old `$F0xx` base (the ROM seeds guard bytes around it), and
+the `$00`-based burst begins at entry `$EC` — one entry past the driver's own 16-bit wait counter at
+`$EA`/`$EB`. Applying `ESA` on the sample of the write starts the burst one entry early, at `$E8`:
+the echo overwrites the wait counter, the disable write never runs, and the ring sweeps its whole
+2 KB over the zero page, the stack page, and the driver — the CPU ends in a `STOP` with no verdict.
+The mirrored second half of the sub-test flips `ESA` the other way (`$00` → `$F0`) and reads both
+regions back, pinning the lag in both directions.
+
+### The `$F8`/`$F9` port bytes are out of the echo's reach
+
+The same sub-test sweeps its echo burst across the RAM beneath the `$F0`–`$FF` register overlay and
+then reads the sixteen addresses back through the CPU. The echo bytes land in that RAM — the DSP
+addresses memory directly, below the overlay — but the CPU's reads return register values, and at
+`$F8`/`$F9` the value is the port's own byte: Anomie marks the pair "normal RAM, except … not
+altered by S-DSP echo buffer writes". A CPU write still mirrors into the RAM beneath, so the two
+stores agree until an echo write splits them.
+
+### `VxENVX` carries an extra sample of read-back pipeline
+
+**Neither document mentions this.** `VxENVX` publishes at the voice's own slot, but the value it
+publishes is the envelope computed **one sample earlier** — so a CPU read lags the envelope by a full
+sample beyond the publish slot.
+
+*Derived from `KON/envx during kon`*, which pins the first read-visible envelope step one sample later
+than a same-sample publish allows, while a separate sub-test pins the first live *compute* to an
+earlier instant. The two only reconcile through a value lag in the register.
+
+The publish slots themselves are contested: fullsnes's array column reads `VxENVX` at each voice's
+sixth step slot and `VxOUTX` at the seventh; Anomie prepares `VxOUTX` at the sixth and `VxENVX` at the
+seventh, each readable two slots later. **Anomie is right on both.** `VxENVX` first: moving it three
+slots earlier regresses an otherwise-passing sub-test. Then `Timing/Voice/V8 outx` and `V9 envx`
+place both to the cycle — `VxOUTX` at T4 for voice 0 and T(3v+4) for voices 1-7, `VxENVX` one slot
+later — by the write-versus-write measurement described under
+[the DSP's register writes](#the-dsps-own-register-writes-lose-to-a-cpu-write-issued-in-the-two-cycles-before-them).
+
+### The pitch pair is read at the voice's own slots and steps the next advance — a key-on holds the reads for its silent span
+
+**Both documents place the reads, and the ROM confirms them to the cycle.** `VxPITCHL` is read at
+the voice's directory slot — T22 for voice 0, T(3v−2) for voices 1-7 — and `VxPITCHH` one slot
+later, T23 and T(3v−1): for voices 1-7 the compute slot itself, read before the compute runs in it.
+fullsnes's register-array column has `V0PITCHL` at T22 and `V0PITCHH` at T23; Anomie reads
+`VxPITCHL` at V2 (`0:21 1:0 2:3 …`) and `VxPITCHH` at V3a (`0:22 1:1 2:4 …`). `VxADSR1` is read
+at the directory slot too (`V0ADSR1` T22; Anomie's V2), while `VxADSR2` and `VxGAIN` are read at
+the compute (V3c). `Timing/Voice/V2 pitchl`, `V3 pitchh` and `V2 adsr0.0F`/`.70`/`.80` measure the
+three registers the way the `dir.*` and `srcn.*` pairs measure theirs: per row a five-cycle pulse
+into the register at a per-row offset, and the hash records which voices took it. The recovered
+read cycles — one structured solution per constant — are exactly those slots; the three tests
+sharing one constant pulse `VxPITCHL` and `VxADSR1` at the same offsets and `VxPITCHH` one slot
+later, which is the column itself.
+
+**The pair a sample reads steps the advance of the sample after it.** The slot measurement cannot
+say which sample's advance a read serves; the documents' step order does. V4 increments the
+position *after* V3c has formed the sample's output, one step after the pair was read, and this
+model advances before it interpolates — so a compute takes the pair read at the voice's pitch
+slots of the sample before, for every voice alike, voice 0 included. A pitch write landing after a
+voice's pitch slots reaches the advance two computes on; a value standing for exactly one sample is
+consumed for exactly one advance by every voice, whatever slot its writes land on. The same-sample
+form — the read stepping the compute it precedes — fails `Order/pitch added before interp`,
+`Order/pitch after brr`, `Misc/interp pos clamped at $7FFF`, `Random/pitch mod` and `KON/kon then
+change pitch`; the lagged form passes all five. `VxADSR1` has no such lag: the directory slot's
+read drives the compute that follows it.
+
+**A key-on suspends the reads for the voice's silent span.** Every key-on the poll consumes —
+including one absorbed or rewound inside the silent span — schedules a capture of the pair at the
+first slot of the poll-parity sample after the consuming poll (voice 0's compute takes it that
+sample, voices 1-7's the sample after), then holds the slot reads off for six computes, the silent
+span. The seventh compute's reads are the first live ones and the eighth compute the first advance
+at a live pitch — uniform across the eight voices, because voice 0's first compute follows the poll
+in the slot they share and the others' come a sample later. Through the hold, the startup's stream
+walk uses the pitch the scheduled capture took. A bare pitch write inside the hold never reaches
+the stream; one landing between the poll and the parity sample's first slot does, because it is
+what the scheduled capture reads.
+
+*Derived from `KON/kon then change pitch`.* The sub-test keys a voice with pitch zero, pulses
+`VxPITCHL` to `$10` for exactly one sample at an offset that grows one sample per reading, and reads
+the cursor's total advance back through the echo buffer. The expected readings are `$0008` for the
+first four offsets and `$0018` — exactly one sample at the pulsed pitch — for the last four, on all
+eight rows alike. Nothing lands while the hold stands, one sample lands after it, and both halves
+hold at *every* alignment: an every-other-sample read leaves half the visible alignments blind, and
+moving the hold's edge by one compute in either direction — or anchoring it to the poll's sample
+rather than the voice's computes — moves the boundary off the ROM's.
+
+*`KON/kon decoding when another kon` re-read.* That ROM's frozen-pitch readings quantize in pairs,
+which first read as a capture grid two samples wide. Each of its freezes rides nine cycles behind a
+`KON` write, so what its table actually quantizes is the **keying poll's** every-other-sample grid,
+reached through the key-on's scheduled capture — the pairs and the row-uniformity both follow, and
+the two ROMs stop contradicting each other. The nine-cycle gap also pins the scheduled capture's
+instant from the early side: a write that close behind the consumed `KON` is reliably seen, while
+`KON/kon then change pitch`'s earliest pulse — completing about three cycles after the parity
+sample's first slot — is reliably not.
+
+### The BRR header is read every sample
+
+The header byte is loaded and its end/loop bits are checked **every sample**, not only when the pitch
+counter advances far enough to decode new data. Anomie loads it "every time"; fullsnes carries the row
+for every voice in every sample and notes that the DSP's RAM strobes go low "even when no new BRR/DIR
+data is needed".
+
+The consequence is easy to miss: a voice whose pitch is zero decodes nothing, yet a block that turns
+End+Mute underneath it still releases the voice.
+
+The check goes live from **each voice's third compute after a key-on, counting the load's own slot**
+— a uniform per-voice count. The load sits at T31, which is voice 0's own compute slot with the load
+running first, so the load's sample is voice 0's first count while voices 1-7 begin theirs in the
+next sample; that shared-slot asymmetry is what lets one uniform count produce the ROM's eight
+identical per-voice rows. Both documents are silent on when the check goes live at all.
+
+### The decoder runs eight samples ahead of the cursor, and the check trails it by one
+
+The header the per-sample check reads is the **decoder's** block — and the decoder is not where the
+sound is. A key-on primes the voice's whole first block before the voice sounds, and from then on
+the decoder enters each following block while the interpolation cursor is still eight samples back
+in the block before: it resolves there where the chain goes (the next block, or the loop address
+for an end block — read from the directory at the voice's directory slot earlier in that sample,
+see [below](#the-loop-address-is-read-at-the-voices-directory-slot-ahead-of-the-compute) — and,
+for an end block, when `ENDX` is
+set; see [below](#endx-is-set-when-the-decoder-leaves-the-end-block-and-reads-back-three-slots-after-the-compute)).
+Neither reference states the lead — Anomie describes a twelve-sample ring
+turned "when the interpolation index passes 0x4000" without fixing the decoder's distance ahead,
+and fullsnes does not mention the buffer at all. The ROM measures it.
+
+`Misc/brr early end at many pitches` is the measurement: two silent blocks chained to an End+Mute
+block, keyed from silence once per pitch `$0000, $0200 … $3E00` under direct gain, counting driver
+polls of `VxENVX` until it reads zero. The expected per-pitch table — recovered closed-form from
+the driver's CRC-32 compare constant (`$08396832`) as the unique fit over the walk-anchor ×
+lead-distance plane, then ratified by the ROM advancing — has every count land exactly where the
+release publishes two samples after the cursor's twentieth walked sample: the End+Mute block sits
+thirty-two samples in, and the decoder is there twelve samples early — its full-block priming plus
+the eight-sample lead. The voice dies with the last eight samples of the middle block unplayed, and
+the End+Mute block's own samples never sound — "the samples in the final block will never be
+output" (Anomie), at every pitch, by a fixed sample distance.
+
+The check itself trails the decoder by one sample: Anomie's V3c carries the 'e'/'l' check early in
+the voice's sample while V4 decodes after it, so a sample whose advance carries the decoder into an
+End+Mute block still sounds, and the release lands at the next sample's check, one sample after
+the decoder moved in.
+
+Around a key-on the check's view stands still longer — through the five empty samples and the first
+two live samples. `KON/kon as prev sample ends` bounds this from below: it parks a voice at pitch
+zero over a sixteen-sample silent block chained to an End+Mute block, starts the stream at `$1800`,
+then re-keys at twenty swept phases and reads `VxENVX` nine samples after each key-on. The re-keyed
+startup walks four samples through its countdown and crosses the decoder into the End+Mute block on
+its first live advance — yet every one of the twenty reads returns the full direct-gain level, so
+that advance cannot reach the check until the second live sample has passed. `KON/kon when prev
+sample at end` pins the same window from the envelope's side: its racing startup publishes its
+first attack step and the ROM's sync spins until `VxENVX` reads non-zero — a check that saw the
+decoder's crossing at the first live step would kill the level at zero and spin forever. The
+stationary case is pinned by `KON/kon then set sample's end flag`: a header pulse already standing
+at the first live step's sample reads back as a voice that never sounded, so the kill itself stays
+ahead of the envelope update within the sample — what lags a crossing is the header address, not
+the check's place in the sample.
+
+### BRR data is read in groups of four, ahead of the sound — twelve samples at the key-on
+
+The decoder's lead is not only an address: the sample **data** is read from RAM ahead of the
+sound too. Anomie describes the structure — a twelve-sample ring of three four-sample groups,
+the key-on decoding three groups before the voice sounds, a new group turned in "when the
+interpolation index passes 0x4000" — and his V4 note says this sub-test's name out loud:
+decoding a group "is definately not done when not necessary" [sic]. What neither reference
+states is the observable consequence: how much already-read data a RAM rewrite cannot reach.
+
+`Misc/brr not always decoding` measures exactly that, using the echo buffer as an oscilloscope.
+It keys two voices at pitch zero — parked cursors — under direct gain, voice 0 on a block whose
+own data goes quiet four samples early, voice 1 on a block loud to its sixteenth sample, both
+chained to a silent loop. While both voices are parked, the driver rewrites voice 1's block to
+silence. It then points the echo unit at free RAM (`ESA` `$F0`, `EDL` `$01`, both voices in
+`EON`, writes enabled), sets both pitches to `$1000` so the voices move, and freezes the buffer
+twenty-odd samples later — leaving a recording of twenty stereo samples of the voices' own
+outputs, voice 0 on the left channel, voice 1 on the right, which the driver checksums.
+
+The expected table — recovered closed-form from the driver's compare constant (`$A0CBCF78`) as
+the unique fit over the two channels' roll-off positions, then ratified by the ROM advancing —
+holds both channels at the parked level for exactly twelve samples, roll-offs aligned. Voice 0's
+twelve are its own data. Voice 1's block held sixteen loud samples and was rewritten to silence
+while the voice was parked: the twelve it still plays are the twelve its key-on primed, read
+from RAM before the rewrite. A machine that reads data at consumption plays four — the
+interpolation window primed at the key-on — and rolls off eight samples early, which is the
+failing row this machine produced. One that buffers the whole first block plays sixteen and
+rolls off four late. The ROM pins twelve: three groups, read at the key-on, immune to everything
+RAM does afterward.
+
+The group reads compose with the block-level facts already pinned: with the prime covering
+stream samples 0–11, the group a moving voice needs at each group-aligned consume is the one
+eight stream samples on — and that group always lies in the decoder's block, which
+`Misc/brr early end at many pitches` pins as entered at the eighth consume of the block before.
+The parked voice is the limiting case: it consumes nothing, so it decodes nothing — its primed
+samples play untouched whenever it moves again — while its header check still reads RAM every
+sample (the section above).
+
+The exact sample at which a moving voice reads each later group is settled by the next section:
+this ROM rewrites RAM only while both voices are parked, so any schedule that reads a group after
+the rewrite and before the group's consumption fits its table, and `Order/pitch after brr` is the
+one that lands a rewrite mid-motion.
+
+The three groups are read at **one moment**, not one per silent sample. One reference spreads them
+across the startup's samples `#2`, `#3` and `#4`, which is a different arrangement with the same
+twelve-sample result whenever RAM holds still — and `KON/kon decoding when another kon`, which keys a
+voice again while an earlier key-on's startup is still running, separates the two: the spread
+arrangement regresses it.
+
+*Arbitrated by `Misc/brr not always decoding`, with the prime's single moment pinned by
+`KON/kon decoding when another kon`.*
+
+### A later group's header is read at its scheduling, its data bytes one sample later
+
+The group a boundary crossing calls for is not served at the crossing. Its decode is scheduled by
+the consumption of the current group's THIRD stream sample — two stream samples after the boundary
+— and the reads split across two samples from there: the **header** is read at the scheduling
+itself, and the **data bytes** at the next sample, the first at the voice's BRR load slot and the
+second one slot after its compute. Each read sits where the timing tests measure it, and every
+byte is captured when read: a RAM write landing after a byte's slot no longer reaches the group.
+
+`Order/pitch after brr` pins the header's sample with a header that changes once per sample. Its
+block is eight `$44` bytes — every nibble `+4` — under header `$C3` (shift 12, filter 0, end+loop
+on itself), so a voice's output reads as the shift its groups were decoded with: `$2000` at shift
+12, `$1000` at 11, `$0800` at 10, `$0400` at 9. Each of the eight voices in turn is keyed at pitch
+zero under direct gain `$20` and `VOLL` `$20` with `EON` set, given a step of `$2000` — two stream
+samples per output sample, so the scheduling's sample is the frame after the boundary's — and the
+header rewritten `$B3`, `$A3`, `$93` at one-sample spacing. The expected row, recovered from the
+driver's compare constant (`$57A05856`) as the unique fit over every non-increasing walk of the
+four levels through a four-tap window moving zero or two samples a frame, is
+`0400 0400 0374 0100 00E8 0080 0080`: the group crossed into while `$B3` stood decodes at shift
+**10** — the header standing one frame after the crossing, the scheduling's — where a decode at
+the crossing reads 11 (`… 03A2 0200 01BA …`).
+
+`Timing/Voice/V3 BRR.sample.lsb` and `.msb` pin the data bytes to the cycle. Each keys one voice
+at a time at pitch `$1000` over one looping block, pulses the group's first or second data byte to
+zero for five cycles at a per-row offset from that row's own key-on, and hashes which rows the
+voice's output caught. The recovered read cycles — one structured solution per hash — put the
+first data byte at the voice's BRR load slot (`T26` for voice 0, its compute slot for voices 1-7)
+of the sample after the scheduling, and the second one slot after that sample's compute (`T0` of
+the following sample for voice 0).
+
+Two consequences. The bytes behind a sample are read six to ten stream samples ahead of it; the
+twelve-sample prime at the key-on is unchanged. And a modulated step that crosses two boundaries
+in one sample (the position clamp at `$7FFF` lets an advance pass up to seven) has both groups'
+bytes read in full before the cursor can touch them — under a drain that steep, one slot ahead of
+the second byte's usual place.
+
+*Arbitrated by `Order/pitch after brr` with `Timing/Voice/V3 BRR.sample.lsb`/`.msb`, the timing
+pair run from two arrival phases.*
+
+### The loop address is read at the voice's directory slot, ahead of the compute
+
+The loop jump the decoder makes as it leaves an end block takes an address read earlier in the
+same sample: the directory entry `DIR`/`VxSRCN` select is read at the voice's **directory slot** —
+T22 for voice 0, nine slots before its compute, and the slot before the compute for voices 1-7
+(T1, T4 … T19). Both references place it there: fullsnes's chart carries a `VxSRCN/DIR.lsb/msb` RAM
+access on exactly those rows, and Anomie's V2 step "loads the sample pointer" one step ahead of the
+header read, his V4 having "flagged the loop address for loading next step V2".
+
+`Timing/Voice/V2 dir.loop.lsb` and `.msb` measure the slot to the cycle. Each keys the eight
+voices in turn at pitch `$3000` over a looping block, with the entry's loop address at the block
+itself; per row it pulses one loop byte to a value that points at a silent block for five cycles at
+a per-row offset from that row's own key-on, and hashes whether the voice went quiet — thirty-six
+rows a voice, one character each, behind the voice's index. The recovered read cycles — one
+structured solution per hash, both bytes identical — put the read nine slots before voice 0's
+compute and one before each other voice's; a read at the compute itself catches a different set of
+rows for every voice.
+
+The consequence is narrow but exact: a directory write that lands after the directory slot and
+before the compute reaches the next sample's read, not this jump.
+
+*Arbitrated by `Timing/Voice/V2 dir.loop.lsb`/`.msb`.*
+
+### The start pointer is read at the voice's directory slot, one sample after the consuming compute
+
+A key-on's start address is read from the directory at the same directory slot — T22 for voice 0,
+T(3v−2) for voices 1-7 — in the sample **after** the compute that applied the key-on, the compute
+that emits the voice's final pre-key-on sample. The start block's header and data bytes follow at
+that sample's BRR load slot, ahead of its compute, so the countdown's first silent call reads
+nothing at all. That is Anomie's order — the key-on taken at V3c, "load the sample pointer" at the
+next V2, the header at that sample's V3b — and fullsnes's `VxSRCN/DIR.lsb/msb` rows on the same
+slots.
+
+`Timing/Voice/V2 dir.start.lsb` and `.msb` measure it as the loop pair does: per row a five-cycle
+pulse into one start byte, at a per-row offset from that row's own key-on write, points the entry at
+a silent block, and the hash records whether the voice went quiet. The recovered read cycles — the
+same constant as the loop pair, one structured solution per voice, both bytes identical — sit 56
+slots after voice 0's key-on write and 67 + 3(v−1) after the others': one sample after the
+consuming compute, at the directory slot. A read at the consuming compute itself catches no row at
+all for voices 0-5 and the wrong rows for voices 6 and 7.
+
+The consequence: a `DIR` or `VxSRCN` write that lands after the key-on's consuming compute and
+before the next sample's directory slot is what the started voice plays from; one landing after
+that slot reaches only the voice's next loop.
+
+*Arbitrated by `Timing/Voice/V2 dir.start.lsb`/`.msb`.*
+
+### The source number is read at its own slot, four ahead of the directory read
+
+`VxSRCN` is not read with the directory entry it selects. It has its own **source slot**, four slots
+before the voice's directory slot — T18 for voice 0, T0 for voice 2, T(3v−6) for voices 3-7 — and
+for voice 1, whose directory slot is T1, the source slot is T21 of the *previous* sample. Both
+directory reads, the per-sample loop read and a key-on's start read, select the entry with the value
+that slot captured. Both references have it: fullsnes's chart carries `V0SRCN` at T18, `V1SRCN` at
+T21 and `V2SRCN` at T0 in its register-array column, and Anomie's V1 step "loads the current value of
+the VxSRCN register" at cycles `0:17 1:20 2:31 3:2 …`, one step before V2 loads the pointer.
+
+`Timing/Voice/V1 srcn.start` and `srcn.loop` measure it exactly as the `V2 dir.*` pairs do, with the
+pulse moved from a directory byte to the register: per row a five-cycle `VxSRCN` pulse to an entry
+that points at a silent block, at a per-row offset from that row's own key-on write, and the hash
+records whether the voice started or looped into silence. The recovered read cycles — one structured
+solution per constant, the same constant for both tests — sit four slots ahead of the directory read
+for every voice but voice 1, and twelve ahead for it; a read at the directory slot itself catches a
+later set of rows for every voice.
+
+The consequence: a `VxSRCN` write that lands between the source slot and the directory slot reaches
+the next sample's directory read, not this one — a loop already resolved, or a start already read,
+keeps the old source.
+
+*Arbitrated by `Timing/Voice/V1 srcn.start`/`.loop`.*
+
+### `PMON`, `NON`, `EON` and `DIR` are read once a sample, not by the voices that use them
+
+The four registers that carry a bit or an address for every voice at once are read on their own
+slots and nowhere else: `PMON` at T28, then `NON`, `EON` and `DIR` together at T29. The voice work
+that consumes them — a modulated advance, a noise substitution, an echo send, a directory read —
+takes what that read held rather than reading the register itself. So one CPU write reaches all
+eight voices on the same sample, and because every voice but 0 computes before T28, seven of them
+carry the value into the *next* sample while voice 0, computing at T31, takes it in this one.
+
+Both references place them there. fullsnes's register-array column reads `PMON` on its T28 row and
+`NON`, `EON` and `DIR` on its T29 row; Anomie loads `PMON` at his cycle 27 and "NON, EON, and DIR"
+in one step at cycle 28 — the same slots in his numbering.
+
+`Timing/Misc/27 pmon`, `28 non`, `28 eon` and `28 dir` measure it. Each pulses its register for
+five cycles at one slot per row, a slot later each row, and hashes whether the pulse changed what
+the voice did — a modulated step, a noise sample, an echo send, a loop into a second directory.
+The recovered read is **one slot for all eight voices**: a search over every slot and every pulse
+width finds exactly one, at T28 for `pmon` and T29 for `non` and `eon`, and a per-voice read fits
+those rows at no slot and no width at all. A machine reading each register at the voice's own work
+produces a staircase three slots wide per voice instead, which is what these four rows reject.
+
+The consequence worth knowing: a write landing between two voices' computes is taken by neither
+until the next T28/T29. There is no window in which one voice has seen a new `NON` bit and its
+neighbour has not.
+
+*Arbitrated by `Timing/Misc/27 pmon`, `28 non`, `28 eon`, `28 dir`.*
+
+### Pitch modulation reads the previous voice's output from the previous sample
+
+fullsnes's pitch-counter listing scales the step by `VxOUTX(x-1)` (line 2790) and Anomie's V3c
+marks the enveloped sample as "the value used for modulating the next voice's pitch" (lines 83–85);
+neither says which sample's. The slot map answers it: voice *x*−1 computes three slots ahead of voice
+*x* in every sample (voice 0 at T31 of the sample before), so a modulator reading the fresh value
+would see the same sample's output. The hardware does not. Voice *x*'s step is scaled by the
+amplitude voice *x*−1 produced one sample earlier — the value that stood before the compute three
+slots back replaced it — for every pair, voice 0 → 1 included. A change in the modulating voice's
+output therefore reaches the modulated voice's pitch one sample after it reaches the mix.
+
+`Order/pitch mod uses prev sample` measures it with an impulse. Voice 1 plays a self-looping block
+with a single `+7` nibble among zeros (header `$C3`, shift 12) under direct gain `$7F` at pitch
+`$2000`, so its output is one loud sample every eight; voice 2 plays a block of alternating `+7`/`-8`
+nibbles at the same pitch under direct gain `$01` and `VOLL` `$20` with `EON` set, so at an even
+position it reads one polarity and at an odd one the other — its output is its phase. With `PMON`
+bit 2 set the two are keyed on together and, after 23 samples, the ten left echo words from
+`$F030` (frames 12–21) are checksummed. Each impulse kicks voice 2's step by the modulation factor
+(`$3800 → $77C`, a step of `$EF80` clamped by the position ceiling), which flips its phase; the
+frame on which the flip shows is the frame the impulse reached the modulator. A machine that reads
+the same sample's amplitude prints `0000 ×4, FFFE ×6` and fails; one that reads the previous
+sample's passes.
+
+*Arbitrated by `Order/pitch mod uses prev sample`.*
+
+### `ENDX` is set when the decoder leaves the end block, and reads back three slots after the compute
+
+Anomie says it both ways. His BRR section: the bit "is set when the block is complete and the next
+block will be that pointed to by the loop pointer" — the decoder's exit from the end block. His
+`$7C` entry: "the bit is set at the START of decoding the BRR block, not at the end" — its entry,
+sixteen stream samples earlier. fullsnes carries the second wording verbatim. The two differ by a
+whole block, and the sub-test's name says which is under test: *endx after final brr decode*.
+
+`Order/endx after final brr decode` measures it per voice. Each voice in turn is keyed at pitch
+`$1000` — one stream sample per output sample — over a plain block chained to an End+Mute block,
+left alone for twenty-four samples in a 32-cycle loop, and `ENDX` is then read three times exactly
+one sample apart, the reads landing on the twenty-sixth, twenty-seventh and twenty-eighth samples
+after the key-on. The expected row — recovered from the driver's compare constant (`$9FAF237D`) as
+the unique fit over every monotone clear-then-set pattern, then ratified by the ROM advancing — is
+**clear, set, set for every one of the eight voices**. The decoder enters the end block on the
+eleventh sample after the key-on (its eight-sample lead plus the startup) and leaves it on the
+twenty-seventh: the bit appears at the exit. A machine that sets it at the entry reads set on all
+three samples; one that sets it when the end block's last group is decoded, four samples before
+the exit, reads set on the first as well.
+
+Two of the eight rows carry more than the placement:
+
+- **Voice 0** computes at the sample's last slot, and the driver's reads sit at the sample
+  boundary. A set made readable at the compute itself is seen by the first read; the ROM says it is
+  not. The bit is staged and reaches the register three slots after the compute — Anomie's V7,
+  "cycles: 0:2 1:5 2:8 …", one ahead of the slot numbering here — which for voice 0 is the following
+  sample's fourth slot. Voices 1-7 land inside their own sample either way; voice 0 is the row that
+  fixes the stage.
+- **Voice 4** is the sync gadget's voice, still sounding at full level when the test re-keys it —
+  and its row is a held startup's. The gadget's `ADSR1` restore to zero (direct gain, level zero)
+  lands on the compute just before the consuming poll, so the level is zero by the time the restart
+  reads it: the restart reads the envelope *after* the consuming compute's own update (the section
+  above). Read before it, the voice walks its startup and its bit comes six samples early.
+
+**Anomie's BRR wording is right; his and fullsnes's `$7C` wording is wrong.** The bit says a
+sample has finished, not that its final block has begun.
+
+The acknowledge write does not reach a set still staged: the set lands at S7 regardless, unless the
+acknowledge was issued in the two cycles before that slot — then it is the DSP's write that is
+lost, the same rule every DSP-written register follows (the next section).
+
+*Arbitrated by `Order/endx after final brr decode` and `Timing/Voice/V7 endx set`.*
+
+### The DSP's own register writes lose to a CPU write issued in the two cycles before them
+
+The DSP writes three kinds of register itself: each voice's `ENDX` bit at its S7 slot (T3 for voice
+0, T(3v+3) for voices 1-7), `VxOUTX` at S8 one slot later, and `VxENVX` at S9 one slot after that.
+Anomie gives every one of those a caveat — "a write up to 2 cycles earlier will overwrite the new
+value" — and the ROM measures it to the cycle: **a CPU write to the register issued in the two
+cycles before the DSP's slot survives the slot; the register keeps the CPU's byte and the DSP's
+value for that sample is dropped.** A write three or more cycles ahead is overwritten at the slot
+as expected.
+
+`Timing/Voice/V8 outx` and `V9 envx` are one driver with the register changed: the voice sits
+silent, and each of 26 rows per voice writes `$FF` into the register at one slot later than the
+last row — the write phase-locked to the sample by the `V0ENVX` sync gadget — then reads it back
+five cycles later, hashing `X` when the read returned the DSP's zero. With a 5-cycle window the DSP's
+write would show for five consecutive rows; the expected constant (`$936D07A2`, shared by both
+drivers and by `V7 endx set`) fits **exactly three rows per voice**, and the CRC solution places
+them so that the last surviving CPU write is one cycle before the publish slot — S8 at T4, T7, …
+T25 for `VxOUTX`, one slot later for `VxENVX`, both to the cycle. `V7 endx set` runs the same probe
+as an acknowledge write against a voice whose end block is about to be reached: the same
+three-row window, ending one cycle before S7.
+
+`Timing/Voice/V7 endx cleared` measures the key-on side of `ENDX` with a bare read per row: the
+voice is keyed, and the bit reads set through the compute slot that applies the key-on and clear
+from S7 on, for every voice — **a key-on's clear is written at the voice's S7 slot, four slots
+after the compute, the same slot its decode's set lands on**, not at the compute itself. The
+expected constant (`$89A7E835`) fits exactly one monotone table, and its boundaries sit four rows
+past the compute-slot clear's for all eight voices.
+
+*Arbitrated by `Timing/Voice/V7 endx cleared`, `V7 endx set`, `V8 outx` and `V9 envx`.*
+
+### The internal key-on is cleared one slot before the poll, and takes a write from the two cycles before it
+
+Anomie puts a step at cycle 29, one before the poll's own load: "clear internal KON bits for any
+channels keyed on in the previous 2 cycles", with the note that the bits "are not cleared until 63
+cycles after they are loaded". Read as a blanket clear of everything standing 63 cycles on, it is
+wrong twice over — it would erase the arm of any program that writes `KON` once per poll period, and
+the ROM refuses it. Read literally, the two-cycle clause is the whole rule.
+
+**The clear takes the bits the previous poll started, and only from a `KON` write issued in the two
+cycles before the clear's own slot.** A write at T28 or T29 of a polling sample, naming a voice that
+poll's predecessor started, starts nothing at all. A write at T30 lands after the clear and the poll
+one cycle later takes it. A write older than those two cycles stands — including one at the same
+slots of the sample *between* two polls, which is 32 cycles clear.
+
+`Timing/Misc/29 kon cleared` is the measurement. Each of its 32 rows keys all eight voices, waits a
+row-dependent number of cycles, writes `KON` again, and then counts its own polls until the left
+echo word turns non-zero, folding that count and the word. The second write walks one cycle later
+per row, from T28 of the polling sample onward. Recovered from the driver's CRC-32 constant
+(`$3BE4805C`) as the unique three-plateau fit — one solution across every boundary pair and every
+count under 64 — the expected table reads **3, 3, 5, then 7 for the remaining 29 rows**: the T28 and
+T29 rows behave as though the second write never happened, the T30 row is served by the poll one
+cycle later, and every row from T31 on is served by the poll after that.
+
+The middle row also settles what such a key-on does. A key-on landing on a voice inside its silent
+span is normally absorbed at the first poll after the one that started it (above). The T30 row is
+taken by exactly that poll and is *not* absorbed: its count of 5 sits between the 3 of a write that
+never arrived and the 7 of one the next poll serves, which is the rewind a later in-span key-on
+produces. So the same two-cycle window governs the arm twice — the clear takes a write inside it,
+and a key-on the poll takes from a write inside it rewinds the silence instead of vanishing into it.
+
+Two neighbouring sub-tests hold the reading in place. `KON/kon decoding when another kon` writes
+`KON` at T30 of the sample between two polls — 32 cycles ahead of the clear — and a blanket clear
+loses that write; `KON/kon clears independent` writes at T29 naming a voice the previous poll did
+not start, and a clear without the bit mask loses that one.
+
+*Arbitrated by `Timing/Misc/29 kon cleared`, with `KON/kon decoding when another kon` and
+`KON/kon clears independent` bounding it.*
+
+---
+
+## Sample arithmetic
+
+### The interpolation kernel wraps on two additions and clamps on the third
+
+A voice's output sample is its four-tap window read through the Gaussian table at the index in the
+pitch counter's bits 11-4. The four taps are taken against table entries `$0FF - i`, `$1FF - i`,
+`$100 + i` and `$000 + i`, applied to the window's oldest, older, old and newest samples, each tap
+scaled `(entry × sample) >> 10`. The order the taps are summed in is observable, because the sum is
+not taken at full width:
+
+| step | width |
+|---|---|
+| the first tap | fits 16 bits on its own |
+| adding the second | **wraps** at 16 bits |
+| adding the third | **wraps** at 16 bits |
+| adding the fourth | **clamps** to `-8000h`…`7FFFh` |
+| the sum | arithmetic-shifted right one |
+
+The two references prescribe different arithmetic here, and the difference is behavioral rather than
+representational: they round at different points, so they disagree on odd sums. The alternative
+scales each tap `>> 11`, folds the first three additions at 15 bits with a final clip to 15 bits, and
+does not shift the sum. Both forms reproduce the glitch case the documentation works through
+(`+3FF8h` from a run of `-4000h` samples at index 0), so that case does not separate them.
+
+`Random/brr before playing` does. It passes under the wrapping-then-clamping form tabulated above and
+fails under the per-tap `>> 11` form.
+
+*Arbitrated by `Random/brr before playing`.*
+
+### A shift of 13 to 15 decodes as shift 12 over the nibble shifted right three
+
+A BRR header's shift field is four bits, but only 0 through 12 are ordinary. A block declaring 13, 14
+or 15 does not scale further: decoding proceeds as though the shift were 12, over the nibble
+arithmetic-shifted right three — which takes `-8`…`-1` to `-1` and `0`…`+7` to `0`, so every sample
+in such a block is either `-1000h` or zero before the filter.
+
+One reference states this in a single sentence and the other is silent, which leaves the substitution
+resting on one source. `Random/brr before playing` exercises it: decoding a shift of 13 to 15 as an
+ordinary scale regresses that sub-test.
+
+*Arbitrated by `Random/brr before playing`.*
+
+## Echo
+
+### The mix clamps at every addition, not once at the end
+
+The dry mix and the echo send both accumulate voice by voice, and each addition saturates to 16 bits
+before the next is made. Anomie types it that way — "mix all voices selected in `EON` in order,
+clamping to 16 bits after each addition" — while fullsnes writes the send as a single term,
+`echo_input = EchoVoices + ((sum × EFB) SAR 7)`, and says nothing about how `EchoVoices` accumulates.
+Plain 16-bit arithmetic wraps, and a running total that leaves the range and comes back ends
+somewhere else entirely: three voices at −20000, +20000, −20000 saturate to −32768, then −12768,
+then −32768, where a wrapping sum arrives at −27232.
+
+**Anomie is right.** Letting each addition wrap regresses `Misc/voice sums clamped each time`, whose
+name is the rule itself, and `Random/voice volumes`.
+
+The difference is only reachable when several voices are enabled at once. The two sub-tests that
+stress the echo unit hardest run with `EON` clear, so neither of them sees this at all — it belongs
+to the mix, not to the echo, and it is arbitrated by the rows that drive many voices together.
+
+*Arbitrated by `Misc/voice sums clamped each time` and `Random/voice volumes`.*
+
+### The FIR output is 15 bits
+
+Anomie masks the FIR output's low bit before echo volume and feedback consume it; fullsnes feeds the
+unmasked 16-bit sum to both and masks only the buffer write. A difference of at most one LSB before a
+multiply — and the ROM catches it.
+
+With `EON` clear, echo volume 0 and feedback `$80`, the buffer write is feedback-only, so an odd FIR
+sum of 1 becomes `(1 × −128) >> 7 = −1`, and the write mask takes that to **−2** where the ROM expects
+**0**. Anomie's placement yields 0.
+
+**Anomie is right.** The buffer write keeps its own mask as well, since the feedback multiply can
+reintroduce the low bit.
+
+*Arbitrated by `Echo/echo calc`.*
+
+### Every volume multiply is 16 bits wide and wraps
+
+The chain saturates at its additions, not at its multiplies. `MVOL`, `EVOL`, `EFB` and each `FIRx`
+coefficient each produce a 16-bit result, and a product that leaves the range comes back around.
+
+Only one coefficient value can get there. A product is `operand × coefficient` shifted right — 6 for a
+FIR tap, 7 for a volume — so the largest magnitude it can reach is the operand's own full scale, and
+it exceeds `+7FFFh` only at `-128` against the most negative operand. `-4000h × -128 >> 6` and
+`-8000h × -128 >> 7` are both `+8000h`, and both come back as `-8000h`: a full-scale swing in the
+opposite direction, where a saturating multiply would give `+7FFFh`.
+
+fullsnes names the hazard without resolving it — `-128` "should not be used for any of the FIRx
+registers (to avoid multiply overflows)" — and Anomie resolves it by typing: every adjusted value in
+his mixer chain is a "16-bit stereo sample", and the clamps he writes are on the mixes that follow.
+
+**The two echo sites are coupled, which is what makes them hard to separate.** With the feedback
+product saturating, the largest entry the unit can write is `7FFEh`; with it wrapping, the entry can
+be `8000h` — and `8000h` read back out of the buffer is `-4000h`, exactly the sample whose product
+with a `-128` coefficient overflows. So the FIR tap's wrap is unreachable until the feedback's is in
+place: correcting the feedback alone changes the stream and still gets it wrong, and correcting the
+tap alone changes nothing at all.
+
+Two sub-tests hold this. `Random/echo data` fills the whole 30 KB echo buffer with pseudorandom bytes,
+sets all eight `FIRx` and `EFB` to `-128`, opens the write gate for one sweep of the ring, and folds
+the result; `Random/echo fir` is the randomized stress over the coefficients themselves. Both fold a
+CRC-32 over a stream the hardware built, so each is a 32-bit match — and neither passes unless both
+multiplies wrap.
+
+The echo volume is not exercised by either: both drivers leave `EVOL` at zero. It is carried on the
+sources' authority, which types it identically to `EFB` in the same list.
+
+*Arbitrated by `Random/echo data` and `Random/echo fir`.*
+
+---
+
+## What remains open
+
+Stated plainly, because a reference that hides its soft spots is worth less than one that marks them:
+
+- **Register-order edge cases** — writing `VxADSR2` or `VxGAIN` before `VxADSR1` within a sample — are
+  noted in the Errata and not modeled at slot granularity.
+- **The echo volume's overflow** is modeled the way `EFB`'s is, on the sources' typing rather than on
+  a test: no sub-test sets `EVOL` to `-128` against a full-scale filter output, so the wrap is
+  reasoned from the mixer chain both documents describe, not measured.
+- **What a voice's BRR filter history holds at a key-on is unconstrained by every sub-test that
+  passes.** The two samples the filter reads before a restarted voice has decoded any of its own are
+  zeroed here. One reference takes them from the physical end of the twelve-sample ring, whose write
+  index resets to zero at the key-on; the other calls them uninitialized. Sweeping the readings —
+  zeroed, the two most recently decoded carried, the ring's physical end at each of its twelve phases
+  in either pair order, the interpolation window's own taps, and one half carried with the other
+  zeroed — leaves **every passing sub-test in `spc_dsp6` green in all of them**, so nothing that
+  passes distinguishes one from another. Two sub-tests are sensitive to the choice and neither is
+  reproduced by any of the readings, which is enough to say the values alone are not what separates
+  them. A reimplementation is free here, and should know that it is.
+
+  **Where the history lives is settled, and it is per voice — though no sub-test says so.** Holding
+  one pair in the decoder instead, read and written by every voice's decode, leaves **every passing
+  sub-test in `spc_dsp6` green**, whether or not a key-on clears the pair; no passing sub-test has two
+  voices decoding through a non-Direct filter at once, which is the condition that would tell the two
+  shapes apart. Ordinary playback tells them apart at once. A BRR block is reconstructed from the two
+  samples decoded before it, so a single shared pair hands each voice the tail of whichever voice
+  decoded last and the reconstruction resumes from a waveform that voice never produced. Through
+  multi-voice music the decoded stream then breaks up continuously — steps between adjacent output
+  samples larger than an eighth of full scale arrive at a rate of thousands a second, where the
+  per-voice pair produces none at all across the same passage — and hardware plays that music without
+  them. The shape is therefore decided by the reconstruction itself rather than by the suite, and a
+  reimplementation that shares the pair will pass the same sub-tests this one does and still sound
+  broken.
+
+  This settles where the pair lives, not what it holds: the values a restarted voice reads remain
+  unconstrained, as above.
+- **What `ENDX` holds at power-on is contested, and no test ROM decides it.** One reference has every
+  bit clear at reset; the other has the status registers come up with all eight set, a few cycles
+  after it. Every driver in `spc_dsp6` acknowledges `ENDX` before it reads one, so starting the
+  register at `FFh` rather than `00h` leaves every sub-test's accumulator in that ROM unchanged — the
+  ones that already fail included. Both readings sit equally well with everything measurable there.
+  This implementation starts it clear.
+- **Which rate gates the store on a decay already inside the sustain band is unconstrained.** That
+  sample stores nothing here. Gating its store by the sustain rate instead leaves **every passing
+  sub-test in `spc_dsp6` green**, and the one sub-test sensitive to the choice is reproduced by
+  neither reading; gating it by both rates at once is byte-identical to suppressing it. Neither
+  reference describes the case: both state the store under the phase's own rate, and neither says
+  what happens when the level is already in band as the phase begins. The section above carries the
+  sweep behind this. Letting that sample store like any other is a different question and is
+  **settled** — it regresses `Random/voice volumes`.
+- **Which key-ons clear a voice's `ENDX` bit is unconstrained by every passing sub-test.** Both
+  references state the clear without qualification — the bit goes to zero when the voice is keyed on,
+  successfully or not — and this implementation follows them: a key-on the poll consumes clears the
+  bit whether it restarts the voice or lands inside that voice's own silent span, absorbed at the
+  poll after the one that keyed it or rewinding the silence at a later one. Clearing it on a
+  restarting key-on alone instead leaves **every passing sub-test in `spc_dsp6` green** and moves one
+  that already fails, so nothing that passes tells the two apart. The documents are the only thing
+  deciding this one, and they agree.
+- **Which sample the walk decision's silence clause reads — and through what — is unconstrained by
+  everything that passes.** The two-clause gate itself is pinned from every side (the level alone,
+  always-walk and always-hold each redden passing sub-tests), but its "old output is silent" operand
+  is not. This implementation reads the enveloped amplitude of the sample before the consuming
+  compute, tested for exact zero. Reading the consuming compute's own final pre-key-on sample
+  instead — its amplitude, or its pre-envelope interpolated value — or reading either sample through
+  the `VxOUTX` high byte, under which an amplitude of 1 to 127 counts as silent, leaves **every
+  passing sub-test in `spc_dsp6` green**, and the consuming-sample amplitude reading holds the whole
+  device-free suite green as well. The two sub-tests sensitive to the walk both move under nearly
+  every alternative — one is blind to the previous sample's `VxOUTX` projection alone — and neither
+  is reproduced by any of them. A reimplementation is free here, and should know that it is.
+
+## How a contested claim gets settled here
+
+Blargg's DSP test ROMs do not print what they expect. Each sub-test checksums a byte stream it builds
+from the hardware's responses and compares against a constant compiled into its own driver, then
+prints only a failure code. So the useful question is not "what did the ROM print" but "what stream
+would have produced the constant it wanted".
+
+That is recoverable. The checksum is a reflected CRC-32, which is affine over GF(2): a stream's
+accumulator is the all-zero stream's accumulator XORed with a per-position, per-byte contribution.
+Precomputing those contributions turns each candidate stream into a handful of XOR operations, which
+makes an exhaustive sweep of a constrained family cheap enough to run in seconds.
+
+Two disciplines make the result trustworthy rather than merely plausible:
+
+- **Self-prove the reconstruction first.** Rebuild the stream from what your *own* implementation
+  produced and confirm it reproduces the accumulator the ROM printed for your run. If that fails, the
+  stream layout is wrong and every hit that follows is noise.
+- **Predict from the documentation, then let the search confirm.** A single hit that matches a value
+  already derived by hand is strong evidence. A bare hit found by changing three or more unknowns is
+  not — it is a plausible stream, and plausible streams are not scarce.
+
+The searches behind this page returned exactly one candidate each, against families of up to
+5.7 million, with the reconstruction self-proving beforehand.

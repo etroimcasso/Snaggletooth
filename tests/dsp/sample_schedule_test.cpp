@@ -11,6 +11,7 @@
 // first slots, so its output rides one sample behind — the hardware's envelope
 // pipeline (fullsnes/anomie, provisional pending the Blargg DSP ROMs).
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +24,7 @@
 
 namespace {
 
+using snaggletooth::cpuWriteDspRegister;
 using snaggletooth::DspState;
 using snaggletooth::EnvPhase;
 using snaggletooth::SlotResult;
@@ -35,8 +37,8 @@ using Ram = std::array<std::uint8_t, 65536>;
 constexpr std::uint8_t kMvolLeft = 0x0C;
 constexpr std::uint8_t kMvolRight = 0x1C;
 constexpr std::uint8_t kNon = 0x3D;
-constexpr std::uint8_t kKon = 0x4C;
 constexpr std::uint8_t kFlg = 0x6C;
+constexpr std::uint8_t kKon = 0x4C;
 
 std::uint8_t& reg(DspState& dsp, std::size_t v, std::uint8_t off) { return dsp[v * 0x10 + off]; }
 std::uint8_t outx(const DspState& dsp, std::size_t v) { return dsp[v * 0x10 + 0x09]; }
@@ -55,6 +57,9 @@ void placeSteadyVoice(DspState& dsp, std::size_t v, std::uint8_t left = 0x40,
   dsp.voices[v].pitchCounter = 0;
   dsp.voices[v].phase = EnvPhase::Sustain;
   dsp.voices[v].konDelay = 0;
+  // A sample is scaled by the level already standing, so a steady voice carries
+  // its Direct-Gain level from the placement rather than reaching it on step one.
+  dsp.voices[v].envelope = 0x7F0;
   reg(dsp, v, 0x07) = 0x7F;  // Direct Gain
   reg(dsp, v, 0x00) = left;
   reg(dsp, v, 0x01) = right;
@@ -95,6 +100,47 @@ StereoFrame sampleWritingAt(DspState& dsp, const Ram& ram, int atSlot, std::uint
     if (r.delivered) frame = r.frame;
   }
   return frame;
+}
+
+// Advances one whole sample, poking a byte into APU RAM just before `atSlot` runs.
+// The read-only overload drives the sample, so the echo unit reads and filters
+// while its write stays disabled and nothing lands back over the poke.
+StereoFrame samplePokingRamAt(DspState& dsp, Ram& ram, int atSlot, std::uint16_t addr,
+                              std::uint8_t value) {
+  StereoFrame frame{};
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == atSlot) ram[addr] = value;
+    const SlotResult r = stepDspCycle(dsp, view(ram));
+    if (r.delivered) frame = r.frame;
+  }
+  return frame;
+}
+
+// A state whose output is the echo unit alone: no voice sounds, ESA and EDL are 0
+// so the ring is the single entry at $0000, the FIR history and the entry carry
+// one value throughout, and the eight coefficients are equal, so every tap
+// contributes and dropping any one of them moves the frame. The echo volumes pass
+// the filter's output to the DAC.
+void placeEchoOnlyState(DspState& dsp, Ram& ram, std::uint8_t coefficient = 0x08) {
+  constexpr std::uint8_t kEntryLowByte = 0x00;
+  constexpr std::uint8_t kEntryHighByte = 0x10;  // both words 1000h
+  ram[0] = kEntryLowByte;
+  ram[1] = kEntryHighByte;
+  ram[2] = kEntryLowByte;
+  ram[3] = kEntryHighByte;
+  dsp.echoFirLeft.fill(0x0800);  // the stored word's 15-bit value
+  dsp.echoFirRight.fill(0x0800);
+  for (std::size_t tap = 0; tap < 8; ++tap) dsp[tap * 0x10 + 0x0F] = coefficient;
+  dsp[0x2C] = 0x7F;  // EVOLL
+  dsp[0x3C] = 0x7F;  // EVOLR
+}
+
+// The slot each FIR coefficient is read at: FIR0 at T23, FIR1 and FIR2 at T24,
+// FIR3 to FIR5 at T25, FIR6 and FIR7 at T26.
+constexpr std::array<int, 8> kFirCoefficientSlot = {23, 24, 24, 25, 25, 25, 26, 26};
+
+std::uint8_t firRegister(std::size_t tap) {
+  return static_cast<std::uint8_t>(tap * 0x10 + 0x0F);
 }
 
 // ── Where each register is consumed ─────────────────────────────────────────
@@ -149,9 +195,13 @@ TEST(SampleSchedule, AVoiceLeftVolumeIsConsumedAtItsFourthStepSlot) {
   EXPECT_GT(missed.left, 0);      // the write one slot late did not
 }
 
-TEST(SampleSchedule, NoiseSubstitutionReadsNonAtTheVoiceComputeSlot) {
-  // Voice 1 computes at slot T2 and reads its NON bit there. Enabling NON before
-  // T2 swaps the noise level in this frame; after T2 it waits for the next.
+// ── The voice-wide registers, each read once a sample at its own slot ────────
+
+TEST(SampleSchedule, TheNoiseEnableIsReadAtItsOwnSlotAheadOfTheComputesThatTakeIt) {
+  // NON is read at T29, for all eight voices at once, and voice 1's compute at
+  // T2 of the sample that follows substitutes on what that read held. So a write
+  // landing before T29 reaches the next sample's voices; one landing after it
+  // waits a whole sample more, and the two runs part on their second frame.
   Ram ram{};
   DspState base;
   placeSteadyVoice(base, 1);
@@ -160,9 +210,213 @@ TEST(SampleSchedule, NoiseSubstitutionReadsNonAtTheVoiceComputeSlot) {
 
   DspState seenState = base;
   DspState missedState = base;
-  const StereoFrame seen = sampleWritingAt(seenState, ram, 2, kNon, 0x02);   // NON voice 1
-  const StereoFrame missed = sampleWritingAt(missedState, ram, 3, kNon, 0x02);
+  sampleWritingAt(seenState, ram, 29, kNon, 0x02);   // NON voice 1, before its read
+  sampleWritingAt(missedState, ram, 30, kNon, 0x02);  // one slot late
+  const StereoFrame seen = sample(seenState, ram);
+  const StereoFrame missed = sample(missedState, ram);
   EXPECT_NE(seen.left, missed.left);
+}
+
+TEST(SampleSchedule, TheEchoEnableIsReadAtItsOwnSlotAheadOfTheFoldsThatTakeIt) {
+  // EON rides the same read: voice 1's left fold at T3 of the sample after the
+  // read sends into the echo buffer, and the entry lands at T30 of that sample.
+  // A write before T29 reaches the fold one sample on; a write after it does not.
+  Ram ram{};
+  const std::span<std::uint8_t, 65536> wram{ram};
+  DspState base;
+  placeSteadyVoice(base, 1);
+  for (int n = 0; n < 32; ++n) stepDspCycle(base, wram);  // the first (atomic) frame
+
+  DspState seenState = base;
+  Ram seenRam = ram;
+  DspState missedState = base;
+  Ram missedRam = ram;
+  const std::span<std::uint8_t, 65536> seenView{seenRam};
+  const std::span<std::uint8_t, 65536> missedView{missedRam};
+  for (int n = 0; n < 32; ++n) {
+    if (seenState.slotCursor == 29) seenState[0x4D] = 0x02;
+    if (missedState.slotCursor == 30) missedState[0x4D] = 0x02;
+    stepDspCycle(seenState, seenView);
+    stepDspCycle(missedState, missedView);
+  }
+  for (int n = 0; n < 32; ++n) {  // the sample whose folds take the read
+    stepDspCycle(seenState, seenView);
+    stepDspCycle(missedState, missedView);
+  }
+  const auto word = [](const Ram& r) { return r[0] | (r[1] << 8); };
+  EXPECT_NE(word(seenRam), 0) << "the voice reached the echo buffer";
+  EXPECT_EQ(word(missedRam), 0) << "the write one slot late had not been read yet";
+}
+
+TEST(SampleSchedule, ThePitchModulationEnableIsReadOneSlotAheadOfTheOthers) {
+  // PMON is read at T28, one slot before NON, EON and DIR. Voice 1's advance at
+  // T2 of the next sample scales its step by voice 0's amplitude only if that
+  // read held the bit, so a write at T28 moves the voice's counter a sample
+  // sooner than a write at T29 does.
+  Ram ram{};
+  DspState base;
+  placeSteadyVoice(base, 0);  // the modulator: a constant amplitude
+  placeSteadyVoice(base, 1);
+  reg(base, 1, 0x02) = 0x00;  // voice 1 pitch 0400h: a step modulation can scale
+  reg(base, 1, 0x03) = 0x04;
+  sample(base, ram);
+  sample(base, ram);
+
+  DspState seenState = base;
+  DspState missedState = base;
+  sampleWritingAt(seenState, ram, 28, 0x2D, 0x02);   // PMON voice 1, before its read
+  sampleWritingAt(missedState, ram, 29, 0x2D, 0x02);  // one slot late
+  sample(seenState, ram);
+  sample(missedState, ram);
+  EXPECT_NE(seenState.voices[1].pitchCounter, missedState.voices[1].pitchCounter);
+}
+
+TEST(SampleSchedule, TheDirectoryRegisterIsReadAtItsOwnSlotAheadOfTheDirectoryReads) {
+  // DIR is read at T29 with NON and EON, and the directory reads that follow —
+  // here voice 1's loop-address read at T1 — address the table that read named.
+  // Two tables, one entry each: a write before T29 moves the next sample's read
+  // to the second table, a write after it leaves the read where it was.
+  Ram ram{};
+  ram[0x0F02] = 0x34;  // table 0Fh, entry 0, loop address 1234h
+  ram[0x0F03] = 0x12;
+  ram[0x2002] = 0x78;  // table 20h, entry 0, loop address 5678h
+  ram[0x2003] = 0x56;
+  DspState base;
+  placeSteadyVoice(base, 1);
+  base[0x5D] = 0x0F;
+  sample(base, ram);
+
+  DspState seenState = base;
+  DspState missedState = base;
+  sampleWritingAt(seenState, ram, 29, 0x5D, 0x20);
+  sampleWritingAt(missedState, ram, 30, 0x5D, 0x20);
+  sample(seenState, ram);
+  sample(missedState, ram);
+  EXPECT_EQ(seenState.voices[1].loopPointer, 0x5678);
+  EXPECT_EQ(missedState.voices[1].loopPointer, 0x1234);
+}
+
+// ── The echo unit's ladder (T23 to T27) ─────────────────────────────────────
+
+TEST(SampleSchedule, TheEchoBufferWordsAreReadAtTheirOwnSlots) {
+  // The ring entry's two words leave the buffer one slot apart — the left at T23
+  // and the right at T24 (fullsnes rows RdEchoLeft/RdEchoRight; anomie's cycles
+  // 22-23) — so a byte poked into the entry between the two slots reaches this
+  // sample's right channel and misses its left. spc_dsp6 `Timing/Echo/22-23 echo
+  // read` walks a poke of each word across the sample and folds both back.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  sample(base, ram);  // the first (atomic) frame primes the schedule
+
+  Ram seenRam = ram;
+  Ram missedRam = ram;
+  DspState seenState = base;
+  DspState missedState = base;
+  const StereoFrame seenLeft = samplePokingRamAt(seenState, seenRam, 23, 0x0000, 0x40);
+  const StereoFrame missedLeft = samplePokingRamAt(missedState, missedRam, 24, 0x0000, 0x40);
+  EXPECT_NE(seenLeft.left, missedLeft.left) << "the left word is read at T23";
+  EXPECT_EQ(seenLeft.right, missedLeft.right) << "and only the left word";
+
+  Ram seenRightRam = ram;
+  Ram missedRightRam = ram;
+  DspState seenRightState = base;
+  DspState missedRightState = base;
+  const StereoFrame seenRight =
+      samplePokingRamAt(seenRightState, seenRightRam, 24, 0x0002, 0x40);
+  const StereoFrame missedRight =
+      samplePokingRamAt(missedRightState, missedRightRam, 25, 0x0002, 0x40);
+  EXPECT_NE(seenRight.right, missedRight.right) << "the right word is read at T24";
+  EXPECT_EQ(seenRight.left, missedRight.left) << "one slot after the left word";
+}
+
+TEST(SampleSchedule, EachFirCoefficientIsReadAtItsOwnSlot) {
+  // The eight coefficients are read across four slots — FIR0 at T23, FIR1 and
+  // FIR2 at T24, FIR3 to FIR5 at T25, FIR6 and FIR7 at T26 (both references'
+  // access charts) — so zeroing one reaches this sample's filter only if the
+  // write lands before that coefficient's own slot. spc_dsp6
+  // `Timing/Echo/22-25 fir` walks such a write across the sample for each of the
+  // eight in turn.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  sample(base, ram);
+
+  for (std::size_t tap = 0; tap < 8; ++tap) {
+    const int slot = kFirCoefficientSlot[tap];
+    DspState untouchedState = base;
+    DspState seenState = base;
+    DspState missedState = base;
+    const StereoFrame untouched = sample(untouchedState, ram);
+    const StereoFrame seen = sampleWritingAt(seenState, ram, slot, firRegister(tap), 0x00);
+    const StereoFrame missed = sampleWritingAt(missedState, ram, slot + 1, firRegister(tap), 0x00);
+    EXPECT_NE(seen.left, untouched.left) << "FIR" << tap << " is read at T" << slot;
+    EXPECT_EQ(missed.left, untouched.left) << "FIR" << tap << " was already read by T" << slot + 1;
+  }
+}
+
+TEST(SampleSchedule, TheFilterRunsOnTheCoefficientsTheSampleCaptured) {
+  // Each coefficient is captured at its own slot rather than read where the
+  // filter runs: a write to FIR0 landing after T23 but before T26 — the slot the
+  // last two coefficients arrive at and the filter runs — does not reach this
+  // sample. Read live at the filter, the same write would.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  sample(base, ram);
+
+  DspState untouchedState = base;
+  DspState lateState = base;
+  const StereoFrame untouched = sample(untouchedState, ram);
+  const StereoFrame late = sampleWritingAt(lateState, ram, 25, firRegister(0), 0x00);
+  EXPECT_EQ(late.left, untouched.left) << "FIR0 was captured at T23, two slots before";
+}
+
+TEST(SampleSchedule, TheEchoFeedbackIsReadAtItsOwnSlot) {
+  // EFB is read at T27, where the write-back value is formed — not where the
+  // buffer is read — so a write landing before T27 scales the feedback this
+  // sample stages, and one landing after it waits for the next. spc_dsp6
+  // `Timing/Echo/26 efb` notches EFB across the sample and folds the entry back.
+  Ram ram{};
+  DspState base;
+  placeEchoOnlyState(base, ram);
+  base[0x0D] = 0x40;  // EFB: the entry feeds back into itself
+  const std::span<std::uint8_t, 65536> wram{ram};
+  for (int n = 0; n < 32; ++n) stepDspCycle(base, wram);  // the first (atomic) frame
+
+  const auto runWritingEfbAt = [&](int atSlot) {
+    DspState dsp = base;
+    Ram own = ram;
+    const std::span<std::uint8_t, 65536> ownView{own};
+    for (int n = 0; n < 32; ++n) {
+      if (dsp.slotCursor == atSlot) dsp[0x0D] = 0x00;
+      stepDspCycle(dsp, ownView);
+    }
+    return own[0] | (own[1] << 8);
+  };
+  EXPECT_NE(runWritingEfbAt(27), runWritingEfbAt(28)) << "EFB is read at T27";
+}
+
+TEST(SampleSchedule, OneReadOfTheVoiceWideRegistersServesEveryVoice) {
+  // The read is not per voice: a write landing between two voices' computes is
+  // taken by neither until the next T29. Voices 1 and 7 compute at T2 and T20,
+  // so a NON write at T10 — after voice 1's compute, before voice 7's — reaches
+  // both on the sample after next, and neither substitutes before then.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  placeSteadyVoice(dsp, 7);
+  sample(dsp, ram);
+
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == 10) dsp[kNon] = 0x82;  // NON voices 1 and 7
+    stepDspCycle(dsp, view(ram));
+  }
+  EXPECT_EQ(dsp.latchedNon, 0x82) << "this sample's T29 read took the write";
+  const int steady = dsp.voiceAmplitude[7];
+  sample(dsp, ram);
+  EXPECT_NE(dsp.voiceAmplitude[1], steady) << "voice 1 substituted on the next sample";
+  EXPECT_NE(dsp.voiceAmplitude[7], steady) << "and voice 7 on the same one";
 }
 
 // ── Two-phase VxOUTX / VxENVX visibility ────────────────────────────────────
@@ -191,10 +445,16 @@ TEST(SampleSchedule, VoiceOutxIsNotReadableUntilItsEighthStepSlot) {
 
 TEST(SampleSchedule, VoiceEnvxIsNotReadableUntilItsNinthStepSlot) {
   // The same for VxENVX, whose visibility slot is T8 (S9), one past OUTX's.
+  // ENVX carries one extra pipeline stage (the S9 slot writes the value
+  // computed a sample earlier), so the stage is warmed with one slot-scheduled
+  // sample before the sentinel round; with a steady envelope the staged value
+  // is the same 7Fh and only the visibility slot is under test here.
   Ram ram{};
   DspState dsp;
   placeSteadyVoice(dsp, 1);  // envelope 7F0h -> VxENVX 7Fh
   sample(dsp, ram);
+  sample(dsp, ram);  // first slot-scheduled sample stages the value...
+  sample(dsp, ram);  // ...and the second publishes it
   ASSERT_EQ(envx(dsp, 1), 0x7F);
 
   std::uint8_t atSeven = 0;
@@ -207,6 +467,172 @@ TEST(SampleSchedule, VoiceEnvxIsNotReadableUntilItsNinthStepSlot) {
   }
   EXPECT_EQ(atSeven, 0x55);
   EXPECT_EQ(atNine, 0x7F);
+}
+
+TEST(SampleSchedule, VoiceEnvxReadsTheValueComputedOneSampleEarlier) {
+  // The ENVX read-back pipeline: each voice's S9 slot writes the value computed
+  // one sample earlier and stages the fresh one, so a CPU read lags the
+  // envelope compute by a full sample beyond the visibility slot. Measured
+  // against spc_dsp6 `KON/envx during kon`, whose sync vernier anchors the
+  // CPU's read phase to voice 0's ENVX publish and whose expected table reads
+  // one step behind a same-sample publish for every voice.
+  Ram ram{};
+  DspState dsp;
+  placeClimbingVoice(dsp, 1);
+  reg(dsp, 1, 0x05) = 0x00;  // ADSR off: custom gain drives the level instead
+  reg(dsp, 1, 0x07) = 0xDF;  // Linear Increase at rate 31: +32 every sample
+  sample(dsp, ram);          // prime (atomic; writes ENVX live)
+  sample(dsp, ram);          // first slot-scheduled sample warms the stage
+
+  // From here each sample's compute raises the envelope by 32 (ENVX by 2); the
+  // register after a sample's S9 slot carries the PREVIOUS sample's value.
+  const std::uint16_t levelBefore = dsp.voices[1].envelope;
+  sample(dsp, ram);
+  EXPECT_EQ(envx(dsp, 1), static_cast<std::uint8_t>(levelBefore >> 4))
+      << "the register carries the value the compute produced one sample ago";
+  EXPECT_EQ(dsp.voices[1].envelope, levelBefore + 32);
+}
+
+TEST(SampleSchedule, ADspOutxWriteLosesToACpuWriteIssuedInTheTwoCyclesBeforeIt) {
+  // Voice 1 publishes VxOUTX at T7 (S8). A CPU write to the register issued in
+  // the two cycles before that slot outlives it — the register keeps the CPU's
+  // byte and the DSP's value for the sample is dropped — while one issued three
+  // cycles before is overwritten at the slot as usual. spc_dsp6 `Timing/Voice/
+  // V8 outx` writes the register at one slot per row and reads it back five
+  // cycles later: the DSP's byte shows for exactly three consecutive rows,
+  // ending two slots short of the publish slot (Anomie: "a write up to 2
+  // cycles earlier will overwrite the new value"). The write goes through
+  // cpuWriteDspRegister, which stamps it; the harness writes just before the
+  // cursor's slot runs, so a write at cursor k is the CPU's write of cycle k-1.
+  for (int cursor : {7, 6, 5}) {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);  // constant VxOUTX = 0Ah
+    sample(dsp, ram);          // prime
+    sample(dsp, ram);
+    ASSERT_EQ(outx(dsp, 1), 0x0A);
+    std::uint8_t afterS8 = 0;
+    for (int n = 0; n < 32; ++n) {
+      if (dsp.slotCursor == cursor) cpuWriteDspRegister(dsp, 0x19, 0x55);
+      if (dsp.slotCursor == 8) afterS8 = outx(dsp, 1);  // T7 has run
+      stepDspCycle(dsp, view(ram));
+    }
+    const bool stands = cursor >= 6;  // issued one or two cycles before T7
+    EXPECT_EQ(afterS8, stands ? 0x55 : 0x0A) << "write at cursor " << cursor;
+    EXPECT_EQ(outx(dsp, 1), afterS8) << "nothing later in the sample republishes it";
+    sample(dsp, ram);
+    EXPECT_EQ(outx(dsp, 1), 0x0A) << "the next sample's S8 publishes again";
+  }
+}
+
+TEST(SampleSchedule, ADspEnvxWriteLosesToACpuWriteIssuedInTheTwoCyclesBeforeIt) {
+  // The same at VxENVX's slot, T8 (S9) for voice 1: a CPU write in the two
+  // cycles before it stands, one three cycles before is overwritten
+  // (spc_dsp6 `Timing/Voice/V9 envx`, the outx driver with its probe one cycle
+  // later — the same three-row window, one slot on). The pipeline stage still
+  // advances under a lost write, so the next sample publishes as usual.
+  for (int cursor : {8, 7, 6}) {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);  // envelope 7F0h -> VxENVX 7Fh
+    sample(dsp, ram);
+    sample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(envx(dsp, 1), 0x7F);
+    std::uint8_t afterS9 = 0;
+    for (int n = 0; n < 32; ++n) {
+      if (dsp.slotCursor == cursor) cpuWriteDspRegister(dsp, 0x18, 0x55);
+      if (dsp.slotCursor == 9) afterS9 = envx(dsp, 1);  // T8 has run
+      stepDspCycle(dsp, view(ram));
+    }
+    const bool stands = cursor >= 7;  // issued one or two cycles before T8
+    EXPECT_EQ(afterS9, stands ? 0x55 : 0x7F) << "write at cursor " << cursor;
+    sample(dsp, ram);
+    EXPECT_EQ(envx(dsp, 1), 0x7F) << "the next sample's S9 publishes again";
+  }
+}
+
+TEST(SampleSchedule, AKeyOnsEndxClearLandsAtTheVoicesS7Slot) {
+  // A slot-scheduled restart clears the voice's ENDX bit at its S7 slot, four
+  // slots after the compute that applied the key-on — voice 1's compute at T2
+  // clears at T6, voice 0's compute at T31 clears at the next sample's T3 — not
+  // at the compute itself. spc_dsp6 `Timing/Voice/V7 endx cleared` keys each
+  // voice and reads ENDX one cycle later per row: the bit stands through the
+  // compute slot and reads clear from S7 on, for every voice.
+  {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);
+    dsp.voices[1].computesSinceKeyOn = 0xFF;  // long past any startup: a full restart
+    sample(dsp, ram);                          // sampleIndex 1 (odd)
+    sample(dsp, ram);                          // the next sample polls
+    dsp[0x7C] = 0xFF;                          // every end flag standing
+    dsp.internalKon = 0x02;                    // a KON write arms voice 1
+    sample(dsp, ram);                          // polled at T31; the restart waits for T2
+    ASSERT_EQ(dsp[0x7C], 0xFF);
+    std::array<std::uint8_t, 8> after{};
+    for (int t = 0; t < 8; ++t) {
+      stepDspCycle(dsp, view(ram));
+      after[static_cast<std::size_t>(t)] = dsp[0x7C];
+    }
+    for (int t = 0; t <= 5; ++t) EXPECT_EQ(after[static_cast<std::size_t>(t)], 0xFF) << "after T" << t;
+    EXPECT_EQ(after[6], 0xFD) << "T6 is voice 1's S7";
+    EXPECT_EQ(after[7], 0xFD);
+  }
+  {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 0);
+    dsp.voices[0].computesSinceKeyOn = 0xFF;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    dsp[0x7C] = 0xFF;
+    dsp.internalKon = 0x01;                    // arms voice 0
+    sample(dsp, ram);                          // polled and applied at T31
+    ASSERT_EQ(dsp[0x7C], 0xFF) << "voice 0's compute ran; the clear is still four slots out";
+    std::array<std::uint8_t, 4> after{};
+    for (int t = 0; t < 4; ++t) {
+      stepDspCycle(dsp, view(ram));
+      after[static_cast<std::size_t>(t)] = dsp[0x7C];
+    }
+    for (int t = 0; t <= 2; ++t) EXPECT_EQ(after[static_cast<std::size_t>(t)], 0xFF) << "after T" << t;
+    EXPECT_EQ(after[3], 0xFE) << "T3 is voice 0's S7";
+  }
+}
+
+TEST(SampleSchedule, AKeyOnInsideTheSilentSpanClearsEndxAtTheSameSlotARestartDoes) {
+  // Every key-on the poll consumes clears the voice's ENDX bit, not only one
+  // that restarts the voice. A key-on landing inside a voice's own silent span
+  // rewinds the hold or is absorbed into it, and clears the bit either way, at
+  // the voice's S7 slot — T6 for voice 1, the same slot a restart's clear lands
+  // on. Both references state the clear for a consumed key-on without
+  // qualification; no spc_dsp6 row that passes distinguishes it from clearing on
+  // a restart alone.
+  const auto clearAtS7 = [](std::uint8_t computesBeforeThePollingSample) {
+    Ram ram{};
+    DspState dsp;
+    placeSteadyVoice(dsp, 1);
+    sample(dsp, ram);  // sampleIndex 1 (odd)
+    sample(dsp, ram);  // the next sample polls
+    // Voice 1 computes at T2, before the poll at T31, so the poll reads one more
+    // than this: 4 rewinds the standing hold, 2 is absorbed into it.
+    dsp.voices[1].computesSinceKeyOn = computesBeforeThePollingSample;
+    dsp[0x7C] = 0xFF;      // every end flag standing
+    dsp.internalKon = 0x02;  // a KON write arms voice 1
+    sample(dsp, ram);
+    EXPECT_EQ(dsp[0x7C], 0xFF) << "the poll ran; the clear is still slots out";
+    std::array<std::uint8_t, 8> after{};
+    for (int t = 0; t < 8; ++t) {
+      stepDspCycle(dsp, view(ram));
+      after[static_cast<std::size_t>(t)] = dsp[0x7C];
+    }
+    for (int t = 0; t <= 5; ++t)
+      EXPECT_EQ(after[static_cast<std::size_t>(t)], 0xFF) << "after T" << t;
+    EXPECT_EQ(after[6], 0xFD) << "T6 is voice 1's S7";
+    EXPECT_EQ(after[7], 0xFD);
+  };
+  clearAtS7(3);  // the poll sees 4 — a rewinding key-on
+  clearAtS7(1);  // the poll sees 2 — an absorbed key-on
 }
 
 // ── The last slot: keying, the global counter and the noise generator ───────
@@ -238,6 +664,55 @@ TEST(SampleSchedule, TheNoiseGeneratorStepsAtTheLastSlot) {
   EXPECT_NE(dsp.noiseLevel, level) << "the noise generator stepped at T31";
 }
 
+TEST(SampleSchedule, VoiceZeroEnvelopeReadsTheCounterTheLastSlotJustAdvanced) {
+  // The counter advances at T31 before voice 0's compute in the same slot, so
+  // voice 0's envelope-rate check reads the advanced value — the value voices
+  // 1-7 read at their compute slots in the following frame. GAIN $D8 (linear
+  // increase, rate 24) fires when (counter + 536) % 10 == 0, i.e. at counter
+  // ≡ 4 (mod 10): a sample whose advance lands ON a firing value steps the
+  // envelope, and a sample entered AT a firing value does not — the advance
+  // has moved the counter off it before the check runs. Measured against
+  // spc_dsp6 `Misc/counter rate synchronizations`, which locks the counter
+  // phase through one voice and measures another's time-to-first-step.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  placeSteadyVoice(dsp, 0);
+  dsp.voices[0].envelope = 0x100;
+  reg(dsp, 0, 0x07) = 0xD8;  // GAIN: linear increase, rate 24
+  sample(dsp, ram);  // prime
+
+  dsp.globalCounter = 15;  // T31 advances to 14 ≡ 4 (mod 10): the check fires
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].envelope, 0x120) << "the advanced value fires the check";
+
+  dsp.globalCounter = 14;  // ≡ 4 pre-advance; T31 moves it to 13: no fire
+  const int held = dsp.voices[0].envelope;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].envelope, held) << "the pre-advance value is never read";
+}
+
+TEST(SampleSchedule, TheNoiseStepReadsTheCounterTheLastSlotJustAdvanced) {
+  // The noise step at T31 follows the counter's advance in the same slot, so
+  // its rate check reads the advanced value, exactly as voice 0's envelope
+  // check does. Noise rate 24 in FLG fires at counter ≡ 4 (mod 10).
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  dsp[kFlg] = 0x18;  // noise rate 24
+  sample(dsp, ram);  // prime
+
+  dsp.globalCounter = 15;  // T31 advances to 14 ≡ 4 (mod 10): the step runs
+  const std::int16_t before = dsp.noiseLevel;
+  sample(dsp, ram);
+  EXPECT_NE(dsp.noiseLevel, before) << "the advanced value fires the step";
+
+  dsp.globalCounter = 14;  // ≡ 4 pre-advance; the advance moves off it: no step
+  const std::int16_t held = dsp.noiseLevel;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.noiseLevel, held) << "the pre-advance value is never read";
+}
+
 TEST(SampleSchedule, KeyOnIsPolledAtTheLastSlotOnEvenSamples) {
   // A KON bit is read at T31, so the voice it keys does not begin its startup
   // until that slot; and the poll runs only on even samples.
@@ -247,11 +722,216 @@ TEST(SampleSchedule, KeyOnIsPolledAtTheLastSlotOnEvenSamples) {
   sample(dsp, ram);            // sample 0 done; sampleIndex now 1 (odd)
   ASSERT_EQ(dsp.sampleIndex % 2, 1u);
 
-  dsp[kKon] = 0x04;            // key voice 2 on
+  dsp.internalKon = 0x04;      // a KON write arms voice 2
   sample(dsp, ram);           // an odd sample: the poll does not run
   EXPECT_EQ(dsp.voices[2].konDelay, 0) << "no poll on the odd sample";
   sample(dsp, ram);           // the next (even) sample polls at its T31
   EXPECT_EQ(dsp.voices[2].konDelay, 5) << "keyed on at the even sample's last slot";
+}
+
+TEST(SampleSchedule, TheKeyingLoadPrecedesVoiceZerosComputeAtTheLastSlot) {
+  // The KON/KOFF load and voice 0's compute share T31, and the load runs FIRST:
+  // a keyed voice 0 takes that very slot as its first silent startup call, so
+  // its countdown already reads one lower than a voice computing later in the
+  // next sample. This in-slot order is what makes the eight voices' key-on
+  // startup read-uniform through VxENVX (spc_dsp6 `KON/envx during kon`).
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  sample(dsp, ram);            // sample 0 done; sampleIndex now 1 (odd)
+  ASSERT_EQ(dsp.sampleIndex % 2, 1u);
+  sample(dsp, ram);            // run the odd sample so the next one polls
+
+  dsp.internalKon = 0x05;      // one KON write arms voices 0 and 2
+  sample(dsp, ram);            // the even sample polls at its T31
+  EXPECT_EQ(dsp.voices[0].konDelay, 4)
+      << "voice 0's compute followed the load in the shared slot";
+  EXPECT_EQ(dsp.voices[2].konDelay, 5)
+      << "voice 2's first startup call is still ahead of it";
+}
+
+TEST(SampleSchedule, AKeyOnDuringTheStartupCountdownIsAbsorbed) {
+  // A key-on consumed by the poll while the voice is still inside its startup
+  // countdown is absorbed: the countdown is not reset and the stream is not
+  // re-primed, so two polls each consuming a write that names the same voice
+  // key it once. A voice past its startup restarts in full — the documented
+  // click/pop case. Measured against spc_dsp6's `KON/kon clears independent`,
+  // whose two KON writes straddle one poll and expect the first voice to lead
+  // the second by exactly the poll period.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  sample(dsp, ram);            // sample 0 done; sampleIndex now 1 (odd)
+  ASSERT_EQ(dsp.sampleIndex % 2, 1u);
+  sample(dsp, ram);            // run the odd sample so the next one polls
+
+  dsp.internalKon = 0x04;      // a KON write arms voice 2
+  sample(dsp, ram);            // the even sample polls: voice 2 keys on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  dsp.internalKon = 0x04;      // a second write names voice 2 again
+  sample(dsp, ram);            // odd sample: the countdown runs, no poll
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  sample(dsp, ram);            // even sample: the poll consumes the arm...
+  EXPECT_EQ(dsp.voices[2].konDelay, 3)
+      << "...and absorbs it — the countdown is not reset";
+  EXPECT_EQ(dsp.internalKon, 0) << "the arm is consumed either way";
+
+  // Voice 1 has been sounding all along with its countdown at 0: the same
+  // write restarts it in full.
+  dsp.internalKon = 0x02;
+  sample(dsp, ram);            // odd sample: no poll
+  sample(dsp, ram);            // even sample: the poll re-keys it
+  EXPECT_EQ(dsp.voices[1].konDelay, 5)
+      << "a re-key past the startup begins a fresh countdown";
+}
+
+// Runs one sample, issuing a KON write through cpuWriteDspRegister the instant
+// the cursor reaches `atCursor`. A write at cursor k is the CPU's write of cycle
+// k-1, so the clear at T30 sees a write issued at cursor 29 or 30, and the poll
+// at T31 sees one issued at cursor 30 or 31.
+void sampleWritingKonAt(DspState& dsp, const Ram& ram, int atCursor, std::uint8_t value) {
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == atCursor) cpuWriteDspRegister(dsp, kKon, value);
+    stepDspCycle(dsp, view(ram));
+  }
+}
+
+// Keys voice 0 on at a polling sample, leaving its bit standing as the value the
+// next clear strikes. Returns with the cursor at the top of the sample between
+// that poll and the next.
+void keyVoiceZeroAtAPollingSample(DspState& dsp, const Ram& ram) {
+  sample(dsp, ram);
+  if (dsp.sampleIndex % 2 != 0) sample(dsp, ram);
+  cpuWriteDspRegister(dsp, kKon, 0x01);
+  sample(dsp, ram);
+}
+
+TEST(SampleSchedule, AKeyOnArmedInTheTwoCyclesBeforeTheClearIsStruck) {
+  // The internal key-on is cleared of the bits the previous poll took at T30,
+  // one slot before the poll that reads it, and a KON write issued in the two
+  // cycles before that slot goes with them: it never reaches the poll and keys
+  // nothing on. A write issued at T30 itself lands after the clear and is read
+  // by that sample's own poll. spc_dsp6 `Timing/Misc/29 kon cleared` keys all
+  // eight voices, writes KON again one cycle later per row, and reads how long
+  // the voices take to reach the echo tape: the rows whose write lands at T28
+  // and T29 read as though the second write never happened, and the row that
+  // writes at T30 reads the key-on the poll one cycle later took.
+  for (int cursor : {29, 30, 31}) {
+    Ram ram{};
+    DspState dsp;
+    keyVoiceZeroAtAPollingSample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.consumedKon, 0x01) << "cursor " << cursor;
+    sampleWritingKonAt(dsp, ram, cursor, 0x01);
+    const bool reachesThePoll = cursor == 31;
+    EXPECT_EQ(dsp.voices[0].pitchCaptureHold, reachesThePoll ? 5 : 3)
+        << "write at cursor " << cursor;
+  }
+}
+
+TEST(SampleSchedule, TheClearTakesOnlyTheBitsThePreviousPollConsumed) {
+  // The clear is not a wipe: it takes the bits that poll keyed on. A write in
+  // the same two cycles naming a different voice stands, and the poll one slot
+  // later keys that voice on — at its own countdown, since every voice but 0
+  // computes before the poll and takes its first startup call in the sample
+  // after it.
+  Ram ram{};
+  DspState dsp;
+  keyVoiceZeroAtAPollingSample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.consumedKon, 0x01);
+  sampleWritingKonAt(dsp, ram, 29, 0x02);
+  EXPECT_EQ(dsp.voices[1].konDelay, 5) << "voice 1 was keyed on";
+  EXPECT_EQ(dsp.voices[0].pitchCaptureHold, 3) << "voice 0 was not keyed again";
+}
+
+TEST(SampleSchedule, TheClearTakesNoWriteOlderThanItsTwoCycles) {
+  // The clear guards two cycles, not the whole poll period, and it rides the
+  // poll's own every-other-sample step. A write naming the voice that poll keyed
+  // — issued at the same slots, but in the sample between the two polls — stands
+  // through the clear and the next poll takes it. `KON/kon decoding when another
+  // kon` arms a voice exactly there, 32 cycles ahead of the clear.
+  Ram ram{};
+  DspState dsp;
+  keyVoiceZeroAtAPollingSample(dsp, ram);
+  ASSERT_EQ(dsp.consumedKon, 0x01);
+  sampleWritingKonAt(dsp, ram, 29, 0x01);  // the sample between the polls
+  sample(dsp, ram);                        // the next poll takes it
+  EXPECT_EQ(dsp.voices[0].pitchCaptureHold, 5) << "the write survived to this poll";
+  EXPECT_EQ(dsp.voices[0].konDelay, 2) << "and is absorbed into the standing startup";
+}
+
+TEST(SampleSchedule, AKeyOnTakenFromAWriteInTheTwoCyclesBeforeThePollRewindsTheHold) {
+  // A key-on the poll takes from a write issued in the two cycles before it is
+  // not absorbed into the standing startup the way an earlier write is: the
+  // countdown re-arms and the level drops, as a key-on later in the silent span
+  // does. In `Timing/Misc/29 kon cleared` the row writing at T30 reads its
+  // voices reaching the tape later than the rows whose write was struck, and
+  // earlier than the rows whose write the next poll takes.
+  for (int cursor : {20, 31}) {
+    Ram ram{};
+    DspState dsp;
+    keyVoiceZeroAtAPollingSample(dsp, ram);
+    sample(dsp, ram);
+    sampleWritingKonAt(dsp, ram, cursor, 0x01);
+    ASSERT_EQ(dsp.voices[0].pitchCaptureHold, 5) << "cursor " << cursor << ": the poll took it";
+    EXPECT_EQ(dsp.voices[0].konDelay, cursor == 31 ? 4 : 2) << "write at cursor " << cursor;
+  }
+}
+
+TEST(SampleSchedule, AVoiceIsScaledByTheLevelStandingBeforeItsUpdate) {
+  // A voice's sample is scaled by the level its previous update left behind, and
+  // the update runs after — so a moving envelope reaches the output one sample
+  // after the step producing it. Anomie's V3c applies the volume envelope before
+  // updating it, and his per-sample key-on account states the consequence at #5:
+  // envelope updating begins there, yet "the sample output is still '0000',
+  // because of the order in which voice operations are performed".
+  Ram ram{};
+  DspState dsp;
+  placeClimbingVoice(dsp, 1);  // ADSR Attack at rate 15: +1024 a sample from 0
+  dsp[0x0C] = 0x7F;            // MVOLL = +127
+  dsp[0x1C] = 0x7F;            // MVOLR = +127
+
+  const StereoFrame first = sample(dsp, ram);
+  EXPECT_EQ(first.left, 0) << "scaled by the zero it started from, not by its own step";
+  ASSERT_EQ(dsp.voices[1].envelope, 1024) << "while the step itself ran";
+
+  const StereoFrame second = sample(dsp, ram);
+  EXPECT_EQ(dsp.voiceAmplitude[1], (1305 * 1024) >> 11)
+      << "the next sample carries the level the first one computed";
+  EXPECT_GT(second.left, 0);
+}
+
+TEST(SampleSchedule, TheEchoWriteLandsAtItsOwnSlots) {
+  // The echo unit forms its buffer write at T27, where EFB is read, but the bytes
+  // land at the write slots — the left word at T30, the right word at T31
+  // (fullsnes chart rows WrEchoLeft/WrEchoRight; anomie's cycles 29-30) — so a
+  // read of the entry between T27 and T30 still sees the previous sample.
+  Ram ram{};
+  DspState dsp;
+  placeClimbingVoice(dsp, 1);  // a changing amplitude, so each frame's write differs
+  dsp[0x4D] = 0x02;            // EON: voice 1 feeds the echo buffer
+  // ESA and EDL default to 0: the single echo entry sits at $0000-$0003.
+  const std::span<std::uint8_t, 65536> wram{ram};
+
+  for (int n = 0; n < 32; ++n) stepDspCycle(dsp, wram);  // the first (atomic) frame
+
+  const auto word = [&](int lo) { return ram[lo] | (ram[lo + 1] << 8); };
+  const int leftBefore = word(0);
+  const int rightBefore = word(2);
+  while (dsp.slotCursor != 30) {
+    stepDspCycle(dsp, wram);
+    EXPECT_EQ(word(0), leftBefore)
+        << "left word held before T30 (cursor " << int(dsp.slotCursor) << ")";
+    EXPECT_EQ(word(2), rightBefore)
+        << "right word held before T30 (cursor " << int(dsp.slotCursor) << ")";
+  }
+  stepDspCycle(dsp, wram);  // T30 runs
+  EXPECT_NE(word(0), leftBefore) << "the left word landed at T30";
+  EXPECT_EQ(word(2), rightBefore) << "the right word still held at T30";
+  stepDspCycle(dsp, wram);  // T31 runs
+  EXPECT_NE(word(2), rightBefore) << "the right word landed at T31";
 }
 
 // ── Voice 0's output pipeline (one sample behind) ───────────────────────────
@@ -303,10 +983,14 @@ TEST(SampleSchedule, VoiceZeroOutputLagsVoiceOneByOneFrame) {
     EXPECT_EQ(v0[i + 1], v1[i]) << "voice 0 frame " << (i + 1) << " matches voice 1 frame " << i;
 }
 
-TEST(SampleSchedule, VoiceZeroReadsTheNoiseLevelBeforeTheLastSlotStep) {
-  // Voice 0 computes at the last slot, before that slot's noise step, so a NON
-  // voice 0 reads the noise level from before this sample's step — one update
-  // older than a within-sample voice reads it.
+TEST(SampleSchedule, VoiceZeroReadsTheNoiseLevelAfterTheLastSlotStep) {
+  // The last slot steps the noise before voice 0 computes, so a NON voice 0
+  // reads the level this sample's step produced — the same level voices 1-7
+  // read at their compute slots in the frame that follows. Measured against
+  // spc_dsp6's `Order/noise rate flg.1F`: the ROM spins on the echo tape until
+  // voice 0's noise sample reads back as zero, then stops the rate, and the
+  // level left standing is one step short of what a voice 0 reading the
+  // pre-step level leaves.
   Ram ram{};
   DspState dsp;
   dsp.voices[0].phase = EnvPhase::Sustain;
@@ -319,9 +1003,9 @@ TEST(SampleSchedule, VoiceZeroReadsTheNoiseLevelBeforeTheLastSlotStep) {
 
   while (dsp.slotCursor != 31) stepDspCycle(dsp, view(ram));
   const std::int16_t preStep = dsp.noiseLevel;
-  stepDspCycle(dsp, view(ram));  // the last slot: voice 0 computes, then the noise steps
-  EXPECT_EQ(dsp.voiceAmplitude[0], (preStep * 0x7F0) >> 11);  // used the pre-step level
-  EXPECT_NE(dsp.noiseLevel, preStep);                          // and the step then ran
+  stepDspCycle(dsp, view(ram));  // the last slot: the noise steps, then voice 0 computes
+  EXPECT_NE(dsp.noiseLevel, preStep);                                 // the step ran
+  EXPECT_EQ(dsp.voiceAmplitude[0], (dsp.noiseLevel * 0x7F0) >> 11);  // and voice 0 used it
 }
 
 TEST(SampleSchedule, TheFirstSampleFromASeedSoundsVoiceZeroInFrame) {
@@ -404,6 +1088,798 @@ TEST(SampleSchedule, TheMachineDeliversOneScheduledFramePerThirtyTwoCycles) {
   for (const StereoFrame& f : frames) EXPECT_GT(f.left, 0);
 }
 
+TEST(SampleSchedule, TheStartupStreamAdvancesFromItsSecondCall) {
+  // A key-on that interrupts a sounding voice advances its fresh stream at the
+  // pitch through the startup countdown — the voice is silent, but its decode
+  // cursor walks — except on the first startup call, which decodes nothing:
+  // the start pointer is read and the stream primed at the next sample's
+  // directory and load slots. Measured against spc_dsp6's
+  // `KON/kon decoding when another kon`, which freezes the pitch mid-startup of
+  // a voice re-keyed 21 samples after its own key-on and reads where the
+  // cursor stood. (A key-on of a SILENT voice holds its stream instead —
+  // `Misc/brr addr wrap-around` — and so does a re-key of a voice that has
+  // sounded for about a second — `Random/brr before playing` — so the voice
+  // here sounds before the key-on AND is young: keyed on 21 samples earlier.)
+  Ram ram{};
+  DspState dsp;
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
+  dsp.voices[2].computesSinceKeyOn = 21;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain holds the level above zero
+  reg(dsp, 2, 0x03) = 0x20;    // VxPITCHH: two stream samples per output sample
+  sample(dsp, ram);            // sample 0 (atomic); sampleIndex now 1
+  sample(dsp, ram);            // odd sample done, so the next one polls
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;      // a KON write arms voice 2
+  sample(dsp, ram);            // the poll at this sample's T31 arms the restart
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  sample(dsp, ram);            // the voice's compute applies it: the startup's
+                               // first call, which reads and decodes nothing
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_TRUE(dsp.voices[2].startPending) << "the prime waits for the next sample";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 0);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  sample(dsp, ram);            // the load slot primes four samples; the second
+                               // call walks two
+  EXPECT_FALSE(dsp.voices[2].startPending);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 6) << "the prime's four, then the walk's two";
+
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // the countdown's other calls
+  EXPECT_EQ(dsp.voices[2].konDelay, 0);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 12)
+      << "four advancing startup calls walk the cursor two samples each";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x8000);
+}
+
+TEST(SampleSchedule, AKeyOnOfASilentVoiceHoldsItsStreamThroughTheFirstLiveSample) {
+  // A key-on of a silent voice — envelope at 0 as the restart applies — holds
+  // its fresh stream at the primed start through the whole silent span AND the
+  // first live compute: that sample interpolates the stream's first four
+  // samples at fraction 0, and advancing begins the sample after. Measured
+  // against spc_dsp6's `Misc/brr addr wrap-around`, whose first half-envelope
+  // sample interpolates the wrapped block's first four samples and whose rows
+  // then step one stream sample per output sample.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;      // a KON write arms voice 2, long silent
+  sample(dsp, ram);            // the poll arms the restart
+  sample(dsp, ram);            // the voice's compute applies it
+  ASSERT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_TRUE(dsp.voices[2].startPending) << "the prime waits for the next sample";
+  sample(dsp, ram);            // the next sample's load slot primes four samples
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on prime decodes four samples";
+
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // the countdown's other calls
+  ASSERT_EQ(dsp.voices[2].konDelay, 0);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the silent span leaves the stream standing";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  // The countdown's end still emits one silent sample (the envelope's first
+  // move reaches the output a sample late), and the first sounding sample then
+  // reads the primed window: both are inside the hold.
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4)
+      << "the first sounding sample interpolates the primed window";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  sample(dsp, ram);            // advancing begins the sample after
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 5);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x1000);
+}
+
+TEST(SampleSchedule, AReKeyOfALongSoundingVoiceHoldsItsStream) {
+  // A re-key of a voice whose old stream was SOUNDING — its output nonzero —
+  // holds its fresh stream exactly as a key-on from silence does, whatever
+  // its age or level. Measured against spc_dsp6's `Random/brr before
+  // playing` (seven of its eight passes re-key a voice at direct gain $7F0
+  // that has played random data for about a second, every pass's first
+  // sounding sample interpolating the stream's first four samples at index 0)
+  // and `Timing/Voice/V3 BRR.sample.lsb/msb` (thirty-four rows per voice each
+  // re-key it young and loud, and every row's data reads land on the held
+  // cadence). `KON/kon decoding when another kon`'s walking re-key is of a
+  // voice whose old output is SILENT — that is the discriminator, not age.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 2);    // the old stream: stationary and SOUNDING
+  sample(dsp, ram);
+  sample(dsp, ram);            // its amplitude stands nonzero at the re-key
+  ASSERT_NE(dsp.voiceAmplitude[2], 0) << "the old output must be sounding";
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000 for the fresh stream
+  dsp.internalKon = 0x04;      // a KON write arms voice 2, sounding
+  sample(dsp, ram);            // the poll arms the restart
+  sample(dsp, ram);            // the voice's compute applies it
+  ASSERT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_FALSE(dsp.voices[2].startupWalks);
+  EXPECT_TRUE(dsp.voices[2].startPending) << "the prime waits for the next sample";
+  sample(dsp, ram);            // the next sample's load slot primes four samples
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the key-on prime decodes four samples";
+
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // the countdown's other calls
+  ASSERT_EQ(dsp.voices[2].konDelay, 0);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4) << "the silent span leaves the stream standing";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000);
+
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4)
+      << "the first sounding sample interpolates the primed window";
+  sample(dsp, ram);            // advancing begins the sample after
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 5);
+}
+
+TEST(SampleSchedule, ALivePitchWriteLandsPerSampleWhateverTheParity) {
+  // A live voice's stream advance never reads VxPITCHL/H at its own compute:
+  // each voice reads the pair at its own pitch slots every sample, and the
+  // pair read in one sample is the step of the NEXT sample's advance — for
+  // every voice alike, voice 0 included. The cadence carries no parity: a
+  // write frozen before a sample behaves identically whichever sample it
+  // lands on. Measured against spc_dsp6's `KON/kon then change pitch`, whose
+  // one-sample pitch pulse is seen at every alignment — an every-other-sample
+  // read leaves half of them invisible — and `Order/pitch added before
+  // interp`, `Order/pitch after brr`, `Misc/interp pos clamped at $7FFF` and
+  // `Random/pitch mod`, which the same-sample form fails.
+  for (int phase = 0; phase < 2; ++phase) {
+    Ram ram{};
+    DspState dsp;
+    for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+      dsp.voices[v].konDelay = 0;
+      dsp.voices[v].phase = EnvPhase::Sustain;
+      dsp.voices[v].envelope = 0x100;
+      reg(dsp, v, 0x03) = 0x10;  // one stream sample per output sample
+    }
+    sample(dsp, ram);            // sample 0 (atomic) seeds the step
+    for (int n = 0; n < phase; ++n) sample(dsp, ram);  // stagger the parity
+    sample(dsp, ram);
+    const std::uint16_t v0 = dsp.voices[0].pitchCounter;
+    const std::uint16_t v2 = dsp.voices[2].pitchCounter;
+
+    // Freeze both voices' pitch before the next sample begins. Each voice's
+    // pitch slots read the zero that sample, but its compute still advances
+    // by the pair read the sample before; the zero lands on the sample after.
+    dsp[0 * 0x10 + 0x03] = 0x00;
+    dsp[2 * 0x10 + 0x03] = 0x00;
+    sample(dsp, ram);
+    EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000))
+        << "voice 0 advances once more by the previous sample's read (phase " << phase << ")";
+    EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x1000))
+        << "voices 1-7 advance once more by the previous sample's read (phase " << phase << ")";
+
+    sample(dsp, ram);
+    sample(dsp, ram);
+    EXPECT_EQ(dsp.voices[0].pitchCounter, static_cast<std::uint16_t>(v0 + 0x1000));
+    EXPECT_EQ(dsp.voices[2].pitchCounter, static_cast<std::uint16_t>(v2 + 0x1000));
+  }
+}
+
+TEST(SampleSchedule, ThePitchPairIsReadAtTheVoicesPitchSlotsForTheNextAdvance) {
+  // VxPITCHL is read at the voice's directory slot — T22 for voice 0,
+  // T(3v-2) for voices 1-7 — and VxPITCHH one slot later, T23 and T(3v-1),
+  // the compute slot itself for voices 1-7. A write before its slot is in the
+  // pair that sample reads; one after waits for the next sample's read. The
+  // pair read in a sample steps the advance of the sample AFTER it. Measured
+  // against spc_dsp6's `Timing/Voice/V2 pitchl` and `V3 pitchh`: a five-cycle
+  // pulse into each byte is caught by each voice at exactly those slots.
+  const auto pin = [](std::size_t voice, int lowSlot, int highSlot) {
+    Ram ram{};
+    DspState dsp;
+    dsp.voices[voice].konDelay = 0;
+    dsp.voices[voice].phase = EnvPhase::Sustain;
+    dsp.voices[voice].envelope = 0x100;
+    sample(dsp, ram);  // pitch $0000: the stream stands still
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.voices[voice].pitchCounter, 0u);
+
+    const std::uint8_t low = static_cast<std::uint8_t>(voice * 0x10 + 0x02);
+    const std::uint8_t high = static_cast<std::uint8_t>(voice * 0x10 + 0x03);
+    DspState seenHigh = dsp;
+    DspState missedHigh = dsp;
+    DspState seenLow = dsp;
+    DspState missedLow = dsp;
+    sampleWritingAt(seenHigh, ram, highSlot, high, 0x10);        // pitch $1000
+    sampleWritingAt(missedHigh, ram, highSlot + 1, high, 0x10);
+    sampleWritingAt(seenLow, ram, lowSlot, low, 0x10);           // pitch $0010
+    sampleWritingAt(missedLow, ram, lowSlot + 1, low, 0x10);
+    for (DspState* s : {&seenHigh, &missedHigh, &seenLow, &missedLow})
+      EXPECT_EQ(s->voices[voice].pitchCounter, 0u)
+          << "voice " << voice << ": the writing sample's advance takes the pair read before it";
+
+    sample(seenHigh, ram);
+    sample(missedHigh, ram);
+    sample(seenLow, ram);
+    sample(missedLow, ram);
+    EXPECT_EQ(seenHigh.voices[voice].pitchCounter, 0x1000u)
+        << "voice " << voice << ": a VxPITCHH write before its slot steps the next advance";
+    EXPECT_EQ(missedHigh.voices[voice].pitchCounter, 0u)
+        << "voice " << voice << ": a VxPITCHH write after its slot waits a sample";
+    EXPECT_EQ(seenLow.voices[voice].pitchCounter, 0x0010u)
+        << "voice " << voice << ": a VxPITCHL write before the directory slot steps the next advance";
+    EXPECT_EQ(missedLow.voices[voice].pitchCounter, 0u)
+        << "voice " << voice << ": a VxPITCHL write after the directory slot waits a sample";
+
+    sample(missedHigh, ram);
+    sample(missedLow, ram);
+    EXPECT_EQ(missedHigh.voices[voice].pitchCounter, 0x1000u);
+    EXPECT_EQ(missedLow.voices[voice].pitchCounter, 0x0010u);
+  };
+  pin(0, 22, 23);
+  pin(2, 4, 5);
+  pin(7, 19, 20);
+}
+
+TEST(SampleSchedule, VoiceAdsr1IsReadAtTheVoicesDirectorySlot) {
+  // VxADSR1 is read at the voice's directory slot — T22 for voice 0, T(3v-2)
+  // for voices 1-7 — and the compute's envelope step runs under that value:
+  // a write before the slot drives this sample's step, one after it drives
+  // the next sample's. VxADSR2 and VxGAIN are read at the compute itself.
+  // Measured against spc_dsp6's `Timing/Voice/V2 adsr0.0F`, `adsr0.70` and
+  // `adsr0.80`: a five-cycle pulse into the register is caught by each voice
+  // at exactly that slot.
+  const auto pin = [](std::size_t voice, int slot) {
+    Ram ram{};
+    DspState dsp;
+    dsp.voices[voice].konDelay = 0;
+    dsp.voices[voice].phase = EnvPhase::Attack;
+    dsp.voices[voice].envelope = 0;
+    reg(dsp, voice, 0x05) = 0x00;  // direct gain 0: the level stands at 0
+    reg(dsp, voice, 0x07) = 0x00;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.voices[voice].envelope, 0u);
+
+    const std::uint8_t adsr1 = static_cast<std::uint8_t>(voice * 0x10 + 0x05);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    sampleWritingAt(seen, ram, slot, adsr1, 0x8F);        // attack rate 15: +1024 every sample
+    sampleWritingAt(missed, ram, slot + 1, adsr1, 0x8F);
+    EXPECT_EQ(seen.voices[voice].envelope, 1024u)
+        << "voice " << voice << ": a write before the directory slot drives this sample's step";
+    EXPECT_EQ(missed.voices[voice].envelope, 0u)
+        << "voice " << voice << ": a write after the directory slot does not";
+    sample(missed, ram);
+    EXPECT_EQ(missed.voices[voice].envelope, 1024u)
+        << "voice " << voice << ": it drives the next sample's step";
+  };
+  pin(0, 22);
+  pin(2, 4);
+  pin(7, 19);
+}
+
+TEST(SampleSchedule, AKeyOnCapturesThePitchAtTheNextPollParitySample) {
+  // A consumed key-on schedules the voice's pitch capture for the next
+  // poll-parity sample's first slot, and that capture propagates like any
+  // other: voice 0 consumes it at that sample's T31, voices 1-7 one sample
+  // later. A pitch write landing between the poll and that instant is
+  // therefore seen — `KON/kon decoding when another kon`'s freezes ride nine
+  // cycles behind their KON write and land — and every voice stops with the
+  // same one stale-pitch advance taken before the capture.
+  Ram ram{};
+  DspState dsp;
+  for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+    // Sounding voices keyed on 21 samples earlier — the ROM's own age — so the
+    // re-key's startup walks (a key-on of a silent voice holds its stream —
+    // `Misc/brr addr wrap-around` — and so does a re-key of a voice that has
+    // sounded for about a second — `Random/brr before playing`).
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].envelope = 0x100;
+    dsp.voices[v].computesSinceKeyOn = 21;
+    reg(dsp, v, 0x07) = 0x7F;  // Direct Gain holds the level above zero
+    reg(dsp, v, 0x03) = 0x20;  // two stream samples per output sample
+  }
+  sample(dsp, ram);            // sample 0 (atomic); the idle captures track
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x05;      // a KON write arms voices 0 and 2
+  sample(dsp, ram);            // the poll keys both; voice 0's compute 1 runs
+  ASSERT_EQ(dsp.voices[0].konDelay, 4);
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  // The freeze lands after the poll, before the parity sample: the scheduled
+  // capture reads it, so each voice takes exactly one advance at the stale
+  // pitch (voice 0 on this sample, voice 2 on the parity sample) and stops.
+  dsp[0 * 0x10 + 0x03] = 0x00;
+  dsp[2 * 0x10 + 0x03] = 0x00;
+  for (int n = 0; n < 8; ++n) sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].pitchCounter, 0x2000)
+      << "one stale advance before the scheduled capture lands";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, dsp.voices[0].pitchCounter)
+      << "the scheduled capture reaches the eight voices uniformly";
+}
+
+TEST(SampleSchedule, ABarePitchWriteDuringTheKeyOnHoldNeverLands) {
+  // From a consumed key-on, the per-sample pitch capture holds for seven
+  // samples — anchored to the poll, uniform for the eight voices — so a pitch
+  // write that rides no KON is invisible for the hold's whole width: the
+  // countdown keeps advancing at the pitch the key-on's own capture took, and
+  // the write is only picked up by the first live capture after the hold.
+  // Measured against spc_dsp6's `KON/kon then change pitch`: its pulses land
+  // nothing through the fourth reading and exactly one sample from the fifth.
+  Ram ram{};
+  DspState dsp;
+  for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+    // Sounding voices keyed on 21 samples earlier — the ROM's own age — so the
+    // re-key's startup walks (a key-on of a silent voice holds its stream —
+    // `Misc/brr addr wrap-around` — and so does a re-key of a voice that has
+    // sounded for about a second — `Random/brr before playing`).
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].envelope = 0x100;
+    dsp.voices[v].computesSinceKeyOn = 21;
+    reg(dsp, v, 0x07) = 0x7F;  // Direct Gain holds the level above zero
+    reg(dsp, v, 0x03) = 0x20;  // two stream samples per output sample
+  }
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x05;
+  sample(dsp, ram);            // the poll keys voices 0 and 2
+  sample(dsp, ram);
+  sample(dsp, ram);            // the scheduled capture has taken $2000
+
+  // A bare write during the hold: the countdown walks on at the captured
+  // pitch. Each voice takes six advancing calls — the first startup call
+  // decodes nothing — before the first post-hold capture stops it.
+  dsp[0 * 0x10 + 0x03] = 0x00;
+  dsp[2 * 0x10 + 0x03] = 0x00;
+  for (int n = 0; n < 8; ++n) sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].pitchCounter, 0xC000)
+      << "six advances at the held pitch; the write lands only past the hold";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, dsp.voices[0].pitchCounter)
+      << "the hold is poll-anchored, so the eight voices stop together";
+}
+
+TEST(SampleSchedule, AOneSamplePitchPulseAdvancesEveryVoiceBySameOneSample) {
+  // A pitch value standing for exactly one sample is consumed for exactly one
+  // advance by every live voice, whatever its compute slot: the pulse covers
+  // exactly one first-slot capture, and the one-sample propagation hands that
+  // capture to each voice once. Measured against spc_dsp6's `KON/kon then
+  // change pitch`, whose expected readings are $10 — one sample at the pulsed
+  // pitch — on all eight rows alike.
+  Ram ram{};
+  DspState dsp;
+  for (std::size_t v : {std::size_t{0}, std::size_t{2}}) {
+    dsp.voices[v].konDelay = 0;
+    dsp.voices[v].phase = EnvPhase::Sustain;
+    dsp.voices[v].envelope = 0x100;
+  }
+  sample(dsp, ram);            // pitch $0000: nothing advances
+  sample(dsp, ram);
+
+  dsp[0 * 0x10 + 0x03] = 0x20;  // the pulse: up before one sample...
+  dsp[2 * 0x10 + 0x03] = 0x20;
+  sample(dsp, ram);
+  dsp[0 * 0x10 + 0x03] = 0x00;  // ...and back before the next
+  dsp[2 * 0x10 + 0x03] = 0x00;
+  for (int n = 0; n < 4; ++n) sample(dsp, ram);
+
+  EXPECT_EQ(dsp.voices[0].pitchCounter, 0x2000) << "exactly one advance at the pulse";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x2000)
+      << "the same one advance on an early-slot voice";
+}
+
+TEST(SampleSchedule, AKeyOnMidCountdownPastTheFirstPollRewindsTheHold) {
+  // A key-on consumed while the voice is mid-countdown, at any poll past the
+  // one immediately following its keying, rewinds the silent hold: the
+  // countdown re-arms in full and the envelope drops to 0, while the stream
+  // stands where it was — neither re-primed nor stalled. Measured against
+  // spc_dsp6's `KON/kon then another kon` (the level re-emerges as late as a
+  // restart would place it) with `KON/kon decoding when another kon` holding
+  // the cursor's walk (the same re-key leaves the frozen positions standing).
+  Ram ram{};
+  DspState dsp;
+  // A sounding voice keyed on 21 samples earlier — the ROM's own age — so the
+  // key-on's startup walks (a key-on of a silent voice holds its stream —
+  // `Misc/brr addr wrap-around` — and so does a re-key of a voice that has
+  // sounded for about a second — `Random/brr before playing`).
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
+  dsp.voices[2].computesSinceKeyOn = 21;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  for (int n = 0; n < 3; ++n) sample(dsp, ram);  // computes 1-3 run
+  ASSERT_EQ(dsp.voices[2].konDelay, 2);
+
+  // The poll two periods after the keying consumes a fresh arm with the
+  // countdown still running: the hold rewinds, the stream stays put — three
+  // advancing calls' worth of pitch, not a re-primed zero.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "the silent hold re-arms in full";
+  EXPECT_EQ(dsp.voices[2].envelope, 0u);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x3000) << "the cursor is not re-primed";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 7);
+}
+
+TEST(SampleSchedule, AKeyOnLateInTheSilentSpanRewindsTheHoldAndPastItRestarts) {
+  // The one-poll absorption does not cover the voice's whole silent span. A
+  // key-on consumed at the poll right after the first live compute — the last
+  // silent sample — rewinds the hold: countdown re-armed, envelope dropped,
+  // stream standing and still walking at the pitch. One poll later the span is
+  // over and the same write restarts the voice in full, stream re-primed.
+  // Measured against spc_dsp6's `KON/kon then another kon` (the re-key's level
+  // re-emerges restart-late), `KON/kon decoding when another kon` (the cursor
+  // keeps its walk through the re-key), and `KON/envx during kon` (a re-key
+  // past the span restarts).
+  Ram ram{};
+  DspState dsp;
+  // A sounding voice keyed on 21 samples earlier — the ROM's own age — so the
+  // key-on's startup walks (a key-on of a silent voice holds its stream —
+  // `Misc/brr addr wrap-around` — and so does a re-key of a voice that has
+  // sounded for about a second — `Random/brr before playing`).
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
+  dsp.voices[2].computesSinceKeyOn = 21;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain, so the envelope moves once live
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+
+  for (int n = 0; n < 5; ++n) sample(dsp, ram);  // the countdown runs out
+  ASSERT_EQ(dsp.voices[2].konDelay, 0);
+
+  // The next sample runs the first live compute (still silent, and it lifts
+  // the level) and then polls: the consumed key-on rewinds the hold. Computes
+  // 2-6 advanced and decoded five stream samples.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "the silent hold re-arms in full";
+  EXPECT_EQ(dsp.voices[2].envelope, 0u) << "the level the live compute lifted drops";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x5000) << "the cursor is not re-primed";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 9);
+
+  // The rewound hold is not a fresh key-on: its next call advances the stream
+  // as normal instead of repeating the decode-nothing start-address call.
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x6000) << "the re-held span keeps walking";
+
+  // The next poll sits past the silent span: the same write restarts the
+  // voice in full — countdown, envelope, and a re-primed stream. The poll
+  // arms it; the old stream stands through the arming sample (the voice's
+  // compute emits one more sample from it — the final pre-key-on sample —
+  // before the restart applies).
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a re-key past the silent span restarts";
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x7000)
+      << "the old stream still stands at the arming poll's sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is wiped";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "and re-primed at the next sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 3);
+  EXPECT_TRUE(dsp.voices[2].startupWalks) << "the interrupted startup had not sounded";
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 5) << "the prime's four, then the walk's one";
+}
+
+TEST(SampleSchedule, AKeyOnConsumedUnderASoftResetKeepsItsStartup) {
+  // A soft reset standing in the very sample a keying poll consumes a voice's
+  // key-on does not key that voice off: the fresh consumption wins, exactly as
+  // KON applied after KOFF wins at the poll itself, and the startup's whole
+  // ENVX schedule proceeds as if the reset were not standing. Measured against
+  // spc_dsp6's `KON/kon then flg.80`: a one-sample FLG bit-7 pulse over the
+  // consuming poll's sample leaves every voice's ENVX recovery exactly where
+  // an unmolested key-on places it, at both poll-relative compute positions
+  // (voice 0 computes after the poll in its sample; voices 1-7 take their
+  // first startup call the sample after).
+  auto trajectory = [](bool pulsed) {
+    Ram ram{};
+    DspState dsp;
+    reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain: ENVX jumps to 7Fh once live
+    reg(dsp, 2, 0x07) = 0x7F;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    EXPECT_EQ(dsp.sampleIndex % 2, 0u);
+    dsp.internalKon = 0x05;      // a KON write arms voices 0 and 2
+    if (pulsed) dsp[kFlg] = 0x80;
+    sample(dsp, ram);            // the poll consumes under the standing reset
+    if (pulsed) dsp[kFlg] = 0x00;
+    std::array<std::uint8_t, 24> out{};
+    for (std::size_t n = 0; n < 12; ++n) {
+      sample(dsp, ram);
+      out[2 * n] = envx(dsp, 0);
+      out[2 * n + 1] = envx(dsp, 2);
+    }
+    return out;
+  };
+  const auto clean = trajectory(false);
+  const auto shielded = trajectory(true);
+  EXPECT_EQ(shielded, clean) << "the startup's ENVX schedule is untouched";
+  EXPECT_EQ(clean.back(), 0x7F) << "and it is a startup that completes and sounds";
+}
+
+TEST(SampleSchedule, ASoftResetPulseOneSampleLaterKeysTheVoiceOff) {
+  // The consumption sample is the shield's whole width. The same one-sample
+  // reset pulse landing one sample after a voice's key-on is consumed — or
+  // anywhere later in or past the countdown — keys it off like any other
+  // voice: Release, envelope forced to 0, and with nothing re-arming it the
+  // voice never sounds. Measured against spc_dsp6's `KON/kon then flg.80`,
+  // whose readings print the no-recovery mark from its second alignment on.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 0, 0x07) = 0x7F;  // Direct Gain
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+  dsp.internalKon = 0x01;
+  sample(dsp, ram);            // a clean consumption; voice 0's startup begins
+  ASSERT_EQ(dsp.voices[0].konDelay, 4);
+  ASSERT_EQ(dsp.voices[0].phase, EnvPhase::Attack);
+
+  dsp[kFlg] = 0x80;
+  sample(dsp, ram);            // the pulse covers only the following sample
+  dsp[kFlg] = 0x00;
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release) << "one sample past the shield";
+
+  for (int n = 0; n < 12; ++n) sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[0].phase, EnvPhase::Release);
+  EXPECT_EQ(dsp.voices[0].envelope, 0u);
+  EXPECT_EQ(envx(dsp, 0), 0) << "the keyed-off voice never recovers";
+}
+
+TEST(SampleSchedule, AKeyOnConsumedOnAResetKilledStartupRestartsInFull) {
+  // The in-span absorption tiers protect a STANDING startup. A soft-reset
+  // pulse landing inside the span keys the voice off and kills its startup for
+  // good, and a key-on consumed after that kill restarts the voice in full —
+  // countdown re-armed, envelope from 0, stream re-primed — even though the
+  // old span's samples have not run out. Measured against spc_dsp6's `KON/kon
+  // then flg.80 then kon`: on the alignments whose second key-on the poll
+  // sees, ENVX recovers with a full restart's count, identical inside and past
+  // the span.
+  Ram ram{};
+  DspState dsp;
+  // A sounding voice keyed on 21 samples earlier — the ROM's own age — so the
+  // key-on's startup walks (a key-on of a silent voice holds its stream —
+  // `Misc/brr addr wrap-around` — and so does a re-key of a voice that has
+  // sounded for about a second — `Random/brr before playing`).
+  dsp.voices[2].phase = EnvPhase::Sustain;
+  dsp.voices[2].envelope = 0x100;
+  dsp.voices[2].computesSinceKeyOn = 21;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain: ENVX jumps to 7Fh once live
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+  sample(dsp, ram);            // compute 1 runs; the shield's sample is over
+
+  dsp[kFlg] = 0x80;
+  sample(dsp, ram);            // the one-sample pulse kills the startup
+  dsp[kFlg] = 0x00;
+  ASSERT_EQ(dsp.voices[2].phase, EnvPhase::Release);
+  ASSERT_GT(dsp.voices[2].konDelay, 0) << "the kill lands mid-countdown";
+  sample(dsp, ram);
+  ASSERT_NE(dsp.voices[2].pitchCounter, 0u) << "the cursor has moved off the prime";
+
+  // The next poll consumes a key-on with the span's samples still counting.
+  // On the dead startup it is neither absorbed nor a rewind: the voice
+  // restarts in full, stream re-primed. The poll arms it; the dead startup's
+  // state stands through the arming sample and the voice's own compute
+  // applies the restart.
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a key-on on a dead startup restarts";
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Release)
+      << "the killed startup still stands at the arming poll's sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is wiped";
+  EXPECT_TRUE(dsp.voices[2].startPending) << "and re-primed at the next sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].brrSampleIndex, 4);
+
+  for (int n = 0; n < 6; ++n) sample(dsp, ram);
+  EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
+}
+
+TEST(SampleSchedule, AKeyOnConsumedOnAKeyedOffStartupRestartsInFull) {
+  // The dead-startup rule is the voice's keyed-off state, not the reset's
+  // doing: a KOFF landing inside the span kills the startup the same way, and
+  // a key-on consumed after it restarts the voice in full from inside the old
+  // span. One Release condition carries both — spc_dsp6's `KON/kon then koff`
+  // and `KON/kon then set sample's end flag` clear with the same arm that
+  // clears `KON/kon then flg.80 then kon`.
+  Ram ram{};
+  DspState dsp;
+  reg(dsp, 2, 0x07) = 0x7F;    // Direct Gain
+  reg(dsp, 2, 0x03) = 0x10;    // pitch $1000: one stream sample a call
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);            // the poll keys voice 2 on
+  ASSERT_EQ(dsp.voices[2].konDelay, 5);
+  sample(dsp, ram);            // compute 1 runs
+
+  dsp[0x5C] = 0x04;            // KOFF: the next poll keys the voice off
+  sample(dsp, ram);
+  dsp[0x5C] = 0x00;
+  ASSERT_EQ(dsp.voices[2].phase, EnvPhase::Release);
+  ASSERT_GT(dsp.voices[2].konDelay, 0) << "the kill lands mid-countdown";
+  sample(dsp, ram);
+
+  dsp.internalKon = 0x04;
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 5) << "a key-on on a keyed-off startup restarts";
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Release)
+      << "the killed startup still stands at the arming poll's sample";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voices[2].konDelay, 4);
+  EXPECT_EQ(dsp.voices[2].phase, EnvPhase::Attack);
+  EXPECT_EQ(dsp.voices[2].pitchCounter, 0x0000) << "the stream is re-primed";
+
+  for (int n = 0; n < 7; ++n) sample(dsp, ram);
+  EXPECT_EQ(envx(dsp, 2), 0x7F) << "and it is a restart that completes and sounds";
+}
+
+TEST(SampleSchedule, AReKeyOnASoundingVoiceEmitsTheFinalPreKeyOnSample) {
+  // A full restart consumed by the poll silences its voice only from the
+  // sample after the consuming compute: that compute still prepares one sample
+  // from the standing stream and envelope — the final pre-key-on sample — and
+  // the restart applies after it. Measured against spc_dsp6's `KON/kon
+  // unaffected by pitch`, whose echo window records the re-keyed voice's old
+  // data on the consuming sample and the startup's silence only after it,
+  // identically at pitch $3F00 and pitch 0.
+  Ram ram{};
+  DspState dsp;
+  placeSteadyVoice(dsp, 1);
+  dsp[kMvolLeft] = 0x7F;
+  dsp[kMvolRight] = 0x7F;
+  sample(dsp, ram);
+  sample(dsp, ram);
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+  const StereoFrame steady = sample(dsp, ram);
+  ASSERT_GT(steady.left, 0);
+  sample(dsp, ram);            // odd sample, so the next one polls
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x02;      // re-key the sounding voice
+  const StereoFrame atThePoll = sample(dsp, ram);  // computed before its T31 poll
+  const StereoFrame consuming = sample(dsp, ram);  // the consuming compute
+  const StereoFrame after = sample(dsp, ram);      // the startup's first silence
+  EXPECT_EQ(atThePoll.left, steady.left);
+  EXPECT_EQ(consuming.left, steady.left) << "the final pre-key-on sample still sounds";
+  EXPECT_EQ(after.left, 0) << "the restart's silence begins the sample after";
+}
+
+TEST(SampleSchedule, TheFinalPreKeyOnSampleIsTheOldStreamsOwnNext) {
+  // The consuming compute does not replay the voice's standing output: the old
+  // stream takes its final decode and advance first (the sample a un-keyed
+  // voice would have emitted), and only then does the restart wipe it. Pinned
+  // against a control machine: a walking voice re-keyed mid-stream matches the
+  // control's frames exactly through the consuming sample and goes silent the
+  // sample after, while the control keeps sounding.
+  Ram ram{};
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: loops over itself
+  for (int n = 0; n < 8; ++n)
+    ram[static_cast<std::size_t>(0x0301 + n)] = static_cast<std::uint8_t>(0x10 * (n + 1) + n);
+
+  const auto place = [](DspState& dsp) {
+    dsp[0x5D] = 0x02;          // DIR -> $0200
+    dsp[kMvolLeft] = 0x7F;
+    dsp[kMvolRight] = 0x7F;
+    dsp.voices[1].phase = EnvPhase::Sustain;
+    dsp.voices[1].konDelay = 0;
+    dsp.voices[1].envelope = 0x7F0;
+    dsp.voices[1].brrAddress = 0x0300;
+    reg(dsp, 1, 0x03) = 0x10;  // pitch $1000: one stream sample per call
+    reg(dsp, 1, 0x07) = 0x7F;  // Direct Gain holds the level
+    reg(dsp, 1, 0x00) = 0x40;
+    reg(dsp, 1, 0x01) = 0x40;
+  };
+  DspState keyed;
+  DspState control;
+  place(keyed);
+  place(control);
+  for (int n = 0; n < 4; ++n) {
+    const StereoFrame a = sample(keyed, ram);
+    const StereoFrame b = sample(control, ram);
+    ASSERT_EQ(a, b);
+  }
+  ASSERT_EQ(keyed.sampleIndex % 2, 0u);
+
+  keyed.internalKon = 0x02;
+  const StereoFrame armA = sample(keyed, ram);
+  const StereoFrame armB = sample(control, ram);
+  EXPECT_EQ(armA, armB) << "computed before the arming poll";
+  const StereoFrame lastA = sample(keyed, ram);
+  const StereoFrame lastB = sample(control, ram);
+  EXPECT_EQ(lastA, lastB) << "the final pre-key-on sample is the advanced one";
+  ASSERT_NE(lastB.left, 0) << "a frame with signal, or the clause pins nothing";
+  const StereoFrame afterA = sample(keyed, ram);
+  const StereoFrame afterB = sample(control, ram);
+  EXPECT_EQ(afterA.left, 0) << "the restart's silence begins here";
+  EXPECT_NE(afterB.left, 0) << "while the control keeps sounding";
+}
+
+TEST(SampleSchedule, TheFirstSoundingSampleInterpolatesFromIndexZero) {
+  // A key-on's stream walk carries no interpolation fraction: the pitch
+  // counter's fractional bits are cleared through the silent span and the
+  // first sounding compute, so the first audible sample reads the Gaussian
+  // kernel at index 0 and the fraction begins accumulating only with the
+  // advance after it. Measured against spc_dsp6's `KON/pitch at kon`: a voice
+  // keyed at pitch $0010 over a ramp block plays the kernel walked from index
+  // 0, 1, 2, … — a retained startup fraction starts the walk six indices deep.
+  Ram ram{};
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  // The ROM's own ramp block: shift 12, filter 0, end+loop over itself.
+  const std::array<std::uint8_t, 9> block = {0xC3, 0x10, 0xFE, 0xDC, 0xBA,
+                                             0x98, 0x76, 0x54, 0x32};
+  std::copy(block.begin(), block.end(), ram.begin() + 0x0300);
+
+  DspState dsp;
+  dsp[0x5D] = 0x02;          // DIR -> $0200
+  reg(dsp, 2, 0x02) = 0x10;  // VxPITCHL: one interpolation index per sample
+  reg(dsp, 2, 0x07) = 0x7F;  // Direct Gain 7F0h
+  reg(dsp, 2, 0x00) = 0x40;
+  reg(dsp, 2, 0x01) = 0x40;
+  sample(dsp, ram);  // sample 0 (atomic); sampleIndex now 1
+  sample(dsp, ram);  // odd sample done, so the next one polls
+  ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+
+  dsp.internalKon = 0x04;  // a KON write arms voice 2
+  sample(dsp, ram);        // the poll at this sample's T31 arms the restart
+
+  int silent = 0;
+  while (dsp.voiceAmplitude[2] == 0 && silent < 16) {
+    sample(dsp, ram);
+    ++silent;
+  }
+  ASSERT_LT(silent, 16) << "the voice never sounded";
+  EXPECT_EQ(silent, 7) << "the restart-apply call plus six silent computes";
+
+  // The stream never crosses a sample position over this span, so the window
+  // stands still and every audible value is the kernel alone.
+  const snaggletooth::SampleWindow window = dsp.voices[2].window;
+  const auto at = [&](std::uint8_t index) {
+    return (snaggletooth::gaussInterpolate(window, index) * 0x7F0) >> 11;
+  };
+  ASSERT_NE(at(0), at(6)) << "index 0 and a retained fraction differ, or "
+                             "the clause pins nothing";
+  EXPECT_EQ(dsp.voiceAmplitude[2], at(0)) << "the first audible sample reads index 0";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voiceAmplitude[2], at(1)) << "the fraction accumulates from here";
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.voiceAmplitude[2], at(2));
+}
+
 TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {
   // The cursor is the DSP's own: it advances one slot per stepDspCycle and wraps
   // after 32, delivering exactly one frame per wrap.
@@ -415,6 +1891,273 @@ TEST(SampleSchedule, AStandaloneStateSelfDrivesItsSlotCursor) {
     if (stepDspCycle(dsp, view(ram)).delivered) ++delivered;
   EXPECT_EQ(delivered, 2);           // two wraps in 64 slots
   EXPECT_EQ(dsp.slotCursor, 0u);     // back at the start of a sample
+}
+
+// Advances one whole sample, writing ram[addr]=value the instant the cursor
+// reaches `atSlot` (just before that slot runs).
+void sampleWritingRamAt(DspState& dsp, Ram& ram, int atSlot, std::uint16_t addr,
+                        std::uint8_t value) {
+  for (int n = 0; n < 32; ++n) {
+    if (dsp.slotCursor == atSlot) ram[addr] = value;
+    stepDspCycle(dsp, view(ram));
+  }
+}
+
+TEST(SampleSchedule, TheLoopAddressIsReadAtTheVoicesDirectorySlot) {
+  // The loop jump the decoder makes as it leaves an end block takes the loop
+  // address the voice's directory slot read — T22 for voice 0, the slot before
+  // the compute for voices 1-7 — not the directory as it stands at the compute.
+  // Measured against spc_dsp6's `Timing/Voice/V2 dir.loop.lsb`/`.msb`: a
+  // five-cycle pulse into either loop byte is caught by voice 0 nine slots
+  // before its compute and by voices 1-7 one slot before theirs.
+  const auto pin = [](std::size_t voice, int dirSlot) {
+    Ram ram{};
+    ram[0x0200] = 0x00;  // directory entry 0: start $0300
+    ram[0x0201] = 0x03;
+    ram[0x0202] = 0x00;  // loop -> $0300
+    ram[0x0203] = 0x03;
+    ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: loops over itself
+    ram[0x0400] = 0xC3;  // a second looping block the rewritten entry points at
+    for (int n = 0; n < 8; ++n) {
+      ram[static_cast<std::size_t>(0x0301 + n)] = 0x44;
+      ram[static_cast<std::size_t>(0x0401 + n)] = 0x44;
+    }
+    DspState dsp;
+    dsp[0x5D] = 0x02;              // DIR -> $0200
+    reg(dsp, voice, 0x03) = 0x10;  // pitch $1000: one stream sample per call
+    reg(dsp, voice, 0x07) = 0x7F;  // Direct Gain 7F0h
+    reg(dsp, voice, 0x00) = 0x40;
+    reg(dsp, voice, 0x01) = 0x40;
+    sample(dsp, ram);
+    sample(dsp, ram);
+    ASSERT_EQ(dsp.sampleIndex % 2, 0u);
+    dsp.internalKon = static_cast<std::uint8_t>(1u << voice);
+    sample(dsp, ram);  // the poll at this sample's T31 arms the restart
+
+    // Walk the stream to the sample before the decoder leaves the block: the
+    // next compute's advance is the one that resolves the loop.
+    int n = 0;
+    while (dsp.voices[voice].brrSampleIndex != 7 && n < 40) {
+      sample(dsp, ram);
+      ++n;
+    }
+    ASSERT_LT(n, 40) << "the stream never reached the jump";
+    ASSERT_EQ(dsp.voices[voice].decoderAddress, 0x0300u);
+
+    // Point the entry's loop at $0400 one slot before the directory slot, and
+    // one slot after it: only the earlier write reaches this sample's jump.
+    DspState seen = dsp;
+    DspState missed = dsp;
+    Ram seenRam = ram;
+    Ram missedRam = ram;
+    sampleWritingRamAt(seen, seenRam, dirSlot, 0x0203, 0x04);
+    sampleWritingRamAt(missed, missedRam, dirSlot + 1, 0x0203, 0x04);
+    EXPECT_EQ(seen.voices[voice].brrSampleIndex, 8u) << "the jump's sample";
+    EXPECT_EQ(seen.voices[voice].decoderAddress, 0x0400u)
+        << "voice " << voice << ": a write before the directory slot reaches the jump";
+    EXPECT_EQ(missed.voices[voice].decoderAddress, 0x0300u)
+        << "voice " << voice << ": a write after the directory slot does not";
+  };
+  pin(0, 22);
+  pin(1, 1);
+  pin(7, 19);
+}
+
+// A voice keyed on: the poll at one sample's T31 arms the restart, the voice's
+// compute applies it — voice 0's in that same slot, the others' in the next
+// sample — and the sample after that compute reads the start pointer and
+// primes the stream. Returns the state standing at the start of that sample.
+DspState keyedVoiceAwaitingItsPrime(Ram& ram, std::size_t voice) {
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: nibble 4 decodes to 8192
+  ram[0x0400] = 0xC3;  // a second block a rewritten entry points at
+  for (int n = 0; n < 8; ++n) {
+    ram[static_cast<std::size_t>(0x0301 + n)] = 0x44;
+    ram[static_cast<std::size_t>(0x0401 + n)] = 0x22;  // nibble 2 decodes to 4096
+  }
+  DspState dsp;
+  dsp[0x5D] = 0x02;              // DIR -> $0200
+  reg(dsp, voice, 0x03) = 0x10;  // pitch $1000
+  reg(dsp, voice, 0x07) = 0x7F;  // Direct Gain 7F0h
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.sampleIndex % 2, 0u);
+  dsp.internalKon = static_cast<std::uint8_t>(1u << voice);
+  sample(dsp, ram);                    // the poll at this sample's T31 arms the
+                                       // restart; voice 0's compute follows at once
+  if (voice != 0) sample(dsp, ram);    // the other voices' computes apply it
+  EXPECT_TRUE(dsp.voices[voice].startPending);
+  EXPECT_EQ(dsp.voices[voice].brrSampleIndex, 0u);
+  return dsp;
+}
+
+TEST(SampleSchedule, TheStartPointerIsReadAtTheDirectorySlotOfTheSampleAfterTheConsumingCompute) {
+  // A key-on's start pointer is read from the directory at the voice's
+  // directory slot — T22 for voice 0, T(3v-2) for voices 1-7 — of the sample
+  // AFTER the compute that applied the restart, not at that compute. Measured
+  // against spc_dsp6's `Timing/Voice/V2 dir.start.lsb`/`.msb`: a five-cycle
+  // pulse into either start byte is caught by every voice at exactly that
+  // slot, one sample after its consuming compute.
+  const auto pin = [](std::size_t voice, int dirSlot) {
+    Ram ram{};
+    const DspState dsp = keyedVoiceAwaitingItsPrime(ram, voice);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    Ram seenRam = ram;
+    Ram missedRam = ram;
+    sampleWritingRamAt(seen, seenRam, dirSlot, 0x0201, 0x04);      // start -> $0400
+    sampleWritingRamAt(missed, missedRam, dirSlot + 1, 0x0201, 0x04);
+    EXPECT_EQ(seen.voices[voice].brrAddress, 0x0400u)
+        << "voice " << voice << ": a write before the directory slot reaches the start read";
+    EXPECT_EQ(missed.voices[voice].brrAddress, 0x0300u)
+        << "voice " << voice << ": a write after the directory slot does not";
+    EXPECT_FALSE(seen.voices[voice].startPending);
+    EXPECT_EQ(seen.voices[voice].brrSampleIndex, 4u) << "the prime lands the same sample";
+  };
+  pin(0, 22);
+  pin(1, 1);
+  pin(7, 19);
+}
+
+TEST(SampleSchedule, TheStartBlockIsReadAtTheLoadSlotOfTheSampleAfterTheConsumingCompute) {
+  // The start block's bytes are read at the voice's BRR load slot of the
+  // sample the start pointer was read in — T26 for voice 0, the compute slot
+  // itself for voices 1-7 — so a write to the block landing before that slot
+  // reaches the primed samples and one landing after it does not.
+  const auto pin = [](std::size_t voice, int loadSlot) {
+    Ram ram{};
+    const DspState dsp = keyedVoiceAwaitingItsPrime(ram, voice);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    Ram seenRam = ram;
+    Ram missedRam = ram;
+    sampleWritingRamAt(seen, seenRam, loadSlot, 0x0300, 0x03);      // shift 12 -> 0
+    sampleWritingRamAt(missed, missedRam, loadSlot + 1, 0x0300, 0x03);
+    EXPECT_EQ(seen.voices[voice].window.newest, 2)
+        << "voice " << voice << ": a header write before the load slot reaches the prime";
+    EXPECT_EQ(missed.voices[voice].window.newest, 8192)
+        << "voice " << voice << ": a header write after the load slot does not";
+  };
+  pin(0, 26);
+  pin(1, 2);
+  pin(7, 20);
+}
+
+// A looping voice on directory entry 0 ($0300, loops over itself) with entry 1
+// pointing at a second block ($0400), walked until its stream index reaches
+// `stopIndex` — 7 is the sample before the decoder leaves its block, so the
+// next compute's advance resolves the loop jump.
+DspState loopingVoiceOnEntryZero(Ram& ram, std::size_t voice, unsigned stopIndex = 7) {
+  ram[0x0200] = 0x00;  // directory entry 0: start $0300
+  ram[0x0201] = 0x03;
+  ram[0x0202] = 0x00;  // loop -> $0300
+  ram[0x0203] = 0x03;
+  ram[0x0204] = 0x00;  // directory entry 1: start $0400
+  ram[0x0205] = 0x04;
+  ram[0x0206] = 0x00;  // loop -> $0400
+  ram[0x0207] = 0x04;
+  ram[0x0300] = 0xC3;  // shift 12, filter 0, end+loop: loops over itself
+  ram[0x0400] = 0xC3;
+  for (int n = 0; n < 8; ++n) {
+    ram[static_cast<std::size_t>(0x0301 + n)] = 0x44;
+    ram[static_cast<std::size_t>(0x0401 + n)] = 0x44;
+  }
+  DspState dsp;
+  dsp[0x5D] = 0x02;              // DIR -> $0200
+  reg(dsp, voice, 0x03) = 0x10;  // pitch $1000: one stream sample per call
+  reg(dsp, voice, 0x07) = 0x7F;  // Direct Gain 7F0h
+  sample(dsp, ram);
+  sample(dsp, ram);
+  EXPECT_EQ(dsp.sampleIndex % 2, 0u);
+  dsp.internalKon = static_cast<std::uint8_t>(1u << voice);
+  sample(dsp, ram);  // the poll at this sample's T31 arms the restart
+  int n = 0;
+  while (dsp.voices[voice].brrSampleIndex != stopIndex && n < 40) {
+    sample(dsp, ram);
+    ++n;
+  }
+  EXPECT_LT(n, 40) << "the stream never reached index " << stopIndex;
+  EXPECT_EQ(dsp.voices[voice].decoderAddress, 0x0300u);
+  return dsp;
+}
+
+TEST(SampleSchedule, TheSourceNumberIsReadAtTheVoicesSourceSlotAheadOfTheLoopRead) {
+  // The directory read that a loop jump takes selects the entry with the
+  // `VxSRCN` read at the voice's source slot — T18 for voice 0, T21 for
+  // voice 1 in the PREVIOUS sample, T(3v-6) for voices 2-7 — four slots
+  // before the directory slot, not the register as it stands there. Measured
+  // against spc_dsp6's `Timing/Voice/V1 srcn.loop`: a five-cycle pulse into
+  // the register is caught by each voice at exactly that slot.
+  const auto pin = [](std::size_t voice, int srcnSlot) {
+    Ram ram{};
+    const DspState dsp = loopingVoiceOnEntryZero(ram, voice);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    const std::uint8_t srcn = static_cast<std::uint8_t>(voice * 0x10 + 0x04);
+    sampleWritingAt(seen, ram, srcnSlot, srcn, 0x01);
+    sampleWritingAt(missed, ram, srcnSlot + 1, srcn, 0x01);
+    EXPECT_EQ(seen.voices[voice].brrSampleIndex, 8u) << "the jump's sample";
+    EXPECT_EQ(seen.voices[voice].decoderAddress, 0x0400u)
+        << "voice " << voice << ": a write before the source slot reaches the jump";
+    EXPECT_EQ(missed.voices[voice].decoderAddress, 0x0300u)
+        << "voice " << voice << ": a write after the source slot does not";
+  };
+  pin(0, 18);
+  pin(2, 0);
+  pin(7, 15);
+
+  // Voice 1's source slot is T21 of the sample BEFORE its directory slot at
+  // T1: the write lands in the sample that brings the stream to index 7, and
+  // the following sample's compute makes the jump.
+  {
+    Ram ram{};
+    const DspState dsp = loopingVoiceOnEntryZero(ram, 1, 6);
+    DspState seen = dsp;
+    DspState missed = dsp;
+    sampleWritingAt(seen, ram, 21, 0x14, 0x01);
+    sampleWritingAt(missed, ram, 22, 0x14, 0x01);
+    ASSERT_EQ(seen.voices[1].brrSampleIndex, 7u);
+    sample(seen, ram);
+    sample(missed, ram);
+    EXPECT_EQ(seen.voices[1].brrSampleIndex, 8u) << "the jump's sample";
+    EXPECT_EQ(seen.voices[1].decoderAddress, 0x0400u)
+        << "voice 1: a write before T21 of the previous sample reaches the jump";
+    EXPECT_EQ(missed.voices[1].decoderAddress, 0x0300u)
+        << "voice 1: a write after it does not";
+  }
+}
+
+TEST(SampleSchedule, TheSourceNumberForAStartIsReadAtTheSourceSlotAheadOfThePointerRead) {
+  // A key-on's start pointer is read from the entry the source slot's
+  // `VxSRCN` selects — the slot four before the directory slot in the sample
+  // after the consuming compute — so a register write landing between the
+  // two slots reaches only the voice's next loop. Measured against
+  // spc_dsp6's `Timing/Voice/V1 srcn.start`: the same rows as `srcn.loop`,
+  // one V1 step ahead of the start-pointer read.
+  const auto pin = [](std::size_t voice, int srcnSlot) {
+    Ram ram{};
+    DspState dsp = keyedVoiceAwaitingItsPrime(ram, voice);
+    ram[0x0204] = 0x00;  // directory entry 1: start $0400
+    ram[0x0205] = 0x04;
+    ram[0x0206] = 0x00;  // loop -> $0400
+    ram[0x0207] = 0x04;
+    DspState seen = dsp;
+    DspState missed = dsp;
+    const std::uint8_t srcn = static_cast<std::uint8_t>(voice * 0x10 + 0x04);
+    sampleWritingAt(seen, ram, srcnSlot, srcn, 0x01);
+    sampleWritingAt(missed, ram, srcnSlot + 1, srcn, 0x01);
+    EXPECT_EQ(seen.voices[voice].brrAddress, 0x0400u)
+        << "voice " << voice << ": a write before the source slot reaches the start read";
+    EXPECT_EQ(missed.voices[voice].brrAddress, 0x0300u)
+        << "voice " << voice << ": a write after the source slot does not";
+    EXPECT_FALSE(seen.voices[voice].startPending);
+  };
+  pin(0, 18);
+  pin(2, 0);
+  pin(7, 15);
 }
 
 }  // namespace

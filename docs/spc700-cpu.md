@@ -435,10 +435,10 @@ address is reached, the high one only written.
 `SET1` and `CLR1` name a direct-page byte and a bit in the opcode itself, and run the
 read-modify-write seat: `opcode · offset · read · write`, with no flag touched.
 
-`TSET1` and `TCLR1` reach an absolute byte and **read it twice** — the fifth of their six cycles is a
-second read of the same address, not a cycle inside the chip. Both reads are real, so a register
-that clears when read is reached twice. They set `N` and `Z` from `A - memory` and write `A`'s bits
-into the byte (`TSET1` sets them, `TCLR1` clears them); `A` itself is untouched.
+`TSET1` and `TCLR1` reach an absolute byte and **read it once** — the fifth of their six cycles is a
+cycle inside the chip, not a second read, so a register that clears when read is reached only once.
+They set `N` and `Z` from `A - memory` and write `A`'s bits into the byte (`TSET1` sets them, `TCLR1`
+clears them); `A` itself is untouched.
 
 The carry-bit instructions take a 16-bit operand that packs two things: the **address in its low 13
 bits**, and the **bit index in the three above them**.
@@ -678,7 +678,7 @@ environment variables shape a run:
   the read-modify-write seat, the order of the two-operand forms, and the comparison that writes
   nothing.
 - `tests/spc700/word_bit_cycles_test.cpp` — the 16-bit and bit families' cycle placement: the word
-  page-wrap and its interleave, the second read of `TSET1`, the bit operand's packing, and the
+  page-wrap and its interleave, the internal cycle of `TSET1`, the bit operand's packing, and the
   instructions that run inside the chip.
 - `tests/spc700/control_flow_cycles_test.cpp` — the control-flow family's cycle placement: what a
   taken branch costs, the order a call reaches the stack and its destination in, the linear pointer

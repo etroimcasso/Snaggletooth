@@ -28,6 +28,7 @@ add_library(snaggletooth STATIC
   src/dsp.cpp
   src/snes.cpp
   src/snes_dma.cpp
+  src/snes_ipl_stub.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -74,6 +75,34 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   else()
     target_compile_options(spc_render PRIVATE -Wall -Wextra -Werror)
   endif()
+
+  # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
+  # tooling above because that reads a file format and this reads the instruction
+  # set; the test tree already draws the same line between tests/spc and
+  # tests/spc700. The disassembler links the library because it measures each
+  # opcode's cost by running the interpreter rather than carrying a table beside it.
+  add_library(snaggletooth_spc700 STATIC
+    tools/spc700/spc700_disasm.cpp
+  )
+  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth)
+  target_include_directories(snaggletooth_spc700 PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/spc700>
+  )
+  target_compile_features(snaggletooth_spc700 PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_spc700 PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_spc700 PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_spc700 PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(spc700_disasm tools/spc700/spc700_disasm_main.cpp)
+  target_link_libraries(spc700_disasm PRIVATE snaggletooth_spc700)
+  if(MSVC)
+    target_compile_options(spc700_disasm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(spc700_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
 endif()
 
 if(SNAGGLETOOTH_BUILD_TESTS)
@@ -102,6 +131,22 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   set(SNAGGLETOOTH_65816_VECTORS "" CACHE PATH
       "Path to the SingleStepTests 65816 'v1' vector directory")
 
+  # Path to a directory holding the four Blargg SPC test ROMs (spc_smp.sfc,
+  # spc_timer.sfc, spc_mem_access_times.sfc, spc_dsp6.sfc), searched recursively.
+  # When empty, the Blargg acceptance tests register but skip with a visible reason.
+  # The ROMs are third-party test binaries — staged locally, never vendored.
+  set(SNAGGLETOOTH_BLARGG_ROMS "" CACHE PATH
+      "Path to the directory holding the Blargg SPC test ROMs")
+
+  # Path to a 64-byte audio boot ROM. When set, the acceptance tests boot the
+  # machine on that image instead of the built-in upload stub, which is what a
+  # console's own boot code needs to be present for: one Blargg sub-test checksums
+  # the boot-ROM window and only the console's own bytes satisfy it. When empty,
+  # the tests run the stub and assert its outcome instead. The image is nobody's
+  # to distribute — supply your own or leave this unset.
+  set(SNAGGLETOOTH_BOOT_ROM "" CACHE FILEPATH
+      "Path to a 64-byte audio boot ROM to boot the acceptance tests on")
+
   add_executable(snaggletooth_tests
     tests/version_test.cpp
     tests/spc700/vector_harness.cpp
@@ -113,6 +158,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/control_flow_cycles_test.cpp
     tests/spc700/vector_test.cpp
     tests/spc700/dummy_read_test.cpp
+    tests/spc700/disasm_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
@@ -131,10 +177,14 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/math_test.cpp
     tests/snes/ppu_stub_test.cpp
     tests/snes/dma_test.cpp
+    tests/snes/ipl_stub_test.cpp
+    tests/snes/boot_rom_test.cpp
+    tests/snes/blargg_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
     tests/apu/cycle_timing_test.cpp
+    tests/apu/ipl_rom_test.cpp
     tests/dsp/brr_test.cpp
     tests/dsp/dsp_state_test.cpp
     tests/dsp/pitch_gauss_test.cpp
@@ -143,6 +193,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/dsp/noise_master_test.cpp
     tests/dsp/echo_test.cpp
     tests/dsp/sample_schedule_test.cpp
+    tests/dsp/filter_history_test.cpp
     tests/spc/loader_test.cpp
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp
@@ -151,11 +202,18 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   # reaches the library through it — no separate direct link.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
+    snaggletooth_spc700
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
-    SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}")
+    SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}"
+    SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}"
+    SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}")
+  # The IPL-stub test seeds the stub into an audio machine through the internal
+  # seam in src/, so the test target reaches the private headers there.
+  target_include_directories(snaggletooth_tests PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
     # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the

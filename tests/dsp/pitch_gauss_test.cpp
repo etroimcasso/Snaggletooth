@@ -301,17 +301,103 @@ TEST(VoiceStream, ChainedBlocksCarryTheFilterHistory) {
   EXPECT_EQ(s.dsp.voices[0].window.old, b.samples[0]);
 }
 
-TEST(VoiceStream, EndxSetsAtTheStartOfDecodingTheEndBlock) {
-  // "the bit is set at the START of decoding the BRR block, not at the end"
-  // (lines 3092-3093). The decode cursor runs three samples ahead of the
-  // position, so with the end block second, the bit appears when the cursor
-  // enters it — at position 13, three before the position itself would.
+TEST(VoiceStream, ARamRewriteAfterKeyOnDoesNotReachThePrimedSamples) {
+  // BRR bytes are read ahead of consumption: the key-on primes the first
+  // three groups — twelve samples — and later groups are decoded only when
+  // the stream requires them (Anomie's V4: decoding a group "is definately
+  // not done when not necessary"). So a RAM write after the key-on reaches
+  // only samples not yet decoded: spc_dsp6 `Misc/brr not always decoding`
+  // rewrites a parked voice's block to silence and the voice still plays all
+  // twelve primed samples when it moves, with the rewrite audible from stream
+  // sample 12 on. Both bounds matter: one fewer primed sample reddens the
+  // sample-11 read, one more reddens the sample-12 read.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  writeBlock(s.ram, 0x1000, 0xC0, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  for (int sample = 4; sample <= 11; ++sample) {
+    stepVoice(s.dsp, s.ram, 0);
+    EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(sample)) << "sample " << sample;
+  }
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: decoded after the rewrite
+  EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
+}
+
+TEST(VoiceStream, AGroupsDataIsStillWritableAtItsScheduling) {
+  // A group's decode is scheduled by the consumption of the group before
+  // last's THIRD sample — two samples after the boundary — and its data bytes
+  // are read one sample after that (spc_dsp6 `Timing/Voice/V3
+  // BRR.sample.lsb/msb` pulse each byte per row and hash which rows the
+  // hardware caught; the reads land at the load slot and S4 of the sample
+  // after the scheduling). At unity pitch the third step consumes sample 6
+  // and schedules the group holding samples 12-15; a rewrite of their bytes
+  // after that step still reaches them, because the read is the fourth
+  // step's.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the boundary
+  stepVoice(s.dsp, s.ram, 0);  // sample 5
+  stepVoice(s.dsp, s.ram, 0);  // sample 6: the scheduling
+  s.ram[0x1007] = 0x00;        // samples 12-13
+  s.ram[0x1008] = 0x00;        // samples 14-15
+  for (int sample = 7; sample <= 11; ++sample) {
+    stepVoice(s.dsp, s.ram, 0);
+    EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(sample)) << "sample " << sample;
+  }
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: read at sample 7's step, after the rewrite
+  EXPECT_EQ(s.dsp.voices[0].window.newest, 0);  // ramp(12) = 8192 before it
+}
+
+TEST(VoiceStream, AGroupsDataIsNotReadTwoSamplesAfterItsScheduling) {
+  // The other bound of the same read: the fourth step performs the decode,
+  // so a rewrite after it no longer reaches samples 12-15.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the boundary
+  stepVoice(s.dsp, s.ram, 0);  // sample 5
+  stepVoice(s.dsp, s.ram, 0);  // sample 6: the scheduling
+  stepVoice(s.dsp, s.ram, 0);  // sample 7: the read
+  s.ram[0x1007] = 0x00;
+  s.ram[0x1008] = 0x00;
+  for (int sample = 8; sample <= 11; ++sample) stepVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: already decoded
+  EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(12));
+}
+
+TEST(VoiceStream, AGroupsShiftIsTheHeaderStandingAtItsScheduling) {
+  // The header is read at the SCHEDULING itself, one sample before the data:
+  // spc_dsp6 `Order/pitch after brr` rewrites a moving voice's header shift
+  // once per sample and its tape carries the group crossed into under one
+  // shift decoded under the shift standing one sample later — the scheduling
+  // sample under a two-samples-per-step pitch. A header rewrite AFTER the
+  // scheduling does not reach the group: its samples decode under the
+  // captured shift while the data read is still one sample away.
+  Stream s;
+  startVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 4: the boundary
+  stepVoice(s.dsp, s.ram, 0);  // sample 5
+  stepVoice(s.dsp, s.ram, 0);  // sample 6: the scheduling reads the header
+  s.ram[0x1000] = 0xB0;        // shift 12 -> 11: halves every later decode
+  for (int sample = 7; sample <= 11; ++sample) stepVoice(s.dsp, s.ram, 0);
+  stepVoice(s.dsp, s.ram, 0);  // sample 12: decoded under the captured header
+  EXPECT_EQ(s.dsp.voices[0].window.newest, ramp(12));
+}
+
+TEST(VoiceStream, EndxSetsWhenTheDecoderLeavesTheEndBlock) {
+  // The bit is set "when the block is complete and the next block will be
+  // that pointed to by the loop pointer" (Anomie 326-328) — the decoder's
+  // jump out of the end block, not its entry (fullsnes's "set at the START of
+  // decoding the BRR block", lines 3092-3093, is what spc_dsp6 `Order/endx
+  // after final brr decode` refutes). With the end block second, the decoder
+  // enters it at step 4 — the step that consumes the first block's eighth
+  // sample — and leaves it sixteen steps later.
   Stream s;
   writeBlock(s.ram, 0x1009, 0xC3, {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11});
   startVoice(s.dsp, s.ram, 0);
-  for (int n = 1; n <= 12; ++n) stepVoice(s.dsp, s.ram, 0);
-  EXPECT_EQ(s.dsp[kEndx], 0);
-  stepVoice(s.dsp, s.ram, 0);  // the cursor decodes the end block's sample 0
+  for (int n = 1; n <= 19; ++n) {
+    stepVoice(s.dsp, s.ram, 0);
+    EXPECT_EQ(s.dsp[kEndx], 0) << "step " << n;
+  }
+  stepVoice(s.dsp, s.ram, 0);  // the decoder jumps out of the end block
   EXPECT_EQ(s.dsp[kEndx], 0x01);
 }
 
@@ -348,7 +434,11 @@ TEST(VoiceStream, AnEndMuteBlockAlsoJumpsToTheLoopAddress) {
 TEST(VoiceStream, EndxReSetsWhenTheDecoderReachesTheEndAgain) {
   // ENDX re-arms after its acknowledge: "bits may get set ... once when the
   // BRR decoder reaches an End-code" (lines 3087-3090). A self-looping end
-  // block sets its bit at the prime, again on every loop pass.
+  // block sets its bit every time the decoder leaves it for the loop address
+  // — once per pass, sixteen cursor samples apart. The prime itself sets
+  // nothing; the first set is at step 4, when the decoder resolves the loop
+  // out of the start block (spc_dsp6 `Misc/brr early end at many pitches`
+  // pins the decoder's lead, `Order/endx after final brr decode` the exit).
   Ram ram{};
   DspState dsp;
   writeDirectoryEntry(ram, 0x02, 0, 0x1000, 0x1000);
@@ -356,11 +446,15 @@ TEST(VoiceStream, EndxReSetsWhenTheDecoderReachesTheEndAgain) {
   dsp[kDir] = 0x02;
   setPitch(dsp, 0, 0x1000);
   startVoice(dsp, ram, 0);
-  EXPECT_EQ(dsp[kEndx], 0x01);  // the first block is itself an end block
-  dsp[kEndx] = 0;               // the CPU's write-acknowledge cleared it
-  for (int n = 1; n <= 12; ++n) stepVoice(dsp, ram, 0);
+  EXPECT_EQ(dsp[kEndx], 0);  // the prime enters the end block; no set yet
+  for (int n = 1; n <= 3; ++n) stepVoice(dsp, ram, 0);
   EXPECT_EQ(dsp[kEndx], 0);
-  stepVoice(dsp, ram, 0);  // the loop re-enters the same end block
+  stepVoice(dsp, ram, 0);  // the decoder leaves the end block for the loop
+  EXPECT_EQ(dsp[kEndx], 0x01);
+  dsp[kEndx] = 0;  // the CPU's write-acknowledge cleared it
+  for (int n = 1; n <= 15; ++n) stepVoice(dsp, ram, 0);
+  EXPECT_EQ(dsp[kEndx], 0);
+  stepVoice(dsp, ram, 0);  // the next pass leaves it again
   EXPECT_EQ(dsp[kEndx], 0x01);
   EXPECT_EQ(dsp.voices[0].brrAddress, 0x1000);
 }

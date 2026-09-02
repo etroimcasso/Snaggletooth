@@ -8,11 +8,15 @@ can copy, run, and restore.
 
 Where the [SPC700 core](spc700-cpu.md) reads and writes an address space you supply, the machine
 *is* that address space. It routes the CPU's reads and writes: `$00F0`–`$00FF` reach the register
-overlay, everything else is plain RAM. The same interpreter the vectors pin runs unchanged over it.
+overlay; `$FFC0`–`$FFFF` return a mapped boot-ROM image when one is set and CONTROL bit 7 is on (see
+*The boot-ROM window* below); everything else is plain RAM. The same interpreter the vectors pin runs
+unchanged over it.
 
-There is no boot ROM. A real SNES runs Sony's 64-byte IPL program to bring the audio chip up; the
-machine skips that and constructs the state the IPL leaves behind, so no copyrighted bytes are ever
-needed. You load a driver image straight into RAM and point the CPU at it.
+There is no console boot ROM. A real SNES runs Sony's 64-byte IPL program to bring the audio chip up;
+the machine skips that and constructs the state the IPL leaves behind, so no copyrighted bytes are
+ever needed. You load a driver image straight into RAM and point the CPU at it — or, to run the
+console's upload handshake, map an original 64-byte boot program over the `$FFC0` window (see *The
+boot-ROM window*).
 
 ## Constructing and stepping
 
@@ -71,18 +75,20 @@ The sixteen bytes `$F0`–`$FF` are hardware registers laid over RAM. From the C
 - A write to a register address updates the register **and** the RAM byte beneath it.
 - A read of a register address returns the register, never the RAM behind it.
 - Write-only registers (TEST, CONTROL, the timer targets) read back `0`.
-- `$F8` and `$F9` are plain RAM with no register attached.
+- `$F8` and `$F9` are the auxiliary ports (the S-SMP's unconnected P4/P5 pins): storage of their
+  own that reads back what the CPU wrote. The RAM beneath them takes the same write, but a DSP echo
+  buffer sweeping the region writes only that RAM — the port bytes the CPU reads never change.
 
 The registers:
 
 | Address | Register | Behavior |
 |---|---|---|
 | `$F0` | TEST | Stored; power-on `$0A`. A write is ignored while the CPU's `P` flag is set. |
-| `$F1` | CONTROL | Write-only. Timer enables, the input-port clears, the IPL-mapping bit. |
+| `$F1` | CONTROL | Write-only. Timer enables, the input-port clears, and the boot-ROM window enable (bit 7 — see *The boot-ROM window*). |
 | `$F2` | DSPADDR | The DSP register address latch. |
 | `$F3` | DSPDATA | Reads/writes the selected DSP register. |
 | `$F4`–`$F7` | Ports 0–3 | The communication latches (see below). |
-| `$F8`, `$F9` | — | Plain RAM. |
+| `$F8`, `$F9` | AUXIO | Port bytes of their own; read back the last CPU write, untouched by echo writes to the RAM beneath. Power-on `$FF` (the unconnected pins). |
 | `$FA`–`$FC` | T0–T2 TARGET | Write-only timer targets. |
 | `$FD`–`$FF` | T0–T2 OUT | Read-only 4-bit timer outputs; a read clears the value. |
 
@@ -103,6 +109,29 @@ apu.setPc(0x0200);
 apu.run(10);
 // apu.state().dsp[0x10] == 0x7F
 ```
+
+## The boot-ROM window
+
+`$FFC0`–`$FFFF` can serve a 64-byte boot-ROM image to the SPC700 while CONTROL bit 7 is set.
+`mapIplRom` sets the image:
+
+```cpp
+std::array<std::uint8_t, 64> boot = /* an original upload program */;
+apu.mapIplRom(boot);
+```
+
+With an image mapped and CONTROL bit 7 set, a CPU read in `$FFC0`–`$FFFF` returns the image. Writes
+always reach the RAM beneath the window, so a driver can scratch those addresses and still read the
+image back unchanged — the way the console's boot ROM reads back after the upload handshake writes
+over the RAM under it. Clearing bit 7, or mapping no image (the default), exposes that RAM: the window
+reads as plain memory.
+
+The image is configuration, not machine state. It is fixed for the machine's life the way a cartridge
+is: `restore()` and `reset()` keep it, and it is not part of the `ApuState` a snapshot carries. Host
+RAM access (`readRam`/`writeRam`) ignores the window and reaches the RAM beneath.
+
+No console boot ROM is ever needed. The image a host maps is an original program written to the
+documented upload protocol, never Sony's bytes.
 
 ## The communication ports
 
@@ -240,8 +269,10 @@ DSPADDR, not the register the CPU would see there.
   opcodes read their destination), and that read clears the output.
 - **Write-only registers read back 0.** TEST, CONTROL, and the timer targets return 0 when read; the
   write still lands in the RAM byte beneath them.
-- **There is no IPL ROM.** `$FFC0`–`$FFFF` is plain RAM, not a boot ROM window; CONTROL's high bit is
-  carried as state but maps nothing. Set the CPU entry yourself with `setPc`.
+- **The boot-ROM window is opt-in.** With no image mapped — the default — `$FFC0`–`$FFFF` is plain
+  RAM and CONTROL bit 7 maps nothing; load a driver into RAM and set the entry with `setPc`. Map an
+  image with `mapIplRom` and CONTROL bit 7 turns the window into that image for CPU reads, while
+  writes still fall through to the RAM beneath. No console boot ROM is needed either way.
 - **TEST is stored, not fully modeled.** The machine stores TEST and honors the documented
   "ignored while `P` is set" rule, but the register's behavioral bits (clock scaling, the timer gate)
   are not modeled — no sound driver touches them, and the power-on `$0A` satisfies the state the
