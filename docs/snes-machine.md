@@ -39,7 +39,7 @@ into its ready state and a host loads a program into audio RAM directly. See
 
 ## The memory map
 
-The bus maps a 24-bit address as LoROM does:
+The bus maps a 24-bit address the way the console does:
 
 | Address | Content |
 |---|---|
@@ -48,10 +48,48 @@ The bus maps a 24-bit address as LoROM does:
 | `$00-$3F` / `$80-$BF:$2140-$217F` | the APU communication ports (four registers, mirrored every four bytes) |
 | `$00-$3F` / `$80-$BF:$2180-$2183` | the work-RAM data port |
 | `$00-$3F` / `$80-$BF:$420D` | MEMSEL, the second region's speed select |
-| `$8000-$FFFF` (any bank) | the cartridge, laid out in the LoROM window |
+| `$8000-$FFFF` (any bank) | the cartridge |
+| `$40-$7D` / `$C0-$FF:$0000-$FFFF` | the cartridge across the whole bank, under HiROM |
+| `$70-$7D` / `$F0-$FD:$0000-$7FFF` | save RAM, under LoROM |
+| `$20-$3F` / `$A0-$BF:$6000-$7FFF` | save RAM, under HiROM |
 
 A read of an address the machine does not map returns the last value the data bus carried — the open-bus
 behavior real hardware shows. The cartridge is read-only: a write to a ROM address changes nothing.
+
+### How a cartridge lays across the bus
+
+The two layouts differ in how much of a bank the cartridge gets. **LoROM** gives each bank its upper
+32 KB and lays those halves end to end. **HiROM** gives each of `$40-$7D` and `$C0-$FF` a whole 64 KB
+and lays those end to end, reaching the same bytes through the matching system bank's upper half.
+
+`SnesConfig::map` chooses between them. Left absent it is read from the image's own header, which is
+what lets any cartridge boot without the caller knowing its layout; set it to run an image whose
+header is wrong, absent, or not a header at all.
+
+```cpp
+Snes machine(SnesConfig{.rom = image});                              // the header decides
+Snes forced(SnesConfig{.rom = image, .map = CartridgeMap::HiRom});   // the caller decides
+```
+
+`detectCartridgeMap` answers the same question on its own, without building a machine.
+
+**An image repeats across the window it does not fill.** A cartridge carries one ROM chip per power of
+two in its size, wired one after another, and the board leaves the address lines above a chip
+undecoded — so an address past a chip reads that chip again rather than running into the next one. A
+512 KB image is one chip and repeats whole. A 3 MB image is a 2 MB chip and a 1 MB chip, and the
+megabyte above it repeats **the second** chip, not the image.
+
+### Save RAM
+
+`SnesState::sram` is the cartridge's save, as large as its header declares and empty when it declares
+none. It is machine state rather than configuration: a snapshot carries the save and `restore()` puts
+it back, so a game persists one by reading it out.
+
+The size comes from the header, and it matters that it is exact — an address past the end of the save
+repeats it from the start, and a game that writes twice and reads back once is measuring how much save
+RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `declaredSaveRamBytes`
+answers what an image asks for without building a machine. A cartridge declaring none leaves those
+addresses reading open bus.
 
 Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
 the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address

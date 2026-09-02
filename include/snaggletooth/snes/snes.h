@@ -5,10 +5,10 @@
 //
 // The machine owns the CPU, the 128 KB of work RAM, and the audio machine. Its
 // bus maps a 24-bit address the way the console does: work RAM in banks $7E-$7F
-// and mirrored into the low pages of every system bank, the cartridge ROM in the
-// LoROM window, the APU communication ports at $2140-$2143, and the work-RAM data
-// port at $2180-$2183. A read of an unmapped address returns the last value the
-// data bus carried.
+// and mirrored into the low pages of every system bank, the cartridge ROM and its
+// save RAM in whichever windows the cartridge's map gives them, the APU
+// communication ports at $2140-$2143, and the work-RAM data port at $2180-$2183.
+// A read of an unmapped address returns the last value the data bus carried.
 //
 // Every access is priced by the region it reaches. The console runs three memory
 // speeds — six, eight, or twelve master cycles per access — and the machine
@@ -65,13 +65,39 @@ struct DmaChannel {
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
 };
 
+// How a cartridge lays its image across the bus. LoROM gives each bank a 32 KB
+// window in the upper half; HiROM gives it the whole 64 KB and reaches the same
+// bytes through the system banks' upper halves.
+enum class CartridgeMap { LoRom, HiRom };
+
+// Which map a cartridge image uses, read from its header. Both layouts put a
+// header in a fixed place, so the two candidate sites are scored against each
+// other: a header whose checksum agrees with its complement, whose mode byte
+// names the site it sits in, and whose title reads as text is the real one. An
+// image with neither is reported as LoROM, the denser layout of the two.
+[[nodiscard]] CartridgeMap detectCartridgeMap(std::span<const std::uint8_t> rom) noexcept;
+
+// The bytes of save RAM a cartridge header declares, from its size code: zero for
+// a cartridge with none, otherwise 1 KB shifted by the code. Sizes beyond what a
+// cartridge can address are clamped.
+[[nodiscard]] std::size_t declaredSaveRamBytes(std::span<const std::uint8_t> rom) noexcept;
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
 struct SnesConfig {
-  std::span<const std::uint8_t> rom;   // a LoROM cartridge image
+  std::span<const std::uint8_t> rom;   // a cartridge image, LoROM or HiROM
   Region region = Region::Ntsc;        // the console clock rate
   bool iplStub = true;                 // seed the APU with its upload stub (arrives with the loader)
+
+  // The cartridge's map. Left absent, it is read from the image's own header,
+  // which is what lets any cartridge boot without the caller knowing its layout.
+  // Set it to run an image whose header is wrong, absent, or not a header at all.
+  std::optional<CartridgeMap> map = std::nullopt;
+
+  // The save RAM to give the machine, in bytes. Left absent, it is taken from the
+  // cartridge header. Set it to zero to run a cartridge without its save.
+  std::optional<std::size_t> saveRamBytes = std::nullopt;
 
   // An audio boot ROM to run in place of the built-in stub. Absent by default, so
   // the machine boots on the stub. Supply a console's own 64-byte boot ROM and the
@@ -88,6 +114,13 @@ struct SnesConfig {
 struct SnesState {
   Cpu65816State cpu{};
   std::array<std::uint8_t, 131072> wram{};  // 128 KB work RAM (banks $7E-$7F)
+
+  // The cartridge's save RAM, as large as its header declares and empty when it
+  // declares none. It is machine state rather than configuration: a snapshot
+  // carries the save with it, and restore() puts it back. A game persists one by
+  // reading it out.
+  std::vector<std::uint8_t> sram{};
+
   ApuState apu{};
   std::uint32_t wmadd = 0;      // the work-RAM port address ($2181-$2183); $2180 auto-increments it
   std::uint8_t memsel = 0;      // $420D bit 0: the second waitstate region runs fast (1) or slow (0)
@@ -314,9 +347,18 @@ class Snes {
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
-  // The cartridge byte a LoROM address reaches, mirrored across the image. Pure —
-  // it neither prices the cycle nor touches the data bus.
+  // The cartridge byte an address reaches under the machine's map, mirrored across
+  // the image. Pure — it neither prices the cycle nor touches the data bus.
   [[nodiscard]] std::uint8_t romByte(std::uint8_t bank, std::uint16_t offset) const noexcept;
+
+  // Whether an address lands on the cartridge under the machine's map, and whether
+  // it lands on save RAM. HiROM reaches ROM across the whole of banks $40-$7D and
+  // $C0-$FF, where LoROM reaches it only above $8000; the two maps also put save
+  // RAM in different banks. saveRamIndex answers the offset into the save, already
+  // masked to its size, for an address that reaches it.
+  [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
+  [[nodiscard]] std::optional<std::size_t> saveRamIndex(std::uint8_t bank,
+                                                        std::uint16_t offset) const noexcept;
 
   // The work-RAM data port: $2180 reads or writes work RAM at the port address and
   // steps it; $2181-$2183 set the address and read back as open bus.
@@ -364,6 +406,7 @@ class Snes {
   SnesState state_;                  // work RAM, registers and counters are authoritative here
   std::vector<std::uint8_t> rom_;    // the cartridge image, fixed for the machine's life
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
+  CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
