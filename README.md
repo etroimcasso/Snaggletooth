@@ -82,7 +82,8 @@ The table below is kept honest as components land.
 | APU machine (64KB RAM, timers, communication ports) | **complete** — register overlay, three timers, communication ports, exact cycle budgets |
 | S-DSP (voices, mixer, echo) | feature-complete — BRR decode, pitch and Gaussian interpolation, envelopes, keying, eight-voice stereo mix, noise, pitch modulation, master volume, echo delay line, intra-sample register schedule. Three sub-tests of the DSP test ROM still report a wrong checksum (above) |
 | 65816 CPU core (the main CPU's instruction set) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle vector-validated |
-| SPC700 disassembler | **complete** — traces control flow from entry points so data is never decoded as code, names hardware registers, marks run-time-patched bytes, emits assembly source; cycle costs measured from the interpreter |
+| Disassembly framework (tracer, renderer, backend interface) | **complete** — 24-bit addresses, a per-path context so a chip whose instruction widths depend on state is traced correctly and a conflict between paths is reported rather than guessed, assemblable output; each chip's disassembler is a backend over it |
+| SPC700 disassembler | **complete** — the SPC700 backend: traces control flow from entry points so data is never decoded as code, names hardware registers, marks run-time-patched bytes, emits assembly source; cycle costs measured from the interpreter |
 | SNES machine (bus, memory map, clock, timing) | in progress — LoROM map, work RAM and its data port, APU communication ports, the 6/8/12-master-cycle region model at both clock rates, exact master-cycle budgeting and the CPU-to-APU interleave, video counters, vertical-blank NMI and H/V-timer IRQ, multiply/divide unit, PPU register file, eight DMA/HDMA channels, and the audio boot handshake. The rendering PPU remains |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders 32 kHz WAV; output not yet validated against reference renders |
 | SPC700 assembler | not started — the dialect it accepts is specified |
@@ -102,7 +103,8 @@ The pages live in [docs/](docs/README.md), which indexes them by subject and say
 | [65816-cpu.md](docs/65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 | [snes-machine.md](docs/snes-machine.md) | The machine around it — the LoROM and HiROM maps and a cartridge's save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the multiply/divide unit, the PPU register file, the boot handshake, and stepping, running and snapshotting |
 | [spc-rendering.md](docs/spc-rendering.md) | Rendering audio to a WAV from an SPC dump or from a cartridge, and what a dump does and does not carry |
-| [spc700-disassembler.md](docs/spc700-disassembler.md) | The disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
+| [disassembly-framework.md](docs/disassembly-framework.md) | The tracing disassembler's chip-independent half — the backend interface, 24-bit addresses, the per-path context and conflict reporting, and the listing format |
+| [spc700-disassembler.md](docs/spc700-disassembler.md) | The SPC700 disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
 | [spc700-assembly.md](docs/spc700-assembly.md) | The assembly language the disassembler emits |
 
 ## Roadmap

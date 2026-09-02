@@ -1,10 +1,9 @@
 #include "spc700_disasm.h"
 
-#include <algorithm>
 #include <array>
 #include <cstdio>
-#include <deque>
-#include <set>
+#include <string>
+#include <utility>
 
 #include "snaggletooth/apu/spc700.h"
 
@@ -467,10 +466,11 @@ std::string_view registerName(std::uint16_t address) {
   }
 }
 
-std::optional<Instruction> decodeAt(std::span<const std::uint8_t> image,
-                                    std::uint16_t base, std::uint16_t address) {
-  if (address < base) return std::nullopt;
-  const std::size_t offset = static_cast<std::size_t>(address - base);
+std::optional<Decoded> Spc700Backend::decode(std::span<const std::uint8_t> image, Address base,
+                                             Address at, Context context) const {
+  if (at > 0xFFFFu || base > 0xFFFFu) return std::nullopt;
+  if (at < base) return std::nullopt;
+  const std::size_t offset = static_cast<std::size_t>(at - base);
   if (offset >= image.size()) return std::nullopt;
 
   const std::uint8_t opcode = image[offset];
@@ -480,6 +480,7 @@ std::optional<Instruction> decodeAt(std::span<const std::uint8_t> image,
 
   const std::uint8_t first = extra >= 1 ? image[offset + 1] : std::uint8_t{0};
   const std::uint8_t second = extra >= 2 ? image[offset + 2] : std::uint8_t{0};
+  const std::uint16_t address = static_cast<std::uint16_t>(at);
 
   Instruction out;
   out.address = address;
@@ -537,251 +538,33 @@ std::optional<Instruction> decodeAt(std::span<const std::uint8_t> image,
       break;
   }
 
+  // The address the operand names, for the register annotation: a two-byte
+  // instruction's operand byte read as a direct-page address, a three-byte
+  // instruction's operand word.
+  if (extra == 1) out.operandAddress = first;
+  if (extra == 2) out.operandAddress = word;
+
   out.text = fill(info.text, slot1, slot2);
-  return out;
+  return Decoded{.instruction = std::move(out), .next = context};
 }
 
-Listing trace(const DisasmRequest& request) {
-  Listing listing;
-  const std::span<const std::uint8_t> image = request.image;
-  const std::uint16_t base = request.base;
-  if (image.empty()) return listing;
-
-  const std::size_t size = image.size();
-  std::vector<bool> isOpcode(size, false);
-  std::vector<bool> covered(size, false);
-  std::map<std::uint16_t, Instruction> decoded;
-
-  auto inRange = [&](std::uint16_t address) {
-    return address >= base && static_cast<std::size_t>(address - base) < size;
-  };
-
-  std::deque<std::uint16_t> pending;
-  std::set<std::uint16_t> queued;
-  auto visit = [&](std::uint16_t address) {
-    if (!inRange(address) || queued.count(address) != 0) return;
-    queued.insert(address);
-    pending.push_back(address);
-  };
-
-  if (request.entries.empty()) {
-    visit(base);
-    listing.labels[base] = "entry";
-  }
-  for (std::uint16_t entry : request.entries) {
-    if (!inRange(entry)) {
-      listing.warnings.push_back("entry $" + hex16(entry) + " is outside the image");
-      continue;
-    }
-    visit(entry);
-    listing.labels[entry] = "entry_" + hex16(entry);
-  }
-
-  while (!pending.empty()) {
-    const std::uint16_t address = pending.front();
-    pending.pop_front();
-
-    const std::size_t offset = static_cast<std::size_t>(address - base);
-    if (isOpcode[offset]) continue;
-
-    std::optional<Instruction> instruction = decodeAt(image, base, address);
-    if (!instruction) {
-      listing.warnings.push_back("instruction at $" + hex16(address) +
-                                 " runs past the end of the image");
-      continue;
-    }
-
-    // A target that lands inside an instruction already decoded means the trace
-    // read one of the two as code when it is not. Report it rather than silently
-    // preferring either reading.
-    bool overlaps = false;
-    for (std::uint8_t i = 0; i < instruction->length; ++i) {
-      if (covered[offset + i] && !isOpcode[offset]) overlaps = true;
-    }
-    if (overlaps) {
-      listing.warnings.push_back("$" + hex16(address) +
-                                 " overlaps an instruction already decoded");
-    }
-
-    isOpcode[offset] = true;
-    for (std::uint8_t i = 0; i < instruction->length; ++i) covered[offset + i] = true;
-
-    const std::uint16_t next =
-        static_cast<std::uint16_t>(address + instruction->length);
-
-    switch (instruction->flow) {
-      case Flow::Continue:
-        visit(next);
-        break;
-      case Flow::Branch:
-        visit(next);
-        if (instruction->target) visit(*instruction->target);
-        break;
-      case Flow::Call:
-        if (instruction->target) visit(*instruction->target);
-        visit(next);
-        break;
-      case Flow::Jump:
-        if (instruction->target) visit(*instruction->target);
-        break;
-      case Flow::Return:
-      case Flow::Halt:
-        break;
-    }
-
-    if (instruction->target && inRange(*instruction->target)) {
-      const std::uint16_t destination = *instruction->target;
-      if (listing.labels.find(destination) == listing.labels.end()) {
-        listing.labels[destination] =
-            (instruction->flow == Flow::Call ? "sub_" : "loc_") + hex16(destination);
-      }
-    }
-
-    decoded.emplace(address, *instruction);
-  }
-
-  // Supplied symbols win over generated labels.
-  for (const auto& [address, name] : request.symbols) listing.labels[address] = name;
-
-  // Annotate: a named hardware register the operand reaches, and any byte that
-  // differs from the image the code started as.
-  const bool havePrior = request.priorImage.size() == image.size();
-  for (auto& [address, instruction] : decoded) {
-    if (request.annotateRegisters) {
-      const std::size_t at = static_cast<std::size_t>(address - base);
-      if (instruction.length == 2) {
-        const std::string_view named = registerName(image[at + 1]);
-        if (!named.empty()) instruction.note = std::string(named);
-      } else if (instruction.length == 3) {
-        const std::uint16_t word = static_cast<std::uint16_t>(
-            image[at + 1] | (image[at + 2] << 8));
-        const std::string_view named = registerName(word);
-        if (!named.empty()) instruction.note = std::string(named);
-      }
-    }
-    if (havePrior) {
-      const std::size_t at = static_cast<std::size_t>(address - base);
-      std::string was;
-      for (std::uint8_t i = 0; i < instruction.length; ++i) {
-        if (image[at + i] != request.priorImage[at + i]) {
-          was += (was.empty() ? "" : " ") + hex8(request.priorImage[at + i]);
-        }
-      }
-      if (!was.empty()) {
-        if (!instruction.note.empty()) instruction.note += "; ";
-        instruction.note += "PATCHED at run time, was " + was;
-      }
-    }
-  }
-
-  // Emit lines in address order: decoded instructions, and runs of everything the
-  // trace never reached.
-  std::size_t offset = 0;
-  while (offset < size) {
-    const std::uint16_t address = static_cast<std::uint16_t>(base + offset);
-    auto found = decoded.find(address);
-    if (found != decoded.end() && isOpcode[offset]) {
-      Line line;
-      line.isCode = true;
-      line.address = address;
-      line.instruction = found->second;
-      listing.lines.push_back(std::move(line));
-      offset += found->second.length;
-      continue;
-    }
-    const std::size_t start = offset;
-    while (offset < size && !isOpcode[offset]) ++offset;
-    Line line;
-    line.isCode = false;
-    line.address = static_cast<std::uint16_t>(base + start);
-    line.data.assign(image.begin() + static_cast<std::ptrdiff_t>(start),
-                     image.begin() + static_cast<std::ptrdiff_t>(offset));
-    listing.lines.push_back(std::move(line));
-  }
-
-  return listing;
+std::string_view Spc700Backend::registerName(Address address) const {
+  return address > 0xFFFFu ? std::string_view{}
+                           : disasm::registerName(static_cast<std::uint16_t>(address));
 }
 
-std::string render(const Listing& listing) {
-  std::string out;
-
-  for (const std::string& warning : listing.warnings) {
-    out += "; warning: " + warning + "\n";
-  }
-  if (!listing.warnings.empty()) out += "\n";
-
-  // A listing is source, not a report about one: it assembles back to the bytes it
-  // came from, so a ROM can be disassembled, edited and rebuilt without the
-  // original source ever existing. Everything that is not an instruction or a
-  // directive — the address, the raw bytes, the cycle cost, an annotation — rides
-  // in a trailing comment, which is what keeps that true.
-  if (!listing.lines.empty()) {
-    out += "        ORG $" + hex16(listing.lines.front().address) + "\n";
-  }
-
-  auto labelAt = [&](std::uint16_t address) -> const std::string* {
-    auto found = listing.labels.find(address);
-    return found == listing.labels.end() ? nullptr : &found->second;
-  };
-
-  // Where the trailing comment starts. Wide enough for the longest mnemonic the
-  // table can render, so the comment column does not move down the listing.
-  constexpr std::size_t kCommentColumn = 40;
-  auto padTo = [](std::string& text, std::size_t column) {
-    if (text.size() < column) {
-      text.append(column - text.size(), ' ');
-    } else {
-      text += "  ";
-    }
-  };
-
-  for (const Line& line : listing.lines) {
-    if (line.isCode) {
-      if (const std::string* label = labelAt(line.address)) {
-        out += "\n" + *label + ":\n";
-      }
-      const Instruction& instruction = line.instruction;
-      std::string row = "        " + instruction.text;
-      padTo(row, kCommentColumn);
-
-      std::string bytes;
-      for (std::uint8_t byte : instruction.bytes) bytes += hex8(byte) + " ";
-      // Three bytes is the longest instruction, so a fixed width keeps the cycle
-      // costs aligned whatever the mix of lengths above and below.
-      bytes.append(9 - bytes.size(), ' ');
-
-      row += "; $" + hex16(instruction.address) + "  " + bytes + " " +
-             std::to_string(instruction.cycles.base);
-      if (instruction.cycles.taken != 0) {
-        row += "/" + std::to_string(instruction.cycles.taken);
-      }
-      if (!instruction.note.empty()) row += "  " + instruction.note;
-      out += row + "\n";
-      continue;
-    }
-
-    if (line.data.empty()) continue;
-    out += "\n; ---- " + std::to_string(line.data.size()) +
-           " bytes execution did not reach\n";
-    constexpr std::size_t kPerRow = 8;
-    for (std::size_t i = 0; i < line.data.size(); i += kPerRow) {
-      const std::size_t end = std::min(i + kPerRow, line.data.size());
-      std::string row = "        DB ";
-      std::string ascii;
-      for (std::size_t j = i; j < end; ++j) {
-        if (j != i) row += ",";
-        row += "$" + hex8(line.data[j]);
-        const std::uint8_t byte = line.data[j];
-        ascii += (byte >= 0x20 && byte < 0x7F) ? static_cast<char>(byte) : '.';
-      }
-      padTo(row, kCommentColumn);
-      row += "; $" + hex16(static_cast<std::uint16_t>(line.address + i)) + "  |" +
-             ascii + "|";
-      out += row + "\n";
-    }
-  }
-
-  return out;
+const Spc700Backend& spc700Backend() {
+  static const Spc700Backend backend;
+  return backend;
 }
+
+std::optional<Instruction> decodeAt(std::span<const std::uint8_t> image,
+                                    std::uint16_t base, std::uint16_t address) {
+  std::optional<Decoded> decoded = spc700Backend().decode(image, base, address, Context{});
+  if (!decoded) return std::nullopt;
+  return std::move(decoded->instruction);
+}
+
+Listing trace(const DisasmRequest& request) { return trace(spc700Backend(), request); }
 
 }  // namespace snaggletooth::disasm

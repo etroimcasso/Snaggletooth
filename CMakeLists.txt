@@ -87,15 +87,32 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(rom_render PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The disassembly framework — the tracer and the renderer, which do not depend on
+  # which chip the bytes are for. Each chip's disassembler is a backend over it.
+  add_library(snaggletooth_disasm STATIC
+    tools/disasm/disasm.cpp
+  )
+  target_include_directories(snaggletooth_disasm PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_disasm PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_disasm PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_disasm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
   # tooling above because that reads a file format and this reads the instruction
   # set; the test tree already draws the same line between tests/spc and
-  # tests/spc700. The disassembler links the library because it measures each
-  # opcode's cost by running the interpreter rather than carrying a table beside it.
+  # tests/spc700. The disassembler is the SPC700 backend over the framework, and it
+  # links the library because it measures each opcode's cost by running the
+  # interpreter rather than carrying a table beside it.
   add_library(snaggletooth_spc700 STATIC
     tools/spc700/spc700_disasm.cpp
   )
-  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth)
+  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
   target_include_directories(snaggletooth_spc700 PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/spc700>
   )
@@ -170,6 +187,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/vector_test.cpp
     tests/spc700/dummy_read_test.cpp
     tests/spc700/disasm_test.cpp
+    tests/disasm/framework_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp

@@ -39,7 +39,8 @@ what is unstarted.
 | Page | Covers |
 |---|---|
 | [spc-rendering.md](spc-rendering.md) | Rendering audio to a WAV from an SPC dump or from a cartridge, and what a dump does and does not carry |
-| [spc700-disassembler.md](spc700-disassembler.md) | The disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
+| [disassembly-framework.md](disassembly-framework.md) | The tracing disassembler's chip-independent half — the backend interface, 24-bit addresses, the per-path context and conflict reporting, and the listing format |
+| [spc700-disassembler.md](spc700-disassembler.md) | The SPC700 disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
 | [spc700-assembly.md](spc700-assembly.md) | The assembly language the disassembler emits |
 
 ## Reading these pages

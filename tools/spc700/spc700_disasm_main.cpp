@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
   std::uint32_t offset = 0;
   std::uint32_t length = 0;
   std::uint32_t priorOffset = 0;
-  std::vector<std::uint16_t> entries;
+  std::vector<snaggletooth::disasm::Address> entries;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
