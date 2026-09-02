@@ -147,7 +147,13 @@ The handshake runs entirely through the ports at `$2140-$2143` (the APU reads th
    to the address in ports 2 and 3.
 
 Every step waits for the stub's echo before the next, so the two processors stay in step whatever their
-relative speed. The stub occupies `$FFC0-$FFFF`, the window the console maps its boot program to. The
+relative speed. The echo is the last thing a step does, and it is what releases the main CPU: once it
+appears, every input port is the main CPU's again, and a game that rewrites ports 2 and 3 on the same
+instruction it reads the acknowledgement cannot disturb a command already taken. A command reads the
+destination from ports 2 and 3 as a single 16-bit word, so no address is ever assembled from two
+different values.
+
+The stub occupies `$FFC0-$FFFF`, the window the console maps its boot program to. The
 APU serves the stub image over that window while CONTROL bit 7 is set (the APU machine's
 [boot-ROM window](apu-machine.md#the-boot-rom-window)): a driver may scratch-write the RAM beneath the
 window and still re-enter `$FFC0` to receive more code, because a read there returns the mapped image,

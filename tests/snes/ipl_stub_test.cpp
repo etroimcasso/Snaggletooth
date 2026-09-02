@@ -158,6 +158,53 @@ TEST(IplStub, CarriesTheDestinationAcrossAPage) {
   EXPECT_EQ(apu.readRam(0x0353u), data[259]);        // last byte
 }
 
+// ---- the acknowledgement releases the main CPU ----------------------------
+
+// A game treats the acknowledgement as permission to set up whatever comes next
+// and rewrites the ports within a few cycles of seeing it, so a command has to
+// take everything it needs from them before it echoes. This drives a run command
+// the way a cartridge does: poll for the echo one cycle at a time, then rewrite
+// ports 2 and 3 at once. A command that reads its destination after echoing picks
+// up the low byte of the address it was given and the high byte of what replaced
+// it, and jumps through the mixture.
+TEST(IplStub, KeepsTheDestinationWhenTheHostRewritesThePortsOnTheEcho) {
+  Apu apu = stubbedApu();
+  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  Uploader up{.apu = apu};
+
+  // The program stores a sentinel, which is the observable proof of where
+  // control actually landed.
+  const std::vector<std::uint8_t> program = {
+      0xE8u, 0x77u,         // MOV A,#$77
+      0xC5u, 0x90u, 0x05u,  // MOV !$0590,A
+      0xFFu,                // STOP
+  };
+  ASSERT_TRUE(up.block(0x0500u, program));
+
+  apu.writePort(2, 0x00u);  // the destination, $0500
+  apu.writePort(3, 0x05u);
+  apu.writePort(1, 0x00u);  // zero starts the program already loaded there
+  const std::uint8_t cmd = static_cast<std::uint8_t>(up.lastPort0 + 2u);
+  apu.writePort(0, cmd);
+
+  bool acked = false;
+  for (int i = 0; i < 20000 && !acked; ++i) {
+    if (apu.readPort(0) == cmd) { acked = true; break; }
+    apu.run(1);
+  }
+  ASSERT_TRUE(acked);
+
+  apu.writePort(2, 0x00u);  // released, the host moves on to its own traffic
+  apu.writePort(3, 0x00u);
+  apu.writePort(0, 0x00u);
+
+  for (int i = 0; i < 400 && apu.state().cpu.run == RunState::Running; ++i) apu.run(16);
+  EXPECT_EQ(apu.readRam(0x00u), 0x00u);    // the destination is $0500 whole,
+  EXPECT_EQ(apu.readRam(0x01u), 0x05u);    // not half of it and half of $0000
+  EXPECT_EQ(apu.readRam(0x0590u), 0x77u);  // and the program at $0500 ran
+  EXPECT_EQ(apu.state().cpu.run, RunState::Stopped);
+}
+
 // ---- the acknowledgement gate ---------------------------------------------
 
 TEST(IplStub, DoesNotReprocessAStalePort) {
