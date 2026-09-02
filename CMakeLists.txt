@@ -183,6 +183,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/block_move_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
     tests/snes/bus_test.cpp
+    tests/snes/cartridge_map_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/math_test.cpp

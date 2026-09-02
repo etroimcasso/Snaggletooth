@@ -14,3 +14,6 @@ build/
 # Private working docs — local only, never pushed to the public remote.
 docs-internal/
 /CLAUDE.md
+
+# A local convenience symlink to a cartridge library; never part of the repo.
+roms
