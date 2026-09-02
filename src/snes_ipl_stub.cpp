@@ -34,69 +34,71 @@ namespace {
 // destination as one 16-bit word rather than two bytes, leaving no instant at
 // which half of a new address can be mixed with half of the old one.
 //
-//   $FFC0  CD EF      MOV X,#$EF      ; the $CD signature; X is unused
+//   $FFC0  CD EF      MOV X,#$EF      ; the $CD signature; X is set again below
 //   $FFC2  20         CLRP            ; the direct page is $00xx, so $F4-$F7 are the ports
 //   $FFC3  8F B0 F1   MOV $F1,#$B0    ; clear the input ports through CONTROL
-//   $FFC6  8D 00      MOV Y,#$00      ; the byte index starts at zero
-//   $FFC8  CB 03      MOV $03,Y       ; and the last-acted value at zero
-//   $FFCA  8F AA F4   MOV $F4,#$AA    ; ready: post $AA to output port 0
-//   $FFCD  8F BB F5   MOV $F5,#$BB    ; ready: post $BB to output port 1
-//   $FFD0  E4 F4      MOV A,$F4       ; poll: read input port 0
-//   $FFD2  64 03      CMP A,$03       ; still the value already handled?
-//   $FFD4  F0 FA      BEQ $FFD0       ; yes -> keep polling
-//   $FFD6  C4 03      MOV $03,A       ; record this port-0 value
-//   $FFD8  F8 F5      MOV X,$F5       ; read input port 1 (byte or flag) before it can change
-//   $FFDA  7E 03      CMP Y,$03       ; index equals port 0?
-//   $FFDC  D0 0C      BNE $FFEA       ; no -> handle it as a block command
-//   $FFDE  C4 F4      MOV $F4,A       ; data: echo, the byte already held in X
-//   $FFE0  7D         MOV A,X         ;       A = the data byte from port 1
-//   $FFE1  D7 00      MOV [$00]+Y,A   ;       store at destination + index
-//   $FFE3  FC         INC Y           ;       advance the index
-//   $FFE4  D0 EA      BNE $FFD0       ;       still within the page -> next byte
-//   $FFE6  AB 01      INC $01         ;       index wrapped: carry the destination high byte
-//   $FFE8  2F E6      BRA $FFD0       ;       next byte
-//   $FFEA  BA F6      MOVW YA,$F6     ; command: the destination, ports 2 and 3 as one word
-//   $FFEC  DA 00      MOVW $00,YA     ;          keep it
-//   $FFEE  FA 03 F4   MOV $F4,$03     ;          echo, the destination now safely held
-//   $FFF1  7D         MOV A,X         ;          port 1: zero starts the program, nonzero sets an address
-//   $FFF2  D0 03      BNE $FFF7       ;          nonzero -> begin a transfer
-//   $FFF4  1F 00 00   JMP [!$0000+X]  ; run: jump through the destination pointer (X is zero here)
-//   $FFF7  8D 00      MOV Y,#$00      ; transfer: reset the byte index
-//   $FFF9  2F D5      BRA $FFD0       ;           and receive the block
-//   $FFFB..$FFFD      (unused, zero)
-//   $FFFE  C0 FF      reset vector -> $FFC0
+//   $FFC6  8F AA F4   MOV $F4,#$AA    ; ready: post $AA to output port 0
+//   $FFC9  8F BB F5   MOV $F5,#$BB    ; ready: post $BB to output port 1
+//   $FFCC  E4 F4      MOV A,$F4       ; ready wait: read input port 0
+//   $FFCE  68 CC      CMP A,#$CC      ;             only $CC begins an upload
+//   $FFD0  D0 FA      BNE $FFCC       ;             anything else is not addressed here
+//   $FFD2  C4 03      MOV $03,A       ; record it, so the echo can send it back
+//   $FFD4  F8 F5      MOV X,$F5       ; read input port 1 before the echo frees the host
+//   $FFD6  BA F6      MOVW YA,$F6     ; command: the destination, ports 2 and 3 as one word
+//   $FFD8  DA 00      MOVW $00,YA     ;          keep it
+//   $FFDA  FA 03 F4   MOV $F4,$03     ;          echo, the destination now safely held
+//   $FFDD  7D         MOV A,X         ;          port 1: zero runs the program, nonzero an address
+//   $FFDE  D0 03      BNE $FFE3       ;          nonzero -> begin a transfer
+//   $FFE0  1F 00 00   JMP [!$0000+X]  ; run: jump through the destination pointer (X is zero here)
+//   $FFE3  8D 00      MOV Y,#$00      ; transfer: the byte index restarts
+//   $FFE5  E4 F4      MOV A,$F4       ; poll: read input port 0
+//   $FFE7  64 03      CMP A,$03       ;       still the value already handled?
+//   $FFE9  F0 FA      BEQ $FFE5       ;       yes -> keep polling
+//   $FFEB  C4 03      MOV $03,A       ; record this port-0 value
+//   $FFED  F8 F5      MOV X,$F5       ; read input port 1 (byte or flag) before it can change
+//   $FFEF  7E 03      CMP Y,$03       ; index equals port 0?
+//   $FFF1  D0 E3      BNE $FFD6       ; no -> handle it as a block command
+//   $FFF3  C4 F4      MOV $F4,A       ; data: echo, the byte already held in X
+//   $FFF5  7D         MOV A,X         ;       A = the data byte from port 1
+//   $FFF6  D7 00      MOV [$00]+Y,A   ;       store at destination + index
+//   $FFF8  FC         INC Y           ;       advance the index
+//   $FFF9  D0 EA      BNE $FFE5       ;       still within the page -> next byte
+//   $FFFB  AB 01      INC $01         ;       index wrapped: carry the destination high byte
+//   $FFFD  2F E6      BRA $FFE5       ;       next byte
+//   $FFFF  00                         ; (spare; the machine seeds the program counter directly)
 constexpr std::array<std::uint8_t, kIplStubSize> kImage = {
     0xCD, 0xEF,              // MOV X,#$EF     (the $CD signature)
     0x20,                    // CLRP
     0x8F, 0xB0, 0xF1,        // MOV $F1,#$B0   (clear the input ports)
-    0x8D, 0x00,              // MOV Y,#$00
-    0xCB, 0x03,              // MOV $03,Y
     0x8F, 0xAA, 0xF4,        // MOV $F4,#$AA   (ready)
     0x8F, 0xBB, 0xF5,        // MOV $F5,#$BB
-    0xE4, 0xF4,              // MOV A,$F4      (poll)
-    0x64, 0x03,              // CMP A,$03
-    0xF0, 0xFA,              // BEQ $FFD0
+    0xE4, 0xF4,              // MOV A,$F4      (ready wait: only $CC begins)
+    0x68, 0xCC,              // CMP A,#$CC
+    0xD0, 0xFA,              // BNE $FFCC
     0xC4, 0x03,              // MOV $03,A
     0xF8, 0xF5,              // MOV X,$F5
-    0x7E, 0x03,              // CMP Y,$03
-    0xD0, 0x0C,              // BNE $FFEA
-    0xC4, 0xF4,              // MOV $F4,A      (data: echo)
-    0x7D,                    // MOV A,X
-    0xD7, 0x00,              // MOV [$00]+Y,A
-    0xFC,                    // INC Y
-    0xD0, 0xEA,              // BNE $FFD0
-    0xAB, 0x01,              // INC $01
-    0x2F, 0xE6,              // BRA $FFD0
     0xBA, 0xF6,              // MOVW YA,$F6    (command: the destination as one word)
     0xDA, 0x00,              // MOVW $00,YA
     0xFA, 0x03, 0xF4,        // MOV $F4,$03    (echo)
     0x7D,                    // MOV A,X
-    0xD0, 0x03,              // BNE $FFF7
+    0xD0, 0x03,              // BNE $FFE3
     0x1F, 0x00, 0x00,        // JMP [!$0000+X] (run)
     0x8D, 0x00,              // MOV Y,#$00     (transfer)
-    0x2F, 0xD5,              // BRA $FFD0
-    0x00, 0x00, 0x00,        // unused
-    0xC0, 0xFF,              // reset vector -> $FFC0
+    0xE4, 0xF4,              // MOV A,$F4      (poll)
+    0x64, 0x03,              // CMP A,$03
+    0xF0, 0xFA,              // BEQ $FFE5
+    0xC4, 0x03,              // MOV $03,A
+    0xF8, 0xF5,              // MOV X,$F5
+    0x7E, 0x03,              // CMP Y,$03
+    0xD0, 0xE3,              // BNE $FFD6
+    0xC4, 0xF4,              // MOV $F4,A      (data: echo)
+    0x7D,                    // MOV A,X
+    0xD7, 0x00,              // MOV [$00]+Y,A
+    0xFC,                    // INC Y
+    0xD0, 0xEA,              // BNE $FFE5
+    0xAB, 0x01,              // INC $01
+    0x2F, 0xE6,              // BRA $FFE5
+    0x00,                    // (spare)
 };
 
 }  // namespace

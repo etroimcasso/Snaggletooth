@@ -33,6 +33,17 @@ bool waitPort0(Apu& apu, std::uint8_t expect) {
   return apu.readPort(0) == expect;
 }
 
+// The console polls both ready bytes at once with a 16-bit read of $2140, so the
+// pair is what a host waits for. The stub posts $AA a moment before $BB, and a
+// test that stops at the first one can land between the two stores.
+bool waitReady(Apu& apu) {
+  for (int i = 0; i < 8000; ++i) {
+    if (apu.readPort(0) == 0xAAu && apu.readPort(1) == 0xBBu) return true;
+    apu.run(16);
+  }
+  return apu.readPort(0) == 0xAAu && apu.readPort(1) == 0xBBu;
+}
+
 // The main-CPU side of the handshake. Tracks the last value written to port 0 so a
 // block command can satisfy the "at least two higher than the previous value" rule.
 struct Uploader {
@@ -79,15 +90,37 @@ struct Uploader {
 
 TEST(IplStub, PostsReadyBytes) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));    // output port 0 -> $AA
-  EXPECT_EQ(apu.readPort(1), 0xBBu);     // output port 1 -> $BB
+  ASSERT_TRUE(waitReady(apu));           // $AA on output port 0 and $BB on port 1
+  EXPECT_EQ(apu.readPort(0), 0xAAu);
+  EXPECT_EQ(apu.readPort(1), 0xBBu);
+}
+
+// A cartridge may drive port 0 before it has set up an upload, and only $CC begins
+// one. Super Metroid writes $FF while the ports still read zero, then sets the
+// destination and sends the real $CC; a stub that acts on the earlier value takes a
+// destination from ports nobody has written and runs the audio CPU from it.
+TEST(IplStub, IgnoresAPortZeroValueThatIsNotTheKick) {
+  Apu apu = stubbedApu();
+  ASSERT_TRUE(waitReady(apu));
+  apu.writePort(0, 0xFFu);               // not the kick, and the ports are unset
+  apu.run(20000);
+  EXPECT_EQ(apu.readPort(0), 0xAAu);     // no acknowledgement: the stub did not act
+  EXPECT_EQ(apu.readPort(1), 0xBBu);     // and it is still offering the ready bytes
+
+  // The upload that follows still lands, which is what the cartridge depends on.
+  Uploader up{.apu = apu};
+  const std::vector<std::uint8_t> data = {0x11u, 0x22u, 0x33u, 0x44u};
+  ASSERT_TRUE(up.block(0x0200u, data));
+  for (std::size_t i = 0; i < data.size(); ++i) {
+    EXPECT_EQ(apu.readRam(static_cast<std::uint16_t>(0x0200u + i)), data[i]);
+  }
 }
 
 // ---- the kick -------------------------------------------------------------
 
 TEST(IplStub, AcknowledgesTheKick) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
   EXPECT_TRUE(up.command(0x0200u, /*run=*/false));  // the stub echoes $CC
 }
@@ -96,7 +129,7 @@ TEST(IplStub, AcknowledgesTheKick) {
 
 TEST(IplStub, StreamsABlockIntoRam) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
   const std::vector<std::uint8_t> data = {0x11u, 0x22u, 0x33u, 0x44u, 0x55u};
   ASSERT_TRUE(up.block(0x0200u, data));
@@ -109,7 +142,7 @@ TEST(IplStub, StreamsABlockIntoRam) {
 
 TEST(IplStub, RunsTheUploadedProgram) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
   // A program that writes a sentinel to $0250 and stops. Its own store is the
   // observable proof the stub jumped to it.
@@ -129,7 +162,7 @@ TEST(IplStub, RunsTheUploadedProgram) {
 
 TEST(IplStub, ChainsBlocksToDifferentAddresses) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
   ASSERT_TRUE(up.block(0x0300u, {0xDEu, 0xADu}));
   ASSERT_TRUE(up.block(0x0400u, {0xBEu, 0xEFu}));  // a new address, mid-session
@@ -143,7 +176,7 @@ TEST(IplStub, ChainsBlocksToDifferentAddresses) {
 
 TEST(IplStub, CarriesTheDestinationAcrossAPage) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
   // 260 bytes: the running index wraps at 256, so the stub must carry the
   // destination's high byte to keep placing bytes past the page boundary.
@@ -169,7 +202,7 @@ TEST(IplStub, CarriesTheDestinationAcrossAPage) {
 // it, and jumps through the mixture.
 TEST(IplStub, KeepsTheDestinationWhenTheHostRewritesThePortsOnTheEcho) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
 
   // The program stores a sentinel, which is the observable proof of where
@@ -209,7 +242,7 @@ TEST(IplStub, KeepsTheDestinationWhenTheHostRewritesThePortsOnTheEcho) {
 
 TEST(IplStub, DoesNotReprocessAStalePort) {
   Apu apu = stubbedApu();
-  ASSERT_TRUE(waitPort0(apu, 0xAAu));
+  ASSERT_TRUE(waitReady(apu));
   Uploader up{.apu = apu};
   ASSERT_TRUE(up.command(0x0200u, /*run=*/false));
   ASSERT_TRUE(up.byte(0x00u, 0x99u));  // store $99 at $0200, index 0
