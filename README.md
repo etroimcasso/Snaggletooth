@@ -138,3 +138,4 @@ target_link_libraries(your_target PRIVATE snaggletooth::snaggletooth)
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
