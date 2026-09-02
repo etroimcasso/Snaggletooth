@@ -1235,19 +1235,22 @@ Stated plainly, because a reference that hides its soft spots is worth less than
   reproduced by any of the readings, which is enough to say the values alone are not what separates
   them. A reimplementation is free here, and should know that it is.
 
-  **Where the history lives is equally free, and neither source says.** The filter's two previous
-  samples are held per voice here, but holding them in the decoder instead — one pair every voice's
-  decode reads and writes — also leaves **every passing sub-test green**, whether or not a key-on
-  clears the pair. Both of the sensitive sub-tests move under it, and they are the only two that do;
-  no sub-test that passes has two voices decoding through a non-Direct filter at once, which is the
-  condition that would tell the two shapes apart.
+  **Where the history lives is settled, and it is per voice — though no sub-test says so.** Holding
+  one pair in the decoder instead, read and written by every voice's decode, leaves **every passing
+  sub-test in `spc_dsp6` green**, whether or not a key-on clears the pair; no passing sub-test has two
+  voices decoding through a non-Direct filter at once, which is the condition that would tell the two
+  shapes apart. Ordinary playback tells them apart at once. A BRR block is reconstructed from the two
+  samples decoded before it, so a single shared pair hands each voice the tail of whichever voice
+  decoded last and the reconstruction resumes from a waveform that voice never produced. Through
+  multi-voice music the decoded stream then breaks up continuously — steps between adjacent output
+  samples larger than an eighth of full scale arrive at a rate of thousands a second, where the
+  per-voice pair produces none at all across the same passage — and hardware plays that music without
+  them. The shape is therefore decided by the reconstruction itself rather than by the suite, and a
+  reimplementation that shares the pair will pass the same sub-tests this one does and still sound
+  broken.
 
-  **The pairing has since been swept and it is empty.** Every reading above was re-scored against the
-  decoder-held shape — twenty-nine of them, each giving a distinct result, none reproducing either
-  sensitive sub-test and none disturbing anything that passes. With the twenty-eight per-voice
-  readings that is fifty-seven in total across both shapes. Both sensitive sub-tests move under every
-  single one, so the axis has full resolving power on them and simply has no reading that lands: it
-  is free, and it is **not** what separates them.
+  This settles where the pair lives, not what it holds: the values a restarted voice reads remain
+  unconstrained, as above.
 - **What `ENDX` holds at power-on is contested, and no test ROM decides it.** One reference has every
   bit clear at reset; the other has the status registers come up with all eight set, a few cycles
   after it. Every driver in `spc_dsp6` acknowledges `ENDX` before it reads one, so starting the
