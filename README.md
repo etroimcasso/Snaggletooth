@@ -111,7 +111,7 @@ Snaggletooth is built audio-first:
 
 1. **The audio unit** — the SPC700 CPU, the APU machine state, and the S-DSP, composing into a
    complete SNES audio core that plays real sound-driver programs and SPC dumps. It ships as an
-   embeddable component and as the SNES sound backend for the Retro++ engine.
+   embeddable component and as the SNES sound backend for the Polyrhythm engine.
 2. **The full machine** — the 5A22 (the main CPU with its DMA and timing hardware), the PPU, and
    the system glue that binds them to the audio core.
 
