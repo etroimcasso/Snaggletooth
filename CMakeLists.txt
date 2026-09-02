@@ -76,6 +76,17 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(spc_render PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # rom_render renders a cartridge instead of an .spc image: it boots the whole
+  # machine, so the audio carries the command stream the game's own code sends its
+  # sound driver. It shares the WAV writer with spc_render.
+  add_executable(rom_render tools/rom/rom_render_main.cpp)
+  target_link_libraries(rom_render PRIVATE snaggletooth_spc)
+  if(MSVC)
+    target_compile_options(rom_render PRIVATE /W4 /WX)
+  else()
+    target_compile_options(rom_render PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
   # tooling above because that reads a file format and this reads the instruction
   # set; the test tree already draws the same line between tests/spc and

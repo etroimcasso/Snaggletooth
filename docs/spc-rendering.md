@@ -1,10 +1,14 @@
-# Rendering an SPC dump
+# Rendering audio
+
+Snaggletooth writes the [S-DSP](dsp.md)'s 32 kHz stereo output to a WAV file from
+either of two sources. `spc_render` takes an SPC dump, a snapshot of the audio
+machine on its own. `rom_render` takes a cartridge and boots the whole console, so
+the game's own code drives its sound driver. Both write the same canonical PCM WAV.
 
 An SPC dump (`.spc`) is a snapshot of the SNES audio machine at a moment during
 playback: the SPC700's registers, the full 64KB of APU RAM, and the S-DSP's 128
 registers. `spc_render` loads a dump into the machine, runs it forward, and writes
-the [S-DSP](dsp.md)'s 32 kHz stereo output to a WAV file — the first way to hear the
-audio core end to end.
+the output to a WAV file — the first way to hear the audio core end to end.
 
 The dump format and the WAV output are both plain container formats; the loader and
 writer bring in no third-party code. The machine being restored is Snaggletooth's
@@ -64,6 +68,33 @@ is the true state. A dump taken **mid-track** restarts the envelopes, echo, and
 noise from power-on when it resumes; the sound converges as the driver re-keys its
 voices, but the first moments differ from where the dump was taken. Dumps are
 conventionally taken at track start for this reason.
+
+## The `rom_render` tool
+
+```
+rom_render <in.smc> (--seconds N | --samples N) -o <out.wav> [--quiet]
+```
+
+`rom_render` boots a cartridge on the [SNES machine](snes-machine.md) and renders
+what its sound driver plays. The arguments match `spc_render`'s: exactly one of
+`--seconds` or `--samples` gives the length, `-o` names the output. Progress prints
+a second at a time — the frames carrying sound and the voices sounding — which
+`--quiet` suppresses.
+
+```
+rom_render game.smc --seconds 90 -o game.wav
+```
+
+This is the answer to the limits above: a cartridge supplies the command stream a
+dump cannot carry. The 65816 runs the game, so song changes, sound effects and
+per-frame parameter writes all reach the audio unit as they do on the console,
+and a render can run as long as the game keeps playing.
+
+Rendering starts at power-on and runs forward verbatim, so the opening seconds are
+whatever the game does before it starts its driver — silence, usually, while it
+uploads one. A dump copier's 512-byte header is dropped when the file length shows
+one is present. The cartridge is mapped as LoROM, so a HiROM title does not yet
+boot.
 
 ## Loading a dump in code
 
