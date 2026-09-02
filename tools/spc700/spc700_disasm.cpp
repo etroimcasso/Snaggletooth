@@ -538,11 +538,31 @@ std::optional<Decoded> Spc700Backend::decode(std::span<const std::uint8_t> image
       break;
   }
 
-  // The address the operand names, for the register annotation: a two-byte
-  // instruction's operand byte read as a direct-page address, a three-byte
-  // instruction's operand word.
-  if (extra == 1) out.operandAddress = first;
-  if (extra == 2) out.operandAddress = word;
+  // The memory address the operand names, for the register annotation. Only the
+  // forms that reach memory name one: an immediate is a value, a displacement is
+  // a code address, and a page-$FF call target is code. The two-operand forms
+  // name their destination, the byte the instruction writes.
+  switch (info.operands) {
+    case Operands::Dp:
+    case Operands::DpRel:
+      out.operandAddress = first;
+      break;
+    case Operands::Abs:
+      out.operandAddress = word;
+      break;
+    case Operands::AbsBit:
+      out.operandAddress = static_cast<std::uint16_t>(word & 0x1FFFu);
+      break;
+    case Operands::DpDp:
+    case Operands::ImmDp:
+      out.operandAddress = second;
+      break;
+    case Operands::None:
+    case Operands::Imm:
+    case Operands::Rel:
+    case Operands::Upage:
+      break;
+  }
 
   out.text = fill(info.text, slot1, slot2);
   return Decoded{.instruction = std::move(out), .next = context};

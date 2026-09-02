@@ -247,4 +247,29 @@ TEST(Spc700Disasm, ListingRendersAsAssemblableSource) {
   }
 }
 
+
+// Only an operand that names memory is annotated. An immediate is a value and a
+// branch displacement is a code address, and either can land in $F0-$FF by
+// coincidence; naming a register on them tells the reader the instruction touches
+// hardware it does not.
+TEST(Spc700Disasm, OnlyMemoryOperandsAreNamed) {
+  auto noteOf = [](std::vector<std::uint8_t> image) {
+    image.push_back(0x6F);  // RET, so the trace ends inside the image
+    DisasmRequest request;
+    request.image = image;
+    request.base = 0x0400;
+    const Listing listing = trace(request);
+    return listing.lines.front().instruction.note;
+  };
+  EXPECT_EQ(noteOf({0xE8, 0xF2}), "");            // MOV A,#$F2 — a value
+  EXPECT_EQ(noteOf({0xD0, 0xF8}), "");            // BNE -8 — a displacement
+  EXPECT_EQ(noteOf({0x4F, 0xF4}), "");            // PCALL $F4 — code in page $FF
+  EXPECT_EQ(noteOf({0xE4, 0xF2}), "DSPADDR");     // MOV A,$F2
+  EXPECT_EQ(noteOf({0xE5, 0xF4, 0x00}), "CPUIO0"); // MOV A,!$00F4
+  EXPECT_EQ(noteOf({0x8F, 0x00, 0xF4}), "CPUIO0"); // MOV $F4,#$00 — the destination
+  EXPECT_EQ(noteOf({0xFA, 0x00, 0xF5}), "CPUIO1"); // MOV $F5,$00 — the destination
+  EXPECT_EQ(noteOf({0x03, 0xFD, 0x02}), "T0OUT");  // BBS $FD.0,rel — the tested byte
+  EXPECT_EQ(noteOf({0xAA, 0xF2, 0x00}), "DSPADDR"); // MOV1 C,!$00F2.0
+}
+
 }  // namespace snaggletooth::disasm

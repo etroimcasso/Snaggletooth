@@ -107,7 +107,9 @@ Supply your own through `DisasmRequest::symbols` and they take precedence.
 
 ## Hardware registers
 
-An operand reaching `$00F0`–`$00FF` is annotated with the register's name:
+An operand that names memory in `$00F0`–`$00FF` is annotated with the register's
+name. Immediates and branch displacements are never annotated, whatever their value;
+a two-operand form is annotated for its destination:
 
 ```
         MOV X,$FD                       ; $0A42  F8 FD     3  T0OUT
