@@ -8,6 +8,20 @@ The core is CPU-only. It has no memory of its own, no timers, and no DSP — it 
 address space you supply. Give it flat RAM and every address is a plain byte; give it the APU's
 register-overlaid memory and the same instructions drive real hardware.
 
+## Contents
+
+- [The bus](#the-bus)
+- [State](#state)
+- [Running instructions](#running-instructions)
+- [The cycle bar](#the-cycle-bar)
+- [The moves](#the-moves)
+- [The arithmetic](#the-arithmetic)
+- [The words and the bits](#the-words-and-the-bits)
+- [The control flow](#the-control-flow)
+- [Testing against the vectors](#testing-against-the-vectors)
+- [Gotchas](#gotchas)
+- [Where to look](#where-to-look)
+
 ## The bus
 
 The core talks to memory through any type that satisfies the `ApuBus` concept — an 8-bit read and

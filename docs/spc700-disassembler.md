@@ -22,6 +22,18 @@ The output is assembly source, not a report about the bytes — see
 
 ---
 
+## Contents
+
+- [Command line](#command-line)
+- [Entry points decide what is code](#entry-points-decide-what-is-code)
+- [Output](#output)
+- [Hardware registers](#hardware-registers)
+- [Patched bytes](#patched-bytes)
+- [Library](#library)
+- [Warnings](#warnings)
+- [Status](#status)
+- [See also](#see-also)
+
 ## Command line
 
 ```

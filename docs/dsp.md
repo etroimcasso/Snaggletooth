@@ -21,6 +21,20 @@ or wrong, and where a hardware test ROM settled the question.
 [s-dsp-behavior.md](s-dsp-behavior.md) records each of those: what the sources say, how they
 disagree, and the measurement that decided it.
 
+## Contents
+
+- [Running the DSP through the machine](#running-the-dsp-through-the-machine)
+- [The register file](#the-register-file)
+- [How a voice makes sound](#how-a-voice-makes-sound)
+- [Key-on and key-off](#key-on-and-key-off)
+- [The output mixer](#the-output-mixer)
+- [The echo unit](#the-echo-unit)
+- [Noise and pitch modulation](#noise-and-pitch-modulation)
+- [When a register write takes effect](#when-a-register-write-takes-effect)
+- [Inspecting the pipeline directly](#inspecting-the-pipeline-directly)
+- [Gotchas](#gotchas)
+- [Where to look](#where-to-look)
+
 ## Running the DSP through the machine
 
 You do not step the DSP yourself. It runs as part of the machine: `step()` and `run()` advance it

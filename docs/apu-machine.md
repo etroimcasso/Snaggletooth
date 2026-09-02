@@ -18,6 +18,22 @@ ever needed. You load a driver image straight into RAM and point the CPU at it â
 console's upload handshake, map an original 64-byte boot program over the `$FFC0` window (see *The
 boot-ROM window*).
 
+## Contents
+
+- [Constructing and stepping](#constructing-and-stepping)
+  - [What a cycle is](#what-a-cycle-is)
+- [The register overlay](#the-register-overlay)
+  - [DSP register file](#dsp-register-file)
+- [The boot-ROM window](#the-boot-rom-window)
+- [The communication ports](#the-communication-ports)
+- [The timers](#the-timers)
+  - [The tick slots](#the-tick-slots)
+- [Boot and reset](#boot-and-reset)
+- [Snapshot and restore](#snapshot-and-restore)
+- [Host RAM access](#host-ram-access)
+- [Gotchas](#gotchas)
+- [Where to look](#where-to-look)
+
 ## Constructing and stepping
 
 `Apu()` builds the seeded power-on machine. Load a program into RAM, point the CPU at it, and step:

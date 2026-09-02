@@ -7,6 +7,18 @@ incomplete, ambiguous, or wrong — and for what settles each case.
 evidence behind it. Every claim below names where it comes from, and where two sources disagree it
 names the disagreement and what decided it.
 
+## Contents
+
+- [The evidentiary standard](#the-evidentiary-standard)
+- [Sources](#sources)
+- [The envelope](#the-envelope)
+- [Key-on and key-off](#key-on-and-key-off)
+- [The intra-sample schedule](#the-intra-sample-schedule)
+- [Sample arithmetic](#sample-arithmetic)
+- [Echo](#echo)
+- [What remains open](#what-remains-open)
+- [How a contested claim gets settled here](#how-a-contested-claim-gets-settled-here)
+
 ## The evidentiary standard
 
 Three kinds of claim appear here, and they are not equally strong:

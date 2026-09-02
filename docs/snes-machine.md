@@ -12,6 +12,27 @@ the hardware multiply/divide unit, a PPU register file that fills video memory w
 the audio machine running underneath — enough to load a cartridge, run its code under interrupts, and
 hear it.
 
+## Contents
+
+- [Building a machine](#building-a-machine)
+- [The memory map](#the-memory-map)
+  - [How a cartridge lays across the bus](#how-a-cartridge-lays-across-the-bus)
+  - [Save RAM](#save-ram)
+- [Stepping and running](#stepping-and-running)
+- [Memory speed](#memory-speed)
+- [The APU clock](#the-apu-clock)
+- [The audio upload stub](#the-audio-upload-stub)
+  - [Running a console's own boot ROM](#running-a-consoles-own-boot-rom)
+- [The video counters and interrupts](#the-video-counters-and-interrupts)
+- [The multiply/divide unit](#the-multiplydivide-unit)
+- [The video registers (a stub)](#the-video-registers-a-stub)
+- [DMA and HDMA](#dma-and-hdma)
+  - [General-purpose DMA](#general-purpose-dma)
+  - [HDMA](#hdma)
+- [Snapshot and restore](#snapshot-and-restore)
+- [Gotchas](#gotchas)
+- [See also](#see-also)
+
 ## Building a machine
 
 A machine is built from a value: the cartridge image and the console clock rate. The image is copied

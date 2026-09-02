@@ -12,6 +12,33 @@ existing.
 
 ---
 
+## Contents
+
+- [1. Scope](#1-scope)
+- [2. Source format](#2-source-format)
+  - [2.1 Comments](#21-comments)
+  - [2.2 Case](#22-case)
+  - [2.3 Whitespace](#23-whitespace)
+- [3. Numbers](#3-numbers)
+  - [3.1 Character literals](#31-character-literals)
+- [4. Symbols](#4-symbols)
+  - [4.1 Labels](#41-labels)
+  - [4.2 Constants](#42-constants)
+  - [4.3 Expressions](#43-expressions)
+- [5. Addressing modes](#5-addressing-modes)
+  - [5.1 Branch targets are addresses, not displacements](#51-branch-targets-are-addresses-not-displacements)
+  - [5.2 Bit operands](#52-bit-operands)
+  - [5.3 The call forms that carry their destination in the opcode](#53-the-call-forms-that-carry-their-destination-in-the-opcode)
+  - [5.4 The two-operand direct-page order](#54-the-two-operand-direct-page-order)
+- [6. Directives](#6-directives)
+  - [6.1 `ORG`](#61-org)
+  - [6.2 `DB`](#62-db)
+  - [6.3 `DS`](#63-ds)
+- [7. Round-trip](#7-round-trip)
+- [8. Diagnostics](#8-diagnostics)
+- [9. Stability](#9-stability)
+- [See also](#see-also)
+
 ## 1. Scope
 
 The language covers the SPC700 instruction set, symbolic labels, and absolute

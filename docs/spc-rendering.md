@@ -15,6 +15,14 @@ writer bring in no third-party code. The machine being restored is Snaggletooth'
 own — the loader maps the dump's bytes onto the [APU machine](apu-machine.md)'s
 state and hands it to `Apu`.
 
+## Contents
+
+- [The `spc_render` tool](#the-spc_render-tool)
+- [What a dump carries — and what it doesn't](#what-a-dump-carries--and-what-it-doesnt)
+- [The `rom_render` tool](#the-rom_render-tool)
+- [Loading a dump in code](#loading-a-dump-in-code)
+- [The WAV output](#the-wav-output)
+
 ## The `spc_render` tool
 
 ```
