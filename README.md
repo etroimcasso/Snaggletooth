@@ -31,8 +31,10 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 ## Status
 
-The audio core is complete and the main machine runs everything but the picture. The rendering PPU is
-the missing piece; the public embedding API and the SPC700 assembler have not been started.
+The audio core is feature-complete — every part of the chain is built and cycle-scheduled, with three
+sub-tests of the DSP test ROM still outstanding — and the main machine runs everything but the picture.
+The rendering PPU is the missing piece and is the next work; the public embedding API and the SPC700
+assembler have not been started.
 
 **The audio core.** The SPC700 executes all 256 opcodes a cycle at a time, every cycle checked against
 the SingleStepTests vectors — the address driven, the byte moved, and the cycles that reach memory not
@@ -53,8 +55,24 @@ audio unit boots the upload handshake that streams a driver in from the main CPU
 accepts video memory without drawing it.
 
 **Validation.** Beyond the per-cycle vector suites, the machine runs self-checking SPC test ROMs
-end-to-end. The CPU, timer and memory-access-timing ROMs pass. The DSP ROM does not: it clears the
-echo tests and reports a failure in the envelope tests.
+end-to-end. The CPU, timer and memory-access-timing ROMs pass in full. The DSP ROM does not yet:
+three of its sub-tests still report a wrong checksum, and every other sub-test in it passes.
+
+| Sub-test still failing | What it exercises |
+|---|---|
+| `Random/envelope` | envelope rates and phase transitions under randomised writes |
+| `Random/kon pitch` | eight voices keyed together and re-keyed at random, read back through the echo ring |
+| `Random/brr while playing` | BRR sample content decoded while voices are already sounding |
+
+All three drive long randomised sequences and compare a single checksum at the end, so each run
+reports only whether the whole sequence matched. The behaviour document records what the sub-tests
+constrain and what they leave open; the three above turn on a rare coincidence — a voice re-keyed
+at the instant its own output crosses zero — which ordinary music does not reach, so a rendered
+comparison cannot arbitrate them either.
+
+**What comes next.** The rendering PPU is the next piece of work. After it, the machine is taken
+through the range of cartridge types until they boot, and the DSP returns to close out those three
+sub-tests with the wider body of real software available to exercise it.
 
 The table below is kept honest as components land.
 
@@ -62,7 +80,7 @@ The table below is kept honest as components land.
 |---|---|
 | SPC700 CPU core (the audio CPU's instruction set) | **complete** — 256 opcodes, cycle-stepped, every cycle vector-validated |
 | APU machine (64KB RAM, timers, communication ports) | **complete** — register overlay, three timers, communication ports, exact cycle budgets |
-| S-DSP (voices, mixer, echo) | **complete** — BRR decode, pitch and Gaussian interpolation, envelopes, keying, eight-voice stereo mix, noise, pitch modulation, master volume, echo delay line, intra-sample register schedule |
+| S-DSP (voices, mixer, echo) | feature-complete — BRR decode, pitch and Gaussian interpolation, envelopes, keying, eight-voice stereo mix, noise, pitch modulation, master volume, echo delay line, intra-sample register schedule. Three sub-tests of the DSP test ROM still report a wrong checksum (above) |
 | 65816 CPU core (the main CPU's instruction set) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle vector-validated |
 | SPC700 disassembler | **complete** — traces control flow from entry points so data is never decoded as code, names hardware registers, marks run-time-patched bytes, emits assembly source; cycle costs measured from the interpreter |
 | SNES machine (bus, memory map, clock, timing) | in progress — LoROM map, work RAM and its data port, APU communication ports, the 6/8/12-master-cycle region model at both clock rates, exact master-cycle budgeting and the CPU-to-APU interleave, video counters, vertical-blank NMI and H/V-timer IRQ, multiply/divide unit, PPU register file, eight DMA/HDMA channels, and the audio boot handshake. The rendering PPU remains |
