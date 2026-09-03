@@ -621,16 +621,22 @@ TEST(RomDisasm, TheProjectIsWrittenAsOneFilePerRegionPlusTheManifest) {
   ASSERT_TRUE(d.sound.has_value());
   const std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "snaggletooth-rom-disasm-test";
-  std::filesystem::remove_all(dir);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
   std::string error;
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "project.manifest"));
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "bank_00.asm"));
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "apu" / "driver.asm"));
-  std::ifstream in(dir / "bank_00.asm", std::ios::binary);
-  const std::string bank0((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  // Read and close the file before the directory goes: an open file cannot be
+  // removed on every platform.
+  std::string bank0;
+  {
+    std::ifstream in(dir / "bank_00.asm", std::ios::binary);
+    bank0.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
   EXPECT_EQ(bank0, renderRegion(regionNamed(d, "bank_00.asm"), d));
-  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace
