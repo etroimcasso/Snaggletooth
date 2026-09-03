@@ -296,9 +296,11 @@ two ways, not that the tool failed.
 ## Status
 
 The disassembler reads one image at a time — a bank carved out of a cartridge, or a
-region of RAM. Reading a whole cartridge, with every bank mapped through its header
-and each region handed to the backend that owns it, is not built yet; nor are the
-cartridge coprocessors, nor the assembler that closes the round trip.
+region of RAM. Reading a whole cartridge, with every bank mapped through its header,
+control flow carried across banks and the uploaded sound program handed to the SPC700
+backend, is the [cartridge disassembler](snes-disassembler.md), built over this one.
+The cartridge coprocessors and the assembler that closes the round trip are not
+built yet.
 
 Targets that are not constants — `JMP (!abs,X)` through a table, `JML [!abs]`
 through a pointer, `JSR (!abs,X)` — are decoded and printed, but the trace cannot
@@ -312,5 +314,7 @@ follow them. Code reachable only that way needs an explicit `--entry`.
   and the widths and modes themselves.
 - [Disassembly framework](disassembly-framework.md) — the tracer and renderer this
   backend runs on, and the cartridge entry points.
+- [Cartridge disassembler](snes-disassembler.md) — a whole cartridge traced
+  through this backend, bank by bank, into a source tree.
 - [SPC700 disassembler](spc700-disassembler.md) — the audio CPU's disassembler over
   the same framework.

@@ -18,6 +18,7 @@ what is unstarted.
 | Understand how sound is produced | [dsp.md](dsp.md) |
 | Read the code a dump contains | [spc700-disassembler.md](spc700-disassembler.md) |
 | Read the code a cartridge contains | [65816-disassembler.md](65816-disassembler.md) |
+| Turn a whole cartridge into a source tree | [snes-disassembler.md](snes-disassembler.md) |
 
 ## The machine
 
@@ -44,6 +45,8 @@ what is unstarted.
 | [disassembly-framework.md](disassembly-framework.md) | The tracing disassembler's chip-independent half — the backend interface, 24-bit addresses, the per-path context and conflict reporting, the listing format, and the entry points a cartridge header names |
 | [spc700-disassembler.md](spc700-disassembler.md) | The SPC700 disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
 | [65816-disassembler.md](65816-disassembler.md) | The 65816 disassembler — the register widths carried along every path, what it reports rather than guesses, the costs measured under each mode, and the registers named by bank |
+| [snes-disassembler.md](snes-disassembler.md) | The cartridge disassembler — a whole cartridge traced across its banks from the vectors into one source file per bank, the sound program captured from the machine as a file of its own, the stops a person answers with entries, and what is placed |
+| [project-manifest.md](project-manifest.md) | The project manifest — the lines that name the image, the files and their ranges, the sound program's blocks, the entries, stops and warnings; what is read back; stability |
 | [assembly-lexicon.md](assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |
 | [spc700-assembly.md](spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |
 | [65816-assembly.md](65816-assembly.md) | The 65816 dialect — its addressing modes, the width directives, and the long, jump, block-move and stack forms |
