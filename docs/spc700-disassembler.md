@@ -178,9 +178,10 @@ read two ways, not that the tool failed.
 
 ## Status
 
-The disassembler covers the SPC700 only. The 65816 and the cartridge coprocessors,
-whole-ROM disassembly with bank mapping, and the assembler that closes the round trip
-are not built yet.
+The disassembler covers the SPC700; the main CPU has its own,
+[65816-disassembler.md](65816-disassembler.md), over the same framework. The
+cartridge coprocessors, whole-cartridge disassembly with bank mapping, and the
+assembler that closes the round trip are not built yet.
 
 Targets that are not constants — `JMP [!abs+X]` through a table, a call whose
 destination is computed — are decoded and printed, but the trace cannot follow them.
@@ -188,5 +189,7 @@ Code reachable only that way needs an explicit `--entry`.
 
 ## See also
 
-- [SPC700 assembly language](spc700-assembly.md) — the dialect this emits.
+- [SPC700 assembly language](spc700-assembly.md) — the dialect this emits, over
+  the [common layer](assembly-lexicon.md).
 - [SPC700 CPU core](spc700-cpu.md) — the interpreter the cycle costs are measured from.
+- [Disassembly framework](disassembly-framework.md) — the tracer and renderer this backend runs on.

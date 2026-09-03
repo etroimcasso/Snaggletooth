@@ -1,0 +1,62 @@
+# Cartridge tools
+
+Two things live here: `rom_render`, which boots a cartridge on the whole SNES
+machine and writes what the audio unit plays, and `cartridge_entries.h`, where a
+disassembly of a whole cartridge starts.
+
+## `rom_render`
+
+```
+rom_render <in.smc> (--seconds N | --samples N) -o <out.wav> [--quiet]
+```
+
+Boots the cartridge, runs it for the requested length, and writes the S-DSP's
+32 kHz stereo output as a canonical PCM WAV. Rendering starts at power-on and runs
+forward verbatim — no warm-up, no skip, no fade — so the opening seconds are
+whatever the game does before it starts its sound driver, silence included. A
+512-byte copier header is dropped when the file length says one is present.
+
+```
+rom_render game.sfc --seconds 90 -o game.wav
+```
+
+The audio carries the command stream the game's own code sends its driver, which a
+standalone `.spc` image does not have. The tool links `snaggletooth_spc` for the WAV
+writer.
+
+## `cartridge_entries.h`
+
+A cartridge's header names the handlers the CPU jumps to on reset and on every
+interrupt — the addresses execution reaches before the program has run an
+instruction — and those are the entry points a trace of the cartridge begins from.
+
+```cpp
+#include "rom/cartridge_entries.h"
+#include "snaggletooth/snes/cartridge.h"
+
+const std::optional<snaggletooth::CartridgeHeader> header =
+    snaggletooth::parseCartridgeHeader(image);
+for (const snaggletooth::disasm::VectorEntry& entry :
+     snaggletooth::disasm::vectorEntries(*header)) {
+  entry.address;  // in bank $00
+  entry.name;     // "reset", "nmi", "irq", "cop", "brk", "abort"; "_native" on the native set
+}
+```
+
+`vectorEntries` returns the vectors that land in ROM under the header's map, in
+vector-table order with reset first; a vector pointing at RAM or a register is left
+out. `codeOwner(map, address)` says which disassembler owns the bytes at a bus
+address — the main CPU's for cartridge ROM, none for RAM, registers, a save window
+and open bus. Both read the cartridge through the library's own header functions,
+so a tool and the machine never disagree about a byte.
+
+The library target is `snaggletooth_rom`; `tools/` is on its public include path.
+
+## See also
+
+- [docs/spc-rendering.md](../../docs/spc-rendering.md) — `rom_render` beside
+  `spc_render`, and what each source carries.
+- [docs/disassembly-framework.md §Cartridges](../../docs/disassembly-framework.md#cartridges)
+  — the entry points in the framework's terms.
+- [docs/snes-cartridge.md](../../docs/snes-cartridge.md) — the header, the three
+  maps, and where every bus address lands in the image.

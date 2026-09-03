@@ -36,10 +36,13 @@ using Address = std::uint32_t;
 
 // What an instruction costs in chip cycles. Most costs are fixed and `taken` is
 // zero. A conditional instruction costs `base` when its condition fails and
-// `taken` when it holds.
+// `taken` when it holds. A backend whose costs depend on state the trace does not
+// know at an address clears `known`, and the listing prints `?` there instead of
+// a number.
 struct CycleCost {
   std::uint8_t base = 0;
   std::uint8_t taken = 0;
+  bool known = true;
 };
 
 // How an instruction reaches the rest of the program. The tracer needs to know
@@ -77,9 +80,14 @@ struct Instruction {
 // What a backend returns for one instruction: the instruction, and the context
 // execution carries out of it — to the instruction after it and to its target
 // alike.
+//
+// A backend that cannot read the bytes under the context it was given — an
+// operand whose width the context does not settle — fills `unreadable` with the
+// reason instead. The trace reports it and stops that path; the bytes stay data.
 struct Decoded {
   Instruction instruction;
   Context next;
+  std::string unreadable;
 };
 
 // One line of a listing: an instruction, or a run of bytes execution never reached.
@@ -87,6 +95,8 @@ struct Line {
   bool isCode = false;
   Address address = 0;
   Instruction instruction;         // when isCode
+  Context context;                 // when isCode: what the instruction was decoded under
+  std::vector<std::string> directives;  // when isCode: source lines the backend puts before it
   std::vector<std::uint8_t> data;  // when !isCode
 };
 
@@ -100,8 +110,10 @@ struct Listing {
 };
 
 // What to disassemble. `image` is the bytes; `base` is the address `image[0]`
-// occupies. Tracing starts at every address in `entries`, each with `context`;
-// an empty `entries` traces from `base` alone.
+// occupies. Tracing starts at every address in `entries`; an empty `entries`
+// traces from `base` alone. `entries[i]` starts with `entryContexts[i]` when that
+// is given, and with `context` otherwise — so a reset handler and an interrupt
+// handler, which begin in different modes, can be traced in one request.
 //
 // `priorImage`, when it is the same length as `image`, is the same region before
 // the code ran. Every byte that differs is called out on the line that carries it,
@@ -111,6 +123,7 @@ struct Request {
   std::span<const std::uint8_t> image;
   Address base = 0;
   std::vector<Address> entries;
+  std::vector<Context> entryContexts;
   std::span<const std::uint8_t> priorImage;
   bool annotateRegisters = true;
   std::map<Address, std::string> symbols;
@@ -148,6 +161,21 @@ class Backend {
 
   // A context, as a warning names it. The default prints its bits.
   [[nodiscard]] virtual std::string describe(Context context) const;
+
+  // Whether an address reached under both contexts reads two ways. The default
+  // says so whenever they differ. A backend that carries state beyond what decides
+  // a reading answers from the bits that do.
+  [[nodiscard]] virtual bool conflicts(Context first, Context second) const {
+    return !(first == second);
+  }
+
+  // The source lines that must precede an instruction decoded under `now` when
+  // the instruction before it left `before` — or when there is no instruction
+  // before it, at the start of a region. A backend whose source needs to be told
+  // the state an instruction assembles under answers with its directives; the
+  // default answers with none.
+  [[nodiscard]] virtual std::vector<std::string> directives(std::optional<Context> before,
+                                                            Context now) const;
 };
 
 // Traces the image from its entry points with the backend and returns the listing.
