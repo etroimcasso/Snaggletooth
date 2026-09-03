@@ -154,18 +154,40 @@ struct Placement {
 // The manifest as text — the grammar is `docs/project-manifest.md`.
 [[nodiscard]] std::string renderManifest(const CartridgeDisassembly& disassembly);
 
-// What a manifest gives the next run: the entries and the file split, and the
-// image it was written for. Everything else in it is what the last run found,
-// and is written fresh.
+// A sound-program block as the manifest records it: the audio address the
+// cartridge sent the bytes to, how many, and the image offset they were read
+// from — absent for a block the image does not hold at exactly one place.
+struct ManifestBlock {
+  std::uint16_t apuAddress = 0;
+  std::size_t length = 0;
+  std::optional<std::size_t> romOffset;
+};
+
+// The sound program as the manifest records it: its file, where the audio CPU
+// starts it, and its blocks in address order.
+struct ManifestSound {
+  std::string file;
+  std::uint16_t entry = 0;
+  std::vector<ManifestBlock> blocks;
+};
+
+// What a manifest gives the tools that read it. The next disassembly takes the
+// entries and the file split; a verification takes the map, the file split, the
+// sound program and its blocks, which together say where every file's bytes
+// land; both take the image identity. Everything else in a manifest is what the
+// last run found, and is written fresh.
 struct ManifestInput {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
+  std::optional<CartridgeMap> map;
+  std::optional<ManifestSound> sound;
   std::optional<std::size_t> imageBytes;
   std::optional<std::uint16_t> checksum;
 };
 
-// Reads the entries, regions and image identity out of a manifest. Nothing, with
-// `error` naming the line, when a line does not parse.
+// Reads the entries, regions, map, sound program and image identity out of a
+// manifest. Nothing, with `error` naming the line, when a line does not parse,
+// or when a block names a file no `sound` line does.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
 
 // Why `input` cannot direct a run over `rom`, or an empty string when it can: a

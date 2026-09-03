@@ -84,6 +84,109 @@ struct Cpu65816Mode {
 [[nodiscard]] Context contextOf(const Cpu65816Mode& mode) noexcept;
 [[nodiscard]] Cpu65816Mode modeOf(Context context) noexcept;
 
+// The mode execution carries out of an instruction, given the mode it ran under
+// and its first operand byte (the mask of `REP` and `SEP`). Only a handful of
+// instructions move the flags: `REP` and `SEP` move the widths they name and make
+// them known; `PLP` and `RTI` make both unknown; `XCE` exchanges the carry with
+// the emulation flag when `CLC` or `SEC` was the instruction before, and
+// otherwise keeps the mode and says so in `note`. Every instruction but `CLC`
+// and `SEC` forgets what was known about the carry. The disassembler and the
+// assembler both follow the widths through this one function.
+[[nodiscard]] Cpu65816Mode cpu65816ModeAfter(std::uint8_t opcode, std::uint8_t operand,
+                                             const Cpu65816Mode& mode, std::string& note);
+
+// How an instruction's operand bytes are laid out and how they print. The
+// mnemonic is separate, so every instruction sharing a shape shares a value here
+// however differently it is named.
+enum class Cpu65816Addressing : std::uint8_t {
+  Implied,              // no operand
+  Accumulator,          // `A`
+  ImmediateM,           // `#imm`, one byte or two by the accumulator width
+  ImmediateX,           // `#imm`, one byte or two by the index width
+  ImmediateByte,        // `#imm`, always one byte: REP, SEP, WDM, and the BRK/COP signature
+  Direct,               // `dp`
+  DirectX,              // `dp,X`
+  DirectY,              // `dp,Y`
+  DirectIndirect,       // `(dp)`
+  DirectIndirectX,      // `(dp,X)`
+  DirectIndirectY,      // `(dp),Y`
+  DirectIndirectLong,   // `[dp]`
+  DirectIndirectLongY,  // `[dp],Y`
+  StackRelative,        // `sr,S`
+  StackRelativeY,       // `(sr,S),Y`
+  Absolute,             // `!abs`
+  AbsoluteX,            // `!abs,X`
+  AbsoluteY,            // `!abs,Y`
+  AbsoluteLong,         // `$bb:hhll`
+  AbsoluteLongX,        // `$bb:hhll,X`
+  AbsoluteIndirect,     // `(!abs)`, a pointer in bank zero
+  AbsoluteIndirectLong, // `[!abs]`, a three-byte pointer in bank zero
+  AbsoluteIndexedIndirect,  // `(!abs,X)`, a pointer in the program bank
+  Relative,             // an 8-bit displacement, printed as the address it reaches
+  RelativeLong,         // a 16-bit displacement, printed the same way
+  BlockMove,            // two bank bytes: the destination first, then the source
+  PushAbsolute,         // PEA: a 16-bit value pushed as it is
+  PushRelative,         // PER: a 16-bit displacement, pushed as the address it names
+};
+
+// How many operand bytes an addressing mode carries. The two immediates whose
+// width follows a flag answer for that flag's setting.
+[[nodiscard]] constexpr std::uint8_t cpu65816OperandBytes(Cpu65816Addressing mode,
+                                                          bool accumulator8,
+                                                          bool index8) noexcept {
+  switch (mode) {
+    case Cpu65816Addressing::Implied:
+    case Cpu65816Addressing::Accumulator:
+      return 0;
+    case Cpu65816Addressing::ImmediateM:
+      return accumulator8 ? 1 : 2;
+    case Cpu65816Addressing::ImmediateX:
+      return index8 ? 1 : 2;
+    case Cpu65816Addressing::ImmediateByte:
+    case Cpu65816Addressing::Direct:
+    case Cpu65816Addressing::DirectX:
+    case Cpu65816Addressing::DirectY:
+    case Cpu65816Addressing::DirectIndirect:
+    case Cpu65816Addressing::DirectIndirectX:
+    case Cpu65816Addressing::DirectIndirectY:
+    case Cpu65816Addressing::DirectIndirectLong:
+    case Cpu65816Addressing::DirectIndirectLongY:
+    case Cpu65816Addressing::StackRelative:
+    case Cpu65816Addressing::StackRelativeY:
+    case Cpu65816Addressing::Relative:
+      return 1;
+    case Cpu65816Addressing::Absolute:
+    case Cpu65816Addressing::AbsoluteX:
+    case Cpu65816Addressing::AbsoluteY:
+    case Cpu65816Addressing::AbsoluteIndirect:
+    case Cpu65816Addressing::AbsoluteIndirectLong:
+    case Cpu65816Addressing::AbsoluteIndexedIndirect:
+    case Cpu65816Addressing::RelativeLong:
+    case Cpu65816Addressing::BlockMove:
+    case Cpu65816Addressing::PushAbsolute:
+    case Cpu65816Addressing::PushRelative:
+      return 2;
+    case Cpu65816Addressing::AbsoluteLong:
+    case Cpu65816Addressing::AbsoluteLongX:
+      return 3;
+  }
+  return 0;
+}
+
+// One row of the instruction table: the opcode, its mnemonic, its addressing
+// mode, and how execution leaves it. The same table decodes an instruction and
+// encodes one, so the two cannot disagree.
+struct Cpu65816Opcode {
+  std::uint8_t opcode = 0;
+  const char* mnemonic = "";
+  Cpu65816Addressing mode = Cpu65816Addressing::Implied;
+  Flow flow = Flow::Continue;
+};
+
+// The instruction table, indexed by opcode, in the order of the datasheet's
+// opcode matrix.
+[[nodiscard]] const std::array<Cpu65816Opcode, 256>& cpu65816Opcodes();
+
 // The 65816 backend. Addresses are 24 bits; the context is a `Cpu65816Mode`.
 class Cpu65816Backend final : public Backend {
  public:
@@ -107,9 +210,13 @@ class Cpu65816Backend final : public Backend {
   // emulation flag and the two widths. What is known about the carry is not one.
   [[nodiscard]] bool conflicts(Context first, Context second) const override;
 
-  // The width directives an instruction needs before it: `A8` or `A16` and `X8`
-  // or `X16`, each only where the width is known and the instruction above did
-  // not already leave it so.
+  // The directives an instruction needs before it, and only those: `EMULATION`
+  // where it reads in emulation mode and the instruction above did not leave the
+  // chip there — or there is no instruction above, since a region begins native;
+  // `NATIVE` where the instruction above left emulation mode and this one reads
+  // native; and in native mode `A8` or `A16` and `X8` or `X16`, each only where
+  // the width is known and the instruction above did not already leave it so.
+  // Emulation mode forces both widths, so no width directive follows `EMULATION`.
   [[nodiscard]] std::vector<std::string> directives(std::optional<Context> before,
                                                     Context now) const override;
 };

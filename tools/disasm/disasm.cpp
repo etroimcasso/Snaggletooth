@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <deque>
+#include <iterator>
 #include <set>
 #include <utility>
 
@@ -246,6 +247,17 @@ Listing trace(const Backend& backend, const Request& request) {
     left.reset();
   }
 
+  // A label names a line the listing prints. A target that landed in data, or
+  // inside an instruction already decoded, has no line and keeps no label, so an
+  // operand is never written as a name nothing defines.
+  std::set<Address> printed;
+  for (const Line& line : listing.lines) {
+    if (line.isCode) printed.insert(line.address);
+  }
+  for (auto it = listing.labels.begin(); it != listing.labels.end();) {
+    it = printed.count(it->first) != 0 ? std::next(it) : listing.labels.erase(it);
+  }
+
   return listing;
 }
 
@@ -300,8 +312,15 @@ std::string render(const Listing& listing) {
       for (const std::string& directive : line.directives) {
         out += "        " + directive + "\n";
       }
+      // The target as the label it carries, where the dialect can write one;
+      // the address otherwise. A label is only ever at a line of the listing, so
+      // the name is one the same source defines.
       const Instruction& instruction = line.instruction;
-      std::string row = "        " + instruction.text;
+      const std::string* targetLabel =
+          instruction.target && instruction.symbolic ? labelAt(*instruction.target) : nullptr;
+      std::string row = "        " + (targetLabel ? instruction.symbolic->before + *targetLabel +
+                                                        instruction.symbolic->after
+                                                  : instruction.text);
       padTo(row, kCommentColumn);
 
       std::string bytes;

@@ -24,7 +24,7 @@ Everything lives in `snaggletooth::disasm`.
 | `Backend` | The interface a chip's disassembler implements. |
 | `Request` | What to disassemble: the image, its base, the entry points and the context each starts with, an optional prior image, and symbols. |
 | `trace(backend, request)` | Follows control flow and returns a `Listing`. |
-| `render(listing)` | Renders a `Listing` as source text. |
+| `render(listing)` | Renders a `Listing` as source text, a target that carries a label written as the label. |
 | `formatAddress(address, bits)` | `$XXXX` at 16 bits, `$BB:XXXX` at 24. |
 
 ## Using it

@@ -6,9 +6,10 @@ the placement and data directives, the round-trip guarantee, diagnostics and
 stability — is the [common layer](assembly-lexicon.md); this page describes what
 the SPC700 adds to it.
 
-> **Status.** The assembler is not built. The disassembler emits this language
-> today; sections describing what the assembler accepts describe the target, not
-> shipped behaviour.
+> **Status.** `spc700_asm` assembles this dialect and `spc700_disasm` emits it —
+> [assemblers.md](assemblers.md). Every opcode round-trips through its own text,
+> and a real sound program's dump, disassembled and reassembled, is
+> byte-identical and renders byte-identical audio.
 
 ---
 
@@ -78,7 +79,8 @@ loop:   MOV A,(X)+
 An absolute bit operand packs a 13-bit address and a 3-bit index into one 16-bit
 operand. Written `!addr.bit`, the address must fit in 13 bits (`$0000`–`$1FFF`)
 and the index in 0–7. A leading `/` selects the negated form where the
-instruction has one.
+instruction has one. The index is what follows the last `.` in the operand, so
+a name with a `.` in it — `flags.io.3` — still reads as the name and its bit.
 
 Direct-page bit instructions — `SET1`, `CLR1`, `BBS`, `BBC` — carry the bit index
 in the opcode rather than the operand, so it is written the same way but is not
@@ -98,7 +100,8 @@ Three instructions do not take an ordinary address operand.
 `TCALL`'s operand is an entry number in decimal, 0 through 15, and rides in the
 opcode's high nibble — it is not an address and not an emitted byte. `PCALL`
 takes a **one-byte** offset; the disassembler prints the full destination it
-reaches as a comment, but the operand written in source is the byte.
+reaches as a comment, but the operand written in source is the byte, and
+`PCALL $FF12` is an error.
 
 ### 2.4 The two-operand direct-page order
 
@@ -116,6 +119,8 @@ and disassembler agree on both.
 
 - [Assembly language: the common layer](assembly-lexicon.md) — source format,
   numbers, symbols, directives, round-trip, diagnostics and stability.
+- [The assemblers](assemblers.md) — `spc700_asm`, the tool that reads this
+  language.
 - [SPC700 disassembler](spc700-disassembler.md) — the tool that emits this language.
 - [SPC700 CPU core](spc700-cpu.md) — the instruction set itself: opcodes, cycles,
   and the interpreter.

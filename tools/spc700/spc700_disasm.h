@@ -23,6 +23,56 @@
 
 namespace snaggletooth::disasm {
 
+// What operand bytes follow an opcode, and how each one reads. The instruction's
+// text carries the surrounding syntax — a register name, an index suffix, the
+// brackets of an indirect form — and leaves a numbered slot where each operand
+// lands. So this enumerates the operand bytes alone, and every instruction
+// sharing a byte shape shares a value here however differently it prints.
+enum class Spc700Operands : std::uint8_t {
+  None,    // no operand bytes
+  Imm,     // one byte, an immediate value
+  Dp,      // one byte, a direct-page offset
+  Abs,     // two bytes, an address, low byte first
+  AbsBit,  // two bytes: an address in the low 13 bits, a bit index in the top 3
+  Rel,     // one byte, a displacement from the end of the instruction
+  DpRel,   // a direct-page offset, then a displacement
+  DpDp,    // a source offset, then a destination offset
+  ImmDp,   // an immediate byte, then a destination offset
+  Upage,   // one byte, an offset into page $FF
+};
+
+// How many bytes an operand shape adds to the opcode.
+[[nodiscard]] constexpr std::uint8_t spc700OperandBytes(Spc700Operands operands) noexcept {
+  switch (operands) {
+    case Spc700Operands::None: return 0;
+    case Spc700Operands::Imm:
+    case Spc700Operands::Dp:
+    case Spc700Operands::Rel:
+    case Spc700Operands::Upage: return 1;
+    case Spc700Operands::Abs:
+    case Spc700Operands::AbsBit:
+    case Spc700Operands::DpRel:
+    case Spc700Operands::DpDp:
+    case Spc700Operands::ImmDp: return 2;
+  }
+  return 0;
+}
+
+// One row of the instruction table: the opcode, its text with `%1` and `%2`
+// where the operands go — numbered in the order the bytes appear, so a form
+// whose source byte comes first but prints second names its slots out of order —
+// the operand shape, and how execution leaves the instruction. The same table
+// decodes an instruction and encodes one, so the two cannot disagree.
+struct Spc700Opcode {
+  std::uint8_t opcode = 0;
+  const char* text = "";
+  Spc700Operands operands = Spc700Operands::None;
+  Flow flow = Flow::Continue;
+};
+
+// The instruction table, indexed by opcode.
+[[nodiscard]] const std::array<Spc700Opcode, 256>& spc700Opcodes();
+
 // The SPC700 has a 16-bit address space and its instructions always read the same
 // way, so the backend never sets a bank and passes the context through untouched.
 class Spc700Backend final : public Backend {

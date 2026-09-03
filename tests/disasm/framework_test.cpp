@@ -70,6 +70,7 @@ class ToyBackend final : public Backend {
         out.target = target;
         out.flow = opcode == 0x02 ? Flow::Jump : Flow::Call;
         out.text = std::string(opcode == 0x02 ? "JMP " : "CALL ") + formatAddress(target, 24);
+        out.symbolic = SymbolicText{.before = opcode == 0x02 ? "JMP " : "CALL ", .after = ""};
         break;
       }
       case 0x04: {
@@ -79,6 +80,8 @@ class ToyBackend final : public Backend {
         out.target = target;
         out.flow = Flow::Branch;
         out.text = "BR " + formatAddress(target, 24);
+        // The toy writes a branch's symbol in brackets, so the two parts show.
+        out.symbolic = SymbolicText{.before = "BR [", .after = "]"};
         break;
       }
       case 0x05: out.length = 1; out.flow = Flow::Return; out.text = "RET"; break;
@@ -284,6 +287,65 @@ TEST(DisasmFramework, TheBytesColumnWidensToTheLongestInstruction) {
     EXPECT_EQ(cost, *column) << line;
   }
   EXPECT_TRUE(column.has_value());
+}
+
+// A target that carries a label is written as the label, in the form the backend
+// gave the instruction — and the label is one the listing defines, so the
+// source names only lines it holds.
+TEST(DisasmFramework, ATargetWithALabelIsWrittenAsTheLabel) {
+  const std::vector<std::uint8_t> image = {
+      0x03, 0x07, 0x80, 0x00,  // $8000  CALL $00:8007
+      0x04, 0xFA,              // $8004  BR back to $8000
+      0xFF,                    // $8006  HALT
+      0x05,                    // $8007  RET
+  };
+  Request request;
+  request.image = image;
+  request.base = 0x008000;
+  const std::string text = render(trace(toy(), request));
+  EXPECT_NE(text.find("        CALL sub_008007 "), std::string::npos) << text;
+  EXPECT_NE(text.find("        BR [entry] "), std::string::npos) << text;
+  EXPECT_EQ(text.find("CALL $00:8007"), std::string::npos);
+  EXPECT_EQ(text.find("BR $00:8000"), std::string::npos);
+  // The comment still carries the address and the bytes.
+  EXPECT_NE(text.find("; $00:8000  03 07 80 00"), std::string::npos) << text;
+}
+
+// A target with no line of its own — one that lands inside an instruction
+// already decoded — keeps no label and is written as its address.
+TEST(DisasmFramework, ATargetWithoutALineKeepsNoLabelAndIsWrittenAsAnAddress) {
+  const std::vector<std::uint8_t> image = {
+      0x03, 0x02, 0x80, 0x00,  // $8000  CALL $00:8002 — into its own operand bytes
+      0x05,                    // $8004  RET
+  };
+  Request request;
+  request.image = image;
+  request.base = 0x008000;
+  const Listing listing = trace(toy(), request);
+  EXPECT_EQ(listing.labels.count(0x008002u), 0u);
+  ASSERT_EQ(listing.labels.count(0x008000u), 1u);
+  const std::string text = render(listing);
+  EXPECT_NE(text.find("        CALL $00:8002 "), std::string::npos) << text;
+}
+
+// A backend that gives an instruction no symbolic form keeps the address even
+// where the target carries a label.
+TEST(DisasmFramework, AnInstructionWithoutASymbolicFormKeepsTheAddress) {
+  Listing listing;
+  listing.addressBits = 24;
+  listing.labels[0x008000u] = "entry";
+  Line line;
+  line.isCode = true;
+  line.address = 0x008000u;
+  line.instruction.address = 0x008000u;
+  line.instruction.length = 2;
+  line.instruction.bytes = {0x04, 0xFE};
+  line.instruction.text = "BR $00:8000";
+  line.instruction.target = 0x008000u;
+  listing.lines.push_back(line);
+  EXPECT_NE(render(listing).find("        BR $00:8000 "), std::string::npos);
+  listing.lines[0].instruction.symbolic = SymbolicText{.before = "BR [", .after = "]"};
+  EXPECT_NE(render(listing).find("        BR [entry] "), std::string::npos);
 }
 
 // The SPC700 backend over the same framework: 16-bit addresses, no context.

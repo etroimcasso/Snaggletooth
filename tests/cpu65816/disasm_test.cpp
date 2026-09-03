@@ -490,6 +490,36 @@ TEST(Cpu65816Disasm, JumpsAndCallsCarryTheBankTheyLandIn) {
   EXPECT_EQ(decodeAt(indirectLong, at, at, mode)->flow, Flow::Jump);
 }
 
+// Every form with a constant target carries the text that writes it as a
+// symbol, behind the marker its mode needs: `!` for an absolute jump or call,
+// `>` for a long one, nothing for a branch. A form whose operand is not its
+// target — a pointer, a data address, PER's pushed address — carries none.
+TEST(Cpu65816Disasm, TargetsCarryTheirSymbolicForm) {
+  const Cpu65816Mode mode = Cpu65816Mode::native(true, true);
+  auto symbolic = [&](std::vector<std::uint8_t> image) -> std::optional<SymbolicText> {
+    const std::optional<Instruction> decoded = decodeAt(image, kAt, kAt, mode);
+    EXPECT_TRUE(decoded.has_value());
+    return decoded ? decoded->symbolic : std::nullopt;
+  };
+  const std::optional<SymbolicText> jump = symbolic({0x4C, 0x34, 0x12});  // JMP !$1234
+  ASSERT_TRUE(jump.has_value());
+  EXPECT_EQ(jump->before, "JMP !");
+  EXPECT_EQ(jump->after, "");
+  EXPECT_EQ(symbolic({0x20, 0x34, 0x12})->before, "JSR !");
+  EXPECT_EQ(symbolic({0x5C, 0x34, 0x12, 0x7E})->before, "JML >");
+  EXPECT_EQ(symbolic({0x22, 0x34, 0x12, 0x7E})->before, "JSL >");
+  EXPECT_EQ(symbolic({0xD0, 0x10})->before, "BNE ");
+  EXPECT_EQ(symbolic({0x80, 0x10})->before, "BRA ");
+  EXPECT_EQ(symbolic({0x82, 0x00, 0x10})->before, "BRL ");
+  EXPECT_FALSE(symbolic({0x7C, 0x34, 0x12}).has_value());        // JMP (!$1234,X)
+  EXPECT_FALSE(symbolic({0x6C, 0x34, 0x12}).has_value());        // JMP (!$1234)
+  EXPECT_FALSE(symbolic({0xDC, 0x34, 0x12}).has_value());        // JML [!$1234]
+  EXPECT_FALSE(symbolic({0xAD, 0x34, 0x12}).has_value());        // LDA !$1234
+  EXPECT_FALSE(symbolic({0xAF, 0x34, 0x12, 0x7E}).has_value());  // LDA $7E:1234
+  EXPECT_FALSE(symbolic({0x62, 0x00, 0x10}).has_value());        // PER $00:9003
+  EXPECT_FALSE(symbolic({0x00, 0x12}).has_value());              // BRK #$12
+}
+
 // The block moves store the destination bank first; the dialect writes the
 // source first. Getting this backwards moves the bytes the wrong way.
 TEST(Cpu65816Disasm, BlockMovesPrintTheSourceBankFirst) {

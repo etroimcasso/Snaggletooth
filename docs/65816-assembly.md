@@ -6,9 +6,10 @@ the placement and data directives, the round-trip guarantee, diagnostics and
 stability — is the [common layer](assembly-lexicon.md); this page describes what
 the 65816 adds to it.
 
-> **Status.** The assembler is not built. The disassembler emits this language
-> today; sections describing what the assembler accepts describe the target, not
-> shipped behaviour.
+> **Status.** `cpu65816_asm` assembles this dialect and `cpu65816_disasm` emits
+> it — [assemblers.md](assemblers.md). Every opcode round-trips through its own
+> text under every setting of the register widths, and thirty-one cartridges'
+> source trees reassemble to their images byte for byte.
 
 ---
 
@@ -24,6 +25,7 @@ the 65816 adds to it.
   - [2.6 The stack forms and the signatures](#26-the-stack-forms-and-the-signatures)
 - [3. Directives](#3-directives)
   - [3.1 `A8`, `A16`, `X8`, `X16`](#31-a8-a16-x8-x16)
+  - [3.2 `EMULATION`, `NATIVE`](#32-emulation-native)
 - [See also](#see-also)
 
 ## 1. Scope
@@ -86,6 +88,12 @@ size of a number.
 
 `!$7E:1234` is an error: the bank separator already says the operand is long.
 
+An absolute operand takes a 16-bit value, or a 24-bit value in the instruction's
+own bank, which is taken as its offset — the value a label in the same file
+has, so `JMP !loop` and `JSR !sub_0180E8` write the offset of a line the file
+defines. A 24-bit value in any other bank does not fit and is reported, never
+truncated to its low half.
+
 ### 2.2 Immediates and the register widths
 
 An immediate operand is as wide as the register it loads. The accumulator's
@@ -103,9 +111,19 @@ enters emulation mode, which forces both widths to eight, when the instruction
 before it is `SEC`, and leaves it when that instruction is `CLC`; an `XCE` with
 any other instruction before it keeps the mode. `PLP` and `RTI` load the status
 byte from the stack, after which the widths are unknown until something says them.
-A width is also unknown at the start of every region, until a directive (§3.1) or
-a `REP`/`SEP` settles it. An immediate assembled under an unknown width is an
-error naming the width it needs.
+An immediate assembled under an unknown width is an error naming the width it
+needs.
+
+The mask of a `REP` or `SEP` decides the width of everything after it, so it
+must be resolvable when the line is read: a name defined later in the file is
+an error there.
+
+A **region** begins at the start of a file, at every `ORG`, and after every
+data directive (`DB`, `DW`, `DL`, `DS`). A region begins in native mode with
+both widths unknown and nothing remembered about the carry, until a directive
+(§3) or a `REP`/`SEP` settles a width. Emulation mode has to be said, because
+the instructions cannot say it and it decides whether `REP` and `SEP` move a
+width at all: in emulation mode they move nothing.
 
 ### 2.3 Branch targets are addresses, not displacements
 
@@ -172,11 +190,33 @@ an immediate so that it is never lost.
 Each sets what the assembler knows about a register width from that line on, and
 is what settles a width the instructions cannot: at the start of a region, and
 after a `PLP` or `RTI`. A `REP` or `SEP` after it moves the width as the hardware
-would, so a directive is not repeated after them.
+would, so a directive is not repeated after them. `A16` or `X16` in emulation
+mode is an error, since both widths are eight there until `XCE` leaves it. A
+directive takes no operand.
 
 The disassembler emits these at the start of every region and wherever the trace
 read an instruction under a width the instruction above did not leave — nowhere
 else, because a `REP` or `SEP` already says its own change.
+
+### 3.2 `EMULATION`, `NATIVE`
+
+```
+        EMULATION       ; the chip is in emulation mode from here
+        NATIVE          ; native mode from here, the widths as they were
+```
+
+`EMULATION` says the code from that line on runs in emulation mode: both widths
+are eight and known, `REP` and `SEP` move neither, and an `XCE` after `CLC`
+leaves it. `NATIVE` returns to native mode and keeps the widths where emulation
+held them. A region begins native, so `NATIVE` is only ever needed after an
+`EMULATION` in the same region.
+
+The disassembler emits `EMULATION` at the start of every region the trace read
+in emulation mode, with no width directive under it, and wherever the
+instruction above left the chip native and this one reads in emulation mode;
+`NATIVE` where the instruction above left emulation mode and this one reads
+native. A reset handler's file therefore begins `EMULATION`, and its `CLC` /
+`XCE` says the rest.
 
 ---
 
@@ -184,6 +224,8 @@ else, because a `REP` or `SEP` already says its own change.
 
 - [Assembly language: the common layer](assembly-lexicon.md) — source format,
   numbers, symbols, directives, round-trip, diagnostics and stability.
+- [The assemblers](assemblers.md) — `cpu65816_asm`, the tool that reads this
+  language.
 - [65816 disassembler](65816-disassembler.md) — the tool that emits this language.
 - [65816 CPU core](65816-cpu.md) — the instruction set itself: the widths, the
   modes, and the cycles.

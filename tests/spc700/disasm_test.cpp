@@ -9,6 +9,8 @@
 
 #include <array>
 #include <cstdint>
+#include <initializer_list>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -123,6 +125,45 @@ TEST(Spc700Disasm, RelativeTargetsMeasureFromTheEndOfTheInstruction) {
   const std::optional<Instruction> loop = decodeAt(back, kAt, kAt);
   ASSERT_TRUE(loop.has_value());
   EXPECT_EQ(loop->target.value_or(0), kAt);
+}
+
+// Every form whose target is an address the dialect can name carries the text
+// that writes it as a symbol: the call and the absolute jump behind `!`, a
+// branch bare, a direct-page branch after its first operand. PCALL's operand is
+// an offset byte and TCALL's an entry number, and a jump through a table has no
+// constant target, so none of those carries one.
+TEST(Spc700Disasm, TargetsCarryTheirSymbolicForm) {
+  auto symbolic = [](std::initializer_list<std::uint8_t> bytes) -> std::optional<SymbolicText> {
+    const std::vector<std::uint8_t> image(bytes);
+    const std::optional<Instruction> decoded = decodeAt(image, kAt, kAt);
+    EXPECT_TRUE(decoded.has_value());
+    return decoded ? decoded->symbolic : std::nullopt;
+  };
+  std::optional<SymbolicText> call = symbolic({0x3F, 0x34, 0x12});  // CALL !$1234
+  ASSERT_TRUE(call.has_value());
+  EXPECT_EQ(call->before, "CALL !");
+  EXPECT_EQ(call->after, "");
+  std::optional<SymbolicText> jump = symbolic({0x5F, 0x34, 0x12});  // JMP !$1234
+  ASSERT_TRUE(jump.has_value());
+  EXPECT_EQ(jump->before, "JMP !");
+  std::optional<SymbolicText> branch = symbolic({0xF0, 0x0C});  // BEQ $200E
+  ASSERT_TRUE(branch.has_value());
+  EXPECT_EQ(branch->before, "BEQ ");
+  EXPECT_EQ(branch->after, "");
+  std::optional<SymbolicText> bit = symbolic({0x03, 0x10, 0x0C});  // BBS $10.0,$200F
+  ASSERT_TRUE(bit.has_value());
+  EXPECT_EQ(bit->before, "BBS $10.0,");
+  EXPECT_EQ(bit->after, "");
+  std::optional<SymbolicText> count = symbolic({0x6E, 0x10, 0x0C});  // DBNZ $10,$200F
+  ASSERT_TRUE(count.has_value());
+  EXPECT_EQ(count->before, "DBNZ $10,");
+  std::optional<SymbolicText> indexed = symbolic({0xDE, 0x10, 0x0C});  // CBNE $10+X,$200F
+  ASSERT_TRUE(indexed.has_value());
+  EXPECT_EQ(indexed->before, "CBNE $10+X,");
+  EXPECT_FALSE(symbolic({0x4F, 0x12}).has_value());        // PCALL $12
+  EXPECT_FALSE(symbolic({0x01}).has_value());              // TCALL 0
+  EXPECT_FALSE(symbolic({0x1F, 0x34, 0x12}).has_value());  // JMP [!$1234+X]
+  EXPECT_FALSE(symbolic({0xE5, 0x34, 0x12}).has_value());  // MOV A,!$1234
 }
 
 // The two-operand direct-page forms carry their source byte first and print it
@@ -263,7 +304,7 @@ TEST(Spc700Disasm, OnlyMemoryOperandsAreNamed) {
   };
   EXPECT_EQ(noteOf({0xE8, 0xF2}), "");            // MOV A,#$F2 — a value
   EXPECT_EQ(noteOf({0xD0, 0xF8}), "");            // BNE -8 — a displacement
-  EXPECT_EQ(noteOf({0x4F, 0xF4}), "");            // PCALL $F4 — code in page $FF
+  EXPECT_EQ(noteOf({0x4F, 0xF4}), "$FFF4");       // PCALL $F4 — code in page $FF; the comment is where it lands
   EXPECT_EQ(noteOf({0xE4, 0xF2}), "DSPADDR");     // MOV A,$F2
   EXPECT_EQ(noteOf({0xE5, 0xF4, 0x00}), "CPUIO0"); // MOV A,!$00F4
   EXPECT_EQ(noteOf({0x8F, 0x00, 0xF4}), "CPUIO0"); // MOV $F4,#$00 — the destination

@@ -1,7 +1,8 @@
 # Cartridge tools
 
-Three things live here: `snes_disasm`, which disassembles a whole cartridge into a
-source tree; `rom_render`, which boots a cartridge on the whole SNES machine and
+Four things live here: `snes_disasm`, which disassembles a whole cartridge into a
+source tree; `snes_verify`, which assembles that tree back and compares it with
+the image; `rom_render`, which boots a cartridge on the whole SNES machine and
 writes what the audio unit plays; and `cartridge_entries.h`, where a disassembly of
 a whole cartridge starts.
 
@@ -31,6 +32,33 @@ run, `captureUpload` for the boot alone, `placeBytes` for the count, and the
 renderers and `writeProject` for the files. Full page:
 [docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
 grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
+
+## `snes_verify`
+
+```
+snes_verify <directory> <image> [-o <rebuilt>]
+```
+
+Reads the directory's `project.manifest`, assembles every file it names — the
+bank files with the 65816 dialect, the sound program with the SPC700 dialect —
+places each range and each placed block where the manifest says, and compares the
+whole with the image. One line per file, one per run that differs with its first
+differing byte, then the totals and the verdict; the exit status is 0 only when
+the tree assembles to the image. `-o` writes the rebuilt image.
+
+```
+snes_verify game game.sfc
+bank_00.asm: 1 range, 32768 bytes, identical
+…
+apu/driver.asm: 3 blocks, 11974 bytes, identical
+524288 of 524288 bytes compared, 0 differ
+the tree assembles to the image
+```
+
+The library behind it is `rom/rom_verify.h`: `verifyTree` for a directory,
+`verifyProject` for a parsed manifest and a file reader, `renderReport` for the
+text. Full page:
+[docs/snes-disassembler.md §Verifying the tree](../../docs/snes-disassembler.md#verifying-the-tree).
 
 ## `rom_render`
 
@@ -84,9 +112,9 @@ and it links both chip backends.
 ## See also
 
 - [docs/snes-disassembler.md](../../docs/snes-disassembler.md) — the whole
-  cartridge as a source tree, and
-  [docs/project-manifest.md](../../docs/project-manifest.md), the manifest it writes
-  and reads.
+  cartridge as a source tree and its verification, and
+  [docs/project-manifest.md](../../docs/project-manifest.md), the manifest one
+  writes and both read.
 - [docs/spc-rendering.md](../../docs/spc-rendering.md) — `rom_render` beside
   `spc_render`, and what each source carries.
 - [docs/disassembly-framework.md §Cartridges](../../docs/disassembly-framework.md#cartridges)

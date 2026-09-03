@@ -63,6 +63,17 @@ struct Context {
   friend bool operator==(const Context&, const Context&) = default;
 };
 
+// An instruction's text with its target written as a symbol, in two parts: the
+// text before the symbol and the text after it. A backend sets it for every
+// form whose target the dialect can name — `JSL >` before a long call's symbol,
+// `CBNE $10,` before a branch's — and leaves it unset where the dialect cannot,
+// as for a `PCALL` whose one byte is an offset into page $FF. The listing writes
+// the symbol wherever the target carries a label, and the address otherwise.
+struct SymbolicText {
+  std::string before;
+  std::string after;
+};
+
 // One decoded instruction.
 struct Instruction {
   Address address = 0;
@@ -71,8 +82,9 @@ struct Instruction {
   Flow flow = Flow::Continue;
   CycleCost cycles;
   std::vector<std::uint8_t> bytes;         // the instruction's own bytes, opcode first
-  std::string text;                        // rendered mnemonic and operands
+  std::string text;                        // rendered mnemonic and operands, the target as an address
   std::optional<Address> target;           // the destination, when it is a constant
+  std::optional<SymbolicText> symbolic;    // the text with the target as a symbol, when the dialect can write one
   std::optional<Address> operandAddress;   // the memory address the operand names, when the backend reports one
   std::string note;                        // an annotation: a named register, a changed byte
 };
@@ -95,8 +107,11 @@ struct Line {
   std::vector<std::uint8_t> data;  // when !isCode
 };
 
-// A finished listing: its lines in address order, the labels the trace found, and
-// the width its addresses print at.
+// A finished listing: its lines in address order, the labels it defines, and the
+// width its addresses print at. Every label is at the address of one of the
+// listing's instructions — a target that landed in data or inside another
+// instruction carries none — so an operand written as a label names a line the
+// same source defines.
 struct Listing {
   std::vector<Line> lines;
   std::map<Address, std::string> labels;
@@ -185,7 +200,10 @@ class Backend {
 // Traces the image from its entry points with the backend and returns the listing.
 [[nodiscard]] Listing trace(const Backend& backend, const Request& request);
 
-// Renders a listing as text: address, raw bytes, mnemonic, cycle cost, notes.
+// Renders a listing as text: address, raw bytes, mnemonic, cycle cost, notes. An
+// instruction whose target carries one of the listing's labels, and whose
+// backend gave it a symbolic form, is written with the label in place of the
+// address.
 [[nodiscard]] std::string render(const Listing& listing);
 
 // An address as a listing prints it: `$XXXX` at 16 bits, `$BB:XXXX` at 24.

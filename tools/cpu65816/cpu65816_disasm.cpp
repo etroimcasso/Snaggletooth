@@ -26,46 +26,8 @@ constexpr std::uint32_t kReadingBits =
     kBitAccumulator8 | kBitIndex8 | kBitEmulation | kBitAccumulatorKnown | kBitIndexKnown;
 
 // ---- the instruction table ---------------------------------------------------
-// How an instruction's operand bytes are laid out and how they print. The
-// mnemonic is separate, so every instruction sharing a shape shares an entry
-// here however differently it is named.
-enum class Mode : std::uint8_t {
-  Implied,              // no operand
-  Accumulator,          // `A`
-  ImmediateM,           // `#imm`, one byte or two by the accumulator width
-  ImmediateX,           // `#imm`, one byte or two by the index width
-  ImmediateByte,        // `#imm`, always one byte: REP, SEP, WDM, and the BRK/COP signature
-  Direct,               // `dp`
-  DirectX,              // `dp,X`
-  DirectY,              // `dp,Y`
-  DirectIndirect,       // `(dp)`
-  DirectIndirectX,      // `(dp,X)`
-  DirectIndirectY,      // `(dp),Y`
-  DirectIndirectLong,   // `[dp]`
-  DirectIndirectLongY,  // `[dp],Y`
-  StackRelative,        // `sr,S`
-  StackRelativeY,       // `(sr,S),Y`
-  Absolute,             // `!abs`
-  AbsoluteX,            // `!abs,X`
-  AbsoluteY,            // `!abs,Y`
-  AbsoluteLong,         // `$bb:hhll`
-  AbsoluteLongX,        // `$bb:hhll,X`
-  AbsoluteIndirect,     // `(!abs)`, a pointer in bank zero
-  AbsoluteIndirectLong, // `[!abs]`, a three-byte pointer in bank zero
-  AbsoluteIndexedIndirect,  // `(!abs,X)`, a pointer in the program bank
-  Relative,             // an 8-bit displacement, printed as the address it reaches
-  RelativeLong,         // a 16-bit displacement, printed the same way
-  BlockMove,            // two bank bytes: the destination first, then the source
-  PushAbsolute,         // PEA: a 16-bit value pushed as it is
-  PushRelative,         // PER: a 16-bit displacement, pushed as the address it names
-};
-
-struct OpcodeInfo {
-  std::uint8_t opcode = 0;
-  const char* mnemonic = "";
-  Mode mode = Mode::Implied;
-  Flow flow = Flow::Continue;
-};
+using Mode = Cpu65816Addressing;
+using OpcodeInfo = Cpu65816Opcode;
 
 // The table, one row per opcode, in the order of the datasheet's opcode matrix.
 constexpr std::array<OpcodeInfo, 256> kOpcodes = {{
@@ -327,48 +289,6 @@ constexpr std::array<OpcodeInfo, 256> kOpcodes = {{
     {0xFF, "SBC", Mode::AbsoluteLongX, Flow::Continue},
 }};
 
-// How many operand bytes a mode carries. The two immediates whose width follows
-// a flag answer for that flag's setting.
-constexpr std::uint8_t operandBytes(Mode mode, bool accumulator8, bool index8) noexcept {
-  switch (mode) {
-    case Mode::Implied:
-    case Mode::Accumulator:
-      return 0;
-    case Mode::ImmediateM:
-      return accumulator8 ? 1 : 2;
-    case Mode::ImmediateX:
-      return index8 ? 1 : 2;
-    case Mode::ImmediateByte:
-    case Mode::Direct:
-    case Mode::DirectX:
-    case Mode::DirectY:
-    case Mode::DirectIndirect:
-    case Mode::DirectIndirectX:
-    case Mode::DirectIndirectY:
-    case Mode::DirectIndirectLong:
-    case Mode::DirectIndirectLongY:
-    case Mode::StackRelative:
-    case Mode::StackRelativeY:
-    case Mode::Relative:
-      return 1;
-    case Mode::Absolute:
-    case Mode::AbsoluteX:
-    case Mode::AbsoluteY:
-    case Mode::AbsoluteIndirect:
-    case Mode::AbsoluteIndirectLong:
-    case Mode::AbsoluteIndexedIndirect:
-    case Mode::RelativeLong:
-    case Mode::BlockMove:
-    case Mode::PushAbsolute:
-    case Mode::PushRelative:
-      return 2;
-    case Mode::AbsoluteLong:
-    case Mode::AbsoluteLongX:
-      return 3;
-  }
-  return 0;
-}
-
 // ---- measuring an instruction's cost ------------------------------------
 // A flat 64 KB bus that answers every bank from the same bytes. Every probe runs
 // against it, so the measurement never depends on a register's side effect: the
@@ -467,12 +387,18 @@ std::string hex16(std::uint16_t value) {
 // A 24-bit address as the dialect writes a long operand: `$BB:HHLL`.
 std::string longOperand(Address address) { return formatAddress(address, 24); }
 
+// The cost of an opcode under a mode. Where a width is unknown the cost is looked
+// up under both settings of it, and is known only when they agree.
+CycleCost costUnder(std::uint8_t opcode, const Cpu65816Mode& mode);
+
+}  // namespace
+
 // ---- the mode, applied ------------------------------------------------------
-// The mode execution carries out of an instruction. Only a handful of
-// instructions move the flags; everything else passes the mode through, and
-// every instruction but CLC and SEC forgets what was known about the carry.
-Cpu65816Mode modeAfter(std::uint8_t opcode, std::uint8_t operand, Cpu65816Mode mode,
-                       std::string& note) {
+// Only a handful of instructions move the flags; everything else passes the
+// mode through, and every instruction but CLC and SEC forgets what was known
+// about the carry.
+Cpu65816Mode cpu65816ModeAfter(std::uint8_t opcode, std::uint8_t operand,
+                               const Cpu65816Mode& mode, std::string& note) {
   Cpu65816Mode next = mode;
   next.carryKnown = false;
   next.carry = false;
@@ -535,8 +461,10 @@ Cpu65816Mode modeAfter(std::uint8_t opcode, std::uint8_t operand, Cpu65816Mode m
   return next;
 }
 
-// The cost of an opcode under a mode. Where a width is unknown the cost is looked
-// up under both settings of it, and is known only when they agree.
+const std::array<Cpu65816Opcode, 256>& cpu65816Opcodes() { return kOpcodes; }
+
+namespace {
+
 CycleCost costUnder(std::uint8_t opcode, const Cpu65816Mode& mode) {
   std::optional<CycleCost> found;
   bool agree = true;
@@ -727,7 +655,7 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
   // with; `unreadable` says so first, and a caller that skipped it gets nothing.
   if (!unreadable(image, base, at, context).empty()) return std::nullopt;
 
-  const std::uint8_t extra = operandBytes(info.mode, mode.accumulator8, mode.index8);
+  const std::uint8_t extra = cpu65816OperandBytes(info.mode, mode.accumulator8, mode.index8);
   if (offset + 1u + extra > image.size()) return std::nullopt;
 
   const std::uint8_t first = extra >= 1 ? image[offset + 1] : std::uint8_t{0};
@@ -747,6 +675,9 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
 
   const Address after = following(at, out.length);
   std::string operand;
+  // What precedes the target when it is written as a symbol: the absolute forms'
+  // `!`, the long forms' `>`, nothing before a branch's.
+  std::string symbolMarker;
   switch (info.mode) {
     case Mode::Implied:
       break;
@@ -777,6 +708,7 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
       operand = "!$" + hex16(word);
       if (info.flow == Flow::Jump || info.flow == Flow::Call) {
         out.target = bank | word;
+        symbolMarker = "!";
       } else {
         out.operandAddress = word;
       }
@@ -794,6 +726,7 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
       operand = longOperand(address);
       if (info.flow == Flow::Jump || info.flow == Flow::Call) {
         out.target = address;
+        symbolMarker = ">";
       } else {
         out.operandAddress = address;
       }
@@ -853,7 +786,14 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
 
   out.text = operand.empty() ? std::string(info.mnemonic)
                              : std::string(info.mnemonic) + " " + operand;
-  const Cpu65816Mode next = modeAfter(opcode, first, mode, out.note);
+  // Every form with a constant target — a branch, an absolute or long jump or
+  // call — takes a symbol where the address was, behind the marker its mode
+  // needs.
+  if (out.target) {
+    out.symbolic = SymbolicText{.before = std::string(info.mnemonic) + " " + symbolMarker,
+                                .after = ""};
+  }
+  const Cpu65816Mode next = cpu65816ModeAfter(opcode, first, mode, out.note);
   return Decoded{.instruction = std::move(out), .next = contextOf(next)};
 }
 
@@ -902,6 +842,16 @@ std::vector<std::string> Cpu65816Backend::directives(std::optional<Context> befo
   std::optional<Cpu65816Mode> left;
   if (before) left = modeOf(*before);
   std::vector<std::string> out;
+
+  // A region begins in native mode, so emulation has to be said at its start and
+  // wherever the instruction above did not leave the chip there. It forces both
+  // widths, so nothing more is said under it.
+  if (mode.emulation) {
+    if (!left || !left->emulation) out.emplace_back("EMULATION");
+    return out;
+  }
+  if (left && left->emulation) out.emplace_back("NATIVE");
+
   if (mode.accumulatorKnown &&
       (!left || !left->accumulatorKnown || left->accumulator8 != mode.accumulator8)) {
     out.emplace_back(mode.accumulator8 ? "A8" : "A16");

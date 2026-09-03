@@ -87,7 +87,7 @@ entry_0430:
         CLRP                            ; $0430  20        2
         MOV X,#$FF                      ; $0431  CD FF     2  T2OUT
         MOV SP,X                        ; $0433  BD        2
-        BEQ $0445                       ; $0434  F0 0F     2/4
+        BEQ loc_0445                    ; $0434  F0 0F     2/4
 
 ; ---- 6 bytes execution did not reach
         DB $00,$11,$00,$6F,$0D,$00      ; $0436  |...o..|
@@ -103,7 +103,13 @@ four when it holds.
 
 Labels are generated for every target the trace reaches — `loc_` for a branch or
 jump destination, `sub_` for a call destination, `entry_` for an address you passed.
-Supply your own through `DisasmRequest::symbols` and they take precedence.
+Supply your own through `DisasmRequest::symbols` and they take precedence. A
+branch, a call or an absolute jump whose target carries a label writes the label
+in place of the address — `BEQ loc_0445`, `CALL !sub_0A7D`, `DBNZ $10,loc_0407` —
+so the listing reads as a program and assembles as one. `PCALL` keeps its byte,
+since its operand is an offset into page `$FF` and not the address it reaches;
+a target with no line of its own in the listing keeps no label and stays an
+address.
 
 ## Hardware registers
 
@@ -125,7 +131,7 @@ a two-operand form is annotated for its destination:
 called out on the line carrying it:
 
 ```
-        CALL !$0A7D                     ; $0A35  3F 7D 0A  8  PATCHED at run time, was 35
+        CALL !sub_0A7D                  ; $0A35  3F 7D 0A  8  PATCHED at run time, was 35
         MOV Y,$FA+X                     ; $0A8A  FB FA     4  T0TARGET; PATCHED at run time, was 00 11
 ```
 
@@ -179,9 +185,12 @@ read two ways, not that the tool failed.
 ## Status
 
 The disassembler covers the SPC700; the main CPU has its own,
-[65816-disassembler.md](65816-disassembler.md), over the same framework. The
-cartridge coprocessors, whole-cartridge disassembly with bank mapping, and the
-assembler that closes the round trip are not built yet.
+[65816-disassembler.md](65816-disassembler.md), over the same framework, and a
+whole cartridge is read through both by the
+[cartridge disassembler](snes-disassembler.md). The assembler that closes the
+round trip is [`spc700_asm`](assemblers.md): every opcode, decoded and assembled
+back from its text, gives the bytes decoded, and a real sound program's dump
+reassembles byte for byte. The cartridge coprocessors are not built.
 
 Targets that are not constants — `JMP [!abs+X]` through a table, a call whose
 destination is computed — are decoded and printed, but the trace cannot follow them.
@@ -191,6 +200,7 @@ Code reachable only that way needs an explicit `--entry`.
 
 - [SPC700 assembly language](spc700-assembly.md) — the dialect this emits, over
   the [common layer](assembly-lexicon.md).
+- [The assemblers](assemblers.md) — `spc700_asm`, which reads it back.
 - [SPC700 CPU core](spc700-cpu.md) — the interpreter the cycle costs are measured from.
 - [Disassembly framework](disassembly-framework.md) — the tracer and renderer this backend runs on.
 - [Cartridge disassembler](snes-disassembler.md) — the sound program a cartridge
