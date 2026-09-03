@@ -110,6 +110,25 @@ TEST(Cpu65816Asm, DirectAbsoluteAndLongAreMarkedNotSized) {
             std::string::npos);
 }
 
+// §2.1: an absolute operand takes a 24-bit value in the instruction's own bank as
+// its offset — the value a label in the same file has — and reports a value in
+// any other bank.
+TEST(Cpu65816Asm, AnAbsoluteOperandTakesALabelInItsOwnBank) {
+  EXPECT_EQ(bytesOf("        ORG $01:8000\nloop:   NOP\n        JMP !loop\n"),
+            (Bytes{0xEA, 0x4C, 0x00, 0x80}));
+  EXPECT_EQ(bytesOf("        ORG $7E:2000\n        A8\n        X8\n"
+                    "table:  LDA !table,X\n        JSR !table\n        JMP (!table,X)\n"),
+            (Bytes{0xBD, 0x00, 0x20, 0x20, 0x00, 0x20, 0x7C, 0x00, 0x20}));
+  EXPECT_EQ(bytesOf("        ORG $01:8000\n        JMP !$8000\n"), (Bytes{0x4C, 0x00, 0x80}))
+      << "a 16-bit value is an offset in whatever bank";
+  const std::string far = errorOf("far     EQU $02:8000\n        ORG $01:8000\n        JMP !far\n");
+  EXPECT_NE(far.find("$028000"), std::string::npos);
+  EXPECT_NE(far.find("not in bank $01"), std::string::npos);
+  EXPECT_NE(errorOf("        ORG $01:8000\n        BNE $02:8000\n").find("another bank"),
+            std::string::npos)
+      << "a branch's rule is its own";
+}
+
 // §2.2: an immediate is as wide as the register it loads, and the width comes
 // from the mode, never from the digits.
 TEST(Cpu65816Asm, ImmediatesFollowTheRegisterWidths) {
@@ -367,6 +386,8 @@ TEST(Cpu65816Asm, ARenderedListingAssemblesBackToItsBytes) {
   const std::string text = disasm::render(listing);
   EXPECT_NE(text.find("        EMULATION\n"), std::string::npos) << text;
   EXPECT_NE(text.find("INIDISP"), std::string::npos);
+  EXPECT_NE(text.find("        JSR !sub_008014 "), std::string::npos) << text;
+  EXPECT_NE(text.find("\nsub_008014:\n"), std::string::npos);
 
   const Assembly assembly = assembleCpu65816(text, "listing.asm");
   ASSERT_TRUE(assembly.ok()) << assembly.errors.front().line << ": "

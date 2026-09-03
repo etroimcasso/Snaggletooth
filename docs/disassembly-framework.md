@@ -46,13 +46,16 @@ Everything lives in `snaggletooth::disasm`.
 | `Backend` | The interface a chip's disassembler implements — see [Writing a backend](#writing-a-backend). |
 | `Request` | What to disassemble: the image, its base address, the entry points and the context each starts with, an optional prior image, and symbols. |
 | `trace(backend, request)` | Follows control flow and returns a `Listing`. |
-| `render(listing)` | Renders a `Listing` as source text. |
+| `render(listing)` | Renders a `Listing` as source text, a target that carries a label written as the label. |
 | `formatAddress(address, bits)` | An address as a listing prints it: `$XXXX` at 16 bits, `$BB:XXXX` at 24. |
 
 `Instruction`, `Decoded`, `Line`, `Listing`, `Flow` and `CycleCost` are the value
 types those pass around. An `Instruction` carries its `address`, `opcode`, `length`,
 `flow`, `cycles`, raw `bytes`, rendered `text`, an optional `target`, an optional
-`operandAddress`, and a `note`. `Flow` is how an instruction reaches the rest of the
+`symbolic` form — the text before and after the target's symbol, for the forms
+whose target the dialect can name — an optional `operandAddress`, and a `note`.
+A `Listing`'s `labels` are the labels it defines: every one is at the address
+of one of its instructions. `Flow` is how an instruction reaches the rest of the
 program: `Continue` falls through, `Branch` falls through and may also reach its
 target, `Jump` never falls through, `Call` reaches its target and comes back,
 `Return` and `Halt` never fall through. A `CycleCost` is a `base` and a `taken`
@@ -92,6 +95,11 @@ What a backend fills in decides what the framework can do:
   returns the context it was given.
 - `operandAddress` is the memory address the operand names, when there is one. The
   framework passes it to `registerName` and puts the answer in `note`.
+- `symbolic` is how the instruction is written with its target as a symbol: the
+  text before the symbol and the text after it. Set it for every form whose
+  target the dialect can name, and leave it unset where it cannot — an operand
+  that is an offset byte rather than the address it reaches. Where it is set
+  and the target carries a label, the listing writes the label.
 - `cycles` and `text` are printed as they are.
 Five members have defaults. `unreadable(image, base, at, context)` is why the
 bytes at `at` cannot be read under the context, or empty when they can; the
@@ -173,7 +181,7 @@ stops there, the bytes stay data, and a warning says why:
         ORG $C0:8000
 
 entry:
-        CALL $C0:8005                   ; $C0:8000  03 05 80 C0  6
+        CALL sub_C08005                 ; $C0:8000  03 05 80 C0  6
         NOP                             ; $C0:8004  00           2
 
 sub_C08005:
@@ -185,6 +193,13 @@ the cycle cost, and any annotation. Everything that is not an instruction or a
 directive is a comment, which is what lets the listing assemble back to the bytes it
 came from. The raw-bytes field is as wide as the longest instruction in the listing,
 so the costs stay aligned. A cost the backend marked unknown prints as `?`.
+
+A target that carries one of the listing's labels is written as the label, in the
+`symbolic` form the backend gave the instruction; the address rides in the
+comment as always. A label is only ever at a line of the listing — a target that
+landed in data or inside another instruction has none — so a symbol in an
+operand always names a line the same source defines, and a listing rendered in
+pieces under several `ORG`s still references across its pieces.
 
 A backend's directives print indented like instructions, after the label and
 before the instruction they belong to:

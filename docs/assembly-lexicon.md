@@ -8,8 +8,9 @@ modes, and the directives its encoding needs. Everything here holds in both.
 
 > **Status.** Both assemblers are built — [assemblers.md](assemblers.md) — and
 > the disassemblers emit this language. Every opcode of each chip round-trips
-> through its own text, and a real sound program's dump, disassembled and
-> reassembled, is byte-identical and renders byte-identical audio.
+> through its own text; a real sound program's dump, disassembled and
+> reassembled, is byte-identical and renders byte-identical audio; and
+> thirty-one cartridges' source trees reassemble to their images byte for byte.
 
 A disassembler and its assembler are inverses. A listing assembles back to the
 bytes it came from, so a binary can be disassembled, edited and rebuilt without its

@@ -8,8 +8,8 @@ the 65816 adds to it.
 
 > **Status.** `cpu65816_asm` assembles this dialect and `cpu65816_disasm` emits
 > it — [assemblers.md](assemblers.md). Every opcode round-trips through its own
-> text under every setting of the register widths, and a whole cartridge's
-> source tree reassembles to its image byte for byte.
+> text under every setting of the register widths, and thirty-one cartridges'
+> source trees reassemble to their images byte for byte.
 
 ---
 
@@ -87,6 +87,12 @@ size of a number.
   It is three bytes.
 
 `!$7E:1234` is an error: the bank separator already says the operand is long.
+
+An absolute operand takes a 16-bit value, or a 24-bit value in the instruction's
+own bank, which is taken as its offset — the value a label in the same file
+has, so `JMP !loop` and `JSR !sub_0180E8` write the offset of a line the file
+defines. A 24-bit value in any other bank does not fit and is reported, never
+truncated to its low half.
 
 ### 2.2 Immediates and the register widths
 

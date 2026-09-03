@@ -3,7 +3,9 @@
 `snes_disasm` disassembles a whole cartridge into a source tree: one file per
 bank, the sound program the cartridge uploads at boot as a file of its own, and a
 manifest that says where every file's bytes land in the image, where the trace
-began, and where it stopped. The tree is written in the
+began, and where it stopped. `snes_verify` does the reverse: it assembles every
+file the manifest names, places the bytes where the manifest says, and reports
+the difference from the image. The tree is written in the
 [65816](65816-assembly.md) and [SPC700](spc700-assembly.md) dialects over the
 [common layer](assembly-lexicon.md), and the manifest's grammar is
 [project-manifest.md](project-manifest.md).
@@ -16,11 +18,10 @@ reached the audio unit before its program started, then matched back to the byte
 of the image it was read from.
 
 > **Status.** The tree is complete — every image byte is in exactly one file at
-> its offset — and its listings are the two disassemblers' output. The
-> [assemblers](assemblers.md) rebuild it: every file of a real cartridge's tree,
-> assembled and placed at the offset the manifest names, gives the image's bytes.
-> The command that does that placing and reports the difference — `verify` — is
-> not built; until it is, the proof is run file by file.
+> its offset — and `snes_verify` proves it assembles back: thirty-one real
+> cartridges' trees, across all three maps, rebuild their images byte for byte.
+> The coprocessors have no backend, so a cartridge carrying one is traced as far
+> as the main CPU's own code goes, and its tree still verifies.
 
 ---
 
@@ -32,6 +33,7 @@ of the image it was read from.
 - [The sound program](#the-sound-program)
 - [Stops, and getting past them](#stops-and-getting-past-them)
 - [What is placed](#what-is-placed)
+- [Verifying the tree](#verifying-the-tree)
 - [Library](#library)
 - [Status](#status)
 - [See also](#see-also)
@@ -40,6 +42,7 @@ of the image it was read from.
 
 ```
 snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
+snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
 Reads a cartridge image, writes the tree under the directory, creating it, and
@@ -97,8 +100,13 @@ reset:
 ```
 
 The vectors' handlers carry the vector's name as their label — `reset`, `nmi`,
-`irq_native` — and a routine reached from another bank carries `sub_` or `loc_`
-with its address, the way the disassemblers name any target.
+`irq_native` — except `cop` and `brk`, which are mnemonics and cannot be
+labels, so those handlers are `cop_handler` and `brk_handler`. A routine
+reached from another bank carries `sub_` or `loc_` with its address, the way
+the disassemblers name any target, and a branch, jump or call whose target is
+in the same file names that label: `JSR !sub_0080E8`, `BNE loc_008034`,
+`JSL >sub_008A4E`. A target in another file is written as its address, since
+a symbol does not cross a file.
 
 **The sound program as its own file.** The bytes the cartridge sends to the audio
 unit are written once, as SPC700 source in `apu/driver.asm`, and the bank that
@@ -227,6 +235,63 @@ program's placed blocks. Bytes no file carries, and bytes two files carry, are
 counted and reported when there are any; a region split that leaves a bank
 without a file is the usual way to have bytes nobody carries.
 
+That count says the tree describes every byte. Whether the text assembles back
+to them is what `snes_verify` answers.
+
+## Verifying the tree
+
+```
+snes_verify <directory> <image> [-o <rebuilt>]
+```
+
+Reads the directory's `project.manifest`, assembles every bank file with the
+65816 dialect and the sound file with the SPC700 dialect, places each range a
+file emits at the image offset its address reads from under the manifest's map
+and each placed block at the offset the manifest recorded, and compares the
+whole with the image:
+
+```
+$ snes_verify smw "Super Mario World.smc"
+bank_00.asm: 1 range, 32768 bytes, identical
+bank_01.asm: 1 range, 32768 bytes, identical
+…
+bank_0E.asm: 4 ranges, 20794 bytes, identical
+bank_0F.asm: 1 range, 32768 bytes, identical
+apu/driver.asm: 3 blocks, 11974 bytes, identical
+524288 of 524288 bytes compared, 0 differ
+the tree assembles to the image
+```
+
+The exit status is 0 only for that last line, which is said only when every
+file assembled, every image byte was produced by exactly one file, and none
+differ. Anything else is reported where it is:
+
+```
+bank_00.asm: 1 range, 32768 bytes, 1 differ
+  bank_00.asm $00:8000-$00:FFFF at $000000: first difference at $000000
+bank_01.asm: 1 error, not assembled
+  bank_01.asm:412: `BOGUS` is not a 65816 instruction
+32768 of 65536 bytes compared, 1 differ, 32768 produced by no file
+the tree does not assemble to the image
+```
+
+A run that differs names the file, the range as the file placed it, where it
+lands in the image, and the first differing byte. A file that does not assemble
+is reported with the assembler's own diagnostics and produces nothing, so its
+bytes are counted among those no file produced. Bytes two files produce are
+counted too, since a tree that holds a byte twice is not a clean rebuild
+whatever the bytes say.
+
+`-o` writes the image the tree assembled to, whatever the verdict, with a byte
+nobody produced as `$00`. A manifest written for another image is refused, as
+the disassembler refuses it. A copier header on the image is dropped the same
+way.
+
+The sound file's blocks are compared only where the manifest placed them; an
+`unplaced` block's bytes are in its bank, and are compared there. A placed
+block the sound file does not emit whole is reported rather than compared
+against the fill.
+
 ## Library
 
 ```cpp
@@ -253,12 +318,32 @@ blocks, each with its `romOffset` when the image holds it. `placeBytes` builds t
 image the tree describes and counts what is unplaced or placed twice.
 
 The files are text from `renderRegion`, `renderSoundProgram` and
-`renderManifest`; `parseManifest` reads a manifest's entries, file split and image
-identity back, and `manifestMismatch` says whether that manifest can direct a run
-over a given image. `writeProject` writes all of it under a directory.
+`renderManifest`; `parseManifest` reads a manifest's entries, file split, map,
+sound program and image identity back, and `manifestMismatch` says whether that
+manifest can direct a run over a given image. `writeProject` writes all of it
+under a directory.
 
-The library target is `snaggletooth_rom`, which links both chip backends;
-`tools/` is on its public include path.
+Verification is `rom/rom_verify.h`:
+
+```cpp
+#include "rom/rom_verify.h"
+
+const snaggletooth::disasm::VerifyReport report =
+    snaggletooth::disasm::verifyTree("smw", image);
+if (!report.identical()) std::cout << snaggletooth::disasm::renderReport(report);
+```
+
+`verifyTree(directory, rom)` reads the manifest and the files from the
+directory; `verifyProject(manifest, rom, read)` takes a parsed `ManifestInput`
+and reads each file through a function, which is how a front end verifies a
+tree it holds in memory. The `VerifyReport` carries one `VerifiedFile` per file
+— its diagnostics when it did not assemble, the runs and bytes compared, the
+bytes differing — every `VerifyMismatch` with its first differing offset, the
+rebuilt `image`, the totals, and `identical()`. `renderReport` is the text the
+command prints.
+
+The library target is `snaggletooth_rom`, which links both chip backends and
+through them both assemblers; `tools/` is on its public include path.
 
 ## Status
 
@@ -266,20 +351,20 @@ The tree covers the main CPU's banks and the sound program uploaded at boot. The
 cartridge coprocessors — the SuperFX, the DSP series, the Cx4, the ST018 — have
 no backend, so a cartridge carrying one is traced as far as the main CPU's own
 code goes; a cartridge that cannot boot without its coprocessor yields no sound
-program, and says so in a `note`.
+program, and says so in a `note`. Its tree still verifies, since a coprocessor's
+program is data to the main CPU's file and comes back byte for byte.
 
-Operands are written as addresses, not labels, so a generated label is defined
-and never referenced. The trees round-trip as they are — each bank file and the
-sound program's file assemble, with [`cpu65816_asm` and `spc700_asm`](assemblers.md),
-to the bytes the manifest places them at. The command that assembles a whole
-tree from its manifest and reports the difference from the image, `verify`, is
-not built, and neither are symbolic operands.
+Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
+from 512 KB to 6 MB — assembles back to its image byte for byte under
+`snes_verify`. The trace's own limits stand: a jump through a table stops it,
+and an entry in the manifest is how a person carries it past.
 
 ## See also
 
 - [Project manifest](project-manifest.md) — the manifest's grammar, what is read
   back, and its stability.
-- [The assemblers](assemblers.md) — the tools that rebuild the tree's files.
+- [The assemblers](assemblers.md) — the tools `snes_verify` rebuilds the
+  tree's files with, and their diagnostics.
 - [65816 disassembler](65816-disassembler.md) and
   [SPC700 disassembler](spc700-disassembler.md) — the two backends the tree's
   listings come from.

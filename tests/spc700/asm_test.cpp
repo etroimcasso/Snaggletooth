@@ -234,6 +234,11 @@ TEST(Spc700Asm, ARenderedListingAssemblesBackToItsBytes) {
   EXPECT_NE(text.find("PATCHED"), std::string::npos);
   EXPECT_NE(text.find("DSPADDR"), std::string::npos);
   EXPECT_NE(text.find("sub_0410:"), std::string::npos);
+  // The call and the branch name the labels the listing defines; PCALL keeps
+  // its byte, since its operand is not the address it reaches.
+  EXPECT_NE(text.find("        CALL !sub_0410 "), std::string::npos) << text;
+  EXPECT_NE(text.find("        DBNZ $10,loc_0407 "), std::string::npos) << text;
+  EXPECT_NE(text.find("        PCALL $20 "), std::string::npos) << text;
 
   const Assembly assembly = assembleSpc700(text, "listing.asm");
   ASSERT_TRUE(assembly.ok()) << assembly.errors.front().line << ": "

@@ -205,15 +205,17 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   endif()
 
   # The cartridge side of the toolkit — the entry points a header names, which
-  # disassembler owns each part of the bus, and the whole-cartridge disassembly
-  # that traces across banks and writes a source tree. It reads the cartridge
-  # through the library's own header functions, so a tool and the machine agree
-  # on every byte, and it links both chip backends because a cartridge carries
-  # both chips' programs: the main CPU's in its banks, the audio CPU's uploaded
-  # at boot.
+  # disassembler owns each part of the bus, the whole-cartridge disassembly that
+  # traces across banks and writes a source tree, and the verification that
+  # assembles the tree back and compares it with the image. It reads the
+  # cartridge through the library's own header functions, so a tool and the
+  # machine agree on every byte, and it links both chip backends because a
+  # cartridge carries both chips' programs: the main CPU's in its banks, the
+  # audio CPU's uploaded at boot.
   add_library(snaggletooth_rom STATIC
     tools/rom/cartridge_entries.cpp
     tools/rom/rom_disasm.cpp
+    tools/rom/rom_verify.cpp
   )
   target_link_libraries(snaggletooth_rom PUBLIC
     snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700)
@@ -234,6 +236,14 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snes_disasm PRIVATE /W4 /WX)
   else()
     target_compile_options(snes_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(snes_verify tools/rom/snes_verify_main.cpp)
+  target_link_libraries(snes_verify PRIVATE snaggletooth_rom)
+  if(MSVC)
+    target_compile_options(snes_verify PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_verify PRIVATE -Wall -Wextra -Werror)
   endif()
 endif()
 
@@ -313,6 +323,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/cartridge_header_test.cpp
     tests/rom/cartridge_entries_test.cpp
     tests/rom/rom_disasm_test.cpp
+    tests/rom/verify_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/math_test.cpp

@@ -428,7 +428,21 @@ Encoded Cpu65816Dialect::encode(std::string_view mnemonic, std::string_view oper
     case Cpu65816Addressing::AbsoluteY:
     case Cpu65816Addressing::AbsoluteIndirect:
     case Cpu65816Addressing::AbsoluteIndirectLong:
-    case Cpu65816Addressing::AbsoluteIndexedIndirect:
+    case Cpu65816Addressing::AbsoluteIndexedIndirect: {
+      // An absolute operand is an offset in a bank, so a 24-bit value in the
+      // instruction's own bank — a label in the same file — names its offset.
+      // A value in any other bank does not fit and is reported.
+      const std::optional<std::uint32_t> v = value(operand.first);
+      if (!v) break;
+      const bool sameBank = (*v >> 16) == (at >> 16);
+      if (!unresolved && !fits(*v, 16) && !sameBank) {
+        out.error = "the address " + hex(*v, 6) + " does not fit in 16 bits and is not in bank " +
+                    hex(at >> 16, 2);
+        break;
+      }
+      emitBytes(*v & 0xFFFFu, 2);
+      break;
+    }
     case Cpu65816Addressing::PushAbsolute:
       emitFitting(operand.first, 16, "the address");
       break;

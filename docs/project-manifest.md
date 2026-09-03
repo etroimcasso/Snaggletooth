@@ -6,10 +6,10 @@ tree is of, which files make it up and which bytes of the image each produces,
 where the trace began and where it stopped. Two of its line kinds are read back
 on the next run, which is how a person directs the trace.
 
-> **Status.** The disassembler writes and reads the manifest, and the
-> [assemblers](assemblers.md) build each file it names. The command that executes
-> it — assembles every file, places its bytes, and reports the difference from
-> the image — is not built.
+> **Status.** The disassembler writes the manifest and reads it back on the next
+> run; `snes_verify` executes it — assembles every file it names, places the
+> bytes where it says, and reports the difference from the image. Thirty-one
+> real cartridges' trees verify byte-identical through it.
 
 ---
 
@@ -147,6 +147,8 @@ all: no sound program within the boot's time, an entry that lies in no file, a
 
 ## 3. What is read back
 
+Two tools read a manifest, and each takes the lines that direct it.
+
 When the disassembler runs over a directory that holds a manifest, it reads:
 
 - every `entry` line, and traces from each with the vectors — an entry the
@@ -156,13 +158,28 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - `image` and `checksum`, and refuses to run when the image it was given is not
   the one the manifest was written for.
 
-Everything else is what the last run found and is written fresh. A `stop` line
-records; only an `entry` line directs. The files themselves are written fresh
-too: an edit to a bank file is not read back, so a person's changes belong in the
-manifest, and, once the assembler exists, in the sources it assembles.
+When [`snes_verify`](snes-disassembler.md#verifying-the-tree) runs over the
+directory, it reads:
 
-An `entry` or `file` line that does not parse stops the run with the line number
-and what was expected, before anything is written.
+- `map`, and every `file` line — each file is assembled and its bytes placed at
+  the image offset their address reads from under the map;
+- the `sound` line and every `block` line — the sound file is assembled, and
+  each block `at` an offset is placed there; an `unplaced` block is the bank's
+  and is not compared;
+- `image` and `checksum`, refusing a manifest written for another image as the
+  disassembler does.
+
+Everything else is what the last run found and is written fresh. A `stop` line
+records; only an `entry` line directs. The disassembler writes the files fresh
+too: an edit to a bank file is not read back by it, so a person's changes to the
+trace belong in the manifest, and their changes to the code in the sources,
+which `snes_verify` assembles as they are.
+
+A line that does not parse stops either tool with the line number and what was
+expected, before anything is written. An `entry` whose name is a mnemonic —
+`cop`, `brk` — is labelled with `_handler` after it, since the name cannot be a
+label, and the run says so in a `note`; the vectors of those names are labelled
+the same way.
 
 ## 4. Stability
 
@@ -176,7 +193,7 @@ as a line to pass over.
 ## See also
 
 - [Cartridge disassembler](snes-disassembler.md) — the tool that writes the
-  manifest and the tree it describes.
+  manifest and the tree it describes, and `snes_verify`, which executes it.
 - [Assembly language: the common layer](assembly-lexicon.md) — `ORG`, `DB` and
   the rest of what the files are written in.
 - [SNES cartridge](snes-cartridge.md) — the maps, and how an address places an

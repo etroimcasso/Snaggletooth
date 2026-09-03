@@ -114,7 +114,7 @@ loc_008034:
         LDA #$008D                      ; $00:8034  A9 8D 00     3
         STA $7F:8002,X                  ; $00:8037  9F 02 80 7F  6
         DEX                             ; $00:8045  CA           2
-        BPL $00:8034                    ; $00:8048  10 EA        2/3
+        BPL loc_008034                  ; $00:8048  10 EA        2/3
 ```
 
 Each line carries the mnemonic, then a comment holding the address, the raw bytes,
@@ -137,7 +137,13 @@ it holds.
 
 Labels are generated for every target the trace reaches — `loc_` for a branch or
 jump destination, `sub_` for a call destination, `entry_` for an address you passed.
-Supply your own through `Request::symbols` and they take precedence.
+Supply your own through `Request::symbols` and they take precedence. A branch,
+jump or call whose target carries a label writes the label in place of the
+address, behind the marker its form needs — `BNE loc_008034`, `JSR !sub_0080E8`,
+`JSL >sub_018000` — so the listing reads as a program and assembles as one. A
+target with no line of its own in the listing, one that landed in data or inside
+another instruction, keeps no label and stays an address, as does a target in a
+pointer or a table, which the trace cannot name.
 
 ## How the widths are followed
 
@@ -307,7 +313,9 @@ control flow carried across banks and the uploaded sound program handed to the S
 backend, is the [cartridge disassembler](snes-disassembler.md), built over this one.
 The assembler that closes the round trip is [`cpu65816_asm`](assemblers.md): every
 opcode, decoded under every setting of the widths and assembled back from its text,
-gives the bytes decoded. The cartridge coprocessors are not built.
+gives the bytes decoded, and a listing's label operands assemble to the same
+displacements and offsets the addresses did. The cartridge coprocessors are not
+built.
 
 Targets that are not constants — `JMP (!abs,X)` through a table, `JML [!abs]`
 through a pointer, `JSR (!abs,X)` — are decoded and printed, but the trace cannot

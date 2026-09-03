@@ -675,6 +675,9 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
 
   const Address after = following(at, out.length);
   std::string operand;
+  // What precedes the target when it is written as a symbol: the absolute forms'
+  // `!`, the long forms' `>`, nothing before a branch's.
+  std::string symbolMarker;
   switch (info.mode) {
     case Mode::Implied:
       break;
@@ -705,6 +708,7 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
       operand = "!$" + hex16(word);
       if (info.flow == Flow::Jump || info.flow == Flow::Call) {
         out.target = bank | word;
+        symbolMarker = "!";
       } else {
         out.operandAddress = word;
       }
@@ -722,6 +726,7 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
       operand = longOperand(address);
       if (info.flow == Flow::Jump || info.flow == Flow::Call) {
         out.target = address;
+        symbolMarker = ">";
       } else {
         out.operandAddress = address;
       }
@@ -781,6 +786,13 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
 
   out.text = operand.empty() ? std::string(info.mnemonic)
                              : std::string(info.mnemonic) + " " + operand;
+  // Every form with a constant target — a branch, an absolute or long jump or
+  // call — takes a symbol where the address was, behind the marker its mode
+  // needs.
+  if (out.target) {
+    out.symbolic = SymbolicText{.before = std::string(info.mnemonic) + " " + symbolMarker,
+                                .after = ""};
+  }
   const Cpu65816Mode next = cpu65816ModeAfter(opcode, first, mode, out.note);
   return Decoded{.instruction = std::move(out), .next = contextOf(next)};
 }

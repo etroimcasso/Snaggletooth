@@ -50,6 +50,10 @@ One bank of a cartridge, from the source tree the
 cpu65816_asm bank_00.asm -o bank_00.bin
 ```
 
+A whole tree at once, every file placed where its manifest says and compared
+with the image, is [`snes_verify`](snes-disassembler.md#verifying-the-tree),
+which runs these assemblers as a library.
+
 Numbers on the command line are decimal, or hexadecimal behind `0x` or `$`.
 
 ## What is written
@@ -174,13 +178,10 @@ Both dialects are complete: every opcode of each chip, decoded by its
 disassembler and assembled back, gives the bytes decoded — under every setting
 of the 65816's widths. A real sound program's dump, disassembled from its entry
 and reassembled, is byte-identical, and the 90 s render of the reassembled dump
-is byte-identical to the original's. A whole cartridge's source tree, one file
-per bank plus the sound program, reassembles to its image byte for byte.
-
-What is not built: the command that reads a source tree's manifest, assembles
-every file, places the bytes and reports the difference from the image — the
-`verify` of [snes-disassembler.md](snes-disassembler.md). Operands are still
-written as addresses rather than labels.
+is byte-identical to the original's. Thirty-one cartridges' source trees, one
+file per bank plus the sound program, reassemble to their images byte for byte
+under `snes_verify`, with branches, jumps and calls written as the labels the
+listings define.
 
 ## See also
 

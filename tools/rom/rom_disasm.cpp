@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cpu65816/cpu65816_asm.h"
 #include "rom/cartridge_entries.h"
 #include "snaggletooth/snes/snes.h"
 #include "spc700/spc700_disasm.h"
@@ -88,38 +89,65 @@ struct Range {
 };
 
 // The lines of `listing` that fall inside `keep`, in order. A data run is cut to
-// the parts inside; an instruction is kept only when the whole of it is.
+// the parts inside. An instruction is kept when the whole of it is inside one
+// range, and a label only when its instruction is, so the cut listing defines
+// every label it holds; an instruction that runs past a range's edge is not an
+// instruction of the cut listing, and the bytes of it that are inside are kept
+// as data, so no byte inside a range goes unwritten.
 Listing keepRanges(const Listing& listing, const std::vector<Range>& keep) {
   Listing kept;
-  kept.labels = listing.labels;
   kept.warnings = listing.warnings;
   kept.addressBits = listing.addressBits;
-  for (const Line& line : listing.lines) {
-    if (line.isCode) {
-      const Address end = line.address + line.instruction.length - 1u;
-      for (const Range& range : keep) {
-        if (line.address >= range.first && end <= range.last) {
-          kept.lines.push_back(line);
-          break;
-        }
-      }
-      continue;
-    }
-    if (line.data.empty()) continue;
-    const Address end = line.address + static_cast<Address>(line.data.size()) - 1u;
+  auto keepData = [&](Address address, const std::vector<std::uint8_t>& data) {
+    const Address end = address + static_cast<Address>(data.size()) - 1u;
     for (const Range& range : keep) {
-      const Address from = std::max(line.address, range.first);
+      const Address from = std::max(address, range.first);
       const Address to = std::min(end, range.last);
       if (from > to) continue;
       Line piece;
       piece.isCode = false;
       piece.address = from;
-      piece.data.assign(line.data.begin() + static_cast<std::ptrdiff_t>(from - line.address),
-                        line.data.begin() + static_cast<std::ptrdiff_t>(to - line.address) + 1);
+      piece.data.assign(data.begin() + static_cast<std::ptrdiff_t>(from - address),
+                        data.begin() + static_cast<std::ptrdiff_t>(to - address) + 1);
       kept.lines.push_back(std::move(piece));
     }
+  };
+  for (const Line& line : listing.lines) {
+    if (line.isCode) {
+      const Address end = line.address + line.instruction.length - 1u;
+      bool whole = false;
+      for (const Range& range : keep) {
+        if (line.address >= range.first && end <= range.last) {
+          kept.lines.push_back(line);
+          if (const auto label = listing.labels.find(line.address); label != listing.labels.end()) {
+            kept.labels.insert(*label);
+          }
+          whole = true;
+          break;
+        }
+      }
+      if (!whole) keepData(line.address, line.instruction.bytes);
+      continue;
+    }
+    if (!line.data.empty()) keepData(line.address, line.data);
   }
   return kept;
+}
+
+// `ranges` sorted, with every run of ranges that touch end to end joined into
+// one, so a cut along them keeps an instruction that spans two of them.
+std::vector<Range> joined(std::vector<Range> ranges) {
+  std::sort(ranges.begin(), ranges.end(),
+            [](const Range& a, const Range& b) { return a.first < b.first; });
+  std::vector<Range> out;
+  for (const Range& range : ranges) {
+    if (!out.empty() && out.back().last + 1u == range.first) {
+      out.back().last = range.last;
+    } else {
+      out.push_back(range);
+    }
+  }
+  return out;
 }
 
 Address lineEnd(const Line& line) {
@@ -275,6 +303,15 @@ bool bootUntilProgramStarts(std::span<const std::uint8_t> rom, std::uint8_t fill
   return false;
 }
 
+// The label an entry's name gives its handler. A name the 65816 dialect
+// reserves — `cop` and `brk` are vectors and mnemonics both — cannot be a
+// label, so it carries `_handler`; any other name is the label as it is.
+std::string handlerLabel(std::string_view name) {
+  static const assembler::Cpu65816Dialect dialect;
+  const std::string label(name);
+  return dialect.reserved(assembler::upper(label)) ? label + "_handler" : label;
+}
+
 // The vectors as trace entries: reset in the mode the CPU powers on in, every
 // interrupt handler in native mode with the widths unknown, since the image
 // cannot say what the interrupted code had.
@@ -284,7 +321,7 @@ std::vector<TraceEntry> vectorTraceEntries(const CartridgeHeader& header) {
     entries.push_back(TraceEntry{
         .address = vector.address,
         .mode = vector.name == "reset" ? Cpu65816Mode::reset() : Cpu65816Mode::nativeUnknown(),
-        .name = std::string(vector.name)});
+        .name = handlerLabel(vector.name)});
   }
   return entries;
 }
@@ -349,17 +386,49 @@ std::vector<std::string> tokens(std::string_view line) {
   return out;
 }
 
+// `digits` as a hexadecimal number, or nothing when a character is not a digit.
+std::optional<std::uint32_t> parseHex(std::string_view digits) {
+  if (digits.empty() || digits.size() > 8) return std::nullopt;
+  std::uint32_t value = 0;
+  for (const char c : digits) {
+    value <<= 4;
+    if (c >= '0' && c <= '9') value |= static_cast<std::uint32_t>(c - '0');
+    else if (c >= 'A' && c <= 'F') value |= static_cast<std::uint32_t>(c - 'A' + 10);
+    else if (c >= 'a' && c <= 'f') value |= static_cast<std::uint32_t>(c - 'a' + 10);
+    else return std::nullopt;
+  }
+  return value;
+}
+
 // A 24-bit address in the dialect's long form, `$BB:XXXX`.
 std::optional<Address> parseLongAddress(const std::string& text) {
   if (text.size() != 8 || text[0] != '$' || text[3] != ':') return std::nullopt;
-  const std::string digits = text.substr(1, 2) + text.substr(4, 4);
-  Address value = 0;
-  for (const char c : digits) {
-    value <<= 4;
-    if (c >= '0' && c <= '9') value |= static_cast<Address>(c - '0');
-    else if (c >= 'A' && c <= 'F') value |= static_cast<Address>(c - 'A' + 10);
-    else if (c >= 'a' && c <= 'f') value |= static_cast<Address>(c - 'a' + 10);
-    else return std::nullopt;
+  return parseHex(text.substr(1, 2) + text.substr(4, 4));
+}
+
+// A 16-bit address in the SPC700 dialect's form, `$XXXX`.
+std::optional<std::uint16_t> parseShortAddress(const std::string& text) {
+  if (text.size() != 5 || text[0] != '$') return std::nullopt;
+  const std::optional<std::uint32_t> value = parseHex(text.substr(1));
+  if (!value) return std::nullopt;
+  return static_cast<std::uint16_t>(*value);
+}
+
+// An image offset as the manifest writes one: `$` and six hexadecimal digits.
+std::optional<std::size_t> parseOffset(const std::string& text) {
+  if (text.size() != 7 || text[0] != '$') return std::nullopt;
+  const std::optional<std::uint32_t> value = parseHex(text.substr(1));
+  if (!value) return std::nullopt;
+  return static_cast<std::size_t>(*value);
+}
+
+// A decimal count.
+std::optional<std::size_t> parseCount(const std::string& text) {
+  if (text.empty()) return std::nullopt;
+  std::size_t value = 0;
+  for (const char c : text) {
+    if (c < '0' || c > '9') return std::nullopt;
+    value = value * 10 + static_cast<std::size_t>(c - '0');
   }
   return value;
 }
@@ -530,7 +599,17 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   };
 
   std::vector<TraceEntry> entries = vectorTraceEntries(*header);
-  entries.insert(entries.end(), request.entries.begin(), request.entries.end());
+  for (TraceEntry entry : request.entries) {
+    // A person's name that the dialect reserves is renamed the same way, and
+    // the rename is said, since it was theirs.
+    const std::string label = handlerLabel(entry.name);
+    if (label != entry.name) {
+      out.notes.push_back("entry " + entry.name + " at " + address24(entry.address) +
+                          " is labelled " + label + ": `" + entry.name + "` cannot be a label");
+      entry.name = label;
+    }
+    entries.push_back(std::move(entry));
+  }
   for (const TraceEntry& entry : entries) {
     const std::optional<Address> home = canonical(map, imageBytes, entry.address);
     if (!home) {
@@ -640,7 +719,9 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       traceRequest.base = 0;
       traceRequest.entries = {sound.capture.entry};
       traceRequest.symbols[sound.capture.entry] = "entry";
-      sound.listing = keepRanges(trace(spc700Backend(), traceRequest), blocks);
+      // Two blocks that landed end to end are one run of the program: an
+      // instruction across their edge is kept whole.
+      sound.listing = keepRanges(trace(spc700Backend(), traceRequest), joined(blocks));
       out.sound = std::move(sound);
     }
   }
@@ -681,8 +762,9 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
 
 std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
-  out += "; A Snaggletooth cartridge project. The `entry` and `file` lines are read on\n"
-         "; the next run; everything else is written fresh from what the run found.\n";
+  out += "; A Snaggletooth cartridge project. The next run reads the `entry` and `file`\n"
+         "; lines; snes_verify reads `map`, `file`, `sound` and `block`; everything else\n"
+         "; is written fresh from what the run found.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
   out += "map      " + mapName(disassembly.header.map) + "\n";
   std::string title;
@@ -781,23 +863,59 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
     }
     if (words[0] == "image") {
       if (words.size() != 2) return fail("image is a byte count");
-      try {
-        input.imageBytes = static_cast<std::size_t>(std::stoull(words[1]));
-      } catch (const std::exception&) {
-        return fail(words[1] + " is not a byte count");
-      }
+      const std::optional<std::size_t> count = parseCount(words[1]);
+      if (!count) return fail(words[1] + " is not a byte count");
+      input.imageBytes = *count;
       continue;
     }
     if (words[0] == "checksum") {
-      if (words.size() != 3 || words[1].size() != 5 || words[1][0] != '$') {
-        return fail("checksum is $XXXX $XXXX");
-      }
-      const std::optional<Address> value = parseLongAddress("$00:" + words[1].substr(1));
+      if (words.size() != 3) return fail("checksum is $XXXX $XXXX");
+      const std::optional<std::uint16_t> value = parseShortAddress(words[1]);
       if (!value) return fail(words[1] + " is not a $XXXX value");
-      input.checksum = static_cast<std::uint16_t>(*value);
+      input.checksum = *value;
       continue;
     }
-    static const std::set<std::string> kKnown = {"map", "title", "sound", "block", "stop", "warning", "note"};
+    if (words[0] == "map") {
+      if (words.size() != 2) return fail("map is LoROM, HiROM or ExHiROM");
+      if (words[1] == "LoROM") input.map = CartridgeMap::LoRom;
+      else if (words[1] == "HiROM") input.map = CartridgeMap::HiRom;
+      else if (words[1] == "ExHiROM") input.map = CartridgeMap::ExHiRom;
+      else return fail(words[1] + " is not a map");
+      continue;
+    }
+    if (words[0] == "sound") {
+      if (words.size() != 5 || words[2] != "SPC700" || words[3] != "entry") {
+        return fail("sound is a path, SPC700, entry, and the entry address");
+      }
+      const std::optional<std::uint16_t> entry = parseShortAddress(words[4]);
+      if (!entry) return fail(words[4] + " is not a $XXXX address");
+      std::vector<ManifestBlock> kept = input.sound ? input.sound->blocks : std::vector<ManifestBlock>{};
+      input.sound = ManifestSound{.file = words[1], .entry = *entry, .blocks = std::move(kept)};
+      continue;
+    }
+    if (words[0] == "block") {
+      const bool placed = words.size() == 6 && words[4] == "at";
+      const bool unplaced = words.size() == 5 && words[4] == "unplaced";
+      if (!placed && !unplaced) {
+        return fail("a block is a path, its address, its length, and `at` an offset or `unplaced`");
+      }
+      const std::optional<std::uint16_t> address = parseShortAddress(words[2]);
+      if (!address) return fail(words[2] + " is not a $XXXX address");
+      const std::optional<std::size_t> length = parseCount(words[3]);
+      if (!length) return fail(words[3] + " is not a length");
+      ManifestBlock block{.apuAddress = *address, .length = *length, .romOffset = std::nullopt};
+      if (placed) {
+        block.romOffset = parseOffset(words[5]);
+        if (!block.romOffset) return fail(words[5] + " is not a $XXXXXX offset");
+      }
+      if (!input.sound) input.sound = ManifestSound{.file = words[1], .entry = 0, .blocks = {}};
+      if (input.sound->file != words[1]) {
+        return fail("block " + words[1] + " names a file the sound line does not");
+      }
+      input.sound->blocks.push_back(block);
+      continue;
+    }
+    static const std::set<std::string> kKnown = {"title", "stop", "warning", "note"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   return input;

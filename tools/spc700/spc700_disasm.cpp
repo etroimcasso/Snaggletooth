@@ -531,6 +531,20 @@ std::optional<Decoded> Spc700Backend::decode(std::span<const std::uint8_t> image
   }
 
   out.text = fill(info.text, slot1, slot2);
+
+  // The forms whose target can be written as a symbol: a call or a jump to an
+  // absolute address, and the branches, where the target is the slot printed as
+  // `$%1` or `$%2`. The symbol replaces the `$` and the digits together. PCALL's
+  // operand is an offset byte, not the address it reaches, so it keeps its byte.
+  const bool named = (info.operands == Operands::Abs && out.target) ||
+                     info.operands == Operands::Rel || info.operands == Operands::DpRel;
+  if (named) {
+    const char* slot = info.operands == Operands::DpRel ? "$%2" : "$%1";
+    const std::string text(info.text);
+    const std::size_t at = text.find(slot);
+    out.symbolic = SymbolicText{.before = fill(text.substr(0, at).c_str(), slot1, slot2),
+                                .after = fill(text.substr(at + 3).c_str(), slot1, slot2)};
+  }
   return Decoded{.instruction = std::move(out), .next = context};
 }
 
