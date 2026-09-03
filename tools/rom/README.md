@@ -1,8 +1,36 @@
 # Cartridge tools
 
-Two things live here: `rom_render`, which boots a cartridge on the whole SNES
-machine and writes what the audio unit plays, and `cartridge_entries.h`, where a
-disassembly of a whole cartridge starts.
+Three things live here: `snes_disasm`, which disassembles a whole cartridge into a
+source tree; `rom_render`, which boots a cartridge on the whole SNES machine and
+writes what the audio unit plays; and `cartridge_entries.h`, where a disassembly of
+a whole cartridge starts.
+
+## `snes_disasm`
+
+```
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
+```
+
+Writes one source file per bank, the sound program the cartridge uploads at boot as
+`apu/driver.asm`, and `project.manifest`, which names the files, where the trace
+began, and where it stopped. The trace starts at the vectors and follows control
+flow across banks; the sound program is captured by booting the cartridge on the
+machine and matched back to the image bytes it was read from. A manifest already in
+the directory supplies entries a person added and the file split, which is how the
+trace is carried past a jump table.
+
+```
+snes_disasm game.sfc -o game
+16 files, 1371 instructions, 5 entries, 1 stops
+sound program: entry $0500, 3 blocks, 3 matched to the image
+524288 of 524288 bytes placed -> game
+```
+
+The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
+run, `captureUpload` for the boot alone, `placeBytes` for the count, and the
+renderers and `writeProject` for the files. Full page:
+[docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
+grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 
 ## `rom_render`
 
@@ -50,10 +78,15 @@ address — the main CPU's for cartridge ROM, none for RAM, registers, a save wi
 and open bus. Both read the cartridge through the library's own header functions,
 so a tool and the machine never disagree about a byte.
 
-The library target is `snaggletooth_rom`; `tools/` is on its public include path.
+The library target is `snaggletooth_rom`; `tools/` is on its public include path,
+and it links both chip backends.
 
 ## See also
 
+- [docs/snes-disassembler.md](../../docs/snes-disassembler.md) — the whole
+  cartridge as a source tree, and
+  [docs/project-manifest.md](../../docs/project-manifest.md), the manifest it writes
+  and reads.
 - [docs/spc-rendering.md](../../docs/spc-rendering.md) — `rom_render` beside
   `spc_render`, and what each source carries.
 - [docs/disassembly-framework.md §Cartridges](../../docs/disassembly-framework.md#cartridges)

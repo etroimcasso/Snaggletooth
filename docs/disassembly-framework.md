@@ -244,9 +244,11 @@ both live in [snes-cartridge.md](snes-cartridge.md).
 Two backends exist: the SPC700, described in
 [spc700-disassembler.md](spc700-disassembler.md), and the 65816, described in
 [65816-disassembler.md](65816-disassembler.md). The cartridge side — the header,
-the three maps, and the entry points — is built. Whole-cartridge disassembly, which
-maps every bank through the header and dispatches each region to its backend, and
-the assembler that closes the round trip are not built yet.
+the three maps, and the entry points — is built, and so is whole-cartridge
+disassembly over it, which traces every bank from the vectors with control flow
+carried across banks, hands the sound program the cartridge uploads to the SPC700
+backend, and writes a source tree with a manifest: [snes-disassembler.md](snes-disassembler.md).
+The assembler that closes the round trip is not built yet.
 
 ## See also
 

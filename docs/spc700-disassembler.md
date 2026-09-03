@@ -193,3 +193,5 @@ Code reachable only that way needs an explicit `--entry`.
   the [common layer](assembly-lexicon.md).
 - [SPC700 CPU core](spc700-cpu.md) — the interpreter the cycle costs are measured from.
 - [Disassembly framework](disassembly-framework.md) — the tracer and renderer this backend runs on.
+- [Cartridge disassembler](snes-disassembler.md) — the sound program a cartridge
+  uploads at boot, captured from the machine and traced through this backend.

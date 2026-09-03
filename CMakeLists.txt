@@ -160,13 +160,19 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(cpu65816_disasm PRIVATE -Wall -Wextra -Werror)
   endif()
 
-  # The cartridge side of the toolkit — the entry points a header names and which
-  # disassembler owns each part of the bus. It reads the cartridge through the
-  # library's own header functions, so a tool and the machine agree on every byte.
+  # The cartridge side of the toolkit — the entry points a header names, which
+  # disassembler owns each part of the bus, and the whole-cartridge disassembly
+  # that traces across banks and writes a source tree. It reads the cartridge
+  # through the library's own header functions, so a tool and the machine agree
+  # on every byte, and it links both chip backends because a cartridge carries
+  # both chips' programs: the main CPU's in its banks, the audio CPU's uploaded
+  # at boot.
   add_library(snaggletooth_rom STATIC
     tools/rom/cartridge_entries.cpp
+    tools/rom/rom_disasm.cpp
   )
-  target_link_libraries(snaggletooth_rom PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
+  target_link_libraries(snaggletooth_rom PUBLIC
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -176,6 +182,14 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_rom PRIVATE /W4 /WX)
   else()
     target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(snes_disasm tools/rom/snes_disasm_main.cpp)
+  target_link_libraries(snes_disasm PRIVATE snaggletooth_rom)
+  if(MSVC)
+    target_compile_options(snes_disasm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_disasm PRIVATE -Wall -Wextra -Werror)
   endif()
 endif()
 
@@ -251,6 +265,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/cartridge_map_test.cpp
     tests/snes/cartridge_header_test.cpp
     tests/rom/cartridge_entries_test.cpp
+    tests/rom/rom_disasm_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/math_test.cpp
@@ -277,12 +292,11 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp
   )
-  # snaggletooth_spc links snaggletooth::snaggletooth publicly, so the test target
-  # reaches the library through it — no separate direct link.
+  # snaggletooth_spc links snaggletooth::snaggletooth publicly, and snaggletooth_rom
+  # links both chip backends publicly, so the test target reaches the library and
+  # the backends through them — no separate direct links.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
-    snaggletooth_spc700
-    snaggletooth_cpu65816
     snaggletooth_rom
     GTest::gtest_main
   )
