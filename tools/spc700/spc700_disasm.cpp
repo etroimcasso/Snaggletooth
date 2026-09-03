@@ -541,9 +541,9 @@ std::optional<Decoded> Spc700Backend::decode(std::span<const std::uint8_t> image
   if (named) {
     const char* slot = info.operands == Operands::DpRel ? "$%2" : "$%1";
     const std::string text(info.text);
-    const std::size_t at = text.find(slot);
-    out.symbolic = SymbolicText{.before = fill(text.substr(0, at).c_str(), slot1, slot2),
-                                .after = fill(text.substr(at + 3).c_str(), slot1, slot2)};
+    const std::size_t slotAt = text.find(slot);
+    out.symbolic = SymbolicText{.before = fill(text.substr(0, slotAt).c_str(), slot1, slot2),
+                                .after = fill(text.substr(slotAt + 3).c_str(), slot1, slot2)};
   }
   return Decoded{.instruction = std::move(out), .next = context};
 }

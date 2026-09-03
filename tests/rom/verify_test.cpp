@@ -56,12 +56,14 @@ VerifyReport verify(const Tree& tree, std::span<const std::uint8_t> rom) {
   });
 }
 
-const VerifiedFile& fileNamed(const VerifyReport& report, const std::string& name) {
+// A copy, not a reference: a reference returned past a temporary argument is
+// what one compiler's dangling-reference check refuses.
+VerifiedFile fileNamed(const VerifyReport& report, const std::string& name) {
   for (const VerifiedFile& file : report.files) {
     if (file.file == name) return file;
   }
   ADD_FAILURE() << "no file " << name;
-  return report.files.front();
+  return report.files.empty() ? VerifiedFile{} : report.files.front();
 }
 
 std::string replaceFirst(std::string text, const std::string& from, const std::string& to) {
@@ -132,11 +134,11 @@ TEST(RomVerify, ATreeTheDisassemblerWroteAssemblesToItsImage) {
   ASSERT_EQ(report.files.size(), 2u);
   // The bank file is three pieces around the two uploaded blocks; the sound
   // file is the two blocks.
-  const VerifiedFile& bank = fileNamed(report, "bank_00.asm");
+  const VerifiedFile bank = fileNamed(report, "bank_00.asm");
   EXPECT_EQ(bank.chip, "65816");
   EXPECT_EQ(bank.runs, 3u);
   EXPECT_EQ(bank.bytes, 0x8000u - 24u - 20u);
-  const VerifiedFile& sound = fileNamed(report, "apu/driver.asm");
+  const VerifiedFile sound = fileNamed(report, "apu/driver.asm");
   EXPECT_EQ(sound.chip, "SPC700");
   EXPECT_EQ(sound.runs, 2u);
   EXPECT_EQ(sound.bytes, 44u);
@@ -261,7 +263,7 @@ TEST(RomVerify, AFileThatDoesNotAssembleIsReportedWithItsLine) {
   tree.files["bank_01.asm"] += "        BOGUS\n";
   const VerifyReport report = verify(tree, rom);
   EXPECT_FALSE(report.identical());
-  const VerifiedFile& file = fileNamed(report, "bank_01.asm");
+  const VerifiedFile file = fileNamed(report, "bank_01.asm");
   ASSERT_EQ(file.errors.size(), 1u);
   EXPECT_EQ(file.errors[0].file, "bank_01.asm");
   EXPECT_NE(file.errors[0].message.find("BOGUS"), std::string::npos);
@@ -322,7 +324,7 @@ TEST(RomVerify, ABlockTheSoundFileDoesNotEmitIsReported) {
   tree.files["apu/driver.asm"] = "        ORG $0218\n        DB $9C\n";
   const VerifyReport report = verify(tree, rom);
   EXPECT_FALSE(report.identical());
-  const VerifiedFile& sound = fileNamed(report, "apu/driver.asm");
+  const VerifiedFile sound = fileNamed(report, "apu/driver.asm");
   EXPECT_TRUE(sound.errors.empty());
   EXPECT_EQ(sound.runs, 0u);
   EXPECT_NE(sound.problem.find("not all emitted by the file"), std::string::npos) << sound.problem;

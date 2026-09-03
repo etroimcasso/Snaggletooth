@@ -70,7 +70,13 @@ void placeRun(Rebuild& rebuild, const std::string& fileName, Address address, un
 // reported and not placed.
 void verifyBankFile(Rebuild& rebuild, CartridgeMap map, const SourceRegion& region,
                     const SourceReader& read, VerifyReport& report) {
-  VerifiedFile file{.file = region.file, .chip = "65816"};
+  VerifiedFile file{.file = region.file,
+                    .chip = "65816",
+                    .errors = {},
+                    .problem = {},
+                    .runs = 0,
+                    .bytes = 0,
+                    .differing = 0};
   const std::optional<std::string> source = read(region.file);
   if (!source) {
     file.problem = "cannot read " + region.file;
@@ -108,7 +114,13 @@ void verifyBankFile(Rebuild& rebuild, CartridgeMap map, const SourceRegion& regi
 // whole is reported rather than compared against the fill.
 void verifySoundFile(Rebuild& rebuild, const ManifestSound& sound, const SourceReader& read,
                      VerifyReport& report) {
-  VerifiedFile file{.file = sound.file, .chip = "SPC700"};
+  VerifiedFile file{.file = sound.file,
+                    .chip = "SPC700",
+                    .errors = {},
+                    .problem = {},
+                    .runs = 0,
+                    .bytes = 0,
+                    .differing = 0};
   const std::optional<std::string> source = read(sound.file);
   if (!source) {
     file.problem = "cannot read " + sound.file;
