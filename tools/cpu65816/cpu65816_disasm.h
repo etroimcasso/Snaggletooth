@@ -57,12 +57,24 @@ struct Cpu65816Mode {
 
   // Native mode with both widths known.
   [[nodiscard]] static constexpr Cpu65816Mode native(bool accumulator8, bool index8) noexcept {
-    return {.emulation = false, .accumulator8 = accumulator8, .index8 = index8};
+    return {.emulation = false,
+            .accumulator8 = accumulator8,
+            .index8 = index8,
+            .accumulatorKnown = true,
+            .indexKnown = true,
+            .carryKnown = false,
+            .carry = false};
   }
 
   // Native mode with neither width known — where an interrupt handler starts.
   [[nodiscard]] static constexpr Cpu65816Mode nativeUnknown() noexcept {
-    return {.emulation = false, .accumulatorKnown = false, .indexKnown = false};
+    return {.emulation = false,
+            .accumulator8 = true,
+            .index8 = true,
+            .accumulatorKnown = false,
+            .indexKnown = false,
+            .carryKnown = false,
+            .carry = false};
   }
 };
 
@@ -80,6 +92,12 @@ class Cpu65816Backend final : public Backend {
   [[nodiscard]] std::optional<Decoded> decode(std::span<const std::uint8_t> image, Address base,
                                               Address at, Context context) const override;
   [[nodiscard]] std::string_view registerName(Address address) const override;
+
+  // An immediate operand under a register width the context does not know
+  // cannot be read: the reason names the instruction and the width. Everything
+  // else reads.
+  [[nodiscard]] std::string unreadable(std::span<const std::uint8_t> image, Address base,
+                                       Address at, Context context) const override;
 
   // A mode as a warning names it: `e=0 m=16 x=8`, with `?` for a width the trace
   // does not know.

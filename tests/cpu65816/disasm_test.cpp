@@ -150,7 +150,8 @@ TEST(Cpu65816Disasm, ImmediateWidthFollowsTheFlags) {
   EXPECT_EQ(decodeBare(0x69, wideAccumulator).length, 3);  // ADC #
   EXPECT_EQ(decodeBare(0xC9, wideIndex).length, 2);        // CMP # follows the accumulator
 
-  for (std::uint8_t opcode : {0xC2, 0xE2, 0x42, 0x00, 0x02}) {  // REP SEP WDM BRK COP
+  constexpr std::array<std::uint8_t, 5> kOneByteImmediates = {0xC2, 0xE2, 0x42, 0x00, 0x02};
+  for (std::uint8_t opcode : kOneByteImmediates) {  // REP SEP WDM BRK COP
     EXPECT_EQ(decodeBare(opcode, Cpu65816Mode::native(false, false)).length, 2)
         << "opcode $" << std::hex << int{opcode};
   }

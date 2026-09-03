@@ -51,6 +51,10 @@ std::vector<std::string> Backend::directives(std::optional<Context>, Context) co
   return {};
 }
 
+std::string Backend::unreadable(std::span<const std::uint8_t>, Address, Address, Context) const {
+  return {};
+}
+
 Listing trace(const Backend& backend, const Request& request) {
   Listing listing;
   listing.addressBits = backend.addressBits();
@@ -119,15 +123,15 @@ Listing trace(const Backend& backend, const Request& request) {
       continue;
     }
 
+    const std::string reason = backend.unreadable(image, base, address, item.context);
+    if (!reason.empty()) {
+      listing.warnings.push_back(formatAddress(address, bits) + " cannot be read: " + reason);
+      continue;
+    }
     std::optional<Decoded> result = backend.decode(image, base, address, item.context);
     if (!result) {
       listing.warnings.push_back("instruction at " + formatAddress(address, bits) +
                                  " runs past the end of the image");
-      continue;
-    }
-    if (!result->unreadable.empty()) {
-      listing.warnings.push_back(formatAddress(address, bits) + " cannot be read: " +
-                                 result->unreadable);
       continue;
     }
     const Instruction& instruction = result->instruction;

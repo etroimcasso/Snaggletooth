@@ -93,13 +93,13 @@ What a backend fills in decides what the framework can do:
 - `operandAddress` is the memory address the operand names, when there is one. The
   framework passes it to `registerName` and puts the answer in `note`.
 - `cycles` and `text` are printed as they are.
-- `unreadable`, when the backend fills it instead, says why the bytes cannot be
-  read under this context. The framework reports it and stops that path; the
-  bytes stay data.
-
-Four members have defaults. `following(at, length)` is the address of the next
-instruction, and wraps within the bank, which is what every chip built so far does.
-`describe(context)` is how a warning names a context; the default prints its bits.
+Five members have defaults. `unreadable(image, base, at, context)` is why the
+bytes at `at` cannot be read under the context, or empty when they can; the
+framework asks it before decoding, reports a reason and stops that path, and the
+bytes stay data. The default never refuses. `following(at, length)` is the address
+of the next instruction, and wraps within the bank, which is what every chip built
+so far does. `describe(context)` is how a warning names a context; the default
+prints its bits.
 `conflicts(first, second)` says whether an address reached under both contexts
 reads two ways; the default says so whenever they differ, and a backend that
 carries state beyond what decides a reading answers from the bits that do.

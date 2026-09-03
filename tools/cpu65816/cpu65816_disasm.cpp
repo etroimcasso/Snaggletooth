@@ -723,17 +723,9 @@ std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> ima
   const std::uint8_t opcode = image[offset];
   const OpcodeInfo& info = kOpcodes[opcode];
 
-  // An immediate's width is the width of the register it loads. Where the mode
-  // does not know that width the bytes cannot be read, and the trace is told
-  // rather than handed a guess.
-  if (info.mode == Mode::ImmediateM && !mode.accumulatorKnown) {
-    return Decoded{.unreadable = std::string(info.mnemonic) +
-                                 " # under an accumulator width the trace does not know"};
-  }
-  if (info.mode == Mode::ImmediateX && !mode.indexKnown) {
-    return Decoded{.unreadable = std::string(info.mnemonic) +
-                                 " # under an index width the trace does not know"};
-  }
+  // An immediate under a width the mode does not know has no length to read
+  // with; `unreadable` says so first, and a caller that skipped it gets nothing.
+  if (!unreadable(image, base, at, context).empty()) return std::nullopt;
 
   const std::uint8_t extra = operandBytes(info.mode, mode.accumulator8, mode.index8);
   if (offset + 1u + extra > image.size()) return std::nullopt;
@@ -869,6 +861,26 @@ std::string_view Cpu65816Backend::registerName(Address address) const {
   return cpu65816RegisterName(address);
 }
 
+std::string Cpu65816Backend::unreadable(std::span<const std::uint8_t> image, Address base,
+                                        Address at, Context context) const {
+  if (at > 0xFFFFFFu || base > 0xFFFFFFu || at < base) return {};
+  const std::size_t offset = static_cast<std::size_t>(at - base);
+  if (offset >= image.size()) return {};
+
+  // An immediate's width is the width of the register it loads. Where the mode
+  // does not know that width the bytes cannot be read, and the trace is told
+  // rather than handed a guess.
+  const Cpu65816Mode mode = modeOf(context);
+  const OpcodeInfo& info = kOpcodes[image[offset]];
+  if (info.mode == Mode::ImmediateM && !mode.accumulatorKnown) {
+    return std::string(info.mnemonic) + " # under an accumulator width the trace does not know";
+  }
+  if (info.mode == Mode::ImmediateX && !mode.indexKnown) {
+    return std::string(info.mnemonic) + " # under an index width the trace does not know";
+  }
+  return {};
+}
+
 std::string Cpu65816Backend::describe(Context context) const {
   const Cpu65816Mode mode = modeOf(context);
   auto width = [](bool known, bool eight) -> std::string {
@@ -908,7 +920,7 @@ const Cpu65816Backend& cpu65816Backend() {
 std::optional<Instruction> decodeAt(std::span<const std::uint8_t> image, Address base,
                                     Address address, const Cpu65816Mode& mode) {
   std::optional<Decoded> decoded = cpu65816Backend().decode(image, base, address, contextOf(mode));
-  if (!decoded || !decoded->unreadable.empty()) return std::nullopt;
+  if (!decoded) return std::nullopt;
   return std::move(decoded->instruction);
 }
 

@@ -80,14 +80,9 @@ struct Instruction {
 // What a backend returns for one instruction: the instruction, and the context
 // execution carries out of it — to the instruction after it and to its target
 // alike.
-//
-// A backend that cannot read the bytes under the context it was given — an
-// operand whose width the context does not settle — fills `unreadable` with the
-// reason instead. The trace reports it and stops that path; the bytes stay data.
 struct Decoded {
   Instruction instruction;
   Context next;
-  std::string unreadable;
 };
 
 // One line of a listing: an instruction, or a run of bytes execution never reached.
@@ -147,6 +142,15 @@ class Backend {
   [[nodiscard]] virtual std::optional<Decoded> decode(std::span<const std::uint8_t> image,
                                                       Address base, Address at,
                                                       Context context) const = 0;
+
+  // Why the bytes at `at` cannot be read under `context`, or an empty string when
+  // they can. The trace asks this before it decodes; a reason stops that path,
+  // is reported, and leaves the bytes as data. A backend whose instructions
+  // always read the same way keeps the default, which never refuses; the 65816's
+  // refuses an immediate operand under a register width the context does not
+  // settle.
+  [[nodiscard]] virtual std::string unreadable(std::span<const std::uint8_t> image, Address base,
+                                               Address at, Context context) const;
 
   // The name of the hardware register at `address`, or an empty view when the
   // address is ordinary memory.
