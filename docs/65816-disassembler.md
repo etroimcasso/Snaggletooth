@@ -97,8 +97,7 @@ immediate it would otherwise have to guess.
 
 ```
 entry_008000:
-        A8
-        X8
+        EMULATION
         SEI                             ; $00:8000  78           2
         STZ !$4200                      ; $00:8001  9C 00 42     4  NMITIMEN
         STZ !$420C                      ; $00:8004  9C 0C 42     4  HDMAEN
@@ -123,11 +122,18 @@ the cycle cost, and any annotation. Everything that is not an instruction or a
 directive is a comment, which is what lets the listing assemble back to the bytes it
 came from.
 
-`A8` and `X8` are the width directives an assembler needs. They appear at the start
-of every region and wherever the trace read an instruction under a width the
-instruction above did not leave — nowhere else, because a `REP` or `SEP` already says
-its own change. `2/3` on the branch is the conditional cost: two cycles when the
-condition fails, three when it holds.
+`EMULATION`, `A8` and `X8` are the directives an assembler needs, and they say what
+the instructions cannot: the mode a region begins in. A region begins native with
+both widths unknown, so a listing that starts in emulation mode opens with
+`EMULATION` — which forces both widths, so nothing more is said under it — and one
+that starts native opens with the widths it knows. Within a region a directive
+appears only where the trace read an instruction under a mode the instruction
+above did not leave: `A16` where a reading widened without a `REP` saying so,
+`NATIVE` where the chip left emulation without an `XCE` saying so. Nowhere else,
+because a `REP`, `SEP` or `XCE` already says its own change. The assembler follows
+the same rules, in [65816-assembly.md](65816-assembly.md#3-directives). `2/3` on
+the branch is the conditional cost: two cycles when the condition fails, three when
+it holds.
 
 Labels are generated for every target the trace reaches — `loc_` for a branch or
 jump destination, `sub_` for a call destination, `entry_` for an address you passed.
@@ -299,8 +305,9 @@ The disassembler reads one image at a time — a bank carved out of a cartridge,
 region of RAM. Reading a whole cartridge, with every bank mapped through its header,
 control flow carried across banks and the uploaded sound program handed to the SPC700
 backend, is the [cartridge disassembler](snes-disassembler.md), built over this one.
-The cartridge coprocessors and the assembler that closes the round trip are not
-built yet.
+The assembler that closes the round trip is [`cpu65816_asm`](assemblers.md): every
+opcode, decoded under every setting of the widths and assembled back from its text,
+gives the bytes decoded. The cartridge coprocessors are not built.
 
 Targets that are not constants — `JMP (!abs,X)` through a table, `JML [!abs]`
 through a pointer, `JSR (!abs,X)` — are decoded and printed, but the trace cannot
@@ -310,6 +317,7 @@ follow them. Code reachable only that way needs an explicit `--entry`.
 
 - [65816 assembly language](65816-assembly.md) — the dialect this emits, over the
   [common layer](assembly-lexicon.md).
+- [The assemblers](assemblers.md) — `cpu65816_asm`, which reads it back.
 - [65816 CPU core](65816-cpu.md) — the interpreter the cycle costs are measured from,
   and the widths and modes themselves.
 - [Disassembly framework](disassembly-framework.md) — the tracer and renderer this

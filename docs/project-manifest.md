@@ -6,8 +6,10 @@ tree is of, which files make it up and which bytes of the image each produces,
 where the trace began and where it stopped. Two of its line kinds are read back
 on the next run, which is how a person directs the trace.
 
-> **Status.** The disassembler writes and reads the manifest. The assembler,
-> which will execute it — assemble every file and place its bytes — is not built.
+> **Status.** The disassembler writes and reads the manifest, and the
+> [assemblers](assemblers.md) build each file it names. The command that executes
+> it — assembles every file, places its bytes, and reports the difference from
+> the image — is not built.
 
 ---
 

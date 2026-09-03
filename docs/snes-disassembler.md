@@ -16,10 +16,11 @@ reached the audio unit before its program started, then matched back to the byte
 of the image it was read from.
 
 > **Status.** The tree is complete — every image byte is in exactly one file at
-> its offset — and its listings are the two disassemblers' output. What assembles
-> it back into the image, and proves the result identical, is the assembler,
-> which is not built. Until it is, "the tree assembles back to the image" is the
-> shape of the output, not a demonstrated property.
+> its offset — and its listings are the two disassemblers' output. The
+> [assemblers](assemblers.md) rebuild it: every file of a real cartridge's tree,
+> assembled and placed at the offset the manifest names, gives the image's bytes.
+> The command that does that placing and reports the difference — `verify` — is
+> not built; until it is, the proof is run file by file.
 
 ---
 
@@ -89,8 +90,7 @@ does:
         ORG $00:8000
 
 reset:
-        A8
-        X8
+        EMULATION
         SEI                             ; $00:8000  78           2
         STZ !$4200                      ; $00:8001  9C 00 42     4  NMITIMEN
         STZ !$420C                      ; $00:8004  9C 0C 42     4  HDMAEN
@@ -269,13 +269,17 @@ code goes; a cartridge that cannot boot without its coprocessor yields no sound
 program, and says so in a `note`.
 
 Operands are written as addresses, not labels, so a generated label is defined
-and never referenced. The trees round-trip as they are; symbolic operands come
-with the assembler, which resolves them.
+and never referenced. The trees round-trip as they are — each bank file and the
+sound program's file assemble, with [`cpu65816_asm` and `spc700_asm`](assemblers.md),
+to the bytes the manifest places them at. The command that assembles a whole
+tree from its manifest and reports the difference from the image, `verify`, is
+not built, and neither are symbolic operands.
 
 ## See also
 
 - [Project manifest](project-manifest.md) — the manifest's grammar, what is read
   back, and its stability.
+- [The assemblers](assemblers.md) — the tools that rebuild the tree's files.
 - [65816 disassembler](65816-disassembler.md) and
   [SPC700 disassembler](spc700-disassembler.md) — the two backends the tree's
   listings come from.

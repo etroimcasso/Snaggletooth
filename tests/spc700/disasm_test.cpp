@@ -263,7 +263,7 @@ TEST(Spc700Disasm, OnlyMemoryOperandsAreNamed) {
   };
   EXPECT_EQ(noteOf({0xE8, 0xF2}), "");            // MOV A,#$F2 — a value
   EXPECT_EQ(noteOf({0xD0, 0xF8}), "");            // BNE -8 — a displacement
-  EXPECT_EQ(noteOf({0x4F, 0xF4}), "");            // PCALL $F4 — code in page $FF
+  EXPECT_EQ(noteOf({0x4F, 0xF4}), "$FFF4");       // PCALL $F4 — code in page $FF; the comment is where it lands
   EXPECT_EQ(noteOf({0xE4, 0xF2}), "DSPADDR");     // MOV A,$F2
   EXPECT_EQ(noteOf({0xE5, 0xF4, 0x00}), "CPUIO0"); // MOV A,!$00F4
   EXPECT_EQ(noteOf({0x8F, 0x00, 0xF4}), "CPUIO0"); // MOV $F4,#$00 — the destination

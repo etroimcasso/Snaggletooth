@@ -10,53 +10,14 @@
 namespace snaggletooth::disasm {
 namespace {
 
-// What operand bytes follow an opcode, and how each one reads. The mnemonic text
-// carries the surrounding syntax — a register name, an index suffix, the brackets
-// of an indirect form — and leaves a numbered slot where each operand lands. So
-// this enumerates the operand bytes alone, and every instruction sharing a byte
-// shape shares an entry here however differently it prints.
-enum class Operands : std::uint8_t {
-  None,    // no operand bytes
-  Imm,     // one byte, an immediate value
-  Dp,      // one byte, a direct-page offset
-  Abs,     // two bytes, an address, low byte first
-  AbsBit,  // two bytes: an address in the low 13 bits, a bit index in the top 3
-  Rel,     // one byte, a displacement from the end of the instruction
-  DpRel,   // a direct-page offset, then a displacement
-  DpDp,    // a source offset, then a destination offset
-  ImmDp,   // an immediate byte, then a destination offset
-  Upage,   // one byte, an offset into page $FF
-};
+using Operands = Spc700Operands;
+using OpcodeInfo = Spc700Opcode;
 
-// How many bytes an operand shape adds to the opcode.
-constexpr std::uint8_t operandBytes(Operands operands) noexcept {
-  switch (operands) {
-    case Operands::None: return 0;
-    case Operands::Imm:
-    case Operands::Dp:
-    case Operands::Rel:
-    case Operands::Upage: return 1;
-    case Operands::Abs:
-    case Operands::AbsBit:
-    case Operands::DpRel:
-    case Operands::DpDp:
-    case Operands::ImmDp: return 2;
-  }
-  return 0;
-}
-
-// One row of the instruction table. `opcode` repeats the index so the row is
-// readable on its own and a test can prove the table is in order.
-struct OpcodeInfo {
-  std::uint8_t opcode = 0;
-  const char* text = "";
-  Operands operands = Operands::None;
-  Flow flow = Flow::Continue;
-};
-
-// The instruction table. `%1` and `%2` are the operand slots, filled in the order
-// the bytes appear — so the two-operand direct-page forms, whose source byte comes
-// first but prints second, name their slots out of order on purpose.
+// The instruction table. `opcode` repeats the index so a row is readable on its
+// own and a test can prove the table is in order. `%1` and `%2` are the operand
+// slots, filled in the order the bytes appear — so the two-operand direct-page
+// forms, whose source byte comes first but prints second, name their slots out of
+// order on purpose.
 constexpr std::array<OpcodeInfo, 256> kOpcodes = {{
     {.opcode = 0x00, .text = "NOP", .operands = Operands::None, .flow = Flow::Continue},
     {.opcode = 0x01, .text = "TCALL 0", .operands = Operands::None, .flow = Flow::Call},
@@ -137,7 +98,7 @@ constexpr std::array<OpcodeInfo, 256> kOpcodes = {{
     {.opcode = 0x4C, .text = "LSR !$%1", .operands = Operands::Abs, .flow = Flow::Continue},
     {.opcode = 0x4D, .text = "PUSH X", .operands = Operands::None, .flow = Flow::Continue},
     {.opcode = 0x4E, .text = "TCLR1 !$%1", .operands = Operands::Abs, .flow = Flow::Continue},
-    {.opcode = 0x4F, .text = "PCALL $%1", .operands = Operands::Upage, .flow = Flow::Call},
+    {.opcode = 0x4F, .text = "PCALL $%1", .operands = Operands::Upage, .flow = Flow::Call},  // the one-byte offset; the comment names $FFxx
     {.opcode = 0x50, .text = "BVC $%1", .operands = Operands::Rel, .flow = Flow::Branch},
     {.opcode = 0x51, .text = "TCALL 5", .operands = Operands::None, .flow = Flow::Call},
     {.opcode = 0x52, .text = "CLR1 $%1.2", .operands = Operands::Dp, .flow = Flow::Continue},
@@ -431,6 +392,8 @@ std::string fill(const char* text, const std::string& first, const std::string& 
 
 }  // namespace
 
+const std::array<Spc700Opcode, 256>& spc700Opcodes() { return kOpcodes; }
+
 const std::array<CycleCost, 256>& cycleTable() {
   static const std::array<CycleCost, 256> table = [] {
     std::array<CycleCost, 256> costs{};
@@ -475,7 +438,7 @@ std::optional<Decoded> Spc700Backend::decode(std::span<const std::uint8_t> image
 
   const std::uint8_t opcode = image[offset];
   const OpcodeInfo& info = kOpcodes[opcode];
-  const std::uint8_t extra = operandBytes(info.operands);
+  const std::uint8_t extra = spc700OperandBytes(info.operands);
   if (offset + 1u + extra > image.size()) return std::nullopt;
 
   const std::uint8_t first = extra >= 1 ? image[offset + 1] : std::uint8_t{0};
@@ -503,9 +466,12 @@ std::optional<Decoded> Spc700Backend::decode(std::span<const std::uint8_t> image
     case Operands::Dp:
       slot1 = hex8(first);
       break;
+    // PCALL's operand is the one-byte offset into page $FF, as the dialect
+    // writes it; the destination it reaches rides in the comment.
     case Operands::Upage:
-      slot1 = "FF" + hex8(first);
+      slot1 = hex8(first);
       out.target = static_cast<std::uint16_t>(0xFF00u | first);
+      out.note = "$FF" + hex8(first);
       break;
     case Operands::Abs:
       slot1 = hex16(word);

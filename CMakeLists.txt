@@ -104,16 +104,40 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_disasm PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The assembler — the common layer of the assembly language, which does not
+  # depend on which chip the code is for: lines, numbers, symbols, expressions,
+  # ORG and the data directives, the two passes, the diagnostics. Each chip's
+  # assembler is a dialect over it, beside that chip's disassembler, built from
+  # the same instruction table. The shared command-line shape lives here too.
+  add_library(snaggletooth_assembler STATIC
+    tools/assembler/assembler.cpp
+    tools/assembler/asm_main.cpp
+  )
+  target_include_directories(snaggletooth_assembler PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_assembler PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_assembler PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_assembler PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_assembler PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
   # tooling above because that reads a file format and this reads the instruction
   # set; the test tree already draws the same line between tests/spc and
   # tests/spc700. The disassembler is the SPC700 backend over the framework, and it
   # links the library because it measures each opcode's cost by running the
-  # interpreter rather than carrying a table beside it.
+  # interpreter rather than carrying a table beside it. The assembler is the
+  # dialect over the assembler library, the inverse of the backend over the same
+  # table.
   add_library(snaggletooth_spc700 STATIC
     tools/spc700/spc700_disasm.cpp
+    tools/spc700/spc700_asm.cpp
   )
-  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
+  target_link_libraries(snaggletooth_spc700 PUBLIC
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_assembler)
   target_include_directories(snaggletooth_spc700 PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/spc700>
   )
@@ -133,14 +157,26 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(spc700_disasm PRIVATE -Wall -Wextra -Werror)
   endif()
 
-  # The 65816 tooling — the main CPU's disassembler, the 65816 backend over the
-  # framework. It links the library for the same reason the SPC700 one does: every
-  # opcode's cost is measured by running the core, under each setting of the mode
-  # flags, rather than carried in a table beside it.
+  add_executable(spc700_asm tools/spc700/spc700_asm_main.cpp)
+  target_link_libraries(spc700_asm PRIVATE snaggletooth_spc700)
+  if(MSVC)
+    target_compile_options(spc700_asm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(spc700_asm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # The 65816 tooling — the main CPU's disassembler and assembler. The
+  # disassembler is the 65816 backend over the framework, and links the library
+  # for the same reason the SPC700 one does: every opcode's cost is measured by
+  # running the core, under each setting of the mode flags, rather than carried in
+  # a table beside it. The assembler is the dialect over the assembler library,
+  # following the register widths through the same function the backend does.
   add_library(snaggletooth_cpu65816 STATIC
     tools/cpu65816/cpu65816_disasm.cpp
+    tools/cpu65816/cpu65816_asm.cpp
   )
-  target_link_libraries(snaggletooth_cpu65816 PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
+  target_link_libraries(snaggletooth_cpu65816 PUBLIC
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_assembler)
   target_include_directories(snaggletooth_cpu65816 PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/cpu65816>
   )
@@ -158,6 +194,14 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(cpu65816_disasm PRIVATE /W4 /WX)
   else()
     target_compile_options(cpu65816_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(cpu65816_asm tools/cpu65816/cpu65816_asm_main.cpp)
+  target_link_libraries(cpu65816_asm PRIVATE snaggletooth_cpu65816)
+  if(MSVC)
+    target_compile_options(cpu65816_asm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(cpu65816_asm PRIVATE -Wall -Wextra -Werror)
   endif()
 
   # The cartridge side of the toolkit — the entry points a header names, which
@@ -248,6 +292,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/dummy_read_test.cpp
     tests/spc700/disasm_test.cpp
     tests/disasm/framework_test.cpp
+    tests/assembler/assembler_test.cpp
+    tests/spc700/asm_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
@@ -261,6 +307,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/block_move_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
     tests/cpu65816/disasm_test.cpp
+    tests/cpu65816/asm_test.cpp
     tests/snes/bus_test.cpp
     tests/snes/cartridge_map_test.cpp
     tests/snes/cartridge_header_test.cpp

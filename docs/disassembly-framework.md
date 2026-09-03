@@ -248,7 +248,8 @@ the three maps, and the entry points — is built, and so is whole-cartridge
 disassembly over it, which traces every bank from the vectors with control flow
 carried across banks, hands the sound program the cartridge uploads to the SPC700
 backend, and writes a source tree with a manifest: [snes-disassembler.md](snes-disassembler.md).
-The assembler that closes the round trip is not built yet.
+The assemblers that close the round trip are built over a framework of their own,
+[assemblers.md](assemblers.md), each dialect from the same table as its backend.
 
 ## See also
 

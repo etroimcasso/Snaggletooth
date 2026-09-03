@@ -179,9 +179,12 @@ read two ways, not that the tool failed.
 ## Status
 
 The disassembler covers the SPC700; the main CPU has its own,
-[65816-disassembler.md](65816-disassembler.md), over the same framework. The
-cartridge coprocessors, whole-cartridge disassembly with bank mapping, and the
-assembler that closes the round trip are not built yet.
+[65816-disassembler.md](65816-disassembler.md), over the same framework, and a
+whole cartridge is read through both by the
+[cartridge disassembler](snes-disassembler.md). The assembler that closes the
+round trip is [`spc700_asm`](assemblers.md): every opcode, decoded and assembled
+back from its text, gives the bytes decoded, and a real sound program's dump
+reassembles byte for byte. The cartridge coprocessors are not built.
 
 Targets that are not constants — `JMP [!abs+X]` through a table, a call whose
 destination is computed — are decoded and printed, but the trace cannot follow them.
@@ -191,6 +194,7 @@ Code reachable only that way needs an explicit `--entry`.
 
 - [SPC700 assembly language](spc700-assembly.md) — the dialect this emits, over
   the [common layer](assembly-lexicon.md).
+- [The assemblers](assemblers.md) — `spc700_asm`, which reads it back.
 - [SPC700 CPU core](spc700-cpu.md) — the interpreter the cycle costs are measured from.
 - [Disassembly framework](disassembly-framework.md) — the tracer and renderer this backend runs on.
 - [Cartridge disassembler](snes-disassembler.md) — the sound program a cartridge

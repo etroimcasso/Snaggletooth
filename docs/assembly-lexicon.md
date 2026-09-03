@@ -6,9 +6,10 @@ code is for. Two dialects share it — [SPC700 assembly](spc700-assembly.md) and
 its instruction set adds: the mnemonics, the operand syntax of its addressing
 modes, and the directives its encoding needs. Everything here holds in both.
 
-> **Status.** The assemblers are not built. The disassemblers emit this language
-> today; sections describing what an assembler accepts describe the target, not
-> shipped behaviour.
+> **Status.** Both assemblers are built — [assemblers.md](assemblers.md) — and
+> the disassemblers emit this language. Every opcode of each chip round-trips
+> through its own text, and a real sound program's dump, disassembled and
+> reassembled, is byte-identical and renders byte-identical audio.
 
 A disassembler and its assembler are inverses. A listing assembles back to the
 bytes it came from, so a binary can be disassembled, edited and rebuilt without its
@@ -128,7 +129,8 @@ loop:
 ```
 
 A name matches `[A-Za-z_.][A-Za-z0-9_.]*`. A name that spells a mnemonic,
-register or directive is rejected, so `mov:` is an error.
+register or directive, in any case, is rejected, so `mov:` is an error and so is
+`x:`.
 
 A label takes the address of the byte that follows it. Two labels on consecutive
 lines with nothing between them are the same address.
@@ -178,12 +180,16 @@ word is required in 16, or the assembler reports it.
 ```
 
 Sets the assembly address. Every byte after it is placed from there. A source
-file with no `ORG` starts at address zero.
+file with no `ORG` starts at address zero. The address must be resolvable when
+the directive is read, so an `ORG` may not refer forward.
 
 `ORG` may move forward, leaving a gap; the gap's contents are not emitted, and
 the output describes the ranges that were written. `ORG` may not move backward
 over bytes already emitted — overlapping output is an error rather than a silent
 overwrite.
+
+An `ORG` begins a region: whatever a dialect carries from line to line — the
+65816's register widths — starts over there. So does a data directive.
 
 ### 5.2 `DB`, `DW`, `DL`
 
@@ -215,7 +221,8 @@ addresses are 24 bits wide:
         DS 16,$FF        ; sixteen bytes of $FF
 ```
 
-Emits a run of a repeated byte. The fill defaults to `$00`.
+Emits a run of a repeated byte. The fill defaults to `$00`. The count must be
+resolvable when the directive is read.
 
 ---
 
@@ -245,7 +252,10 @@ does not guess: an operand that could plausibly be two modes is an error naming
 both rather than a choice made quietly.
 
 Assembly stops emitting output on the first error but continues parsing, so one
-run reports every error in the file rather than one per run.
+run reports every error in the file rather than one per run. A value that has
+to be known when its line is read — an `EQU`, an `ORG`, a `DS` count, and in
+the 65816 dialect the mask of a `REP` or `SEP` — reports a name defined later
+in the file as such.
 
 ---
 
@@ -266,5 +276,7 @@ these pages describe.
 
 - [SPC700 assembly language](spc700-assembly.md) — the audio CPU's dialect.
 - [65816 assembly language](65816-assembly.md) — the main CPU's dialect.
+- [The assemblers](assemblers.md) — the tools that read this language, and the
+  library they are built on.
 - [SPC700 disassembler](spc700-disassembler.md) and
-  [65816 disassembler](65816-disassembler.md) — the tools that emit them.
+  [65816 disassembler](65816-disassembler.md) — the tools that emit it.

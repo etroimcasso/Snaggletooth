@@ -128,9 +128,11 @@ Address lineEnd(const Line& line) {
 }
 
 // The listing as text, one piece per run of consecutive lines, each piece under
-// its own `ORG`. `between` names what lies in the gap before a piece.
+// its own `ORG`. `between` names what lies in the gap before a piece. Every
+// piece is a region to an assembler, so the first instruction of a piece carries
+// the directives a region's start needs, whatever the line above the cut left.
 template <typename Between>
-std::string renderPieces(const Listing& listing, Between between) {
+std::string renderPieces(const Listing& listing, const Backend& backend, Between between) {
   std::string out;
   Listing piece;
   piece.labels = listing.labels;
@@ -149,6 +151,9 @@ std::string renderPieces(const Listing& listing, Between between) {
       out += "\n" + between(*previousEnd, line.address - 1u) + "\n";
     }
     piece.lines.push_back(line);
+    if (piece.lines.size() == 1 && line.isCode) {
+      piece.lines.back().directives = backend.directives(std::nullopt, line.context);
+    }
     previousEnd = lineEnd(line);
   }
   flush();
@@ -816,7 +821,7 @@ std::string manifestMismatch(const ManifestInput& input, std::span<const std::ui
 std::string renderRegion(const RegionListing& region, const CartridgeDisassembly& disassembly) {
   const Listing lines = regionLines(region, disassembly);
   const std::string soundFile = disassembly.sound ? disassembly.sound->file : std::string();
-  return renderPieces(lines, [&](Address first, Address last) {
+  return renderPieces(lines, cpu65816Backend(), [&](Address first, Address last) {
     return "; ---- " + address24(first) + "-" + address24(last) + ": the sound program, see " +
            soundFile;
   });
@@ -834,7 +839,7 @@ std::string renderSoundProgram(const SoundProgram& sound) {
     out += "\n";
   }
   out += "\n";
-  out += renderPieces(sound.listing, [&](Address first, Address last) {
+  out += renderPieces(sound.listing, spc700Backend(), [&](Address first, Address last) {
     return "; ---- " + address16(first) + "-" + address16(last) + ": not uploaded";
   });
   return out;
