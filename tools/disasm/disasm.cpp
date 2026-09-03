@@ -47,6 +47,14 @@ std::string Backend::describe(Context context) const {
   return std::string("context ") + buffer;
 }
 
+std::vector<std::string> Backend::directives(std::optional<Context>, Context) const {
+  return {};
+}
+
+std::string Backend::unreadable(std::span<const std::uint8_t>, Address, Address, Context) const {
+  return {};
+}
+
 Listing trace(const Backend& backend, const Request& request) {
   Listing listing;
   listing.addressBits = backend.addressBits();
@@ -60,6 +68,7 @@ Listing trace(const Backend& backend, const Request& request) {
   std::vector<bool> covered(size, false);
   std::map<Address, Instruction> decoded;
   std::map<Address, Context> contextAt;
+  std::map<Address, Context> contextAfter;
 
   auto inRange = [&](Address address) {
     return address >= base && static_cast<std::size_t>(address - base) < size;
@@ -84,12 +93,13 @@ Listing trace(const Backend& backend, const Request& request) {
     visit(base, request.context);
     listing.labels[base] = "entry";
   }
-  for (Address entry : request.entries) {
+  for (std::size_t i = 0; i < request.entries.size(); ++i) {
+    const Address entry = request.entries[i];
     if (!inRange(entry)) {
       listing.warnings.push_back("entry " + formatAddress(entry, bits) + " is outside the image");
       continue;
     }
-    visit(entry, request.context);
+    visit(entry, i < request.entryContexts.size() ? request.entryContexts[i] : request.context);
     listing.labels[entry] = "entry_" + labelDigits(entry, bits);
   }
 
@@ -102,14 +112,22 @@ Listing trace(const Backend& backend, const Request& request) {
     if (isOpcode[offset]) {
       // Decoded already, and under a different context — the queue admits each
       // address once per context, so a loop closing under the same context never
-      // arrives here. The bytes read two ways; the backend names both readings so
-      // the reader can decide, and the first one stands.
-      listing.warnings.push_back(formatAddress(address, bits) + " is reached with " +
-                                 backend.describe(contextAt[address]) + " and with " +
-                                 backend.describe(item.context));
+      // arrives here. The backend says whether the two contexts read the bytes two
+      // ways; when they do it names both readings so the reader can decide, and
+      // the first one stands.
+      if (backend.conflicts(contextAt[address], item.context)) {
+        listing.warnings.push_back(formatAddress(address, bits) + " is reached with " +
+                                   backend.describe(contextAt[address]) + " and with " +
+                                   backend.describe(item.context));
+      }
       continue;
     }
 
+    const std::string reason = backend.unreadable(image, base, address, item.context);
+    if (!reason.empty()) {
+      listing.warnings.push_back(formatAddress(address, bits) + " cannot be read: " + reason);
+      continue;
+    }
     std::optional<Decoded> result = backend.decode(image, base, address, item.context);
     if (!result) {
       listing.warnings.push_back("instruction at " + formatAddress(address, bits) +
@@ -136,6 +154,7 @@ Listing trace(const Backend& backend, const Request& request) {
 
     const Address next = backend.following(address, instruction.length);
     const Context after = result->next;
+    contextAfter[address] = after;
 
     switch (instruction.flow) {
       case Flow::Continue:
@@ -195,8 +214,12 @@ Listing trace(const Backend& backend, const Request& request) {
   }
 
   // Emit lines in address order: decoded instructions, and runs of everything the
-  // trace never reached.
+  // trace never reached. Each instruction carries the source lines the backend
+  // wants before it, judged against the context the instruction above left
+  // behind — or against nothing at the start of the listing and after a run of
+  // data, where an assembler starts fresh.
   std::size_t offset = 0;
+  std::optional<Context> left;
   while (offset < size) {
     const Address address = base + static_cast<Address>(offset);
     auto found = decoded.find(address);
@@ -205,6 +228,9 @@ Listing trace(const Backend& backend, const Request& request) {
       line.isCode = true;
       line.address = address;
       line.instruction = found->second;
+      line.context = contextAt[address];
+      line.directives = backend.directives(left, line.context);
+      left = contextAfter[address];
       listing.lines.push_back(std::move(line));
       offset += found->second.length;
       continue;
@@ -217,6 +243,7 @@ Listing trace(const Backend& backend, const Request& request) {
     line.data.assign(image.begin() + static_cast<std::ptrdiff_t>(start),
                      image.begin() + static_cast<std::ptrdiff_t>(offset));
     listing.lines.push_back(std::move(line));
+    left.reset();
   }
 
   return listing;
@@ -270,6 +297,9 @@ std::string render(const Listing& listing) {
       if (const std::string* label = labelAt(line.address)) {
         out += "\n" + *label + ":\n";
       }
+      for (const std::string& directive : line.directives) {
+        out += "        " + directive + "\n";
+      }
       const Instruction& instruction = line.instruction;
       std::string row = "        " + instruction.text;
       padTo(row, kCommentColumn);
@@ -278,10 +308,14 @@ std::string render(const Listing& listing) {
       for (std::uint8_t byte : instruction.bytes) bytes += hex8(byte) + " ";
       bytes.append(bytesWidth - bytes.size(), ' ');
 
-      row += "; " + formatAddress(instruction.address, bits) + "  " + bytes + " " +
-             std::to_string(instruction.cycles.base);
-      if (instruction.cycles.taken != 0) {
-        row += "/" + std::to_string(instruction.cycles.taken);
+      row += "; " + formatAddress(instruction.address, bits) + "  " + bytes + " ";
+      if (!instruction.cycles.known) {
+        row += "?";
+      } else {
+        row += std::to_string(instruction.cycles.base);
+        if (instruction.cycles.taken != 0) {
+          row += "/" + std::to_string(instruction.cycles.taken);
+        }
       }
       if (!instruction.note.empty()) row += "  " + instruction.note;
       out += row + "\n";

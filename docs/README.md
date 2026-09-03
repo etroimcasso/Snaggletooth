@@ -17,6 +17,7 @@ what is unstarted.
 | Run the audio unit alone | [apu-machine.md](apu-machine.md) |
 | Understand how sound is produced | [dsp.md](dsp.md) |
 | Read the code a dump contains | [spc700-disassembler.md](spc700-disassembler.md) |
+| Read the code a cartridge contains | [65816-disassembler.md](65816-disassembler.md) |
 
 ## The machine
 
@@ -42,7 +43,13 @@ what is unstarted.
 | [spc-rendering.md](spc-rendering.md) | Rendering audio to a WAV from an SPC dump or from a cartridge, and what a dump does and does not carry |
 | [disassembly-framework.md](disassembly-framework.md) | The tracing disassembler's chip-independent half — the backend interface, 24-bit addresses, the per-path context and conflict reporting, the listing format, and the entry points a cartridge header names |
 | [spc700-disassembler.md](spc700-disassembler.md) | The SPC700 disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
-| [spc700-assembly.md](spc700-assembly.md) | The assembly language the disassembler emits |
+| [65816-disassembler.md](65816-disassembler.md) | The 65816 disassembler — the register widths carried along every path, what it reports rather than guesses, the costs measured under each mode, and the registers named by bank |
+| [assembly-lexicon.md](assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |
+| [spc700-assembly.md](spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |
+| [65816-assembly.md](65816-assembly.md) | The 65816 dialect — its addressing modes, the width directives, and the long, jump, block-move and stack forms |
+
+The tools themselves, and the libraries behind them, are described beside their
+sources in [tools/README.md](../tools/README.md).
 
 ## Reading these pages
 

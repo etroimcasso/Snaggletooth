@@ -85,6 +85,7 @@ The table below is kept honest as components land.
 | 65816 CPU core (the main CPU's instruction set) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle vector-validated |
 | Disassembly framework (tracer, renderer, backend interface) | **complete** — 24-bit addresses, a per-path context so a chip whose instruction widths depend on state is traced correctly and a conflict between paths is reported rather than guessed, assemblable output; each chip's disassembler is a backend over it. The cartridge side is built: the header and its vectors, the three maps, and the entry points a whole-cartridge trace starts from |
 | SPC700 disassembler | **complete** — the SPC700 backend: traces control flow from entry points so data is never decoded as code, names hardware registers, marks run-time-patched bytes, emits assembly source; cycle costs measured from the interpreter |
+| 65816 disassembler | **complete** — the 65816 backend: carries the register widths along every path through `REP`, `SEP` and `XCE`, reports an address two paths read two ways and an operand whose width nothing settled rather than guessing either, names the hardware registers in the banks that show them, emits assembly source with the width directives an assembler needs; cycle costs measured from the interpreter under each mode. Reads one image at a time; whole-cartridge mapping is not built |
 | SNES machine (bus, memory map, clock, timing) | in progress — the LoROM, HiROM and ExHiROM maps read from the cartridge header, work RAM and its data port, APU communication ports, the 6/8/12-master-cycle region model at both clock rates, exact master-cycle budgeting and the CPU-to-APU interleave, video counters, vertical-blank NMI and H/V-timer IRQ, multiply/divide unit, PPU register file, eight DMA/HDMA channels, and the audio boot handshake. The rendering PPU remains |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders 32 kHz WAV; output not yet validated against reference renders |
 | SPC700 assembler | not started — the dialect it accepts is specified |
@@ -107,7 +108,11 @@ The pages live in [docs/](docs/README.md), which indexes them by subject and say
 | [spc-rendering.md](docs/spc-rendering.md) | Rendering audio to a WAV from an SPC dump or from a cartridge, and what a dump does and does not carry |
 | [disassembly-framework.md](docs/disassembly-framework.md) | The tracing disassembler's chip-independent half — the backend interface, 24-bit addresses, the per-path context and conflict reporting, the listing format, and the entry points a cartridge header names |
 | [spc700-disassembler.md](docs/spc700-disassembler.md) | The SPC700 disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
-| [spc700-assembly.md](docs/spc700-assembly.md) | The assembly language the disassembler emits |
+| [65816-disassembler.md](docs/65816-disassembler.md) | The 65816 disassembler — the register widths carried along every path, what it reports rather than guesses, the costs measured under each mode, and the registers named by bank |
+| [assembly-lexicon.md](docs/assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |
+| [spc700-assembly.md](docs/spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |
+| [65816-assembly.md](docs/65816-assembly.md) | The 65816 dialect — its addressing modes, the width directives, and the long, jump, block-move and stack forms |
+| [tools/README.md](tools/README.md) | The command-line tools and the libraries behind them, with a README beside each |
 
 ## Roadmap
 

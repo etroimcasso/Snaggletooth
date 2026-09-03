@@ -42,9 +42,9 @@ Everything lives in `snaggletooth::disasm`.
 | Symbol | Purpose |
 |---|---|
 | `Address` | A 24-bit address: the bank in bits 16-23, the offset within it below. |
-| `Context` | The state a trace carries beside an address. One `std::uint32_t` whose meaning belongs to the backend; the framework only compares it. |
+| `Context` | The state a trace carries beside an address. One `std::uint32_t` whose meaning belongs to the backend; the framework compares it through the backend. |
 | `Backend` | The interface a chip's disassembler implements — see [Writing a backend](#writing-a-backend). |
-| `Request` | What to disassemble: the image, its base address, the entry points, an optional prior image, symbols, and the context every entry starts with. |
+| `Request` | What to disassemble: the image, its base address, the entry points and the context each starts with, an optional prior image, and symbols. |
 | `trace(backend, request)` | Follows control flow and returns a `Listing`. |
 | `render(listing)` | Renders a `Listing` as source text. |
 | `formatAddress(address, bits)` | An address as a listing prints it: `$XXXX` at 16 bits, `$BB:XXXX` at 24. |
@@ -55,7 +55,10 @@ types those pass around. An `Instruction` carries its `address`, `opcode`, `leng
 `operandAddress`, and a `note`. `Flow` is how an instruction reaches the rest of the
 program: `Continue` falls through, `Branch` falls through and may also reach its
 target, `Jump` never falls through, `Call` reaches its target and comes back,
-`Return` and `Halt` never fall through.
+`Return` and `Halt` never fall through. A `CycleCost` is a `base` and a `taken`
+count, and a `known` flag a backend clears where the cost depends on state the
+trace does not have. A `Line` of code carries the `context` it was decoded under
+and the `directives` the backend wants printed before it.
 
 ## Writing a backend
 
@@ -90,10 +93,21 @@ What a backend fills in decides what the framework can do:
 - `operandAddress` is the memory address the operand names, when there is one. The
   framework passes it to `registerName` and puts the answer in `note`.
 - `cycles` and `text` are printed as they are.
-
-Two members have defaults. `following(at, length)` is the address of the next
-instruction, and wraps within the bank, which is what every chip built so far does.
-`describe(context)` is how a warning names a context; the default prints its bits.
+Five members have defaults. `unreadable(image, base, at, context)` is why the
+bytes at `at` cannot be read under the context, or empty when they can; the
+framework asks it before decoding, reports a reason and stops that path, and the
+bytes stay data. The default never refuses. `following(at, length)` is the address
+of the next instruction, and wraps within the bank, which is what every chip built
+so far does. `describe(context)` is how a warning names a context; the default
+prints its bits.
+`conflicts(first, second)` says whether an address reached under both contexts
+reads two ways; the default says so whenever they differ, and a backend that
+carries state beyond what decides a reading answers from the bits that do.
+`directives(before, now)` is the source lines that must precede an instruction
+decoded under `now` when the instruction above left `before` — or when nothing is
+above it, at the start of a region; the default is none, and a backend whose
+source has to be told the state an instruction assembles under answers with its
+directives.
 
 ## Tracing and rendering
 
@@ -111,9 +125,12 @@ const auto listing = snaggletooth::disasm::trace(snaggletooth::disasm::spc700Bac
 std::string text = snaggletooth::disasm::render(listing);
 ```
 
-Tracing starts at every address in `entries`, each with `request.context`; with no
-entries it starts at `base`. `symbols` are labels that take precedence over the
-generated ones. `annotateRegisters` turns the register annotation off.
+Tracing starts at every address in `entries`; with no entries it starts at `base`.
+`entries[i]` starts with `entryContexts[i]` when one is given there and with
+`request.context` otherwise, so a reset handler and an interrupt handler, which
+begin in different modes, trace in one request. `symbols` are labels that take
+precedence over the generated ones. `annotateRegisters` turns the register
+annotation off.
 
 ## Addresses
 
@@ -130,13 +147,25 @@ reported and not followed.
 The trace's work item is an address *and* a context. The same address under a
 different context is a different item, which is how the framework can tell that two
 paths read one location two ways. When that happens the first reading is kept and a
-warning names the address and both contexts:
+warning names the address and both contexts, as the backend describes them:
 
 ```
-; warning: $00:8008 is reached with context 1 and with context 0
+; warning: $00:98E1 is reached with e=0 m=8 x=8 and with e=0 m=16 x=8
 ```
+
+Whether two contexts read the bytes two ways is the backend's call, through
+`conflicts`: a backend may carry state in the context that a reading does not
+depend on, and two arrivals differing only in that are not reported.
 
 Reaching an address twice under the same context is a loop and is not reported.
+
+A backend may also answer that it cannot read an address under the context it was
+given — the 65816's immediate under a width nothing on the path settled. The path
+stops there, the bytes stay data, and a warning says why:
+
+```
+; warning: $00:8001 cannot be read: LDA # under an accumulator width the trace does not know
+```
 
 ## Output
 
@@ -155,7 +184,17 @@ Each line carries the mnemonic, then a comment holding the address, the raw byte
 the cycle cost, and any annotation. Everything that is not an instruction or a
 directive is a comment, which is what lets the listing assemble back to the bytes it
 came from. The raw-bytes field is as wide as the longest instruction in the listing,
-so the costs stay aligned.
+so the costs stay aligned. A cost the backend marked unknown prints as `?`.
+
+A backend's directives print indented like instructions, after the label and
+before the instruction they belong to:
+
+```
+entry_008000:
+        A8
+        X8
+        SEI                             ; $00:8000  78           2
+```
 
 Labels are generated for every target the trace reaches — `loc_` for a branch or
 jump destination, `sub_` for a call destination, `entry_` for an address you passed,
@@ -165,9 +204,11 @@ jump destination, `sub_` for a call destination, `entry_` for an address you pas
 
 `Listing::warnings` is non-empty when the trace found something it could not resolve
 cleanly — an entry outside the image, an instruction whose operands run past the end,
-a target landing inside an instruction already decoded, or an address reached under
-two contexts. `render` prints them at the top as comments. They mean the listing is
-incomplete or that a region is being read two ways, not that the tool failed.
+an instruction the backend cannot read under the context that reached it, a target
+landing inside an instruction already decoded, or an address reached under two
+contexts that read it two ways. `render` prints them at the top as comments. They
+mean the listing is incomplete or that a region is being read two ways, not that
+the tool failed.
 
 ## Cartridges
 
@@ -200,13 +241,18 @@ both live in [snes-cartridge.md](snes-cartridge.md).
 
 ## Status
 
-One backend exists: the SPC700, described in
-[spc700-disassembler.md](spc700-disassembler.md). The cartridge side — the header,
-the three maps, and the entry points — is built. The 65816 backend, whole-ROM
-disassembly over it, and the assembler that closes the round trip are not built yet.
+Two backends exist: the SPC700, described in
+[spc700-disassembler.md](spc700-disassembler.md), and the 65816, described in
+[65816-disassembler.md](65816-disassembler.md). The cartridge side — the header,
+the three maps, and the entry points — is built. Whole-cartridge disassembly, which
+maps every bank through the header and dispatches each region to its backend, and
+the assembler that closes the round trip are not built yet.
 
 ## See also
 
 - [spc700-disassembler.md](spc700-disassembler.md) — the SPC700 backend and its command line.
-- [spc700-assembly.md](spc700-assembly.md) — the dialect that backend emits.
+- [65816-disassembler.md](65816-disassembler.md) — the 65816 backend and its command line.
+- [assembly-lexicon.md](assembly-lexicon.md) — the layer the two dialects share;
+  [spc700-assembly.md](spc700-assembly.md) and [65816-assembly.md](65816-assembly.md)
+  are the dialects the backends emit.
 - [snes-cartridge.md](snes-cartridge.md) — the cartridge header and maps the entry points come from.

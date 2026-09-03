@@ -133,6 +133,33 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(spc700_disasm PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The 65816 tooling — the main CPU's disassembler, the 65816 backend over the
+  # framework. It links the library for the same reason the SPC700 one does: every
+  # opcode's cost is measured by running the core, under each setting of the mode
+  # flags, rather than carried in a table beside it.
+  add_library(snaggletooth_cpu65816 STATIC
+    tools/cpu65816/cpu65816_disasm.cpp
+  )
+  target_link_libraries(snaggletooth_cpu65816 PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
+  target_include_directories(snaggletooth_cpu65816 PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/cpu65816>
+  )
+  target_compile_features(snaggletooth_cpu65816 PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_cpu65816 PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_cpu65816 PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_cpu65816 PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(cpu65816_disasm tools/cpu65816/cpu65816_disasm_main.cpp)
+  target_link_libraries(cpu65816_disasm PRIVATE snaggletooth_cpu65816)
+  if(MSVC)
+    target_compile_options(cpu65816_disasm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(cpu65816_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The cartridge side of the toolkit — the entry points a header names and which
   # disassembler owns each part of the bus. It reads the cartridge through the
   # library's own header functions, so a tool and the machine agree on every byte.
@@ -219,6 +246,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/interrupt_cycles_test.cpp
     tests/cpu65816/block_move_cycles_test.cpp
     tests/cpu65816/vector_test.cpp
+    tests/cpu65816/disasm_test.cpp
     tests/snes/bus_test.cpp
     tests/snes/cartridge_map_test.cpp
     tests/snes/cartridge_header_test.cpp
@@ -254,6 +282,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
     snaggletooth_spc700
+    snaggletooth_cpu65816
     snaggletooth_rom
     GTest::gtest_main
   )
