@@ -101,8 +101,8 @@ and a render can run as long as the game keeps playing.
 Rendering starts at power-on and runs forward verbatim, so the opening seconds are
 whatever the game does before it starts its driver — silence, usually, while it
 uploads one. A dump copier's 512-byte header is dropped when the file length shows
-one is present. The cartridge is mapped as LoROM, so a HiROM title does not yet
-boot.
+one is present. The cartridge's map is read from its header, so a LoROM, HiROM or
+ExHiROM title boots without being told which it is.
 
 ## Loading a dump in code
 

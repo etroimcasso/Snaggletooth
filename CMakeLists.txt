@@ -26,6 +26,7 @@ add_library(snaggletooth STATIC
   src/version.cpp
   src/apu.cpp
   src/dsp.cpp
+  src/cartridge.cpp
   src/snes.cpp
   src/snes_dma.cpp
   src/snes_ipl_stub.cpp
@@ -87,15 +88,32 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(rom_render PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The disassembly framework — the tracer and the renderer, which do not depend on
+  # which chip the bytes are for. Each chip's disassembler is a backend over it.
+  add_library(snaggletooth_disasm STATIC
+    tools/disasm/disasm.cpp
+  )
+  target_include_directories(snaggletooth_disasm PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_disasm PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_disasm PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_disasm PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
   # tooling above because that reads a file format and this reads the instruction
   # set; the test tree already draws the same line between tests/spc and
-  # tests/spc700. The disassembler links the library because it measures each
-  # opcode's cost by running the interpreter rather than carrying a table beside it.
+  # tests/spc700. The disassembler is the SPC700 backend over the framework, and it
+  # links the library because it measures each opcode's cost by running the
+  # interpreter rather than carrying a table beside it.
   add_library(snaggletooth_spc700 STATIC
     tools/spc700/spc700_disasm.cpp
   )
-  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth)
+  target_link_libraries(snaggletooth_spc700 PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
   target_include_directories(snaggletooth_spc700 PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/spc700>
   )
@@ -113,6 +131,24 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(spc700_disasm PRIVATE /W4 /WX)
   else()
     target_compile_options(spc700_disasm PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # The cartridge side of the toolkit — the entry points a header names and which
+  # disassembler owns each part of the bus. It reads the cartridge through the
+  # library's own header functions, so a tool and the machine agree on every byte.
+  add_library(snaggletooth_rom STATIC
+    tools/rom/cartridge_entries.cpp
+  )
+  target_link_libraries(snaggletooth_rom PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
+  target_include_directories(snaggletooth_rom PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_rom PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_rom PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_rom PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
   endif()
 endif()
 
@@ -170,6 +206,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc700/vector_test.cpp
     tests/spc700/dummy_read_test.cpp
     tests/spc700/disasm_test.cpp
+    tests/disasm/framework_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
@@ -184,6 +221,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/vector_test.cpp
     tests/snes/bus_test.cpp
     tests/snes/cartridge_map_test.cpp
+    tests/snes/cartridge_header_test.cpp
+    tests/rom/cartridge_entries_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/math_test.cpp
@@ -215,6 +254,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
     snaggletooth_spc700
+    snaggletooth_rom
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE

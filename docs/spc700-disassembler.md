@@ -107,7 +107,9 @@ Supply your own through `DisasmRequest::symbols` and they take precedence.
 
 ## Hardware registers
 
-An operand reaching `$00F0`–`$00FF` is annotated with the register's name:
+An operand that names memory in `$00F0`–`$00FF` is annotated with the register's
+name. Immediates and branch displacements are never annotated, whatever their value;
+a two-operand form is annotated for its destination:
 
 ```
         MOV X,$FD                       ; $0A42  F8 FD     3  T0OUT
@@ -134,7 +136,9 @@ slot into an annotation.
 
 ## Library
 
-The tool is a thin wrapper over `tools/spc700/spc700_disasm.h`:
+The tool is a thin wrapper over `tools/spc700/spc700_disasm.h`, which is the SPC700
+backend over the [disassembly framework](disassembly-framework.md) together with
+calls that use it without naming the backend:
 
 ```cpp
 #include "spc700_disasm.h"
@@ -151,20 +155,18 @@ std::string text = snaggletooth::disasm::render(listing);
 
 | Symbol | Purpose |
 |---|---|
+| `Spc700Backend`, `spc700Backend()` | The backend, and the one instance of it; it holds no state. Pass it to the framework's `trace` to disassemble alongside another chip's code. |
+| `DisasmRequest` | The framework's `Request`. |
 | `decodeAt(image, base, address)` | Decodes one instruction. Empty when the address is outside the image or the operands run past its end. |
-| `trace(request)` | Follows control flow and returns a `Listing`. |
+| `trace(request)` | Follows control flow with the SPC700 backend and returns a `Listing`. |
 | `render(listing)` | Renders a `Listing` as source text. |
 | `cycleTable()` | The measured cost of all 256 opcodes. |
 | `registerName(address)` | A hardware register's name, or empty for ordinary memory. |
 
-`Listing` carries `lines` in address order, the `labels` the trace found, and
-`warnings`. An `Instruction` carries its `address`, `opcode`, `length`, `flow`,
-`cycles`, raw `bytes`, rendered `text`, an optional `target`, and a `note`.
-
-`Flow` is how an instruction reaches the rest of the program: `Continue` falls
-through, `Branch` falls through and may also reach its target, `Jump` never falls
-through, `Call` reaches its target and comes back, `Return` and `Halt` never fall
-through.
+`Listing`, `Instruction` and `Flow` are the framework's types, described on its page.
+Addresses in them are 24-bit values; the SPC700 backend never sets a bank, reports
+`addressBits() == 16`, and passes the trace context through unchanged, since its
+instructions always read the same way.
 
 ## Warnings
 
