@@ -26,6 +26,7 @@ add_library(snaggletooth STATIC
   src/version.cpp
   src/apu.cpp
   src/dsp.cpp
+  src/cartridge.cpp
   src/snes.cpp
   src/snes_dma.cpp
   src/snes_ipl_stub.cpp
@@ -131,6 +132,24 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   else()
     target_compile_options(spc700_disasm PRIVATE -Wall -Wextra -Werror)
   endif()
+
+  # The cartridge side of the toolkit — the entry points a header names and which
+  # disassembler owns each part of the bus. It reads the cartridge through the
+  # library's own header functions, so a tool and the machine agree on every byte.
+  add_library(snaggletooth_rom STATIC
+    tools/rom/cartridge_entries.cpp
+  )
+  target_link_libraries(snaggletooth_rom PUBLIC snaggletooth::snaggletooth snaggletooth_disasm)
+  target_include_directories(snaggletooth_rom PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_rom PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_rom PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_rom PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
+  endif()
 endif()
 
 if(SNAGGLETOOTH_BUILD_TESTS)
@@ -202,6 +221,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/vector_test.cpp
     tests/snes/bus_test.cpp
     tests/snes/cartridge_map_test.cpp
+    tests/snes/cartridge_header_test.cpp
+    tests/rom/cartridge_entries_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/math_test.cpp
@@ -233,6 +254,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
     snaggletooth_spc700
+    snaggletooth_rom
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE

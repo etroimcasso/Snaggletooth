@@ -36,6 +36,7 @@
 
 #include "snaggletooth/apu/apu.h"
 #include "snaggletooth/cpu/cpu65816.h"
+#include "snaggletooth/snes/cartridge.h"
 
 namespace snaggletooth {
 
@@ -65,28 +66,11 @@ struct DmaChannel {
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
 };
 
-// How a cartridge lays its image across the bus. LoROM gives each bank a 32 KB
-// window in the upper half; HiROM gives it the whole 64 KB and reaches the same
-// bytes through the system banks' upper halves.
-enum class CartridgeMap { LoRom, HiRom };
-
-// Which map a cartridge image uses, read from its header. Both layouts put a
-// header in a fixed place, so the two candidate sites are scored against each
-// other: a header whose checksum agrees with its complement, whose mode byte
-// names the site it sits in, and whose title reads as text is the real one. An
-// image with neither is reported as LoROM, the denser layout of the two.
-[[nodiscard]] CartridgeMap detectCartridgeMap(std::span<const std::uint8_t> rom) noexcept;
-
-// The bytes of save RAM a cartridge header declares, from its size code: zero for
-// a cartridge with none, otherwise 1 KB shifted by the code. Sizes beyond what a
-// cartridge can address are clamped.
-[[nodiscard]] std::size_t declaredSaveRamBytes(std::span<const std::uint8_t> rom) noexcept;
-
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
 struct SnesConfig {
-  std::span<const std::uint8_t> rom;   // a cartridge image, LoROM or HiROM
+  std::span<const std::uint8_t> rom;   // a cartridge image under any map
   Region region = Region::Ntsc;        // the console clock rate
   bool iplStub = true;                 // seed the APU with its upload stub (arrives with the loader)
 
@@ -348,14 +332,15 @@ class Snes {
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
   // The cartridge byte an address reaches under the machine's map, mirrored across
-  // the image. Pure — it neither prices the cycle nor touches the data bus.
+  // the image; zero for an address that reaches no cartridge. Pure — it neither
+  // prices the cycle nor touches the data bus.
   [[nodiscard]] std::uint8_t romByte(std::uint8_t bank, std::uint16_t offset) const noexcept;
 
   // Whether an address lands on the cartridge under the machine's map, and whether
-  // it lands on save RAM. HiROM reaches ROM across the whole of banks $40-$7D and
-  // $C0-$FF, where LoROM reaches it only above $8000; the two maps also put save
-  // RAM in different banks. saveRamIndex answers the offset into the save, already
-  // masked to its size, for an address that reaches it.
+  // it lands on save RAM. Both answer through the cartridge functions, so the
+  // machine reads an image exactly where the header says it is. saveRamIndex
+  // answers the offset into the save, already reduced to its size, for an address
+  // that reaches it — nothing when the cartridge has no save.
   [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
   [[nodiscard]] std::optional<std::size_t> saveRamIndex(std::uint8_t bank,
                                                         std::uint16_t offset) const noexcept;

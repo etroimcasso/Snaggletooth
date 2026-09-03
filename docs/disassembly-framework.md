@@ -31,6 +31,7 @@ conflict rather than choosing.
 - [Context and conflicts](#context-and-conflicts)
 - [Output](#output)
 - [Warnings](#warnings)
+- [Cartridges](#cartridges)
 - [Status](#status)
 - [See also](#see-also)
 
@@ -168,14 +169,44 @@ a target landing inside an instruction already decoded, or an address reached un
 two contexts. `render` prints them at the top as comments. They mean the listing is
 incomplete or that a region is being read two ways, not that the tool failed.
 
+## Cartridges
+
+`tools/rom/cartridge_entries.h`, in the same namespace, is where a trace of a whole
+cartridge starts. A cartridge's header names the handlers the CPU jumps to on reset
+and on every interrupt — the addresses execution reaches before the program has run
+an instruction — and those are the entry points a trace begins from.
+
+```cpp
+#include "rom/cartridge_entries.h"
+#include "snaggletooth/snes/cartridge.h"
+
+const std::optional<snaggletooth::CartridgeHeader> header =
+    snaggletooth::parseCartridgeHeader(image);
+for (const snaggletooth::disasm::VectorEntry& entry : snaggletooth::disasm::vectorEntries(*header)) {
+  entry.address;  // in bank $00
+  entry.name;     // "reset", "nmi", "irq", "cop", "abort"; "_native" on the native set
+}
+```
+
+`vectorEntries` returns the vectors that land in ROM under the header's map, in
+vector-table order with reset first: the emulation-mode set, then the native set. A
+vector pointing at RAM or a register is left out, since nothing there can be
+traced; two vectors naming one handler give two entries under their own names.
+
+`codeOwner(map, address)` says which disassembler owns the bytes at a bus address:
+`CodeOwner::Cpu65816` for cartridge ROM, `CodeOwner::None` for RAM, registers, a
+save window and open bus. The map, the header and the address translations behind
+both live in [snes-cartridge.md](snes-cartridge.md).
+
 ## Status
 
 One backend exists: the SPC700, described in
-[spc700-disassembler.md](spc700-disassembler.md). The 65816 backend, whole-ROM
-disassembly with the cartridge map, and the assembler that closes the round trip are
-not built yet.
+[spc700-disassembler.md](spc700-disassembler.md). The cartridge side — the header,
+the three maps, and the entry points — is built. The 65816 backend, whole-ROM
+disassembly over it, and the assembler that closes the round trip are not built yet.
 
 ## See also
 
 - [spc700-disassembler.md](spc700-disassembler.md) — the SPC700 backend and its command line.
 - [spc700-assembly.md](spc700-assembly.md) — the dialect that backend emits.
+- [snes-cartridge.md](snes-cartridge.md) — the cartridge header and maps the entry points come from.

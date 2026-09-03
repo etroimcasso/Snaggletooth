@@ -1,6 +1,5 @@
 #include "snaggletooth/snes/snes.h"
 
-#include <bit>
 #include <cstddef>
 #include <utility>
 
@@ -50,65 +49,10 @@ constexpr std::uint8_t kDivideClocks = 16u;
 // The auto-joypad read holds the busy flag for a fixed window each frame.
 constexpr std::uint16_t kAutoJoyClocks = 4224u;
 
-// A cartridge header sits at a fixed offset from the end of the first bank in
-// each layout, and carries the same fields in both. Only the three this machine
-// needs are named.
-constexpr std::size_t kLoRomHeader = 0x7FC0u;
-constexpr std::size_t kHiRomHeader = 0xFFC0u;
-constexpr std::size_t kHeaderMapMode = 0x15u;      // LoROM/HiROM, and the fast bit
-constexpr std::size_t kHeaderSaveSize = 0x18u;     // the save-RAM size code
-constexpr std::size_t kHeaderComplement = 0x1Cu;   // the checksum's complement, then the checksum
-constexpr std::size_t kHeaderTitle = 0x00u;
-constexpr std::size_t kHeaderTitleLength = 21u;
-constexpr std::size_t kHeaderBytes = 0x20u;
-
-// The largest save a cartridge can address through either window.
+// The largest save a cartridge can address through any window.
 constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 
-// How well a candidate site reads as a header. A checksum agreeing with its own
-// complement is the strongest signal a site is real; a mode byte naming the site
-// it sits in is next; a title that reads as text breaks the remaining ties.
-[[nodiscard]] int headerScore(std::span<const std::uint8_t> rom, std::size_t base, bool hiRom) {
-  if (base + kHeaderBytes > rom.size()) return -1;
-  const std::uint8_t* h = rom.data() + base;
-  int score = 0;
-  const unsigned complement = h[kHeaderComplement] | (h[kHeaderComplement + 1] << 8);
-  const unsigned checksum = h[kHeaderComplement + 2] | (h[kHeaderComplement + 3] << 8);
-  if ((complement ^ checksum) == 0xFFFFu) score += 32;
-  const std::uint8_t mode = h[kHeaderMapMode];
-  if (((mode & 0x01u) != 0u) == hiRom) score += 16;
-  for (std::size_t i = 0; i < kHeaderTitleLength; ++i) {
-    const std::uint8_t c = h[kHeaderTitle + i];
-    if (c >= 0x20u && c < 0x7Fu) ++score;
-  }
-  return score;
-}
-
-// The header the image actually carries, or nothing when neither site reads as one.
-[[nodiscard]] const std::uint8_t* bestHeader(std::span<const std::uint8_t> rom) noexcept {
-  const int lo = headerScore(rom, kLoRomHeader, /*hiRom=*/false);
-  const int hi = headerScore(rom, kHiRomHeader, /*hiRom=*/true);
-  if (lo < 0 && hi < 0) return nullptr;
-  return hi > lo ? rom.data() + kHiRomHeader : rom.data() + kLoRomHeader;
-}
-
 }  // namespace
-
-CartridgeMap detectCartridgeMap(std::span<const std::uint8_t> rom) noexcept {
-  const int lo = headerScore(rom, kLoRomHeader, /*hiRom=*/false);
-  const int hi = headerScore(rom, kHiRomHeader, /*hiRom=*/true);
-  return hi > lo ? CartridgeMap::HiRom : CartridgeMap::LoRom;
-}
-
-std::size_t declaredSaveRamBytes(std::span<const std::uint8_t> rom) noexcept {
-  const std::uint8_t* h = bestHeader(rom);
-  if (h == nullptr) return 0;
-  const std::uint8_t code = h[kHeaderSaveSize];
-  if (code == 0) return 0;
-  if (code > 0x0Fu) return 0;  // a size code this large is not a size; treat it as none
-  const std::size_t bytes = std::size_t{1} << (code + 10u);
-  return bytes > kMaxSaveRamBytes ? kMaxSaveRamBytes : bytes;
-}
 
 Snes::Snes(SnesConfig config)
     : rom_(config.rom.begin(), config.rom.end()), region_(config.region) {
@@ -268,65 +212,31 @@ std::uint32_t Snes::accessCost(std::uint32_t address) const noexcept {
                         : 8u;                     // $00-$3F LoROM is always slow
 }
 
-std::size_t mirroredRomIndex(std::size_t index, std::size_t size) noexcept {
-  // A cartridge carries one ROM chip per power of two in its size, wired one after
-  // another, and the board leaves the address lines above a chip undecoded — so an
-  // address past a chip repeats that chip rather than running into the next one. A
-  // 3 MB cartridge is a 2 MB chip then a 1 MB chip, and the megabyte above it
-  // repeats the second chip, not the whole image. An image that is itself a power
-  // of two is one chip and folds on the first pass.
-  std::size_t base = 0;
-  while (index >= size) {
-    const std::size_t chip = std::bit_floor(index);
-    index -= chip;
-    if (size > chip) {
-      size -= chip;
-      base += chip;
-    }
-  }
-  return base + index;
+namespace {
+
+[[nodiscard]] constexpr std::uint32_t busAddress(std::uint8_t bank, std::uint16_t offset) noexcept {
+  return (static_cast<std::uint32_t>(bank) << 16) | offset;
 }
 
+}  // namespace
+
 std::uint8_t Snes::romByte(std::uint8_t bank, std::uint16_t offset) const noexcept {
-  if (rom_.empty()) return 0;
-  // A bank's high bit only selects the waitstate region, so it is masked off in
-  // both layouts. LoROM lays each bank's upper half end to end; HiROM lays whole
-  // banks end to end, and a system bank's upper half reaches the same bytes as the
-  // matching cartridge bank. The image mirrors to fill the address space.
-  const std::size_t index =
-      map_ == CartridgeMap::HiRom
-          ? (((static_cast<std::size_t>(bank) & 0x3Fu) << 16) | static_cast<std::size_t>(offset))
-          : (((static_cast<std::size_t>(bank) & 0x7Fu) << 15) |
-             (static_cast<std::size_t>(offset) & 0x7FFFu));
-  return rom_[mirroredRomIndex(index, rom_.size())];
+  const std::optional<std::size_t> index = romOffset(map_, busAddress(bank, offset), rom_.size());
+  return index.has_value() ? rom_[*index] : std::uint8_t{0};
 }
 
 bool Snes::addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept {
-  // The cartridge banks carry ROM across their whole range under HiROM and above
-  // $8000 under LoROM; the system banks carry it above $8000 either way.
-  const bool cartridgeBank = (bank >= 0x40 && bank <= 0x7D) || bank >= 0xC0;
-  if (cartridgeBank && map_ == CartridgeMap::HiRom) return true;
-  return offset >= 0x8000;
+  return cartridgeRegion(map_, busAddress(bank, offset)) == CartridgeRegion::Rom;
 }
 
 std::optional<std::size_t> Snes::saveRamIndex(std::uint8_t bank,
                                               std::uint16_t offset) const noexcept {
   if (state_.sram.empty()) return std::nullopt;
-  // LoROM banks the save above the cartridge banks and gives it the lower half;
-  // HiROM fits it into the system banks' expansion window. The offset is masked to
-  // the declared size, so a small save mirrors across its window.
-  std::size_t linear = 0;
-  if (map_ == CartridgeMap::HiRom) {
-    const bool window = (bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF);
-    if (!window || offset < 0x6000u || offset > 0x7FFFu) return std::nullopt;
-    linear = (static_cast<std::size_t>(bank & 0x1Fu) << 13) |
-             (static_cast<std::size_t>(offset) - 0x6000u);
-  } else {
-    const bool window = (bank >= 0x70 && bank <= 0x7D) || (bank >= 0xF0 && bank <= 0xFD);
-    if (!window || offset > 0x7FFFu) return std::nullopt;
-    linear = (static_cast<std::size_t>(bank & 0x0Fu) << 15) | static_cast<std::size_t>(offset);
-  }
-  return linear % state_.sram.size();
+  // The offset is reduced to the declared size, so a small save repeats across
+  // its window.
+  const std::optional<std::size_t> linear = saveRamOffset(map_, busAddress(bank, offset));
+  if (!linear.has_value()) return std::nullopt;
+  return *linear % state_.sram.size();
 }
 
 std::uint8_t Snes::busRead(std::uint32_t address) {

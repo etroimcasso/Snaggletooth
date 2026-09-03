@@ -1,6 +1,6 @@
 # The SNES machine
 
-The `Snes` class wires the 5A22's 65816 core to the console's memory: the LoROM cartridge, the
+The `Snes` class wires the 5A22's 65816 core to the console's memory: the cartridge under its map, the
 128 KB of work RAM, and the APU across the communication ports. Where the [65816 core](65816-cpu.md)
 runs over any bus you hand it, the machine *is* the bus — it maps a 24-bit address the way the
 hardware does, prices every cycle by the region it reaches, and paces the [APU](apu-machine.md)
@@ -42,7 +42,7 @@ in, so the span it comes from need not outlive the call.
 #include "snaggletooth/snes/snes.h"
 using namespace snaggletooth;
 
-std::vector<std::uint8_t> cartridge = /* a LoROM image */;
+std::vector<std::uint8_t> cartridge = /* a cartridge image */;
 Snes machine(SnesConfig{.rom = cartridge, .region = Region::Ntsc});
 ```
 
@@ -70,20 +70,25 @@ The bus maps a 24-bit address the way the console does:
 | `$00-$3F` / `$80-$BF:$2180-$2183` | the work-RAM data port |
 | `$00-$3F` / `$80-$BF:$420D` | MEMSEL, the second region's speed select |
 | `$8000-$FFFF` (any bank) | the cartridge |
-| `$40-$7D` / `$C0-$FF:$0000-$FFFF` | the cartridge across the whole bank, under HiROM |
+| `$40-$7D` / `$C0-$FF:$0000-$FFFF` | the cartridge across the whole bank, under HiROM and ExHiROM |
 | `$70-$7D` / `$F0-$FD:$0000-$7FFF` | save RAM, under LoROM |
 | `$20-$3F` / `$A0-$BF:$6000-$7FFF` | save RAM, under HiROM |
+| `$80-$BF:$6000-$7FFF` | save RAM, under ExHiROM |
 
 A read of an address the machine does not map returns the last value the data bus carried — the open-bus
 behavior real hardware shows. The cartridge is read-only: a write to a ROM address changes nothing.
 
 ### How a cartridge lays across the bus
 
-The two layouts differ in how much of a bank the cartridge gets. **LoROM** gives each bank its upper
-32 KB and lays those halves end to end. **HiROM** gives each of `$40-$7D` and `$C0-$FF` a whole 64 KB
-and lays those end to end, reaching the same bytes through the matching system bank's upper half.
+The three layouts differ in how much of a bank the cartridge gets and how much image the bus can
+reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end. **HiROM** gives
+each of `$40-$7D` and `$C0-$FF` a whole 64 KB and lays those end to end, reaching the same bytes
+through the matching system bank's upper half. **ExHiROM** is HiROM with a second 4 MB: banks
+`$80-$FF` serve the first 4 MB as HiROM does and banks `$00-$7D` serve the second. The bus reads the
+image through the [cartridge functions](snes-cartridge.md), which is where each map is spelled out
+address by address.
 
-`SnesConfig::map` chooses between them. Left absent it is read from the image's own header, which is
+`SnesConfig::map` chooses among them. Left absent it is read from the image's own header, which is
 what lets any cartridge boot without the caller knowing its layout; set it to run an image whose
 header is wrong, absent, or not a header at all.
 
@@ -92,7 +97,8 @@ Snes machine(SnesConfig{.rom = image});                              // the head
 Snes forced(SnesConfig{.rom = image, .map = CartridgeMap::HiRom});   // the caller decides
 ```
 
-`detectCartridgeMap` answers the same question on its own, without building a machine.
+`detectCartridgeMap` answers the same question on its own, without building a machine, and
+`parseCartridgeHeader` reads the whole header.
 
 **An image repeats across the window it does not fill.** A cartridge carries one ROM chip per power of
 two in its size, wired one after another, and the board leaves the address lines above a chip
@@ -110,7 +116,8 @@ The size comes from the header, and it matters that it is exact — an address p
 repeats it from the start, and a game that writes twice and reads back once is measuring how much save
 RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `declaredSaveRamBytes`
 answers what an image asks for without building a machine. A cartridge declaring none leaves those
-addresses reading open bus.
+addresses reading open bus. Each map keeps the save in its own window, listed in the table above and
+described in [the cartridge page](snes-cartridge.md#save-ram).
 
 Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
 the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address
@@ -420,5 +427,6 @@ machine.restore(saved);   // back to the saved cycle, exactly
 
 ## See also
 
+- [The cartridge](snes-cartridge.md) — the header, the three maps, and where every address lands.
 - [The 65816 CPU core](65816-cpu.md) — the instruction set the machine runs.
 - [The APU machine](apu-machine.md) — the audio machine on the other side of the ports.
