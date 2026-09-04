@@ -143,7 +143,7 @@ const ReachedTarget* reachedFrom(const std::vector<ReachedTarget>& seen, Address
 std::vector<ReachedTarget> run(std::span<const std::uint8_t> rom, std::uint64_t cycles,
                                std::vector<std::string>* notes = nullptr) {
   std::vector<std::string> local;
-  return observeRun(rom, cycles, notes ? *notes : local);
+  return observeRun(rom, cycles, InputScript{}, notes ? *notes : local);
 }
 
 }  // namespace

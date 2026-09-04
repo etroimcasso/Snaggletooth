@@ -17,6 +17,10 @@
 // step, and the landing only confirms it — a step that services an interrupt
 // instead lands in the handler, and records nothing; the instruction runs later,
 // and is seen then.
+//
+// A run sees what it exercised. Left alone, a cartridge reaches its title and
+// its attract mode; with a recorded run replayed into its controller ports it
+// reaches what a player does, and the trace follows.
 
 #include <cstdint>
 #include <span>
@@ -25,6 +29,7 @@
 
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
+#include "rom/input_script.h"
 
 namespace snaggletooth::disasm {
 
@@ -54,8 +59,13 @@ struct ReachedTarget {
 // once in `notes` and produces nothing; so is a site whose pointer did not match
 // where the CPU then went, which the design does not expect and reports rather
 // than hides.
+//
+// `input` is replayed into the controller ports as the run goes: at the start
+// of every frame, counted from power-on, each port is given what the script
+// holds for it there. An empty script leaves both ports empty.
 [[nodiscard]] std::vector<ReachedTarget> observeRun(std::span<const std::uint8_t> rom,
                                                     std::uint64_t masterCycles,
+                                                    const InputScript& input,
                                                     std::vector<std::string>& notes);
 
 }  // namespace snaggletooth::disasm

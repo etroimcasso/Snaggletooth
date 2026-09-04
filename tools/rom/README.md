@@ -9,7 +9,7 @@ a whole cartridge starts.
 ## `snes_disasm`
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script>]
 ```
 
 Writes one source file per bank, the sound program the cartridge uploads at boot as
@@ -31,7 +31,11 @@ It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
 and steps it, recording the destination of every indirect jump or call the run
 took, and the trace starts from each — see the
 [Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)
-section. `--no-run` skips it; `--run-seconds N` bounds it.
+section. `--no-run` skips it; `--run-seconds N` bounds it; `--input <script>`
+plays it, replaying an [input script](../../docs/input-script.md) — which buttons
+are held on which port from which frame — into the controller ports, so the run
+reaches what a player would. `rom/input_script.h` reads the script
+(`parseInputScript`) and says what a port holds at a frame (`InputScript::padAt`).
 
 The facts it attaches to addresses — the hardware each instruction reaches, and the
 DMA transfers those add up to — come from `rom/rom_facts.h`:
@@ -126,6 +130,8 @@ and it links both chip backends.
   cartridge as a source tree and its verification, and
   [docs/project-manifest.md](../../docs/project-manifest.md), the manifest one
   writes and both read.
+- [docs/input-script.md](../../docs/input-script.md) — the recorded run
+  `snes_disasm --input` replays.
 - [docs/spc-rendering.md](../../docs/spc-rendering.md) — `rom_render` beside
   `spc_render`, and what each source carries.
 - [docs/disassembly-framework.md §Cartridges](../../docs/disassembly-framework.md#cartridges)

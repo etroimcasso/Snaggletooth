@@ -616,7 +616,8 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // target is the one it keeps.
   std::vector<ReachedTarget> reached = request.reached;
   if (request.observeRun) {
-    for (const ReachedTarget& seen : observeRun(request.rom, request.runMasterCycles, out.notes)) {
+    for (const ReachedTarget& seen :
+         observeRun(request.rom, request.runMasterCycles, request.input, out.notes)) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
         return sameSighting(r, seen);
       });

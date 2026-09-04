@@ -1,6 +1,7 @@
 // snes_disasm — disassembles a whole cartridge into a source tree.
 //
-//   snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]
+//   snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
+//                                      [--no-run] [--run-seconds N] [--input <script>]
 //
 // The tree is one source file per bank, the sound program the cartridge uploads
 // at boot as a file of its own, and `project.manifest`, which says where every
@@ -16,6 +17,11 @@
 // The sound program is found by booting the cartridge on the machine and reading
 // what reached the audio unit before its program started. --no-sound skips the
 // boot; --boot-seconds bounds it (fifteen seconds of the master clock by default).
+//
+// The cartridge is also run, stepped, so the destinations its indirect jumps take
+// become entries. --no-run skips it; --run-seconds bounds it (sixty by default);
+// --input replays a recorded run into the controller ports while it goes, so the
+// run reaches what a player would.
 //
 // A copier header, the 512 bytes some dumps carry ahead of the image, is dropped
 // when the file length says one is present.
@@ -38,8 +44,11 @@ namespace {
 constexpr std::uint64_t kMasterPerSecond = 21'477'272ull;
 
 [[noreturn]] void usage(const char* prog) {
-  std::cerr << "usage: " << prog << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]\n"
-               "  the directory's project.manifest, when present, supplies entries and the file split\n";
+  std::cerr << "usage: " << prog
+            << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]"
+               " [--input <script>]\n"
+               "  the directory's project.manifest, when present, supplies entries and the file split\n"
+               "  --input replays a recorded run into the controller ports while the cartridge runs\n";
   std::exit(2);
 }
 
@@ -59,6 +68,7 @@ int main(int argc, char** argv) {
   std::uint64_t bootSeconds = 15;
   bool run = true;
   std::uint64_t runSeconds = 60;
+  std::string inputPath;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -80,6 +90,8 @@ int main(int argc, char** argv) {
         std::cerr << "--run-seconds needs a number\n";
         usage(argv[0]);
       }
+    } else if (arg == "--input") {
+      inputPath = next("--input");
     } else if (arg == "--no-sound") {
       sound = false;
     } else if (arg == "--boot-seconds") {
@@ -96,6 +108,27 @@ int main(int argc, char** argv) {
     }
   }
   if (imagePath.empty() || outDir.empty()) usage(argv[0]);
+  if (!inputPath.empty() && !run) {
+    std::cerr << "--input replays a run; it has nothing to do under --no-run\n";
+    return 2;
+  }
+
+  snaggletooth::disasm::InputScript input;
+  if (!inputPath.empty()) {
+    std::string text;
+    if (!readFile(inputPath, text)) {
+      std::cerr << "cannot open " << inputPath << "\n";
+      return 1;
+    }
+    std::string error;
+    const std::optional<snaggletooth::disasm::InputScript> parsed =
+        snaggletooth::disasm::parseInputScript(text, error);
+    if (!parsed) {
+      std::cerr << inputPath << ": " << error << "\n";
+      return 1;
+    }
+    input = *parsed;
+  }
 
   std::string bytes;
   if (!readFile(imagePath, bytes)) {
@@ -113,7 +146,8 @@ int main(int argc, char** argv) {
   request.rom = rom;
   request.captureSound = sound;
   request.observeRun = run;
-  request.runMasterCycles = runSeconds * 21'477'272u;
+  request.runMasterCycles = runSeconds * kMasterPerSecond;
+  request.input = input;
   request.bootMasterCycles = bootSeconds * kMasterPerSecond;
 
   const std::filesystem::path directory(outDir);

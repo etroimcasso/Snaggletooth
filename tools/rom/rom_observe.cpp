@@ -112,6 +112,12 @@ std::optional<Pending> pendingTarget(CartridgeMap map, std::span<const std::uint
   return Pending{.target = *target, .call = info.flow == Flow::Call};
 }
 
+// Gives each port what the script holds for it at `frame`.
+void presentPads(Snes& machine, const InputScript& input, std::uint32_t frame) {
+  machine.setJoypad(JoypadPort::One, input.padAt(JoypadPort::One, frame));
+  machine.setJoypad(JoypadPort::Two, input.padAt(JoypadPort::Two, frame));
+}
+
 }  // namespace
 
 bool sameSighting(const ReachedTarget& a, const ReachedTarget& b) {
@@ -120,7 +126,7 @@ bool sameSighting(const ReachedTarget& a, const ReachedTarget& b) {
 }
 
 std::vector<ReachedTarget> observeRun(std::span<const std::uint8_t> rom, std::uint64_t masterCycles,
-                                      std::vector<std::string>& notes) {
+                                      const InputScript& input, std::vector<std::string>& notes) {
   std::vector<ReachedTarget> out;
   const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
   if (!header) {
@@ -134,6 +140,12 @@ std::vector<ReachedTarget> observeRun(std::span<const std::uint8_t> rom, std::ui
   std::set<Address> unreadableSites;
   std::set<Address> unconfirmedSites;
 
+  // Frames are counted from power-on, the first being 0, and a frame begins when
+  // the beam wraps to line 0. The pads for a frame are presented as it begins,
+  // ahead of the vertical blank in which the auto-read latches them.
+  std::uint32_t frame = 0;
+  presentPads(machine, input, frame);
+
   std::uint64_t spent = 0;
   while (spent < masterCycles) {
     // `state()` is the live machine: everything read from it before the step is
@@ -141,6 +153,7 @@ std::vector<ReachedTarget> observeRun(std::span<const std::uint8_t> rom, std::ui
     const SnesState& before = machine.state();
     const Address site = (static_cast<Address>(before.cpu.pbr) << 16) | before.cpu.pc;
     const std::uint16_t stackBefore = before.cpu.s;
+    const std::uint16_t lineBefore = before.vpos;
     bool unreadable = false;
     const std::optional<Pending> pending = pendingTarget(map, rom, before, unreadable);
     const Cpu65816Mode mode = modeOf(before.cpu);
@@ -150,6 +163,13 @@ std::vector<ReachedTarget> observeRun(std::span<const std::uint8_t> rom, std::ui
     }
 
     spent += machine.step();
+
+    // A step runs one instruction, or one cycle of a transfer, never a whole
+    // frame, so the beam wrapping to line 0 is a frame boundary seen exactly once.
+    if (machine.state().vpos < lineBefore) {
+      ++frame;
+      presentPads(machine, input, frame);
+    }
 
     if (!pending) continue;
     // The landing confirms the pointer. A step that serviced an interrupt instead

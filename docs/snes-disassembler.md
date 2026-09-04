@@ -47,7 +47,7 @@ of the image it was read from.
 ## Command line
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script>]
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
@@ -74,7 +74,11 @@ that has not started its sound program in that time is reported as a `note` in
 the manifest and its banks keep every byte.
 
 `--no-run` skips [running the cartridge](#running-the-cartridge); `--run-seconds N`
-bounds the run at N seconds of the master clock, sixty by default.
+bounds the run at N seconds of the master clock, sixty by default. `--input <script>`
+replays an [input script](input-script.md) into the controller ports while the
+cartridge runs, so the run plays the game rather than watching it; a script that
+cannot be read is refused with its line named, and `--input` under `--no-run` is
+refused as well, having nothing to replay into.
 
 When the directory already holds a `project.manifest`, its `entry`, `reached` and
 `file` lines are read first, and the manifest must name the image it was written for: a
@@ -283,9 +287,34 @@ recorded nowhere. The run is deterministic: work RAM is cleared at power-on and
 the machine has no other seed, so the same cartridge reaches the same set.
 
 A run sees what it exercised. An unattended boot reaches what the cartridge does
-on its own — its title, its attract mode — and no further; the manifest keeps
-every `reached` line from one disassembly to the next and merges a new run's with
-them, and an `entry` a person adds still names what no run has taken.
+on its own — its title, its attract mode — and no further. To reach the rest, the
+run is played: `--input <script>` replays an [input script](input-script.md) into
+the controller ports as the machine runs, holding the buttons the script names
+from the frames it names, and the program reads them through the auto-read and
+the serial ports exactly as it reads a pad. A cartridge whose interrupt handler
+takes one jump when Start is down and another when A is, neither named by the
+bytes:
+
+```
+$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
+1 files, 5 instructions, 2 entries, 0 stops
+$ cat play.txt
+frame 5 1 start
+frame 9 1 a
+$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1 --input play.txt
+1 files, 11 instructions, 2 entries, 0 stops
+```
+
+```
+reached  $00:8200 loc_008200 e=1 m=8 x=8 from $00:8311
+reached  $00:8210 loc_008210 e=1 m=8 x=8 from $00:833B
+```
+
+Each run's script is a person's record of what was played, and different scripts
+reach different code. The manifest keeps every `reached` line from one
+disassembly to the next and merges a new run's with them, so an unattended run
+and a played one over the same directory accumulate — and an `entry` a person
+adds still names what no run has taken.
 
 ## What is placed
 
@@ -425,11 +454,13 @@ image the tree describes and counts what is unplaced or placed twice.
 `reached` carries [what the run reached](#running-the-cartridge): one
 `ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site`
 that took it, whether it was a `call`, and the `name` the tree gives it.
-`rom/rom_observe.h` is the run itself: `observeRun(rom, masterCycles, notes)`
-boots the machine and returns the sightings in site order, and `sameSighting`
-says whether two are one. `CartridgeRequest::observeRun` asks for the run —
-off unless asked, since it costs about as long as it emulates; `snes_disasm`
-asks unless told `--no-run` — and `runMasterCycles` bounds it.
+`rom/rom_observe.h` is the run itself: `observeRun(rom, masterCycles, input, notes)`
+boots the machine, replays `input` — an [`InputScript`](input-script.md#6-library),
+empty for the boot alone — into the controller ports, and returns the sightings
+in site order; `sameSighting` says whether two are one. `CartridgeRequest::observeRun`
+asks for the run — off unless asked, since it costs about as long as it emulates;
+`snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
+`CartridgeRequest::input` is the script it replays.
 
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
@@ -478,7 +509,9 @@ program is data to the main CPU's file and comes back byte for byte.
 
 The run answers the stops it took and no others: a jump the run never reached
 keeps its `stop` alone, and a person's `entry` is still the way past it. A run
-drives no controller, so it reaches what a cartridge does on its own.
+without a script reaches what a cartridge does on its own; with one it reaches
+what the script plays, and no script plays everything — coverage is what a person
+exercises, run by run, and the manifest accumulates it.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access` lines. A value
@@ -495,6 +528,8 @@ and an entry in the manifest is how a person carries it past.
 
 - [Project manifest](project-manifest.md) — the manifest's grammar, what is read
   back, and its stability.
+- [Input script](input-script.md) — the recorded run `--input` replays, its
+  grammar and its refusals.
 - [The assemblers](assemblers.md) — the tools `snes_verify` rebuilds the
   tree's files with, and their diagnostics.
 - [65816 disassembler](65816-disassembler.md) and

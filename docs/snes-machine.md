@@ -6,11 +6,11 @@ runs over any bus you hand it, the machine *is* the bus — it maps a 24-bit add
 hardware does, prices every cycle by the region it reaches, and paces the [APU](apu-machine.md)
 against the CPU on its own clock.
 
-The machine is the system minus the picture. It does not draw and has no DMA engine. What it has is a
-complete memory map, an exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ,
-the hardware multiply/divide unit, a PPU register file that fills video memory without rendering it, and
-the audio machine running underneath — enough to load a cartridge, run its code under interrupts, and
-hear it.
+The machine is the system minus the picture. It does not draw. What it has is a complete memory map, an
+exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ, the DMA and HDMA
+engines, the hardware multiply/divide unit, the two controller ports, a PPU register file that fills
+video memory without rendering it, and the audio machine running underneath — enough to load a
+cartridge, run its code under interrupts, play it, and hear it.
 
 ## Contents
 
@@ -24,6 +24,7 @@ hear it.
 - [The audio upload stub](#the-audio-upload-stub)
   - [Running a console's own boot ROM](#running-a-consoles-own-boot-rom)
 - [The video counters and interrupts](#the-video-counters-and-interrupts)
+- [The controller ports](#the-controller-ports)
 - [The multiply/divide unit](#the-multiplydivide-unit)
 - [The video registers (a stub)](#the-video-registers-a-stub)
 - [DMA and HDMA](#dma-and-hdma)
@@ -141,7 +142,7 @@ std::uint32_t cost = machine.step();  // e.g. 16 for an immediate load from slow
 `run(budget)` spends an exact number of master cycles and returns that count:
 
 ```cpp
-machine.run(357'954);  // one NTSC scanline's worth of master cycles
+machine.run(357'368);  // one NTSC frame's worth of master cycles (262 lines of 1364)
 ```
 
 A cycle is priced by its region, so a budget rarely lands on a cycle boundary. When it falls
@@ -273,16 +274,53 @@ Two interrupt sources reach the CPU, both driven from these counters:
   or it runs again.
 
 `$4212` reports the current position directly: bit 7 is set during vblank, bit 6 during hblank (outside
-the active picture, which spans master cycles 88 to 1112), and bit 0 while the auto-joypad read is busy.
+the active picture, which spans master cycles 88 to 1112), and bit 0 while the
+[auto-read](#the-controller-ports) of the controllers is busy.
 
 ```cpp
 // A minimal vblank-NMI loop: enable the NMI, then let the machine run into vblank.
 // LDA #$80 ; STA $4200 ; ...   the handler at the $FFFA vector runs once per frame.
 ```
 
-The auto-joypad read is a stub: with `$4200` bit 0 enabled, `$4212` bit 0 reads busy for a fixed window
-early in each frame's vblank, and `$4218-$421F` read back zero — the reliable "no buttons" result — since
-no controller is modelled.
+## The controller ports
+
+A controller is a value, `Joypad` — the twelve buttons of a standard pad, each a `bool`, true when
+pressed — and a port holds one or nothing. The machine starts with both ports empty. `setJoypad` plugs a
+pad in or pulls it out; `joypad` reads back what a port holds.
+
+```cpp
+machine.setJoypad(JoypadPort::One, Joypad{.start = true});   // Start held on port 1
+machine.run(357'368);                                          // a frame: the program reads it
+machine.setJoypad(JoypadPort::One, Joypad{});                  // released, still plugged in
+machine.setJoypad(JoypadPort::One, std::nullopt);              // unplugged
+```
+
+The program reads a pad the two ways the console offers, and both see the same value:
+
+- **The auto-read.** With `$4200` bit 0 set, the machine reads all sixteen bits of each port at the start
+  of every vertical blank, holding `$4212` bit 0 busy for the 4224 master cycles the read takes, and
+  lands the result in `$4218-$421F` as the window closes: port 1 in `$4218/$4219`, port 2 in
+  `$421A/$421B`. The high byte carries B, Y, Select, Start, Up, Down, Left and Right from bit 7 down;
+  the low byte A, X, L and R from bit 7 to bit 4, and the pad's identity code, zero for a standard pad,
+  in bits 3-0. A program reads the registers after the busy flag clears; while the read is in progress
+  they hold the previous frame's result. `$421C-$421F`, the ports' second data lines, stay zero — nothing
+  is modelled on them.
+- **The serial ports.** A write of 1 then 0 to `$4016` bit 0 strobes both pads, latching their sixteen
+  bits; each read of `$4016` returns port 1's next bit in bit 0, and each read of `$4017` port 2's, in
+  the order above — B first, the identity bits last. Past the sixteenth bit a pad returns 1, and an
+  empty port returns 0 on every read. `$4017` bits 4-2 are wired low and read as 1; the bits neither
+  port drives are open bus.
+
+`Joypad::bits()` is the sixteen-bit word in the auto-read's layout, `$4219` in the high byte and
+`$4218` in the low. A snapshot carries the pads with the rest of the machine, so a restore resumes with
+the same controllers plugged in.
+
+Two consequences of the hardware sharing one set of lines are modelled. The auto-read strobes and
+clocks the same shift register the serial ports read, so after it runs a program reading `$4016`
+without strobing first is past the sixteenth bit and sees padding; a program that uses both paths
+strobes before it reads. And while the strobe is held high the pads reload continuously, so every
+bit read — by the serial ports or by the auto-read — is the B button's state; a program that leaves
+`$4016` at 1 sees `$4218/$4219` as all ones or all zeros.
 
 ## The multiply/divide unit
 
@@ -420,6 +458,9 @@ machine.restore(saved);   // back to the saved cycle, exactly
   glitch. Issue a dummy read, or account for it.
 - An IRQ handler must acknowledge the timer (read `$4211` or disable the IRQ); an NMI handler need not,
   but reading `$4210` before re-enabling NMIs avoids taking a stale one.
+- A pad set during a frame is read on that frame's vertical blank, not the one before it: set the pad,
+  then run the frame. An empty port and a pad with nothing pressed differ past the sixteenth serial
+  bit, which is how a program tells a controller from no controller.
 - A DMA byte count of zero (`das`) transfers the whole 65536 bytes, not none.
 - A transfer's A-bus bank is fixed: the address wraps within its bank and never crosses into the next.
 - HDMA re-initialises every frame and delivers only on the visible lines; arm `$420C` and set the table

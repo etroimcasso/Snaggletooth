@@ -11,7 +11,7 @@ shelling out to the tool.
 | [`assembler/`](assembler/README.md) | `snaggletooth_assembler` | — | [assemblers.md](../docs/assemblers.md) |
 | [`spc700/`](spc700/README.md) | `snaggletooth_spc700` | `spc700_disasm`, `spc700_asm` | [spc700-disassembler.md](../docs/spc700-disassembler.md), [assemblers.md](../docs/assemblers.md) |
 | [`cpu65816/`](cpu65816/README.md) | `snaggletooth_cpu65816` | `cpu65816_disasm`, `cpu65816_asm` | [65816-disassembler.md](../docs/65816-disassembler.md), [assemblers.md](../docs/assemblers.md) |
-| [`rom/`](rom/README.md) | `snaggletooth_rom` | `snes_disasm`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [spc-rendering.md](../docs/spc-rendering.md) |
+| [`rom/`](rom/README.md) | `snaggletooth_rom` | `snes_disasm`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [input-script.md](../docs/input-script.md), [spc-rendering.md](../docs/spc-rendering.md) |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 
 `parse_dsp_tables.py` stands apart from the toolkit: it transcribes the S-DSP's

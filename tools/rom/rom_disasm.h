@@ -150,6 +150,10 @@ struct CartridgeRequest {
   // told `--no-run`.
   bool observeRun = false;
   std::uint64_t runMasterCycles = 60u * 21'477'272u;
+  // The recorded run replayed into the controller ports while the machine runs —
+  // see `rom/input_script.h`. Empty, the ports stay empty and the run is the boot
+  // alone. `snes_disasm --input <script>` supplies one.
+  InputScript input;
 };
 
 // Disassembles the cartridge: the header, the regions traced from every entry with
