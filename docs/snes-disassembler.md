@@ -23,7 +23,9 @@ of the image it was read from.
 > cartridges' trees, across all three maps, rebuild their images byte for byte.
 > The cartridge is run on the machine and the destinations its indirect jumps
 > took become entries, so a cartridge whose dispatch goes through pointers is
-> traced past them.
+> traced past them. The manifest says what the code reaches: every register
+> access, every transfer, and every routine with what it calls and what it
+> drives.
 > The coprocessors have no backend, so a cartridge carrying one is traced as far
 > as the main CPU's own code goes, and its tree still verifies.
 
@@ -428,6 +430,25 @@ An instruction under a sixteen-bit register reaches two registers and produces a
 line for each, which is how one `STA !$4301` sets both a channel's B-bus address
 and the low byte of its source.
 
+**The routines.** A [`routine` line](project-manifest.md#28-routines) per
+routine says which lines belong together, which routines it calls, and its
+role — the classes its own lines reach, and the classes its calls reach through
+every routine they call in turn:
+
+```
+routine  $00:8000 reset lines 26 bytes 66 calls sub_018000 reaches Display,Vram,Oam,Interrupt,DmaControl,DmaChannel through Cgram,DmaChannel
+routine  $01:8000 sub_018000 lines 3 bytes 6 calls none reaches Cgram,DmaChannel through none
+```
+
+A routine is what execution reaches from a label by falling through, branching
+and jumping, without passing a return or a halt and without entering the routine
+a call names; every entry, every target a run reached, and every label a call
+names begins one. Nothing else draws a boundary: a routine with no return of its
+own runs on into the next label's code and holds those lines too, and a line two
+routines reach is in both. That is what the bytes say, and the labels stay the
+trace's — `sub_` and `loc_` with the address — until a person names them; the
+role is what to name them from.
+
 ## Library
 
 ```cpp
@@ -470,7 +491,11 @@ asks for the run — off unless asked, since it costs about as long as it emulat
 instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the
 `value` where the bytes say it, and the `run` of straight-line code it sits in —
 and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up.
-`accessKindName` and `dmaDirectionName` are their names as text.
+`accessKindName` and `dmaDirectionName` are their names as text. `routines`
+carries one `Routine` per routine — its `address` and `label`, the `lines` it
+holds and their `bytes`, the routines it `calls`, and its role as `reaches` and
+`through` — from `routines(disassembly)`, which reads the finished listings, the
+accesses and the transfers.
 
 The files are text from `renderRegion`, `renderSoundProgram` and
 `renderManifest`; `parseManifest` reads a manifest's entries, file split, map,
@@ -516,10 +541,13 @@ what the script plays, and no script plays everything — coverage is what a per
 exercises, run by run, and the manifest accumulates it.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
-another chip's, with registers of its own, and has no `access` lines. A value
-carries one instruction and no further, and only within a run of straight-line
-code, so a channel configured from a table or across a call leaves the fields it
-did not settle `none` rather than guessing at them.
+another chip's, with registers of its own, and has no `access` or `routine`
+lines. A value carries one instruction and no further, and only within a run of
+straight-line code, so a channel configured from a table or across a call leaves
+the fields it did not settle `none` rather than guessing at them. A routine's
+role counts what the bytes reach and what a run reached; a call through a
+pointer the run did not take contributes nothing to `through`, since nothing
+names its target.
 
 Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
 from 512 KB to 6 MB — assembles back to its image byte for byte under

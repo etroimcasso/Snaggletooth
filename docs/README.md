@@ -22,7 +22,7 @@ what is unstarted.
 | Prove a source tree rebuilds its cartridge | [snes-disassembler.md §Verifying the tree](snes-disassembler.md#verifying-the-tree) |
 | Trace a cartridge past the jumps the bytes cannot name | [snes-disassembler.md §Running the cartridge](snes-disassembler.md#running-the-cartridge) |
 | Play a cartridge through the disassembler so the trace reaches what a player does | [input-script.md](input-script.md) |
-| See what hardware a cartridge's code drives | [snes-disassembler.md §What the code reaches](snes-disassembler.md#what-the-code-reaches) |
+| See what hardware a cartridge's code drives, and which routine drives what | [snes-disassembler.md §What the code reaches](snes-disassembler.md#what-the-code-reaches) |
 | Assemble source back into bytes | [assemblers.md](assemblers.md) |
 
 ## The machine
@@ -50,8 +50,8 @@ what is unstarted.
 | [disassembly-framework.md](disassembly-framework.md) | The tracing disassembler's chip-independent half — the backend interface, 24-bit addresses, the per-path context and conflict reporting, the listing format, and the entry points a cartridge header names |
 | [spc700-disassembler.md](spc700-disassembler.md) | The SPC700 disassembler — tracing from entry points, the register and patched-byte annotations, and the library surface |
 | [65816-disassembler.md](65816-disassembler.md) | The 65816 disassembler — the register widths carried along every path, what it reports rather than guesses, the costs measured under each mode, and the registers named by bank, each with the part of the machine it belongs to |
-| [snes-disassembler.md](snes-disassembler.md) | The cartridge disassembler and verifier — a whole cartridge traced across its banks from the vectors into one source file per bank, the sound program captured from the machine as a file of its own, the stops a person answers with entries, what is placed, `snes_verify`, which assembles the tree back and reports the difference from the image, what the traced code reaches, and the cartridge run on the machine — unattended or played from a script — so its indirect jumps' destinations become entries |
-| [project-manifest.md](project-manifest.md) | The project manifest — the lines that name the image, the files and their ranges, the sound program's blocks, the entries, stops and warnings, and the hardware the code reaches; what each tool reads back; stability |
+| [snes-disassembler.md](snes-disassembler.md) | The cartridge disassembler and verifier — a whole cartridge traced across its banks from the vectors into one source file per bank, the sound program captured from the machine as a file of its own, the stops a person answers with entries, what is placed, `snes_verify`, which assembles the tree back and reports the difference from the image, what the traced code reaches and which routine reaches it, and the cartridge run on the machine — unattended or played from a script — so its indirect jumps' destinations become entries |
+| [project-manifest.md](project-manifest.md) | The project manifest — the lines that name the image, the files and their ranges, the sound program's blocks, the entries, stops and warnings, and the hardware the code reaches and the routines that reach it; what each tool reads back; stability |
 | [input-script.md](input-script.md) | The input script — the recorded run `snes_disasm --input` replays into the controller ports: its line form, frames, ports, buttons, refusals, library and stability |
 | [assemblers.md](assemblers.md) | The two assemblers — the command lines, what is written, the diagnostics, how the 65816's widths are followed, the library, and writing a dialect |
 | [assembly-lexicon.md](assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |

@@ -120,10 +120,12 @@ struct CartridgeDisassembly {
   std::optional<SoundProgram> sound;
   std::vector<TraceStop> stops;
   std::vector<std::string> notes;  // what the run could not do, in words
-  // What the traced code reaches, attached to the addresses that reach it. Both
-  // are written fresh on every run and read back by nothing — see `rom_facts.h`.
+  // What the traced code reaches, attached to the addresses that reach it, and
+  // the routines those addresses belong to. All three are written fresh on every
+  // run and read back by nothing — see `rom_facts.h`.
   std::vector<HardwareAccess> accesses;
   std::vector<DmaTransfer> dmas;
+  std::vector<Routine> routines;
   // The targets a run saw the indirect jumps take, this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_observe.h`.
   std::vector<ReachedTarget> reached;

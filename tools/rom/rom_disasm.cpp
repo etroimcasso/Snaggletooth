@@ -767,10 +767,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
   }
 
-  // What the traced code reaches. Read off the finished listings, so a byte the
-  // trace never entered contributes nothing.
+  // What the traced code reaches, and the routines that reach it. Read off the
+  // finished listings, so a byte the trace never entered contributes nothing.
   out.accesses = hardwareAccesses(out);
   out.dmas = dmaTransfers(out.accesses);
+  out.routines = routines(out);
   return out;
 }
 
@@ -894,6 +895,34 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            (dma.startMask ? (dma.hdma ? "start-hdma" : "start") : "start") + " " +
            (dma.startMask ? "$" + hex(*dma.startMask, 2) : std::string("none")) + "\n";
   }
+
+  // The routines. A list is one field, its names joined by commas; an empty
+  // list is `none`, which again is a fact about the routine.
+  std::map<Address, std::string> routineLabels;
+  for (const Routine& routine : disassembly.routines) {
+    routineLabels[routine.address] = routine.label;
+  }
+  const auto classList = [](const std::vector<RegisterClass>& classes) {
+    if (classes.empty()) return std::string("none");
+    std::string text;
+    for (const RegisterClass cls : classes) {
+      if (!text.empty()) text += ",";
+      text += std::string(cpu65816RegisterClassName(cls));
+    }
+    return text;
+  };
+  if (!disassembly.routines.empty()) out += "\n";
+  for (const Routine& routine : disassembly.routines) {
+    std::string calls;
+    for (const Address callee : routine.calls) {
+      if (!calls.empty()) calls += ",";
+      calls += routineLabels.at(callee);
+    }
+    out += "routine  " + address24(routine.address) + " " + routine.label + " lines " +
+           std::to_string(routine.lines.size()) + " bytes " + std::to_string(routine.bytes) +
+           " calls " + (calls.empty() ? std::string("none") : calls) + " reaches " +
+           classList(routine.reaches) + " through " + classList(routine.through) + "\n";
+  }
   return out;
 }
 
@@ -1006,8 +1035,8 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.sound->blocks.push_back(block);
       continue;
     }
-    static const std::set<std::string> kKnown = {"title", "stop",   "warning",
-                                                 "note",  "access", "dma"};
+    static const std::set<std::string> kKnown = {"title", "stop",   "warning", "note",
+                                                 "access", "dma",   "routine"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   return input;

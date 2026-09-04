@@ -37,10 +37,12 @@ are held on which port from which frame — into the controller ports, so the ru
 reaches what a player would. `rom/input_script.h` reads the script
 (`parseInputScript`) and says what a port holds at a frame (`InputScript::padAt`).
 
-The facts it attaches to addresses — the hardware each instruction reaches, and the
-DMA transfers those add up to — come from `rom/rom_facts.h`:
-`hardwareAccesses(disassembly)` and `dmaTransfers(accesses)`, both written into the
-manifest as `access` and `dma` lines.
+The facts it attaches to addresses — the hardware each instruction reaches, the
+DMA transfers those add up to, and the routines the instructions belong to, each
+with what it calls and what it drives — come from `rom/rom_facts.h`:
+`hardwareAccesses(disassembly)`, `dmaTransfers(accesses)` and
+`routines(disassembly)`, written into the manifest as `access`, `dma` and
+`routine` lines.
 
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count, and the

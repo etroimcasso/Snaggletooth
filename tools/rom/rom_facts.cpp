@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <set>
 #include <string>
 
 #include "rom/rom_disasm.h"
@@ -270,6 +271,129 @@ std::vector<DmaTransfer> dmaTransfers(const std::vector<HardwareAccess>& accesse
     if (a.site != b.site) return a.site < b.site;
     return a.channel < b.channel;
   });
+  return out;
+}
+
+namespace {
+
+// The lines a walk from `root` holds: what falling through, branching and jumping
+// reach, across every region, stopping at a return, a halt, a target the bytes do
+// not name, and an address that is not a code line. A call adds nothing but the
+// line after it.
+std::set<Address> walkFrom(Address root, const std::map<Address, const Line*>& code) {
+  std::set<Address> held;
+  std::vector<Address> pending = {root};
+  const Cpu65816Backend& backend = cpu65816Backend();
+  while (!pending.empty()) {
+    const Address at = pending.back();
+    pending.pop_back();
+    const auto found = code.find(at);
+    if (found == code.end() || !held.insert(at).second) continue;
+    const Instruction& instruction = found->second->instruction;
+    const Address next = backend.following(at, instruction.length);
+    switch (instruction.flow) {
+      case Flow::Continue:
+      case Flow::Call:
+        pending.push_back(next);
+        break;
+      case Flow::Branch:
+        pending.push_back(next);
+        if (instruction.target) pending.push_back(*instruction.target);
+        break;
+      case Flow::Jump:
+        if (instruction.target) pending.push_back(*instruction.target);
+        break;
+      case Flow::Return:
+      case Flow::Halt:
+        break;
+    }
+  }
+  return held;
+}
+
+}  // namespace
+
+std::vector<Routine> routines(const CartridgeDisassembly& disassembly) {
+  // Every code line of the 65816 regions by address, and every label.
+  std::map<Address, const Line*> code;
+  std::map<Address, std::string> labels;
+  for (const RegionListing& region : disassembly.regions) {
+    for (const Line& line : region.listing.lines) {
+      if (line.isCode) code[line.address] = &line;
+    }
+    for (const auto& [address, name] : region.listing.labels) labels[address] = name;
+  }
+
+  // The roots: every entry, every target a run reached, and every label a call
+  // names. Every code line was reached by the trace from an entry through these
+  // same flows, entering calls where this walk does not — so every line is in
+  // the routine of some root, and no other label starts one.
+  std::set<Address> roots;
+  for (const TraceEntry& entry : disassembly.entries) roots.insert(entry.address);
+  for (const ReachedTarget& seen : disassembly.reached) roots.insert(seen.target);
+  for (const auto& [address, line] : code) {
+    const Instruction& instruction = line->instruction;
+    if (instruction.flow == Flow::Call && instruction.target &&
+        code.find(*instruction.target) != code.end()) {
+      roots.insert(*instruction.target);
+    }
+  }
+
+  std::vector<Routine> out;
+  for (const Address root : roots) {
+    const auto label = labels.find(root);
+    if (code.find(root) == code.end() || label == labels.end()) continue;
+    Routine routine;
+    routine.address = root;
+    routine.label = label->second;
+    const std::set<Address> held = walkFrom(root, code);
+    std::set<Address> calls;
+    for (const Address at : held) {
+      const Instruction& instruction = code.at(at)->instruction;
+      routine.lines.push_back(at);
+      routine.bytes += instruction.length;
+      if (instruction.flow == Flow::Call && instruction.target &&
+          code.find(*instruction.target) != code.end()) {
+        calls.insert(*instruction.target);
+      }
+    }
+    routine.calls.assign(calls.begin(), calls.end());
+    out.push_back(std::move(routine));
+  }
+
+  // The role: what the routine's own lines reach — the registers the accesses
+  // name and the destinations the transfers name — and, through its calls, what
+  // every routine it can reach by calling reaches itself.
+  std::map<Address, std::set<RegisterClass>> direct;
+  for (Routine& routine : out) {
+    std::set<RegisterClass>& classes = direct[routine.address];
+    const std::set<Address> held(routine.lines.begin(), routine.lines.end());
+    for (const HardwareAccess& access : disassembly.accesses) {
+      if (held.count(access.site)) classes.insert(access.cls);
+    }
+    for (const DmaTransfer& dma : disassembly.dmas) {
+      if (held.count(dma.site) && dma.destinationClass) classes.insert(*dma.destinationClass);
+    }
+    routine.reaches.assign(classes.begin(), classes.end());
+  }
+  std::map<Address, const Routine*> byAddress;
+  for (const Routine& routine : out) byAddress[routine.address] = &routine;
+  for (Routine& routine : out) {
+    std::set<RegisterClass> classes;
+    std::set<Address> visited;
+    std::vector<Address> pending(routine.calls.begin(), routine.calls.end());
+    while (!pending.empty()) {
+      const Address callee = pending.back();
+      pending.pop_back();
+      if (!visited.insert(callee).second) continue;
+      const auto found = byAddress.find(callee);
+      if (found == byAddress.end()) continue;
+      const std::set<RegisterClass>& reached = direct[callee];
+      classes.insert(reached.begin(), reached.end());
+      pending.insert(pending.end(), found->second->calls.begin(), found->second->calls.end());
+    }
+    routine.through.assign(classes.begin(), classes.end());
+  }
   return out;
 }
 
