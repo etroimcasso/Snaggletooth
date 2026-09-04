@@ -1,7 +1,7 @@
 // snes_lift — lifts a cartridge's source tree into the intermediate
 // representation and writes it out for reading.
 //
-//   snes_lift <directory> <image> [-o <file>] [--file <name>]
+//   snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
 //
 // Reads the directory's `project.manifest`, traces the image as the manifest
 // directs — its entries, its file split, the targets earlier runs saw — and
@@ -12,7 +12,7 @@
 // in address order: a header line with its address, mnemonic and operand, its
 // mode and its measured costs, and under it each effect on its own line.
 // `--file` limits the output to one region's file; `-o` writes it to a file
-// rather than standard output.
+// rather than standard output. The text form carries the `.snagir` extension.
 //
 // The exit status is 0 when the tree lifted, 2 on a bad argument or an
 // unreadable input.
@@ -39,7 +39,7 @@
 namespace {
 
 [[noreturn]] void usage(const char* prog) {
-  std::cerr << "usage: " << prog << " <directory> <image> [-o <file>] [--file <name>]\n"
+  std::cerr << "usage: " << prog << " <directory> <image> [-o <file.snagir>] [--file <name>]\n"
                "  lifts the tree's 65816 code into the intermediate representation and writes it out\n";
   std::exit(2);
 }

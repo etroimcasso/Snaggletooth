@@ -12,7 +12,7 @@ shelling out to the tool.
 | [`spc700/`](spc700/README.md) | `snaggletooth_spc700` | `spc700_disasm`, `spc700_asm` | [spc700-disassembler.md](../docs/spc700-disassembler.md), [assemblers.md](../docs/assemblers.md) |
 | [`cpu65816/`](cpu65816/README.md) | `snaggletooth_cpu65816` | `cpu65816_disasm`, `cpu65816_asm` | [65816-disassembler.md](../docs/65816-disassembler.md), [assemblers.md](../docs/assemblers.md) |
 | [`rom/`](rom/README.md) | `snaggletooth_rom` | `snes_disasm`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [input-script.md](../docs/input-script.md), [spc-rendering.md](../docs/spc-rendering.md) |
-| [`ir/`](ir/README.md) | `snaggletooth_ir` | `snes_lift`, `snes_differential` | [ir.md](../docs/ir.md) |
+| [`ir/`](ir/README.md) | `snaggletooth_ir`, `snaggletooth_ir_differential` | `snes_lift`, `snes_differential` | [ir.md](../docs/ir.md) |
 | [`examples/`](examples/README.md) | — (header-only) | `snes_examples` | one README per cartridge |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 
@@ -68,19 +68,22 @@ with the routines it calls and the hardware it drives itself and through them.
 `ir/` lifts the 65816 listings a cartridge disassembly produces into a form
 with no bytes in it — one node per instruction, carrying what source says and
 the typed effects the chip performs — runs that form through an interpreter
-that never sees the bytes, and replays a cartridge's recorded run on the machine
-with the interpreter beside it, so the representation is held to the core rather
-than taken on trust. `examples/` holds the cartridges built by hand that the
+that never sees the bytes, writes SNES assembly back from it, and replays a
+cartridge's recorded run on the machine with the interpreter beside it, so the
+representation is held to the core rather than taken on trust. The bank files
+`rom/` writes come through that renderer, with the registers, labels and
+routines the manifest carries attached as names. `examples/` holds the cartridges built by hand that the
 tests run every tool on and every page's example output comes from, one
 directory each. `spc/` reads and writes the two file formats the renderers
 use, an SPC dump in and a WAV out.
 
 The include paths follow the targets. `tools/` is on the public include path of
 `snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_rom`,
-`snaggletooth_ir` and `snaggletooth_spc`, so those headers are included by
-directory: `disasm/disasm.h`, `assembler/assembler.h`, `rom/rom_disasm.h`,
-`rom/rom_verify.h`, `rom/cartridge_entries.h`, `ir/ir.h`, `ir/cpu65816_lift.h`,
-`ir/ir_interpret.h`, `ir/ir_differential.h`, `ir/ir_text.h`,
+`snaggletooth_ir`, `snaggletooth_ir_differential` and `snaggletooth_spc`, so
+those headers are included by directory: `disasm/disasm.h`,
+`assembler/assembler.h`, `rom/rom_disasm.h`, `rom/rom_verify.h`,
+`rom/cartridge_entries.h`, `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/ir_interpret.h`,
+`ir/ir_render.h`, `ir/ir_text.h`, `ir/ir_differential.h`,
 `examples/example_cartridges.h`, `spc/spc_loader.h`. The two chip libraries put their own directory on the path,
 so their headers are included bare: `spc700_disasm.h`, `spc700_asm.h`,
 `cpu65816_disasm.h`, `cpu65816_asm.h`; `snaggletooth_rom` links both, so a

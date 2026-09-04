@@ -4,10 +4,12 @@
 source says about the instruction and the typed effects the chip performs for it,
 with no bytes in it. `cpu65816_lift.h` builds a program from a listing the 65816
 disassembler traced — the one place in the toolkit where bytes become meaning —
-`ir_interpret.h` runs a program's effects and nothing else, `ir_differential.h`
-runs it beside the machine through a recorded run and reports every
-disagreement, and `ir_text.h` writes it out for reading. Two commands sit over
-the library.
+`ir_interpret.h` runs a program's effects and nothing else, `ir_render.h` writes
+SNES assembly from its instruction layer, `ir_differential.h` runs it beside the
+machine through a recorded run and reports every disagreement, and `ir_text.h`
+writes it out for reading. Two commands sit over the library, and the cartridge
+disassembler in [`../rom/`](../rom/README.md) writes its bank files through the
+renderer.
 
 ## Surface
 
@@ -22,17 +24,20 @@ Everything lives in `snaggletooth::ir`.
 | `Interpreter` | Runs a node or an interrupt sequence over a `Bus` the host implements, and returns the cycles. |
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
 | `renderNode(node)`, `renderEffect(effect)` | A node, an effect, as text. |
+| `renderInstruction(instruction, names)`, `renderLine(node, names, bytesWidth)` | An instruction as source, with a label, a register name and an annotation in place of addresses where given; a line with its comment. |
+| `encode(instruction)`, `renderCost(node)` | The bytes an instruction assembles to; the cost as a listing prints it. |
+| `SourceMode` | The mode a region of source carries in file order, and the directives each instruction needs before it. |
 
 ## `snes_lift`
 
 ```
-snes_lift <directory> <image> [-o <file>] [--file <name>]
+snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
 ```
 
 Lifts a cartridge tree — the directory's `project.manifest` and the image it
 was written for — and writes the summary, then every node with its effects,
 region by region in address order. `--file` limits it to one region's file;
-`-o` writes to a file.
+`-o` writes to a file, which carries the `.snagir` extension.
 
 ```
 snes_lift mixed mixed.smc
@@ -82,14 +87,21 @@ interpreter.execute(*node, bus);
 
 The library target is `snaggletooth_ir`; `tools/` is on its public include path.
 It links `snaggletooth_cpu65816` for the lift, which reads a listing and the
-measured cycle tables, and `snaggletooth_rom` for the recorded run the
-differential replays. The interpreter's own translation unit includes neither.
+measured cycle tables, and for the renderer, which reads the opcode table and
+follows the widths through the same function the assembler does. The
+interpreter's own translation unit includes neither. The differential is its
+own target, `snaggletooth_ir_differential`, which links the representation and
+`snaggletooth_rom` for the recorded run it replays — and `snaggletooth_rom`
+links the representation for the bank files it renders.
 
 ## See also
 
 - [docs/ir.md](../../docs/ir.md) — the full page: the two layers, the
   vocabulary, every rule the effects follow, the cost, reading a program,
-  running beside the machine, and how the lift is held to the core.
+  rendering source, running beside the machine, and how the lift is held to
+  the core.
+- [`../rom/`](../rom/README.md) — the cartridge disassembler, whose bank files
+  the renderer writes.
 - [`../examples/`](../examples/README.md) — the cartridges the examples above
   are run on.
 - [`../cpu65816/`](../cpu65816/README.md) — the disassembler whose listing the

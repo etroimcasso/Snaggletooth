@@ -9,6 +9,8 @@
 #include <utility>
 
 #include "cpu65816/cpu65816_asm.h"
+#include "ir/cpu65816_lift.h"
+#include "ir/ir_render.h"
 #include "rom/cartridge_entries.h"
 #include "snaggletooth/snes/snes.h"
 #include "spc700/spc700_disasm.h"
@@ -1057,13 +1059,264 @@ std::string manifestMismatch(const ManifestInput& input, std::span<const std::ui
   return {};
 }
 
+namespace {
+
+// ---- a bank file, from the representation -------------------------------------
+
+// Whether `name` can be a symbol of the 65816 dialect: the lexicon's name form,
+// and not a mnemonic, a register or a directive.
+bool symbolName(std::string_view name) {
+  static const assembler::Cpu65816Dialect dialect;
+  static const std::set<std::string> kCoreDirectives = {"ORG", "DB", "DW", "DL", "DS", "EQU"};
+  if (name.empty()) return false;
+  auto letter = [](char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '.';
+  };
+  if (!letter(name.front())) return false;
+  for (const char c : name) {
+    if (!letter(c) && !(c >= '0' && c <= '9')) return false;
+  }
+  const std::string upper = assembler::upper(name);
+  return !dialect.reserved(upper) && kCoreDirectives.find(upper) == kCoreDirectives.end();
+}
+
+// The register the absolute operand at `site` addresses, from the access facts:
+// the fact at the site whose register is the operand's own address. Empty where
+// no fact names one.
+std::string_view operandRegister(const CartridgeDisassembly& disassembly, Address site,
+                                 std::uint32_t operand) {
+  const std::vector<HardwareAccess>& accesses = disassembly.accesses;
+  auto it = std::lower_bound(accesses.begin(), accesses.end(), site,
+                             [](const HardwareAccess& a, Address wanted) { return a.site < wanted; });
+  for (; it != accesses.end() && it->site == site; ++it) {
+    if (it->registerAddress == operand) return it->name;
+  }
+  return {};
+}
+
+// The label an address carries in any of the tree's listings, or nothing.
+std::optional<std::string> labelAnywhere(const CartridgeDisassembly& disassembly, Address address) {
+  for (const RegionListing& region : disassembly.regions) {
+    const auto found = region.listing.labels.find(address);
+    if (found != region.listing.labels.end()) return found->second;
+  }
+  return std::nullopt;
+}
+
+bool absoluteData(const ir::Instruction& instruction) {
+  const bool absolute = instruction.addressing == ir::Addressing::Absolute ||
+                        instruction.addressing == ir::Addressing::AbsoluteX ||
+                        instruction.addressing == ir::Addressing::AbsoluteY;
+  return absolute && !instruction.target;
+}
+
+// A run of bytes execution never reached, as `DB` rows of eight with the bytes
+// as text beside them — the framework's own form, so a bank file and a listing
+// read alike.
+std::string renderDataRun(const Line& line) {
+  constexpr std::size_t kCommentColumn = 40;
+  constexpr std::size_t kPerRow = 8;
+  std::string out = "\n; ---- " + std::to_string(line.data.size()) +
+                    " bytes execution did not reach\n";
+  for (std::size_t i = 0; i < line.data.size(); i += kPerRow) {
+    const std::size_t end = std::min(i + kPerRow, line.data.size());
+    std::string row = "        DB ";
+    std::string ascii;
+    for (std::size_t j = i; j < end; ++j) {
+      if (j != i) row += ",";
+      row += "$" + hex(line.data[j], 2);
+      const std::uint8_t byte = line.data[j];
+      ascii += (byte >= 0x20 && byte < 0x7F) ? static_cast<char>(byte) : '.';
+    }
+    if (row.size() < kCommentColumn) {
+      row.append(kCommentColumn - row.size(), ' ');
+    } else {
+      row += "  ";
+    }
+    row += "; " + address24(line.address + static_cast<Address>(i)) + "  |" + ascii + "|";
+    out += row + "\n";
+  }
+  return out;
+}
+
+std::string classList(const std::vector<RegisterClass>& classes) {
+  if (classes.empty()) return "none";
+  std::string text;
+  for (const RegisterClass cls : classes) {
+    if (!text.empty()) text += ", ";
+    text += std::string(cpu65816RegisterClassName(cls));
+  }
+  return text;
+}
+
+std::string nameList(const std::vector<std::string>& names) {
+  if (names.empty()) return "none";
+  std::string text;
+  for (const std::string& name : names) {
+    if (!text.empty()) text += ", ";
+    text += name;
+  }
+  return text;
+}
+
+std::string counted(std::size_t count, const char* noun) {
+  return std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
+}
+
+}  // namespace
+
 std::string renderRegion(const RegionListing& region, const CartridgeDisassembly& disassembly) {
   const Listing lines = regionLines(region, disassembly);
   const std::string soundFile = disassembly.sound ? disassembly.sound->file : std::string();
-  return renderPieces(lines, cpu65816Backend(), [&](Address first, Address last) {
-    return "; ---- " + address24(first) + "-" + address24(last) + ": the sound program, see " +
-           soundFile;
-  });
+
+  // The instructions as the representation holds them: one node per code line,
+  // the first reading where an address was read two ways.
+  const ir::Program program = ir::lift65816(lines);
+  std::map<Address, const ir::Node*> nodes;
+  for (const ir::Node& node : program.nodes) nodes.emplace(node.instruction.address, &node);
+  auto nodeAt = [&](Address address) -> const ir::Node& {
+    const auto found = nodes.find(address);
+    if (found == nodes.end()) {
+      throw std::logic_error("no node was lifted for the instruction at " + address24(address));
+    }
+    return *found->second;
+  };
+
+  // What the file names: the labels it defines, the registers its absolute
+  // operands address, and the labels other files define that it refers to. A
+  // register is named only where its name can be a symbol and the file defines
+  // no label of that name.
+  std::set<std::string> defined;
+  for (const auto& [address, label] : lines.labels) defined.insert(label);
+  std::map<std::uint32_t, std::string_view> registers;
+  std::map<Address, std::string> foreign;
+  for (const Line& line : lines.lines) {
+    if (!line.isCode) continue;
+    const ir::Instruction& instruction = nodeAt(line.address).instruction;
+    // A target is looked up as the bytes name it: a jump through a mirror bank
+    // finds no label there, and keeps its address, since a symbol would carry
+    // the bank the bytes are placed in rather than the one they name.
+    if (instruction.target) {
+      if (lines.labels.find(*instruction.target) != lines.labels.end()) continue;
+      const std::optional<std::string> label = labelAnywhere(disassembly, *instruction.target);
+      if (label && defined.find(*label) == defined.end()) foreign[*instruction.target] = *label;
+      continue;
+    }
+    if (!absoluteData(instruction)) continue;
+    const std::string_view name = operandRegister(disassembly, line.address, instruction.operand);
+    if (!name.empty() && symbolName(name) && defined.find(std::string(name)) == defined.end()) {
+      registers[instruction.operand] = name;
+    }
+  }
+
+  // The routines that begin in this file, and who calls each.
+  std::map<Address, const Routine*> routines;
+  std::map<Address, std::string> routineLabels;
+  std::map<Address, std::vector<std::string>> callers;
+  for (const Routine& routine : disassembly.routines) routineLabels[routine.address] = routine.label;
+  for (const Routine& routine : disassembly.routines) {
+    if (lines.labels.find(routine.address) != lines.labels.end()) {
+      routines[routine.address] = &routine;
+    }
+    for (const Address callee : routine.calls) callers[callee].push_back(routine.label);
+  }
+
+  std::string out;
+  for (const std::string& warning : lines.warnings) out += "; warning: " + warning + "\n";
+  if (!lines.warnings.empty()) out += "\n";
+
+  if (!registers.empty() || !foreign.empty()) {
+    std::size_t width = 0;
+    for (const auto& [address, name] : registers) width = std::max(width, name.size());
+    for (const auto& [address, name] : foreign) width = std::max(width, name.size());
+    auto equ = [&](std::string_view name, const std::string& value) {
+      std::string row(name);
+      row.append(width + 2 - name.size(), ' ');
+      out += row + "EQU " + value + "\n";
+    };
+    out += "; The hardware registers this file names, and the labels other files\n"
+           "; define that it refers to.\n";
+    for (const auto& [address, name] : registers) equ(name, "$" + hex(address, 4));
+    for (const auto& [address, name] : foreign) equ(name, "$" + hex(address, 6));
+    out += "\n";
+  }
+
+  // The raw-bytes field is as wide as the longest instruction in the file, and
+  // never narrower than three bytes, so the cycle costs stay aligned.
+  std::size_t longest = 3;
+  for (const Line& line : lines.lines) {
+    if (line.isCode) longest = std::max<std::size_t>(longest, line.instruction.length);
+  }
+  const std::size_t bytesWidth = longest * 3;
+
+  // One piece per run of consecutive lines, each under its own `ORG`; a gap is
+  // the sound program's bytes. Every piece is a region to an assembler, and so is
+  // whatever follows a run of data.
+  std::optional<Address> previousEnd;
+  bool open = false;
+  ir::SourceMode mode;
+  for (const Line& line : lines.lines) {
+    if (previousEnd && line.address != *previousEnd) {
+      out += "\n; ---- " + address24(*previousEnd) + "-" + address24(line.address - 1u) +
+             ": the sound program, see " + soundFile + "\n";
+      open = false;
+    }
+    if (!open) {
+      out += "        ORG " + address24(line.address) + "\n";
+      open = true;
+      mode.reset();
+    }
+    previousEnd = lineEnd(line);
+
+    if (!line.isCode) {
+      if (!line.data.empty()) out += renderDataRun(line);
+      mode.reset();
+      continue;
+    }
+
+    const ir::Node& node = nodeAt(line.address);
+    // A routine's header sits directly above its label: its size, its role, and
+    // the call graph either way.
+    bool headed = false;
+    if (const auto routine = routines.find(line.address); routine != routines.end()) {
+      const Routine& r = *routine->second;
+      std::vector<std::string> calls;
+      for (const Address callee : r.calls) calls.push_back(routineLabels.at(callee));
+      const auto called = callers.find(r.address);
+      out += "\n; routine " + r.label + ": " + counted(r.lines.size(), "line") + ", " +
+             counted(r.bytes, "byte") + "\n";
+      out += ";   reaches " + classList(r.reaches) + "; through " + classList(r.through) + "\n";
+      out += ";   calls " + nameList(calls) + "; called by " +
+             nameList(called == callers.end() ? std::vector<std::string>{} : called->second) +
+             "\n";
+      headed = true;
+    }
+    if (const auto label = lines.labels.find(line.address); label != lines.labels.end()) {
+      out += (headed ? "" : "\n") + label->second + ":\n";
+    }
+    for (const std::string& directive : mode.directives(node)) {
+      out += "        " + directive + "\n";
+    }
+
+    ir::SourceNames names;
+    const ir::Instruction& instruction = node.instruction;
+    if (instruction.target) {
+      if (const auto label = lines.labels.find(*instruction.target); label != lines.labels.end()) {
+        names.target = label->second;
+      } else if (const auto label = foreign.find(*instruction.target); label != foreign.end()) {
+        names.target = label->second;
+      }
+    } else if (absoluteData(instruction)) {
+      const std::string_view name = operandRegister(disassembly, line.address, instruction.operand);
+      if (registers.find(instruction.operand) != registers.end()) {
+        names.operand = name;
+      } else {
+        names.annotation = name;
+      }
+    }
+    out += ir::renderLine(node, names, bytesWidth);
+  }
+  return out;
 }
 
 std::string renderSoundProgram(const SoundProgram& sound) {

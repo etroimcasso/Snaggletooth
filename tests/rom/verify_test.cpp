@@ -161,9 +161,11 @@ TEST(RomVerify, ALabelAcrossAPieceOfTheBankFileAssembles) {
 TEST(RomVerify, ThreeBanksWithoutASoundProgramAssembleToTheImage) {
   const std::vector<std::uint8_t> rom = threeBankImage();
   const Tree tree = treeOf(rom, false);
-  // A call into another file keeps its address: the lexicon has no symbol that
-  // crosses a file.
-  EXPECT_NE(tree.files.at("bank_00.asm").find("JSL $01:8000"), std::string::npos);
+  // A call into another file names the label, defined for this file by an `EQU`
+  // in its prologue: the lexicon has no symbol that crosses a file, and needs
+  // none.
+  EXPECT_NE(tree.files.at("bank_00.asm").find("sub_018000  EQU $018000\n"), std::string::npos);
+  EXPECT_NE(tree.files.at("bank_00.asm").find("JSL >sub_018000"), std::string::npos);
   const VerifyReport report = verify(tree, rom);
   EXPECT_TRUE(report.identical()) << renderReport(report);
   ASSERT_EQ(report.files.size(), 3u);

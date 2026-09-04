@@ -4,10 +4,13 @@
 carrying what source says about the instruction and what the chip does for it,
 with no bytes anywhere. `tools/ir/cpu65816_lift.h` builds it from a listing the
 [65816 disassembler](65816-disassembler.md) traced, `tools/ir/ir_interpret.h`
-runs it, and `tools/ir/ir_differential.h` runs it beside the machine and reports
-every place the two disagree. Two commands put those in a person's hands:
-`snes_lift` writes a cartridge's program out for reading, and `snes_differential`
-replays a cartridge's recorded run and reports.
+runs it, `tools/ir/ir_render.h` writes SNES assembly from it, and
+`tools/ir/ir_differential.h` runs it beside the machine and reports every place
+the two disagree. Two commands put those in a person's hands: `snes_lift` writes
+a cartridge's program out for reading, and `snes_differential` replays a
+cartridge's recorded run and reports; the
+[cartridge disassembler](snes-disassembler.md#the-tree) writes its bank files
+through the renderer.
 
 Three properties shape everything below.
 
@@ -44,6 +47,7 @@ them, and the interpreter reads the flag when it runs.
 - [Lifting a listing](#lifting-a-listing)
 - [Running a program](#running-a-program)
 - [Reading a program](#reading-a-program)
+- [Rendering source](#rendering-source)
 - [Running beside the machine](#running-beside-the-machine)
   - [What is checked](#what-is-checked)
   - [What is an input](#what-is-an-input)
@@ -359,13 +363,15 @@ from `renderEffect`. The text is for reading; nothing parses it back.
 `snes_lift` does it for a whole cartridge tree:
 
 ```
-snes_lift <directory> <image> [-o <file>] [--file <name>]
+snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
 ```
 
 It reads the directory's `project.manifest`, traces the image as the manifest
 directs, lifts every 65816 region, and writes the summary and then every node,
 region by region, in address order. `--file` limits it to one region's file and
-`-o` writes to a file. On the `mixed` cartridge from
+`-o` writes to a file; the text form carries the `.snagir` extension, and a
+whole cartridge's is large — ten times the image, since every instruction is
+written with each of its effects on a line. On the `mixed` cartridge from
 [`tools/examples/`](../tools/examples/README.md), after `snes_disasm mixed.smc
 -o mixed --no-run --no-sound`:
 
@@ -414,6 +420,52 @@ the access kind where it is not plain data, or `pinned` / `unpinned` for a push
 or pull; a condition follows the bracket. The four costs are the measured base
 under each setting of the widths, in `costIndex` order: both eight, index
 sixteen, accumulator sixteen, both sixteen.
+
+## Rendering source
+
+`tools/ir/ir_render.h` writes SNES assembly from the instruction layer alone.
+The mnemonic and the addressing mode name one opcode, and the operand with the
+node's length names the operand bytes, so the instruction layer is enough to
+write the source line and to write the bytes back:
+
+```cpp
+#include "ir/ir_render.h"
+
+using namespace snaggletooth::ir;
+
+renderInstruction(node.instruction);            // "STA !$2100"
+encode(node.instruction);                       // {0x8D, 0x00, 0x21}
+renderCost(node);                               // "4", "2/3" for a branch, "?" under an unknown width
+renderLine(node, {}, 9);                        // "        STA !$2100   …  ; $00:8018  8D 00 21  4\n"
+```
+
+`renderInstruction` writes the text the listing carries, and takes names to
+write in place of addresses through `SourceNames`: `target`, the label of the
+target of a branch, jump or call, written behind the marker its form needs
+(`JSR !sub_008040`, `JSL >sub_018000`, `BNE loc_008023`); `operand`, the
+hardware register an absolute data operand addresses (`STA !INIDISP`,
+`LDA !VMDATAL,X`); and `annotation`, text for the trailing comment. Which label
+an address carries and which register it reaches are facts attached to the
+program rather than part of it, so the names are the caller's — the
+[cartridge disassembler](snes-disassembler.md#the-tree) supplies them from its
+manifest. A long operand keeps its address; its register name, which the node
+carries, goes in the comment.
+
+`renderLine` is one line of source: the instruction under the indent, then the
+comment with the address, the bytes from `encode` padded to the width the
+caller chose, the cost, and the annotation, the long operand's register name,
+and `PATCHED at run time` for a node lifted from patched bytes.
+
+The directives an assembler needs — `EMULATION`, `NATIVE`, `A8`, `A16`, `X8`,
+`X16` — are written by `SourceMode`, which carries the mode a region of source
+holds from one instruction to the next in file order, exactly as the
+[assembler](65816-assembly.md#3-directives) reads it: `reset()` at the start of
+a file, at an `ORG` and after a run of data, then `directives(node)` for each
+instruction, which answers the lines the instruction needs against what the
+line above left and carries what this one leaves through `cpu65816ModeAfter`,
+the one function the disassembler and the assembler both follow the widths
+through. Over the example cartridges the directives land exactly where the
+listing put them.
 
 ## Running beside the machine
 
@@ -589,11 +641,24 @@ a wrong access kind, a break in the interrupt sequence. `tests/snes/observer_tes
 holds the machine's observer, which the replay rests on, to what the core and
 the engines drive.
 
+`tests/ir/render_test.cpp` holds the renderer to the listing over every example
+cartridge: the bytes `encode` writes back from a node are the bytes the node was
+lifted from, the text it writes with no names is the listing's own, the cost
+reads the same, and the directives land where the listing put them. Then the
+bank file: the prologue names what the file uses and nothing else, a register
+stands as an operand only where its name can be a symbol and the file defines
+no label of that name, a call into another file names its label, a routine's
+header says its size, role, calls and callers, an address read two ways renders
+as the first reading, a run of data is written as the framework writes it, and
+every example tree assembles back to its image.
+
 The two proofs are independent by construction, and that is checked: a
 deliberate wrong rule in one effect reddens the replay and leaves `snes_verify`
 green, since the bytes are unchanged; a deliberate wrong character in rendered
-source reddens `snes_verify` and leaves the replay green. A break that reddened
-both, or neither, would mean the layers leak into each other.
+source — an absolute form's `!` dropped, `,X` written as `,Y`, a label's `EQU`
+truncated to its offset — reddens `snes_verify` and leaves the replay green,
+since the replay never reads the text. A break that reddened both, or neither,
+would mean the layers leak into each other.
 
 ## Library
 
@@ -616,12 +681,19 @@ both, or neither, would mean the layers leak into each other.
 | `registersOf(state)` | A core state as the interpreter's registers. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
 | `renderEffect(effect)`, `renderNode(node)` | An effect on one line; a node with its header and every effect. |
+| `opcodeOf(instruction)`, `encode(instruction)` | The opcode the mnemonic and mode name; the bytes the instruction assembles to. |
+| `renderInstruction(instruction, names)`, `SourceNames` | The instruction as source, with a label, a register name and an annotation in place of addresses where given. |
+| `renderCost(node)`, `renderLine(node, names, bytesWidth)` | The cost as a listing prints it; one line of source with its comment. |
+| `SourceMode::reset()`, `directives(node)` | The mode a region of source carries in file order, and the directives each instruction needs. |
 
 The library target is `snaggletooth_ir`; `tools/` is on its public include path,
 so the headers are `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/ir_interpret.h`,
-`ir/ir_differential.h` and `ir/ir_text.h`. It links the 65816 disassembler for
-the lift and the cartridge tools for the recorded run the differential replays.
-The commands are `snes_lift` and `snes_differential`.
+`ir/ir_render.h` and `ir/ir_text.h`. It links the 65816 disassembler for the
+lift and the renderer. The differential is `snaggletooth_ir_differential`,
+header `ir/ir_differential.h`, which links the representation and the
+cartridge tools for the recorded run it replays; the cartridge tools link the
+representation for the bank files they render. The commands are `snes_lift`
+and `snes_differential`.
 
 ## Stability
 
@@ -636,13 +708,15 @@ differ from it, and such a change is reported with the case that found it.
 The lift covers the 65816: every opcode under every mode. The interpreter runs a
 node, a hardware interrupt sequence and a halt, and is held to the core at unit
 grain by the vector suite and at cartridge grain by the replay beside the
-machine, which checks every instruction a run takes. The audio CPU has no lift,
-and the vocabulary is written so it can take one — named state per chip, a bus,
-typed widths — without a change to what is here. Nothing renders from the
-representation; the source tree the [cartridge disassembler](snes-disassembler.md)
-writes comes from the listing. The replay reports an instruction at an address
-the tree has no node for, but does not trace from it; those addresses are the
-person's to answer with entries.
+machine, which checks every instruction a run takes. The renderer writes SNES
+assembly from the instruction layer, and the source tree the
+[cartridge disassembler](snes-disassembler.md) writes comes through it: every
+tree in a corpus of thirty-one cartridges still assembles back to its image
+byte for byte. The audio CPU has no lift, and the vocabulary is written so it
+can take one — named state per chip, a bus, typed widths — without a change to
+what is here. The replay reports an instruction at an address the tree has no
+node for, but does not trace from it; those addresses are the person's to
+answer with entries.
 
 ## See also
 
@@ -653,7 +727,10 @@ person's to answer with entries.
 - [Disassembly framework](disassembly-framework.md) — the listing's shape, the
   context beside every address, and how a conflict is reported.
 - [Cartridge disassembler](snes-disassembler.md) — a whole cartridge traced into
-  the listings a program is lifted from.
+  the listings a program is lifted from, and its bank files written back from
+  the program.
+- [65816 assembly language](65816-assembly.md) — the dialect the renderer
+  writes, and the directives `SourceMode` places.
 - [The SNES machine](snes-machine.md#the-bus-observer) — the observer the replay
   reads the machine's accesses through.
 - [The example cartridges](../tools/examples/README.md) — the cartridges this

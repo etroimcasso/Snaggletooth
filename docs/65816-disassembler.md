@@ -146,6 +146,11 @@ target with no line of its own in the listing, one that landed in data or inside
 another instruction, keeps no label and stays an address, as does a target in a
 pointer or a table, which the trace cannot name.
 
+The [cartridge disassembler](snes-disassembler.md#the-tree) writes its bank
+files in the same shape from the listing's lifted form, and adds what a whole
+tree knows: the registers as operands, `STA !INIDISP`, with an `EQU` prologue
+defining them; labels in other files; a header per routine.
+
 ## How the widths are followed
 
 The trace carries the emulation flag and the two widths beside every address, and
