@@ -14,6 +14,13 @@ The backend carries those flags in the trace context, moves them through `REP`,
 `SEP` and `XCE`, and where a path reaches an immediate under a width it does not
 know, says so and stops rather than guess.
 
+## Contents
+
+- [Command line](#command-line)
+- [Output](#output)
+- [Library](#library)
+- [See also](#see-also)
+
 ## Command line
 
 ```

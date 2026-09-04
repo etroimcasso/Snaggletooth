@@ -8,6 +8,14 @@ settles the case is [s-dsp-behavior.md](s-dsp-behavior.md).
 The [project README](../README.md) carries the status table — what is live, what is partial, and
 what is unstarted.
 
+## Contents
+
+- [Where to start](#where-to-start)
+- [The machine](#the-machine)
+- [The audio unit](#the-audio-unit)
+- [Tools](#tools)
+- [Reading these pages](#reading-these-pages)
+
 ## Where to start
 
 | If you want to | Read |

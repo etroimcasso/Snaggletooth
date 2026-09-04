@@ -11,6 +11,12 @@ disassembler, built from the same instruction table.
 Assembly is absolute: every byte's address is known while it is assembled, and
 the result is a set of address ranges with bytes.
 
+## Contents
+
+- [Surface](#surface)
+- [Using it](#using-it)
+- [See also](#see-also)
+
 ## Surface
 
 Everything lives in `snaggletooth::assembler`.

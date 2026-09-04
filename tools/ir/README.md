@@ -11,6 +11,14 @@ writes it out for reading. Two commands sit over the library, and the cartridge
 disassembler in [`../rom/`](../rom/README.md) writes its bank files through the
 renderer.
 
+## Contents
+
+- [Surface](#surface)
+- [`snes_lift`](#snes_lift)
+- [`snes_differential`](#snes_differential)
+- [Using the library](#using-the-library)
+- [See also](#see-also)
+
 ## Surface
 
 Everything lives in `snaggletooth::ir`.

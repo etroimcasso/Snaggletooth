@@ -13,6 +13,12 @@ how bytes read in the context, the framework propagates it along each path, and
 where two paths reach one address under contexts that read the bytes two ways it
 reports the conflict rather than choosing.
 
+## Contents
+
+- [Surface](#surface)
+- [Using it](#using-it)
+- [See also](#see-also)
+
 ## Surface
 
 Everything lives in `snaggletooth::disasm`.

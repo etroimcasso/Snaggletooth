@@ -4,6 +4,13 @@
 writes what it plays as a WAV. Beside it are the two file-format pieces both
 renderers use: the `.spc` loader and the WAV writer.
 
+## Contents
+
+- [`spc_render`](#spc_render)
+- [The loader](#the-loader)
+- [The WAV writer](#the-wav-writer)
+- [See also](#see-also)
+
 ## `spc_render`
 
 ```

@@ -13,6 +13,12 @@ reach are printed as data, and it measures each opcode's cycle cost by running t
 core over a synthetic bus, so a listing and the emulator cannot disagree about what
 an instruction costs.
 
+## Contents
+
+- [Command line](#command-line)
+- [Library](#library)
+- [See also](#see-also)
+
 ## Command line
 
 ```

@@ -32,6 +32,12 @@ and noise rate tables — from two public references, cross-checking them entry 
 entry, into the generated includes the library compiles. It runs once when a table
 changes, never at build time; its docstring carries the usage.
 
+## Contents
+
+- [Building](#building)
+- [How the pieces fit](#how-the-pieces-fit)
+- [See also](#see-also)
+
 ## Building
 
 The tools build whenever Snaggletooth is the top-level project or the tests are on

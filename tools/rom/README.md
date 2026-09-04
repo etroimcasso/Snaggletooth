@@ -6,6 +6,14 @@ the image; `rom_render`, which boots a cartridge on the whole SNES machine and
 writes what the audio unit plays; and `cartridge_entries.h`, where a disassembly of
 a whole cartridge starts.
 
+## Contents
+
+- [`snes_disasm`](#snes_disasm)
+- [`snes_verify`](#snes_verify)
+- [`rom_render`](#rom_render)
+- [`cartridge_entries.h`](#cartridge_entriesh)
+- [See also](#see-also)
+
 ## `snes_disasm`
 
 ```
