@@ -513,6 +513,141 @@ const std::array<std::array<std::string, 16>, 8>& dmaRegisterNames() {
   return names;
 }
 
+// A register the CPU only writes, only reads, or does both — the staged table's
+// Type column, which prefixes W, R or both to the access width. The width itself
+// is how many of these registers one instruction reaches, which the caller works
+// out from the operand's own width, so it is not a fact about the register.
+constexpr Cpu65816Register writeOnly(std::string_view name, RegisterClass cls) {
+  return {.name = name, .cls = cls, .reads = false, .writes = true};
+}
+constexpr Cpu65816Register readOnly(std::string_view name, RegisterClass cls) {
+  return {.name = name, .cls = cls, .reads = true, .writes = false};
+}
+constexpr Cpu65816Register readWrite(std::string_view name, RegisterClass cls) {
+  return {.name = name, .cls = cls, .reads = true, .writes = true};
+}
+
+// The PPU registers, `$2100`-`$213F` in address order. The classes follow the PPU
+// registers page's own sections: the layer-enable pair is the screen's, not the
+// windows'; the multiplication result has a section of its own and is arithmetic
+// wherever a game uses it, which is often nothing to do with Mode 7; and the
+// counters and status registers report on the screen.
+constexpr std::array<Cpu65816Register, 64> kPpuRegisters = {
+    writeOnly("INIDISP", RegisterClass::Display),
+    writeOnly("OBJSEL", RegisterClass::Oam),
+    writeOnly("OAMADDL", RegisterClass::Oam),
+    writeOnly("OAMADDH", RegisterClass::Oam),
+    writeOnly("OAMDATA", RegisterClass::Oam),
+    writeOnly("BGMODE", RegisterClass::Background),
+    writeOnly("MOSAIC", RegisterClass::Background),
+    writeOnly("BG1SC", RegisterClass::Background),
+    writeOnly("BG2SC", RegisterClass::Background),
+    writeOnly("BG3SC", RegisterClass::Background),
+    writeOnly("BG4SC", RegisterClass::Background),
+    writeOnly("BG12NBA", RegisterClass::Background),
+    writeOnly("BG34NBA", RegisterClass::Background),
+    writeOnly("BG1HOFS", RegisterClass::Background),
+    writeOnly("BG1VOFS", RegisterClass::Background),
+    writeOnly("BG2HOFS", RegisterClass::Background),
+    writeOnly("BG2VOFS", RegisterClass::Background),
+    writeOnly("BG3HOFS", RegisterClass::Background),
+    writeOnly("BG3VOFS", RegisterClass::Background),
+    writeOnly("BG4HOFS", RegisterClass::Background),
+    writeOnly("BG4VOFS", RegisterClass::Background),
+    writeOnly("VMAIN", RegisterClass::Vram),
+    writeOnly("VMADDL", RegisterClass::Vram),
+    writeOnly("VMADDH", RegisterClass::Vram),
+    writeOnly("VMDATAL", RegisterClass::Vram),
+    writeOnly("VMDATAH", RegisterClass::Vram),
+    writeOnly("M7SEL", RegisterClass::Mode7),
+    writeOnly("M7A", RegisterClass::Mode7),
+    writeOnly("M7B", RegisterClass::Mode7),
+    writeOnly("M7C", RegisterClass::Mode7),
+    writeOnly("M7D", RegisterClass::Mode7),
+    writeOnly("M7X", RegisterClass::Mode7),
+    writeOnly("M7Y", RegisterClass::Mode7),
+    writeOnly("CGADD", RegisterClass::Cgram),
+    writeOnly("CGDATA", RegisterClass::Cgram),
+    writeOnly("W12SEL", RegisterClass::Window),
+    writeOnly("W34SEL", RegisterClass::Window),
+    writeOnly("WOBJSEL", RegisterClass::Window),
+    writeOnly("WH0", RegisterClass::Window),
+    writeOnly("WH1", RegisterClass::Window),
+    writeOnly("WH2", RegisterClass::Window),
+    writeOnly("WH3", RegisterClass::Window),
+    writeOnly("WBGLOG", RegisterClass::Window),
+    writeOnly("WOBJLOG", RegisterClass::Window),
+    writeOnly("TM", RegisterClass::Display),
+    writeOnly("TS", RegisterClass::Display),
+    writeOnly("TMW", RegisterClass::Window),
+    writeOnly("TSW", RegisterClass::Window),
+    writeOnly("CGWSEL", RegisterClass::ColorMath),
+    writeOnly("CGADSUB", RegisterClass::ColorMath),
+    writeOnly("COLDATA", RegisterClass::ColorMath),
+    writeOnly("SETINI", RegisterClass::Display),
+    readOnly("MPYL", RegisterClass::Math),
+    readOnly("MPYM", RegisterClass::Math),
+    readOnly("MPYH", RegisterClass::Math),
+    readOnly("SLHV", RegisterClass::Display),
+    readOnly("OAMDATAREAD", RegisterClass::Oam),
+    readOnly("VMDATALREAD", RegisterClass::Vram),
+    readOnly("VMDATAHREAD", RegisterClass::Vram),
+    readOnly("CGDATAREAD", RegisterClass::Cgram),
+    readOnly("OPHCT", RegisterClass::Display),
+    readOnly("OPVCT", RegisterClass::Display),
+    readOnly("STAT77", RegisterClass::Display),
+    readOnly("STAT78", RegisterClass::Display),
+};
+
+// The 5A22, work-RAM and APU registers, `$2140`-`$421F`. `$4016` is two registers
+// at one address — the staged table names the write JOYOUT and the read JOYSER0 —
+// so it is the one entry that carries both names and both directions.
+std::optional<Cpu65816Register> systemRegister(std::uint16_t offset) {
+  switch (offset) {
+    case 0x2140: return readWrite("APUIO0", RegisterClass::Apu);
+    case 0x2141: return readWrite("APUIO1", RegisterClass::Apu);
+    case 0x2142: return readWrite("APUIO2", RegisterClass::Apu);
+    case 0x2143: return readWrite("APUIO3", RegisterClass::Apu);
+    case 0x2180: return readWrite("WMDATA", RegisterClass::WramPort);
+    case 0x2181: return writeOnly("WMADDL", RegisterClass::WramPort);
+    case 0x2182: return writeOnly("WMADDM", RegisterClass::WramPort);
+    case 0x2183: return writeOnly("WMADDH", RegisterClass::WramPort);
+    case 0x4016: return readWrite("JOYSER0/JOYOUT", RegisterClass::Joypad);
+    case 0x4017: return readOnly("JOYSER1", RegisterClass::Joypad);
+    case 0x4200: return writeOnly("NMITIMEN", RegisterClass::Interrupt);
+    case 0x4201: return writeOnly("WRIO", RegisterClass::Io);
+    case 0x4202: return writeOnly("WRMPYA", RegisterClass::Math);
+    case 0x4203: return writeOnly("WRMPYB", RegisterClass::Math);
+    case 0x4204: return writeOnly("WRDIVL", RegisterClass::Math);
+    case 0x4205: return writeOnly("WRDIVH", RegisterClass::Math);
+    case 0x4206: return writeOnly("WRDIVB", RegisterClass::Math);
+    case 0x4207: return writeOnly("HTIMEL", RegisterClass::Interrupt);
+    case 0x4208: return writeOnly("HTIMEH", RegisterClass::Interrupt);
+    case 0x4209: return writeOnly("VTIMEL", RegisterClass::Interrupt);
+    case 0x420A: return writeOnly("VTIMEH", RegisterClass::Interrupt);
+    case 0x420B: return writeOnly("MDMAEN", RegisterClass::DmaControl);
+    case 0x420C: return writeOnly("HDMAEN", RegisterClass::DmaControl);
+    case 0x420D: return writeOnly("MEMSEL", RegisterClass::Speed);
+    case 0x4210: return readOnly("RDNMI", RegisterClass::Interrupt);
+    case 0x4211: return readOnly("TIMEUP", RegisterClass::Interrupt);
+    case 0x4212: return readOnly("HVBJOY", RegisterClass::Interrupt);
+    case 0x4213: return readOnly("RDIO", RegisterClass::Io);
+    case 0x4214: return readOnly("RDDIVL", RegisterClass::Math);
+    case 0x4215: return readOnly("RDDIVH", RegisterClass::Math);
+    case 0x4216: return readOnly("RDMPYL", RegisterClass::Math);
+    case 0x4217: return readOnly("RDMPYH", RegisterClass::Math);
+    case 0x4218: return readOnly("JOY1L", RegisterClass::Joypad);
+    case 0x4219: return readOnly("JOY1H", RegisterClass::Joypad);
+    case 0x421A: return readOnly("JOY2L", RegisterClass::Joypad);
+    case 0x421B: return readOnly("JOY2H", RegisterClass::Joypad);
+    case 0x421C: return readOnly("JOY3L", RegisterClass::Joypad);
+    case 0x421D: return readOnly("JOY3H", RegisterClass::Joypad);
+    case 0x421E: return readOnly("JOY4L", RegisterClass::Joypad);
+    case 0x421F: return readOnly("JOY4H", RegisterClass::Joypad);
+    default: return std::nullopt;
+  }
+}
+
 }  // namespace
 
 Context contextOf(const Cpu65816Mode& mode) noexcept {
@@ -570,74 +705,52 @@ const std::array<CycleCost, 256>& cpu65816CycleTable(bool emulation, bool accumu
   return tables[tableIndex(emulation, accumulator8, index8)];
 }
 
-std::string_view cpu65816RegisterName(Address address) {
-  const std::uint32_t bank = (address >> 16) & 0xFFu;
-  const bool visible = bank <= 0x3Fu || (bank >= 0x80u && bank <= 0xBFu);
-  if (!visible) return {};
-  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
-
-  static constexpr std::array<std::string_view, 64> kPpu = {
-      "INIDISP", "OBJSEL",  "OAMADDL", "OAMADDH", "OAMDATA", "BGMODE",  "MOSAIC",  "BG1SC",
-      "BG2SC",   "BG3SC",   "BG4SC",   "BG12NBA", "BG34NBA", "BG1HOFS", "BG1VOFS", "BG2HOFS",
-      "BG2VOFS", "BG3HOFS", "BG3VOFS", "BG4HOFS", "BG4VOFS", "VMAIN",   "VMADDL",  "VMADDH",
-      "VMDATAL", "VMDATAH", "M7SEL",   "M7A",     "M7B",     "M7C",     "M7D",     "M7X",
-      "M7Y",     "CGADD",   "CGDATA",  "W12SEL",  "W34SEL",  "WOBJSEL", "WH0",     "WH1",
-      "WH2",     "WH3",     "WBGLOG",  "WOBJLOG", "TM",      "TS",      "TMW",     "TSW",
-      "CGWSEL",  "CGADSUB", "COLDATA", "SETINI",  "MPYL",    "MPYM",    "MPYH",    "SLHV",
-      "OAMDATAREAD", "VMDATALREAD", "VMDATAHREAD", "CGDATAREAD", "OPHCT", "OPVCT", "STAT77",
-      "STAT78",
-  };
-  if (offset >= 0x2100u && offset <= 0x213Fu) return kPpu[offset - 0x2100u];
-
-  switch (offset) {
-    case 0x2140: return "APUIO0";
-    case 0x2141: return "APUIO1";
-    case 0x2142: return "APUIO2";
-    case 0x2143: return "APUIO3";
-    case 0x2180: return "WMDATA";
-    case 0x2181: return "WMADDL";
-    case 0x2182: return "WMADDM";
-    case 0x2183: return "WMADDH";
-    case 0x4016: return "JOYSER0/JOYOUT";
-    case 0x4017: return "JOYSER1";
-    case 0x4200: return "NMITIMEN";
-    case 0x4201: return "WRIO";
-    case 0x4202: return "WRMPYA";
-    case 0x4203: return "WRMPYB";
-    case 0x4204: return "WRDIVL";
-    case 0x4205: return "WRDIVH";
-    case 0x4206: return "WRDIVB";
-    case 0x4207: return "HTIMEL";
-    case 0x4208: return "HTIMEH";
-    case 0x4209: return "VTIMEL";
-    case 0x420A: return "VTIMEH";
-    case 0x420B: return "MDMAEN";
-    case 0x420C: return "HDMAEN";
-    case 0x420D: return "MEMSEL";
-    case 0x4210: return "RDNMI";
-    case 0x4211: return "TIMEUP";
-    case 0x4212: return "HVBJOY";
-    case 0x4213: return "RDIO";
-    case 0x4214: return "RDDIVL";
-    case 0x4215: return "RDDIVH";
-    case 0x4216: return "RDMPYL";
-    case 0x4217: return "RDMPYH";
-    case 0x4218: return "JOY1L";
-    case 0x4219: return "JOY1H";
-    case 0x421A: return "JOY2L";
-    case 0x421B: return "JOY2H";
-    case 0x421C: return "JOY3L";
-    case 0x421D: return "JOY3H";
-    case 0x421E: return "JOY4L";
-    case 0x421F: return "JOY4H";
-    default: break;
-  }
-
-  if (offset >= 0x4300u && offset <= 0x437Fu) {
-    const std::string& name = dmaRegisterNames()[(offset >> 4) & 7u][offset & 0xFu];
-    return name;
+std::string_view cpu65816RegisterClassName(RegisterClass cls) {
+  switch (cls) {
+    case RegisterClass::Display: return "Display";
+    case RegisterClass::Background: return "Background";
+    case RegisterClass::Vram: return "Vram";
+    case RegisterClass::Cgram: return "Cgram";
+    case RegisterClass::Oam: return "Oam";
+    case RegisterClass::Mode7: return "Mode7";
+    case RegisterClass::Window: return "Window";
+    case RegisterClass::ColorMath: return "ColorMath";
+    case RegisterClass::Apu: return "Apu";
+    case RegisterClass::WramPort: return "WramPort";
+    case RegisterClass::Joypad: return "Joypad";
+    case RegisterClass::Interrupt: return "Interrupt";
+    case RegisterClass::Math: return "Math";
+    case RegisterClass::DmaControl: return "DmaControl";
+    case RegisterClass::DmaChannel: return "DmaChannel";
+    case RegisterClass::Io: return "Io";
+    case RegisterClass::Speed: return "Speed";
   }
   return {};
+}
+
+std::optional<Cpu65816Register> cpu65816Register(Address address) {
+  const std::uint32_t bank = (address >> 16) & 0xFFu;
+  const bool visible = bank <= 0x3Fu || (bank >= 0x80u && bank <= 0xBFu);
+  if (!visible) return std::nullopt;
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+
+  if (offset >= 0x2100u && offset <= 0x213Fu) return kPpuRegisters[offset - 0x2100u];
+  if (const std::optional<Cpu65816Register> system = systemRegister(offset)) return system;
+
+  // Every channel's registers are read and written alike, and three of the
+  // sixteen slots the channel occupies are named by no table: they are not
+  // registers, so they have no row here either.
+  if (offset >= 0x4300u && offset <= 0x437Fu) {
+    const std::string& name = dmaRegisterNames()[(offset >> 4) & 7u][offset & 0xFu];
+    if (name.empty()) return std::nullopt;
+    return readWrite(name, RegisterClass::DmaChannel);
+  }
+  return std::nullopt;
+}
+
+std::string_view cpu65816RegisterName(Address address) {
+  const std::optional<Cpu65816Register> reg = cpu65816Register(address);
+  return reg ? reg->name : std::string_view{};
 }
 
 std::optional<Decoded> Cpu65816Backend::decode(std::span<const std::uint8_t> image, Address base,

@@ -27,6 +27,11 @@ sound program: entry $0500, 3 blocks, 3 matched to the image
 524288 of 524288 bytes placed -> game
 ```
 
+The facts it attaches to addresses — the hardware each instruction reaches, and the
+DMA transfers those add up to — come from `rom/rom_facts.h`:
+`hardwareAccesses(disassembly)` and `dmaTransfers(accesses)`, both written into the
+manifest as `access` and `dma` lines.
+
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count, and the
 renderers and `writeProject` for the files. Full page:

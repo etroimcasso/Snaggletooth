@@ -61,7 +61,7 @@ const std::optional<CartridgeHeader> header = parseCartridgeHeader(image);
 if (!header) { /* too small to be a cartridge at all */ }
 
 header->map;              // CartridgeMap::HiRom — the site the header was read from
-header->title;            // "EARTHWORM JIM" — 21 bytes, trailing spaces and zero bytes removed
+header->title;            // the 21-byte title, trailing spaces and zero bytes removed
 header->mapMode;          // 0x31 — the byte as written
 header->fastRom;          // true — bit 4 of the map-mode byte
 header->saveRamBytes;     // 0, or the bytes the size code means

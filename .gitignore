@@ -8,8 +8,13 @@
 *.smc
 *.fig
 
-# Build output
+# Anything a tool produced FROM a cartridge is ROM-derived too — a disassembled
+# source tree, its manifest, a render — so the scratch and build directories the
+# tools write into are never committed either.
+tmp/
 build/
+build-*/
+*.wav
 
 # Private working docs — local only, never pushed to the public remote.
 docs-internal/

@@ -37,6 +37,7 @@ The output is assembly source, not a report about the bytes — see
 - [What is reported rather than guessed](#what-is-reported-rather-than-guessed)
 - [Cycle costs](#cycle-costs)
 - [Hardware registers](#hardware-registers)
+  - [The class beside the name](#the-class-beside-the-name)
 - [Patched bytes](#patched-bytes)
 - [Library](#library)
 - [Warnings](#warnings)
@@ -256,6 +257,35 @@ and `JOYOUT` written.
 
 `cpu65816RegisterName(address)` exposes the same mapping over a 24-bit address.
 
+### The class beside the name
+
+Every register also carries the part of the machine it belongs to, and whether the
+CPU reads it, writes it, or both. `cpu65816Register(address)` answers all three —
+`cpu65816RegisterName` reads from the same table, so a name and a class can never
+disagree about which addresses are registers:
+
+```cpp
+if (const std::optional<Cpu65816Register> reg = cpu65816Register(0x002118)) {
+  reg->name;                              // "VMDATAL"
+  reg->cls;                               // RegisterClass::Vram
+  cpu65816RegisterClassName(reg->cls);    // "Vram"
+  reg->reads;                             // false — the write port only
+  reg->writes;                            // true
+}
+```
+
+The classes are `Display`, `Background`, `Vram`, `Cgram`, `Oam`, `Mode7`,
+`Window`, `ColorMath`, `Apu`, `WramPort`, `Joypad`, `Interrupt`, `Math`,
+`DmaControl`, `DmaChannel`, `Io` and `Speed`. Three of them are worth stating
+because a name alone suggests otherwise: `TM` and `TS` enable layers on the two
+screens and are `Display`, while `TMW` and `TSW` enable *windows* and are
+`Window`; `MPYL`–`MPYH` are `Math`, since a game reads that multiplier whether or
+not it is drawing Mode 7; and the three bytes of each DMA channel that no register
+table names are not registers, so they have no name and no class.
+
+What a cartridge's code reaches, class by class, is what the
+[cartridge disassembler](snes-disassembler.md#what-the-code-reaches) reports.
+
 ## Patched bytes
 
 `--prior` names the same memory region before the code ran. Any byte that differs is
@@ -291,6 +321,8 @@ std::string text = render(listing);
 | `decodeAt(image, base, address, mode)` | Decodes one instruction under a mode. Empty when the address is outside the image, the operands run past its end, or the mode does not settle the operand's width. |
 | `cpu65816CycleTable(emulation, accumulator8, index8)` | The measured cost of all 256 opcodes under one setting of the flags. |
 | `cpu65816RegisterName(address)` | A hardware register's name at a 24-bit address, or empty. |
+| `cpu65816Register(address)` | The register at a 24-bit address — name, class, and whether it reads and writes — or nothing when the address is memory. |
+| `RegisterClass`, `cpu65816RegisterClassName(cls)` | The part of the machine a register belongs to, and its name as text. |
 
 `Listing`, `Instruction`, `Flow` and `CycleCost` are the framework's types, described
 on its page. A `Line` of code carries the context it was decoded under and the

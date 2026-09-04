@@ -96,9 +96,10 @@ TEST(IplStub, PostsReadyBytes) {
 }
 
 // A cartridge may drive port 0 before it has set up an upload, and only $CC begins
-// one. Super Metroid writes $FF while the ports still read zero, then sets the
-// destination and sends the real $CC; a stub that acts on the earlier value takes a
-// destination from ports nobody has written and runs the audio CPU from it.
+// one. Real cartridges do: one writes $FF while the ports still read zero, then
+// sets the destination and sends the real $CC. A stub that acts on the earlier
+// value takes a destination from ports nobody has written and runs the audio CPU
+// from it.
 TEST(IplStub, IgnoresAPortZeroValueThatIsNotTheKick) {
   Apu apu = stubbedApu();
   ASSERT_TRUE(waitReady(apu));
