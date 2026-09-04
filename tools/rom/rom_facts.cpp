@@ -140,7 +140,7 @@ std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disasse
           // before to have loaded one.
           std::optional<std::uint16_t> written;
           if (writes && info.mnemonic == std::string_view("STZ")) {
-            written = 0u;
+            written = std::uint16_t{0};
           } else if (writes) {
             written = immediateBefore(previous, info.mnemonic);
           }
