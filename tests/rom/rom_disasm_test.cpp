@@ -199,7 +199,8 @@ TEST(RomDisasm, AVectorNamedLikeAMnemonicIsLabelledAsAHandler) {
   const Listing& bank0 = regionNamed(d, "bank_00.asm").listing;
   EXPECT_EQ(bank0.labels.at(0x008010u), "cop_handler");
   EXPECT_EQ(bank0.labels.at(0x008012u), "brk_native");
-  EXPECT_NE(renderManifest(d).find("entry    $00:8010 cop_handler e=0 m=? x=?\n"), std::string::npos);
+  EXPECT_NE(renderManifest(d).find("entry    $00:8010 cop_handler e=1 m=8 x=8\n"), std::string::npos);
+  EXPECT_NE(renderManifest(d).find("entry    $00:8012 brk_native e=0 m=? x=?\n"), std::string::npos);
   EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d).find("\ncop_handler:\n"), std::string::npos);
   EXPECT_TRUE(d.notes.empty());
 
@@ -212,6 +213,43 @@ TEST(RomDisasm, AVectorNamedLikeAMnemonicIsLabelledAsAHandler) {
   ASSERT_EQ(named.notes.size(), 1u);
   EXPECT_NE(named.notes[0].find("entry brk at $00:8012 is labelled brk_handler"), std::string::npos);
   EXPECT_EQ(named.entries.back().name, "brk_handler");
+}
+
+// The CPU takes an emulation-mode vector only with the emulation flag set, which
+// fixes both widths at eight; a native vector is taken with whatever widths the
+// interrupted code had. So an immediate in the emulation NMI handler reads, and
+// the same instruction in the native NMI handler is reported.
+TEST(RomDisasm, AnEmulationVectorIsTracedInEmulationMode) {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  const std::size_t site = 0x7FC0u;
+  rom[site + 0x3A] = 0x10u;  // nmi (emulation) -> $8010
+  rom[site + 0x3B] = 0x80u;
+  rom[site + 0x2A] = 0x20u;  // nmi (native) -> $8020
+  rom[site + 0x2B] = 0x80u;
+  put(rom, 0x0000u, {0xDBu});                      // $8000 STP
+  put(rom, 0x0010u, {0xA9u, 0x80u, 0x40u});        // $8010 LDA #$80 / RTI
+  put(rom, 0x0020u, {0xA9u, 0x80u, 0x40u});        // $8020 LDA #$80 / RTI
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+
+  ASSERT_EQ(d.entries.size(), 3u);
+  EXPECT_EQ(d.entries[1].name, "nmi");
+  EXPECT_EQ(d.entries[1].mode, Cpu65816Mode::reset());
+  EXPECT_EQ(d.entries[2].name, "nmi_native");
+  EXPECT_EQ(d.entries[2].mode, Cpu65816Mode::nativeUnknown());
+
+  const Listing& bank0 = regionNamed(d, "bank_00.asm").listing;
+  const Line* emulation = codeLineAt(bank0, 0x008010u);
+  ASSERT_NE(emulation, nullptr);
+  EXPECT_EQ(emulation->instruction.text, "LDA #$80");
+  EXPECT_EQ(emulation->instruction.length, 2u);
+  EXPECT_NE(codeLineAt(bank0, 0x008012u), nullptr) << "the handler's RTI was reached";
+  EXPECT_EQ(codeLineAt(bank0, 0x008020u), nullptr) << "an immediate under an unknown width is not read";
+  ASSERT_EQ(bank0.warnings.size(), 1u);
+  EXPECT_NE(bank0.warnings[0].find("$00:8020"), std::string::npos);
+
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("entry    $00:8010 nmi e=1 m=8 x=8\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("entry    $00:8020 nmi_native e=0 m=? x=?\n"), std::string::npos) << manifest;
 }
 
 TEST(RomDisasm, AnEntryOutsideTheImageIsANote) {

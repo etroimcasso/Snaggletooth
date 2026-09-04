@@ -138,8 +138,10 @@ An address the trace started from, the label it carries, and the mode execution
 arrives in: `e=1` is emulation mode, which fixes both widths at eight; `e=0` is
 native mode, with the accumulator width `m` and the index width `x` each eight,
 sixteen, or `?` for a width the trace does not know and must not guess. The
-vectors are written first — the reset handler `e=1`, every interrupt handler
-`e=0 m=? x=?` — then every entry a person added.
+vectors are written first, each in the mode the CPU takes it in — the
+emulation-mode set, reset among them, `e=1 m=8 x=8`; the native set
+`e=0 m=? x=?`, since the image cannot say what widths the interrupted code had —
+then every entry a person added.
 
 ### 2.5 Stops, warnings and notes
 

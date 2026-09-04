@@ -199,6 +199,25 @@ TEST(Cpu65816Disasm, EmulationModeHoldsBothWidthsAtEight) {
   EXPECT_EQ(lines[1]->instruction.length, 2);
 }
 
+// PLP and RTI make the widths unknown in native mode; under emulation the flag
+// forces both to eight, so they stay known — through the one function the
+// assembler follows too, so a NATIVE after an emulation RTI keeps them.
+TEST(Cpu65816Disasm, ReturnUnderEmulationKeepsTheWidthsKnown) {
+  std::string note;
+  const Cpu65816Mode afterRti = cpu65816ModeAfter(0x40, 0, Cpu65816Mode::reset(), note);
+  EXPECT_TRUE(afterRti.emulation);
+  EXPECT_TRUE(afterRti.accumulatorKnown);
+  EXPECT_TRUE(afterRti.indexKnown);
+  EXPECT_TRUE(afterRti.accumulator8);
+  EXPECT_TRUE(afterRti.index8);
+  const Cpu65816Mode afterPlp = cpu65816ModeAfter(0x28, 0, Cpu65816Mode::reset(), note);
+  EXPECT_TRUE(afterPlp.accumulatorKnown);
+  EXPECT_TRUE(afterPlp.indexKnown);
+  const Cpu65816Mode native = cpu65816ModeAfter(0x40, 0, Cpu65816Mode::native(true, true), note);
+  EXPECT_FALSE(native.accumulatorKnown) << "in native mode the stacked status byte is unknown";
+  EXPECT_FALSE(native.indexKnown);
+}
+
 // XCE takes the carry the instruction before it set. CLC then XCE enters native
 // mode with the widths still eight; SEC then XCE enters emulation and forces
 // them.

@@ -150,8 +150,10 @@ warning the listings raised. Its grammar is [project-manifest.md](project-manife
 ## The trace across banks
 
 Every region is traced by the [65816 disassembler](65816-disassembler.md) from
-the entries that land in it: the reset handler in emulation mode, every interrupt
-handler in native mode with the widths unknown, and any entry a person added. A
+the entries that land in it: each vector's handler in the mode the CPU takes that
+vector in — the emulation-mode set, reset among them, in emulation mode, and the
+native set in native mode with the widths unknown, since the image cannot say
+what the interrupted code had — and any entry a person added. A
 call or a jump whose target is in another region — `JSL`, `JML`, and an absolute
 jump whose bank is not the current one — enters that region's trace under the mode
 the instruction was made in, so `REP #$30` in bank `$00` is what makes an immediate

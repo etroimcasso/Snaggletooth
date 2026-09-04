@@ -189,6 +189,21 @@ TEST(Cpu65816Asm, XceFollowsTheCarryTheInstructionBeforeSet) {
       << "in emulation mode the widths stay forced after PLP";
 }
 
+// §3.2: NATIVE keeps the widths where emulation held them, and emulation holds
+// them at eight through every instruction — so an RTI or a PLP under EMULATION,
+// which would make the widths unknown in native mode, leaves the immediate after
+// a NATIVE sized. This is the shape of an interrupt handler that ends in RTI with
+// the code the trace reached in native mode right after it.
+TEST(Cpu65816Asm, NativeAfterAnEmulationReturnKeepsTheWidthsEight) {
+  EXPECT_EQ(bytesOf("        EMULATION\n        RTI\n        NATIVE\n        LDA #$09\n"),
+            (Bytes{0x40, 0xA9, 0x09}));
+  EXPECT_EQ(bytesOf("        EMULATION\n        PLP\n        NATIVE\n        LDX #$09\n"),
+            (Bytes{0x28, 0xA2, 0x09}));
+  EXPECT_NE(errorOf("        A8\n        RTI\n        LDA #$09\n").find("A8 or A16"),
+            std::string::npos)
+      << "in native mode the same RTI does make the width unknown";
+}
+
 // §3: a region begins at the start of the file, at every ORG and after every
 // data directive, in native mode with both widths unknown; EMULATION says a
 // region begins in emulation mode, NATIVE returns to native.

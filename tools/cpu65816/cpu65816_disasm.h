@@ -90,8 +90,10 @@ struct Cpu65816Mode {
 // them known; `PLP` and `RTI` make both unknown; `XCE` exchanges the carry with
 // the emulation flag when `CLC` or `SEC` was the instruction before, and
 // otherwise keeps the mode and says so in `note`. Every instruction but `CLC`
-// and `SEC` forgets what was known about the carry. The disassembler and the
-// assembler both follow the widths through this one function.
+// and `SEC` forgets what was known about the carry. Under emulation both widths
+// are eight and known after every instruction, `PLP` and `RTI` included, since
+// the flag forces them and nothing but `XCE` moves the flag. The disassembler and
+// the assembler both follow the widths through this one function.
 [[nodiscard]] Cpu65816Mode cpu65816ModeAfter(std::uint8_t opcode, std::uint8_t operand,
                                              const Cpu65816Mode& mode, std::string& note);
 

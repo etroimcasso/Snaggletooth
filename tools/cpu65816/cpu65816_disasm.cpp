@@ -414,8 +414,8 @@ Cpu65816Mode cpu65816ModeAfter(std::uint8_t opcode, std::uint8_t operand,
 
     // REP clears the flags its mask names and SEP sets them; the widths they
     // name become known either way. Emulation mode holds both widths at eight
-    // whatever the mask says, and that rule is applied where the mode is packed
-    // (`contextOf`), so nothing here tests for it.
+    // whatever the mask says, and that rule is applied once, below, so nothing
+    // here tests for it.
     case 0xC2:  // REP #imm
       if (operand & kCpuFlagM) { next.accumulator8 = false; next.accumulatorKnown = true; }
       if (operand & kCpuFlagX) { next.index8 = false; next.indexKnown = true; }
@@ -426,8 +426,8 @@ Cpu65816Mode cpu65816ModeAfter(std::uint8_t opcode, std::uint8_t operand,
       break;
 
     // PLP and RTI load the status byte from the stack, which the image cannot
-    // say anything about. Emulation mode keeps the widths forced, by the same
-    // rule as above.
+    // say anything about. Emulation mode keeps the widths forced, by the rule
+    // below.
     case 0x28:  // PLP
     case 0x40:  // RTI
       next.accumulatorKnown = false;
@@ -457,6 +457,17 @@ Cpu65816Mode cpu65816ModeAfter(std::uint8_t opcode, std::uint8_t operand,
 
     default:
       break;
+  }
+  // The emulation flag forces both widths to eight, and nothing but XCE moves
+  // it — so under emulation the widths are eight and known after every
+  // instruction, PLP and RTI included, and a NATIVE that follows keeps them.
+  // Applied here so the disassembler and the assembler agree on it through the
+  // one function, rather than each forcing it where it happens to look.
+  if (next.emulation) {
+    next.accumulator8 = true;
+    next.index8 = true;
+    next.accumulatorKnown = true;
+    next.indexKnown = true;
   }
   return next;
 }

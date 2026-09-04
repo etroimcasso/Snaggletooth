@@ -312,15 +312,17 @@ std::string handlerLabel(std::string_view name) {
   return dialect.reserved(assembler::upper(label)) ? label + "_handler" : label;
 }
 
-// The vectors as trace entries: reset in the mode the CPU powers on in, every
-// interrupt handler in native mode with the widths unknown, since the image
-// cannot say what the interrupted code had.
+// The vectors as trace entries, each in the mode the CPU takes it in. The
+// emulation-mode set — reset among them — is taken only with the emulation flag
+// set, which fixes both widths at eight; the native set is taken in native mode,
+// with the widths whatever the interrupted code had, which the image cannot say.
 std::vector<TraceEntry> vectorTraceEntries(const CartridgeHeader& header) {
   std::vector<TraceEntry> entries;
   for (const VectorEntry& vector : vectorEntries(header)) {
+    const bool native = vector.name.ends_with("_native");
     entries.push_back(TraceEntry{
         .address = vector.address,
-        .mode = vector.name == "reset" ? Cpu65816Mode::reset() : Cpu65816Mode::nativeUnknown(),
+        .mode = native ? Cpu65816Mode::nativeUnknown() : Cpu65816Mode::reset(),
         .name = handlerLabel(vector.name)});
   }
   return entries;
