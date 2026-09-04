@@ -108,16 +108,18 @@ struct SparseBus final : snaggletooth::ir::Bus {
 };
 
 Registers registersOf(const RegState& r) {
-  return Registers{.pc = r.pc,
-                   .s = r.s,
-                   .a = r.a,
-                   .x = r.x,
-                   .y = r.y,
-                   .d = r.d,
-                   .p = r.p,
-                   .dbr = r.dbr,
-                   .pbr = r.pbr,
-                   .e = r.e};
+  Registers out;
+  out.pc = r.pc;
+  out.s = r.s;
+  out.a = r.a;
+  out.x = r.x;
+  out.y = r.y;
+  out.d = r.d;
+  out.p = r.p;
+  out.dbr = r.dbr;
+  out.pbr = r.pbr;
+  out.e = r.e;
+  return out;
 }
 
 Cpu65816Mode modeOf(const RegState& r) {
@@ -181,7 +183,9 @@ void runCase(const VectorCase& c, const Cpu65816Mode& liftMode, std::uint8_t opc
   }
 
   const Registers& r = interpreter.registers;
-  if (!capped) EXPECT_EQ(int{r.pc}, int{c.final_.pc}) << name << " (pc)";
+  if (!capped) {
+    EXPECT_EQ(int{r.pc}, int{c.final_.pc}) << name << " (pc)";
+  }
   EXPECT_EQ(int{r.s}, int{c.final_.s}) << name << " (s)";
   EXPECT_EQ(int{r.a}, int{c.final_.a}) << name << " (a)";
   EXPECT_EQ(int{r.x}, int{c.final_.x}) << name << " (x)";

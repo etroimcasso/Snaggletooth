@@ -94,8 +94,17 @@ struct IrBus final : Bus {
 };
 
 Registers registersOf(const Cpu65816State& s) {
-  Registers r{.pc = s.pc, .s = s.s, .a = s.a, .x = s.x, .y = s.y, .d = s.d,
-              .p = s.p, .dbr = s.dbr, .pbr = s.pbr, .e = s.e};
+  Registers r;
+  r.pc = s.pc;
+  r.s = s.s;
+  r.a = s.a;
+  r.x = s.x;
+  r.y = s.y;
+  r.d = s.d;
+  r.p = s.p;
+  r.dbr = s.dbr;
+  r.pbr = s.pbr;
+  r.e = s.e;
   r.run = s.run == CpuRunState::Running   ? Run::Running
           : s.run == CpuRunState::Waiting ? Run::Waiting
                                           : Run::Stopped;
@@ -271,7 +280,7 @@ TEST(Lift, EightBitAccumulatorLoadKeepsTheHighByte) {
   Scenario sc;
   sc.state = native(true, false);
   sc.state.a = 0xBB00;
-  sc.bytes = {0xA9, 0x7F};  // LDA #$7F
+  sc.bytes = std::vector<std::uint8_t>{0xA9, 0x7F};  // LDA #$7F
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.a}, 0xBB7F);
   EXPECT_EQ(widthOfEffectOn(out.node, Op::SetNZ, Place::A), Width::Byte);
@@ -281,7 +290,7 @@ TEST(Lift, EightBitIndexTransferClearsTheHighByte) {
   Scenario sc;
   sc.state = native(false, true);
   sc.state.a = 0x1234;
-  sc.bytes = {0xAA};  // TAX
+  sc.bytes = std::vector<std::uint8_t>{0xAA};  // TAX
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.x}, 0x34);
 }
@@ -290,7 +299,7 @@ TEST(Lift, SixteenBitTransfersToDirectAndStackMoveTheWholeAccumulator) {
   Scenario sc;
   sc.state = native(true, true);
   sc.state.a = 0x8001;
-  sc.bytes = {0x5B, 0x1B};  // TCD ; TCS
+  sc.bytes = std::vector<std::uint8_t>{0x5B, 0x1B};  // TCD ; TCS
   sc.steps = 2;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.d}, 0x8001);
@@ -302,7 +311,7 @@ TEST(Lift, RepWidensAndSepNarrowsThroughTheSameWrite) {
   Scenario sc;
   sc.state = native(true, true);
   sc.state.x = 0x00FF;
-  sc.bytes = {0xC2, 0x30, 0xA2, 0x34, 0x12, 0xE2, 0x10};  // REP #$30 ; LDX #$1234 ; SEP #$10
+  sc.bytes = std::vector<std::uint8_t>{0xC2, 0x30, 0xA2, 0x34, 0x12, 0xE2, 0x10};  // REP #$30 ; LDX #$1234 ; SEP #$10
   sc.steps = 3;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.x}, 0x34) << "narrowing X clears its high byte";
@@ -312,7 +321,7 @@ TEST(Lift, RepWidensAndSepNarrowsThroughTheSameWrite) {
 TEST(Lift, RepMaskIsInertUnderEmulation) {
   Scenario sc;
   sc.state = emulation();
-  sc.bytes = {0xC2, 0x30};  // REP #$30
+  sc.bytes = std::vector<std::uint8_t>{0xC2, 0x30};  // REP #$30
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.p & (kCpuFlagM | kCpuFlagX)), int{kCpuFlagM | kCpuFlagX});
 }
@@ -325,7 +334,7 @@ TEST(Lift, PlpNarrowingTheIndexClearsTheHighBytes) {
   sc.state.y = 0xABCD;
   sc.state.s = 0x01FE;
   sc.memory[0x0001FF] = 0x30;  // the status byte to pull: M and X set
-  sc.bytes = {0x28};           // PLP
+  sc.bytes = std::vector<std::uint8_t>{0x28};           // PLP
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.x}, 0x34);
   EXPECT_EQ(int{out.ir.y}, 0xCD);
@@ -340,7 +349,7 @@ TEST(Lift, WidthAfterPlpIsTheLiveFlagsWhenTheTraceDoesNotKnowIt) {
     sc.state.a = 0x1122;
     sc.memory[0x340010] = 0x55;
     sc.memory[0x340011] = 0x66;
-    sc.bytes = {0xAD, 0x10, 0x00};  // LDA !$0010
+    sc.bytes = std::vector<std::uint8_t>{0xAD, 0x10, 0x00};  // LDA !$0010
     sc.liftMode = Cpu65816Mode::nativeUnknown();
     const Outcome out = runSame(sc);
     EXPECT_EQ(widthOfEffectOn(out.node, Op::SetNZ, Place::A), Width::ByM);
@@ -357,7 +366,7 @@ TEST(Lift, RtiInNativeModePullsTheBankAndAppliesTheStatusLast) {
   sc.memory[0x0001FE] = 0x90;  // PC high
   sc.memory[0x0001FF] = 0x7E;  // PBR
   sc.state.x = 0x4321;
-  sc.bytes = {0x40};  // RTI
+  sc.bytes = std::vector<std::uint8_t>{0x40};  // RTI
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pbr}, 0x7E);
   EXPECT_EQ(int{out.ir.pc}, 0x9000);
@@ -371,7 +380,7 @@ TEST(Lift, RtiInEmulationModeTakesNoBank) {
   sc.memory[0x0001FD] = 0x04;
   sc.memory[0x0001FE] = 0x00;
   sc.memory[0x0001FF] = 0x90;
-  sc.bytes = {0x40};  // RTI
+  sc.bytes = std::vector<std::uint8_t>{0x40};  // RTI
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pbr}, 0x12);
   EXPECT_EQ(out.irLog.size(), 3u);
@@ -383,7 +392,7 @@ TEST(Lift, XceEnteringEmulationForcesTheWidthsAndPinsTheStack) {
   sc.state.p |= kCpuFlagC;
   sc.state.s = 0x1FFF;
   sc.state.x = 0x1234;
-  sc.bytes = {0xFB};  // XCE
+  sc.bytes = std::vector<std::uint8_t>{0xFB};  // XCE
   const Outcome out = runSame(sc);
   EXPECT_TRUE(out.ir.e);
   EXPECT_EQ(int{out.ir.s}, 0x01FF);
@@ -397,7 +406,7 @@ TEST(Lift, CompareMovesNZCAndLeavesV) {
   sc.state = native(true, true);
   sc.state.a = 0x10;
   sc.state.p |= kCpuFlagV;
-  sc.bytes = {0xC9, 0x20};  // CMP #$20
+  sc.bytes = std::vector<std::uint8_t>{0xC9, 0x20};  // CMP #$20
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.p & kCpuFlagV), int{kCpuFlagV});
   EXPECT_EQ(static_cast<int>(out.ir.p & kCpuFlagC), 0);
@@ -409,7 +418,7 @@ TEST(Lift, BitImmediateMovesZAloneAndBitFromMemoryTakesNVFromTheOperand) {
   sc.state = native(true, true);
   sc.state.a = 0x01;
   sc.memory[0x340020] = 0xC0;
-  sc.bytes = {0x89, 0xC0, 0x2C, 0x20, 0x00};  // BIT #$C0 ; BIT !$0020
+  sc.bytes = std::vector<std::uint8_t>{0x89, 0xC0, 0x2C, 0x20, 0x00};  // BIT #$C0 ; BIT !$0020
   sc.steps = 1;
   Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.p & (kCpuFlagN | kCpuFlagV)), 0);
@@ -425,7 +434,7 @@ TEST(Lift, TsbMovesZOnlyAndWritesTheBitsSet) {
   sc.state.a = 0x81;
   sc.state.p |= kCpuFlagN | kCpuFlagC;
   sc.memory[0x000010] = 0x01;
-  sc.bytes = {0x04, 0x10};  // TSB $10
+  sc.bytes = std::vector<std::uint8_t>{0x04, 0x10};  // TSB $10
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.irMem.at(0x000010)}, 0x81);
   EXPECT_EQ(static_cast<int>(out.ir.p & (kCpuFlagN | kCpuFlagC)), int{kCpuFlagN | kCpuFlagC});
@@ -437,7 +446,7 @@ TEST(Lift, IncMovesNZOnlyAndXbaSetsThemFromTheNewLowByte) {
   sc.state = native(true, true);
   sc.state.a = 0x80FF;
   sc.state.p |= kCpuFlagC;
-  sc.bytes = {0x1A, 0xEB};  // INC A ; XBA
+  sc.bytes = std::vector<std::uint8_t>{0x1A, 0xEB};  // INC A ; XBA
   sc.steps = 2;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.a}, 0x0080);
@@ -452,7 +461,7 @@ TEST(Lift, PlbAndPldSetNZOnWhatTheyLoaded) {
   sc.memory[0x0001FD] = 0x80;  // PLB pulls $80
   sc.memory[0x0001FE] = 0x00;  // PLD pulls $0000
   sc.memory[0x0001FF] = 0x00;
-  sc.bytes = {0xAB, 0x2B};  // PLB ; PLD
+  sc.bytes = std::vector<std::uint8_t>{0xAB, 0x2B};  // PLB ; PLD
   sc.steps = 1;
   Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.p & kCpuFlagN), int{kCpuFlagN});
@@ -474,7 +483,7 @@ TEST(Lift, DecimalAddAndSubtractAtEightAndSixteenBits) {
           sc.state = native(a8, true);
           sc.state.p |= kCpuFlagD | (carry ? kCpuFlagC : 0);
           sc.state.a = a;
-          sc.bytes = {opcode, static_cast<std::uint8_t>(m)};
+          sc.bytes = std::vector<std::uint8_t>{opcode, static_cast<std::uint8_t>(m)};
           if (!a8) sc.bytes.push_back(static_cast<std::uint8_t>(m >> 8));
           runSame(sc);
         }
@@ -489,7 +498,7 @@ TEST(Lift, DirectPageWrapsWithinBankZeroAndCostsACycleWithALowByte) {
   sc.state = native(true, true);
   sc.state.d = 0xFFF1;
   sc.memory[0x000000] = 0x42;  // $FFF1 + $0F wraps to $0000
-  sc.bytes = {0xA5, 0x0F};     // LDA $0F
+  sc.bytes = std::vector<std::uint8_t>{0xA5, 0x0F};     // LDA $0F
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0x42);
   EXPECT_EQ(out.irCycles, 4u);
@@ -501,7 +510,7 @@ TEST(Lift, DirectPageStaysInThePageUnderEmulationWithAPageAlignedRegister) {
   sc.state.d = 0x1200;
   sc.state.x = 0x10;
   sc.memory[0x001205] = 0x99;  // $F5 + $10 stays in page $12
-  sc.bytes = {0xB5, 0xF5};     // LDA $F5,X
+  sc.bytes = std::vector<std::uint8_t>{0xB5, 0xF5};     // LDA $F5,X
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0x99);
 }
@@ -512,7 +521,7 @@ TEST(Lift, SixteenBitDirectOperandSecondByteStepsWithinBankZero) {
   sc.state.d = 0xFFFF;
   sc.memory[0x00FFFF] = 0x34;
   sc.memory[0x000000] = 0x12;
-  sc.bytes = {0xA5, 0x00};  // LDA $00 at D = $FFFF
+  sc.bytes = std::vector<std::uint8_t>{0xA5, 0x00};  // LDA $00 at D = $FFFF
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.a}, 0x1234);
 }
@@ -527,7 +536,7 @@ TEST(Lift, SixtyFiveOhTwoPointerWrapsInThePageUnderEmulationWithDZero) {
   sc.memory[0x000000] = 0x80;  // ... high wraps to $00: pointer $8000
   sc.memory[0x000100] = 0xEE;  // where the pointer would read if it stepped out
   sc.memory[0x348001] = 0x77;
-  sc.bytes = {0xB1, 0xFF};  // LDA ($FF),Y
+  sc.bytes = std::vector<std::uint8_t>{0xB1, 0xFF};  // LDA ($FF),Y
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0x77);
 }
@@ -540,7 +549,7 @@ TEST(Lift, LongPointerStepsOutOfThePageUnderTheSameConditions) {
   sc.memory[0x000100] = 0x80;
   sc.memory[0x000101] = 0x7E;  // pointer $7E:8000
   sc.memory[0x7E8000] = 0x66;
-  sc.bytes = {0xA7, 0xFF};  // LDA [$FF]
+  sc.bytes = std::vector<std::uint8_t>{0xA7, 0xFF};  // LDA [$FF]
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0x66);
 }
@@ -552,7 +561,7 @@ TEST(Lift, PointerStepsOutWhenTheDirectRegisterIsNotZero) {
   sc.memory[0x0001FF] = 0x00;
   sc.memory[0x000200] = 0x90;  // pointer $9000, read past the page
   sc.memory[0x349000] = 0x55;
-  sc.bytes = {0xB2, 0xFF};  // LDA ($FF)
+  sc.bytes = std::vector<std::uint8_t>{0xB2, 0xFF};  // LDA ($FF)
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0x55);
 }
@@ -563,7 +572,7 @@ TEST(Lift, IndexedAbsoluteCrossesIntoTheNextBank) {
   sc.state = native(true, true);
   sc.state.x = 0x02;
   sc.memory[0x350001] = 0xAB;  // $34:FFFF + 2
-  sc.bytes = {0xBD, 0xFF, 0xFF};  // LDA !$FFFF,X
+  sc.bytes = std::vector<std::uint8_t>{0xBD, 0xFF, 0xFF};  // LDA !$FFFF,X
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0xAB);
   EXPECT_EQ(out.irCycles, 5u) << "the page crossed under an eight-bit index";
@@ -573,7 +582,7 @@ TEST(Lift, IndexedAbsoluteReadCostsNoExtraCycleWithoutACrossing) {
   Scenario sc;
   sc.state = native(true, true);
   sc.state.x = 0x02;
-  sc.bytes = {0xBD, 0x00, 0x10};  // LDA !$1000,X
+  sc.bytes = std::vector<std::uint8_t>{0xBD, 0x00, 0x10};  // LDA !$1000,X
   const Outcome out = runSame(sc);
   EXPECT_EQ(out.irCycles, 4u);
 }
@@ -582,7 +591,7 @@ TEST(Lift, IndexedAbsoluteUnderASixteenBitIndexAlwaysPaysTheCycle) {
   Scenario sc;
   sc.state = native(true, false);
   sc.state.x = 0x0002;
-  sc.bytes = {0xBD, 0x00, 0x10};
+  sc.bytes = std::vector<std::uint8_t>{0xBD, 0x00, 0x10};
   const Outcome out = runSame(sc);
   EXPECT_EQ(out.irCycles, 5u);
 }
@@ -592,7 +601,7 @@ TEST(Lift, LongIndexedNeverWrapsAtABank) {
   sc.state = native(true, true);
   sc.state.x = 0x01;
   sc.memory[0x7F0000] = 0xCD;
-  sc.bytes = {0xBF, 0xFF, 0xFF, 0x7E};  // LDA $7E:FFFF,X
+  sc.bytes = std::vector<std::uint8_t>{0xBF, 0xFF, 0xFF, 0x7E};  // LDA $7E:FFFF,X
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0xCD);
 }
@@ -600,12 +609,12 @@ TEST(Lift, LongIndexedNeverWrapsAtABank) {
 TEST(Lift, LongOperandCarriesTheRegisterName) {
   Scenario sc;
   sc.state = native(true, true);
-  sc.bytes = {0x8F, 0x00, 0x21, 0x00};  // STA $00:2100
+  sc.bytes = std::vector<std::uint8_t>{0x8F, 0x00, 0x21, 0x00};  // STA $00:2100
   const Outcome out = runSame(sc);
   EXPECT_EQ(out.node.registerName, "INIDISP");
   Scenario absolute;
   absolute.state = native(true, true);
-  absolute.bytes = {0x8D, 0x00, 0x21};  // STA !$2100: the bank is the runtime's
+  absolute.bytes = std::vector<std::uint8_t>{0x8D, 0x00, 0x21};  // STA !$2100: the bank is the runtime's
   EXPECT_TRUE(runSame(absolute).node.registerName.empty());
 }
 
@@ -614,7 +623,7 @@ TEST(Lift, IndirectJumpPointerWrapsWithinBankZero) {
   sc.state = native(true, true);
   sc.memory[0x00FFFF] = 0x00;
   sc.memory[0x000000] = 0x90;
-  sc.bytes = {0x6C, 0xFF, 0xFF};  // JMP (!$FFFF)
+  sc.bytes = std::vector<std::uint8_t>{0x6C, 0xFF, 0xFF};  // JMP (!$FFFF)
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0x9000);
 }
@@ -625,7 +634,7 @@ TEST(Lift, IndexedIndirectJumpPointerWrapsWithinTheProgramBank) {
   sc.state.x = 0x01;
   sc.memory[0x12FFFF] = 0x00;
   sc.memory[0x120000] = 0xA0;
-  sc.bytes = {0x7C, 0xFE, 0xFF};  // JMP (!$FFFE,X)
+  sc.bytes = std::vector<std::uint8_t>{0x7C, 0xFE, 0xFF};  // JMP (!$FFFE,X)
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0xA000);
   EXPECT_EQ(int{out.ir.pbr}, 0x12);
@@ -637,7 +646,7 @@ TEST(Lift, LongIndirectJumpTakesTheBankFromTheThirdByte) {
   sc.memory[0x001000] = 0x00;
   sc.memory[0x001001] = 0xB0;
   sc.memory[0x001002] = 0x7E;
-  sc.bytes = {0xDC, 0x00, 0x10};  // JML [!$1000]
+  sc.bytes = std::vector<std::uint8_t>{0xDC, 0x00, 0x10};  // JML [!$1000]
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pbr}, 0x7E);
   EXPECT_EQ(int{out.ir.pc}, 0xB000);
@@ -648,7 +657,7 @@ TEST(Lift, BranchWrapsWithinTheProgramBank) {
   Scenario sc;
   sc.state = native(true, true);
   sc.state.pc = 0xFFFE;
-  sc.bytes = {0x80, 0x10};  // BRA +$10 from $0000
+  sc.bytes = std::vector<std::uint8_t>{0x80, 0x10};  // BRA +$10 from $0000
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0x0010);
   EXPECT_EQ(int{out.ir.pbr}, 0x12);
@@ -659,7 +668,7 @@ TEST(Lift, TakenBranchCostsACycleAndAPageCrossingOneMoreUnderEmulation) {
   native8.state = native(true, true);
   native8.state.p |= kCpuFlagZ;
   native8.state.pc = 0x80F0;
-  native8.bytes = {0xF0, 0x20};  // BEQ across the page
+  native8.bytes = std::vector<std::uint8_t>{0xF0, 0x20};  // BEQ across the page
   EXPECT_EQ(runSame(native8).irCycles, 3u);
 
   Scenario emulated = native8;
@@ -677,7 +686,7 @@ TEST(Lift, BrlAndPerAddASignedDisplacementWithinTheBank) {
   Scenario sc;
   sc.state = native(true, true);
   sc.state.pc = 0x0002;
-  sc.bytes = {0x62, 0xF0, 0xFF, 0x82, 0xF0, 0xFF};  // PER -$10 ; BRL -$10
+  sc.bytes = std::vector<std::uint8_t>{0x62, 0xF0, 0xFF, 0x82, 0xF0, 0xFF};  // PER -$10 ; BRL -$10
   sc.steps = 2;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.irMem.at(0x0001FE)}, 0xF5);  // PER pushed $FFF5
@@ -691,7 +700,7 @@ TEST(Lift, PushOfASixOhTwoRegisterWrapsInsidePageOneUnderEmulation) {
   sc.state = emulation();
   sc.state.s = 0x0100;
   sc.state.a = 0x5A;
-  sc.bytes = {0x48};  // PHA
+  sc.bytes = std::vector<std::uint8_t>{0x48};  // PHA
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.s}, 0x01FF);
   EXPECT_EQ(int{out.irMem.at(0x000100)}, 0x5A);
@@ -702,7 +711,7 @@ TEST(Lift, PushOfADirectRegisterLeavesThePageAndSettlesBack) {
   sc.state = emulation();
   sc.state.s = 0x0100;
   sc.state.d = 0x1234;
-  sc.bytes = {0x0B};  // PHD
+  sc.bytes = std::vector<std::uint8_t>{0x0B};  // PHD
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.irMem.at(0x000100)}, 0x12);
   EXPECT_EQ(int{out.irMem.at(0x0000FF)}, 0x34) << "the low byte lands below the page";
@@ -713,7 +722,7 @@ TEST(Lift, TcsUnderEmulationWritesTheLowByteOnly) {
   Scenario sc;
   sc.state = emulation();
   sc.state.a = 0x7E55;
-  sc.bytes = {0x1B};  // TCS
+  sc.bytes = std::vector<std::uint8_t>{0x1B};  // TCS
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.s}, 0x0155);
 }
@@ -725,7 +734,7 @@ TEST(Lift, IndexedIndirectCallStaysPinnedAtThePageEdgeUnderEmulation) {
   sc.state.x = 0;
   sc.memory[0x128100] = 0x00;
   sc.memory[0x128101] = 0x90;
-  sc.bytes = {0xFC, 0x00, 0x81};  // JSR (!$8100,X)
+  sc.bytes = std::vector<std::uint8_t>{0xFC, 0x00, 0x81};  // JSR (!$8100,X)
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.s}, 0x01FE);
   EXPECT_EQ(int{out.irMem.at(0x000100)}, 0x80);
@@ -738,7 +747,7 @@ TEST(Lift, CallAndReturnPairThroughTheLastByteOfTheCall) {
   Scenario sc;
   sc.state = native(true, true);
   sc.memory[0x129000] = 0x60;  // RTS at the target
-  sc.bytes = {0x20, 0x00, 0x90};  // JSR !$9000
+  sc.bytes = std::vector<std::uint8_t>{0x20, 0x00, 0x90};  // JSR !$9000
   sc.steps = 2;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0x8003);
@@ -749,7 +758,7 @@ TEST(Lift, LongCallAndReturnCarryTheBank) {
   Scenario sc;
   sc.state = native(true, true);
   sc.memory[0x7E9000] = 0x6B;  // RTL at the target
-  sc.bytes = {0x22, 0x00, 0x90, 0x7E};  // JSL $7E:9000
+  sc.bytes = std::vector<std::uint8_t>{0x22, 0x00, 0x90, 0x7E};  // JSL $7E:9000
   sc.steps = 2;
   Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pbr}, 0x12);
@@ -763,7 +772,7 @@ TEST(Lift, LongCallAndReturnCarryTheBank) {
 TEST(Lift, PushEffectiveThenReturnDispatchesWithNoSpecialCase) {
   Scenario sc;
   sc.state = native(false, false);  // sixteen bits everywhere; PEA pushes sixteen regardless
-  sc.bytes = {0xF4, 0xFF, 0x8F, 0x60};  // PEA $8FFF ; RTS
+  sc.bytes = std::vector<std::uint8_t>{0xF4, 0xFF, 0x8F, 0x60};  // PEA $8FFF ; RTS
   sc.steps = 2;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0x9000);
@@ -776,7 +785,7 @@ TEST(Lift, BrkInNativeModeSavesTheBankAndEntersBankZero) {
   sc.state.p |= kCpuFlagD;
   sc.memory[0x00FFE6] = 0x00;
   sc.memory[0x00FFE7] = 0xC0;
-  sc.bytes = {0x00, 0x00};  // BRK
+  sc.bytes = std::vector<std::uint8_t>{0x00, 0x00};  // BRK
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pbr}, 0);
   EXPECT_EQ(int{out.ir.pc}, 0xC000);
@@ -790,7 +799,7 @@ TEST(Lift, CopInEmulationModeSavesThreeBytesThroughItsOwnVector) {
   sc.state = emulation();
   sc.memory[0x00FFF4] = 0x00;
   sc.memory[0x00FFF5] = 0xD0;
-  sc.bytes = {0x02, 0x00};  // COP
+  sc.bytes = std::vector<std::uint8_t>{0x02, 0x00};  // COP
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0xD000);
   EXPECT_EQ(int{out.ir.s}, 0x01FC);
@@ -806,7 +815,7 @@ TEST(Lift, HardwareInterruptIsAnInputRunAsTheSameEntrySequence) {
     sc.memory[0x00FFEB] = 0xE0;
     sc.memory[0x00FFFA] = 0x00;
     sc.memory[0x00FFFB] = 0xE1;
-    sc.bytes = {0xEA, 0xEA};  // NOP ; then the request lands ; NOP at the handler
+    sc.bytes = std::vector<std::uint8_t>{0xEA, 0xEA};  // NOP ; then the request lands ; NOP at the handler
     sc.steps = 2;
     sc.nmiBefore = 2;
     const Outcome out = runSame(sc);
@@ -819,11 +828,11 @@ TEST(Lift, HardwareInterruptIsAnInputRunAsTheSameEntrySequence) {
 TEST(Lift, WaitAndStopHaltTheInterpreterAsTheyHaltTheCore) {
   Scenario wait;
   wait.state = native(true, true);
-  wait.bytes = {0xCB};  // WAI
+  wait.bytes = std::vector<std::uint8_t>{0xCB};  // WAI
   EXPECT_EQ(static_cast<int>(runSame(wait).ir.run), static_cast<int>(Run::Waiting));
   Scenario stop;
   stop.state = native(true, true);
-  stop.bytes = {0xDB};  // STP
+  stop.bytes = std::vector<std::uint8_t>{0xDB};  // STP
   EXPECT_EQ(static_cast<int>(runSame(stop).ir.run), static_cast<int>(Run::Stopped));
 }
 
@@ -832,7 +841,7 @@ TEST(Lift, EmulationModeReadModifyWriteWritesItsAddressTwice) {
   Scenario sc;
   sc.state = emulation();
   sc.memory[0x342100] = 0x0F;
-  sc.bytes = {0xEE, 0x00, 0x21};  // INC !$2100, in the data bank
+  sc.bytes = std::vector<std::uint8_t>{0xEE, 0x00, 0x21};  // INC !$2100, in the data bank
   const Outcome out = runSame(sc);
   ASSERT_EQ(out.irLog.size(), 3u);
   EXPECT_FALSE(out.irLog[0].write);
@@ -847,7 +856,7 @@ TEST(Lift, SixteenBitReadModifyWriteWritesTheHighByteFirst) {
   sc.state = native(false, true);
   sc.memory[0x340020] = 0xFF;
   sc.memory[0x340021] = 0x00;
-  sc.bytes = {0xEE, 0x20, 0x00};  // INC !$0020
+  sc.bytes = std::vector<std::uint8_t>{0xEE, 0x20, 0x00};  // INC !$0020
   const Outcome out = runSame(sc);
   ASSERT_EQ(out.irLog.size(), 4u);
   EXPECT_EQ(out.irLog[2].address, 0x340021u);
@@ -865,7 +874,7 @@ TEST(Lift, BlockMoveCarriesOneBytePerRunAndReentersUntilTheCountRunsOut) {
   sc.memory[0x7E0010] = 1;
   sc.memory[0x7E0011] = 2;
   sc.memory[0x7E0012] = 3;
-  sc.bytes = {0x54, 0x7F, 0x7E};  // MVN $7E,$7F
+  sc.bytes = std::vector<std::uint8_t>{0x54, 0x7F, 0x7E};  // MVN $7E,$7F
   sc.steps = 3;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.ir.pc}, 0x8003);
@@ -883,7 +892,7 @@ TEST(Lift, BlockMoveDownwardStepsTheIndexesAtTheirWidth) {
   sc.state.y = 0x00;
   sc.memory[0x7E0000] = 0xAA;
   sc.memory[0x7E00FF] = 0xBB;
-  sc.bytes = {0x44, 0x7F, 0x7E};  // MVP $7E,$7F
+  sc.bytes = std::vector<std::uint8_t>{0x44, 0x7F, 0x7E};  // MVP $7E,$7F
   sc.steps = 2;
   const Outcome out = runSame(sc);
   EXPECT_EQ(int{out.irMem.at(0x7F0000)}, 0xAA);
@@ -902,7 +911,7 @@ TEST(Lift, InterruptBetweenBlockMoveBytesIsOnlyAnInterrupt) {
   sc.memory[0x00FFEA] = 0x00;
   sc.memory[0x00FFEB] = 0xE0;
   sc.memory[0x00E000] = 0x40;  // RTI at the handler
-  sc.bytes = {0x54, 0x7F, 0x7E};
+  sc.bytes = std::vector<std::uint8_t>{0x54, 0x7F, 0x7E};
   sc.steps = 4;  // byte one, the request, RTI, byte two
   sc.nmiBefore = 2;
   const Outcome out = runSame(sc);
@@ -914,7 +923,7 @@ TEST(Lift, InterruptBetweenBlockMoveBytesIsOnlyAnInterrupt) {
 TEST(Lift, AReadsValueIsWhateverTheBusAnswers) {
   Scenario sc;
   sc.state = native(true, true);
-  sc.bytes = {0xAD, 0x10, 0x42};  // LDA !$4210: nothing at that address here
+  sc.bytes = std::vector<std::uint8_t>{0xAD, 0x10, 0x42};  // LDA !$4210: nothing at that address here
   const Outcome out = runSame(sc);
   EXPECT_EQ(static_cast<int>(out.ir.a & 0xFFu), 0);
   EXPECT_EQ(out.irLog.front().address, 0x344210u);

@@ -253,6 +253,11 @@ struct Run65816 {
   }
 
   // ---- conditions ----
+  [[nodiscard]] static Operand placeOperand(Place place) {
+    Operand o;
+    o.place = place;
+    return o;
+  }
   [[nodiscard]] bool holds(const Cond& cond) const {
     if (cond.andEmulation && !r.e) return false;
     switch (cond.when) {
@@ -261,8 +266,8 @@ struct Run65816 {
       case When::Native: return !r.e;
       case When::FlagSet: return flag(flagMask(cond.place));
       case When::FlagClear: return !flag(flagMask(cond.place));
-      case When::PlaceIs: return raw({.place = cond.place}) == cond.value;
-      case When::PlaceIsNot: return raw({.place = cond.place}) != cond.value;
+      case When::PlaceIs: return raw(placeOperand(cond.place)) == cond.value;
+      case When::PlaceIsNot: return raw(placeOperand(cond.place)) != cond.value;
       case When::DirectLowByte: return (r.d & 0xFFu) != 0;
       case When::IndexCrossed: return r.index8() && crossed;
     }

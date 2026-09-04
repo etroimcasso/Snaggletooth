@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <cstdio>
 #include <iterator>
 #include <optional>
 #include <stdexcept>
@@ -17,13 +16,32 @@ using disasm::Cpu65816Addressing;
 using disasm::Cpu65816Mode;
 
 // ---- operands ---------------------------------------------------------------
-Operand imm(std::uint32_t value) { return {.place = Place::Imm, .value = value}; }
-Operand at(Place place) { return {.place = place, .value = 0}; }
+Operand imm(std::uint32_t value) {
+  Operand o;
+  o.place = Place::Imm;
+  o.value = value;
+  return o;
+}
+Operand at(Place place) {
+  Operand o;
+  o.place = place;
+  return o;
+}
 
 Cond always() { return {}; }
-Cond when(When condition) { return {.when = condition}; }
-Cond flagSet(Place flag) { return {.when = When::FlagSet, .place = flag}; }
-Cond flagClear(Place flag) { return {.when = When::FlagClear, .place = flag}; }
+Cond when(When condition) {
+  Cond c;
+  c.when = condition;
+  return c;
+}
+Cond flagTest(When condition, Place flag) {
+  Cond c;
+  c.when = condition;
+  c.place = flag;
+  return c;
+}
+Cond flagSet(Place flag) { return flagTest(When::FlagSet, flag); }
+Cond flagClear(Place flag) { return flagTest(When::FlagClear, flag); }
 
 // The width a node's accumulator and index operations run at: a type where the
 // trace settled it, a selection by the live flag where it did not.
@@ -41,7 +59,9 @@ struct Builder {
   std::vector<Effect> effects;
 
   Effect& emit(Op op) {
-    effects.push_back(Effect{.op = op});
+    Effect e;
+    e.op = op;
+    effects.push_back(e);
     return effects.back();
   }
   void set(Place dst, Operand a, Width width, Cond cond = always()) {
@@ -699,8 +719,11 @@ void liftBlockMove(Builder& b, std::uint8_t opcode, std::uint8_t sourceBank,
   b.alu(step, Place::X, at(Place::X), imm(1), wX);
   b.alu(step, Place::Y, at(Place::Y), imm(1), wX);
   b.alu(Op::Sub, Place::A, at(Place::A), imm(1), Width::Word);
-  b.set(Place::PC, imm(address & 0xFFFFu), Width::Word,
-        Cond{.when = When::PlaceIsNot, .place = Place::A, .value = 0xFFFFu});
+  Cond countRemains;
+  countRemains.when = When::PlaceIsNot;
+  countRemains.place = Place::A;
+  countRemains.value = 0xFFFFu;
+  b.set(Place::PC, imm(address & 0xFFFFu), Width::Word, countRemains);
 }
 
 // REP clears the bits its mask names and SEP sets them, through the same write
@@ -745,32 +768,63 @@ struct Conflict {
   Cpu65816Mode mode;
 };
 
-std::optional<Conflict> parseConflict(const std::string& warning) {
-  // "$BB:XXXX is reached with e=E m=M x=X and with e=E m=M x=X"
-  unsigned bank = 0;
-  unsigned offset = 0;
-  int consumed = 0;
-  if (std::sscanf(warning.c_str(), "$%2x:%4x is reached with %n", &bank, &offset, &consumed) < 2 ||
-      consumed == 0) {
+// A run of hexadecimal digits, or nothing where the text has none.
+std::optional<unsigned> hexAt(const std::string& text, std::size_t at, std::size_t digits) {
+  if (at + digits > text.size()) return std::nullopt;
+  unsigned value = 0;
+  for (std::size_t i = 0; i < digits; ++i) {
+    const char c = text[at + i];
+    unsigned digit = 0;
+    if (c >= '0' && c <= '9') {
+      digit = static_cast<unsigned>(c - '0');
+    } else if (c >= 'A' && c <= 'F') {
+      digit = static_cast<unsigned>(c - 'A' + 10);
+    } else if (c >= 'a' && c <= 'f') {
+      digit = static_cast<unsigned>(c - 'a' + 10);
+    } else {
+      return std::nullopt;
+    }
+    value = (value << 4) | digit;
+  }
+  return value;
+}
+
+// One mode as the backend describes it: `e=E m=M x=X`, each width `8`, `16` or `?`.
+std::optional<Cpu65816Mode> modeFromText(const std::string& text) {
+  const std::size_t e = text.find("e=");
+  const std::size_t m = text.find(" m=");
+  const std::size_t x = text.find(" x=");
+  if (e == std::string::npos || m == std::string::npos || x == std::string::npos) {
     return std::nullopt;
   }
-  const std::string rest = warning.substr(static_cast<std::size_t>(consumed));
-  const std::size_t second = rest.find(" and with ");
-  if (second == std::string::npos) return std::nullopt;
-  const std::string text = rest.substr(second + 10);
-  char m[4] = {};
-  char x[4] = {};
-  int e = 0;
-  if (std::sscanf(text.c_str(), "e=%d m=%3s x=%3s", &e, m, x) != 3) return std::nullopt;
+  if (e + 2 >= text.size() || m + 3 >= text.size() || x + 3 >= text.size()) return std::nullopt;
   Cpu65816Mode mode;
-  mode.emulation = e != 0;
-  mode.accumulatorKnown = m[0] != '?';
-  mode.accumulator8 = m[0] != '1';  // "8" or "?" read as eight; "16" as sixteen
-  mode.indexKnown = x[0] != '?';
-  mode.index8 = x[0] != '1';
+  mode.emulation = text[e + 2] != '0';
+  mode.accumulatorKnown = text[m + 3] != '?';
+  mode.accumulator8 = text[m + 3] != '1';  // "8" or "?" read as eight; "16" as sixteen
+  mode.indexKnown = text[x + 3] != '?';
+  mode.index8 = text[x + 3] != '1';
   mode.carryKnown = false;
   mode.carry = false;
-  return Conflict{.address = (bank << 16) | offset, .mode = mode};
+  return mode;
+}
+
+std::optional<Conflict> parseConflict(const std::string& warning) {
+  // "$BB:XXXX is reached with e=E m=M x=X and with e=E m=M x=X"
+  static const std::string kReached = " is reached with ";
+  static const std::string kAndWith = " and with ";
+  if (warning.size() < 8 || warning[0] != '$' || warning[3] != ':') return std::nullopt;
+  const std::optional<unsigned> bank = hexAt(warning, 1, 2);
+  const std::optional<unsigned> offset = hexAt(warning, 4, 4);
+  if (!bank || !offset || warning.compare(8, kReached.size(), kReached) != 0) return std::nullopt;
+  const std::size_t second = warning.find(kAndWith, 8 + kReached.size());
+  if (second == std::string::npos) return std::nullopt;
+  const std::optional<Cpu65816Mode> mode = modeFromText(warning.substr(second + kAndWith.size()));
+  if (!mode) return std::nullopt;
+  Conflict conflict;
+  conflict.address = (*bank << 16) | *offset;
+  conflict.mode = *mode;
+  return conflict;
 }
 
 }  // namespace
