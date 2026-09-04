@@ -442,7 +442,9 @@ std::uint32_t Interpreter::execute(const Node& node, Bus& bus) {
   Run65816 run{registers, bus};
   run.normalize();
   run.cycles = node.cost.base[costIndex(registers.accumulator8(), registers.index8())];
-  for (const Effect& effect : node.effects) run.apply(effect);
+  for (effectIndex = 0; effectIndex < node.effects.size(); ++effectIndex) {
+    run.apply(node.effects[effectIndex]);
+  }
   return run.cycles;
 }
 
@@ -450,7 +452,9 @@ std::uint32_t Interpreter::interrupt(const std::vector<Effect>& sequence, Bus& b
   release();
   Run65816 run{registers, bus};
   run.normalize();
-  for (const Effect& effect : sequence) run.apply(effect);
+  for (effectIndex = 0; effectIndex < sequence.size(); ++effectIndex) {
+    run.apply(sequence[effectIndex]);
+  }
   return run.cycles;
 }
 

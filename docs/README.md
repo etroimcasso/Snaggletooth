@@ -25,12 +25,17 @@ what is unstarted.
 | See what hardware a cartridge's code drives, and which routine drives what | [snes-disassembler.md §What the code reaches](snes-disassembler.md#what-the-code-reaches) |
 | Assemble source back into bytes | [assemblers.md](assemblers.md) |
 | Lift a cartridge's code into a form with no bytes in it, and run that form | [ir.md](ir.md) |
+| Read what the lift wrote for a cartridge | [ir.md §Reading a program](ir.md#reading-a-program) |
+| Prove the lifted form runs as the machine does, over a whole recorded run | [ir.md §Running beside the machine](ir.md#running-beside-the-machine) |
+| Watch every access a running machine makes | [snes-machine.md §The bus observer](snes-machine.md#the-bus-observer) |
+| Run a directory of cartridges through every tool | [tools/README.md](../tools/README.md) |
+| Get the example cartridges the pages' output comes from | [tools/examples/README.md](../tools/examples/README.md) |
 
 ## The machine
 
 | Page | Covers |
 |---|---|
-| [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the controller ports, the multiply/divide unit, the PPU register file, DMA and HDMA, the boot handshake, and stepping, running and snapshotting |
+| [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the controller ports, the multiply/divide unit, the PPU register file, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
 | [snes-cartridge.md](snes-cartridge.md) | The cartridge as a value — the header and its vectors, the LoROM, HiROM and ExHiROM maps, where every bus address lands in the image, and the save windows |
 | [65816-cpu.md](65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 
@@ -54,7 +59,7 @@ what is unstarted.
 | [snes-disassembler.md](snes-disassembler.md) | The cartridge disassembler and verifier — a whole cartridge traced across its banks from the vectors into one source file per bank, the sound program captured from the machine as a file of its own, the stops a person answers with entries, what is placed, `snes_verify`, which assembles the tree back and reports the difference from the image, what the traced code reaches and which routine reaches it, and the cartridge run on the machine — unattended or played from a script — so its indirect jumps' destinations become entries |
 | [project-manifest.md](project-manifest.md) | The project manifest — the lines that name the image, the files and their ranges, the sound program's blocks, the entries, stops and warnings, and the hardware the code reaches and the routines that reach it; what each tool reads back; stability |
 | [input-script.md](input-script.md) | The input script — the recorded run `snes_disasm --input` replays into the controller ports: its line form, frames, ports, buttons, refusals, library and stability |
-| [ir.md](ir.md) | The intermediate representation — a 65816 program as its meaning: the instruction layer and the effect layer, the vocabulary, every wrap and flag rule the effects follow, the measured cost, the lift from a listing, the interpreter, and how both are held to the core |
+| [ir.md](ir.md) | The intermediate representation — a 65816 program as its meaning: the instruction layer and the effect layer, the vocabulary, every wrap and flag rule the effects follow, the measured cost, the lift from a listing, the interpreter, the program written out for reading, the run replayed beside the machine with every access, register and cycle checked, and how all of it is held to the core |
 | [assemblers.md](assemblers.md) | The two assemblers — the command lines, what is written, the diagnostics, how the 65816's widths are followed, the library, and writing a dialect |
 | [assembly-lexicon.md](assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |
 | [spc700-assembly.md](spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |

@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "cartridge_fixtures.h"
+#include "examples/example_cartridges.h"
 #include "gtest/gtest.h"
 #include "rom/rom_disasm.h"
 #include "rom/rom_facts.h"
@@ -26,9 +26,9 @@
 namespace snaggletooth::disasm {
 namespace {
 
-using fixtures::loRomImage;
-using fixtures::put;
-using fixtures::threeBankImage;
+using examples::loRomImage;
+using examples::put;
+using examples::threeBankImage;
 
 // The register at an address, or a default row and a failure naming the address.
 Cpu65816Register at(Address address) {

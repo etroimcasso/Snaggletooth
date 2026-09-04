@@ -11,15 +11,15 @@
 #include <string>
 #include <vector>
 
-#include "cartridge_fixtures.h"
+#include "examples/example_cartridges.h"
 #include "gtest/gtest.h"
 #include "rom/rom_verify.h"
 
 namespace snaggletooth::disasm {
 namespace {
 
-using fixtures::threeBankImage;
-using fixtures::uploadingImage;
+using examples::threeBankImage;
+using examples::uploadingImage;
 
 // A tree as text: the manifest and every file, by the path the manifest names.
 struct Tree {
@@ -176,7 +176,7 @@ TEST(RomVerify, ThreeBanksWithoutASoundProgramAssembleToTheImage) {
 
 TEST(RomVerify, AnUnplacedBlockIsTheBanksAndIsNotCompared) {
   std::vector<std::uint8_t> rom = uploadingImage();
-  std::copy(fixtures::kUploadedProgram.begin(), fixtures::kUploadedProgram.end(),
+  std::copy(examples::kUploadedProgram.begin(), examples::kUploadedProgram.end(),
             rom.begin() + 0x1000);
   const VerifyReport report = verify(treeOf(rom, true), rom);
   EXPECT_TRUE(report.identical()) << renderReport(report);
@@ -185,7 +185,7 @@ TEST(RomVerify, AnUnplacedBlockIsTheBanksAndIsNotCompared) {
 }
 
 TEST(RomVerify, AHandlerNamedLikeAMnemonicStillAssembles) {
-  const std::vector<std::uint8_t> rom = fixtures::copVectorImage();
+  const std::vector<std::uint8_t> rom = examples::copVectorImage();
   const Tree tree = treeOf(rom, false);
   EXPECT_NE(tree.files.at("bank_00.asm").find("\ncop_handler:\n"), std::string::npos);
   const VerifyReport report = verify(tree, rom);
@@ -199,7 +199,7 @@ TEST(RomVerify, AHandlerNamedLikeAMnemonicStillAssembles) {
 // written as data. Either way every uploaded byte is in the file, and a branch
 // to a line the file does not hold as an instruction stays an address.
 TEST(RomVerify, AnInstructionAcrossTwoUploadedPiecesIsKeptWhole) {
-  const std::vector<std::uint8_t> rom = fixtures::straddlingUploadImage();
+  const std::vector<std::uint8_t> rom = examples::straddlingUploadImage();
   const Tree tree = treeOf(rom, true);
   const std::string& sound = tree.files.at("apu/driver.asm");
   EXPECT_NE(sound.find("; $0200: 24 bytes, read from image offset $0000A0\n"), std::string::npos) << sound;

@@ -15,6 +15,7 @@
 // counter and flags, supplies a hardware interrupt between two nodes when one is
 // due, and answers every read.
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -57,6 +58,10 @@ struct Registers {
 class Interpreter {
  public:
   Registers registers;
+
+  // The index, in the sequence being run, of the effect whose accesses the bus
+  // is answering — so a bus that reports where an access came from can name it.
+  std::size_t effectIndex = 0;
 
   // Runs one node: re-establishes the invariants the chip holds between
   // instructions — the index high bytes zero while the index registers are eight

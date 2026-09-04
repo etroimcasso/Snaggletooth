@@ -1,5 +1,5 @@
 // A whole cartridge disassembled into a source tree. The images are the
-// hand-built cartridges of `cartridge_fixtures.h` — a LoROM header, a few
+// hand-built cartridges of `examples/example_cartridges.h` — a LoROM header, a few
 // banks of 65816 code that call and jump across them, and one whose reset code
 // speaks the audio upload protocol — so each case pins one rule about how the
 // tree is traced, split, matched to the image, and written.
@@ -14,19 +14,19 @@
 #include <string>
 #include <vector>
 
-#include "cartridge_fixtures.h"
+#include "examples/example_cartridges.h"
 #include "gtest/gtest.h"
 #include "rom/rom_disasm.h"
 
 namespace snaggletooth::disasm {
 namespace {
 
-using fixtures::kUploadedProgram;
-using fixtures::kUploadedTable;
-using fixtures::loRomImage;
-using fixtures::put;
-using fixtures::threeBankImage;
-using fixtures::uploadingImage;
+using examples::kUploadedProgram;
+using examples::kUploadedTable;
+using examples::loRomImage;
+using examples::put;
+using examples::threeBankImage;
+using examples::uploadingImage;
 
 CartridgeDisassembly disassembleWithoutSound(std::span<const std::uint8_t> rom) {
   CartridgeRequest request;
@@ -190,7 +190,7 @@ TEST(RomDisasm, AnEntryAPersonAddsIsTracedUnderItsMode) {
 // so the label carries `_handler`; every other vector's name is its label. A
 // person's entry with such a name is renamed the same way, and told.
 TEST(RomDisasm, AVectorNamedLikeAMnemonicIsLabelledAsAHandler) {
-  const std::vector<std::uint8_t> rom = fixtures::copVectorImage();
+  const std::vector<std::uint8_t> rom = examples::copVectorImage();
   const CartridgeDisassembly d = disassembleWithoutSound(rom);
   ASSERT_EQ(d.entries.size(), 3u);
   EXPECT_EQ(d.entries[0].name, "reset");

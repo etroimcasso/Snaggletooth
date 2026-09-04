@@ -90,7 +90,8 @@ The table below is kept honest as components land.
 | Cartridge verifier | **complete** — `snes_verify` executes a tree's manifest: assembles every file with the two assemblers, places each range and each sound block where the manifest says, and reports every file, every differing run with its first differing byte, and every byte nobody produced; thirty-one cartridges across all three maps rebuild their images byte for byte |
 | SPC700 assembler | **complete** — the SPC700 dialect over the assembler library, built from the disassembler's own table: every opcode round-trips through its text, and a real sound program's dump reassembles byte for byte and renders byte-identical audio |
 | 65816 assembler | **complete** — the 65816 dialect over the same library: follows the register widths through `REP`, `SEP` and `XCE` the way the disassembler does, and the source states the mode a region begins in; every opcode round-trips under every width, and a whole cartridge's tree reassembles to its image byte for byte |
-| SNES machine (bus, memory map, clock, timing) | in progress — the LoROM, HiROM and ExHiROM maps read from the cartridge header, work RAM and its data port, APU communication ports, the 6/8/12-master-cycle region model at both clock rates, exact master-cycle budgeting and the CPU-to-APU interleave, video counters, vertical-blank NMI and H/V-timer IRQ, multiply/divide unit, PPU register file, eight DMA/HDMA channels, and the audio boot handshake. The rendering PPU remains |
+| Intermediate representation | in progress — every 65816 instruction lifted into a form with no bytes in it, two layers over one set of nodes: what source says, and the typed effects the chip performs with every wrap, flag and cycle rule stated. An interpreter runs the effects and nothing else, and is held to the core two ways: the vector suite at unit grain, and a whole recorded run replayed on the machine with every access, register and cycle checked instruction by instruction. `snes_lift` writes a cartridge's program out for reading; `snes_differential` replays its run and reports. Nothing renders from it yet |
+| SNES machine (bus, memory map, clock, timing) | in progress — the LoROM, HiROM and ExHiROM maps read from the cartridge header, work RAM and its data port, APU communication ports, the 6/8/12-master-cycle region model at both clock rates, exact master-cycle budgeting and the CPU-to-APU interleave, video counters, vertical-blank NMI and H/V-timer IRQ, multiply/divide unit, PPU register file, eight DMA/HDMA channels, the audio boot handshake, and an observer told every access the machine makes. The rendering PPU remains |
 | SPC dump loader + WAV renderer | in progress — loads a dump into the machine and renders 32 kHz WAV; output not yet validated against reference renders |
 | Public embedding API | not started |
 | PPU, full system | future — see the roadmap |
@@ -119,7 +120,9 @@ The pages live in [docs/](docs/README.md), which indexes them by subject and say
 | [assembly-lexicon.md](docs/assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |
 | [spc700-assembly.md](docs/spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |
 | [65816-assembly.md](docs/65816-assembly.md) | The 65816 dialect — its addressing modes, the width and mode directives, regions, and the long, jump, block-move and stack forms |
+| [ir.md](docs/ir.md) | The intermediate representation — a 65816 program as its meaning, the lift, the interpreter, the program written out for reading, the run replayed beside the machine, and how it is held to the core |
 | [tools/README.md](tools/README.md) | The command-line tools and the libraries behind them, with a README beside each |
+| [tools/examples/README.md](tools/examples/README.md) | The example cartridges every page's output comes from, one directory each |
 
 ## Roadmap
 
