@@ -233,6 +233,27 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The intermediate representation — a 65816 program as its meaning, with no
+  # bytes in it: the model, the lift from a listing (the one consumer of bytes),
+  # and the interpreter that runs the effects and nothing else. The lift links
+  # the 65816 backend because it reads a listing and the measured cycle tables;
+  # the interpreter's own translation unit includes neither.
+  add_library(snaggletooth_ir STATIC
+    tools/ir/cpu65816_lift.cpp
+    tools/ir/ir_interpret.cpp
+  )
+  target_link_libraries(snaggletooth_ir PUBLIC snaggletooth_cpu65816)
+  target_include_directories(snaggletooth_ir PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_ir PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_ir PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_ir PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_ir PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   add_executable(snes_disasm tools/rom/snes_disasm_main.cpp)
   target_link_libraries(snes_disasm PRIVATE snaggletooth_rom)
   if(MSVC)
@@ -331,6 +352,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/rom/rom_disasm_test.cpp
     tests/rom/routines_test.cpp
     tests/rom/verify_test.cpp
+    tests/ir/lift_test.cpp
+    tests/ir/ir_vector_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/controller_test.cpp
@@ -364,13 +387,15 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
     snaggletooth_rom
+    snaggletooth_ir
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
     SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}"
     SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}"
-    SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}")
+    SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}"
+    SNAGGLETOOTH_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   # The IPL-stub test seeds the stub into an audio machine through the internal
   # seam in src/, so the test target reaches the private headers there.
   target_include_directories(snaggletooth_tests PRIVATE
