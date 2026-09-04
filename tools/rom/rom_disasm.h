@@ -31,6 +31,7 @@
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
 #include "rom/rom_facts.h"
+#include "rom/rom_observe.h"
 #include "snaggletooth/snes/cartridge.h"
 
 namespace snaggletooth::disasm {
@@ -123,6 +124,9 @@ struct CartridgeDisassembly {
   // are written fresh on every run and read back by nothing — see `rom_facts.h`.
   std::vector<HardwareAccess> accesses;
   std::vector<DmaTransfer> dmas;
+  // The targets a run saw the indirect jumps take, this run's and every earlier
+  // manifest's, each traced from as an entry — see `rom_observe.h`.
+  std::vector<ReachedTarget> reached;
 };
 
 // What to disassemble. `entries` are the entry points beyond the vectors, which
@@ -135,8 +139,17 @@ struct CartridgeRequest {
   std::span<const std::uint8_t> rom;
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
+  std::vector<ReachedTarget> reached;  // what earlier runs saw, read back from the manifest
   bool captureSound = true;
   std::uint64_t bootMasterCycles = 15u * 21'477'272u;
+  // `observeRun` boots the machine and steps it for `runMasterCycles` — sixty
+  // seconds of the master clock — recording the targets the indirect jumps take,
+  // which the trace then starts from beside the vectors and entries. Off unless
+  // asked for: the run costs about as long as it emulates, and a caller that
+  // wants the trace alone should not pay it. `snes_disasm` asks for it unless
+  // told `--no-run`.
+  bool observeRun = false;
+  std::uint64_t runMasterCycles = 60u * 21'477'272u;
 };
 
 // Disassembles the cartridge: the header, the regions traced from every entry with
@@ -184,14 +197,15 @@ struct ManifestSound {
 struct ManifestInput {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
+  std::vector<ReachedTarget> reached;
   std::optional<CartridgeMap> map;
   std::optional<ManifestSound> sound;
   std::optional<std::size_t> imageBytes;
   std::optional<std::uint16_t> checksum;
 };
 
-// Reads the entries, regions, map, sound program and image identity out of a
-// manifest. Nothing, with `error` naming the line, when a line does not parse,
+// Reads the entries, reached targets, regions, map, sound program and image
+// identity out of a manifest. Nothing, with `error` naming the line, when a line does not parse,
 // or when a block names a file no `sound` line does.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
 

@@ -216,6 +216,7 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     tools/rom/cartridge_entries.cpp
     tools/rom/rom_disasm.cpp
     tools/rom/rom_facts.cpp
+    tools/rom/rom_observe.cpp
     tools/rom/rom_verify.cpp
   )
   target_link_libraries(snaggletooth_rom PUBLIC
@@ -324,6 +325,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/cartridge_header_test.cpp
     tests/rom/cartridge_entries_test.cpp
     tests/rom/facts_test.cpp
+    tests/rom/observe_test.cpp
     tests/rom/rom_disasm_test.cpp
     tests/rom/verify_test.cpp
     tests/snes/machine_test.cpp

@@ -12,7 +12,8 @@ the difference from the image. The tree is written in the
 
 The trace starts at the handlers the cartridge header names and follows control
 flow across banks, so a byte anywhere in the image is code only when execution
-can reach it from a vector — or from an entry a person adds to the manifest. The
+can reach it from a vector — or from an entry a person adds to the manifest, or
+from a destination the cartridge, run on the machine, was seen to take. The
 sound program is found by booting the cartridge on the machine and reading what
 reached the audio unit before its program started, then matched back to the bytes
 of the image it was read from.
@@ -20,6 +21,9 @@ of the image it was read from.
 > **Status.** The tree is complete — every image byte is in exactly one file at
 > its offset — and `snes_verify` proves it assembles back: thirty-one real
 > cartridges' trees, across all three maps, rebuild their images byte for byte.
+> The cartridge is run on the machine and the destinations its indirect jumps
+> took become entries, so a cartridge whose dispatch goes through pointers is
+> traced past them.
 > The coprocessors have no backend, so a cartridge carrying one is traced as far
 > as the main CPU's own code goes, and its tree still verifies.
 
@@ -32,6 +36,7 @@ of the image it was read from.
 - [The trace across banks](#the-trace-across-banks)
 - [The sound program](#the-sound-program)
 - [Stops, and getting past them](#stops-and-getting-past-them)
+- [Running the cartridge](#running-the-cartridge)
 - [What is placed](#what-is-placed)
 - [Verifying the tree](#verifying-the-tree)
 - [What the code reaches](#what-the-code-reaches)
@@ -42,7 +47,7 @@ of the image it was read from.
 ## Command line
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
@@ -68,8 +73,11 @@ program and streams tens of kilobytes of samples takes to start it. A cartridge
 that has not started its sound program in that time is reported as a `note` in
 the manifest and its banks keep every byte.
 
-When the directory already holds a `project.manifest`, its `entry` and `file`
-lines are read first, and the manifest must name the image it was written for: a
+`--no-run` skips [running the cartridge](#running-the-cartridge); `--run-seconds N`
+bounds the run at N seconds of the master clock, sixty by default.
+
+When the directory already holds a `project.manifest`, its `entry`, `reached` and
+`file` lines are read first, and the manifest must name the image it was written for: a
 manifest written for another image is refused rather than applied. See
 [Stops, and getting past them](#stops-and-getting-past-them).
 
@@ -224,6 +232,61 @@ vectors, and the tree grows. The `file` lines are read back the same way, so the
 file split is a person's to change: a region may be any range within one bank, and
 the default the tool writes is one region per bank.
 
+## Running the cartridge
+
+A trace names a target only when the instruction names it. Four forms do not —
+`JMP (!abs)`, `JMP (!abs,X)`, `JML [!abs]` and `JSR (!abs,X)` take their
+destination from a pointer in memory — and a cartridge whose dispatch goes through
+one of them is a wall to the trace: every stop it reports is real, and the
+destinations only exist when the cartridge runs. So the disassembler runs it. The
+machine is booted and stepped one instruction at a time for sixty seconds of its
+clock; every time it is about to execute one of those four forms, the pointer it
+is about to read is read first, the way the CPU reads it, and the destination is
+recorded with the mode the instruction carries in. Each is a
+[`reached` line](project-manifest.md#27-what-a-run-reached) in the manifest, and
+the trace starts from it as it starts from a vector.
+
+A cartridge that dispatches through a table:
+
+```
+$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
+1 files, 12 instructions, 1 entries, 2 stops
+```
+
+```
+reached  $00:8240 loc_008240 e=0 m=8 x=8 from $00:800B
+reached  $00:8220 loc_008220 e=0 m=8 x=8 from $00:8245
+
+stop     $00:800B `JMP (!$8100,X)`: the target is computed at run time; add an entry for each destination
+stop     $00:8245 `JMP (!$8100)`: the target is computed at run time; add an entry for each destination
+```
+
+Both stops stand, since the bytes still do not name the targets; both targets are
+now code in the tree, labelled by the form that took them:
+
+```
+        JMP (!$8100,X)                  ; $00:800B  7C 00 81  6
+
+loc_008240:
+        A8
+        X8
+        LDA #$0F                        ; $00:8240  A9 0F     2
+```
+
+Nothing is inferred from where the CPU landed. The pointer is read before the
+step, and the landing only confirms it: a step that services an interrupt instead
+lands in the handler and records nothing, a step on which a DMA transfer holds the
+CPU off the bus runs no instruction and records nothing, and the jump is seen on
+the step that runs it. A pointer the run cannot read — one in a register window or
+the save window rather than the image or work RAM — is named in a `note` and
+recorded nowhere. The run is deterministic: work RAM is cleared at power-on and
+the machine has no other seed, so the same cartridge reaches the same set.
+
+A run sees what it exercised. An unattended boot reaches what the cartridge does
+on its own — its title, its attract mode — and no further; the manifest keeps
+every `reached` line from one disassembly to the next and merges a new run's with
+them, and an `entry` a person adds still names what no run has taken.
+
 ## What is placed
 
 The tree is complete when every image byte is in exactly one file at its offset.
@@ -359,6 +422,15 @@ run could not do. `bankRegions(map, imageBytes)` is the default split.
 blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the
 image the tree describes and counts what is unplaced or placed twice.
 
+`reached` carries [what the run reached](#running-the-cartridge): one
+`ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site`
+that took it, whether it was a `call`, and the `name` the tree gives it.
+`rom/rom_observe.h` is the run itself: `observeRun(rom, masterCycles, notes)`
+boots the machine and returns the sightings in site order, and `sameSighting`
+says whether two are one. `CartridgeRequest::observeRun` asks for the run —
+off unless asked, since it costs about as long as it emulates; `snes_disasm`
+asks unless told `--no-run` — and `runMasterCycles` bounds it.
+
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
 `hardwareAccesses(disassembly)` gives one `HardwareAccess` per register an
@@ -403,6 +475,10 @@ no backend, so a cartridge carrying one is traced as far as the main CPU's own
 code goes; a cartridge that cannot boot without its coprocessor yields no sound
 program, and says so in a `note`. Its tree still verifies, since a coprocessor's
 program is data to the main CPU's file and comes back byte for byte.
+
+The run answers the stops it took and no others: a jump the run never reached
+keeps its `stop` alone, and a person's `entry` is still the way past it. A run
+drives no controller, so it reaches what a cartridge does on its own.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access` lines. A value

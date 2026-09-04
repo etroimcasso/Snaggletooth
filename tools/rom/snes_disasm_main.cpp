@@ -1,6 +1,6 @@
 // snes_disasm — disassembles a whole cartridge into a source tree.
 //
-//   snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
+//   snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]
 //
 // The tree is one source file per bank, the sound program the cartridge uploads
 // at boot as a file of its own, and `project.manifest`, which says where every
@@ -38,7 +38,7 @@ namespace {
 constexpr std::uint64_t kMasterPerSecond = 21'477'272ull;
 
 [[noreturn]] void usage(const char* prog) {
-  std::cerr << "usage: " << prog << " <image> -o <directory> [--no-sound] [--boot-seconds N]\n"
+  std::cerr << "usage: " << prog << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]\n"
                "  the directory's project.manifest, when present, supplies entries and the file split\n";
   std::exit(2);
 }
@@ -57,6 +57,8 @@ int main(int argc, char** argv) {
   std::string outDir;
   bool sound = true;
   std::uint64_t bootSeconds = 15;
+  bool run = true;
+  std::uint64_t runSeconds = 60;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -69,6 +71,15 @@ int main(int argc, char** argv) {
     };
     if (arg == "-o") {
       outDir = next("-o");
+    } else if (arg == "--no-run") {
+      run = false;
+    } else if (arg == "--run-seconds") {
+      try {
+        runSeconds = std::stoull(next("--run-seconds"));
+      } catch (const std::exception&) {
+        std::cerr << "--run-seconds needs a number\n";
+        usage(argv[0]);
+      }
     } else if (arg == "--no-sound") {
       sound = false;
     } else if (arg == "--boot-seconds") {
@@ -101,6 +112,8 @@ int main(int argc, char** argv) {
   snaggletooth::disasm::CartridgeRequest request;
   request.rom = rom;
   request.captureSound = sound;
+  request.observeRun = run;
+  request.runMasterCycles = runSeconds * 21'477'272u;
   request.bootMasterCycles = bootSeconds * kMasterPerSecond;
 
   const std::filesystem::path directory(outDir);
@@ -121,6 +134,7 @@ int main(int argc, char** argv) {
     }
     request.entries = input->entries;
     request.regions = input->regions;
+    request.reached = input->reached;
     std::cout << "read " << input->entries.size() << " entries and " << input->regions.size()
               << " files from " << manifestPath.string() << "\n";
   }

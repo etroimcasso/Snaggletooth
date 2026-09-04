@@ -610,6 +610,25 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
     entries.push_back(std::move(entry));
   }
+  // What a run saw the indirect jumps take: this run's, when asked for one, and
+  // every earlier run's from the manifest. Each is an entry the trace starts
+  // from, after the vectors and the person's entries, so a name a person gave a
+  // target is the one it keeps.
+  std::vector<ReachedTarget> reached = request.reached;
+  if (request.observeRun) {
+    for (const ReachedTarget& seen : observeRun(request.rom, request.runMasterCycles, out.notes)) {
+      const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
+        return sameSighting(r, seen);
+      });
+      if (!known) reached.push_back(seen);
+    }
+  }
+  std::sort(reached.begin(), reached.end(), [](const ReachedTarget& a, const ReachedTarget& b) {
+    if (a.site != b.site) return a.site < b.site;
+    if (a.target != b.target) return a.target < b.target;
+    return contextOf(a.mode).bits < contextOf(b.mode).bits;
+  });
+
   for (const TraceEntry& entry : entries) {
     const std::optional<Address> home = canonical(map, imageBytes, entry.address);
     if (!home) {
@@ -625,6 +644,25 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
     if (!*added) continue;  // the same address under the same mode, already an entry
     out.entries.push_back(TraceEntry{.address = *home, .mode = entry.mode, .name = entry.name});
+  }
+  for (const ReachedTarget& seen : reached) {
+    const std::optional<Address> home = canonical(map, imageBytes, seen.target);
+    if (!home) {
+      out.notes.push_back("reached " + address24(seen.target) + " from " + address24(seen.site) +
+                          " is not in the image; not traced");
+      continue;
+    }
+    const std::string name = (seen.call ? "sub_" : "loc_") + hex(*home, 6);
+    const std::optional<bool> added = add(*home, contextOf(seen.mode), name);
+    if (!added) {
+      out.notes.push_back("reached " + address24(seen.target) + " from " + address24(seen.site) +
+                          " lies in no region; not traced");
+      continue;
+    }
+    // The label the target carries: a person's, when their entry named it first.
+    const std::string label = pending[*regionOf(*home)].symbols[*home];
+    out.reached.push_back(ReachedTarget{
+        .target = *home, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = label});
   }
 
   // Trace every region that is owed one, and carry each call or jump that leaves
@@ -802,6 +840,11 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
     out += "entry    " + address24(entry.address) + " " + entry.name + " " + modeText(entry.mode) +
            "\n";
   }
+  if (!disassembly.reached.empty()) out += "\n";
+  for (const ReachedTarget& seen : disassembly.reached) {
+    out += "reached  " + address24(seen.target) + " " + seen.name + " " + modeText(seen.mode) +
+           " from " + address24(seen.site) + "\n";
+  }
 
   if (!disassembly.stops.empty()) out += "\n";
   for (const TraceStop& stop : disassembly.stops) {
@@ -877,6 +920,22 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
       if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
       input.entries.push_back(TraceEntry{.address = *address, .mode = *mode, .name = words[2]});
+      continue;
+    }
+    if (words[0] == "reached") {
+      if (words.size() != 8 || words[6] != "from") {
+        return fail("a reached target is an address, a name, e=, m=, x=, `from` and the site");
+      }
+      const std::optional<Address> target = parseLongAddress(words[1]);
+      const std::optional<Address> site = parseLongAddress(words[7]);
+      if (!target || !site) return fail("addresses are written $BB:XXXX");
+      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
+      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
+      input.reached.push_back(ReachedTarget{.target = *target,
+                                            .mode = *mode,
+                                            .site = *site,
+                                            .call = words[2].rfind("sub_", 0) == 0,
+                                            .name = words[2]});
       continue;
     }
     if (words[0] == "file") {

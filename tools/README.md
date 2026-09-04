@@ -47,7 +47,9 @@ cartridge starts from, and runs that trace: every bank through the 65816 backend
 with control flow carried across banks, the uploaded sound program through the
 SPC700 backend, and the result written as a source tree with a manifest — and
 it runs the reverse, assembling every file of a tree through the two dialects
-and comparing the result with the image. It also reports what the traced code
+and comparing the result with the image. It runs the cartridge on the machine
+to find the destinations of the jumps the bytes do not name, and traces from
+them. It also reports what the traced code
 reaches: the hardware register behind every instruction that touches one, and the
 DMA transfers those add up to. `spc/` reads and writes the two file formats the
 renderers use, an SPC dump in and a WAV out.

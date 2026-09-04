@@ -9,7 +9,7 @@ a whole cartridge starts.
 ## `snes_disasm`
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]
 ```
 
 Writes one source file per bank, the sound program the cartridge uploads at boot as
@@ -26,6 +26,12 @@ snes_disasm game.sfc -o game
 sound program: entry $0500, 3 blocks, 3 matched to the image
 524288 of 524288 bytes placed -> game
 ```
+
+It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
+and steps it, recording the destination of every indirect jump or call the run
+took, and the trace starts from each — see the
+[Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)
+section. `--no-run` skips it; `--run-seconds N` bounds it.
 
 The facts it attaches to addresses — the hardware each instruction reaches, and the
 DMA transfers those add up to — come from `rom/rom_facts.h`:
