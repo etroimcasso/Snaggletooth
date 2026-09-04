@@ -3,15 +3,17 @@
 `project.manifest` is the file at the root of a source tree the
 [cartridge disassembler](snes-disassembler.md) writes. It says which image the
 tree is of, which files make it up and which bytes of the image each produces,
-where the trace began and where it stopped. Two of its line kinds are read back
-on the next run, which is how a person directs the trace.
+where the trace began and where it stopped. Three of its line kinds are read back
+on the next run — which is how a person directs the trace, and how a run's
+findings outlive it.
 
 > **Status.** The disassembler writes the manifest and reads it back on the next
 > run; `snes_verify` executes it — assembles every file it names, places the
 > bytes where it says, and reports the difference from the image. Thirty-one
 > real cartridges' trees verify byte-identical through it. It also carries what
 > the traced code reaches: a line per hardware register access, and a line per
-> DMA transfer a channel was set up for.
+> DMA transfer a channel was set up for. Run on the machine, it records the
+> destinations the indirect jumps took, and traces from them.
 
 ---
 
@@ -25,6 +27,7 @@ on the next run, which is how a person directs the trace.
   - [2.4 Entries](#24-entries)
   - [2.5 Stops, warnings and notes](#25-stops-warnings-and-notes)
   - [2.6 What the code reaches](#26-what-the-code-reaches)
+  - [2.7 What a run reached](#27-what-a-run-reached)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -204,6 +207,38 @@ of the OAM address, and `STA !$4301` writes `$04` to the channel's B-bus address
 and `$00` to the low byte of its source. `$04` in `BBAD0` is what makes the
 destination `OAMDATA`, and the three source bytes together make `$7F:0000`.
 
+### 2.7 What a run reached
+
+```
+reached  <address> <name> e=<0|1> m=<8|16|?> x=<8|16|?> from <address>
+```
+
+A destination the cartridge, run on the machine, was seen to take through a
+jump or a call whose target the bytes do not name — `JMP (!abs)`,
+`JMP (!abs,X)`, `JML [!abs]` and `JSR (!abs,X)` — with the mode it arrived in
+and the instruction that took it. It is an entry the trace starts from, exactly
+as an `entry` line is, and the vectors and entries come first: a person's
+`entry` naming the same address under the same mode gives it its name, which the
+`reached` line then carries. The name is otherwise `sub_` for a call's target and
+`loc_` for a jump's, with the address.
+
+A cartridge that dispatches through a table, run for one second of its clock:
+
+```
+entry    $00:8000 reset e=1 m=8 x=8
+
+reached  $00:8240 loc_008240 e=0 m=8 x=8 from $00:800B
+reached  $00:8220 loc_008220 e=0 m=8 x=8 from $00:8245
+
+stop     $00:800B `JMP (!$8100,X)`: the target is computed at run time; add an entry for each destination
+stop     $00:8245 `JMP (!$8100)`: the target is computed at run time; add an entry for each destination
+```
+
+The `stop` lines stay: they are what the bytes say, and the `reached` lines beside
+them are what the run saw. A run sees only what it exercised, so a jump the run
+never took has a `stop` and no `reached`, and a person's `entry` is still the way
+to name a destination the run did not.
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -212,6 +247,9 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 
 - every `entry` line, and traces from each with the vectors — an entry the
   vectors already name, under the same mode, is one entry;
+- every `reached` line, and traces from each after the entries — so a run's
+  findings are kept from one disassembly to the next whether or not the next
+  one runs, and a new run's are merged with them;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not

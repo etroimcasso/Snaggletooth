@@ -11,7 +11,7 @@ shelling out to the tool.
 | [`assembler/`](assembler/README.md) | `snaggletooth_assembler` | — | [assemblers.md](../docs/assemblers.md) |
 | [`spc700/`](spc700/README.md) | `snaggletooth_spc700` | `spc700_disasm`, `spc700_asm` | [spc700-disassembler.md](../docs/spc700-disassembler.md), [assemblers.md](../docs/assemblers.md) |
 | [`cpu65816/`](cpu65816/README.md) | `snaggletooth_cpu65816` | `cpu65816_disasm`, `cpu65816_asm` | [65816-disassembler.md](../docs/65816-disassembler.md), [assemblers.md](../docs/assemblers.md) |
-| [`rom/`](rom/README.md) | `snaggletooth_rom` | `snes_disasm`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [spc-rendering.md](../docs/spc-rendering.md) |
+| [`rom/`](rom/README.md) | `snaggletooth_rom` | `snes_disasm`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [input-script.md](../docs/input-script.md), [spc-rendering.md](../docs/spc-rendering.md) |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 
 `parse_dsp_tables.py` stands apart from the toolkit: it transcribes the S-DSP's
@@ -47,7 +47,9 @@ cartridge starts from, and runs that trace: every bank through the 65816 backend
 with control flow carried across banks, the uploaded sound program through the
 SPC700 backend, and the result written as a source tree with a manifest — and
 it runs the reverse, assembling every file of a tree through the two dialects
-and comparing the result with the image. It also reports what the traced code
+and comparing the result with the image. It runs the cartridge on the machine
+to find the destinations of the jumps the bytes do not name, and traces from
+them. It also reports what the traced code
 reaches: the hardware register behind every instruction that touches one, and the
 DMA transfers those add up to. `spc/` reads and writes the two file formats the
 renderers use, an SPC dump in and a WAV out.

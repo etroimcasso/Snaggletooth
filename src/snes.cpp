@@ -278,6 +278,7 @@ std::uint8_t Snes::routeRead(std::uint32_t address) {
       return latch(apu_.readPort(static_cast<std::uint8_t>(offset & 3u)));
     }
     if (offset >= 0x2180 && offset <= 0x2183) return readWramPort(offset);
+    if (offset == 0x4016 || offset == 0x4017) return readJoypadPort(offset);
     if (offset >= 0x4200 && offset <= 0x421F) return readCpuReg(offset);
     if (offset >= 0x4300 && offset <= 0x437F) return readDmaReg(offset);
   }
@@ -313,6 +314,10 @@ void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
     }
     if (offset >= 0x2180 && offset <= 0x2183) {
       writeWramPort(offset, value);
+      return;
+    }
+    if (offset == 0x4016) {
+      writeJoypadStrobe(value);
       return;
     }
     if (offset >= 0x4200 && offset <= 0x421F) {
@@ -395,7 +400,10 @@ void Snes::advanceLine() noexcept {
     state_.vblankNmi = true;  // the NMI flag is set at the start of vblank, whether or not NMIs are enabled
     state_.hdmaActive = 0u;   // and every HDMA channel deactivates for the rest of the frame
     if ((state_.nmitimen & 1u) != 0u) {
-      state_.autoJoyClocks = kAutoJoyClocks;  // the auto-joypad read runs each frame it is enabled
+      // The auto-joypad read runs each frame it is enabled: it strobes the pads
+      // now, clocks their bits out over the window, and lands them as it ends.
+      latchJoypads();
+      state_.autoJoyClocks = kAutoJoyClocks;
     }
   }
   if (state_.vpos == 0u) {
@@ -411,11 +419,13 @@ void Snes::tickVideo(std::uint32_t cost) {
     --state_.mathClocks;
     if (state_.mathClocks == 0u) commitMath();
   }
-  // The auto-joypad busy window is counted in master cycles.
+  // The auto-joypad busy window is counted in master cycles; the result registers
+  // take the bits it read as it closes.
   if (state_.autoJoyClocks != 0u) {
     state_.autoJoyClocks = state_.autoJoyClocks > cost
         ? static_cast<std::uint16_t>(state_.autoJoyClocks - cost)
         : std::uint16_t{0u};
+    if (state_.autoJoyClocks == 0u) finishAutoJoypadRead();
   }
 
   // Advance the beam by the cycle's master cost, wrapping scanlines as it goes. The
@@ -623,7 +633,7 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
       break;
   }
   if (offset >= 0x4218 && offset <= 0x421F) {
-    return latch(state_.joy[static_cast<std::size_t>(offset - 0x4218)]);  // the auto-read result: zero, no controller
+    return latch(state_.joy[static_cast<std::size_t>(offset - 0x4218)]);  // the auto-read result, as of the last window's end
   }
   return state_.mdr;  // other CPU-register reads are open bus
 }
@@ -661,6 +671,83 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x420D: state_.memsel = static_cast<std::uint8_t>(value & 1u); return;
     default: return;  // $4201 WRIO and the read-only ports ignore writes
   }
+}
+
+// ---- the controller ports -----------------------------------------------------
+
+std::uint16_t Joypad::bits() const noexcept {
+  // The wire order, first bit highest: B Y Select Start Up Down Left Right A X L R,
+  // then the four identity bits, zero for a standard pad.
+  std::uint16_t word = 0;
+  const bool order[12] = {b, y, select, start, up, down, left, right, a, x, l, r};
+  for (std::size_t i = 0; i < 12; ++i) {
+    if (order[i]) word = static_cast<std::uint16_t>(word | (0x8000u >> i));
+  }
+  return word;
+}
+
+void Snes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {
+  state_.pads[static_cast<std::size_t>(port)] = pad;
+}
+
+const std::optional<Joypad>& Snes::joypad(JoypadPort port) const noexcept {
+  return state_.pads[static_cast<std::size_t>(port)];
+}
+
+void Snes::latchJoypads() noexcept {
+  // The strobe pulse: every port's pad loads its sixteen bits and the clock count
+  // starts over. A port with nothing in it latches nothing.
+  for (std::size_t p = 0; p < 2; ++p) {
+    state_.joyLatch[p] = state_.pads[p] ? state_.pads[p]->bits() : std::uint16_t{0u};
+    state_.joyClocks[p] = 0u;
+  }
+}
+
+std::uint8_t Snes::clockJoypad(std::size_t port) noexcept {
+  const std::optional<Joypad>& pad = state_.pads[port];
+  if (!pad) return 0u;  // an empty port's data line stays high, which reads as zero
+  // While the strobe is held high the pad keeps reloading its register, so every
+  // clock returns the first bit — B — and the count never advances.
+  if (state_.joyStrobe) return static_cast<std::uint8_t>((pad->bits() >> 15) & 1u);
+  if (state_.joyClocks[port] >= 16u) return 1u;  // past the sixteenth bit a pad returns its padding, low
+  const std::uint8_t bit =
+      static_cast<std::uint8_t>((state_.joyLatch[port] >> (15u - state_.joyClocks[port])) & 1u);
+  ++state_.joyClocks[port];
+  return bit;
+}
+
+void Snes::finishAutoJoypadRead() noexcept {
+  // Sixteen clocks per port, the first bit landing highest, into the port's pair
+  // of registers: the low byte at $4218/$421A, the high at $4219/$421B. The
+  // second data line of each port — a multitap's — carries nothing here, so
+  // $421C-$421F stay zero.
+  for (std::size_t p = 0; p < 2; ++p) {
+    std::uint16_t word = 0;
+    for (std::size_t i = 0; i < 16; ++i) {
+      word = static_cast<std::uint16_t>((word << 1) | clockJoypad(p));
+    }
+    state_.joy[p * 2u] = static_cast<std::uint8_t>(word & 0xFFu);
+    state_.joy[p * 2u + 1u] = static_cast<std::uint8_t>(word >> 8);
+  }
+}
+
+std::uint8_t Snes::readJoypadPort(std::uint16_t offset) {
+  if (offset == 0x4016) {
+    // JOYSER0: bit 0 is port 1's data line, bit 1 its second line (nothing is on
+    // it); the rest is open bus.
+    return latch(static_cast<std::uint8_t>((state_.mdr & 0xFCu) | clockJoypad(0)));
+  }
+  // JOYSER1: bit 0 is port 2's data line, bit 1 its second line; bits 4-2 are
+  // wired low and read as ones; the rest is open bus.
+  return latch(static_cast<std::uint8_t>((state_.mdr & 0xE0u) | 0x1Cu | clockJoypad(1)));
+}
+
+void Snes::writeJoypadStrobe(std::uint8_t value) noexcept {
+  // Bit 0 is the strobe line to both ports. Its fall latches the pads; while it
+  // is high the pads reload continuously, which clockJoypad reads as B every time.
+  const bool high = (value & 1u) != 0u;
+  if (state_.joyStrobe && !high) latchJoypads();
+  state_.joyStrobe = high;
 }
 
 }  // namespace snaggletooth

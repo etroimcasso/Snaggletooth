@@ -66,6 +66,36 @@ struct DmaChannel {
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
 };
 
+// A standard controller's twelve buttons as a value: true is pressed. A pad is
+// presented to the machine with Snes::setJoypad and read by the program through
+// the auto-read registers or the serial ports; the machine samples it when it
+// latches, so a value set at any point in a frame is what that frame's read sees.
+struct Joypad {
+  bool b = false;
+  bool y = false;
+  bool select = false;
+  bool start = false;
+  bool up = false;
+  bool down = false;
+  bool left = false;
+  bool right = false;
+  bool a = false;
+  bool x = false;
+  bool l = false;
+  bool r = false;
+
+  // The sixteen bits the pad shifts out, in the layout the auto-read registers
+  // hold them: bit 15 is B, the first bit on the wire, down to bit 4 for R; bits
+  // 3-0 are the standard pad's identity code, all zero. The high byte is what
+  // $4219 reads, the low byte $4218.
+  [[nodiscard]] std::uint16_t bits() const noexcept;
+
+  [[nodiscard]] bool operator==(const Joypad&) const noexcept = default;
+};
+
+// The two controller ports on the console's front.
+enum class JoypadPort : std::uint8_t { One, Two };
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
@@ -144,10 +174,19 @@ struct SnesState {
   std::uint8_t mathClocks = 0;  // CPU cycles left before the result lands (0 = idle)
   MathOp mathOp = MathOp::None; // which result the pending job will commit
 
-  // ---- the auto-joypad-read stub --------------------------------------------
-  // When enabled, the machine spends a fixed window each frame reading the pads; the
-  // busy flag is raised for that window. With no controller modelled the latched
-  // values are zero, the reliable "no buttons" result.
+  // ---- the controller ports -------------------------------------------------
+  // The pads presented to the two ports (none by default, which reads as no
+  // controller: every bit zero), the strobe line the program drives through
+  // $4016, and each port's shift register — the sixteen bits latched at the
+  // strobe's fall and how many of them have been clocked out. The auto-read uses
+  // the same strobe and clock lines, so its sixteen clocks leave a port's register
+  // at its padding until the program strobes again. When enabled, the auto-read
+  // spends a fixed window each frame; the busy flag is raised for that window and
+  // the result registers take their new value as it ends.
+  std::array<std::optional<Joypad>, 2> pads{};  // what is plugged into each port
+  bool joyStrobe = false;               // $4016 bit 0 as last written: the latch line held high
+  std::array<std::uint16_t, 2> joyLatch{};  // per port: the bits latched at the strobe's fall
+  std::array<std::uint8_t, 2> joyClocks{};  // per port: bits clocked out since the latch (16 = at the padding)
   std::uint16_t autoJoyClocks = 0;      // master cycles left in the auto-read busy window (0 = idle)
   std::array<std::uint8_t, 8> joy{};    // $4218-$421F: the four 16-bit pad reads
 
@@ -234,6 +273,15 @@ class Snes {
   // machine paces the APU, so frames accumulate as it runs; a caller drains
   // periodically to bound the queue. Frames are output, not state.
   [[nodiscard]] std::vector<StereoFrame> takeFrames();
+
+  // The controller in a port: a pad, or nothing, which is how the machine starts.
+  // The program sees it the way it sees a real one — through the auto-read at
+  // $4218-$421F once a frame when $4200 bit 0 enables it, and through the serial
+  // ports at $4016/$4017 whenever it strobes and clocks them — so a pad presented
+  // before a frame's vertical blank is what that frame's read returns. The pad is
+  // part of the machine's state: a snapshot carries it and restore() puts it back.
+  void setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept;
+  [[nodiscard]] const std::optional<Joypad>& joypad(JoypadPort port) const noexcept;
 
   // The video memory a host reads to see what the program drew. Nothing renders it —
   // the register ports store here the way the console does, and these faces hand the
@@ -360,6 +408,15 @@ class Snes {
   std::uint8_t readCpuReg(std::uint16_t offset);
   void writeCpuReg(std::uint16_t offset, std::uint8_t value);
 
+  // The serial controller ports: a write to $4016 drives the strobe line, and a
+  // read of $4016 or $4017 returns a port's next bit and clocks its register.
+  std::uint8_t readJoypadPort(std::uint16_t offset);
+  void writeJoypadStrobe(std::uint8_t value) noexcept;
+  // Latches every port's sixteen bits — the strobe pulse a program or the
+  // auto-read gives — and one bit clocked out of a port's register.
+  void latchJoypads() noexcept;
+  [[nodiscard]] std::uint8_t clockJoypad(std::size_t port) noexcept;
+
   // The VRAM word the address currently reaches, after any $2115 address translation.
   [[nodiscard]] std::uint16_t vramWordAddress() const noexcept;
   // The 16-bit word at that address, the value the read-prefetch register takes.
@@ -372,6 +429,9 @@ class Snes {
   // and setting or clearing the vblank flag and starting the auto-joypad read at the
   // boundaries the console does.
   void advanceLine() noexcept;
+  // The auto-read's end: the sixteen bits it clocked out of each port land in
+  // $4218-$421F.
+  void finishAutoJoypadRead() noexcept;
   // Whether the H/V-timer condition currently holds, by the mode $4200 selects.
   [[nodiscard]] bool irqConditionMet() const noexcept;
 
