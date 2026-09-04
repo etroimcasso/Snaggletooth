@@ -34,6 +34,7 @@ of the image it was read from.
 - [Stops, and getting past them](#stops-and-getting-past-them)
 - [What is placed](#what-is-placed)
 - [Verifying the tree](#verifying-the-tree)
+- [What the code reaches](#what-the-code-reaches)
 - [Library](#library)
 - [Status](#status)
 - [See also](#see-also)
@@ -49,11 +50,14 @@ Reads a cartridge image, writes the tree under the directory, creating it, and
 reports what it found:
 
 ```
-$ snes_disasm "Super Mario World.smc" -o smw
-16 files, 1371 instructions, 5 entries, 1 stops
-sound program: entry $0500, 3 blocks, 3 matched to the image
-524288 of 524288 bytes placed -> smw
+$ snes_disasm cartridge.sfc -o cartridge
+2 files, 29 instructions, 2 entries, 0 stops
+65536 of 65536 bytes placed -> cartridge
 ```
+
+A cartridge that uploads a sound program at boot reports that too, on a line of
+its own: the entry the audio CPU started it at, how many blocks were sent, and
+how many of those were matched back to bytes of the image.
 
 A 512-byte copier header is dropped when the file length says one is present.
 
@@ -72,7 +76,7 @@ manifest written for another image is refused rather than applied. See
 ## The tree
 
 ```
-smw/
+cartridge/
   project.manifest
   bank_00.asm
   bank_01.asm
@@ -251,7 +255,7 @@ and each placed block at the offset the manifest recorded, and compares the
 whole with the image:
 
 ```
-$ snes_verify smw "Super Mario World.smc"
+$ snes_verify cartridge cartridge.sfc
 bank_00.asm: 1 range, 32768 bytes, identical
 bank_01.asm: 1 range, 32768 bytes, identical
 …
@@ -292,6 +296,44 @@ The sound file's blocks are compared only where the manifest placed them; an
 block the sound file does not emit whole is reported rather than compared
 against the fill.
 
+## What the code reaches
+
+A listing says which registers an instruction names. The manifest says what that
+adds up to: for every instruction the trace decoded that reaches a hardware
+register, an `access` line with the register, the part of the machine it belongs
+to, whether the instruction reads or writes it, and the value it wrote where the
+bytes say what that was; and for every DMA channel a routine set up, a `dma` line
+with the transfer those accesses describe. Both are
+[manifest lines](project-manifest.md#26-what-the-code-reaches), written fresh on
+every run.
+
+The destination of a transfer is the register the channel's `BBAD` names — the
+value written there, not `BBAD` itself — so its class is what the transfer is
+for. A transfer to `OAMDATA` is a sprite table, one to `VMDATAL` a tileset or a
+tilemap, one to `CGDATA` a palette, one to `APUIO0` a sound driver or its
+samples — each named by where it is sent, rather than by anything a person has
+labelled yet:
+
+```
+dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
+dma      $00:8045 channel 1 to-register $00:2118 VMDATAL Vram source none start $02
+dma      $00:8082 channel 2 direction-unknown $00:2122 CGDATA Cgram source none start none
+```
+
+**A value is what the bytes say and no more.** It is recorded where the
+instruction immediately before loaded it as an immediate, with no label between
+them — the `LDA #$8F` / `STA !$2100` idiom every cartridge is written in — and
+where the instruction is `STZ`, which carries its own zero. Anything else leaves
+the field `none`: the second transfer above has no source because its address
+registers were filled from a table, and the third's direction is unknown because
+nothing wrote its `DMAP` with a value the bytes settle. A run of straight-line
+code is as far as a value carries, so pieces of one channel written across a call
+are not joined.
+
+An instruction under a sixteen-bit register reaches two registers and produces a
+line for each, which is how one `STA !$4301` sets both a channel's B-bus address
+and the low byte of its source.
+
 ## Library
 
 ```cpp
@@ -306,7 +348,7 @@ const snaggletooth::disasm::CartridgeDisassembly tree =
     snaggletooth::disasm::disassembleCartridge(request);
 
 std::string error;
-snaggletooth::disasm::writeProject(tree, "smw", error);
+snaggletooth::disasm::writeProject(tree, "cartridge", error);
 ```
 
 `disassembleCartridge` returns the header, the entries traced from, one
@@ -316,6 +358,14 @@ run could not do. `bankRegions(map, imageBytes)` is the default split.
 `captureUpload(rom, masterCycles, reason)` is the boot alone: the entry and the
 blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the
 image the tree describes and counts what is unplaced or placed twice.
+
+`accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
+`rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
+`hardwareAccesses(disassembly)` gives one `HardwareAccess` per register an
+instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the
+`value` where the bytes say it, and the `run` of straight-line code it sits in —
+and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up.
+`accessKindName` and `dmaDirectionName` are their names as text.
 
 The files are text from `renderRegion`, `renderSoundProgram` and
 `renderManifest`; `parseManifest` reads a manifest's entries, file split, map,
@@ -329,7 +379,7 @@ Verification is `rom/rom_verify.h`:
 #include "rom/rom_verify.h"
 
 const snaggletooth::disasm::VerifyReport report =
-    snaggletooth::disasm::verifyTree("smw", image);
+    snaggletooth::disasm::verifyTree("cartridge", image);
 if (!report.identical()) std::cout << snaggletooth::disasm::renderReport(report);
 ```
 
@@ -353,6 +403,12 @@ no backend, so a cartridge carrying one is traced as far as the main CPU's own
 code goes; a cartridge that cannot boot without its coprocessor yields no sound
 program, and says so in a `note`. Its tree still verifies, since a coprocessor's
 program is data to the main CPU's file and comes back byte for byte.
+
+What the code reaches is reported for the main CPU's regions. The sound program is
+another chip's, with registers of its own, and has no `access` lines. A value
+carries one instruction and no further, and only within a run of straight-line
+code, so a channel configured from a table or across a call leaves the fields it
+did not settle `none` rather than guessing at them.
 
 Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
 from 512 KB to 6 MB — assembles back to its image byte for byte under

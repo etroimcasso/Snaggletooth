@@ -9,7 +9,9 @@ on the next run, which is how a person directs the trace.
 > **Status.** The disassembler writes the manifest and reads it back on the next
 > run; `snes_verify` executes it — assembles every file it names, places the
 > bytes where it says, and reports the difference from the image. Thirty-one
-> real cartridges' trees verify byte-identical through it.
+> real cartridges' trees verify byte-identical through it. It also carries what
+> the traced code reaches: a line per hardware register access, and a line per
+> DMA transfer a channel was set up for.
 
 ---
 
@@ -22,6 +24,7 @@ on the next run, which is how a person directs the trace.
   - [2.3 The sound program](#23-the-sound-program)
   - [2.4 Entries](#24-entries)
   - [2.5 Stops, warnings and notes](#25-stops-warnings-and-notes)
+  - [2.6 What the code reaches](#26-what-the-code-reaches)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -43,33 +46,39 @@ Addresses are written in the 65816 dialect's long form, `$BB:XXXX`, and the soun
 program's in the SPC700 dialect's, `$XXXX`. An image offset is `$` and six
 hexadecimal digits. A count is decimal.
 
-A manifest as the disassembler writes one:
+A manifest as the disassembler writes one, for a two-bank cartridge whose reset
+code blanks the screen, sets up two transfers and calls a routine in the second
+bank:
 
 ```
-image    524288
+image    65536
 map      LoROM
-title    "SUPER MARIOWORLD"
-checksum $A0DA $5F25
+title    "FACTS DEMO CARTRIDGE"
+checksum $EDCB $1234
 
 file     bank_00.asm 65816 $00:8000 $00:FFFF
 file     bank_01.asm 65816 $01:8000 $01:FFFF
-…
-file     bank_0F.asm 65816 $0F:8000 $0F:FFFF
-sound    apu/driver.asm SPC700 entry $0500
-block    apu/driver.asm $0500 3646 at $070004
-block    apu/driver.asm $1360 5661 at $0718B5
-block    apu/driver.asm $5570 2667 at $070E46
 
 entry    $00:8000 reset e=1 m=8 x=8
-entry    $00:82C3 nmi e=0 m=? x=?
-entry    $00:816A nmi_native e=0 m=? x=?
-entry    $00:8374 irq_native e=0 m=? x=?
-entry    $00:FFFF brk_native e=0 m=? x=?
+entry    $00:8300 nmi_native e=0 m=? x=?
 
-stop     $00:86F7 `JML [!$0000]`: the target is computed at run time; add an entry for each destination
+warning  bank_00.asm $00:8300 cannot be read: LDA # under an accumulator width the trace does not know
 
-warning  bank_00.asm $00:98E1 is reached with e=0 m=8 x=8 and with e=0 m=16 x=8
+access   $00:8006 INIDISP Display write $8F
+access   $00:8009 RDNMI Interrupt read none
+access   $00:8017 BBAD0 DmaChannel write $04
+access   $00:8017 A1T0L DmaChannel write $00
+access   $00:8024 MDMAEN DmaControl write $01
+access   $01:8002 BBAD2 DmaChannel write $22
+
+dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
+dma      $01:8002 channel 2 direction-unknown $00:2122 CGDATA Cgram source none start none
 ```
+
+A cartridge that uploads a sound program at boot also carries the `sound` and
+`block` lines of [2.3](#23-the-sound-program), and one whose trace meets a target
+the bytes do not name carries the `stop` lines of
+[2.5](#25-stops-warnings-and-notes).
 
 ## 2. Lines
 
@@ -145,6 +154,56 @@ two ways, an operand no width settles. A `note` is what the run could not do at
 all: no sound program within the boot's time, an entry that lies in no file, a
 `file` line that does not read consecutive bytes.
 
+### 2.6 What the code reaches
+
+```
+access   <address> <register> <class> read | write | read-write   $XX | none
+dma      <address> channel <n> <direction> <register address> <register> <class>
+                   source <address> start | start-hdma <mask>
+```
+
+An `access` is one instruction reaching one hardware register: where the
+instruction is, the register's name and [class](65816-disassembler.md#hardware-registers),
+whether it reads the register, writes it or both, and the byte it wrote where the
+bytes say what that was. An instruction whose register is sixteen bits wide
+reaches two registers and has a line for each.
+
+A `dma` is a transfer a channel was set up for: the channel, which way it moves
+bytes (`to-register`, `from-register`, or `direction-unknown`), the B-bus register
+it reaches — the address the channel's `BBAD` names, with that register's own name
+and class — the A-bus address it moves from, and the mask that started it, from
+`MDMAEN` as `start` or from `HDMAEN` as `start-hdma`.
+
+Every field is present on every line. `none` is a field the bytes did not say,
+which is a fact about the cartridge rather than a gap in the format: a value is
+written only where the instruction immediately before loaded it as an immediate,
+or where the instruction is `STZ` and carries its own zero, and a channel
+configured from a table says `none` rather than a guess.
+
+A routine that blanks the screen and sends a sprite table, and the lines it
+produces:
+
+```
+access   $00:8006 INIDISP Display write $8F
+access   $00:8009 RDNMI Interrupt read none
+access   $00:800C DMAP0 DmaChannel write $00
+access   $00:8011 OAMADDL Oam write $00
+access   $00:8011 OAMADDH Oam write $00
+access   $00:8017 BBAD0 DmaChannel write $04
+access   $00:8017 A1T0L DmaChannel write $00
+access   $00:801D A1T0H DmaChannel write $00
+access   $00:801D A1B0 DmaChannel write $7F
+access   $00:8024 MDMAEN DmaControl write $01
+
+dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
+```
+
+`$00:8011`, `$00:8017` and `$00:801D` are each one instruction under a
+sixteen-bit accumulator, so each has two lines: `STZ !$2102` clears both halves
+of the OAM address, and `STA !$4301` writes `$04` to the channel's B-bus address
+and `$00` to the low byte of its source. `$04` in `BBAD0` is what makes the
+destination `OAMDATA`, and the three source bytes together make `$7F:0000`.
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -169,8 +228,10 @@ directory, it reads:
 - `image` and `checksum`, refusing a manifest written for another image as the
   disassembler does.
 
-Everything else is what the last run found and is written fresh. A `stop` line
-records; only an `entry` line directs. The disassembler writes the files fresh
+Everything else is what the last run found and is written fresh — the `access`
+and `dma` lines among them, which no tool reads back: they are what the trace saw,
+and the next trace sees it again. A `stop` line records; only an `entry` line
+directs. The disassembler writes the files fresh
 too: an edit to a bank file is not read back by it, so a person's changes to the
 trace belong in the manifest, and their changes to the code in the sources,
 which `snes_verify` assembles as they are.

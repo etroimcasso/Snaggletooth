@@ -240,10 +240,54 @@ class Cpu65816Backend final : public Backend {
                                                                     bool accumulator8,
                                                                     bool index8);
 
+// What part of the machine a hardware register belongs to. The class is a fact
+// about the register, so it is authored from the same staged tables the name is
+// and lives beside it; a report says what a routine reaches without its reader
+// having to know all two hundred names.
+enum class RegisterClass : std::uint8_t {
+  Display,     // brightness, forced blank, screen composition, the beam counters and status
+  Background,  // the four background layers: mode, tilemaps, character bases, scroll, mosaic
+  Vram,        // the video RAM port: address, increment mode, data
+  Cgram,       // the palette port: address and data
+  Oam,         // the sprite table port, and sprite size and character base
+  Mode7,       // the Mode 7 matrix, centre and settings
+  Window,      // the two windows: positions, per-layer enable, mask logic
+  ColorMath,   // colour addition and subtraction, and the fixed colour
+  Apu,         // the four ports the CPU talks to the audio unit through
+  WramPort,    // the work-RAM port: address and data
+  Joypad,      // the controller ports, both serial and auto-read
+  Interrupt,   // NMI and IRQ enable, the timer targets, and the flags they raise
+  Math,        // the multiplier and the divider, and the multiplication result
+  DmaControl,  // the two registers that start a transfer
+  DmaChannel,  // one of the eight channels' own registers
+  Io,          // the general-purpose I/O bits of the controller ports
+  Speed,       // the FastROM enable
+};
+
+// A class as a manifest and a report name one: the enumerator's own spelling.
+[[nodiscard]] std::string_view cpu65816RegisterClassName(RegisterClass cls);
+
+// A hardware register: its name, the part of the machine it belongs to, and
+// whether the CPU reads it, writes it, or both. Authored from the staged MMIO
+// register table — its Type column is what `reads` and `writes` say — and from
+// the PPU registers page, whose sections are what `cls` says. Never from the
+// core's own handling of an address, so the table and the machine stay two
+// readings of one document rather than one copied from the other.
+struct Cpu65816Register {
+  std::string_view name;
+  RegisterClass cls = RegisterClass::Display;
+  bool reads = false;
+  bool writes = false;
+};
+
+// The register at a 24-bit address, or nothing when the address is ordinary
+// memory. The registers sit at `$2100`-`$21FF` and `$4000`-`$43FF` of banks
+// `$00`-`$3F` and `$80`-`$BF`; the same offsets in any other bank are memory.
+[[nodiscard]] std::optional<Cpu65816Register> cpu65816Register(Address address);
+
 // The name of a hardware register at a 24-bit address, or an empty view when the
-// address is ordinary memory. The registers sit at `$2100`-`$21FF` and
-// `$4000`-`$43FF` of banks `$00`-`$3F` and `$80`-`$BF`; the same offsets in any
-// other bank are memory and have no name.
+// address is ordinary memory. The same table `cpu65816Register` answers from, so
+// a name and a class can never disagree about which addresses are registers.
 [[nodiscard]] std::string_view cpu65816RegisterName(Address address);
 
 }  // namespace snaggletooth::disasm

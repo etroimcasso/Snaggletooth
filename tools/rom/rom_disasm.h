@@ -30,6 +30,7 @@
 
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
+#include "rom/rom_facts.h"
 #include "snaggletooth/snes/cartridge.h"
 
 namespace snaggletooth::disasm {
@@ -118,6 +119,10 @@ struct CartridgeDisassembly {
   std::optional<SoundProgram> sound;
   std::vector<TraceStop> stops;
   std::vector<std::string> notes;  // what the run could not do, in words
+  // What the traced code reaches, attached to the addresses that reach it. Both
+  // are written fresh on every run and read back by nothing — see `rom_facts.h`.
+  std::vector<HardwareAccess> accesses;
+  std::vector<DmaTransfer> dmas;
 };
 
 // What to disassemble. `entries` are the entry points beyond the vectors, which

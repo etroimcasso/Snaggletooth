@@ -725,6 +725,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       out.sound = std::move(sound);
     }
   }
+
+  // What the traced code reaches. Read off the finished listings, so a byte the
+  // trace never entered contributes nothing.
+  out.accesses = hardwareAccesses(out);
+  out.dmas = dmaTransfers(out.accesses);
   return out;
 }
 
@@ -819,6 +824,30 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   }
   if (!disassembly.notes.empty()) out += "\n";
   for (const std::string& note : disassembly.notes) out += "note     " + note + "\n";
+
+  // What the code reaches. Every field is present on every line; `none` is a
+  // field the bytes did not say, which is a fact about the cartridge and not a
+  // gap in the format.
+  if (!disassembly.accesses.empty()) out += "\n";
+  for (const HardwareAccess& access : disassembly.accesses) {
+    out += "access   " + address24(access.site) + " " + std::string(access.name) + " " +
+           std::string(cpu65816RegisterClassName(access.cls)) + " " +
+           std::string(accessKindName(access.kind)) + " " +
+           (access.value ? "$" + hex(*access.value, 2) : std::string("none")) + "\n";
+  }
+  if (!disassembly.dmas.empty()) out += "\n";
+  for (const DmaTransfer& dma : disassembly.dmas) {
+    out += "dma      " + address24(dma.site) + " channel " + std::to_string(dma.channel) + " " +
+           std::string(dmaDirectionName(dma.direction)) + " " +
+           (dma.destination ? address24(*dma.destination) : std::string("none")) + " " +
+           (dma.destinationName.empty() ? std::string("none") : std::string(dma.destinationName)) +
+           " " +
+           (dma.destinationClass ? std::string(cpu65816RegisterClassName(*dma.destinationClass))
+                                 : std::string("none")) +
+           " source " + (dma.source ? address24(*dma.source) : std::string("none")) + " " +
+           (dma.startMask ? (dma.hdma ? "start-hdma" : "start") : "start") + " " +
+           (dma.startMask ? "$" + hex(*dma.startMask, 2) : std::string("none")) + "\n";
+  }
   return out;
 }
 
@@ -915,7 +944,8 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.sound->blocks.push_back(block);
       continue;
     }
-    static const std::set<std::string> kKnown = {"title", "stop", "warning", "note"};
+    static const std::set<std::string> kKnown = {"title", "stop",   "warning",
+                                                 "note",  "access", "dma"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   return input;
