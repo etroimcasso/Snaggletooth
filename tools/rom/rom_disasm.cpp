@@ -1301,10 +1301,10 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
     ir::SourceNames names;
     const ir::Instruction& instruction = node.instruction;
     if (instruction.target) {
-      if (const auto label = lines.labels.find(*instruction.target); label != lines.labels.end()) {
-        names.target = label->second;
-      } else if (const auto label = foreign.find(*instruction.target); label != foreign.end()) {
-        names.target = label->second;
+      if (const auto own = lines.labels.find(*instruction.target); own != lines.labels.end()) {
+        names.target = own->second;
+      } else if (const auto other = foreign.find(*instruction.target); other != foreign.end()) {
+        names.target = other->second;
       }
     } else if (absoluteData(instruction)) {
       const std::string_view name = operandRegister(disassembly, line.address, instruction.operand);

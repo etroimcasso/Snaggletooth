@@ -346,7 +346,9 @@ TEST(Render, ARunOfDataIsWrittenAsTheFrameworkWritesIt) {
   put(rom, 0x0000u, {0xDBu});                       // STP: nothing reaches bank $01
   put(rom, 0x8000u, {'H', 'e', 'l', 'l', 'o', 0x00u, 0xA9u, 0x12u, 0xFFu});
   const CartridgeDisassembly d = disassemble(rom);
-  const RegionListing& bank1 = regionNamed(d, "bank_01.asm");
+  // A copy, not a reference: a reference bound past a temporary argument is what
+  // one compiler's dangling-reference check refuses.
+  const RegionListing bank1 = regionNamed(d, "bank_01.asm");
   EXPECT_EQ(disasm::renderRegion(bank1, d), disasm::render(bank1.listing));
 }
 
