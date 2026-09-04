@@ -726,7 +726,7 @@ TEST(RomFacts, TheNewKindsParseAndAnUnknownKindIsStillAnError) {
 
   // The stability rule is unchanged: a kind a reader does not know is an error,
   // never a line to pass over.
-  EXPECT_FALSE(parseManifest("routine $00:8000 Vram\n", error).has_value());
+  EXPECT_FALSE(parseManifest("role $00:8000 Vram\n", error).has_value());
   EXPECT_NE(error.find("not a manifest line"), std::string::npos);
 }
 

@@ -11,9 +11,10 @@ findings outlive it.
 > run; `snes_verify` executes it — assembles every file it names, places the
 > bytes where it says, and reports the difference from the image. Thirty-one
 > real cartridges' trees verify byte-identical through it. It also carries what
-> the traced code reaches: a line per hardware register access, and a line per
-> DMA transfer a channel was set up for. Run on the machine, it records the
-> destinations the indirect jumps took, and traces from them.
+> the traced code reaches: a line per hardware register access, a line per DMA
+> transfer a channel was set up for, and a line per routine with what it calls
+> and what it drives. Run on the machine, it records the destinations the
+> indirect jumps took, and traces from them.
 
 ---
 
@@ -28,6 +29,7 @@ findings outlive it.
   - [2.5 Stops, warnings and notes](#25-stops-warnings-and-notes)
   - [2.6 What the code reaches](#26-what-the-code-reaches)
   - [2.7 What a run reached](#27-what-a-run-reached)
+  - [2.8 Routines](#28-routines)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -76,6 +78,9 @@ access   $01:8002 BBAD2 DmaChannel write $22
 
 dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
 dma      $01:8002 channel 2 direction-unknown $00:2122 CGDATA Cgram source none start none
+
+routine  $00:8000 reset lines 26 bytes 66 calls sub_018000 reaches Display,Vram,Oam,Interrupt,DmaControl,DmaChannel through Cgram,DmaChannel
+routine  $01:8000 sub_018000 lines 3 bytes 6 calls none reaches Cgram,DmaChannel through none
 ```
 
 A cartridge that uploads a sound program at boot also carries the `sound` and
@@ -138,8 +143,10 @@ An address the trace started from, the label it carries, and the mode execution
 arrives in: `e=1` is emulation mode, which fixes both widths at eight; `e=0` is
 native mode, with the accumulator width `m` and the index width `x` each eight,
 sixteen, or `?` for a width the trace does not know and must not guess. The
-vectors are written first — the reset handler `e=1`, every interrupt handler
-`e=0 m=? x=?` — then every entry a person added.
+vectors are written first, each in the mode the CPU takes it in — the
+emulation-mode set, reset among them, `e=1 m=8 x=8`; the native set
+`e=0 m=? x=?`, since the image cannot say what widths the interrupted code had —
+then every entry a person added.
 
 ### 2.5 Stops, warnings and notes
 
@@ -239,6 +246,43 @@ them are what the run saw. A run sees only what it exercised, so a jump the run
 never took has a `stop` and no `reached`, and a person's `entry` is still the way
 to name a destination the run did not.
 
+### 2.8 Routines
+
+```
+routine  <address> <label> lines <n> bytes <n> calls <label,…> | none
+         reaches <class,…> | none  through <class,…> | none
+```
+
+A routine is the code execution reaches from a label by falling through,
+branching and jumping, without passing a return or a halt and without entering
+the routine a call names: the call is an edge, and execution resumes after it. A
+jump or a call whose target the bytes do not name ends it, as it ends the trace.
+Every entry, every target a run reached, and every label a call names is a
+routine; a label only branches and jumps reach is inside the routines that reach
+it, so a routine that falls through into the next label's code, or jumps into
+it, holds those lines too, and a line two routines reach is in both.
+
+`lines` and `bytes` count what the routine holds. `calls` names the routines its
+call instructions name, each once, in address order. `reaches` is its role: the
+[classes](65816-disassembler.md#hardware-registers) of the registers its own
+lines reach and of the transfers its own lines set up, in the table's order.
+`through` is what its calls reach, followed through every routine they call in
+turn — so a routine that only calls others has `reaches none` and a `through`
+that says what the calls were for. Each list is one field, its names joined by
+commas, and an empty list is `none`.
+
+The cartridge of [1](#1-form), whose reset code drives the screen and two
+transfers itself and calls into the second bank for a third:
+
+```
+routine  $00:8000 reset lines 26 bytes 66 calls sub_018000 reaches Display,Vram,Oam,Interrupt,DmaControl,DmaChannel through Cgram,DmaChannel
+routine  $01:8000 sub_018000 lines 3 bytes 6 calls none reaches Cgram,DmaChannel through none
+```
+
+`Oam` and `Vram` are in reset's own role through its transfers — the channel
+registers it writes are `DmaChannel`, and where it points them is what the
+transfers reach — and `Cgram` is in its role through the call alone.
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -266,10 +310,10 @@ directory, it reads:
 - `image` and `checksum`, refusing a manifest written for another image as the
   disassembler does.
 
-Everything else is what the last run found and is written fresh — the `access`
-and `dma` lines among them, which no tool reads back: they are what the trace saw,
-and the next trace sees it again. A `stop` line records; only an `entry` line
-directs. The disassembler writes the files fresh
+Everything else is what the last run found and is written fresh — the `access`,
+`dma` and `routine` lines among them, which no tool reads back: they are what
+the trace saw, and the next trace sees it again. A `stop` line records; only an
+`entry` line directs. The disassembler writes the files fresh
 too: an edit to a bank file is not read back by it, so a person's changes to the
 trace belong in the manifest, and their changes to the code in the sources,
 which `snes_verify` assembles as they are.

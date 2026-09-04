@@ -50,9 +50,11 @@ it runs the reverse, assembling every file of a tree through the two dialects
 and comparing the result with the image. It runs the cartridge on the machine
 to find the destinations of the jumps the bytes do not name, and traces from
 them. It also reports what the traced code
-reaches: the hardware register behind every instruction that touches one, and the
-DMA transfers those add up to. `spc/` reads and writes the two file formats the
-renderers use, an SPC dump in and a WAV out.
+reaches: the hardware register behind every instruction that touches one, the
+DMA transfers those add up to, and the routines the instructions belong to, each
+with the routines it calls and the hardware it drives itself and through them.
+`spc/` reads and writes the two file formats the renderers use, an SPC dump in
+and a WAV out.
 
 The include paths follow the targets. `tools/` is on the public include path of
 `snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_rom` and
