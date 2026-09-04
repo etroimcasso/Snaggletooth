@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  snaggletooth::disasm::InputScript input;
+  snaggletooth::disasm::InputScript script;
   if (!inputPath.empty()) {
     std::string text;
     if (!readFile(inputPath, text)) {
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
       std::cerr << inputPath << ": " << error << "\n";
       return 1;
     }
-    input = *parsed;
+    script = *parsed;
   }
 
   std::string bytes;
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
   request.captureSound = sound;
   request.observeRun = run;
   request.runMasterCycles = runSeconds * kMasterPerSecond;
-  request.input = input;
+  request.input = script;
   request.bootMasterCycles = bootSeconds * kMasterPerSecond;
 
   const std::filesystem::path directory(outDir);

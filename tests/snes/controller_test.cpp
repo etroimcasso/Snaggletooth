@@ -59,9 +59,12 @@ std::vector<std::uint8_t> strobeAndRead(std::uint16_t port, int reads) {
                                  0x8Du, 0x16u, 0x40u,   // STA $4016   strobe high
                                  0x9Cu, 0x16u, 0x40u};  // STZ $4016   strobe low: latched
   for (int i = 0; i < reads; ++i) {
-    p.insert(p.end(), {0xADu, static_cast<std::uint8_t>(port & 0xFFu),
-                       static_cast<std::uint8_t>(port >> 8),                       // LDA $401x
-                       0x8Du, static_cast<std::uint8_t>(0x10u + i), 0x00u});     // STA $00xx
+    p.push_back(0xADu);                                       // LDA $401x
+    p.push_back(static_cast<std::uint8_t>(port & 0xFFu));
+    p.push_back(static_cast<std::uint8_t>(port >> 8));
+    p.push_back(0x8Du);                                       // STA $00xx
+    p.push_back(static_cast<std::uint8_t>(0x10u + i));
+    p.push_back(0x00u);
   }
   p.push_back(0xDBu);  // STP
   return p;
