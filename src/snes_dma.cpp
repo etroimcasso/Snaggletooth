@@ -11,6 +11,9 @@
 // by $420C) runs in the background, delivering a table's values to hardware
 // registers once per visible scanline; the CPU is halted for each event, so an
 // event runs whole and only the per-frame table state is carried between lines.
+// Every byte either engine moves is reported to the machine's observer as two
+// accesses in the engine's name, the read then the write; an engine's overhead
+// cycles touch no address and are not.
 
 namespace snaggletooth {
 namespace {
@@ -67,6 +70,22 @@ void Snes::dmaWriteA(std::uint32_t address, std::uint8_t value) {
   routeWrite(address, value);
 }
 
+std::uint8_t Snes::engineRead(std::uint32_t address, bool aBus, AccessSource source) {
+  const std::uint8_t value = aBus ? dmaReadA(address) : routeRead(address);
+  observe(address, value, false, CycleKind::DataRead, source);
+  return value;
+}
+
+void Snes::engineWrite(std::uint32_t address, std::uint8_t value, bool aBus,
+                       AccessSource source) {
+  if (aBus) {
+    dmaWriteA(address, value);
+  } else {
+    routeWrite(address, value);
+  }
+  observe(address, value, true, CycleKind::DataWrite, source);
+}
+
 std::uint32_t Snes::resumePad(std::uint32_t cpuCycle) const noexcept {
   // Wait to a whole number of CPU-clock cycles since the transfer paused; zero is
   // not an option, so an already-whole boundary waits a full CPU cycle.
@@ -118,10 +137,12 @@ void Snes::dmaCycle() {
   const std::uint32_t bAddr =
       0x2100u | ((ch.bbad + pattern.offset[state_.dmaUnit]) & 0xFFu);
   const std::uint32_t aAddr = (static_cast<std::uint32_t>(ch.a1b) << 16) | ch.a1t;
-  if ((ch.dmap & 0x80u) == 0u) {
-    routeWrite(bAddr, dmaReadA(aAddr));  // A -> B
-  } else {
-    dmaWriteA(aAddr, routeRead(bAddr));  // B -> A
+  if ((ch.dmap & 0x80u) == 0u) {  // A -> B
+    const std::uint8_t byte = engineRead(aAddr, /*aBus=*/true, AccessSource::Dma);
+    engineWrite(bAddr, byte, /*aBus=*/false, AccessSource::Dma);
+  } else {                         // B -> A
+    const std::uint8_t byte = engineRead(bAddr, /*aBus=*/false, AccessSource::Dma);
+    engineWrite(aAddr, byte, /*aBus=*/true, AccessSource::Dma);
   }
 
   // Step the A-bus address by the adjust mode: increment, decrement, or fixed.
@@ -153,14 +174,15 @@ void Snes::hdmaLoadEntry(DmaChannel& channel, bool indirect) {
   // Read the next line-count byte from the table, advancing the table pointer. A
   // $00 terminates the channel — the caller deactivates it. An indirect entry then
   // carries a two-byte pointer, loaded into the channel's indirect address.
-  channel.nltr = dmaReadA((static_cast<std::uint32_t>(channel.a1b) << 16) | channel.a2a);
+  channel.nltr = engineRead((static_cast<std::uint32_t>(channel.a1b) << 16) | channel.a2a,
+                            /*aBus=*/true, AccessSource::Hdma);
   channel.a2a = static_cast<std::uint16_t>(channel.a2a + 1u);
   if (channel.nltr == 0u) return;
   if (indirect) {
     const std::uint32_t bank = static_cast<std::uint32_t>(channel.a1b) << 16;
-    const std::uint8_t lo = dmaReadA(bank | channel.a2a);
-    const std::uint8_t hi = dmaReadA(
-        bank | static_cast<std::uint16_t>(channel.a2a + 1u));
+    const std::uint8_t lo = engineRead(bank | channel.a2a, /*aBus=*/true, AccessSource::Hdma);
+    const std::uint8_t hi = engineRead(bank | static_cast<std::uint16_t>(channel.a2a + 1u),
+                                       /*aBus=*/true, AccessSource::Hdma);
     channel.das = static_cast<std::uint16_t>(lo | (hi << 8));
     channel.a2a = static_cast<std::uint16_t>(channel.a2a + 2u);
   }
@@ -211,10 +233,12 @@ void Snes::hdmaCycle() {
           aAddr = (static_cast<std::uint32_t>(ch.a1b) << 16) | ch.a2a;
           ch.a2a = static_cast<std::uint16_t>(ch.a2a + 1u);
         }
-        if ((ch.dmap & 0x80u) == 0u) {
-          routeWrite(bAddr, dmaReadA(aAddr));  // A -> B, HDMA's usual direction
-        } else {
-          dmaWriteA(aAddr, routeRead(bAddr));  // B -> A
+        if ((ch.dmap & 0x80u) == 0u) {  // A -> B, HDMA's usual direction
+          const std::uint8_t byte = engineRead(aAddr, /*aBus=*/true, AccessSource::Hdma);
+          engineWrite(bAddr, byte, /*aBus=*/false, AccessSource::Hdma);
+        } else {                         // B -> A
+          const std::uint8_t byte = engineRead(bAddr, /*aBus=*/false, AccessSource::Hdma);
+          engineWrite(aAddr, byte, /*aBus=*/true, AccessSource::Hdma);
         }
         cost += kDmaByte;
       }

@@ -221,8 +221,15 @@ struct ManifestInput {
 [[nodiscard]] std::string manifestMismatch(const ManifestInput& input,
                                            std::span<const std::uint8_t> rom);
 
-// A region's source file: its listing rendered in pieces, with an `ORG` where a
-// piece starts and a comment where a sound-program block's bytes are left out.
+// A region's source file. The instructions are written from the representation
+// the listing lifts to (`ir/ir_render.h`), in pieces with an `ORG` where a piece
+// starts and a comment where a sound-program block's bytes are left out; the
+// data runs and the labels are the listing's. The file opens with an `EQU` line
+// for every hardware register its absolute operands address and every label
+// another file defines that it refers to, an absolute operand that addresses a
+// register is written as the register's name, a target with a label anywhere in
+// the tree is written as the label, and each routine that begins in the file
+// carries a comment with its role, what it calls and what calls it.
 [[nodiscard]] std::string renderRegion(const RegionListing& region,
                                        const CartridgeDisassembly& disassembly);
 

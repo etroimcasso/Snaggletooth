@@ -338,8 +338,12 @@ void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
 
 std::uint8_t Snes::readWramPort(std::uint16_t offset) {
   if (offset == 0x2180) {
-    const std::uint8_t v = state_.wram[state_.wmadd & 0x1FFFFu];
-    state_.wmadd = (state_.wmadd + 1u) & 0x1FFFFu;
+    const std::uint32_t at = state_.wmadd & 0x1FFFFu;
+    const std::uint8_t v = state_.wram[at];
+    state_.wmadd = (at + 1u) & 0x1FFFFu;
+    // The port's own read of work RAM, at the bank-$7E address it reached; the
+    // access to $2180 that asked for it is reported by whoever made it.
+    observe(0x7E0000u | at, v, false, CycleKind::DataRead, AccessSource::WramPort);
     return latch(v);
   }
   return state_.mdr;  // $2181-$2183 are write-only
@@ -347,10 +351,13 @@ std::uint8_t Snes::readWramPort(std::uint16_t offset) {
 
 void Snes::writeWramPort(std::uint16_t offset, std::uint8_t value) {
   switch (offset) {
-    case 0x2180:
-      state_.wram[state_.wmadd & 0x1FFFFu] = value;
-      state_.wmadd = (state_.wmadd + 1u) & 0x1FFFFu;
+    case 0x2180: {
+      const std::uint32_t at = state_.wmadd & 0x1FFFFu;
+      state_.wram[at] = value;
+      state_.wmadd = (at + 1u) & 0x1FFFFu;
+      observe(0x7E0000u | at, value, true, CycleKind::DataWrite, AccessSource::WramPort);
       break;
+    }
     case 0x2181:
       state_.wmadd = (state_.wmadd & 0x1FF00u) | value;
       break;

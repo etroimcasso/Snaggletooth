@@ -10,7 +10,8 @@ The machine is the system minus the picture. It does not draw. What it has is a 
 exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ, the DMA and HDMA
 engines, the hardware multiply/divide unit, the two controller ports, a PPU register file that fills
 video memory without rendering it, and the audio machine running underneath — enough to load a
-cartridge, run its code under interrupts, play it, and hear it.
+cartridge, run its code under interrupts, play it, and hear it. A host that wants to watch the bus
+rather than the state sets an [observer](#the-bus-observer), and is told every access in order.
 
 ## Contents
 
@@ -30,6 +31,7 @@ cartridge, run its code under interrupts, play it, and hear it.
 - [DMA and HDMA](#dma-and-hdma)
   - [General-purpose DMA](#general-purpose-dma)
   - [HDMA](#hdma)
+- [The bus observer](#the-bus-observer)
 - [Snapshot and restore](#snapshot-and-restore)
 - [Gotchas](#gotchas)
 - [See also](#see-also)
@@ -432,6 +434,68 @@ to write a unit on each of the next `count` lines. A direct table holds the data
 //          ^^ write once, wait 2 lines   ^^ write once, wait 1   ^^ stop
 ```
 
+## The bus observer
+
+`state()` says what the machine holds after a step. An observer says what the machine *did* to get
+there: every access that crossed the bus, in order, and every CPU cycle that drove an address without
+one. A host that needs the order of two writes inside one instruction, the address of every read, or a
+count of CPU cycles between two instruction boundaries sets one; a host that needs none of that never
+pays for it — with no observer set, an access costs one check, and the machine runs exactly as it does
+without the feature.
+
+```cpp
+#include "snaggletooth/snes/snes.h"
+using namespace snaggletooth;
+
+struct Log final : BusObserver {
+  std::vector<BusAccess> accesses;
+  std::uint32_t cpuCycles = 0;
+  void access(const BusAccess& a) override {
+    accesses.push_back(a);
+    if (a.source == AccessSource::Cpu) ++cpuCycles;
+  }
+  void internal(std::uint32_t, std::optional<CycleKind>) override { ++cpuCycles; }
+};
+
+Log log;
+machine.setObserver(&log);
+machine.step();               // one instruction: every access it made is in log.accesses,
+                              // and log.cpuCycles is how many CPU cycles it took
+machine.setObserver(nullptr);
+```
+
+A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what the bus answered for a
+read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an
+opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and
+write-back, a vector pull — and who made it:
+
+| `AccessSource` | Who |
+|---|---|
+| `Cpu` | The core, one access per cycle that reaches memory, with the kind it drove |
+| `Dma` | The general-purpose DMA engine, each byte as a read on one bus then a write on the other |
+| `Hdma` | The HDMA engine, its table reads and each byte it delivers the same way |
+| `WramPort` | The work-RAM data port, reaching work RAM on its own behalf when a byte moves through `$2180` |
+
+`internal` is called for a CPU cycle that drives an address without a valid access; `kind` is set when
+the pins say what the cycle was for — a read-modify-write's modify cycle — and absent for a plain
+internal cycle. A halted cycle, while the CPU waits or has stopped, drives nothing and reports nothing;
+so do a transfer engine's overhead cycles. Every CPU access plus every internal cycle is therefore the
+CPU's cycle count, which is what `tests/snes/observer_test.cpp` holds it to instruction by
+instruction.
+
+A byte moved through the data port is reported twice: the port's own access to work RAM, at the
+bank-`$7E` address it reached, and then the access to `$2180` that moved it — the CPU's or an
+engine's. The port's comes first, because it completes inside the cycle that caused it and the
+causing access is reported once its value is settled.
+
+The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()`
+leaves it in place, and it must outlive every step it is set for. `observer()` reads back what is
+set; the machine starts with none.
+
+The [intermediate representation](ir.md#running-beside-the-machine) is its first consumer: a run
+replayed instruction by instruction with an interpreter beside the core, held to every access the
+observer reports.
+
 ## Snapshot and restore
 
 The whole mutable machine is a value. `state()` returns a `SnesState` coherent at any cycle the machine
@@ -465,6 +529,9 @@ machine.restore(saved);   // back to the saved cycle, exactly
 - A transfer's A-bus bank is fixed: the address wraps within its bank and never crosses into the next.
 - HDMA re-initialises every frame and delivers only on the visible lines; arm `$420C` and set the table
   before line 0, and it stops on its own at vblank.
+- An observer sees fetches too: to count only the data an instruction touched, drop `OpcodeFetch` and
+  `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle
+  the CPU spent, count its accesses and the internal cycles together.
 
 ## See also
 

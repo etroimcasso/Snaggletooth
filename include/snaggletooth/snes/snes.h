@@ -27,6 +27,11 @@
 // region-speed map is counted in master cycles either way, so it does not change;
 // only the master clock does, and with it the exact share of master cycles the
 // APU's own crystal is paced against.
+//
+// A host that wants to see the bus rather than the state sets an observer: it is
+// told every access the machine makes — the CPU's with the kind the core drove,
+// the transfer engines' bytes, the work-RAM port's own reads and writes — and
+// every internal CPU cycle, in the order they happen.
 
 #include <array>
 #include <cstdint>
@@ -95,6 +100,45 @@ struct Joypad {
 
 // The two controller ports on the console's front.
 enum class JoypadPort : std::uint8_t { One, Two };
+
+// Who made a bus access. The CPU narrates every cycle of its own; the two
+// transfer engines make their accesses while the CPU is held off the bus; the
+// work-RAM port reaches work RAM on its own behalf when a program or a transfer
+// moves a byte through $2180.
+enum class AccessSource : std::uint8_t { Cpu, Dma, Hdma, WramPort };
+
+// One access as the machine made it: the 24-bit address, the byte that crossed
+// the bus, which way, what the cycle was for, and who made it. A transfer
+// engine's accesses are plain data reads and writes; the CPU's carry the kind
+// the core drove.
+struct BusAccess {
+  std::uint32_t address = 0;
+  std::uint8_t value = 0;
+  bool write = false;
+  CycleKind kind = CycleKind::DataRead;
+  AccessSource source = AccessSource::Cpu;
+};
+
+// What a machine tells about every access it makes, and every CPU cycle that
+// drives an address without one. A host derives the machine's whole observable
+// behaviour from it: which addresses were read and written in what order, and
+// how many cycles the CPU spent between two instruction boundaries — every CPU
+// access plus every internal cycle. A halted cycle drives nothing and is not
+// reported, and neither are a transfer engine's overhead cycles; the transfer's
+// bytes are.
+class BusObserver {
+ public:
+  virtual ~BusObserver() = default;
+
+  // An access that crossed the bus, after its value is settled: a read carries
+  // what the bus answered, a write what the source drove.
+  virtual void access(const BusAccess& access) = 0;
+
+  // A CPU cycle that drove `address` without a valid access. `kind` is set when
+  // the pins say what the cycle was for — a read-modify-write's modify cycle —
+  // and absent for a plain internal cycle.
+  virtual void internal(std::uint32_t address, std::optional<CycleKind> kind) = 0;
+};
 
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
@@ -289,19 +333,58 @@ class Snes {
   [[nodiscard]] std::span<const std::uint8_t> vram() const noexcept { return state_.vram; }
   [[nodiscard]] std::span<const std::uint8_t> cgram() const noexcept { return state_.cgram; }
 
+  // The observer told every access the machine makes and every internal CPU
+  // cycle, or none, which is how the machine starts. It is the host's object and
+  // outlives every step it is set for; it is not part of the state, so a snapshot
+  // does not carry it and restore() leaves it in place. With none set an access
+  // costs one check.
+  void setObserver(BusObserver* observer) noexcept { observer_ = observer; }
+  [[nodiscard]] BusObserver* observer() const noexcept { return observer_; }
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
   // internal cycle drives an address without an access and costs the fast rate.
+  // Every call is reported to the observer as the CPU's, with the kind the core
+  // drove.
   struct Bus {
     Snes& m;
-    std::uint8_t read(std::uint32_t address, CycleKind) { return m.busRead(address); }
-    void write(std::uint32_t address, std::uint8_t value, CycleKind) {
-      m.busWrite(address, value);
+    std::uint8_t read(std::uint32_t address, CycleKind kind) {
+      const std::uint8_t value = m.busRead(address);
+      m.observe(address, value, false, kind, AccessSource::Cpu);
+      return value;
     }
-    void internal(std::uint32_t) { m.busInternal(); }
-    void internal(std::uint32_t, CycleKind) { m.busInternal(); }
+    void write(std::uint32_t address, std::uint8_t value, CycleKind kind) {
+      m.busWrite(address, value);
+      m.observe(address, value, true, kind, AccessSource::Cpu);
+    }
+    void internal(std::uint32_t address) {
+      m.busInternal();
+      if (m.observer_ != nullptr) m.observer_->internal(address, std::nullopt);
+    }
+    void internal(std::uint32_t address, CycleKind kind) {
+      m.busInternal();
+      if (m.observer_ != nullptr) m.observer_->internal(address, kind);
+    }
   };
+
+  // Reports one access to the observer, when one is set.
+  void observe(std::uint32_t address, std::uint8_t value, bool write, CycleKind kind,
+               AccessSource source) {
+    if (observer_ == nullptr) return;
+    BusAccess access;
+    access.address = address;
+    access.value = value;
+    access.write = write;
+    access.kind = kind;
+    access.source = source;
+    observer_->access(access);
+  }
+
+  // A transfer engine's two sides of one byte, reported as its accesses: the
+  // read on one bus and the write on the other, in that order.
+  std::uint8_t engineRead(std::uint32_t address, bool aBus, AccessSource source);
+  void engineWrite(std::uint32_t address, std::uint8_t value, bool aBus, AccessSource source);
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
@@ -456,6 +539,7 @@ class Snes {
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
   bool videoAdvanced_ = false;       // whether this cycle's access already ticked the machine's events
+  BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
 };
 
 }  // namespace snaggletooth

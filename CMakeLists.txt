@@ -204,6 +204,32 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(cpu65816_asm PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The intermediate representation — a 65816 program as its meaning, with no
+  # bytes in it: the model, the lift from a listing (the one consumer of bytes),
+  # the interpreter that runs the effects and nothing else, the text form for
+  # reading, and the renderer that writes SNES assembly from the instruction
+  # layer. The lift links the 65816 backend because it reads a listing and the
+  # measured cycle tables; the renderer links it for the opcode table and the
+  # mode tracker it shares with the assembler; the interpreter's own translation
+  # unit includes neither.
+  add_library(snaggletooth_ir STATIC
+    tools/ir/cpu65816_lift.cpp
+    tools/ir/ir_interpret.cpp
+    tools/ir/ir_render.cpp
+    tools/ir/ir_text.cpp
+  )
+  target_link_libraries(snaggletooth_ir PUBLIC snaggletooth_cpu65816)
+  target_include_directories(snaggletooth_ir PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_ir PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_ir PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_ir PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_ir PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The cartridge side of the toolkit — the entry points a header names, which
   # disassembler owns each part of the bus, the whole-cartridge disassembly that
   # traces across banks and writes a source tree, and the verification that
@@ -211,7 +237,8 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   # cartridge through the library's own header functions, so a tool and the
   # machine agree on every byte, and it links both chip backends because a
   # cartridge carries both chips' programs: the main CPU's in its banks, the
-  # audio CPU's uploaded at boot.
+  # audio CPU's uploaded at boot. It links the representation because the bank
+  # files are rendered from it.
   add_library(snaggletooth_rom STATIC
     tools/rom/cartridge_entries.cpp
     tools/rom/input_script.cpp
@@ -221,7 +248,8 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     tools/rom/rom_verify.cpp
   )
   target_link_libraries(snaggletooth_rom PUBLIC
-    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700)
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
+    snaggletooth_ir)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -231,6 +259,53 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_rom PRIVATE /W4 /WX)
   else()
     target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # The differential — a recorded run replayed on the machine beside the
+  # interpreter. Its own target because it links the cartridge tools for the run
+  # it replays, and the cartridge tools link the representation for the files
+  # they render.
+  add_library(snaggletooth_ir_differential STATIC
+    tools/ir/ir_differential.cpp
+  )
+  target_link_libraries(snaggletooth_ir_differential PUBLIC snaggletooth_ir snaggletooth_rom)
+  target_compile_features(snaggletooth_ir_differential PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_ir_differential PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_ir_differential PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_ir_differential PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(snes_differential tools/ir/snes_differential_main.cpp)
+  target_link_libraries(snes_differential PRIVATE snaggletooth_ir_differential)
+  if(MSVC)
+    target_compile_options(snes_differential PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_differential PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(snes_lift tools/ir/snes_lift_main.cpp)
+  target_link_libraries(snes_lift PRIVATE snaggletooth_rom)
+  if(MSVC)
+    target_compile_options(snes_lift PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_lift PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # The example cartridges — the images the tests read and the documentation's
+  # examples are produced from, written to disk by one command. Header-only
+  # beside it, on the same include path as the other tools.
+  add_executable(snes_examples tools/examples/snes_examples_main.cpp)
+  target_include_directories(snes_examples PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snes_examples PRIVATE cxx_std_20)
+  set_target_properties(snes_examples PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snes_examples PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_examples PRIVATE -Wall -Wextra -Werror)
   endif()
 
   add_executable(snes_disasm tools/rom/snes_disasm_main.cpp)
@@ -331,7 +406,12 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/rom/rom_disasm_test.cpp
     tests/rom/routines_test.cpp
     tests/rom/verify_test.cpp
+    tests/ir/lift_test.cpp
+    tests/ir/ir_vector_test.cpp
+    tests/ir/differential_test.cpp
+    tests/ir/render_test.cpp
     tests/snes/machine_test.cpp
+    tests/snes/observer_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/controller_test.cpp
     tests/snes/math_test.cpp
@@ -358,19 +438,21 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp
   )
-  # snaggletooth_spc links snaggletooth::snaggletooth publicly, and snaggletooth_rom
-  # links both chip backends publicly, so the test target reaches the library and
-  # the backends through them — no separate direct links.
+  # snaggletooth_spc links snaggletooth::snaggletooth publicly, and the
+  # differential links the representation and the cartridge tools publicly, which
+  # link both chip backends publicly, so the test target reaches the library, the
+  # tools and the backends through them — no separate direct links.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
-    snaggletooth_rom
+    snaggletooth_ir_differential
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
     SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}"
     SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}"
-    SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}")
+    SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}"
+    SNAGGLETOOTH_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   # The IPL-stub test seeds the stub into an audio machine through the internal
   # seam in src/, so the test target reaches the private headers there.
   target_include_directories(snaggletooth_tests PRIVATE

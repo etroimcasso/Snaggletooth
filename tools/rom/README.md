@@ -18,7 +18,13 @@ began, and where it stopped. The trace starts at the vectors and follows control
 flow across banks; the sound program is captured by booting the cartridge on the
 machine and matched back to the image bytes it was read from. A manifest already in
 the directory supplies entries a person added and the file split, which is how the
-trace is carried past a jump table.
+trace is carried past a jump table. A bank file's instructions are written from
+the [intermediate representation](../ir/README.md) the listing lifts to, with
+what the tree knows attached as names: an `EQU` prologue for the hardware
+registers the file addresses and the labels other files define, registers as
+operands (`STA !INIDISP`), labels across files (`JSL >sub_018000`), and a
+comment above each routine with its size, its role, what it calls and what
+calls it.
 
 ```
 snes_disasm game.sfc -o game
@@ -124,7 +130,8 @@ and open bus. Both read the cartridge through the library's own header functions
 so a tool and the machine never disagree about a byte.
 
 The library target is `snaggletooth_rom`; `tools/` is on its public include path,
-and it links both chip backends.
+and it links both chip backends and the representation the bank files are
+rendered from.
 
 ## See also
 
@@ -140,3 +147,5 @@ and it links both chip backends.
   — the entry points in the framework's terms.
 - [docs/snes-cartridge.md](../../docs/snes-cartridge.md) — the header, the three
   maps, and where every bus address lands in the image.
+- [`../ir/`](../ir/README.md) — the representation the bank files are written
+  from, and the renderer that writes them.

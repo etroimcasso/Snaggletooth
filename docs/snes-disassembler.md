@@ -25,7 +25,9 @@ of the image it was read from.
 > took become entries, so a cartridge whose dispatch goes through pointers is
 > traced past them. The manifest says what the code reaches: every register
 > access, every transfer, and every routine with what it calls and what it
-> drives.
+> drives — and the bank files say it beside the code, written from the
+> intermediate representation: registers as operands, labels across files, a
+> header per routine.
 > The coprocessors have no backend, so a cartridge carrying one is traced as far
 > as the main CPU's own code goes, and its tree still verifies.
 
@@ -104,27 +106,85 @@ whole, from its first byte to its last, under one `ORG`: instructions where the
 trace reached, `DB` runs everywhere else. Every image byte is placed once, at the
 address `romAddress` reports for its offset, so a mirror is never written twice —
 a bank reached through `$80`–`$FF` is written as `$00`–`$7F` under LoROM, and
-under HiROM the banks are `$C0`–`$FF`. The file starts the way every listing
-does:
+under HiROM the banks are `$C0`–`$FF`. The instructions are written from the
+[intermediate representation](ir.md#rendering-source) the listing lifts to, with
+the facts the manifest carries attached as names. This is the start of
+`bank_00.asm` for the `mixed` cartridge from
+[`tools/examples/`](../tools/examples/README.md):
 
 ```
+; The hardware registers this file names, and the labels other files
+; define that it refers to.
+NMITIMEN  EQU $4200
+RDNMI     EQU $4210
+
         ORG $00:8000
 
+; routine reset: 21 lines, 46 bytes
+;   reaches Interrupt; through none
+;   calls sub_008040; called by none
 reset:
         EMULATION
-        SEI                             ; $00:8000  78           2
-        STZ !$4200                      ; $00:8001  9C 00 42     4  NMITIMEN
-        STZ !$420C                      ; $00:8004  9C 0C 42     4  HDMAEN
+        CLC                             ; $00:8000  18        2
+        XCE                             ; $00:8001  FB        2
+        REP #$30                        ; $00:8002  C2 30     3
+        LDX #$0002                      ; $00:8004  A2 02 00  3
+        LDA #$1234                      ; $00:8007  A9 34 12  3
+        STA !$0100                      ; $00:800A  8D 00 01  5
+        INC !$0100                      ; $00:800D  EE 00 01  8
+        SEP #$20                        ; $00:8010  E2 20     3
+        LDA #$05                        ; $00:8012  A9 05     2
+        STA $10                         ; $00:8014  85 10     3
+        LDA !$FFFF,X                    ; $00:8016  BD FF FF  5
+        PHA                             ; $00:8019  48        3
+        PLA                             ; $00:801A  68        4
+        JSR !sub_008040                 ; $00:801B  20 40 80  6
+        LDA #$80                        ; $00:801E  A9 80     2
+        STA !NMITIMEN                   ; $00:8020  8D 00 42  4
+
+loc_008023:
+        INC !$0102                      ; $00:8023  EE 02 01  6
+        LDA !$0104                      ; $00:8026  AD 04 01  4
+        CMP #$03                        ; $00:8029  C9 03     2
+        BNE loc_008023                  ; $00:802B  D0 F6     2/3
+        STP                             ; $00:802D  DB        3
 ```
 
-The vectors' handlers carry the vector's name as their label — `reset`, `nmi`,
-`irq_native` — except `cop` and `brk`, which are mnemonics and cannot be
-labels, so those handlers are `cop_handler` and `brk_handler`. A routine
-reached from another bank carries `sub_` or `loc_` with its address, the way
-the disassemblers name any target, and a branch, jump or call whose target is
-in the same file names that label: `JSR !sub_0080E8`, `BNE loc_008034`,
-`JSL >sub_008A4E`. A target in another file is written as its address, since
-a symbol does not cross a file.
+Each line is the instruction, then a comment with its address, its bytes, its
+cycle cost and any annotation, as the [65816 disassembler](65816-disassembler.md#output)
+writes a listing. What the file adds is names.
+
+**The prologue.** The file opens with an `EQU` for every hardware register its
+absolute operands address and every label another file defines that it refers
+to — and nothing else, so the prologue is a list of what the file touches. A
+register's `EQU` carries the 16-bit offset, which the absolute forms take in
+every bank; a label's carries its full 24-bit address, which `>` takes.
+
+**Register names as operands.** An absolute data operand that the manifest's
+`access` line names is written as the register: `STA !NMITIMEN`, `LDA !RDNMI`,
+`STA !VMDATAL,X`. That is exactly the set the listing annotates — an absolute
+operand taken in bank zero — so the operand says what the comment said. A long
+operand keeps its address with the name in the comment, since a long symbol
+would need the bank in the name. A register whose name cannot be a symbol —
+`$4016` is two registers, `JOYSER0/JOYOUT` — keeps its address and its comment,
+as does one whose name the file already uses as a label.
+
+**Labels across files.** The vectors' handlers carry the vector's name as their
+label — `reset`, `nmi`, `irq_native` — except `cop` and `brk`, which are
+mnemonics and cannot be labels, so those handlers are `cop_handler` and
+`brk_handler`. A routine reached from another bank carries `sub_` or `loc_` with
+its address, the way the disassemblers name any target. A branch, jump or call
+whose target carries a label anywhere in the tree names it — `JSR !sub_0080E8`,
+`BNE loc_008034` in the same file; `JSL >sub_018000` into another, whose `EQU`
+the prologue carries. A target the bytes name through a mirror bank keeps its
+address, since a symbol would carry the bank the bytes are placed in rather than
+the one they name.
+
+**Routine headers.** Every routine that begins in the file carries a comment
+above its label: how many lines and bytes it holds, the parts of the machine it
+reaches itself and through what it calls, what it calls, and what calls it — the
+manifest's [`routine` line](#what-the-code-reaches) read out beside the code it
+describes.
 
 **The sound program as its own file.** The bytes the cartridge sends to the audio
 unit are written once, as SPC700 source in `apu/driver.asm`, and the bank that
@@ -501,7 +561,10 @@ The files are text from `renderRegion`, `renderSoundProgram` and
 `renderManifest`; `parseManifest` reads a manifest's entries, file split, map,
 sound program and image identity back, and `manifestMismatch` says whether that
 manifest can direct a run over a given image. `writeProject` writes all of it
-under a directory.
+under a directory. `renderRegion` lifts the region's listing into the
+[intermediate representation](ir.md) and writes each instruction from it
+(`ir/ir_render.h`), with the labels, the register names from `accesses` and the
+`routines` attached; the data runs and the sound-program cut are the listing's.
 
 Verification is `rom/rom_verify.h`:
 
@@ -551,8 +614,11 @@ names its target.
 
 Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
 from 512 KB to 6 MB — assembles back to its image byte for byte under
-`snes_verify`. The trace's own limits stand: a jump through a table stops it,
-and an entry in the manifest is how a person carries it past.
+`snes_verify`. The bank files are written from the intermediate representation,
+which holds no bytes: the bytes in every comment are re-encoded from the
+instruction layer, and the tree still assembles to the image. The trace's own
+limits stand: a jump through a table stops it, and an entry in the manifest is
+how a person carries it past.
 
 ## See also
 
@@ -562,6 +628,8 @@ and an entry in the manifest is how a person carries it past.
   grammar and its refusals.
 - [The assemblers](assemblers.md) — the tools `snes_verify` rebuilds the
   tree's files with, and their diagnostics.
+- [The intermediate representation](ir.md#rendering-source) — what the bank
+  files are written from, and how the writing is held to the listing.
 - [65816 disassembler](65816-disassembler.md) and
   [SPC700 disassembler](spc700-disassembler.md) — the two backends the tree's
   listings come from.

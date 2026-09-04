@@ -1,66 +1,10 @@
 #pragma once
 
-// Cartridge images built by hand for the tests of the cartridge tools: a LoROM
-// header, a few banks of 65816 code that call and jump across them, and one
-// cartridge whose reset code speaks the audio upload protocol. Shared by the
-// disassembly and the verification tests, so both read one tree.
-
 #include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <initializer_list>
-#include <vector>
 
-namespace snaggletooth::disasm::fixtures {
+#include "examples/common.h"
 
-// A LoROM image of `banks` 32 KB banks whose header names reset at $8000 and
-// leaves every other vector unused.
-inline std::vector<std::uint8_t> loRomImage(std::size_t banks) {
-  std::vector<std::uint8_t> rom(banks * 0x8000u, 0u);
-  const std::size_t site = 0x7FC0u;
-  for (std::size_t i = 0; i < 21; ++i) rom[site + i] = 'A';
-  rom[site + 0x15] = 0x20u;  // the map-mode byte: LoROM
-  rom[site + 0x1C] = 0x34u;  // a complement and checksum that agree
-  rom[site + 0x1D] = 0x12u;
-  rom[site + 0x1E] = 0xCBu;
-  rom[site + 0x1F] = 0xEDu;
-  rom[site + 0x3C] = 0x00u;  // reset -> $8000
-  rom[site + 0x3D] = 0x80u;
-  return rom;
-}
-
-inline void put(std::vector<std::uint8_t>& rom, std::size_t offset,
-                std::initializer_list<std::uint8_t> bytes) {
-  std::size_t i = offset;
-  for (const std::uint8_t b : bytes) rom[i++] = b;
-}
-
-// Three banks. Reset switches to native mode with both widths sixteen, calls a
-// routine in bank $01, and jumps to bank $02 through its mirror at $82. The
-// bank-$01 routine calls back into bank $00, at an address only it reaches. The
-// bank-$02 code narrows the accumulator, calls into work RAM, and ends in a
-// jump through a table; the table's one target sits at $02:8100.
-inline std::vector<std::uint8_t> threeBankImage() {
-  std::vector<std::uint8_t> rom = loRomImage(3);
-  put(rom, 0x0000u, {0x18u,                       // CLC
-                     0xFBu,                       // XCE
-                     0xC2u, 0x30u,                // REP #$30
-                     0x22u, 0x00u, 0x80u, 0x01u,  // JSL $01:8000
-                     0x5Cu, 0x00u, 0x80u, 0x82u});  // JML $82:8000
-  put(rom, 0x0100u, {0xEAu,    // $00:8100 NOP   (reached only from bank $01)
-                     0x6Bu});  //          RTL
-  put(rom, 0x8000u, {0xA9u, 0x34u, 0x12u,          // LDA #$1234
-                     0x22u, 0x00u, 0x81u, 0x00u,   // JSL $00:8100
-                     0x6Bu});                      // RTL
-  put(rom, 0x10000u, {0xE2u, 0x20u,                // SEP #$20
-                      0xA9u, 0x12u,                // LDA #$12
-                      0x22u, 0x00u, 0x20u, 0x7Eu,  // JSL $7E:2000
-                      0x7Cu, 0x00u, 0x81u});       // JMP (!$8100,X)
-  put(rom, 0x10100u, {0xEAu,          // NOP        (reached only through the table)
-                      0x00u, 0x01u,   // BRK #$01   (continues at the BRK vector's handler)
-                      0x6Bu});        // RTL
-  return rom;
-}
+namespace snaggletooth::examples {
 
 // The 24-byte program the uploading cartridge sends: three instructions, sixteen
 // NOPs (whose opcode is zero, the value cleared audio memory already holds) and
@@ -158,34 +102,4 @@ inline std::vector<std::uint8_t> uploadingImage() {
   return rom;
 }
 
-// One bank whose header names the COP vector and the native BRK vector beside
-// reset: `cop` and `brk` are mnemonics, so their handlers cannot carry the
-// vector's name as a label. Reset stops at once; each handler returns.
-inline std::vector<std::uint8_t> copVectorImage() {
-  std::vector<std::uint8_t> rom = loRomImage(1);
-  const std::size_t site = 0x7FC0u;
-  rom[site + 0x34] = 0x10u;  // cop (emulation) -> $8010
-  rom[site + 0x35] = 0x80u;
-  rom[site + 0x26] = 0x12u;  // brk (native) -> $8012
-  rom[site + 0x27] = 0x80u;
-  put(rom, 0x0000u, {0xDBu});  // 8000 STP
-  put(rom, 0x0010u, {0x40u});  // 8010 RTI
-  put(rom, 0x0012u, {0x40u});  // 8012 RTI
-  return rom;
-}
-
-// The uploading cartridge with two edits that put instructions across the
-// edges of what was uploaded: the program's STOP becomes `MOV A,#`, whose
-// operand is the table's first byte, so one instruction spans the two blocks;
-// the table's second byte branches to its last, which is `MOV A,#` again, whose
-// operand lies past the end of the upload.
-inline std::vector<std::uint8_t> straddlingUploadImage() {
-  std::vector<std::uint8_t> rom = uploadingImage();
-  rom[0xA0u + 23u] = 0xE8u;   // $0217  MOV A,#<table[0]>
-  rom[0x100u + 1u] = 0x2Fu;   // $0219  BRA $022B
-  rom[0x100u + 2u] = 0x10u;
-  rom[0x100u + 19u] = 0xE8u;  // $022B  MOV A,#<not uploaded>
-  return rom;
-}
-
-}  // namespace snaggletooth::disasm::fixtures
+}  // namespace snaggletooth::examples
