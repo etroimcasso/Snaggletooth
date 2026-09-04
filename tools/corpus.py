@@ -3,19 +3,20 @@
 image and a verdict.
 
     corpus.py <images> <output> --build <build-dir> [--no-run] [--seconds N]
-              [--input-dir <scripts>] [--no-differential] [--facts] [--routines]
+              [--input-dir <scripts>] [--no-lift] [--no-differential] [--facts] [--routines]
 
 For every `.smc` or `.sfc` under <images>, in name order, the tree is written
 under <output>/<name>/ by `snes_disasm` (reading back the manifest already
-there, so a directory an earlier run filled keeps its `reached` lines), assembled
-back by `snes_verify` with the rebuilt image's SHA-256 compared with the
-original's, and — unless `--no-differential` — replayed beside the interpreter
-by `snes_differential`, whose report lands under <output>/<name>/differential/.
-A script named <name>.txt under `--input-dir` is the recorded run for that
-image, given to both the disassembler and the replay. `--no-run` skips the
-machine run in the disassembler (the trace alone takes seconds; the run takes
-about as long as it emulates), `--seconds` sets both the run's and the replay's
-length (sixty by default).
+there, so a directory an earlier run filled keeps its `reached` lines), lifted
+by `snes_lift` into <output>/<name>.snagir unless `--no-lift`, assembled back by
+`snes_verify` into <output>/<name>-rebuilt<.smc|.sfc> with the rebuilt image's
+SHA-256 compared with the original's, and — unless `--no-differential` —
+replayed beside the interpreter by `snes_differential`, whose report lands under
+<output>/<name>/differential/. A script named <name>.txt under `--input-dir` is
+the recorded run for that image, given to both the disassembler and the replay.
+`--no-run` skips the machine run in the disassembler (the trace alone takes
+seconds; the run takes about as long as it emulates), `--seconds` sets both the
+run's and the replay's length (sixty by default).
 
 `--facts` and `--routines` add the corpus-wide aggregates the manifests carry:
 every hardware access by class and by register, every transfer by destination,
@@ -90,6 +91,7 @@ def main():
     parser.add_argument("--no-run", action="store_true", help="trace without running the cartridge")
     parser.add_argument("--seconds", default="60", help="the run's and the replay's length in seconds of the master clock")
     parser.add_argument("--input-dir", type=pathlib.Path, help="recorded runs, one <name>.txt per image")
+    parser.add_argument("--no-lift", action="store_true", help="skip writing the tree's program as <name>.snagir")
     parser.add_argument("--no-differential", action="store_true", help="skip the replay beside the interpreter")
     parser.add_argument("--facts", action="store_true", help="aggregate the hardware accesses and transfers")
     parser.add_argument("--routines", action="store_true", help="aggregate the routines")
@@ -126,7 +128,13 @@ def main():
             disasm += ["--input", script]
         results.append(subprocess.run([str(c) for c in disasm], capture_output=True, text=True))
 
-        rebuilt = tree / "rebuilt.bin"
+        if not args.no_lift:
+            lifted = args.output / f"{name}.snagir"
+            results.append(subprocess.run([str(c) for c in [args.build / "snes_lift", tree, rom, "-o", lifted]],
+                                          capture_output=True, text=True))
+
+        # The rebuilt image keeps the original's extension: it is the same kind of file.
+        rebuilt = args.output / f"{name}-rebuilt{rom.suffix}"
         results.append(subprocess.run([str(c) for c in [args.build / "snes_verify", tree, rom, "-o", rebuilt]],
                                       capture_output=True, text=True))
         same = rebuilt.exists() and sha(rom) == sha(rebuilt)

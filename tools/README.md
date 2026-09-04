@@ -17,12 +17,14 @@ shelling out to the tool.
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
-cartridges through the commands — the tree written, assembled back and compared
-with the image, replayed beside the interpreter — one line per image and a
-verdict, with the corpus-wide aggregates the manifests carry on request:
+cartridges through the commands — the tree written, its program lifted to a
+`.snagir` beside it, the tree assembled back into a rebuilt image with the
+original's extension and compared with it, and the recorded run replayed beside
+the interpreter — one line per image and a verdict, with the corpus-wide
+aggregates the manifests carry on request:
 
 ```
-tools/corpus.py <images> <output> --build build [--no-run] [--seconds N] [--input-dir <scripts>] [--facts] [--routines]
+tools/corpus.py <images> <output> --build build [--no-run] [--seconds N] [--input-dir <scripts>] [--no-lift] [--no-differential] [--facts] [--routines]
 ```
 
 It exits 0 only when every image is OK, and writes nothing outside `<output>`.
