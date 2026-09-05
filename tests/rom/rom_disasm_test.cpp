@@ -742,7 +742,7 @@ bool anyNote(const CartridgeDisassembly& d, const std::string& text) {
 TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
   const std::vector<std::uint8_t> rom = liftingImage();
   const CartridgeDisassembly d = lifted(rom);
-  ASSERT_EQ(d.assets.size(), 9u) << renderManifest(d);
+  ASSERT_EQ(d.assets.size(), 10u) << renderManifest(d);
   struct Expected {
     const char* file;
     RegisterClass cls;
@@ -750,6 +750,9 @@ TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
     Address first;
     std::size_t bytes;
   };
+  // The tenth is the shadow's: the transfer from `$01:FFF0` wraps into
+  // `$01:0000`, which is work RAM holding the bytes the port copied there from
+  // `$9900`, so those sixteen are lifted as the source they were staged from.
   const Expected expected[] = {
       {"vram/00_9000.bin", RegisterClass::Vram, MovedKind::Dma, 0x009000u, 80},
       {"cgram/00_9200.bin", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
@@ -758,10 +761,11 @@ TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
       {"hdma/00_9700.bin", RegisterClass::Cgram, MovedKind::Table, 0x009700u, 7},
       {"hdma/00_9710.bin", RegisterClass::Cgram, MovedKind::Indirect, 0x009710u, 2},
       {"hdma/00_9712.bin", RegisterClass::Cgram, MovedKind::Indirect, 0x009712u, 2},
+      {"vram/00_9900.bin", RegisterClass::Vram, MovedKind::Staged, 0x009900u, 16},
       {"vram/01_8000.bin", RegisterClass::Vram, MovedKind::Dma, 0x018000u, 32},
       {"vram/01_FFF0.bin", RegisterClass::Vram, MovedKind::Dma, 0x01FFF0u, 16},
   };
-  for (std::size_t i = 0; i < 9; ++i) {
+  for (std::size_t i = 0; i < 10; ++i) {
     const AssetFile& asset = d.assets[i];
     EXPECT_EQ(asset.file, expected[i].file);
     EXPECT_EQ(asset.cls, expected[i].cls) << asset.file;
@@ -819,10 +823,14 @@ TEST(RomAssets, ARefusedRangeIsNotedAndStaysInItsBank) {
 
 TEST(RomAssets, WhatIsNotAnAssetIsLeftWithoutAWord) {
   const CartridgeDisassembly d = lifted(liftingImage());
-  // A copy into work RAM through the port, a fill from one byte, and a read
-  // from a register back into the image, which takes nothing.
+  // A fill from one byte, and a read from a register back into the image,
+  // which takes nothing. The copy into work RAM through the port is not an
+  // asset for being copied; it is lifted only because the wrapped transfer
+  // later sent sixteen of its bytes on to VRAM, and as that source.
   for (const AssetFile& asset : d.assets) {
-    EXPECT_NE(asset.first, 0x009900u);
+    if (asset.first == 0x009900u) {
+      EXPECT_EQ(asset.kind, MovedKind::Staged);
+    }
     EXPECT_NE(asset.first, 0x009A00u);
     EXPECT_NE(asset.first, 0x009B00u);
   }
@@ -943,7 +951,7 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
   std::string error;
   const std::optional<ManifestInput> input = parseManifest(manifest, error);
   ASSERT_TRUE(input.has_value()) << error;
-  ASSERT_EQ(input->assets.size(), 9u);
+  ASSERT_EQ(input->assets.size(), 10u);
   EXPECT_EQ(input->assets[0].file, "vram/00_9000.bin");
   EXPECT_EQ(input->assets[0].first, 0x009000u);
   EXPECT_EQ(input->assets[0].bytes, 80u);
@@ -953,7 +961,7 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
   EXPECT_FALSE(parseManifest("asset vram/x.bin Tiles as dma from $00:9000 bytes 80\n", error).has_value());
   EXPECT_NE(error.find("not a register class"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as copy from $00:9000 bytes 80\n", error).has_value());
-  EXPECT_NE(error.find("not dma, table or indirect"), std::string::npos);
+  EXPECT_NE(error.find("not dma, table, indirect, stream or staged"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $9000 bytes 80\n", error).has_value());
   EXPECT_NE(error.find("$BB:XXXX"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $00:9000 bytes 0\n", error).has_value());
@@ -986,6 +994,11 @@ TEST(RomAssets, ATreeWithoutARunLiftsWhatItReadBack) {
   request.captureSound = false;
   request.observeRun = false;
   request.moved = first.moved;
+  // The shadow's file is kept by its own line; the rest follow from `moved`.
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(first), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  request.assets = input->assets;
   const CartridgeDisassembly again = disassembleCartridge(request);
   ASSERT_EQ(again.assets.size(), first.assets.size());
   for (std::size_t i = 0; i < first.assets.size(); ++i) {
@@ -994,6 +1007,146 @@ TEST(RomAssets, ATreeWithoutARunLiftsWhatItReadBack) {
   }
   EXPECT_EQ(renderRegion(regionNamed(again, "bank_00.asm"), again),
             renderRegion(regionNamed(first, "bank_00.asm"), first));
+}
+
+// ---- what the shadow lifts ---------------------------------------------------
+//
+// The staging cartridge builds ranges in work RAM and sends them; the cases pin
+// that each is lifted as its source, that a computed range is not, that a
+// stream is lifted as its bytes, that the lines survive a pass without a run,
+// and that the tree still assembles.
+
+namespace {
+
+using examples::stagingImage;
+
+CartridgeDisassembly stagedLift(CartridgeRequest request = {}) {
+  static const std::vector<std::uint8_t> rom = stagingImage();
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  return disassembleCartridge(request);
+}
+
+}  // namespace
+
+TEST(RomAssets, AStagedRangeIsLiftedAsItsSourceWhole) {
+  const CartridgeDisassembly d = stagedLift();
+  ASSERT_EQ(d.assets.size(), 5u) << renderManifest(d);
+  // The decoder's stream: the counts, the values and the terminator, eleven bytes.
+  const AssetFile* stream = assetNamed(d, "vram/00_9000.bin");
+  ASSERT_NE(stream, nullptr);
+  EXPECT_EQ(stream->kind, MovedKind::Staged);
+  EXPECT_EQ(stream->cls, RegisterClass::Vram);
+  EXPECT_EQ(stream->first, 0x009000u);
+  EXPECT_EQ(stream->bytes, (std::vector<std::uint8_t>{0x08u, 0x11u, 0x08u, 0x22u, 0x04u, 0x33u, 0x04u, 0x44u,
+                                                      0x08u, 0x55u, 0x00u}));
+  // The copied block, and the two bytes the port stores took from it: one file.
+  const AssetFile* copy = assetNamed(d, "vram/00_9100.bin");
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->bytes.size(), 32u);
+  EXPECT_EQ(copy->kind, MovedKind::Staged);
+  // The bytes the engine carried in through the port and out again: the
+  // engine's, and exact.
+  const AssetFile* port = assetNamed(d, "vram/00_9300.bin");
+  ASSERT_NE(port, nullptr);
+  EXPECT_EQ(port->bytes.size(), 32u);
+  EXPECT_EQ(port->kind, MovedKind::Staged);
+  EXPECT_NE(renderManifest(d).find("staged   vram/00_9300.bin at $7E:0400 bytes 32 by none exact\n"),
+            std::string::npos);
+}
+
+TEST(RomAssets, AStagedTableIsPlacedWhereItsUseWent) {
+  // A table copied into work RAM and walked by HDMA to a display register: the
+  // source is placed as a table is, under `hdma/`, and named `staged`.
+  const CartridgeDisassembly d = stagedLift();
+  const AssetFile* table = assetNamed(d, "hdma/00_9400.bin");
+  ASSERT_NE(table, nullptr);
+  EXPECT_EQ(table->kind, MovedKind::Staged);
+  EXPECT_EQ(table->cls, RegisterClass::Display);
+  EXPECT_EQ(table->bytes, (std::vector<std::uint8_t>{0x01u, 0x0Fu, 0x00u}));
+  EXPECT_NE(renderManifest(d).find("asset    hdma/00_9400.bin Display as staged from $00:9400 bytes 3\n"),
+            std::string::npos);
+}
+
+TEST(RomAssets, AComputedRangeIsNotLifted) {
+  const CartridgeDisassembly d = stagedLift();
+  for (const AssetFile& asset : d.assets) {
+    EXPECT_EQ(asset.file.rfind("oam/", 0), std::string::npos) << asset.file;
+  }
+  // And says nothing of it: no note, since nothing was refused.
+  EXPECT_FALSE(anyNote(d, "$7F:0300"));
+}
+
+TEST(RomAssets, AStreamIsLiftedAsTheBytesTheCpuCarried) {
+  const CartridgeDisassembly d = stagedLift();
+  const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
+  ASSERT_NE(palette, nullptr);
+  EXPECT_EQ(palette->kind, MovedKind::Stream);
+  EXPECT_EQ(palette->cls, RegisterClass::Cgram);
+  EXPECT_EQ(palette->first, 0x009200u);
+  EXPECT_EQ(palette->bytes.size(), 16u);
+  EXPECT_EQ(palette->bytes[0], 0xE0u);
+  EXPECT_NE(renderManifest(d).find("asset    cgram/00_9200.bin Cgram as stream from $00:9200 bytes 16\n"),
+            std::string::npos);
+  EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d)
+                .find("; ---- $00:9200-$00:920F: 16 bytes the CPU carried to Cgram, in cgram/00_9200.bin\n"
+                      "        INCBIN \"cgram/00_9200.bin\"\n"),
+            std::string::npos);
+}
+
+TEST(RomAssets, TheStagedAndStreamLinesAreReadBackAndKeptWithoutARun) {
+  const CartridgeDisassembly ran = stagedLift();
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(ran), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  ASSERT_EQ(input->assets.size(), 5u);
+  EXPECT_EQ(input->assets[0].kind, MovedKind::Staged);
+  EXPECT_EQ(input->assets[0].cls, RegisterClass::Vram);
+  EXPECT_EQ(input->assets[2].kind, MovedKind::Stream);
+  EXPECT_EQ(input->assets[2].cls, RegisterClass::Cgram);
+  EXPECT_EQ(input->assets[4].cls, RegisterClass::Display);
+
+  CartridgeRequest again;
+  static const std::vector<std::uint8_t> rom = stagingImage();
+  again.rom = rom;
+  again.captureSound = false;
+  again.observeRun = false;
+  again.moved = input->moved;
+  again.assets = input->assets;
+  const CartridgeDisassembly kept = disassembleCartridge(again);
+  ASSERT_EQ(kept.assets.size(), 5u) << renderManifest(kept);
+  for (std::size_t i = 0; i < 5; ++i) {
+    EXPECT_EQ(kept.assets[i].file, ran.assets[i].file);
+    EXPECT_EQ(kept.assets[i].kind, ran.assets[i].kind);
+    EXPECT_EQ(kept.assets[i].bytes, ran.assets[i].bytes);
+  }
+  // The bank file reads the same either way: the comment names the class,
+  // which the line keeps, not the register, which only the run knows.
+  EXPECT_EQ(renderRegion(regionNamed(kept, "bank_00.asm"), kept),
+            renderRegion(regionNamed(ran, "bank_00.asm"), ran));
+  EXPECT_FALSE(anyNote(kept, "names no range this run lifted"));
+}
+
+TEST(RomAssets, AStagedFileTheNextRunLiftsWiderIsTheWiderFile) {
+  // A person's line for a staged file is read back; a run that lifts a wider
+  // file over the same bytes names the wider file, and no note is owed.
+  CartridgeRequest request;
+  request.assets = {ManifestAsset{.file = "vram/two.bin", .first = 0x009100u, .bytes = 2,
+                                  .cls = RegisterClass::Vram, .kind = MovedKind::Staged}};
+  const CartridgeDisassembly d = stagedLift(request);
+  EXPECT_EQ(assetNamed(d, "vram/two.bin"), nullptr);
+  EXPECT_NE(assetNamed(d, "vram/00_9100.bin"), nullptr);
+  EXPECT_FALSE(anyNote(d, "vram/two.bin"));
+}
+
+TEST(RomAssets, TheStagedTreeStillAssemblesToItsImage) {
+  const CartridgeDisassembly d = stagedLift();
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.unplaced, 0u);
+  EXPECT_EQ(placement.placedTwice, 0u);
+  EXPECT_EQ(placement.image, stagingImage());
 }
 
 TEST(RomAssets, TheInstructionsTextDoesNotChange) {

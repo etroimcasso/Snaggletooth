@@ -57,6 +57,7 @@ of the image it was read from.
 - [Where a run landed, and what it saw](#where-a-run-landed-and-what-it-saw)
 - [What a run moved](#what-a-run-moved)
 - [The assets](#the-assets)
+- [Where the bytes came from](#where-the-bytes-came-from)
 - [What is placed](#what-is-placed)
 - [Verifying the tree](#verifying-the-tree)
 - [What the code reaches](#what-the-code-reaches)
@@ -626,6 +627,7 @@ asset    apu/00_9600.bin Apu as dma from $00:9600 bytes 8
 asset    hdma/00_9700.bin Cgram as table from $00:9700 bytes 7
 asset    hdma/00_9710.bin Cgram as indirect from $00:9710 bytes 2
 asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2
+asset    vram/00_9900.bin Vram as staged from $00:9900 bytes 16
 asset    vram/01_8000.bin Vram as dma from $01:8000 bytes 32
 asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
 ```
@@ -636,7 +638,10 @@ points at lie end to end and are two files; the transfer from `$01:FFF0` read
 its last sixteen bytes from `$01:0000`, which is not the image, and its file
 holds the sixteen that were. The three notes are the three refusals: the same
 bytes sent two places, twice — once to two classes, once to two registers of
-one — and the reset routine's own bytes sent to VRAM.
+one — and the reset routine's own bytes sent to VRAM. The `staged` file is the
+next section's: `$01:0000` is work RAM, and the sixteen bytes there were the
+ones the port had copied in from `$9900`, so the transfer carried them on and
+the run knows it.
 
 **A name is a person's.** The disassembler writes every source file fresh, so a
 path edited in a bank file is gone on the next run; the manifest is where a
@@ -648,11 +653,121 @@ that matches no range the run lifts is dropped, with a `note` saying so. A tree
 disassembled with `--no-run` lifts what its manifest's `moved` lines say, so the
 files are kept from one run to the next whether or not the cartridge ran.
 
-The pass reaches what the run saw leave the image. Most of what a cartridge
-sends is built in work RAM first — decompressed, drawn, assembled from pieces —
-and those ranges are recorded as `moved` lines whose memory is work RAM, and are
-not lifted: the image holds them in another form, which this pass does not
-follow.
+Most of what a cartridge sends is built in work RAM first — decompressed, drawn,
+assembled from pieces — and those ranges are recorded as `moved` lines whose
+memory is work RAM. The image holds them in another form, and the run's shadow
+says which: see the next section.
+
+## Where the bytes came from
+
+Beside the interpreter the run keeps a shadow
+([ir.md §The shadow](ir.md#the-shadow)): every value carries the image offsets
+it was computed from, work RAM keeps the origin and the last writer of every
+byte, and every byte the engines and the port move keeps it current. So when a
+transfer carries a range out of work RAM, the run reads the shadow under it and
+the manifest says where the bytes came from — an
+[`origin` line](project-manifest.md#215-where-a-staged-range-came-from) per
+writer and per source — and what was built from each lifted file, a `staged`
+line.
+
+**An origin is data.** A value's origin is the set of image bytes its value was
+computed from: a load takes the origin of the bytes it read, never of the
+address it read them at; an operation takes the union of its operands'; a
+constant and a flag have none. A value the image does not hold carries a mark
+instead — a hardware register, named, or the save — so `computed` is said only
+of bytes built from constants alone. The origin of a decoder's output is the
+literal bytes it copied; the counts and lengths that decided how many are not
+in it, since they never reached a value.
+
+**A source is what the writer read.** The shadow follows every call and return
+and keeps, for each invocation, the image bytes it read, its helpers' reads
+joining it when they return. The source of a staged byte is the run of image
+bytes its writer's invocation read that holds the byte's origin: the compressed
+stream whole, counts included, and not a table the decoder consulted whose
+values never reached the output. The `origin` line names the source and says,
+with `using`, how many of its bytes the origin covers — every byte for a copy,
+the literals for a decoder. Where no read holds the origin — the bytes were
+staged through work RAM twice, or an engine wrote them — the origin's own
+intervals are the source.
+
+**A staged range is lifted as its source.** Each source of a `moved` range in
+work RAM that went to a register a file can be named for is lifted under the
+same rules as a range from the image, as an `asset` of kind `staged`; the
+`staged` line says which extent was built from it and by which routine. A
+computed range is not lifted, and nothing is said. The same bytes sent
+directly and sent after staging are one file. A routine's name is the
+routine's label; `none` is an engine's write, and a site written as an address
+is one the trace holds no routine at — code the run executed that the trace
+did not reach, which an `entry` answers.
+
+**A stream is lifted as its bytes.** Consecutive stores the CPU made to a data
+register — `VMDATAL`/`VMDATAH`, `CGDATA`, `OAMDATA`, the audio ports — from
+values whose origins are consecutive image bytes are recorded as a
+[`streamed` line](project-manifest.md#216-what-the-cpu-streamed) and lifted as
+an `asset` of kind `stream`, so a tileset the CPU copies a word at a time is a
+file exactly as one an engine carries.
+
+The `staging` cartridge from [`tools/examples/`](../tools/examples/README.md)
+builds six ranges in work RAM every way the shadow has a rule for, then sends
+each, run for one second:
+
+```
+$ snes_disasm staging.smc -o staging --no-sound --run-seconds 1
+1 files, 200 instructions, 1 entries, 0 stops
+32768 of 32768 bytes placed -> staging
+```
+
+```
+origin   $7E:0400 bytes 32 from $00:9300 bytes 32 using 32 by none exact
+origin   $7E:0500 bytes 2 from $00:9100 bytes 2 using 2 by sub_008300 exact
+origin   $7F:0000 bytes 32 from $00:9000 bytes 11 using 5 by sub_008100 exact
+origin   $7F:0100 bytes 32 from $00:9100 bytes 32 using 32 by sub_008140 exact
+origin   $7F:0300 bytes 16 computed by sub_0081A0
+origin   $7F:0600 bytes 3 from $00:9400 bytes 3 using 3 by sub_008380 exact
+
+asset    vram/00_9000.bin Vram as staged from $00:9000 bytes 11
+asset    vram/00_9100.bin Vram as staged from $00:9100 bytes 32
+asset    cgram/00_9200.bin Cgram as stream from $00:9200 bytes 16
+asset    vram/00_9300.bin Vram as staged from $00:9300 bytes 32
+asset    hdma/00_9400.bin Display as staged from $00:9400 bytes 3
+
+staged   vram/00_9300.bin at $7E:0400 bytes 32 by none exact
+staged   vram/00_9100.bin at $7E:0500 bytes 2 by sub_008300 exact
+staged   vram/00_9000.bin at $7F:0000 bytes 32 by sub_008100 exact
+staged   vram/00_9100.bin at $7F:0100 bytes 32 by sub_008140 exact
+staged   hdma/00_9400.bin at $7F:0600 bytes 3 by sub_008380 exact
+
+streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1
+```
+
+The decoder at `$8100` unpacked eleven bytes — five runs, each a count and a
+value, then a zero — into thirty-two at `$7F:0000`: the origin is the five
+values, the source is the eleven, and the file is the eleven. The copy at
+`$8140` used every byte of its source. The fill at `$81A0` built sixteen bytes
+from a constant, which have no source and no file. An engine carried `$9300`
+in through the port and out again, so that extent is the engine's; two stores
+by `sub_008300` put two bytes of `$9100` through the port, and the file the
+copy was lifted from carries a `staged` line for each. The loop at `$8180`
+carried sixteen bytes to `CGDATA` one at a time, and they are a file too. The
+table at `$7F:0600` is walked by HDMA, so its source is placed as a table the
+engine reads from the image is, under `hdma/`.
+
+In the bank file, a staged file's `INCBIN` says what it is:
+
+```
+; ---- $00:9000-$00:900A: 11 bytes a routine built Vram data from, in vram/00_9000.bin
+        INCBIN "vram/00_9000.bin"
+```
+
+A `staged` or `stream` file's evidence is the run's, written fresh; its `asset`
+line is read back whole, so the file is kept through a disassembly without a
+run and until a run lifts a wider file over its bytes.
+
+**Cost.** The shadow runs beside the interpreter on every instruction: on a
+commercial cartridge's sixty seconds it adds about one second of wall time and
+some thirty megabytes, and an origin is widened to its hull only above sixty-four
+intervals — which no range of the five cartridges the tool is measured on
+reaches.
 
 ## What is placed
 
@@ -893,10 +1008,19 @@ itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
 `input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone
 — into the controller ports, and returns a `RunObservation` holding the
 `reached` sightings in site order, the `moved` ranges, the `ran` landings, the
-`seen` values, and what the run beside the interpreter checked — the
-`instructions` and `interrupts` it ran a node or a sequence for, the distinct
-`nodes` it lifted from the fetches, and the `divergences` on which a node
-disagreed with the machine, each site once in the notes. `CartridgeRequest::observeRun`
+`seen` values, the `staged` extents — one `StagedRange` per extent of work RAM
+an engine carried to a register: `memory`, `bytes`, the `origin` of every byte
+together (an `ir::OriginSet`) and the `writers`, each a `StagedWriter` with the
+`writer` site or engine, whether the bytes were `unwritten`, how many `bytes`
+it wrote, their `origin` and their `sources`; `sameExtent` says whether two
+are one — the `streamed` runs, one `StreamedRange` per stream: `site`,
+`registerAddress` with `registerName` and `registerClass`, `romOffset`,
+`bytes` and `times`, `sameStream` likewise — and what the run beside the
+interpreter checked — the `instructions` and `interrupts` it ran a node or a
+sequence for, the distinct `nodes` it lifted from the fetches, the
+`divergences` on which a node disagreed with the machine, each site once in
+the notes, and the `originSets` the shadow interned under its `originCap`.
+`extentStart` is the lowest address a `MovedRange` covered. `CartridgeRequest::observeRun`
 asks for the run — off unless asked, since it costs about as long as it emulates;
 `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
 `CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`,
@@ -979,13 +1103,18 @@ and ran there is checked by the run and lifted from its fetches, but the tree
 has no file to place it in, so a landing there is a `note` and its bytes stay
 in the bank as the data they were copied from.
 
-The assets are the ranges the run saw leave the image. A range the program built
-in work RAM before sending it — which is most of what a real cartridge sends —
-is recorded as a `moved` line and is not lifted; the image holds it compressed,
-or in pieces, or not at all, and nothing here follows the program back to that
-form. A transfer the run never started has no `moved` line and no file; the
-static `dma` line names its source where the bytes say it, but not its length,
-so nothing is lifted from it either.
+The assets are the ranges the run saw leave the image, and the sources of the
+ranges it saw leave work RAM. A range the program built in work RAM before
+sending it — which is most of what a real cartridge sends — is lifted as the
+image bytes its writer read to build it, where the shadow found them; a range
+built from constants, or from a register's values, has no source and no file,
+and the `origin` line says which. A source is what the run's invocation read:
+a decoder that reads its stream through a helper is followed into the helper,
+but a range staged twice through work RAM keeps only its origin's own
+intervals, and a routine the trace holds no label at is named by its site. A
+transfer the run never started has no `moved` line and no file; the static
+`dma` line names its source where the bytes say it, but not its length, so
+nothing is lifted from it either.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or

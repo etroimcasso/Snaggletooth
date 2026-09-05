@@ -45,6 +45,8 @@ findings outlive it, and how a name a person gives a file survives.
   - [2.12 Assets](#212-assets)
   - [2.13 Where a run landed](#213-where-a-run-landed)
   - [2.14 What a run saw](#214-what-a-run-saw)
+  - [2.15 Where a staged range came from](#215-where-a-staged-range-came-from)
+  - [2.16 What the CPU streamed](#216-what-the-cpu-streamed)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -522,20 +524,25 @@ and a `moved` line for every range the run saw it carry.
 ### 2.12 Assets
 
 ```
-asset    <path> <class> as dma | table | indirect from <address> bytes <n>
+asset    <path> <class> as dma | table | indirect | staged | stream from <address> bytes <n>
 ```
 
 A file lifted out of a bank file: a range the run saw an engine carry from the
-image to the hardware, written once, as the bytes are, under a directory named
-for the memory it went to, and included from the bank file where it was with
+image to the hardware, the image source of a range a routine built in work RAM
+before an engine carried it, or a run of bytes the CPU carried to a data
+register itself — written once, as the bytes are, under a directory named for
+the memory it went to, and included from the bank file where it was with
 [`INCBIN`](assembly-lexicon.md#54-incbin). The path is relative to the
 manifest; then the [class](65816-disassembler.md#hardware-registers) of the
-register the bytes reached and, after `as`, what the range was to the engine,
-as the `moved` line says them; after `from`, the address the tree places the
+register the bytes reached and, after `as`, what the file is: `dma`, `table` or
+`indirect`, what the range was to the engine as the `moved` line says it;
+`staged`, the source a routine built its range from (§2.15); `stream`, the
+bytes the CPU carried (§2.16). After `from`, the address the tree places the
 file's first byte at, and after `bytes`, how many it holds. The `moved` lines
 whose memory lies within a file are its uses, and say which instruction sent it
-where and how many times. One line per file, in address order. Which ranges are
-lifted, and which stay in their bank with a `note` saying why, is
+where and how many times; a `staged` line says what a routine built from it.
+One line per file, in address order. Which ranges are lifted, and which stay in
+their bank with a `note` saying why, is
 [snes-disassembler.md §The assets](snes-disassembler.md#the-assets).
 
 A cartridge that sends bytes from the image every way the rules have a case
@@ -549,17 +556,25 @@ asset    apu/00_9600.bin Apu as dma from $00:9600 bytes 8
 asset    hdma/00_9700.bin Cgram as table from $00:9700 bytes 7
 asset    hdma/00_9710.bin Cgram as indirect from $00:9710 bytes 2
 asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2
+asset    vram/00_9900.bin Vram as staged from $00:9900 bytes 16
 asset    vram/01_8000.bin Vram as dma from $01:8000 bytes 32
 asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
 ```
 
 Three transfers from `$9000` that share bytes are the one file of eighty; the
-two blocks the HDMA table at `$9700` points at lie end to end and are two files.
+two blocks the HDMA table at `$9700` points at lie end to end and are two
+files. The transfer from `$01:FFF0` ran off its bank's end into `$01:0000`,
+which is work RAM, holding sixteen bytes the port had copied there from
+`$9900`: those are the `staged` file, the source of what the transfer carried
+on.
 
 The line is read back for its path: a person renames the file, changes the path
 here to match, and the next run lifts the same range — the same `from` and
-`bytes` — under that name. The class, the kind and the range are the run's and
-are written fresh.
+`bytes` — under that name. For a `dma`, `table` or `indirect` file the class,
+the kind and the range are the run's and are written fresh, the `moved` lines
+being what keeps the file; a `staged` or `stream` file's evidence is written
+fresh (§2.15, §2.16), so its line is read back whole and keeps the file from
+one disassembly to the next until a run lifts a wider file over its bytes.
 
 ### 2.13 Where a run landed
 
@@ -657,7 +672,105 @@ the indexed one beside it, which the run does not name since it does not carry
         STA $03,X                       ; $00:8041  95 03        4
 ```
 
-## 3. What is read back
+### 2.15 Where a staged range came from
+
+```
+origin   <address> bytes <n> from <address> bytes <n> using <n> by <label> exact | approximate
+origin   <address> bytes <n> from register <address> <register> by <label>
+origin   <address> bytes <n> from save by <label>
+origin   <address> bytes <n> computed by <label>
+origin   <address> bytes <n> unwritten
+staged   <path> at <address> bytes <n> by <label> exact | approximate
+```
+
+Where a range an engine carried out of work RAM came from. The run's shadow
+carries, beside every value the interpreter computes, the image offsets it was
+computed from — a load takes the origin of the bytes it read, an operation the
+union of its operands', a constant and a flag none — and rests it in work RAM
+byte by byte with the site that last wrote each; the engines' and the port's
+moves keep it current. At every `moved` range whose memory is work RAM the
+shadow is read, and the extent — the first address and the count, every range
+that covers exactly those bytes together — gets one `origin` line per writer
+and per source.
+
+The first address and count name the extent. The writer after `by` is the
+routine whose instruction last wrote the bytes, `none` for an engine's write,
+and the site itself where the trace holds no routine there. What follows is
+what the shadow found of the bytes that writer wrote. After `from`, an image
+address and a count: the source, a run of image bytes the writer's invocation
+read that holds the bytes' origin — a decoder reads its whole stream, counts
+and lengths included, and only the literal values reach the output, so the
+source is the stream and `using` says how many of its bytes the values came
+from; a copy uses every byte of its source. `exact` says the origin is; an
+`approximate` origin was widened to its hull by the run because it had more
+intervals than the run keeps, and its source is every run the hull overlaps. A
+writer with several sources has one line each. `from register` names a
+hardware register whose value entered the bytes — the joypads, VRAM read back,
+the multiplier — and `from save` a byte of the save; both stand beside an
+image source when there is one. `computed` says the bytes were built from
+constants alone; `unwritten` that nothing wrote them since power-on.
+
+A `staged` line says what was built from a lifted file: the file whose bytes
+hold a source, the extent built from it and by which routine, and the mark.
+One line per file and extent and writer.
+
+The `staging` cartridge builds six ranges in work RAM and sends each, run for
+one second:
+
+```
+origin   $7E:0400 bytes 32 from $00:9300 bytes 32 using 32 by none exact
+origin   $7E:0500 bytes 2 from $00:9100 bytes 2 using 2 by sub_008300 exact
+origin   $7F:0000 bytes 32 from $00:9000 bytes 11 using 5 by sub_008100 exact
+origin   $7F:0100 bytes 32 from $00:9100 bytes 32 using 32 by sub_008140 exact
+origin   $7F:0300 bytes 16 computed by sub_0081A0
+origin   $7F:0600 bytes 3 from $00:9400 bytes 3 using 3 by sub_008380 exact
+
+staged   vram/00_9300.bin at $7E:0400 bytes 32 by none exact
+staged   vram/00_9100.bin at $7E:0500 bytes 2 by sub_008300 exact
+staged   vram/00_9000.bin at $7F:0000 bytes 32 by sub_008100 exact
+staged   vram/00_9100.bin at $7F:0100 bytes 32 by sub_008140 exact
+staged   hdma/00_9400.bin at $7F:0600 bytes 3 by sub_008380 exact
+```
+
+The decoder at `$8100` unpacked eleven bytes at `$9000` — five runs, each a
+count and a value, then a zero — into thirty-two: the source is the eleven,
+the values are five of them. The copy at `$8140` used every byte of its
+source. The sixteen bytes at `$7F:0300` were filled from a constant and have
+no source, and no file. An engine carried `$9300` in through the port and out
+again, so the extent at `$7E:0400` is the engine's, and the two bytes at
+`$7E:0500` were stores through the port by `sub_008300`, from the same source
+the copy used; every lifted file carries a `staged` line for each extent built
+from it. The three bytes at `$7F:0600` are an HDMA table the run walked sixty
+times, copied there from `$9400`, and its file lives under `hdma/` as a table
+the engine reads from the image would.
+
+Every line here is written fresh from the run and read back by nothing; a
+`staged` or `stream` file outlives the run through its `asset` line (§2.12).
+
+### 2.16 What the CPU streamed
+
+```
+streamed <address> <register address> <register> <class> from <address> bytes <n> times <n>
+```
+
+A run of bytes the CPU carried to a data register one store at a time, from
+consecutive image bytes: the site of the first store, as the tree places it;
+the register — `VMDATAL` for the pair with `VMDATAH`, `CGDATA`, `OAMDATA`, an
+audio port for its pair — with its name and class; after `from`, the image
+address of the first byte and after `bytes` how many consecutive ones
+followed; after `times`, how many sightings of exactly this stream the run
+made. A store continues a stream when its value came from exactly the next
+image byte and it was made at the same site as the last store or on one
+straight run from it — no jump, branch, call or return between the two. A
+sequence of one byte is not a stream. The bytes are lifted as an `asset` line
+of kind `stream` under the register's directory.
+
+The same cartridge's loop at `$8180`:
+
+```
+streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1
+```
+
 
 Two tools read a manifest, and each takes the lines that direct it.
 
@@ -679,8 +792,10 @@ When the disassembler runs over a directory that holds a manifest, it reads:
   hardware's bytes came from, and lifts the same files;
 - every `asset` line, for its path — a file lifted again with the same first
   address and length takes the path the line gives it, so a name a person gave
-  a file survives; a line matching no file this run lifts is dropped, and a
-  `note` says so;
+  a file survives; a `dma`, `table` or `indirect` line matching no file this
+  run lifts is dropped, and a `note` says so — and a `staged` or `stream` line
+  whole, the file lifted again as the line records it unless this run lifts a
+  file over its bytes;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not
@@ -698,7 +813,8 @@ directory, it reads:
   disassembler does.
 
 Everything else is what the last run found and is written fresh — the `access`,
-`dma`, `routine`, `state` and `seen` lines among them, which no tool reads back:
+`dma`, `routine`, `state`, `seen`, `origin`, `staged` and `streamed` lines
+among them, which no tool reads back:
 they are what the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. The disassembler writes the files fresh
 too: an edit to a bank file is not read back by it, so a person's changes to the

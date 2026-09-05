@@ -61,7 +61,13 @@ memory address it began at, its length and how many times the run saw it, as
 lifting every such range that begins in the image out of its bank into a file
 of its own, the bank file including it with `INCBIN` and the manifest recording
 it as an `asset` line, read back so a name a person gives a file survives — see
-[The assets](../../docs/snes-disassembler.md#the-assets). `--no-run`
+[The assets](../../docs/snes-disassembler.md#the-assets) — and, through the
+shadow beside the interpreter (`ir/ir_provenance.h`), where every range carried
+out of work RAM came from: the image bytes each routine built it from as
+`origin` lines, each source lifted as a `staged` file with a `staged` line
+saying what was built from it, and every run of bytes the CPU carried to a data
+register itself as a `streamed` line and a `stream` file — see
+[Where the bytes came from](../../docs/snes-disassembler.md#where-the-bytes-came-from). `--no-run`
 skips the run; `--run-seconds N` bounds it; `--input <script>` plays it,
 replaying an [input script](../../docs/input-script.md) — which buttons are held
 on which port from which frame — into the controller ports, so the run reaches

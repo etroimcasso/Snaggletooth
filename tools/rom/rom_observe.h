@@ -37,6 +37,15 @@
 // the direct register and the data bank held are recorded, which is what the
 // run saw against what every path proves.
 //
+// Beside the interpreter runs its shadow (`ir/ir_provenance.h`): every value
+// carries the image offsets it was computed from, work RAM keeps the origin
+// and the last writer of every byte, and the engines' and the port's moves
+// keep the shadow current. So a range an engine carries out of work RAM — the
+// tiles a routine decompressed, the sprite table a frame assembled — names the
+// image bytes it was built from and the routine that built it, and a sequence
+// of stores the CPU made to a data register from consecutive image bytes is
+// recorded as the stream it is.
+//
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
 // reaches what a player does, and the trace follows.
@@ -51,6 +60,7 @@
 
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
+#include "ir/ir_provenance.h"
 #include "rom/input_script.h"
 
 namespace snaggletooth::disasm {
@@ -78,10 +88,14 @@ struct ReachedTarget {
 // What a range of bytes was to the engine that moved it: a general-purpose
 // transfer; an HDMA channel's table, read as the frame walked it — the line
 // counts, a direct table's inline values, an indirect table's pointers; or the
-// block an indirect entry pointed at.
-enum class MovedKind : std::uint8_t { Dma, Table, Indirect };
+// block an indirect entry pointed at. The last two are not an engine's: they
+// name a lifted file whose bytes the CPU carried to a data register itself,
+// one store at a time (`Stream`), or the image source of a range a routine
+// built in work RAM before an engine carried it (`Staged`); no range an engine
+// moved is ever of either kind.
+enum class MovedKind : std::uint8_t { Dma, Table, Indirect, Stream, Staged };
 
-// A kind as a manifest names it: `dma`, `table`, `indirect`.
+// A kind as a manifest names it: `dma`, `table`, `indirect`, `stream`, `staged`.
 [[nodiscard]] std::string_view movedKindName(MovedKind kind);
 
 // How the memory address moved from one byte to the next, as the channel's
@@ -118,6 +132,10 @@ struct MovedRange {
 // Two sightings are the same range when every field but the count agrees.
 [[nodiscard]] bool sameRange(const MovedRange& a, const MovedRange& b);
 
+// The lowest address a range covered: its memory address, or for a range read
+// downward the address its last byte came from.
+[[nodiscard]] Address extentStart(const MovedRange& range);
+
 // The order ranges are reported and written in: by site, then channel, then
 // memory address, then kind, then the longer first — so a table's blocks follow
 // the table, and a walk the run's end cut short follows the whole one.
@@ -153,32 +171,90 @@ struct SeenState {
   std::vector<std::uint8_t> dbr;
 };
 
+// One writer of a staged range's bytes — an instruction, as the tree places it,
+// or the trigger of an engine — with how many of the range's bytes it wrote,
+// over every sighting, the origin of those bytes together, and their sources:
+// the runs of image bytes the writer's invocations read that hold the origin
+// (`ir/ir_provenance.h`), ascending, no two touching. Bytes nothing wrote since
+// power-on are counted under a writer that is `unwritten`.
+struct StagedWriter {
+  ir::Writer writer;
+  bool unwritten = false;
+  std::uint64_t bytes = 0;
+  ir::OriginSet origin;
+  std::vector<ir::OriginInterval> sources;
+};
+
+// One extent of work RAM an engine carried to a register, and where its bytes
+// came from: the lowest address and the count, the origin of every byte
+// together over every sighting of every range with that extent, and the
+// writers, most bytes first. An extent whose origin is empty was built from
+// constants alone.
+struct StagedRange {
+  Address memory = 0;
+  std::uint32_t bytes = 0;
+  ir::OriginSet origin;
+  std::vector<StagedWriter> writers;
+};
+
+// Two staged ranges are the same extent when they begin at the same address
+// and run for the same count.
+[[nodiscard]] bool sameExtent(const StagedRange& a, const StagedRange& b);
+
+// A stream the CPU carried a byte at a time: consecutive stores to one data
+// register — `VMDATAL`/`VMDATAH` as one, `CGDATA`, `OAMDATA`, the audio ports
+// in pairs — from values whose origins are consecutive image bytes, made at one
+// site or by instructions one after another. `site` is the first store's, as
+// the tree places it; `registerAddress` is the register the stream names, with
+// its name and class; `romOffset` is the image offset of the first byte and
+// `bytes` how many consecutive ones followed; `times` is how many sightings of
+// exactly this stream the run made.
+struct StreamedRange {
+  Address site = 0;
+  Address registerAddress = 0;
+  std::string_view registerName;
+  std::optional<RegisterClass> registerClass;
+  std::size_t romOffset = 0;
+  std::uint32_t bytes = 0;
+  std::uint32_t times = 1;
+};
+
+// Two streams are the same when every field but the count agrees.
+[[nodiscard]] bool sameStream(const StreamedRange& a, const StreamedRange& b);
+
 // Everything one run recorded: the targets the indirect jumps took, in site
 // order, then target order, each site/target/mode once; the ranges the engines
 // moved, in `rangeBefore` order, each distinct range once with its count; the
 // landings, in site order, then target order, each site/target/mode once; the
-// values seen, in address order; and what the run beside the interpreter
-// checked. `divergences` counts the steps on which the node lifted from the
-// fetches disagreed with the machine — each site once in the notes, the
-// interpreter realigned after — and is zero on every cartridge the lift is
-// right for.
+// values seen, in address order; the staged extents, in address order, then
+// by count; the streams, in site order, then register, then offset; and what
+// the run beside the interpreter checked. `divergences` counts the steps on
+// which the node lifted from the fetches disagreed with the machine — each site
+// once in the notes, the interpreter realigned after — and is zero on every
+// cartridge the lift is right for. `originSets` is how many distinct origins
+// the run interned, and `originCap` the cap above which one is widened.
 struct RunObservation {
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
   std::vector<Landing> ran;
   std::vector<SeenState> seen;
+  std::vector<StagedRange> staged;
+  std::vector<StreamedRange> streamed;
   std::uint64_t instructions = 0;  // steps the interpreter ran a node for and checked
   std::uint64_t interrupts = 0;    // hardware sequences run and checked
   std::size_t nodes = 0;           // distinct nodes lifted from fetches: an address, a mode, the bytes
   std::uint64_t divergences = 0;
+  std::size_t originSets = 0;
+  std::size_t originCap = 0;
 };
 
 // Boots `rom` on the machine and steps it for `masterCycles` of the master clock,
 // recording every distinct target the four indirect forms took, every range
-// the transfer engines moved, every landing the instructions did not name, and
-// the direct register and data bank at every site executed in the image — with
-// every executed instruction lifted from its fetches and checked against the
-// machine. A site whose pointer lies where the run cannot read it — anything
+// the transfer engines moved, every landing the instructions did not name, the
+// direct register and data bank at every site executed in the image, where
+// every range carried out of work RAM came from, and every stream the CPU
+// carried — with every executed instruction lifted from its fetches and checked
+// against the machine, its shadow beside it. A site whose pointer lies where the run cannot read it — anything
 // but the image and work RAM — is named once in `notes` and produces nothing;
 // so is a site whose pointer did not match where the CPU then went, which the
 // design does not expect and reports rather than hides. A range is recorded

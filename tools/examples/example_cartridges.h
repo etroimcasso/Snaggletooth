@@ -5,8 +5,9 @@
 // protocol, ones that dispatch through pointers, read the controllers, run a
 // transfer, wait for an interrupt, copy code into work RAM, prove their
 // registers the way real code does and dispatch through bounded tables, send
-// the image's bytes to the hardware every way the asset pass has a rule for, or
-// run through a mirror of the bank the tree places them in. The
+// the image's bytes to the hardware every way the asset pass has a rule for,
+// run through a mirror of the bank the tree places them in, or build what they
+// send in work RAM first. The
 // tests of the cartridge tools read them, and `snes_examples` writes them to disk, so every
 // example a page shows is the real output of a tool on a cartridge that is ours
 // to publish.
@@ -35,6 +36,7 @@
 #include "examples/wrapping/wrapping.h"
 #include "examples/mirrored/mirrored.h"
 #include "examples/running_bank/running_bank.h"
+#include "examples/staging/staging.h"
 
 namespace snaggletooth::examples {
 
@@ -69,6 +71,7 @@ inline const std::vector<Example>& examples() {
       {"wrapping", "a HiROM transfer that runs off its bank's end and on from the bank's start", &wrappingImage},
       {"mirrored", "a program that runs through the fast mirror of the bank the tree places it in", &mirroredImage},
       {"running_bank", "a HiROM program that proves its data bank from the bank the CPU runs in, every way a path arrives", &runningBankImage},
+      {"staging", "ranges built in work RAM every way the shadow has a rule for, then sent to the hardware", &stagingImage},
   };
   return all;
 }

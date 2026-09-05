@@ -4,7 +4,8 @@
 source says about the instruction and the typed effects the chip performs for it,
 with no bytes in it. `cpu65816_lift.h` builds a program from a listing the 65816
 disassembler traced — the one place in the toolkit where bytes become meaning —
-`ir_interpret.h` runs a program's effects and nothing else, `ir_render.h` writes
+`ir_interpret.h` runs a program's effects and nothing else, `ir_provenance.h`
+is the shadow that follows where every value came from, `ir_render.h` writes
 SNES assembly from its instruction layer, `ir_lockstep.h` holds the interpreter
 to one step of the machine, `ir_differential.h` runs a program beside the
 machine through a recorded run and reports every disagreement, `ir_dataflow.h`
@@ -32,7 +33,8 @@ Everything lives in `snaggletooth::ir`.
 | `Program` | The nodes in address order with the two hardware interrupt sequences; `find` answers the node for the live flags. |
 | `lift65816(listing, image, base)` | A whole 65816 listing as a program. |
 | `liftInstruction(instruction, mode)` | One decoded instruction as a node. |
-| `Interpreter` | Runs a node or an interrupt sequence over a `Bus` the host implements, and returns the cycles. |
+| `Interpreter` | Runs a node or an interrupt sequence over a `Bus` the host implements, and returns the cycles; tells its `Shadow`, if one is set, every move a value makes. |
+| `Provenance`, `Origins`, `OriginSet` | The shadow that carries, beside every value, the image bytes it was computed from — interned interval sets, a mark for a register or the save — and keeps work RAM's origin, last writer and each invocation's reads; `originOf`, `writerOf`, `sourcesOf` read it back, and the streams the CPU carried to a data register. |
 | `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the machine collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; every disagreement is a `Divergence`. |
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
 | `Dataflow(program, entries, sightings, image, canonical)` | Runs the effects over every path from the entries; `before(address)` is what is proven there, `derived()` every table slot a bounded index selects. |
@@ -110,6 +112,9 @@ machine, and two things link it: the differential, its own target
 recorded run it replays; and `snaggletooth_rom` itself, whose run on the
 machine lifts every executed instruction from its fetches and holds it to the
 same check — and which links the representation for the bank files it renders.
+The shadow is its own target too, `snaggletooth_ir_provenance`, which links the
+representation and the cartridge map and nothing else; `snaggletooth_rom` links
+it for the run.
 
 ## See also
 

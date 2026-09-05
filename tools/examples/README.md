@@ -1,6 +1,6 @@
 # Example cartridges
 
-Twenty-one cartridges, each built by hand to do one thing, each in its own
+Twenty-two cartridges, each built by hand to do one thing, each in its own
 directory with the source that builds it and a README saying what it does and
 who reads it. They are the cartridges the tests run the tools on, and the
 cartridges every page's example output comes from — a page shows what a tool
@@ -44,6 +44,7 @@ snes_differential mixed examples/mixed.smc -o mixed/differential --seconds 0.1
 | [`wrapping/`](wrapping/README.md) | A HiROM transfer that runs off its bank's end and on from the bank's start |
 | [`mirrored/`](mirrored/README.md) | A program that runs through the fast mirror of the bank the tree places it in |
 | [`running_bank/`](running_bank/README.md) | A HiROM program that proves its data bank from the bank the CPU runs in, every way a path arrives |
+| [`staging/`](staging/README.md) | Ranges built in work RAM every way the shadow has a rule for, then sent to the hardware |
 
 Each directory's header builds its image as a function in
 `snaggletooth::examples`; `common.h` holds what they share — a LoROM or a HiROM

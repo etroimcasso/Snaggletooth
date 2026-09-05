@@ -32,6 +32,44 @@ class Bus {
   virtual void write(Address address, std::uint8_t value, Access access) = 0;
 };
 
+// What travels beside a value. The interpreter computes values; a host that
+// wants to follow something else about them — where each one came from —
+// supplies a shadow, and the interpreter tells it every move a value makes:
+// into a place from other places, into a place from the bus, onto the bus from
+// a place. The interpreter never reads a shadow back, so a shadow cannot change
+// a value, and a run with none costs one null check per effect.
+//
+// Every call names bytes: a place's byte `n` is bits 8n to 8n+7 of what it
+// holds, and a move at `bits` wide touches the low `bits / 8` bytes. A register
+// written narrower than it is follows the register's own rule — the accumulator
+// keeps its high byte, the others clear theirs — and a shadow mirrors that rule
+// for whatever it carries. A flag, the status register and the emulation flag
+// carry nothing, whatever a shadow is told about them.
+class Shadow {
+ public:
+  virtual ~Shadow() = default;
+
+  // `dst`'s low `bits` take, byte for byte, what `a`'s bytes carry.
+  virtual void copy(Place dst, unsigned bits, Place a) = 0;
+
+  // Every byte of `dst`'s low `bits` takes the union of what every byte of
+  // `a`, `b` and `c` carry — an operation whose result depends on all of its
+  // operands, an address computed from an offset, an index and a bank. A
+  // source that is `None` or a constant contributes nothing.
+  virtual void combine(Place dst, unsigned bits, Place a, Place b, Place c) = 0;
+
+  // `dst`'s byte `byte` takes what the bus holds at `address`; the move is
+  // `bits` wide in all, so a shadow can apply the register's rule once the
+  // last byte has landed.
+  virtual void load(Place dst, unsigned bits, unsigned byte, Address address) = 0;
+
+  // The bus at `address` takes what `source`'s byte `byte` carries.
+  virtual void store(Address address, Place source, unsigned byte) = 0;
+
+  // The accumulator's two bytes exchange what they carry.
+  virtual void exchange() = 0;
+};
+
 enum class Run : std::uint8_t { Running, Waiting, Stopped };
 
 // The CPU's state as the effects name it.
@@ -62,6 +100,9 @@ class Interpreter {
   // The index, in the sequence being run, of the effect whose accesses the bus
   // is answering — so a bus that reports where an access came from can name it.
   std::size_t effectIndex = 0;
+
+  // The shadow told about every move a value makes, or none.
+  Shadow* shadow = nullptr;
 
   // Runs one node: re-establishes the invariants the chip holds between
   // instructions — the index high bytes zero while the index registers are eight
