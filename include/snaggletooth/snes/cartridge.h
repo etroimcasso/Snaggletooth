@@ -47,6 +47,39 @@ struct EmulationVectors {
   std::uint16_t irq = 0;    // $FFFE, shared with BRK
 };
 
+// The coprocessor a cartridge's chipset byte names. The byte's high nibble picks
+// one of the first seven; `$F` names a custom chip that the sub-type byte at
+// $FFBF tells apart. `Unknown` is a code the header layout does not list.
+enum class Coprocessor : std::uint8_t {
+  None,
+  Dsp,      // DSP-1 to DSP-4
+  Gsu,      // the SuperFX family
+  Obc1,
+  Sa1,
+  Sdd1,
+  Srtc,
+  Other,    // the Super Game Boy and the Satellaview BIOS
+  Spc7110,  // custom, sub-type $00
+  St010,    // custom, sub-type $01: ST010 and ST011
+  St018,    // custom, sub-type $02
+  Cx4,      // custom, sub-type $10
+  Unknown,
+};
+
+// The video standard a cartridge's country byte implies: 60 Hz or 50 Hz.
+enum class VideoStandard : std::uint8_t { Ntsc, Pal, Unknown };
+
+// The sixteen bytes ahead of the header, at $FFB0-$FFBE, which a cartridge
+// carries when its developer byte is $33.
+struct ExtendedHeader {
+  std::string makerCode;                    // two characters at $FFB0
+  std::string gameCode;                     // four characters at $FFB2, trailing spaces removed
+  std::uint8_t expansionFlashSizeCode = 0;  // $FFBC, as written
+  std::uint8_t expansionRamSizeCode = 0;    // $FFBD, as written
+  std::size_t expansionRamBytes = 0;        // the bytes that code declares, by the save-RAM rule
+  std::uint8_t specialVersion = 0;          // $FFBE, as written
+};
+
 // What a cartridge header says, read from the site its map puts it at.
 struct CartridgeHeader {
   std::size_t offset = 0;          // where in the image the header sits
@@ -54,11 +87,24 @@ struct CartridgeHeader {
   std::string title;               // the 21-byte title, trailing spaces and zero bytes removed
   std::uint8_t mapMode = 0;        // the map-mode byte as written
   bool fastRom = false;            // bit 4 of the map-mode byte: the cartridge runs at the fast rate in $80-$FF
+  std::uint8_t chipset = 0;        // the chipset byte as written
+  Coprocessor coprocessor = Coprocessor::None;  // what the chipset byte names
+  bool hasRam = false;             // the chipset byte says the cartridge carries RAM
+  bool hasBattery = false;         // and a battery
+  bool hasClock = false;           // and a real-time clock beside its coprocessor
+  std::uint8_t chipsetSubtype = 0; // the byte at $FFBF as written; tells custom coprocessors apart
+  std::uint8_t romSizeCode = 0;    // the ROM size code as written
+  std::size_t romSizeBytes = 0;    // the bytes that code declares
   std::uint8_t saveSizeCode = 0;   // the save-RAM size code as written
   std::size_t saveRamBytes = 0;    // the bytes of save RAM that code declares
+  std::uint8_t country = 0;        // the country byte as written
+  VideoStandard video = VideoStandard::Unknown;  // what that country runs at
+  std::uint8_t developer = 0;      // the developer byte as written; $33 says an extended header follows
+  std::uint8_t version = 0;        // the version byte as written
   std::uint16_t complement = 0;    // the checksum's complement
   std::uint16_t checksum = 0;      // the checksum
   bool checksumAgrees = false;     // whether the two are each other's complement
+  std::optional<ExtendedHeader> extended;  // present only when the developer byte is $33
   NativeVectors native;
   EmulationVectors emulation;
 };
@@ -72,6 +118,15 @@ struct CartridgeHeader {
 // LoROM. The bytes at the winning site are reported as they are, so
 // `checksumAgrees` and `title` say how much to trust them; only an image too
 // small to hold a header at any site has none.
+//
+// The chipset byte is read as its layout says: the low nibble tells what sits
+// beside the ROM ($0 nothing, $1 RAM, $2 RAM and a battery, $3 a coprocessor,
+// $4 with RAM, $5 with RAM and a battery, $6 with a battery, $9 with RAM, a
+// battery and a clock, $A as $5) and the high nibble which coprocessor. A low
+// nibble of $2 under a nonzero high nibble reads as $5. A nibble the layout does
+// not list reports `Coprocessor::Unknown` and no RAM, battery or clock. The two
+// size codes are 1 KB shifted left by the code: a code past $0F is not a size
+// and reads as zero, and a ROM size past 8 MB is clamped to it.
 [[nodiscard]] std::optional<CartridgeHeader> parseCartridgeHeader(
     std::span<const std::uint8_t> rom);
 

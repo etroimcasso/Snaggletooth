@@ -18,7 +18,12 @@ constexpr std::size_t kExHiRomHeader = 0x40FFC0u;
 constexpr std::size_t kHeaderTitle = 0x00u;
 constexpr std::size_t kHeaderTitleLength = 21u;
 constexpr std::size_t kHeaderMapMode = 0x15u;
+constexpr std::size_t kHeaderChipset = 0x16u;
+constexpr std::size_t kHeaderRomSize = 0x17u;
 constexpr std::size_t kHeaderSaveSize = 0x18u;
+constexpr std::size_t kHeaderCountry = 0x19u;
+constexpr std::size_t kHeaderDeveloper = 0x1Au;
+constexpr std::size_t kHeaderVersion = 0x1Bu;
 constexpr std::size_t kHeaderComplement = 0x1Cu;
 constexpr std::size_t kHeaderChecksum = 0x1Eu;
 constexpr std::size_t kHeaderBytes = 0x20u;
@@ -34,11 +39,27 @@ constexpr std::size_t kEmulationReset = 0x3Cu;
 constexpr std::size_t kEmulationIrq = 0x3Eu;
 constexpr std::size_t kHeaderWithVectors = 0x40u;
 
+// The extended header's fields, as offsets from its own site sixteen bytes
+// ahead of the header, at $FFB0.
+constexpr std::size_t kExtendedBytes = 0x10u;
+constexpr std::size_t kExtendedMaker = 0x00u;
+constexpr std::size_t kExtendedMakerLength = 2u;
+constexpr std::size_t kExtendedGame = 0x02u;
+constexpr std::size_t kExtendedGameLength = 4u;
+constexpr std::size_t kExtendedFlashSize = 0x0Cu;
+constexpr std::size_t kExtendedRamSize = 0x0Du;
+constexpr std::size_t kExtendedSpecialVersion = 0x0Eu;
+constexpr std::size_t kExtendedChipsetSubtype = 0x0Fu;
+
 constexpr std::uint8_t kMapModeFast = 0x10u;
 constexpr std::uint8_t kMapModeExHiRom = 0x05u;  // the low nibble that names ExHiROM
+constexpr std::uint8_t kDeveloperExtended = 0x33u;  // the developer byte that says an extended header follows
 
 // The largest save a cartridge can address through any window.
 constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
+
+// The largest image a map can address: ExHiROM's two halves.
+constexpr std::size_t kMaxRomBytes = 8u * 1024u * 1024u;
 
 // The first 4 MB of an ExHiROM image, the part banks $80-$FF serve.
 constexpr std::size_t kExHiRomHalf = 0x400000u;
@@ -99,6 +120,84 @@ struct Site {
   return bytes > kMaxSaveRamBytes ? kMaxSaveRamBytes : bytes;
 }
 
+// The ROM size code read literally: 1 KB shifted by the code, so a code of zero
+// is 1 KB. A code past $0F is not a size.
+[[nodiscard]] std::size_t romBytesFromCode(std::uint8_t code) noexcept {
+  if (code > 0x0Fu) return 0;
+  const std::size_t bytes = std::size_t{1} << (code + 10u);
+  return bytes > kMaxRomBytes ? kMaxRomBytes : bytes;
+}
+
+// The coprocessor a chipset byte's high nibble names, with the sub-type byte
+// telling the custom ones apart.
+[[nodiscard]] Coprocessor coprocessorFromNibble(std::uint8_t high, std::uint8_t subtype) noexcept {
+  if (high == 0xFu) {
+    switch (subtype) {
+      case 0x00u: return Coprocessor::Spc7110;
+      case 0x01u: return Coprocessor::St010;
+      case 0x02u: return Coprocessor::St018;
+      case 0x10u: return Coprocessor::Cx4;
+      default: return Coprocessor::Unknown;
+    }
+  }
+  switch (high) {
+    case 0x0u: return Coprocessor::Dsp;
+    case 0x1u: return Coprocessor::Gsu;
+    case 0x2u: return Coprocessor::Obc1;
+    case 0x3u: return Coprocessor::Sa1;
+    case 0x4u: return Coprocessor::Sdd1;
+    case 0x5u: return Coprocessor::Srtc;
+    case 0xEu: return Coprocessor::Other;
+    default: return Coprocessor::Unknown;
+  }
+}
+
+// Reads the chipset byte into the header: what sits beside the ROM from the low
+// nibble, the coprocessor from the high nibble when the low nibble says one is
+// present. A low nibble of $2 under a nonzero high nibble is the $5 form.
+void readChipset(CartridgeHeader& header) noexcept {
+  const std::uint8_t high = static_cast<std::uint8_t>(header.chipset >> 4);
+  std::uint8_t low = static_cast<std::uint8_t>(header.chipset & 0x0Fu);
+  if (low == 0x2u && high != 0u) low = 0x5u;
+  bool coprocessor = false;
+  switch (low) {
+    case 0x0u: break;
+    case 0x1u: header.hasRam = true; break;
+    case 0x2u: header.hasRam = true; header.hasBattery = true; break;
+    case 0x3u: coprocessor = true; break;
+    case 0x4u: coprocessor = true; header.hasRam = true; break;
+    case 0x5u: coprocessor = true; header.hasRam = true; header.hasBattery = true; break;
+    case 0x6u: coprocessor = true; header.hasBattery = true; break;
+    case 0x9u:
+      coprocessor = true;
+      header.hasRam = true;
+      header.hasBattery = true;
+      header.hasClock = true;
+      break;
+    case 0xAu: coprocessor = true; header.hasRam = true; header.hasBattery = true; break;
+    default: header.coprocessor = Coprocessor::Unknown; return;
+  }
+  if (coprocessor) header.coprocessor = coprocessorFromNibble(high, header.chipsetSubtype);
+}
+
+// The video standard a country byte implies. Japan, the USA, South Korea, Canada
+// and Brazil run at 60 Hz; the run from Europe to Indonesia and Australia at 50;
+// the other codes name no standard.
+[[nodiscard]] VideoStandard videoFromCountry(std::uint8_t country) noexcept {
+  switch (country) {
+    case 0x00u: case 0x01u: case 0x0Du: case 0x0Fu: case 0x10u: return VideoStandard::Ntsc;
+    case 0x11u: return VideoStandard::Pal;
+    default: return country >= 0x02u && country <= 0x0Cu ? VideoStandard::Pal : VideoStandard::Unknown;
+  }
+}
+
+// Text from the image with trailing spaces and zero bytes removed.
+[[nodiscard]] std::string trimmedText(const std::uint8_t* at, std::size_t length) {
+  std::string text(reinterpret_cast<const char*>(at), length);
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\0')) text.pop_back();
+  return text;
+}
+
 // The image index an address reaches before the image's own size folds it: the
 // map's linear layout, with nothing when the address is not ROM.
 [[nodiscard]] std::optional<std::size_t> linearRomIndex(CartridgeMap map,
@@ -153,14 +252,31 @@ std::optional<CartridgeHeader> parseCartridgeHeader(std::span<const std::uint8_t
   CartridgeHeader header;
   header.offset = base;
   header.map = site->map;
-  header.title.assign(reinterpret_cast<const char*>(h + kHeaderTitle), kHeaderTitleLength);
-  while (!header.title.empty() && (header.title.back() == ' ' || header.title.back() == '\0')) {
-    header.title.pop_back();
-  }
+  header.title = trimmedText(h + kHeaderTitle, kHeaderTitleLength);
   header.mapMode = h[kHeaderMapMode];
   header.fastRom = (header.mapMode & kMapModeFast) != 0u;
+  const std::uint8_t* x = h - kExtendedBytes;  // every site lies past $FFB0 of its bank
+  header.chipset = h[kHeaderChipset];
+  header.chipsetSubtype = x[kExtendedChipsetSubtype];
+  readChipset(header);
+  header.romSizeCode = h[kHeaderRomSize];
+  header.romSizeBytes = romBytesFromCode(header.romSizeCode);
   header.saveSizeCode = h[kHeaderSaveSize];
   header.saveRamBytes = saveBytesFromCode(header.saveSizeCode);
+  header.country = h[kHeaderCountry];
+  header.video = videoFromCountry(header.country);
+  header.developer = h[kHeaderDeveloper];
+  header.version = h[kHeaderVersion];
+  if (header.developer == kDeveloperExtended) {
+    ExtendedHeader extended;
+    extended.makerCode.assign(reinterpret_cast<const char*>(x + kExtendedMaker), kExtendedMakerLength);
+    extended.gameCode = trimmedText(x + kExtendedGame, kExtendedGameLength);
+    extended.expansionFlashSizeCode = x[kExtendedFlashSize];
+    extended.expansionRamSizeCode = x[kExtendedRamSize];
+    extended.expansionRamBytes = saveBytesFromCode(extended.expansionRamSizeCode);
+    extended.specialVersion = x[kExtendedSpecialVersion];
+    header.extended = extended;
+  }
   header.complement = word(rom, base + kHeaderComplement);
   header.checksum = word(rom, base + kHeaderChecksum);
   header.checksumAgrees = (header.complement ^ header.checksum) == 0xFFFFu;

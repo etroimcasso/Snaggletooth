@@ -211,6 +211,203 @@ TEST(CartridgeHeader, TheSaveSizeCodeIsOneKilobyteShiftedAndClamped) {
   EXPECT_EQ(bytesFor(0x10u), 0u);     // not a size
 }
 
+// Writes the hardware bytes that follow the map-mode byte: the chipset, the ROM
+// size code, the country, the developer and the version, each in its own slot.
+void writeHardware(std::vector<std::uint8_t>& rom, std::size_t site, std::uint8_t chipset,
+                   std::uint8_t romCode, std::uint8_t country, std::uint8_t developer,
+                   std::uint8_t version) {
+  rom[site + 0x16] = chipset;
+  rom[site + 0x17] = romCode;
+  rom[site + 0x19] = country;
+  rom[site + 0x1A] = developer;
+  rom[site + 0x1B] = version;
+}
+
+// Writes the sixteen bytes ahead of the header: the maker code, the game code,
+// six reserved zero bytes, the two expansion size codes, the special version and
+// the chipset sub-type.
+void writeExtended(std::vector<std::uint8_t>& rom, std::size_t site, const char* maker,
+                   const char* game, std::uint8_t flashCode, std::uint8_t ramCode,
+                   std::uint8_t special, std::uint8_t subtype) {
+  const std::size_t base = site - 0x10;
+  rom[base + 0x0] = static_cast<std::uint8_t>(maker[0]);
+  rom[base + 0x1] = static_cast<std::uint8_t>(maker[1]);
+  for (std::size_t i = 0; i < 4; ++i) rom[base + 0x2 + i] = static_cast<std::uint8_t>(game[i]);
+  for (std::size_t i = 0x6; i < 0xC; ++i) rom[base + i] = 0;
+  rom[base + 0xC] = flashCode;
+  rom[base + 0xD] = ramCode;
+  rom[base + 0xE] = special;
+  rom[base + 0xF] = subtype;
+}
+
+TEST(CartridgeHeader, TheHardwareBytesAreReportedAsWritten) {
+  std::vector<std::uint8_t> rom = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+  writeHardware(rom, kLoRomSite, 0x02u, 0x09u, 0x01u, 0x01u, 0x02u);
+  const std::optional<CartridgeHeader> h = parseCartridgeHeader(rom);
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->chipset, 0x02u);
+  EXPECT_EQ(h->romSizeCode, 0x09u);
+  EXPECT_EQ(h->country, 0x01u);
+  EXPECT_EQ(h->developer, 0x01u);
+  EXPECT_EQ(h->version, 0x02u);
+  // The slots are the same under every map: the header's own layout does not move.
+  std::vector<std::uint8_t> hi = authored(kMegabyte, kHiRomSite, 0x21u, 0u);
+  writeHardware(hi, kHiRomSite, 0x35u, 0x0Cu, 0x00u, 0x33u, 0x01u);
+  const std::optional<CartridgeHeader> g = parseCartridgeHeader(hi);
+  ASSERT_TRUE(g.has_value());
+  EXPECT_EQ(g->chipset, 0x35u);
+  EXPECT_EQ(g->romSizeCode, 0x0Cu);
+  EXPECT_EQ(g->country, 0x00u);
+  EXPECT_EQ(g->developer, 0x33u);
+  EXPECT_EQ(g->version, 0x01u);
+}
+
+// The chipset byte's low nibble says what sits beside the ROM and its high nibble
+// which coprocessor; a custom coprocessor is told apart by the sub-type byte.
+TEST(CartridgeHeader, TheChipsetByteNamesTheRamTheBatteryAndTheCoprocessor) {
+  struct Case {
+    std::uint8_t chipset;
+    std::uint8_t subtype;
+    Coprocessor coprocessor;
+    bool ram;
+    bool battery;
+    bool clock;
+  };
+  const Case cases[] = {
+      {0x00u, 0x00u, Coprocessor::None, false, false, false},
+      {0x01u, 0x00u, Coprocessor::None, true, false, false},
+      {0x02u, 0x00u, Coprocessor::None, true, true, false},
+      {0x03u, 0x00u, Coprocessor::Dsp, false, false, false},
+      {0x04u, 0x00u, Coprocessor::Dsp, true, false, false},
+      {0x05u, 0x00u, Coprocessor::Dsp, true, true, false},
+      {0x06u, 0x00u, Coprocessor::Dsp, false, true, false},
+      {0x13u, 0x00u, Coprocessor::Gsu, false, false, false},
+      {0x14u, 0x00u, Coprocessor::Gsu, true, false, false},
+      {0x15u, 0x00u, Coprocessor::Gsu, true, true, false},
+      {0x1Au, 0x00u, Coprocessor::Gsu, true, true, false},
+      {0x25u, 0x00u, Coprocessor::Obc1, true, true, false},
+      {0x32u, 0x00u, Coprocessor::Sa1, true, true, false},  // the x2 form: the same as x5
+      {0x34u, 0x00u, Coprocessor::Sa1, true, false, false},
+      {0x35u, 0x00u, Coprocessor::Sa1, true, true, false},
+      {0x43u, 0x00u, Coprocessor::Sdd1, false, false, false},
+      {0x45u, 0x00u, Coprocessor::Sdd1, true, true, false},
+      {0x55u, 0x00u, Coprocessor::Srtc, true, true, false},
+      {0x59u, 0x00u, Coprocessor::Srtc, true, true, true},
+      {0xE3u, 0x00u, Coprocessor::Other, false, false, false},
+      {0xE5u, 0x00u, Coprocessor::Other, true, true, false},
+      {0xF5u, 0x00u, Coprocessor::Spc7110, true, true, false},
+      {0xF9u, 0x00u, Coprocessor::Spc7110, true, true, true},
+      {0xF6u, 0x01u, Coprocessor::St010, false, true, false},
+      {0xF5u, 0x02u, Coprocessor::St018, true, true, false},
+      {0xF3u, 0x10u, Coprocessor::Cx4, false, false, false},
+      {0xF3u, 0x20u, Coprocessor::Unknown, false, false, false},  // a sub-type the table does not list
+      {0x73u, 0x00u, Coprocessor::Unknown, false, false, false},  // a high nibble the table does not list
+      {0x07u, 0x00u, Coprocessor::Unknown, false, false, false},  // a low nibble the table does not list
+  };
+  for (const Case& c : cases) {
+    std::vector<std::uint8_t> rom = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+    writeHardware(rom, kLoRomSite, c.chipset, 0x08u, 0x01u, 0x01u, 0x00u);
+    rom[kLoRomSite - 1] = c.subtype;
+    const std::optional<CartridgeHeader> h = parseCartridgeHeader(rom);
+    ASSERT_TRUE(h.has_value());
+    EXPECT_EQ(h->coprocessor, c.coprocessor) << "chipset " << int{c.chipset} << " sub-type " << int{c.subtype};
+    EXPECT_EQ(h->hasRam, c.ram) << "chipset " << int{c.chipset};
+    EXPECT_EQ(h->hasBattery, c.battery) << "chipset " << int{c.chipset};
+    EXPECT_EQ(h->hasClock, c.clock) << "chipset " << int{c.chipset};
+    EXPECT_EQ(h->chipsetSubtype, c.subtype);
+  }
+}
+
+TEST(CartridgeHeader, TheRomSizeCodeIsOneKilobyteShiftedAndClamped) {
+  const auto bytesFor = [](std::uint8_t code) {
+    std::vector<std::uint8_t> rom = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+    writeHardware(rom, kLoRomSite, 0x00u, code, 0x01u, 0x01u, 0x00u);
+    const std::optional<CartridgeHeader> h = parseCartridgeHeader(rom);
+    EXPECT_EQ(h->romSizeCode, code);
+    return h->romSizeBytes;
+  };
+  EXPECT_EQ(bytesFor(0x08u), 256u * 1024u);
+  EXPECT_EQ(bytesFor(0x09u), 512u * 1024u);
+  EXPECT_EQ(bytesFor(0x0Au), kMegabyte);
+  EXPECT_EQ(bytesFor(0x0Cu), 4u * kMegabyte);
+  EXPECT_EQ(bytesFor(0x0Du), 8u * kMegabyte);
+  EXPECT_EQ(bytesFor(0x0Eu), 8u * kMegabyte);  // beyond what a map can address
+  EXPECT_EQ(bytesFor(0x00u), 1024u);           // the formula, read literally
+  EXPECT_EQ(bytesFor(0x10u), 0u);              // not a size
+  EXPECT_EQ(bytesFor(0xFFu), 0u);
+}
+
+TEST(CartridgeHeader, TheCountryByteImpliesTheVideoStandard) {
+  const auto videoFor = [](std::uint8_t country) {
+    std::vector<std::uint8_t> rom = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+    writeHardware(rom, kLoRomSite, 0x00u, 0x08u, country, 0x01u, 0x00u);
+    const std::optional<CartridgeHeader> h = parseCartridgeHeader(rom);
+    EXPECT_EQ(h->country, country);
+    return h->video;
+  };
+  EXPECT_EQ(videoFor(0x00u), VideoStandard::Ntsc);  // Japan, and the international code
+  EXPECT_EQ(videoFor(0x01u), VideoStandard::Ntsc);  // USA and Canada
+  EXPECT_EQ(videoFor(0x02u), VideoStandard::Pal);   // Europe
+  EXPECT_EQ(videoFor(0x06u), VideoStandard::Pal);   // France: SECAM, 50 Hz
+  EXPECT_EQ(videoFor(0x0Cu), VideoStandard::Pal);   // Indonesia, the last of the run
+  EXPECT_EQ(videoFor(0x0Du), VideoStandard::Ntsc);  // South Korea
+  EXPECT_EQ(videoFor(0x0Eu), VideoStandard::Unknown);
+  EXPECT_EQ(videoFor(0x0Fu), VideoStandard::Ntsc);  // Canada
+  EXPECT_EQ(videoFor(0x10u), VideoStandard::Ntsc);  // Brazil: PAL-M, 60 Hz
+  EXPECT_EQ(videoFor(0x11u), VideoStandard::Pal);   // Australia
+  EXPECT_EQ(videoFor(0x12u), VideoStandard::Unknown);
+  EXPECT_EQ(videoFor(0x14u), VideoStandard::Unknown);
+  EXPECT_EQ(videoFor(0xFFu), VideoStandard::Unknown);
+}
+
+// The sixteen bytes ahead of the header are an extended header only when the
+// developer byte is $33; otherwise they are whatever the bank holds there, and
+// only the sub-type byte is reported.
+TEST(CartridgeHeader, TheExtendedHeaderExistsOnlyUnderDeveloperThirtyThree) {
+  std::vector<std::uint8_t> rom = authored(kMegabyte, kHiRomSite, 0x21u, 0u);
+  writeHardware(rom, kHiRomSite, 0x15u, 0x0Au, 0x01u, 0x01u, 0x00u);
+  writeExtended(rom, kHiRomSite, "01", "AXYE", 0x00u, 0x06u, 0x00u, 0x00u);
+  std::optional<CartridgeHeader> h = parseCartridgeHeader(rom);
+  ASSERT_TRUE(h.has_value());
+  EXPECT_FALSE(h->extended.has_value());
+  EXPECT_EQ(h->chipsetSubtype, 0x00u);
+
+  writeHardware(rom, kHiRomSite, 0x15u, 0x0Au, 0x01u, 0x33u, 0x00u);
+  h = parseCartridgeHeader(rom);
+  ASSERT_TRUE(h.has_value());
+  ASSERT_TRUE(h->extended.has_value());
+  EXPECT_EQ(h->extended->makerCode, "01");
+  EXPECT_EQ(h->extended->gameCode, "AXYE");
+  EXPECT_EQ(h->extended->expansionFlashSizeCode, 0x00u);
+  EXPECT_EQ(h->extended->expansionRamSizeCode, 0x06u);
+  EXPECT_EQ(h->extended->expansionRamBytes, 65536u);
+  EXPECT_EQ(h->extended->specialVersion, 0x00u);
+
+  // The old two-letter game code is space padded, and comes back without the padding.
+  writeExtended(rom, kHiRomSite, "B2", "ZL  ", 0x05u, 0x00u, 0x01u, 0x10u);
+  h = parseCartridgeHeader(rom);
+  ASSERT_TRUE(h.has_value() && h->extended.has_value());
+  EXPECT_EQ(h->extended->makerCode, "B2");
+  EXPECT_EQ(h->extended->gameCode, "ZL");
+  EXPECT_EQ(h->extended->expansionFlashSizeCode, 0x05u);
+  EXPECT_EQ(h->extended->expansionRamSizeCode, 0x00u);
+  EXPECT_EQ(h->extended->expansionRamBytes, 0u);
+  EXPECT_EQ(h->extended->specialVersion, 0x01u);
+  EXPECT_EQ(h->chipsetSubtype, 0x10u);
+}
+
+// The extended header sits ahead of the header at every site, so a LoROM
+// cartridge keeps it at $7FB0.
+TEST(CartridgeHeader, TheExtendedHeaderSitsSixteenBytesAheadOfEverySite) {
+  std::vector<std::uint8_t> rom = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+  writeHardware(rom, kLoRomSite, 0x00u, 0x09u, 0x01u, 0x33u, 0x00u);
+  writeExtended(rom, kLoRomSite, "01", "AABE", 0x00u, 0x00u, 0x00u, 0x00u);
+  const std::optional<CartridgeHeader> h = parseCartridgeHeader(rom);
+  ASSERT_TRUE(h.has_value() && h->extended.has_value());
+  EXPECT_EQ(h->extended->gameCode, "AABE");
+  EXPECT_EQ(rom[0x7FB2u], 'A');
+}
+
 TEST(CartridgeHeader, TheVectorsFollowTheHeaderInTheirDocumentedSlots) {
   const std::optional<CartridgeHeader> h = parseCartridgeHeader(authored(kMegabyte, kHiRomSite, 0x21u, 0u));
   ASSERT_TRUE(h.has_value());

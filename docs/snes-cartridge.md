@@ -27,7 +27,10 @@ Everything lives in `snaggletooth`.
 | Symbol | Purpose |
 |---|---|
 | `CartridgeMap` | `LoRom`, `HiRom` or `ExHiRom` — how an image lays across the bus. |
-| `CartridgeHeader` | What a header says: the site it was read from, its map, the title, the map-mode byte and its fast bit, the save-RAM size code and the bytes it means, the checksum pair and whether they agree, and the interrupt vectors. |
+| `CartridgeHeader` | What a header says: the site it was read from, its map, the title, the map-mode byte and its fast bit, the chipset byte and what it names, the two size codes and the bytes they mean, the country byte and its video standard, the developer and version bytes, the checksum pair and whether they agree, the extended header when there is one, and the interrupt vectors. |
+| `Coprocessor` | What the chipset byte names beside the ROM: `None`, `Dsp`, `Gsu`, `Obc1`, `Sa1`, `Sdd1`, `Srtc`, `Other`, `Spc7110`, `St010`, `St018`, `Cx4`, or `Unknown` for a code the layout does not list. |
+| `VideoStandard` | `Ntsc`, `Pal` or `Unknown` — what the country byte implies. |
+| `ExtendedHeader` | The sixteen bytes ahead of the header: the maker and game codes, the expansion size codes, the special version. |
 | `NativeVectors`, `EmulationVectors` | The handler addresses the CPU reads in each mode. |
 | `parseCartridgeHeader(rom)` | The header the image carries, or nothing when the image is too small to hold one. |
 | `detectCartridgeMap(rom)` | The map alone. |
@@ -67,6 +70,15 @@ header->fastRom;          // true — bit 4 of the map-mode byte
 header->saveRamBytes;     // 0, or the bytes the size code means
 header->checksumAgrees;   // true when complement and checksum are each other's inverse
 header->emulation.reset;  // where the CPU starts
+
+header->chipset;          // 0x35 — the chipset byte as written
+header->coprocessor;      // Coprocessor::Sa1
+header->hasRam;           // true
+header->hasBattery;       // true
+header->romSizeBytes;     // 4 MB, from a code of 0x0C
+header->video;            // VideoStandard::Ntsc, from a country byte of 0x01
+header->developer;        // 0x33 — an extended header follows
+header->extended->gameCode;  // "ARWE"
 ```
 
 `map` is the map of the site the header was found at, which is what the machine lays the image out
@@ -77,6 +89,36 @@ a LoROM cartridge, and `map` says so.
 The save-RAM size code is 1 KB shifted left by the code: `$01` is 2 KB, `$03` is 8 KB, `$05` is
 32 KB. A code of zero declares no save; a code beyond `$0F` is not a size and is read as none; a size
 past 128 KB is clamped to it, the most a cartridge can address.
+
+**The chipset byte** says what the board carries beside the ROM. Its low nibble names the memory and
+whether a coprocessor is present — `$0` ROM alone, `$1` with RAM, `$2` with RAM and a battery, `$3` a
+coprocessor, `$4` a coprocessor with RAM, `$5` with RAM and a battery, `$6` with a battery, `$9` with
+RAM, a battery and a real-time clock, `$A` as `$5` — and its high nibble which coprocessor: `$0` a DSP,
+`$1` the SuperFX family, `$2` the OBC1, `$3` the SA-1, `$4` the S-DD1, `$5` the S-RTC, `$E` the Super
+Game Boy and Satellaview hardware, and `$F` a custom chip that the sub-type byte at `$FFBF` tells
+apart: `$00` the SPC7110, `$01` the ST010 and ST011, `$02` the ST018, `$10` the Cx4. A low nibble of
+`$2` under a nonzero high nibble is the `$5` form. `chipset` and `chipsetSubtype` are the bytes as
+written; `coprocessor`, `hasRam`, `hasBattery` and `hasClock` are what they name, and a nibble the
+layout does not list reports `Coprocessor::Unknown` with nothing beside the ROM.
+
+**The ROM size code** is 1 KB shifted left by the code, read literally — `$08` is 256 KB, `$0C` is
+4 MB, `$0D` is 8 MB — clamped to 8 MB, the most any map addresses; a code beyond `$0F` is not a size
+and reads as zero. A cartridge whose chips do not add up to a power of two carries the next power up,
+so a 3 MB image declares `$0C`, and `romSizeBytes` says what the header says, not what the image
+measures.
+
+**The country byte** is reported as written, and `video` is the standard it implies: `Ntsc` for the
+60 Hz regions — Japan and the international code `$00`, the USA `$01`, South Korea `$0D`, Canada
+`$0F`, Brazil `$10` — and `Pal` for the 50 Hz run from Europe `$02` through Indonesia `$0C` and for
+Australia `$11`. The remaining codes name no standard and read as `Unknown`.
+
+**The developer and version bytes** are reported as written. A developer byte of `$33` says the
+sixteen bytes ahead of the header, `$FFB0-$FFBF`, are an extended header, and `extended` is then
+present: `makerCode` is the two characters at `$FFB0`, `gameCode` the four at `$FFB2` with trailing
+spaces removed (an older two-letter code is space padded), `expansionFlashSizeCode` and
+`expansionRamSizeCode` the bytes at `$FFBC` and `$FFBD` with `expansionRamBytes` read by the save-RAM
+rule, and `specialVersion` the byte at `$FFBE`. Under any other developer byte those bytes are
+whatever the bank holds there, `extended` is absent, and only `chipsetSubtype` is read from them.
 
 **The vectors.** `native` holds the handlers the CPU reads in native mode from `$FFE4-$FFEF` — COP,
 BRK, ABORT, NMI and IRQ — and `emulation` those it reads in emulation mode from `$FFF4-$FFFF` — COP,
@@ -169,6 +211,12 @@ saveRamOffset(CartridgeMap::HiRom, 0x205FFF);   // nothing: below the window
   handler. A cartridge leaves a vector it does not use at either.
 - `cartridgeRegion` reports the save window for every map whether or not the cartridge declares a
   save; the machine leaves an undeclared save reading open bus.
+- `chipsetSubtype` is read from `$FFBF` on every cartridge, because a custom coprocessor needs it,
+  but it means something only under a chipset high nibble of `$F` or an extended header. On a
+  cartridge with neither it is whatever byte the bank holds there, often `$FF` or `$00`.
+- The map-mode byte's low nibble names more than the three maps: `$2` is LoROM with an S-DD1, `$3`
+  LoROM with an SA-1, `$A` HiROM with an SPC7110. `map` still comes from the site, so a cartridge with
+  one of those bytes lays out under the map its site names.
 
 ## See also
 
