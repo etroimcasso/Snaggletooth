@@ -182,7 +182,7 @@ RangeKey keyOf(const MovedRange& r) {
 struct Recorder final : BusObserver {
   const Snes& machine;
   Address site = 0;  // the instruction about to run
-  ir::StepObserver step;  // what the CPU did this step: its fetches, its data accesses, its cycles
+  ir::StepObserver cpu;  // what the CPU did this step: its fetches, its data accesses, its cycles
 
   // An open range and where its next byte is expected.
   struct Open {
@@ -275,7 +275,7 @@ struct Recorder final : BusObserver {
 
   void access(const BusAccess& a) override {
     if (a.source == AccessSource::Cpu) {
-      step.access(a);
+      cpu.access(a);
       // Only the two start registers matter here: a write to `MDMAEN` names the
       // site of every byte the channels it selects then move, and closes what
       // those channels had open; a write to `HDMAEN` does the same for the
@@ -313,7 +313,7 @@ struct Recorder final : BusObserver {
   }
 
   void internal(std::uint32_t address, std::optional<CycleKind> kind) override {
-    step.internal(address, kind);
+    cpu.internal(address, kind);
   }
 };
 
@@ -596,7 +596,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
     }
 
     recorder.site = site;
-    recorder.step.clear();
+    recorder.cpu.clear();
     spent += machine.step();
 
     // A step runs one instruction, or one cycle of a transfer, never a whole
@@ -610,7 +610,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
     // The interpreter beside the machine: the step's instruction lifted from
     // its fetches and checked, the landing read, the registers recorded.
     const SnesState& after = machine.state();
-    lockstep.step(cpuBefore, after.cpu, recorder.step, notes);
+    lockstep.step(cpuBefore, after.cpu, recorder.cpu, notes);
 
     if (!pending) continue;
     // The landing confirms the pointer. A step that serviced an interrupt instead
