@@ -619,13 +619,27 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // from, after the vectors and the person's entries, so a name a person gave a
   // target is the one it keeps.
   std::vector<ReachedTarget> reached = request.reached;
+  // What a run saw the engines move: every earlier run's from the manifest, and
+  // this run's over them — a range this run saw again carries this run's count,
+  // one it did not see is kept as it was.
+  out.moved = request.moved;
   if (request.observeRun) {
-    for (const ReachedTarget& seen :
-         observeRun(request.rom, request.runMasterCycles, request.input, out.notes)) {
+    const RunObservation observation =
+        observeRun(request.rom, request.runMasterCycles, request.input, out.notes);
+    for (const ReachedTarget& seen : observation.reached) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
         return sameSighting(r, seen);
       });
       if (!known) reached.push_back(seen);
+    }
+    for (const MovedRange& range : observation.moved) {
+      const auto known = std::find_if(out.moved.begin(), out.moved.end(),
+                                      [&](const MovedRange& m) { return sameRange(m, range); });
+      if (known == out.moved.end()) {
+        out.moved.push_back(range);
+      } else {
+        known->times = range.times;
+      }
     }
   }
   std::sort(reached.begin(), reached.end(), [](const ReachedTarget& a, const ReachedTarget& b) {
@@ -633,6 +647,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     if (a.target != b.target) return a.target < b.target;
     return contextOf(a.mode).bits < contextOf(b.mode).bits;
   });
+  std::sort(out.moved.begin(), out.moved.end(), rangeBefore);
 
   for (const TraceEntry& entry : entries) {
     const std::optional<Address> home = canonical(map, imageBytes, entry.address);
@@ -891,8 +906,8 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
 std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
   out += "; A Snaggletooth cartridge project. The next run reads the `entry`, `reached`,\n"
-         "; `derived` and `file` lines; snes_verify reads `map`, `file`, `sound` and\n"
-         "; `block`; everything else is written fresh from what the run found.\n";
+         "; `derived`, `moved` and `file` lines; snes_verify reads `map`, `file`, `sound`\n"
+         "; and `block`; everything else is written fresh from what the run found.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
   out += "map      " + mapName(disassembly.header.map) + "\n";
   std::string title;
@@ -980,6 +995,22 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            " source " + (dma.source ? address24(*dma.source) : std::string("none")) + " " +
            (dma.startMask ? (dma.hdma ? "start-hdma" : "start") : "start") + " " +
            (dma.startMask ? "$" + hex(*dma.startMask, 2) : std::string("none")) + "\n";
+  }
+
+  // What a run saw move. Every field is present; a B-bus address no register
+  // has writes `none` for the name and the class, as a `dma` line does.
+  if (!disassembly.moved.empty()) out += "\n";
+  for (const MovedRange& range : disassembly.moved) {
+    out += "moved    " + address24(range.site) + " channel " + std::to_string(range.channel) + " " +
+           (range.toRegister ? "to-register" : "from-register") + " " +
+           address24(range.registerAddress) + " " +
+           (range.registerName.empty() ? std::string("none") : std::string(range.registerName)) +
+           " " +
+           (range.registerClass ? std::string(cpu65816RegisterClassName(*range.registerClass))
+                                : std::string("none")) +
+           " memory " + address24(range.memory) + " " + std::string(movedStepName(range.step)) +
+           " bytes " + std::to_string(range.bytes) + " as " + std::string(movedKindName(range.kind)) +
+           " times " + std::to_string(range.times) + "\n";
   }
 
   // The routines. A list is one field, its names joined by commas; an empty
@@ -1074,6 +1105,51 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
                                             .site = *site,
                                             .call = words[2].rfind("sub_", 0) == 0,
                                             .name = words[2]});
+      continue;
+    }
+    if (words[0] == "moved") {
+      // moved <site> channel <n> <direction> <register> <name> <class> memory
+      // <address> <step> bytes <n> as <kind> times <n>
+      if (words.size() != 17 || words[2] != "channel" || words[8] != "memory" ||
+          words[11] != "bytes" || words[13] != "as" || words[15] != "times") {
+        return fail("a moved range is a site, `channel` n, a direction, a register with its name and "
+                    "class, `memory` an address, a step, `bytes` n, `as` a kind and `times` n");
+      }
+      const std::optional<Address> site = parseLongAddress(words[1]);
+      const std::optional<Address> registerAddress = parseLongAddress(words[5]);
+      const std::optional<Address> memory = parseLongAddress(words[9]);
+      if (!site || !registerAddress || !memory) return fail("addresses are written $BB:XXXX");
+      const std::optional<std::size_t> channel = parseCount(words[3]);
+      const std::optional<std::size_t> bytes = parseCount(words[12]);
+      const std::optional<std::size_t> times = parseCount(words[16]);
+      if (!channel || *channel > 7u) return fail(words[3] + " is not a channel 0-7");
+      if (!bytes || !times) return fail("bytes and times are counts");
+      MovedRange range{.site = *site,
+                       .channel = static_cast<std::uint8_t>(*channel),
+                       .toRegister = true,
+                       .registerAddress = *registerAddress,
+                       .registerName = {},
+                       .registerClass = std::nullopt,
+                       .memory = *memory,
+                       .step = MovedStep::Increment,
+                       .bytes = static_cast<std::uint32_t>(*bytes),
+                       .kind = MovedKind::Dma,
+                       .times = static_cast<std::uint32_t>(*times)};
+      if (words[4] == "from-register") range.toRegister = false;
+      else if (words[4] != "to-register") return fail(words[4] + " is not to-register or from-register");
+      if (words[10] == "decrement") range.step = MovedStep::Decrement;
+      else if (words[10] == "fixed") range.step = MovedStep::Fixed;
+      else if (words[10] != "increment") return fail(words[10] + " is not increment, decrement or fixed");
+      if (words[14] == "table") range.kind = MovedKind::Table;
+      else if (words[14] == "indirect") range.kind = MovedKind::Indirect;
+      else if (words[14] != "dma") return fail(words[14] + " is not dma, table or indirect");
+      // The name and the class are the register table's, from the address; the
+      // words on the line are what the last run wrote from the same table.
+      if (const std::optional<Cpu65816Register> reg = cpu65816Register(*registerAddress)) {
+        range.registerName = reg->name;
+        range.registerClass = reg->cls;
+      }
+      input.moved.push_back(range);
       continue;
     }
     if (words[0] == "derived") {

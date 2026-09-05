@@ -18,13 +18,21 @@
 // instead lands in the handler, and records nothing; the instruction runs later,
 // and is seen then.
 //
+// The same run watches the transfer engines. Every byte a general-purpose DMA
+// or an HDMA channel moves crosses the bus in the engine's name, and the run
+// records where each range of them came from, where it went, how many there
+// were and which instruction started it — the transfers a cartridge sets up from
+// pointers, which the bytes alone never name a source for.
+//
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
 // reaches what a player does, and the trace follows.
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cpu65816/cpu65816_disasm.h"
@@ -52,20 +60,77 @@ struct ReachedTarget {
 // the same mode; what it was called is not part of what was seen.
 [[nodiscard]] bool sameSighting(const ReachedTarget& a, const ReachedTarget& b);
 
+// What a range of bytes was to the engine that moved it: a general-purpose
+// transfer; an HDMA channel's table, read as the frame walked it — the line
+// counts, a direct table's inline values, an indirect table's pointers; or the
+// block an indirect entry pointed at.
+enum class MovedKind : std::uint8_t { Dma, Table, Indirect };
+
+// A kind as a manifest names it: `dma`, `table`, `indirect`.
+[[nodiscard]] std::string_view movedKindName(MovedKind kind);
+
+// How the memory address moved from one byte to the next, as the channel's
+// `DMAP` said: up, down, or not at all — a fill from one byte, which is not a
+// range of anything. A table and an indirect block always step up.
+enum class MovedStep : std::uint8_t { Increment, Decrement, Fixed };
+
+// A step as a manifest names it: `increment`, `decrement`, `fixed`.
+[[nodiscard]] std::string_view movedStepName(MovedStep step);
+
+// One contiguous range of bytes one channel moved under one trigger, as the
+// engine performed it. `site` is the instruction that started it: the write to
+// `MDMAEN` for a general-purpose transfer, the write to `HDMAEN` that enabled
+// the channel for a table and its blocks. `registerAddress` is the B-bus
+// register the channel's `BBAD` named, with its name and class where the
+// address has one; a pattern that reaches a second register is implied by the
+// count. `memory` is the A-bus address the range began at and `bytes` how many
+// followed it under `step`. `times` is how many sightings of exactly this range
+// the run made — a sprite table sent every frame is one range, seen once a frame.
+struct MovedRange {
+  Address site = 0;
+  std::uint8_t channel = 0;
+  bool toRegister = true;  // memory to the register; false for a read back into memory
+  Address registerAddress = 0;
+  std::string_view registerName;  // empty when no register has the address
+  std::optional<RegisterClass> registerClass;
+  Address memory = 0;
+  MovedStep step = MovedStep::Increment;
+  std::uint32_t bytes = 0;
+  MovedKind kind = MovedKind::Dma;
+  std::uint32_t times = 1;
+};
+
+// Two sightings are the same range when every field but the count agrees.
+[[nodiscard]] bool sameRange(const MovedRange& a, const MovedRange& b);
+
+// The order ranges are reported and written in: by site, then channel, then
+// memory address, then kind, then the longer first — so a table's blocks follow
+// the table, and a walk the run's end cut short follows the whole one.
+[[nodiscard]] bool rangeBefore(const MovedRange& a, const MovedRange& b);
+
+// Everything one run recorded: the targets the indirect jumps took, in site
+// order, then target order, each site/target/mode once; and the ranges the
+// engines moved, in `rangeBefore` order, each distinct range once with its
+// count.
+struct RunObservation {
+  std::vector<ReachedTarget> reached;
+  std::vector<MovedRange> moved;
+};
+
 // Boots `rom` on the machine and steps it for `masterCycles` of the master clock,
-// recording every distinct target the four indirect forms took. Returned in site
-// order, then target order, each site/target/mode once. A site whose pointer lies
-// where the run cannot read it — anything but the image and work RAM — is named
-// once in `notes` and produces nothing; so is a site whose pointer did not match
-// where the CPU then went, which the design does not expect and reports rather
-// than hides.
+// recording every distinct target the four indirect forms took and every range
+// the transfer engines moved. A site whose pointer lies where the run cannot read
+// it — anything but the image and work RAM — is named once in `notes` and
+// produces nothing; so is a site whose pointer did not match where the CPU then
+// went, which the design does not expect and reports rather than hides. A range
+// is recorded wherever its memory address lies: the engine addressed it, and
+// nothing here needs to read it.
 //
 // `input` is replayed into the controller ports as the run goes: at the start
 // of every frame, counted from power-on, each port is given what the script
 // holds for it there. An empty script leaves both ports empty.
-[[nodiscard]] std::vector<ReachedTarget> observeRun(std::span<const std::uint8_t> rom,
-                                                    std::uint64_t masterCycles,
-                                                    const InputScript& input,
-                                                    std::vector<std::string>& notes);
+[[nodiscard]] RunObservation observeRun(std::span<const std::uint8_t> rom,
+                                        std::uint64_t masterCycles, const InputScript& input,
+                                        std::vector<std::string>& notes);
 
 }  // namespace snaggletooth::disasm

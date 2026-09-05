@@ -348,6 +348,107 @@ TEST(SnesObserver, AnHdmaEventIsReportedInTheEnginesName) {
   EXPECT_EQ(m.state().inidisp, 0x0Fu);
 }
 
+// ---- which channel, and whether the table --------------------------------------------
+
+TEST(SnesObserver, ACpuAccessNamesNoChannelAndNoTable) {
+  Snes m = programMachine({kLdaAbs, 0x10u, 0x00u, kStp});
+  Recorder r;
+  m.setObserver(&r);
+  m.step();
+  for (const Event& e : r.events) {
+    EXPECT_EQ(int{e.access.channel}, 0);
+    EXPECT_FALSE(e.access.table);
+  }
+}
+
+TEST(SnesObserver, ATransfersAccessesNameTheChannelThatMovedThem) {
+  // Channel 3, so the field is not its default.
+  Snes m = programMachine({kLdaImm, 0x08u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
+  SnesState s = m.state();
+  s.dma[3].dmap = 0x00u;
+  s.dma[3].bbad = 0x80u;
+  s.dma[3].a1t = 0x0010u;
+  s.dma[3].a1b = 0x7Eu;
+  s.dma[3].das = 4;
+  s.wmadd = 0x001000u;
+  m.restore(s);
+  Recorder r;
+  m.setObserver(&r);
+  m.run(20000u);
+  const std::vector<BusAccess> dma = r.accessesFrom(AccessSource::Dma);
+  ASSERT_EQ(dma.size(), 8u);
+  for (const BusAccess& a : dma) {
+    EXPECT_EQ(int{a.channel}, 3);
+    EXPECT_FALSE(a.table) << "a general-purpose transfer has no table";
+  }
+  // The port's own access to work RAM is the port's, and names no channel.
+  for (const BusAccess& a : r.accessesFrom(AccessSource::WramPort)) EXPECT_EQ(int{a.channel}, 0);
+}
+
+TEST(SnesObserver, ADirectHdmaTablesReadsAreTheTablesAndItsWriteIsNot) {
+  // Channel 2 delivers a direct table to $2100: one write, wait one line, stop.
+  Snes m = programMachine({kNop, 0x80u, 0xFDu});
+  SnesState s = m.state();
+  s.hdmaen = 0x04u;
+  s.dma[2].dmap = 0x00u;
+  s.dma[2].bbad = 0x00u;
+  s.dma[2].a1t = 0x0100u;
+  s.dma[2].a1b = 0x7Eu;
+  s.wram[0x100] = 0x01u;
+  s.wram[0x101] = 0x0Fu;
+  s.wram[0x102] = 0x00u;
+  m.restore(s);
+  Recorder r;
+  m.setObserver(&r);
+  m.run(2u * 1364u);
+  const std::vector<BusAccess> hdma = r.accessesFrom(AccessSource::Hdma);
+  ASSERT_GE(hdma.size(), 3u);
+  EXPECT_EQ(int{hdma[0].channel}, 2);
+  EXPECT_TRUE(hdma[0].table) << "the line count is the table's";
+  EXPECT_EQ(int{hdma[1].channel}, 2);
+  EXPECT_TRUE(hdma[1].table) << "a direct table's value is the table's";
+  EXPECT_EQ(int{hdma[2].channel}, 2);
+  EXPECT_TRUE(hdma[2].write);
+  EXPECT_FALSE(hdma[2].table) << "the delivery is not";
+}
+
+TEST(SnesObserver, AnIndirectEntrysPointerIsTheTablesAndItsDataIsNot) {
+  // Channel 1, indirect: one entry pointing at $7E:0110, then stop.
+  Snes m = programMachine({kNop, 0x80u, 0xFDu});
+  SnesState s = m.state();
+  s.hdmaen = 0x02u;
+  s.dma[1].dmap = 0x40u;   // indirect, pattern 0
+  s.dma[1].bbad = 0x00u;   // $2100
+  s.dma[1].a1t = 0x0100u;  // the table at $7E:0100
+  s.dma[1].a1b = 0x7Eu;
+  s.dma[1].dasb = 0x7Eu;   // the data's bank
+  s.wram[0x100] = 0x01u;   // one line
+  s.wram[0x101] = 0x10u;   // pointer low
+  s.wram[0x102] = 0x01u;   // pointer high: $0110
+  s.wram[0x103] = 0x00u;   // stop
+  s.wram[0x110] = 0x0Fu;   // the value the pointer names
+  m.restore(s);
+  Recorder r;
+  m.setObserver(&r);
+  m.run(2u * 1364u);
+  const std::vector<BusAccess> hdma = r.accessesFrom(AccessSource::Hdma);
+  ASSERT_GE(hdma.size(), 5u);
+  EXPECT_EQ(hdma[0].address, 0x7E0100u);
+  EXPECT_TRUE(hdma[0].table) << "the line count";
+  EXPECT_EQ(hdma[1].address, 0x7E0101u);
+  EXPECT_TRUE(hdma[1].table) << "the pointer's low byte";
+  EXPECT_EQ(hdma[2].address, 0x7E0102u);
+  EXPECT_TRUE(hdma[2].table) << "the pointer's high byte";
+  EXPECT_EQ(hdma[3].address, 0x7E0110u);
+  EXPECT_FALSE(hdma[3].write);
+  EXPECT_FALSE(hdma[3].table) << "the byte the pointer names is not the table's";
+  EXPECT_EQ(hdma[4].address, 0x002100u);
+  EXPECT_TRUE(hdma[4].write);
+  EXPECT_FALSE(hdma[4].table);
+  for (const BusAccess& a : hdma) EXPECT_EQ(int{a.channel}, 1);
+  EXPECT_EQ(m.state().inidisp, 0x0Fu);
+}
+
 // ---- the machine with and without one --------------------------------------------
 
 struct Counter final : BusObserver {

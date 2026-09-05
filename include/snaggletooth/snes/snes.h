@@ -110,13 +110,16 @@ enum class AccessSource : std::uint8_t { Cpu, Dma, Hdma, WramPort };
 // One access as the machine made it: the 24-bit address, the byte that crossed
 // the bus, which way, what the cycle was for, and who made it. A transfer
 // engine's accesses are plain data reads and writes; the CPU's carry the kind
-// the core drove.
+// the core drove. An engine's access also says which of the eight channels it
+// served, and the HDMA engine's whether it was reading its own table.
 struct BusAccess {
   std::uint32_t address = 0;
   std::uint8_t value = 0;
   bool write = false;
   CycleKind kind = CycleKind::DataRead;
   AccessSource source = AccessSource::Cpu;
+  std::uint8_t channel = 0;  // the channel an engine's access served, 0-7; 0 for the CPU's and the port's
+  bool table = false;        // the HDMA engine reading its table — a line count, a direct table's inline value, an indirect entry's pointer — rather than a byte an indirect entry points at, or any write
 };
 
 // What a machine tells about every access it makes, and every CPU cycle that
@@ -368,9 +371,10 @@ class Snes {
     }
   };
 
-  // Reports one access to the observer, when one is set.
+  // Reports one access to the observer, when one is set. `channel` and `table`
+  // are an engine's to say; the CPU's accesses leave them at their defaults.
   void observe(std::uint32_t address, std::uint8_t value, bool write, CycleKind kind,
-               AccessSource source) {
+               AccessSource source, std::uint8_t channel = 0, bool table = false) {
     if (observer_ == nullptr) return;
     BusAccess access;
     access.address = address;
@@ -378,13 +382,18 @@ class Snes {
     access.write = write;
     access.kind = kind;
     access.source = source;
+    access.channel = channel;
+    access.table = table;
     observer_->access(access);
   }
 
   // A transfer engine's two sides of one byte, reported as its accesses: the
-  // read on one bus and the write on the other, in that order.
-  std::uint8_t engineRead(std::uint32_t address, bool aBus, AccessSource source);
-  void engineWrite(std::uint32_t address, std::uint8_t value, bool aBus, AccessSource source);
+  // read on one bus and the write on the other, in that order, each naming the
+  // channel it served. A read of an HDMA table says so with `table`.
+  std::uint8_t engineRead(std::uint32_t address, bool aBus, AccessSource source,
+                          std::uint8_t channel, bool table = false);
+  void engineWrite(std::uint32_t address, std::uint8_t value, bool aBus, AccessSource source,
+                   std::uint8_t channel);
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
@@ -451,7 +460,7 @@ class Snes {
   // single visible scanline's delivery for every active channel — and the helper
   // that loads the next table entry into a channel.
   void hdmaCycle();
-  void hdmaLoadEntry(DmaChannel& channel, bool indirect);
+  void hdmaLoadEntry(std::uint8_t index, bool indirect);
 
   // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
   // register files, read and written by their documented layout.

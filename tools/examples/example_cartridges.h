@@ -28,6 +28,7 @@
 #include "examples/irq/irq.h"
 #include "examples/frame_press/frame_press.h"
 #include "examples/proving/proving.h"
+#include "examples/moving/moving.h"
 
 namespace snaggletooth::examples {
 
@@ -57,6 +58,7 @@ inline const std::vector<Example>& examples() {
       {"irq", "a timer request held under the interrupt-disable flag, a wait it ends, then taken", &irqImage},
       {"frame_press", "a Start press that counts only on the one frame the tenth interrupt reads", &framePressImage},
       {"proving", "every register proved the way real code proves it, and three jump tables, two of them bounded", &provingImage},
+      {"moving", "bytes moved every way the transfer engines can, and a sprite table sent every frame", &movingImage},
   };
   return all;
 }

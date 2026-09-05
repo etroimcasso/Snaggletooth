@@ -467,7 +467,8 @@ machine.setObserver(nullptr);
 A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what the bus answered for a
 read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an
 opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and
-write-back, a vector pull — and who made it:
+write-back, a vector pull — who made it, and, for an engine's access, which of the eight channels it
+served (`channel`) and whether the HDMA engine was reading its own table (`table`):
 
 | `AccessSource` | Who |
 |---|---|
@@ -475,6 +476,14 @@ write-back, a vector pull — and who made it:
 | `Dma` | The general-purpose DMA engine, each byte as a read on one bus then a write on the other |
 | `Hdma` | The HDMA engine, its table reads and each byte it delivers the same way |
 | `WramPort` | The work-RAM data port, reaching work RAM on its own behalf when a byte moves through `$2180` |
+
+`channel` is 0–7 on a `Dma` or `Hdma` access and 0 on the CPU's and the port's. `table` is true on the
+HDMA engine's reads of the table it is walking — a line count, a direct table's inline value, an
+indirect entry's two pointer bytes — and false on every other access: the byte an indirect entry
+points at is read from where the pointer says and is not the table's, and a write never is. The two
+together let a host follow every byte an engine moves back to the channel and the table it came from,
+which is how the [cartridge disassembler](snes-disassembler.md#what-a-run-moved) records what a run
+moved.
 
 `internal` is called for a CPU cycle that drives an address without a valid access; `kind` is set when
 the pins say what the cycle was for — a read-modify-write's modify cycle — and absent for a plain
