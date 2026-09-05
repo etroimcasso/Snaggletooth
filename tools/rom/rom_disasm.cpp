@@ -675,64 +675,141 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // no region has a new entry.
   const Cpu65816Backend& backend = cpu65816Backend();
   std::vector<Listing> listings(regions.size());
-  bool owed = true;
-  while (owed) {
-    owed = false;
-    for (std::size_t i = 0; i < regions.size(); ++i) {
-      if (!pending[i].owed) continue;
-      pending[i].owed = false;
-      const SourceRegion& region = regions[i];
-      const std::size_t start = *romOffset(map, region.first, imageBytes);
-      const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
-      Request traceRequest;
-      traceRequest.image = request.rom.subspan(start, length);
-      traceRequest.base = region.first;
-      traceRequest.entries = pending[i].entries;
-      traceRequest.entryContexts = pending[i].contexts;
-      traceRequest.symbols = pending[i].symbols;
-      listings[i] = trace(backend, traceRequest);
-      for (const Line& line : listings[i].lines) {
-        if (!line.isCode) continue;
-        const Instruction& instruction = line.instruction;
-        const bool leaves = instruction.flow == Flow::Jump || instruction.flow == Flow::Call;
-        if (!leaves || !instruction.target || within(region, *instruction.target)) continue;
-        const std::optional<Address> home = canonical(map, imageBytes, *instruction.target);
-        if (!home) continue;
-        const std::optional<Decoded> again =
-            backend.decode(traceRequest.image, region.first, line.address, line.context);
-        const Context after = again ? again->next : line.context;
-        const std::string prefix = instruction.flow == Flow::Call ? "sub_" : "loc_";
-        const std::optional<bool> added = add(*home, after, prefix + hex(*home, 6));
-        if (added) {
-          if (*added) owed = true;
-        } else {
-          out.stops.push_back(TraceStop{
-              .address = line.address,
-              .reason = "`" + instruction.text + "`: the target " + address24(*instruction.target) +
-                        " lies in no region"});
+  auto traceOwed = [&]() {
+    bool owed = true;
+    while (owed) {
+      owed = false;
+      for (std::size_t i = 0; i < regions.size(); ++i) {
+        if (!pending[i].owed) continue;
+        pending[i].owed = false;
+        const SourceRegion& region = regions[i];
+        const std::size_t start = *romOffset(map, region.first, imageBytes);
+        const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
+        Request traceRequest;
+        traceRequest.image = request.rom.subspan(start, length);
+        traceRequest.base = region.first;
+        traceRequest.entries = pending[i].entries;
+        traceRequest.entryContexts = pending[i].contexts;
+        traceRequest.symbols = pending[i].symbols;
+        listings[i] = trace(backend, traceRequest);
+        for (const Line& line : listings[i].lines) {
+          if (!line.isCode) continue;
+          const Instruction& instruction = line.instruction;
+          const bool leaves = instruction.flow == Flow::Jump || instruction.flow == Flow::Call;
+          if (!leaves || !instruction.target || within(region, *instruction.target)) continue;
+          const std::optional<Address> home = canonical(map, imageBytes, *instruction.target);
+          if (!home) continue;
+          const std::optional<Decoded> again =
+              backend.decode(traceRequest.image, region.first, line.address, line.context);
+          const Context after = again ? again->next : line.context;
+          const std::string prefix = instruction.flow == Flow::Call ? "sub_" : "loc_";
+          const std::optional<bool> added = add(*home, after, prefix + hex(*home, 6));
+          if (added) {
+            if (*added) owed = true;
+          } else {
+            out.stops.push_back(TraceStop{
+                .address = line.address,
+                .reason = "`" + instruction.text + "`: the target " + address24(*instruction.target) +
+                          " lies in no region"});
+          }
         }
       }
     }
-  }
+  };
 
-  for (std::size_t i = 0; i < regions.size(); ++i) {
-    // A region nothing reached is all data: one run of every byte it holds.
-    if (pending[i].entries.empty()) {
-      const std::size_t start = *romOffset(map, regions[i].first, imageBytes);
-      const std::size_t length = static_cast<std::size_t>(regions[i].last - regions[i].first) + 1u;
-      Line line;
-      line.isCode = false;
-      line.address = regions[i].first;
-      line.data.assign(request.rom.begin() + static_cast<std::ptrdiff_t>(start),
-                       request.rom.begin() + static_cast<std::ptrdiff_t>(start + length));
-      listings[i].addressBits = backend.addressBits();
-      listings[i].lines.push_back(std::move(line));
+  // The regions as they stand: every listing traced so far, and a region
+  // nothing reached as all data — one run of every byte it holds.
+  auto gatherRegions = [&]() {
+    out.regions.clear();
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+      Listing listing = listings[i];
+      if (pending[i].entries.empty()) {
+        const std::size_t start = *romOffset(map, regions[i].first, imageBytes);
+        const std::size_t length = static_cast<std::size_t>(regions[i].last - regions[i].first) + 1u;
+        Line line;
+        line.isCode = false;
+        line.address = regions[i].first;
+        line.data.assign(request.rom.begin() + static_cast<std::ptrdiff_t>(start),
+                         request.rom.begin() + static_cast<std::ptrdiff_t>(start + length));
+        listing.addressBits = backend.addressBits();
+        listing.lines.push_back(std::move(line));
+      }
+      out.regions.push_back(RegionListing{.region = regions[i], .listing = std::move(listing)});
     }
-    out.regions.push_back(RegionListing{.region = regions[i], .listing = std::move(listings[i])});
-    for (const Line& line : out.regions.back().listing.lines) {
-      if (!line.isCode) continue;
+  };
+
+  // What the bytes prove the indirect jumps take: every earlier run's, read back
+  // from the manifest, and then this run's, derived over the traced program —
+  // each an entry the trace starts from, after the vectors, the person's entries
+  // and the run's sightings, so a name any of those gave a target is the one it
+  // keeps. Deriving can reach code that derives more, so the trace and the
+  // analysis take turns until neither adds anything.
+  auto addDerived = [&](const std::vector<DerivedTarget>& found) {
+    bool any = false;
+    for (const DerivedTarget& derived : found) {
+      const bool known = std::any_of(out.derived.begin(), out.derived.end(), [&](const DerivedTarget& d) {
+        return sameDerivation(d, derived);
+      });
+      if (known) continue;
+      const std::optional<Address> home = canonical(map, imageBytes, derived.target);
+      if (!home) {
+        out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
+                            " is not in the image; not traced");
+        continue;
+      }
+      const std::string name = (derived.call ? "sub_" : "loc_") + hex(*home, 6);
+      const std::optional<bool> added = add(*home, contextOf(derived.mode), name);
+      if (!added) {
+        out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
+                            " lies in no region; not traced");
+        continue;
+      }
+      any = any || *added;
+      const std::string label = pending[*regionOf(*home)].symbols[*home];
+      out.derived.push_back(DerivedTarget{.target = *home,
+                                          .mode = derived.mode,
+                                          .site = derived.site,
+                                          .pointer = derived.pointer,
+                                          .call = derived.call,
+                                          .name = label});
+    }
+    return any;
+  };
+
+  traceOwed();
+  gatherRegions();
+  std::vector<DerivedTarget> readBack = request.derived;
+  std::sort(readBack.begin(), readBack.end(), [](const DerivedTarget& a, const DerivedTarget& b) {
+    if (a.site != b.site) return a.site < b.site;
+    return a.target < b.target;
+  });
+  if (addDerived(readBack)) {
+    traceOwed();
+    gatherRegions();
+  }
+  std::optional<ProvenProgram> proven;
+  for (;;) {
+    proven = proveProgram(out, request.rom);
+    if (!addDerived(derivedTargets(out, *proven))) break;
+    traceOwed();
+    gatherRegions();
+  }
+  std::sort(out.derived.begin(), out.derived.end(), [](const DerivedTarget& a, const DerivedTarget& b) {
+    if (a.site != b.site) return a.site < b.site;
+    if (a.target != b.target) return a.target < b.target;
+    return a.pointer < b.pointer;
+  });
+
+  // The stops: every jump or call whose successors the bytes do not name —
+  // except one every destination of which the analysis derived, which is
+  // answered.
+  std::set<Address> derivedSites;
+  for (const DerivedTarget& derived : out.derived) derivedSites.insert(derived.site);
+  for (const RegionListing& region : out.regions) {
+    for (const Line& line : region.listing.lines) {
+      if (!line.isCode || derivedSites.count(line.address)) continue;
       if (const std::optional<std::string> reason =
-              stopReason(line.instruction, map, imageBytes, regions[i])) {
+              stopReason(line.instruction, map, imageBytes, region.region)) {
         out.stops.push_back(TraceStop{.address = line.address, .reason = *reason});
       }
     }
@@ -769,11 +846,13 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
   }
 
-  // What the traced code reaches, and the routines that reach it. Read off the
-  // finished listings, so a byte the trace never entered contributes nothing.
-  out.accesses = hardwareAccesses(out);
+  // What the traced code reaches, the routines that reach it, and what every
+  // path proves. Read off the finished listings and the program proven over
+  // them, so a byte the trace never entered contributes nothing.
+  out.accesses = hardwareAccesses(out, &*proven);
   out.dmas = dmaTransfers(out.accesses);
   out.routines = routines(out);
+  out.states = stateFacts(out, *proven);
   return out;
 }
 
@@ -811,9 +890,9 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
 
 std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
-  out += "; A Snaggletooth cartridge project. The next run reads the `entry` and `file`\n"
-         "; lines; snes_verify reads `map`, `file`, `sound` and `block`; everything else\n"
-         "; is written fresh from what the run found.\n";
+  out += "; A Snaggletooth cartridge project. The next run reads the `entry`, `reached`,\n"
+         "; `derived` and `file` lines; snes_verify reads `map`, `file`, `sound` and\n"
+         "; `block`; everything else is written fresh from what the run found.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
   out += "map      " + mapName(disassembly.header.map) + "\n";
   std::string title;
@@ -850,6 +929,11 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   for (const ReachedTarget& seen : disassembly.reached) {
     out += "reached  " + address24(seen.target) + " " + seen.name + " " + modeText(seen.mode) +
            " from " + address24(seen.site) + "\n";
+  }
+  if (!disassembly.derived.empty()) out += "\n";
+  for (const DerivedTarget& derived : disassembly.derived) {
+    out += "derived  " + address24(derived.target) + " " + derived.name + " " + modeText(derived.mode) +
+           " from " + address24(derived.site) + " via " + address24(derived.pointer) + "\n";
   }
 
   if (!disassembly.stops.empty()) out += "\n";
@@ -925,6 +1009,26 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            " calls " + (calls.empty() ? std::string("none") : calls) + " reaches " +
            classList(routine.reaches) + " through " + classList(routine.through) + "\n";
   }
+
+  // What every path proves at each label. A field is the value, `?` where it is
+  // not known, and the values joined by `|` where the paths disagree; a
+  // disagreement of more values than a reader can hold at once is not known
+  // either.
+  constexpr std::size_t kMostShown = 8;
+  const auto valueList = [](const std::vector<std::uint32_t>& values, int digits) {
+    if (values.empty() || values.size() > kMostShown) return std::string("?");
+    std::string text;
+    for (const std::uint32_t value : values) {
+      if (!text.empty()) text += "|";
+      text += "$" + hex(value, digits);
+    }
+    return text;
+  };
+  if (!disassembly.states.empty()) out += "\n";
+  for (const StateFact& state : disassembly.states) {
+    out += "state    " + address24(state.address) + " D=" + valueList(state.d, 4) +
+           " DBR=" + valueList(state.dbr, 2) + " S=" + valueList(state.s, 4) + "\n";
+  }
   return out;
 }
 
@@ -968,6 +1072,24 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.reached.push_back(ReachedTarget{.target = *target,
                                             .mode = *mode,
                                             .site = *site,
+                                            .call = words[2].rfind("sub_", 0) == 0,
+                                            .name = words[2]});
+      continue;
+    }
+    if (words[0] == "derived") {
+      if (words.size() != 10 || words[6] != "from" || words[8] != "via") {
+        return fail("a derived target is an address, a name, e=, m=, x=, `from` the site and `via` the pointer");
+      }
+      const std::optional<Address> target = parseLongAddress(words[1]);
+      const std::optional<Address> site = parseLongAddress(words[7]);
+      const std::optional<Address> pointer = parseLongAddress(words[9]);
+      if (!target || !site || !pointer) return fail("addresses are written $BB:XXXX");
+      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
+      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
+      input.derived.push_back(DerivedTarget{.target = *target,
+                                            .mode = *mode,
+                                            .site = *site,
+                                            .pointer = *pointer,
                                             .call = words[2].rfind("sub_", 0) == 0,
                                             .name = words[2]});
       continue;
@@ -1038,7 +1160,7 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       continue;
     }
     static const std::set<std::string> kKnown = {"title", "stop",   "warning", "note",
-                                                 "access", "dma",   "routine"};
+                                                 "access", "dma",   "routine", "state"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   return input;
@@ -1108,6 +1230,23 @@ bool absoluteData(const ir::Instruction& instruction) {
                         instruction.addressing == ir::Addressing::AbsoluteX ||
                         instruction.addressing == ir::Addressing::AbsoluteY;
   return absolute && !instruction.target;
+}
+
+bool directData(const ir::Instruction& instruction) {
+  return instruction.addressing == ir::Addressing::Direct ||
+         instruction.addressing == ir::Addressing::DirectX ||
+         instruction.addressing == ir::Addressing::DirectY;
+}
+
+// The register a direct-page operand at `site` lands on under the direct
+// register every path proves, from the access facts: the first fact at the
+// site. Empty where none names one.
+std::string_view directRegister(const CartridgeDisassembly& disassembly, Address site) {
+  const std::vector<HardwareAccess>& accesses = disassembly.accesses;
+  auto it = std::lower_bound(accesses.begin(), accesses.end(), site,
+                             [](const HardwareAccess& a, Address wanted) { return a.site < wanted; });
+  if (it != accesses.end() && it->site == site) return it->name;
+  return {};
 }
 
 // A run of bytes execution never reached, as `DB` rows of eight with the bytes
@@ -1313,6 +1452,10 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
       } else {
         names.annotation = name;
       }
+    } else if (directData(instruction)) {
+      // A direct-page operand stays the offset it is; the register it lands on
+      // under the proven direct register goes in the comment.
+      names.annotation = directRegister(disassembly, line.address);
     }
     out += ir::renderLine(node, names, bytesWidth);
   }

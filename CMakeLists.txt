@@ -217,6 +217,7 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     tools/ir/ir_interpret.cpp
     tools/ir/ir_render.cpp
     tools/ir/ir_text.cpp
+    tools/ir/ir_dataflow.cpp
   )
   target_link_libraries(snaggletooth_ir PUBLIC snaggletooth_cpu65816)
   target_include_directories(snaggletooth_ir PUBLIC
@@ -410,6 +411,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/ir/ir_vector_test.cpp
     tests/ir/differential_test.cpp
     tests/ir/render_test.cpp
+    tests/ir/dataflow_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/observer_test.cpp
     tests/snes/timing_test.cpp

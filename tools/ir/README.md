@@ -6,8 +6,10 @@ with no bytes in it. `cpu65816_lift.h` builds a program from a listing the 65816
 disassembler traced — the one place in the toolkit where bytes become meaning —
 `ir_interpret.h` runs a program's effects and nothing else, `ir_render.h` writes
 SNES assembly from its instruction layer, `ir_differential.h` runs it beside the
-machine through a recorded run and reports every disagreement, and `ir_text.h`
-writes it out for reading. Two commands sit over the library, and the cartridge
+machine through a recorded run and reports every disagreement, `ir_dataflow.h`
+runs the effects over every path at once and says what each instruction can
+rely on — the direct register, the data bank, the stack pointer, a stored
+value, the slots of a jump table — and `ir_text.h` writes it out for reading. Two commands sit over the library, and the cartridge
 disassembler in [`../rom/`](../rom/README.md) writes its bank files through the
 renderer.
 
@@ -31,6 +33,8 @@ Everything lives in `snaggletooth::ir`.
 | `liftInstruction(instruction, mode)` | One decoded instruction as a node. |
 | `Interpreter` | Runs a node or an interrupt sequence over a `Bus` the host implements, and returns the cycles. |
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
+| `Dataflow(program, entries, sightings, image, canonical)` | Runs the effects over every path from the entries; `before(address)` is what is proven there, `derived()` every table slot a bounded index selects. |
+| `evaluate(node, before, image)` | One node over a `State`: the state after and every access it can make. |
 | `renderNode(node)`, `renderEffect(effect)` | A node, an effect, as text. |
 | `renderInstruction(instruction, names)`, `renderLine(node, names, bytesWidth)` | An instruction as source, with a label, a register name and an annotation in place of addresses where given; a line with its comment. |
 | `encode(instruction)`, `renderCost(node)` | The bytes an instruction assembles to; the cost as a listing prints it. |

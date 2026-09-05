@@ -91,7 +91,7 @@ The include paths follow the targets. `tools/` is on the public include path of
 those headers are included by directory: `disasm/disasm.h`,
 `assembler/assembler.h`, `rom/rom_disasm.h`, `rom/rom_verify.h`,
 `rom/cartridge_entries.h`, `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/ir_interpret.h`,
-`ir/ir_render.h`, `ir/ir_text.h`, `ir/ir_differential.h`,
+`ir/ir_render.h`, `ir/ir_text.h`, `ir/ir_dataflow.h`, `ir/ir_differential.h`,
 `examples/example_cartridges.h`, `spc/spc_loader.h`. The two chip libraries put their own directory on the path,
 so their headers are included bare: `spc700_disasm.h`, `spc700_asm.h`,
 `cpu65816_disasm.h`, `cpu65816_asm.h`; `snaggletooth_rom` links both, so a

@@ -3,7 +3,8 @@
 // Cartridge images built by hand: a LoROM header, a few banks of 65816 code that
 // call and jump across them, one whose reset code speaks the audio upload
 // protocol, ones that dispatch through pointers, read the controllers, run a
-// transfer, wait for an interrupt, or copy code into work RAM. The tests of the
+// transfer, wait for an interrupt, copy code into work RAM, or prove their
+// registers the way real code does and dispatch through bounded tables. The tests of the
 // cartridge tools read them, and `snes_examples` writes them to disk, so every
 // example a page shows is the real output of a tool on a cartridge that is ours
 // to publish.
@@ -26,6 +27,7 @@
 #include "examples/hdma/hdma.h"
 #include "examples/irq/irq.h"
 #include "examples/frame_press/frame_press.h"
+#include "examples/proving/proving.h"
 
 namespace snaggletooth::examples {
 
@@ -54,6 +56,7 @@ inline const std::vector<Example>& examples() {
       {"hdma", "one HDMA write per frame while the program idles", &hdmaImage},
       {"irq", "a timer request held under the interrupt-disable flag, a wait it ends, then taken", &irqImage},
       {"frame_press", "a Start press that counts only on the one frame the tenth interrupt reads", &framePressImage},
+      {"proving", "every register proved the way real code proves it, and three jump tables, two of them bounded", &provingImage},
   };
   return all;
 }

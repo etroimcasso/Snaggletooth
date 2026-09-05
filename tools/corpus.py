@@ -22,6 +22,9 @@ run's and the replay's length (sixty by default).
 every hardware access by class and by register, every transfer by destination,
 and every routine with what it calls and reaches.
 
+Every image's line counts its manifest's `stop`, `reached`, `derived` and `state`
+lines, so a corpus run says how far the trace, the run and the analysis reached.
+
 An image is OK only when every command exits 0 and the rebuilt image matches;
 the script exits 0 only when every image is OK. A failure's whole output is
 printed, never truncated. Nothing is written anywhere but under <output>.
@@ -154,6 +157,12 @@ def main():
             failures += 1
 
         summary = f"{'OK ' if ok else 'BAD'} {rom.name}: {elapsed:.0f} s"
+        manifest = tree / "project.manifest"
+        if manifest.exists():
+            kinds = collections.Counter(line.split()[0] for line in manifest.read_text(errors="replace").splitlines()
+                                        if line.strip() and not line.startswith(";"))
+            summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['derived']} derived, "
+                        f"{kinds['state']} state lines")
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:
