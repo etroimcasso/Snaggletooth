@@ -52,11 +52,17 @@ reaches what a player would. `rom/input_script.h` reads the script
 (`parseInputScript`) and says what a port holds at a frame (`InputScript::padAt`).
 
 The facts it attaches to addresses — the hardware each instruction reaches, the
-DMA transfers those add up to, and the routines the instructions belong to, each
-with what it calls and what it drives — come from `rom/rom_facts.h`:
-`hardwareAccesses(disassembly)`, `dmaTransfers(accesses)` and
-`routines(disassembly)`, written into the manifest as `access`, `dma` and
-`routine` lines.
+DMA transfers those add up to, the routines the instructions belong to, each
+with what it calls and what it drives, and what every path proves about the
+direct register, the data bank and the stack pointer at each label — come from
+`rom/rom_facts.h`: `proveProgram(disassembly, rom)` lifts every region and runs
+the [dataflow](../ir/README.md) over it, then `hardwareAccesses(disassembly,
+&proven)`, `dmaTransfers(accesses)`, `routines(disassembly)` and
+`stateFacts(disassembly, proven)`, written into the manifest as `access`, `dma`,
+`routine` and `state` lines. `derivedTargets(disassembly, proven)` is every
+destination of a jump through a table whose index the bytes bound; the
+disassembler traces from each and writes it as a `derived` line, so a bounded
+table is traced past without running the cartridge.
 
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count, and the

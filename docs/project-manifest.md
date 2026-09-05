@@ -3,7 +3,7 @@
 `project.manifest` is the file at the root of a source tree the
 [cartridge disassembler](snes-disassembler.md) writes. It says which image the
 tree is of, which files make it up and which bytes of the image each produces,
-where the trace began and where it stopped. Three of its line kinds are read back
+where the trace began and where it stopped. Four of its line kinds are read back
 on the next run — which is how a person directs the trace, and how a run's
 findings outlive it.
 
@@ -14,7 +14,10 @@ findings outlive it.
 > the traced code reaches: a line per hardware register access, a line per DMA
 > transfer a channel was set up for, and a line per routine with what it calls
 > and what it drives. Run on the machine, it records the destinations the
-> indirect jumps took, and traces from them.
+> indirect jumps took, and traces from them. Read for what every path proves,
+> it records the direct register, the data bank and the stack pointer at every
+> label where something is proven, and the destinations of every jump through
+> a table the bytes bound, and traces from those too.
 
 ---
 
@@ -30,6 +33,8 @@ findings outlive it.
   - [2.6 What the code reaches](#26-what-the-code-reaches)
   - [2.7 What a run reached](#27-what-a-run-reached)
   - [2.8 Routines](#28-routines)
+  - [2.9 What every path proves](#29-what-every-path-proves)
+  - [2.10 What the bytes derive](#210-what-the-bytes-derive)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -283,6 +288,120 @@ routine  $01:8000 sub_018000 lines 3 bytes 6 calls none reaches Cgram,DmaChannel
 registers it writes are `DmaChannel`, and where it points them is what the
 transfers reach — and `Cgram` is in its role through the call alone.
 
+### 2.9 What every path proves
+
+```
+state    <address> D=<value> DBR=<value> S=<value>
+```
+
+A `state` is what the code proves about three registers at a label, before the
+instruction there runs: the direct register, the data bank register and the
+stack pointer. Each field is the value — `$XXXX`, or `$XX` for the bank — where
+every path into the label proves the same one; `?` where some path proves
+nothing; and two or more values joined by `|` where different paths prove
+different ones, which is a disagreement the code carries and the line reports
+rather than settles. A label at which nothing is proven has no line.
+
+A value is proven by an immediate, or by a transfer of a register whose value is
+proven, and by nothing else. `LDA #$0000` then `TCD` proves the direct register;
+`LDX #$1FFF` then `TXS` proves the stack pointer; `PHK` then `PLB` proves the data
+bank to be the program bank, and `PEA $7E7E` then `PLB` twice proves it `$7E`. A
+value pulled from the stack is proven only when the push that put it there is
+on the same straight path, with no call and no store the stack could be under
+between them. A value loaded from memory is proven only when the memory is the
+image. The reset vector begins with the direct register and the data bank both
+zero, which the chip clears on reset, and nothing else proven; an interrupt
+vector and an entry a person added begin with nothing proven; a target a run
+[reached](#27-what-a-run-reached) or the bytes [derived](#210-what-the-bytes-derive)
+begins with what the site that jumped to it proves.
+
+A call carries the caller's values into the routine it names. What comes back
+is what every return of that routine proves — except a register the routine and
+everything it calls never write, which comes back as it went in. A call whose
+target the bytes do not name, a `BRK` or `COP`, and a routine that reaches a
+jump the bytes do not name bring nothing back. A hardware interrupt is not a
+path: its handler's own paths begin at its vector, and what the handler does to
+the registers between two of the program's instructions is the handler's to
+restore, as the program itself assumes.
+
+The program bank is the bank the tree places the instruction in. A cartridge
+that runs its code through a mirror of that bank reads the same bytes, and a
+data bank proven from the program bank names the same registers.
+
+The value proven at a site is also what the `access` lines of
+[2.6](#26-what-the-code-reaches) carry: a register written from a value every
+path proves has that value, whether the load was the instruction before or
+twenty instructions and a call earlier, and a direct-page operand under a
+proven direct register reaches the register it lands on.
+
+A cartridge whose reset code sets the stack pointer, sets the direct register to
+the DMA channels, calls a routine that keeps it, sets it back to zero, proves the
+data bank twice over, and dispatches through a table two of whose targets set
+the direct register apart and meet, and one of whose targets calls the same
+routine again:
+
+```
+state    $00:8000 D=$0000 DBR=$00 S=?
+state    $00:802A D=$0000 DBR=$7E S=$1FFF
+state    $00:8100 D=$0000|$0100|$0200|$4300 DBR=$00 S=$1FFD
+state    $00:8380 D=$0100|$0200 DBR=$00 S=$1FFF
+state    $00:8390 D=$0000 DBR=$00 S=$1FFF
+```
+
+At `$00:8000` the reset vector's own facts and nothing else; at `$00:802A` the
+data bank `PEA $7E7E`/`PLB`/`PLB` left; inside the routine at `$00:8100` the
+direct registers its two callers bring — `$4300` from the reset code, three
+values from the second call — and a stack pointer two bytes down; at `$00:8380`
+two paths carrying different direct registers, reported as both; at `$00:8390`
+five paths agreeing.
+
+### 2.10 What the bytes derive
+
+```
+derived  <address> <name> e=<0|1> m=<8|16|?> x=<8|16|?> from <address> via <address>
+```
+
+A destination the bytes prove a jump or a call through a pointer takes: the
+pointer lies in the image, and the index that selects it — for `JMP (!abs,X)`
+and `JSR (!abs,X)` — is bounded on every path into the jump by a comparison
+against an immediate followed by a branch on the carry (`CMP #n` and `BCS`, or
+`CPX #n` and `BCC`), or by a mask (`AND #mask`), whose bound carries through
+the arithmetic between it and the jump (`ASL`, `TAX`). Every value the index can
+take selects one pointer, and each is a `derived` line: the target, its label,
+the mode the jump carries in, the site, and after `via` the address the pointer
+was read from. A pointer outside the image, or an index nothing bounds, derives
+nothing. `JMP (!abs)` and `JML [!abs]` read a pointer that is a value in memory
+rather than a slot of a table, and derive nothing either; the
+[run](#27-what-a-run-reached) answers them.
+
+A `derived` line is an entry the trace starts from, exactly as a `reached` line
+is, and is named the same way: a person's `entry` for the same address under the
+same mode gives it its name; otherwise `sub_` for a call's target and `loc_` for
+a jump's, with the address. The two kinds are kept apart because they say
+different things — `reached` that a run saw the destination taken, `derived`
+that the bytes prove it can be — and a destination both saw has both lines. A
+jump every one of whose destinations is derived is not a stop, and has no `stop`
+line; a jump the bytes bound but whose pointers lie outside the image keeps its
+`stop`.
+
+The same cartridge's reset code masks a value nothing knows to three bits,
+doubles it, and dispatches through an eight-entry table at `$00:8200`:
+
+```
+derived  $00:8300 loc_008300 e=0 m=8 x=16 from $00:8033 via $00:8200
+derived  $00:8310 loc_008310 e=0 m=8 x=16 from $00:8033 via $00:8202
+derived  $00:8320 loc_008320 e=0 m=8 x=16 from $00:8033 via $00:8204
+derived  $00:8330 loc_008330 e=0 m=8 x=16 from $00:8033 via $00:8206
+derived  $00:8340 loc_008340 e=0 m=8 x=16 from $00:8033 via $00:8208
+derived  $00:8350 loc_008350 e=0 m=8 x=16 from $00:8033 via $00:820A
+derived  $00:8360 loc_008360 e=0 m=8 x=16 from $00:8033 via $00:820C
+derived  $00:8370 loc_008370 e=0 m=8 x=16 from $00:8033 via $00:820E
+```
+
+Eight slots, eight pointers, eight destinations, each traced from; the jump at
+`$00:8033` has no `stop` line. The cartridge's third table, indexed by a value
+nothing bounds, derives nothing and keeps its `stop`.
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -294,6 +413,9 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - every `reached` line, and traces from each after the entries — so a run's
   findings are kept from one disassembly to the next whether or not the next
   one runs, and a new run's are merged with them;
+- every `derived` line, and traces from each as it traces from a `reached`
+  line — and derives them again from the bytes, so the set is kept and grows
+  with the tree;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not
@@ -311,9 +433,9 @@ directory, it reads:
   disassembler does.
 
 Everything else is what the last run found and is written fresh — the `access`,
-`dma` and `routine` lines among them, which no tool reads back: they are what
-the trace saw, and the next trace sees it again. A `stop` line records; only an
-`entry` line directs. The disassembler writes the files fresh
+`dma`, `routine` and `state` lines among them, which no tool reads back: they
+are what the trace saw, and the next trace sees it again. A `stop` line records;
+only an `entry` line directs. The disassembler writes the files fresh
 too: an edit to a bank file is not read back by it, so a person's changes to the
 trace belong in the manifest, and their changes to the code in the sources,
 which `snes_verify` assembles as they are.

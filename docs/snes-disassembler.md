@@ -23,9 +23,12 @@ of the image it was read from.
 > cartridges' trees, across all three maps, rebuild their images byte for byte.
 > The cartridge is run on the machine and the destinations its indirect jumps
 > took become entries, so a cartridge whose dispatch goes through pointers is
-> traced past them. The manifest says what the code reaches: every register
-> access, every transfer, and every routine with what it calls and what it
-> drives — and the bank files say it beside the code, written from the
+> traced past them; and the lifted program is read for what every path proves,
+> so a jump through a table whose index the bytes bound is traced past without
+> running. The manifest says what the code reaches: every register access,
+> every transfer, every routine with what it calls and what it drives, and the
+> direct register, data bank and stack pointer at every label where the paths
+> settle them — and the bank files say it beside the code, written from the
 > intermediate representation: registers as operands, labels across files, a
 > header per routine.
 > The coprocessors have no backend, so a cartridge carrying one is traced as far
@@ -44,6 +47,7 @@ of the image it was read from.
 - [What is placed](#what-is-placed)
 - [Verifying the tree](#verifying-the-tree)
 - [What the code reaches](#what-the-code-reaches)
+- [What every path proves](#what-every-path-proves)
 - [Library](#library)
 - [Status](#status)
 - [See also](#see-also)
@@ -84,10 +88,10 @@ cartridge runs, so the run plays the game rather than watching it; a script that
 cannot be read is refused with its line named, and `--input` under `--no-run` is
 refused as well, having nothing to replay into.
 
-When the directory already holds a `project.manifest`, its `entry`, `reached` and
-`file` lines are read first, and the manifest must name the image it was written for: a
-manifest written for another image is refused rather than applied. See
-[Stops, and getting past them](#stops-and-getting-past-them).
+When the directory already holds a `project.manifest`, its `entry`, `reached`,
+`derived` and `file` lines are read first, and the manifest must name the image
+it was written for: a manifest written for another image is refused rather than
+applied. See [Stops, and getting past them](#stops-and-getting-past-them).
 
 ## The tree
 
@@ -300,6 +304,14 @@ vectors, and the tree grows. The `file` lines are read back the same way, so the
 file split is a person's to change: a region may be any range within one bank, and
 the default the tool writes is one region per bank.
 
+Some stops the bytes answer themselves. A jump or call through a table in the
+image whose index every path bounds — `AND #$07`, `ASL`, `TAX`, `JMP (!table,X)`;
+or `CMP #$03`, `BCS` past the jump, then the same — names every destination it
+can take, and each is a [`derived` line](project-manifest.md#210-what-the-bytes-derive)
+the trace starts from, as it starts from an entry. A jump every destination of
+which is derived is not a stop. What is bounded and how is
+[what every path proves](#what-every-path-proves), below.
+
 ## Running the cartridge
 
 A trace names a target only when the instruction names it. Four forms do not —
@@ -476,19 +488,71 @@ dma      $00:8045 channel 1 to-register $00:2118 VMDATAL Vram source none start 
 dma      $00:8082 channel 2 direction-unknown $00:2122 CGDATA Cgram source none start none
 ```
 
-**A value is what the bytes say and no more.** It is recorded where the
+**A value is what the bytes prove and no more.** It is recorded where the
 instruction immediately before loaded it as an immediate, with no label between
-them — the `LDA #$8F` / `STA !$2100` idiom every cartridge is written in — and
-where the instruction is `STZ`, which carries its own zero. Anything else leaves
+them — the `LDA #$8F` / `STA !$2100` idiom every cartridge is written in — where
+the instruction is `STZ`, which carries its own zero, and where every path into
+the store proves the register's value, however far back the load was and
+whatever was called in between, as long as the calls give the register back
+(see [What every path proves](#what-every-path-proves)). Anything else leaves
 the field `none`: the second transfer above has no source because its address
 registers were filled from a table, and the third's direction is unknown because
-nothing wrote its `DMAP` with a value the bytes settle. A run of straight-line
-code is as far as a value carries, so pieces of one channel written across a call
-are not joined.
+nothing wrote its `DMAP` with a value the bytes settle. Pieces of one channel are
+joined only within a run of straight-line code, so a channel set up across a
+label is two transfers' worth of lines.
 
 An instruction under a sixteen-bit register reaches two registers and produces a
 line for each, which is how one `STA !$4301` sets both a channel's B-bus address
-and the low byte of its source.
+and the low byte of its source. A direct-page operand reaches a register when
+every path proves the direct register it is an offset from: `LDA #$4300`, `TCD`,
+then `STA $01` is a write to `BBAD0`, and the line says so.
+
+## What every path proves
+
+The lifted program's effects, run over every path at once with every register a
+set of the values it can hold, say what is true at an instruction however
+execution reached it. The rules are the ones the
+[manifest page](project-manifest.md#29-what-every-path-proves) states: a value is
+proven by an immediate, by a transfer of a proven register, by a pull of a byte
+pushed on the same straight path, or by a load from the image, and by nothing
+else; two paths that prove different values are a disagreement the tree
+reports, never a choice; a call carries the caller's values into the routine
+and brings back what the routine's returns prove, except a register the routine
+gives back as it took it; a hardware interrupt is not a path.
+
+Three things come of it. A [`state` line](project-manifest.md#29-what-every-path-proves)
+per label where any of the direct register, the data bank or the stack pointer
+is known:
+
+```
+state    $00:802A D=$0000 DBR=$7E S=$1FFF
+state    $00:8100 D=$0000|$0100|$0200|$4300 DBR=$00 S=$1FFD
+state    $00:8380 D=$0100|$0200 DBR=$00 S=$1FFF
+```
+
+— the second inside a routine two callers enter with different direct
+registers, two bytes down the stack; the third at a label two paths reach with
+the direct register set differently.
+A [`derived` line](project-manifest.md#210-what-the-bytes-derive) per
+destination of a jump through a table the bytes bound:
+
+```
+derived  $00:8300 loc_008300 e=0 m=8 x=16 from $00:8033 via $00:8200
+derived  $00:8310 loc_008310 e=0 m=8 x=16 from $00:8033 via $00:8202
+```
+
+— the index masked to eight values and doubled, so eight pointers, each read
+from the address after `via`. And `access` lines a direct-page operand or a
+value carried across a call could not have had before.
+
+What is not proven is silent: a register the paths do not settle has `?` in its
+`state` line, a table whose index nothing bounds keeps its `stop`, a store whose
+value the paths disagree on has `none`. The analysis follows the accumulator
+and the index registers by the byte, so an eight-bit load is known while the
+other byte is not; it does not follow the carry, so the result of `ADC`, `SBC`,
+`ROL` and `ROR` is never known, and it does not follow the decimal flag. Memory
+other than the image — work RAM, a register, the save window — is a value the
+cartridge supplies when it runs, and a load from it is not known.
 
 **The routines.** A [`routine` line](project-manifest.md#28-routines) per
 routine says which lines belong together, which routines it calls, and its
@@ -547,10 +611,19 @@ asks for the run — off unless asked, since it costs about as long as it emulat
 
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
-`hardwareAccesses(disassembly)` gives one `HardwareAccess` per register an
+`hardwareAccesses(disassembly, proven)` gives one `HardwareAccess` per register an
 instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the
-`value` where the bytes say it, and the `run` of straight-line code it sits in —
+`value` where the bytes prove it, and the `run` of straight-line code it sits in —
 and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up.
+`proven` is a `ProvenProgram` from `proveProgram(disassembly, rom)`: the regions
+lifted into one program and the [dataflow](ir.md#what-every-path-proves) run
+over it, held together; without one, a value is the instruction before's alone
+and a direct-page operand produces nothing. `derivedTargets(disassembly, proven)`
+gives one `DerivedTarget` per destination the analysis derived — `target`,
+`mode`, `site`, `pointer`, `call`, `name` — which `disassembleCartridge` traces
+from and carries as `derived`; `stateFacts(disassembly, proven)` gives one
+`StateFact` per label at which any of `d`, `dbr` or `s` is known, each the
+values the register can hold, carried as `states`.
 `accessKindName` and `dmaDirectionName` are their names as text. `routines`
 carries one `Routine` per routine — its `address` and `label`, the `lines` it
 holds and their `bytes`, the routines it `calls`, and its role as `reaches` and
@@ -604,13 +677,16 @@ what the script plays, and no script plays everything — coverage is what a per
 exercises, run by run, and the manifest accumulates it.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
-another chip's, with registers of its own, and has no `access` or `routine`
-lines. A value carries one instruction and no further, and only within a run of
-straight-line code, so a channel configured from a table or across a call leaves
-the fields it did not settle `none` rather than guessing at them. A routine's
-role counts what the bytes reach and what a run reached; a call through a
-pointer the run did not take contributes nothing to `through`, since nothing
-names its target.
+another chip's, with registers of its own, and has no `access`, `routine` or
+`state` lines. A value carries as far as every path proves it and no further, so
+a channel configured from a table, or across a call that does not give the
+register back, leaves the fields it did not settle `none` rather than guessing at
+them. A routine's role counts what the bytes reach and what a run reached; a call
+through a pointer the run did not take contributes nothing to `through`, since
+nothing names its target. A table is derived only where its index is bounded by
+a mask or by a compare and a branch on the carry and the table lies in the
+image; an index that comes from memory, or a table in work RAM, keeps its stop
+for the run or a person to answer.
 
 Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
 from 512 KB to 6 MB — assembles back to its image byte for byte under

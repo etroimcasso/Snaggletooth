@@ -120,15 +120,23 @@ struct CartridgeDisassembly {
   std::optional<SoundProgram> sound;
   std::vector<TraceStop> stops;
   std::vector<std::string> notes;  // what the run could not do, in words
-  // What the traced code reaches, attached to the addresses that reach it, and
-  // the routines those addresses belong to. All three are written fresh on every
-  // run and read back by nothing — see `rom_facts.h`.
+  // What the traced code reaches, attached to the addresses that reach it, the
+  // routines those addresses belong to, and what every path proves about the
+  // direct register, the data bank and the stack pointer at each label. All
+  // four are written fresh on every run and read back by nothing — see
+  // `rom_facts.h`.
   std::vector<HardwareAccess> accesses;
   std::vector<DmaTransfer> dmas;
   std::vector<Routine> routines;
+  std::vector<StateFact> states;
   // The targets a run saw the indirect jumps take, this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_observe.h`.
   std::vector<ReachedTarget> reached;
+  // The targets the bytes prove the indirect jumps take — a pointer in the image
+  // selected by an index every path bounds — this run's and every earlier
+  // manifest's, each traced from as an entry — see `rom_facts.h`. A jump every
+  // one of whose destinations is derived is not among `stops`.
+  std::vector<DerivedTarget> derived;
 };
 
 // What to disassemble. `entries` are the entry points beyond the vectors, which
@@ -142,6 +150,7 @@ struct CartridgeRequest {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
   std::vector<ReachedTarget> reached;  // what earlier runs saw, read back from the manifest
+  std::vector<DerivedTarget> derived;  // what earlier runs derived, read back the same way
   bool captureSound = true;
   std::uint64_t bootMasterCycles = 15u * 21'477'272u;
   // `observeRun` boots the machine and steps it for `runMasterCycles` — sixty
@@ -196,22 +205,24 @@ struct ManifestSound {
 };
 
 // What a manifest gives the tools that read it. The next disassembly takes the
-// entries and the file split; a verification takes the map, the file split, the
-// sound program and its blocks, which together say where every file's bytes
-// land; both take the image identity. Everything else in a manifest is what the
-// last run found, and is written fresh.
+// entries, the reached and derived targets, and the file split; a verification
+// takes the map, the file split, the sound program and its blocks, which
+// together say where every file's bytes land; both take the image identity.
+// Everything else in a manifest is what the last run found, and is written
+// fresh.
 struct ManifestInput {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
   std::vector<ReachedTarget> reached;
+  std::vector<DerivedTarget> derived;
   std::optional<CartridgeMap> map;
   std::optional<ManifestSound> sound;
   std::optional<std::size_t> imageBytes;
   std::optional<std::uint16_t> checksum;
 };
 
-// Reads the entries, reached targets, regions, map, sound program and image
-// identity out of a manifest. Nothing, with `error` naming the line, when a line does not parse,
+// Reads the entries, reached and derived targets, regions, map, sound program
+// and image identity out of a manifest. Nothing, with `error` naming the line, when a line does not parse,
 // or when a block names a file no `sound` line does.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
 
@@ -227,9 +238,11 @@ struct ManifestInput {
 // data runs and the labels are the listing's. The file opens with an `EQU` line
 // for every hardware register its absolute operands address and every label
 // another file defines that it refers to, an absolute operand that addresses a
-// register is written as the register's name, a target with a label anywhere in
-// the tree is written as the label, and each routine that begins in the file
-// carries a comment with its role, what it calls and what calls it.
+// register is written as the register's name, a direct-page operand that every
+// path proves lands on a register carries the register's name in its comment, a
+// target with a label anywhere in the tree is written as the label, and each
+// routine that begins in the file carries a comment with its role, what it
+// calls and what calls it.
 [[nodiscard]] std::string renderRegion(const RegionListing& region,
                                        const CartridgeDisassembly& disassembly);
 

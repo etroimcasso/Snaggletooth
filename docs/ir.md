@@ -4,13 +4,14 @@
 carrying what source says about the instruction and what the chip does for it,
 with no bytes anywhere. `tools/ir/cpu65816_lift.h` builds it from a listing the
 [65816 disassembler](65816-disassembler.md) traced, `tools/ir/ir_interpret.h`
-runs it, `tools/ir/ir_render.h` writes SNES assembly from it, and
+runs it, `tools/ir/ir_render.h` writes SNES assembly from it,
 `tools/ir/ir_differential.h` runs it beside the machine and reports every place
-the two disagree. Two commands put those in a person's hands: `snes_lift` writes
-a cartridge's program out for reading, and `snes_differential` replays a
-cartridge's recorded run and reports; the
+the two disagree, and `tools/ir/ir_dataflow.h` runs it over every path at once
+and says what each instruction can rely on. Two commands put those in a
+person's hands: `snes_lift` writes a cartridge's program out for reading, and
+`snes_differential` replays a cartridge's recorded run and reports; the
 [cartridge disassembler](snes-disassembler.md#the-tree) writes its bank files
-through the renderer.
+through the renderer and reads the dataflow for its manifest.
 
 Three properties shape everything below.
 
@@ -52,6 +53,7 @@ them, and the interpreter reads the flag when it runs.
   - [What is checked](#what-is-checked)
   - [What is an input](#what-is-an-input)
   - [The report](#the-report)
+- [What every path proves](#what-every-path-proves)
 - [How it is checked](#how-it-is-checked)
 - [Library](#library)
 - [Stability](#stability)
@@ -610,6 +612,65 @@ $7E2000
 $7E2001
 ```
 
+## What every path proves
+
+`tools/ir/ir_dataflow.h` runs the effect layer over a whole program at once,
+with every register a set of the values it can hold rather than one of them, and
+answers what is true at each instruction however execution reached it. The
+[cartridge disassembler](snes-disassembler.md#what-every-path-proves) is its
+consumer: the `state`, `derived` and widened `access` lines of a manifest come
+from it.
+
+A `Values` is a register's possibilities: not known, or a sorted set of at most
+512 values — one is a fact, several are what different paths prove or the values
+a mask bounded an index to. A value that is not known may still carry the bits
+known to be zero (a shift left clears the low bit; a mask says which bits it
+admits) or a `Symbol`, a name for what the register held when the routine under
+examination was entered. A `RegisterState` holds the accumulator and the index
+registers as two bytes each, the direct register and the stack pointer whole,
+and the data bank; a `State` adds the compare the last instruction made against
+an immediate, for the branch on the carry after it, and the bytes the path has
+pushed and not yet pulled.
+
+`evaluate(node, before, image)` runs one node's effects over a state. It follows
+`Set`, the address arithmetic, the shifts, `Inc`, `Dec`, `And`, `Or`, `Xor`,
+`Tsb`, `Trb` and `Xba` exactly over the sets; answers a `Load` from the image
+where every address lies in it and from nothing else; records every `Load`,
+`Store` and `StoreRmw` as a `ProvenAccess` with the addresses it can reach and
+the values it can move; pushes and pulls through the path's own stack; and
+forgets a register an `Adc`, `Sbc`, `Rol` or `Ror` writes, since the carry is not
+followed. Under a width the trace did not settle, the register written is not
+known. The invariants the chip holds between instructions — the index high bytes
+zero while the index registers are eight bits wide, the stack in page one under
+emulation — are re-established before every node from the node's own mode.
+
+`Dataflow(program, entries, sightings, image, canonical)` runs to a fixed point
+from the entries — `resetState()` for the reset vector, with the direct register
+and the data bank zero; `nothingProven()` for every other — along the program's
+own flow and the `Sighting`s a run saw or an earlier analysis derived, with
+`canonical` placing every successor where the program places its nodes. Two
+paths meeting take the union of what each proves; a value one path does not
+know is not known. A branch on the carry after `CMP #n`, `CPX #n` or `CPY #n`
+bounds the compared register on each edge. A call carries the caller's state
+into the routine and brings back what every return of the routine proves, except
+a register the routine gives back as it took it, which comes back as the caller
+left it: each routine is run once from a named entry, and a register whose name
+comes back whole — never written, or pushed and pulled around the routine's own
+work — is one it gives back; a stack pointer whose name comes back moved by
+exactly the return's own pull makes the routine balanced, and the caller's stack
+pointer comes back too. A call the bytes do not resolve, a `BRK` or `COP`, and a
+routine that reaches a jump the bytes do not name bring back nothing known.
+
+`before(address)` is what is proven before the first node at an address, or
+nothing for an address no path reached. `derived()` is every `DerivedTarget` —
+site, pointer, target, whether the site calls — of a `JMP (abs,X)` or `JSR (abs,X)`
+whose index every path bounds and whose table lies in the image: each slot the
+index selects is read as the chip reads it. The plain and long indirect forms
+read a value in memory rather than a slot of a table and derive nothing.
+
+The `proving` cartridge under [`tools/examples/`](../tools/examples/README.md)
+runs every rule above; `tests/ir/dataflow_test.cpp` pins each.
+
 ## How it is checked
 
 Three suites hold the lift to the core, at three grains.
@@ -685,10 +746,14 @@ would mean the layers leak into each other.
 | `renderInstruction(instruction, names)`, `SourceNames` | The instruction as source, with a label, a register name and an annotation in place of addresses where given. |
 | `renderCost(node)`, `renderLine(node, names, bytesWidth)` | The cost as a listing prints it; one line of source with its comment. |
 | `SourceMode::reset()`, `directives(node)` | The mode a region of source carries in file order, and the directives each instruction needs. |
+| `Values`, `Symbol`, `RegisterState`, `Compare`, `State` | What every path proves: a register's possible values, a named entry value, the registers, the last compare, the bytes pushed. |
+| `resetState()`, `nothingProven()` | Where the reset vector begins; where everything else does. |
+| `evaluate(node, before, image)` | One node over a state: the state after, every access as a `ProvenAccess`, and the program counter and bank its effects leave. |
+| `Dataflow(program, entries, sightings, image, canonical)`, `before(address)`, `derived()`, `reachedNodes()` | The fixed point over a program from `FlowEntry`s along the flow and the `Sighting`s; what is proven before an address; every `DerivedTarget`; how many nodes a path reached. |
 
 The library target is `snaggletooth_ir`; `tools/` is on its public include path,
 so the headers are `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/ir_interpret.h`,
-`ir/ir_render.h` and `ir/ir_text.h`. It links the 65816 disassembler for the
+`ir/ir_render.h`, `ir/ir_text.h` and `ir/ir_dataflow.h`. It links the 65816 disassembler for the
 lift and the renderer. The differential is `snaggletooth_ir_differential`,
 header `ir/ir_differential.h`, which links the representation and the
 cartridge tools for the recorded run it replays; the cartridge tools link the
@@ -712,11 +777,16 @@ machine, which checks every instruction a run takes. The renderer writes SNES
 assembly from the instruction layer, and the source tree the
 [cartridge disassembler](snes-disassembler.md) writes comes through it: every
 tree in a corpus of thirty-one cartridges still assembles back to its image
-byte for byte. The audio CPU has no lift, and the vocabulary is written so it
-can take one — named state per chip, a bus, typed widths — without a change to
-what is here. The replay reports an instruction at an address the tree has no
-node for, but does not trace from it; those addresses are the person's to
-answer with entries.
+byte for byte. The dataflow runs the effects over every path of a program and
+proves the direct register, the data bank, the stack pointer and the values
+stored where the paths settle them, and the destinations of every jump through
+a table whose index the bytes bound; it follows the registers by the byte and
+does not follow the carry or the decimal flag, so an `ADC` result is never
+known. The audio CPU has no lift, and the vocabulary is written so it can take
+one — named state per chip, a bus, typed widths — without a change to what is
+here. The replay reports an instruction at an address the tree has no node for,
+but does not trace from it; those addresses are the person's to answer with
+entries.
 
 ## See also
 

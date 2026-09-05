@@ -169,6 +169,7 @@ int main(int argc, char** argv) {
     request.entries = input->entries;
     request.regions = input->regions;
     request.reached = input->reached;
+    request.derived = input->derived;
     std::cout << "read " << input->entries.size() << " entries and " << input->regions.size()
               << " files from " << manifestPath.string() << "\n";
   }

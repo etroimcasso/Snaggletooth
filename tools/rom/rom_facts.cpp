@@ -2,14 +2,62 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 
+#include "ir/cpu65816_lift.h"
 #include "rom/rom_disasm.h"
+#include "snaggletooth/snes/cartridge.h"
 
 namespace snaggletooth::disasm {
 namespace {
+
+// The node lifted for the code line at `site` — the first reading where the
+// address was read two ways — with what every path proves before it, or
+// nothing where no path reached it.
+struct SiteProof {
+  const ir::Node* node = nullptr;
+  ir::Evaluation evaluation;
+};
+
+std::optional<SiteProof> proofAt(const ProvenProgram& proven, Address site) {
+  const std::vector<ir::Node>& nodes = proven.program->nodes;
+  auto it = std::lower_bound(nodes.begin(), nodes.end(), site, [](const ir::Node& n, Address a) {
+    return n.instruction.address < a;
+  });
+  for (; it != nodes.end() && it->instruction.address == site; ++it) {
+    const std::size_t index = static_cast<std::size_t>(it - nodes.begin());
+    const ir::State* before = proven.flow->before(index);
+    if (!before) continue;
+    return SiteProof{.node = &*it, .evaluation = ir::evaluate(*it, *before, proven.image, proven.stack)};
+  }
+  return std::nullopt;
+}
+
+// The one access an instruction makes to the memory its operand names: the
+// store, or the load, or a read-modify-write's write-back.
+const ir::ProvenAccess* operandAccess(const SiteProof& proof) {
+  const ir::ProvenAccess* load = nullptr;
+  for (const ir::ProvenAccess& access : proof.evaluation.accesses) {
+    if (access.op == ir::Op::Store || access.op == ir::Op::StoreRmw) return &access;
+    if (access.op == ir::Op::Load && load == nullptr) load = &access;
+  }
+  return load;
+}
+
+bool directForm(const ir::Node& node) {
+  switch (node.instruction.addressing) {
+    case ir::Addressing::Direct:
+    case ir::Addressing::DirectX:
+    case ir::Addressing::DirectY:
+      return true;
+    default:
+      return false;
+  }
+}
 
 // The register an instruction's memory operand passes through, which is the
 // register whose width decides how many bytes the operand is. The index forms
@@ -97,7 +145,8 @@ std::string_view dmaDirectionName(DmaDirection direction) {
   return {};
 }
 
-std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disassembly) {
+std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disassembly,
+                                             const ProvenProgram* proven) {
   std::vector<HardwareAccess> out;
   std::uint32_t run = 0;
 
@@ -128,30 +177,51 @@ std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disasse
       // rather than the hardware, and is named by none of those forms.
       const std::optional<AccessKind> kind = accessKind(info.mnemonic);
 
-      if (instruction.operandAddress && kind) {
-        const Address first = *instruction.operandAddress;
-        // Only an operand the listing itself annotates produces a fact, so the
-        // report says no more than the comment beside the instruction does.
-        if (const std::optional<Cpu65816Register> named = cpu65816Register(first)) {
+      // What every path proves at this instruction, when the program was proven:
+      // the address its operand reaches and the value it moves.
+      std::optional<SiteProof> proof;
+      const ir::ProvenAccess* access = nullptr;
+      if (proven && kind) {
+        proof = proofAt(*proven, instruction.address);
+        if (proof) access = operandAccess(*proof);
+      }
+
+      // The address the fact is about: the one the listing annotates — a long
+      // operand in its own bank, an absolute operand in bank zero — or, for a
+      // direct-page operand, the one every path proves it lands on.
+      std::optional<Address> first = kind ? instruction.operandAddress : std::nullopt;
+      if (!first && proof && access && directForm(*proof->node)) {
+        if (const std::optional<std::uint32_t> address = access->address.single()) first = *address;
+      }
+
+      if (first) {
+        // Only an operand the listing itself annotates, or the paths settle,
+        // produces a fact, so the report says no more than is proven.
+        if (const std::optional<Cpu65816Register> named = cpu65816Register(*first)) {
           const Cpu65816Mode mode = modeOf(line.context);
           const bool wide = operandIsWide(mode, info.mnemonic);
           const bool writes = *kind == AccessKind::Write;
 
           // `STZ` carries its own value; anything else needs the instruction
-          // before to have loaded one.
+          // before to have loaded one, or every path to prove one.
           std::optional<std::uint16_t> written;
           if (writes && info.mnemonic == std::string_view("STZ")) {
             written = std::uint16_t{0};
           } else if (writes) {
             written = immediateBefore(previous, info.mnemonic);
+            if (!written && access) {
+              if (const std::optional<std::uint32_t> value = access->value.single()) {
+                written = static_cast<std::uint16_t>(*value & 0xFFFFu);
+              }
+            }
           }
 
           const unsigned reached = wide ? 2u : 1u;
           for (unsigned i = 0; i < reached; ++i) {
-            const std::optional<Cpu65816Register> reg = cpu65816Register(first + i);
+            const std::optional<Cpu65816Register> reg = cpu65816Register(*first + i);
             if (!reg) continue;
             HardwareAccess fact{.site = instruction.address,
-                                .registerAddress = first + i,
+                                .registerAddress = *first + i,
                                 .name = reg->name,
                                 .cls = reg->cls,
                                 .kind = *kind,
@@ -394,6 +464,148 @@ std::vector<Routine> routines(const CartridgeDisassembly& disassembly) {
     }
     routine.through.assign(classes.begin(), classes.end());
   }
+  return out;
+}
+
+// ---- what every path proves ----------------------------------------------------
+
+namespace {
+
+Cpu65816Mode cpuModeOf(const ir::Mode& mode) {
+  return Cpu65816Mode{.emulation = mode.emulation,
+                      .accumulator8 = mode.accumulator8,
+                      .index8 = mode.index8,
+                      .accumulatorKnown = mode.accumulatorKnown,
+                      .indexKnown = mode.indexKnown,
+                      .carryKnown = false,
+                      .carry = false};
+}
+
+// The address every byte of the image is placed at, or nothing off the image.
+std::optional<Address> homeOf(CartridgeMap map, std::size_t imageBytes, Address address) {
+  const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+  if (!offset) return std::nullopt;
+  return romAddress(map, *offset);
+}
+
+std::vector<std::uint32_t> valuesOf(const ir::Values& values) {
+  return values.known ? values.values : std::vector<std::uint32_t>{};
+}
+
+}  // namespace
+
+ProvenProgram proveProgram(const CartridgeDisassembly& disassembly, std::span<const std::uint8_t> rom) {
+  const CartridgeMap map = disassembly.header.map;
+  const std::size_t imageBytes = rom.size();
+
+  // One program over every region, in address order, each address's readings
+  // in the order the listing gives them.
+  auto program = std::make_unique<ir::Program>();
+  for (const RegionListing& region : disassembly.regions) {
+    const std::optional<std::size_t> start = romOffset(map, region.region.first, imageBytes);
+    if (!start) continue;
+    const std::size_t length = static_cast<std::size_t>(region.region.last - region.region.first) + 1u;
+    ir::Program lifted = ir::lift65816(region.listing, rom.subspan(*start, length), region.region.first);
+    program->nodes.insert(program->nodes.end(), std::make_move_iterator(lifted.nodes.begin()),
+                          std::make_move_iterator(lifted.nodes.end()));
+    program->nmi = std::move(lifted.nmi);
+    program->irq = std::move(lifted.irq);
+  }
+  std::stable_sort(program->nodes.begin(), program->nodes.end(), [](const ir::Node& a, const ir::Node& b) {
+    return a.instruction.address < b.instruction.address;
+  });
+
+  // The reset vector starts with the direct register and the data bank cleared;
+  // everything else starts knowing nothing.
+  const std::optional<Address> reset = homeOf(map, imageBytes, disassembly.header.emulation.reset);
+  std::vector<ir::FlowEntry> entries;
+  for (const TraceEntry& entry : disassembly.entries) {
+    const bool isReset = reset && entry.address == *reset && entry.mode == Cpu65816Mode::reset();
+    entries.push_back(ir::FlowEntry{.address = entry.address,
+                                    .state = isReset ? ir::resetState() : ir::nothingProven()});
+  }
+  std::vector<ir::Sighting> sightings;
+  for (const ReachedTarget& seen : disassembly.reached) {
+    sightings.push_back(ir::Sighting{.site = seen.site, .target = seen.target});
+  }
+  for (const DerivedTarget& derived : disassembly.derived) {
+    sightings.push_back(ir::Sighting{.site = derived.site, .target = derived.target});
+  }
+
+  ir::ImageReader image = [map, imageBytes, rom](ir::Address address) -> std::optional<std::uint8_t> {
+    const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+    if (!offset) return std::nullopt;
+    return rom[*offset];
+  };
+  ir::Canonical canonical = [map, imageBytes](ir::Address address) { return homeOf(map, imageBytes, address); };
+  // The stack pointer is sixteen bits in bank zero, and bank zero's low eight
+  // kilobytes are work RAM, mirrored in every bank that shows the registers and
+  // in bank $7E itself; nowhere else in bank zero can a stack be written.
+  ir::StackReach stack = [](ir::Address address) {
+    const std::uint32_t bank = address >> 16;
+    const bool mirrored = bank <= 0x3Fu || (bank >= 0x80u && bank <= 0xBFu) || bank == 0x7Eu;
+    return mirrored && (address & 0xFFFFu) < 0x2000u;
+  };
+
+  ProvenProgram proven;
+  proven.image = image;
+  proven.stack = stack;
+  proven.flow = std::make_unique<ir::Dataflow>(*program, entries, sightings, image, canonical, stack);
+  proven.program = std::move(program);
+  return proven;
+}
+
+bool sameDerivation(const DerivedTarget& a, const DerivedTarget& b) {
+  return a.site == b.site && a.target == b.target && a.pointer == b.pointer &&
+         contextOf(a.mode).bits == contextOf(b.mode).bits;
+}
+
+std::vector<DerivedTarget> derivedTargets(const CartridgeDisassembly& /*disassembly*/,
+                                          const ProvenProgram& proven) {
+  std::vector<DerivedTarget> out;
+  const std::vector<ir::Node>& nodes = proven.program->nodes;
+  for (const ir::DerivedTarget& derived : proven.flow->derived()) {
+    // The mode a jump through a pointer carries in is the mode it runs under:
+    // none of the four forms moves a flag.
+    auto site = std::lower_bound(nodes.begin(), nodes.end(), derived.site,
+                                 [](const ir::Node& n, Address a) { return n.instruction.address < a; });
+    if (site == nodes.end() || site->instruction.address != derived.site) continue;
+    out.push_back(DerivedTarget{.target = derived.target,
+                                .mode = cpuModeOf(site->mode),
+                                .site = derived.site,
+                                .pointer = derived.pointer,
+                                .call = derived.call,
+                                .name = {}});
+  }
+  return out;
+}
+
+std::vector<StateFact> stateFacts(const CartridgeDisassembly& disassembly, const ProvenProgram& proven) {
+  std::vector<StateFact> out;
+  const std::vector<ir::Node>& nodes = proven.program->nodes;
+  for (const RegionListing& region : disassembly.regions) {
+    for (const auto& [address, label] : region.listing.labels) {
+      const ir::State* state = proven.flow->before(address);
+      if (!state) continue;
+      auto node = std::lower_bound(nodes.begin(), nodes.end(), address,
+                                   [](const ir::Node& n, Address a) { return n.instruction.address < a; });
+      if (node == nodes.end() || node->instruction.address != address) continue;
+      StateFact fact{.address = address,
+                     .d = valuesOf(state->registers.d),
+                     .dbr = valuesOf(state->registers.dbr),
+                     .s = valuesOf(state->registers.s)};
+      // Under emulation the stack pointer's high byte is one, whatever a path
+      // left in it.
+      if (node->mode.emulation) {
+        for (std::uint32_t& s : fact.s) s = 0x0100u | (s & 0xFFu);
+        std::sort(fact.s.begin(), fact.s.end());
+        fact.s.erase(std::unique(fact.s.begin(), fact.s.end()), fact.s.end());
+      }
+      if (fact.d.empty() && fact.dbr.empty() && fact.s.empty()) continue;
+      out.push_back(std::move(fact));
+    }
+  }
+  std::sort(out.begin(), out.end(), [](const StateFact& a, const StateFact& b) { return a.address < b.address; });
   return out;
 }
 
