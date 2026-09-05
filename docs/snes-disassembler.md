@@ -786,7 +786,11 @@ pushed on the same straight path, or by a load from the image, and by nothing
 else; two paths that prove different values are a disagreement the tree
 reports, never a choice; a call carries the caller's values into the routine
 and brings back what the routine's returns prove, except a register the routine
-gives back as it took it; a hardware interrupt is not a path.
+gives back as it took it; a hardware interrupt is not a path; and the program
+bank is the bank the CPU runs in, carried along every path like any other
+value, so a cartridge that runs through a mirror of the bank the tree places it
+in proves the mirror's number from `PHK`, and a data bank proven from it names
+what that bank holds.
 
 Three things come of it. A [`state` line](project-manifest.md#29-what-every-path-proves)
 per label where any of the direct register, the data bank or the stack pointer

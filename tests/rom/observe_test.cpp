@@ -42,6 +42,7 @@ using examples::movingImage;
 using examples::provingImage;
 using examples::put;
 using examples::ramCodeImage;
+using examples::runningBankImage;
 using examples::stalledJumpImage;
 using examples::threeBankImage;
 using examples::unreadablePointerImage;
@@ -1020,6 +1021,34 @@ TEST(RomLockstep, ASiteRunThroughAMirrorBankIsSeenWhereTheTreePlacesIt) {
   EXPECT_TRUE(o.ran.empty());
   EXPECT_NE(seenAt(o.seen, 0x008010u), nullptr);
   EXPECT_EQ(seenAt(o.seen, 0x808010u), nullptr);
+}
+
+// A cartridge that runs through a mirror: the run records where the CPU went in
+// the bank it went there in, and sees each site where the tree places it.
+TEST(RomLockstep, AReachedTargetAndALandingAreRecordedInTheBankTheCpuArrivedIn) {
+  const std::vector<std::uint8_t> rom = runningBankImage();
+  const RunObservation o = observe(rom, kFrame);
+  EXPECT_EQ(o.divergences, 0u);
+  ASSERT_EQ(o.reached.size(), 4u) << "the pointer jump, the table jump, and the shared table jump run in two banks";
+  EXPECT_EQ(o.reached[0].target, 0x008400u);
+  EXPECT_EQ(o.reached[0].site, 0x00802Fu) << "a reached target's site is the address the CPU ran it at";
+  EXPECT_EQ(o.reached[1].target, 0x008900u);
+  EXPECT_EQ(o.reached[1].site, 0x008412u);
+  EXPECT_EQ(o.reached[2].target, 0x008A10u);
+  EXPECT_EQ(o.reached[2].site, 0x008A04u);
+  EXPECT_EQ(o.reached[3].target, 0xC08A10u);
+  EXPECT_EQ(o.reached[3].site, 0xC08A04u);
+  ASSERT_EQ(o.ran.size(), 1u);
+  EXPECT_EQ(o.ran[0].target, 0x008500u) << "the return through the frame PEA built";
+  EXPECT_EQ(o.ran[0].site, 0xC08905u);
+  EXPECT_EQ(o.ran[0].mode, Cpu65816Mode::native(true, true));
+  const SeenState* arrived = seenAt(o.seen, 0xC08400u);
+  ASSERT_NE(arrived, nullptr);
+  EXPECT_EQ(arrived->dbr, (std::vector<std::uint8_t>{0x00u}));
+  EXPECT_EQ(seenAt(o.seen, 0x008400u), nullptr);
+  const SeenState* routine = seenAt(o.seen, 0xC08202u);
+  ASSERT_NE(routine, nullptr);
+  EXPECT_EQ(routine->dbr, (std::vector<std::uint8_t>{0xC0u})) << "the long call's routine runs in $C0";
 }
 
 TEST(RomLockstep, TwoRunsSeeTheSameLandingsAndValues) {

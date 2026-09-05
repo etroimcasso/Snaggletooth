@@ -31,8 +31,19 @@
 // read off the routine itself, run once from a named entry: a register never
 // written keeps its name, and so does one pushed and pulled around the routine's
 // own work. A hardware interrupt is not a path: its handler begins at its vector
-// with nothing proven, and what it does between two of the program's instructions
-// is the handler's to restore.
+// with the program bank zero, which the chip clears to take it, and nothing else
+// proven, and what it does between two of the program's instructions is the
+// handler's to restore.
+//
+// The program bank is a value like the others, and it is the bank the CPU runs
+// in, not the bank the program places the instruction in: a cartridge that runs
+// its code through a mirror of the bank the tree holds it in pushes the mirror's
+// number with `PHK`, and under a map where the mirror and the home read different
+// memory below `$8000`, a data bank proven from it names different registers. It
+// begins as the reset vector's bank, zero; a long jump or call writes its
+// operand's bank; a destination a run saw carries the bank the CPU arrived in;
+// a fall-through, a branch and a same-bank jump keep it; and a call brings the
+// caller's back, since a routine returns to the bank it was called from.
 
 #include <cstddef>
 #include <cstdint>
@@ -90,8 +101,10 @@ struct Values {
 
 // The registers the analysis follows. The accumulator and the index registers
 // are two bytes each, so an eight-bit load is known while the other byte is not;
-// the direct register and the stack pointer are sixteen bits, the data bank
-// eight. The program bank is the bank the instruction lies in and is not carried.
+// the direct register and the stack pointer are sixteen bits, the data bank and
+// the program bank eight. The program bank is the bank the CPU runs the
+// instruction in, which is the bank the tree places it in only when the program
+// does not run through a mirror.
 struct RegisterState {
   Values aLow, aHigh;
   Values xLow, xHigh;
@@ -99,6 +112,7 @@ struct RegisterState {
   Values d;
   Values s;
   Values dbr;
+  Values pbr;
 
   // A register whole: the product of its two bytes, or not known when either is.
   [[nodiscard]] Values a() const;
@@ -128,11 +142,19 @@ struct State {
   friend bool operator==(const State&, const State&) = default;
 };
 
-// Where the reset vector begins: the direct register and the data bank both
-// zero, which the chip clears on reset, and nothing else known.
+// Where the reset vector begins: the direct register, the data bank and the
+// program bank all zero, which the chip clears on reset, and nothing else known.
 [[nodiscard]] State resetState();
 
-// Where an interrupt vector or an entry a person added begins: nothing known.
+// Where an interrupt vector begins: the program bank zero, which the chip clears
+// to take the interrupt, and nothing else known.
+[[nodiscard]] State handlerState();
+
+// Where an entry a person added begins: the program bank the address they gave
+// names, and nothing else known.
+[[nodiscard]] State entryState(Address address);
+
+// Nothing known at all — what lies after a call the analysis cannot follow.
 [[nodiscard]] State nothingProven();
 
 // The image's byte at a bus address, or nothing where the address is not the
@@ -150,14 +172,19 @@ using Canonical = std::function<std::optional<Address>(Address)>;
 // under. Empty, the stack could be anywhere in bank zero.
 using StackReach = std::function<bool(Address)>;
 
-// An entry the analysis starts from, and what is proven there.
+// An entry the analysis starts from, and what is proven there. The address is
+// placed to find the node; the bank the CPU enters in is in the state.
 struct FlowEntry {
   Address address = 0;
   State state;
 };
 
-// A destination something else proved a jump or a call at `site` takes: a run's
-// sighting, or an earlier analysis's derivation. The site's state flows to it.
+// A destination something else proved the instruction at `site` takes: a run's
+// sighting of a jump or a call through a pointer, a run's sighting of where a
+// return landed, or an earlier analysis's derivation. The target is the address
+// the CPU arrived at, in the bank it ran in: the analysis places it to find the
+// node and carries its bank as the program bank there. The site's state flows
+// to it.
 struct Sighting {
   Address site = 0;
   Address target = 0;
@@ -187,13 +214,13 @@ struct ProvenAccess {
 };
 
 // One node evaluated over a state: the state after it, every access it makes,
-// and the program counter and program bank its effects leave — which name the
-// destinations of a jump or a call through a pointer when they are known.
+// and the program counter its effects leave — which, with the program bank the
+// state carries, names the destination of a jump or a call through a pointer
+// when it is known.
 struct Evaluation {
   State after;
   std::vector<ProvenAccess> accesses;
   Values pc;
-  Values pbr;
 };
 
 // Runs a node's effects over `before`. The image answers loads whose every

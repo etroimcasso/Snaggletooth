@@ -28,6 +28,7 @@ namespace {
 
 using examples::loRomImage;
 using examples::put;
+using examples::runningBankImage;
 using examples::threeBankImage;
 
 // The cartridge. Every address the cases name is commented.
@@ -158,6 +159,36 @@ TEST(RomRoutines, ATargetARunReachedIsARoutine) {
   EXPECT_EQ(routineAt(d.routines, 0x008027u), seen);
   EXPECT_EQ(routineAt(disassembled(rom).routines, 0x008027u), nullptr)
       << "without the run the bytes there were never reached";
+}
+
+// A target the run reached in a mirror bank, and an entry a person gave in one,
+// each begin a routine where the tree places the code.
+TEST(RomRoutines, ARootNamedInAMirrorBankIsARoutineWhereTheTreePlacesIt) {
+  const std::vector<std::uint8_t> rom = runningBankImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.reached.push_back(ReachedTarget{.target = 0x008400u,
+                                          .mode = Cpu65816Mode::native(true, true),
+                                          .site = 0xC0802Fu,
+                                          .call = false,
+                                          .name = {}});
+  request.entries.push_back(TraceEntry{.address = 0x008600u,
+                                       .mode = Cpu65816Mode::native(true, true),
+                                       .name = "entered_through_the_mirror"});
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  const Routine* reached = routineAt(d.routines, 0xC08400u);
+  ASSERT_NE(reached, nullptr);
+  EXPECT_EQ(reached->label, "loc_C08400");
+  EXPECT_EQ(reached->lines, (std::vector<Address>{0xC08400u, 0xC08401u, 0xC08402u, 0xC08410u, 0xC08412u}));
+  EXPECT_EQ(reached->calls, std::vector<Address>{}) << "a jump through a table names no routine";
+  const Routine* shared = routineAt(d.routines, 0xC08A00u);
+  ASSERT_NE(shared, nullptr) << "called from two banks, one routine where the tree places it";
+  const Routine* entered = routineAt(d.routines, 0xC08600u);
+  ASSERT_NE(entered, nullptr);
+  EXPECT_EQ(entered->label, "entered_through_the_mirror");
+  EXPECT_EQ(routineAt(d.routines, 0x008400u), nullptr);
+  EXPECT_EQ(routineAt(d.routines, 0x008600u), nullptr);
 }
 
 // ---- what a routine holds ---------------------------------------------------

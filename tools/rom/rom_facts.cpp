@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "ir/cpu65816_lift.h"
+#include "rom/cartridge_entries.h"
 #include "rom/rom_disasm.h"
 #include "snaggletooth/snes/cartridge.h"
 
@@ -395,12 +396,20 @@ std::vector<Routine> routines(const CartridgeDisassembly& disassembly) {
   }
 
   // The roots: every entry, every target a run reached, and every label a call
-  // names. Every code line was reached by the trace from an entry through these
-  // same flows, entering calls where this walk does not — so every line is in
-  // the routine of some root, and no other label starts one.
+  // names — each where the tree places it, since an entry a person gave and a
+  // target a run saw name the bank the CPU runs in, which may be a mirror. Every
+  // code line was reached by the trace from an entry through these same flows,
+  // entering calls where this walk does not — so every line is in the routine of
+  // some root, and no other label starts one.
+  const CartridgeMap map = disassembly.header.map;
   std::set<Address> roots;
-  for (const TraceEntry& entry : disassembly.entries) roots.insert(entry.address);
-  for (const ReachedTarget& seen : disassembly.reached) roots.insert(seen.target);
+  auto placed = [&](Address address) {
+    const std::optional<std::size_t> offset = romOffset(map, address, disassembly.imageBytes);
+    if (!offset) return;
+    if (const std::optional<std::uint32_t> home = romAddress(map, *offset)) roots.insert(*home);
+  };
+  for (const TraceEntry& entry : disassembly.entries) placed(entry.address);
+  for (const ReachedTarget& seen : disassembly.reached) placed(seen.target);
   for (const auto& [address, line] : code) {
     const Instruction& instruction = line->instruction;
     if (instruction.flow == Flow::Call && instruction.target &&
@@ -515,16 +524,41 @@ ProvenProgram proveProgram(const CartridgeDisassembly& disassembly, std::span<co
     return a.instruction.address < b.instruction.address;
   });
 
-  // The reset vector starts with the direct register and the data bank cleared;
-  // everything else starts knowing nothing.
+  // Every vector begins in bank zero, which the chip clears to take it — reset
+  // with the direct register and the data bank cleared too, the others knowing
+  // nothing else. An entry a person added begins in the bank of the address they
+  // gave, and knows nothing else.
   const std::optional<Address> reset = homeOf(map, imageBytes, disassembly.header.emulation.reset);
+  struct Vector {
+    Address home = 0;
+    Cpu65816Mode mode;
+  };
+  std::vector<Vector> vectors;
+  for (const VectorEntry& vector : vectorEntries(disassembly.header)) {
+    const std::optional<Address> home = homeOf(map, imageBytes, vector.address);
+    if (!home) continue;
+    const bool native = vector.name.ends_with("_native");
+    vectors.push_back(Vector{.home = *home, .mode = native ? Cpu65816Mode::nativeUnknown() : Cpu65816Mode::reset()});
+  }
   std::vector<ir::FlowEntry> entries;
   for (const TraceEntry& entry : disassembly.entries) {
     const bool isReset = reset && entry.address == *reset && entry.mode == Cpu65816Mode::reset();
+    const bool isVector = std::any_of(vectors.begin(), vectors.end(), [&](const Vector& v) {
+      return v.home == entry.address && v.mode == entry.mode;
+    });
     entries.push_back(ir::FlowEntry{.address = entry.address,
-                                    .state = isReset ? ir::resetState() : ir::nothingProven()});
+                                    .state = isReset    ? ir::resetState()
+                                             : isVector ? ir::handlerState()
+                                                        : ir::entryState(entry.address)});
   }
   std::vector<ir::Sighting> sightings;
+  // Where a run landed without an instruction naming it is a sighting like a
+  // reached target: the instruction that took the CPU there is the site, and
+  // what the paths prove at it flows to the landing, in the bank the CPU
+  // arrived in.
+  for (const Landing& landing : disassembly.ran) {
+    sightings.push_back(ir::Sighting{.site = landing.site, .target = landing.target});
+  }
   for (const ReachedTarget& seen : disassembly.reached) {
     sightings.push_back(ir::Sighting{.site = seen.site, .target = seen.target});
   }
