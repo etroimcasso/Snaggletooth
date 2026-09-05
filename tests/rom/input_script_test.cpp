@@ -51,7 +51,7 @@ const ReachedTarget* reachedFrom(const std::vector<ReachedTarget>& seen, Address
 std::vector<ReachedTarget> run(std::span<const std::uint8_t> rom, std::uint64_t cycles,
                                const InputScript& input) {
   std::vector<std::string> notes;
-  const std::vector<ReachedTarget> seen = observeRun(rom, cycles, input, notes);
+  const std::vector<ReachedTarget> seen = observeRun(rom, cycles, input, notes).reached;
   EXPECT_TRUE(notes.empty()) << notes.front();
   return seen;
 }

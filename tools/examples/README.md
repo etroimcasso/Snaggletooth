@@ -1,6 +1,6 @@
 # Example cartridges
 
-Sixteen cartridges, each built by hand to do one thing, each in its own
+Seventeen cartridges, each built by hand to do one thing, each in its own
 directory with the source that builds it and a README saying what it does and
 who reads it. They are the cartridges the tests run the tools on, and the
 cartridges every page's example output comes from — a page shows what a tool
@@ -39,6 +39,7 @@ snes_differential mixed examples/mixed.smc -o mixed/differential --seconds 0.1
 | [`irq/`](irq/README.md) | A timer request held under the interrupt-disable flag, a wait it ends, then taken |
 | [`frame_press/`](frame_press/README.md) | A Start press that counts only on the one frame the tenth interrupt reads |
 | [`proving/`](proving/README.md) | Every register proved the way real code proves it, and three jump tables, two of them bounded |
+| [`moving/`](moving/README.md) | Bytes moved every way the transfer engines can, and a sprite table sent every frame |
 
 Each directory's header builds its image as a function in
 `snaggletooth::examples`; `common.h` holds what they share — a LoROM image with

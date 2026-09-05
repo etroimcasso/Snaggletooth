@@ -23,12 +23,14 @@ of the image it was read from.
 > cartridges' trees, across all three maps, rebuild their images byte for byte.
 > The cartridge is run on the machine and the destinations its indirect jumps
 > took become entries, so a cartridge whose dispatch goes through pointers is
-> traced past them; and the lifted program is read for what every path proves,
-> so a jump through a table whose index the bytes bound is traced past without
-> running. The manifest says what the code reaches: every register access,
-> every transfer, every routine with what it calls and what it drives, and the
-> direct register, data bank and stack pointer at every label where the paths
-> settle them — and the bank files say it beside the code, written from the
+> traced past them, and every range of bytes the transfer engines moved is
+> recorded with where it came from, where it went and which instruction sent
+> it; and the lifted program is read for what every path proves, so a jump
+> through a table whose index the bytes bound is traced past without running.
+> The manifest says what the code reaches: every register access, every
+> transfer, every routine with what it calls and what it drives, and the direct
+> register, data bank and stack pointer at every label where the paths settle
+> them — and the bank files say it beside the code, written from the
 > intermediate representation: registers as operands, labels across files, a
 > header per routine.
 > The coprocessors have no backend, so a cartridge carrying one is traced as far
@@ -44,6 +46,7 @@ of the image it was read from.
 - [The sound program](#the-sound-program)
 - [Stops, and getting past them](#stops-and-getting-past-them)
 - [Running the cartridge](#running-the-cartridge)
+- [What a run moved](#what-a-run-moved)
 - [What is placed](#what-is-placed)
 - [Verifying the tree](#verifying-the-tree)
 - [What the code reaches](#what-the-code-reaches)
@@ -392,6 +395,67 @@ disassembly to the next and merges a new run's with them, so an unattended run
 and a played one over the same directory accumulate — and an `entry` a person
 adds still names what no run has taken.
 
+## What a run moved
+
+The same run watches the two transfer engines. A `dma` line (see
+[What the code reaches](#what-the-code-reaches)) says what a channel was set up
+for, and only where the bytes say the values: a routine that uploads a level's
+tiles takes its source from a pointer, so its `dma` line reads `source none`
+and always will. The run knows. Every byte a general-purpose transfer or an
+HDMA channel moves crosses the bus in the engine's name, and the run records
+each range of them as a [`moved` line](project-manifest.md#211-what-a-run-moved):
+the instruction that started it, the channel, which way the bytes went, the
+register they reached with its class, the memory address they began at and how
+it stepped, how many there were, whether they were a transfer, an HDMA table as
+a frame walked it or the block an indirect entry pointed at, and how many times
+the run saw that exact range.
+
+A cartridge that fills a channel from a pointer, run for one second:
+
+```
+$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
+1 files, 143 instructions, 3 entries, 0 stops
+```
+
+```
+dma      $00:8132 channel 7 to-register $00:2104 OAMDATA Oam source none start none
+
+moved    $00:8326 channel 7 to-register $00:2104 OAMDATA Oam memory $7E:0200 increment bytes 544 as dma times 60
+```
+
+The `dma` line stands where the channel's `BBAD` was written, and its source is
+`none` because the address registers are filled elsewhere — here in the
+vertical-blank handler, which writes them and starts the channel every frame.
+The `moved` line stands at the handler's write to `MDMAEN`, names the 544 bytes
+from `$7E:0200`, and says the run saw them go sixty times. A range in work RAM
+is a table the program builds; a range in the image is bytes the cartridge
+ships, which is what an asset is.
+
+What is recorded is what the engine did. A `fixed` step is a fill from one byte
+and says so, since sixty-four bytes from one address are not a range of the
+image. An HDMA table is recorded once per frame that walked it, from its start
+to where the walk stopped — so a table the run's end cut part-way is its own
+range with the bytes it had read — and each block an indirect entry points at
+is a range of its own, named by the register the channel reaches. Two channels
+started by one write are two lines at one site; a write of zero starts nothing.
+The register is the one the channel's `BBAD` names; a pattern that reaches a
+second register is implied by the byte count.
+
+A `moved` line's site is an instruction the run executed, at the address the
+CPU executed it — a cartridge that runs its code from the fast mirror banks
+names them, and the same bytes are in the file named after their home bank.
+Where the site lies in a `DB` run of that file, the run reached code the trace
+did not — a routine behind a jump the run took and the bytes do not name — and
+an `entry` for the routine is how the trace catches up. A range whose memory address is in
+work RAM was built by the program: a table the cartridge decompresses or draws
+before sending it, which the image holds in another form, or not at all.
+
+The manifest keeps every `moved` line from one disassembly to the next: a range
+this run saw again carries this run's count, one it did not see is kept as it
+was, and a run skipped with `--no-run` keeps them all. So a tree carries where
+the hardware's bytes came from whether or not the disassembly that wrote it ran
+the cartridge.
+
 ## What is placed
 
 The tree is complete when every image byte is in exactly one file at its offset.
@@ -600,14 +664,22 @@ image the tree describes and counts what is unplaced or placed twice.
 
 `reached` carries [what the run reached](#running-the-cartridge): one
 `ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site`
-that took it, whether it was a `call`, and the `name` the tree gives it.
-`rom/rom_observe.h` is the run itself: `observeRun(rom, masterCycles, input, notes)`
-boots the machine, replays `input` — an [`InputScript`](input-script.md#6-library),
-empty for the boot alone — into the controller ports, and returns the sightings
-in site order; `sameSighting` says whether two are one. `CartridgeRequest::observeRun`
+that took it, whether it was a `call`, and the `name` the tree gives it. `moved`
+carries [what the run moved](#what-a-run-moved): one `MovedRange` per range —
+`site`, `channel`, `toRegister`, `registerAddress` with `registerName` and
+`registerClass` where the address has one, `memory`, `step` (a `MovedStep`),
+`bytes`, `kind` (a `MovedKind`) and `times`; `movedStepName` and `movedKindName`
+are their names as text, `sameRange` says whether two are one range, and
+`rangeBefore` is the order they are written in. `rom/rom_observe.h` is the run
+itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
+`input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone
+— into the controller ports, and returns a `RunObservation` holding both the
+`reached` sightings in site order and the `moved` ranges. `CartridgeRequest::observeRun`
 asks for the run — off unless asked, since it costs about as long as it emulates;
 `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
-`CartridgeRequest::input` is the script it replays.
+`CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`
+and `CartridgeRequest::moved` are what earlier runs found, read back from the
+manifest, which the disassembly merges with this run's.
 
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
@@ -631,9 +703,10 @@ holds and their `bytes`, the routines it `calls`, and its role as `reaches` and
 accesses and the transfers.
 
 The files are text from `renderRegion`, `renderSoundProgram` and
-`renderManifest`; `parseManifest` reads a manifest's entries, file split, map,
-sound program and image identity back, and `manifestMismatch` says whether that
-manifest can direct a run over a given image. `writeProject` writes all of it
+`renderManifest`; `parseManifest` reads a manifest's entries, reached and
+derived targets, moved ranges, file split, map, sound program and image identity
+back, and `manifestMismatch` says whether that manifest can direct a run over a
+given image. `writeProject` writes all of it
 under a directory. `renderRegion` lifts the region's listing into the
 [intermediate representation](ir.md) and writes each instruction from it
 (`ir/ir_render.h`), with the labels, the register names from `accesses` and the
@@ -674,7 +747,10 @@ The run answers the stops it took and no others: a jump the run never reached
 keeps its `stop` alone, and a person's `entry` is still the way past it. A run
 without a script reaches what a cartridge does on its own; with one it reaches
 what the script plays, and no script plays everything — coverage is what a person
-exercises, run by run, and the manifest accumulates it.
+exercises, run by run, and the manifest accumulates it. The same holds for what
+a run moved: a transfer the run never started has its `dma` line and no `moved`
+line, and a byte the CPU carries to a register itself, a store at a time, is
+not a transfer and is not recorded here.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or

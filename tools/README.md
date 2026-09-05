@@ -69,10 +69,12 @@ SPC700 backend, and the result written as a source tree with a manifest — and
 it runs the reverse, assembling every file of a tree through the two dialects
 and comparing the result with the image. It runs the cartridge on the machine
 to find the destinations of the jumps the bytes do not name, and traces from
-them. It also reports what the traced code
-reaches: the hardware register behind every instruction that touches one, the
-DMA transfers those add up to, and the routines the instructions belong to, each
-with the routines it calls and the hardware it drives itself and through them.
+them, and to record every range of bytes the transfer engines moved — where
+from, where to, how many, and from which instruction. It also reports what the
+traced code reaches: the hardware register behind every instruction that
+touches one, the DMA transfers those add up to, and the routines the
+instructions belong to, each with the routines it calls and the hardware it
+drives itself and through them.
 `ir/` lifts the 65816 listings a cartridge disassembly produces into a form
 with no bytes in it — one node per instruction, carrying what source says and
 the typed effects the chip performs — runs that form through an interpreter

@@ -3,7 +3,7 @@
 `project.manifest` is the file at the root of a source tree the
 [cartridge disassembler](snes-disassembler.md) writes. It says which image the
 tree is of, which files make it up and which bytes of the image each produces,
-where the trace began and where it stopped. Four of its line kinds are read back
+where the trace began and where it stopped. Five of its line kinds are read back
 on the next run — which is how a person directs the trace, and how a run's
 findings outlive it.
 
@@ -14,10 +14,12 @@ findings outlive it.
 > the traced code reaches: a line per hardware register access, a line per DMA
 > transfer a channel was set up for, and a line per routine with what it calls
 > and what it drives. Run on the machine, it records the destinations the
-> indirect jumps took, and traces from them. Read for what every path proves,
-> it records the direct register, the data bank and the stack pointer at every
-> label where something is proven, and the destinations of every jump through
-> a table the bytes bound, and traces from those too.
+> indirect jumps took, and traces from them, and every range of bytes the
+> transfer engines moved — where from, where to, how many, and from which
+> instruction. Read for what every path proves, it records the direct
+> register, the data bank and the stack pointer at every label where something
+> is proven, and the destinations of every jump through a table the bytes
+> bound, and traces from those too.
 
 ---
 
@@ -35,6 +37,7 @@ findings outlive it.
   - [2.8 Routines](#28-routines)
   - [2.9 What every path proves](#29-what-every-path-proves)
   - [2.10 What the bytes derive](#210-what-the-bytes-derive)
+  - [2.11 What a run moved](#211-what-a-run-moved)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -402,6 +405,85 @@ Eight slots, eight pointers, eight destinations, each traced from; the jump at
 `$00:8033` has no `stop` line. The cartridge's third table, indexed by a value
 nothing bounds, derives nothing and keeps its `stop`.
 
+### 2.11 What a run moved
+
+```
+moved    <address> channel <n> to-register | from-register <register address> <register> <class>
+                   memory <address> increment | decrement | fixed bytes <n>
+                   as dma | table | indirect times <n>
+```
+
+One contiguous range of bytes one channel moved under one trigger, as the
+transfer engine performed it while the cartridge ran on the machine. The first
+address is the instruction that started it: the write to `MDMAEN` for a
+general-purpose transfer, the write to `HDMAEN` that enabled the channel for a
+table and the blocks it points at. Then the channel; which way the bytes went —
+`to-register` from memory to the B bus, `from-register` back into memory; the
+B-bus register the channel's `BBAD` named, with its name and
+[class](65816-disassembler.md#hardware-registers), or `none none` where no
+register has that address; after `memory`, the A-bus address the range began
+at, and how the address stepped from one byte to the next — `increment`,
+`decrement`, or `fixed`, a fill from one byte, which is not a range of anything;
+after `bytes`, how many; after `as`, what the range was to the engine — `dma`, a
+general-purpose transfer; `table`, an HDMA channel's table as one frame walked
+it, its line counts, a direct table's inline values and an indirect table's
+pointers, from the table's start to where the walk stopped; `indirect`, the
+block one indirect entry pointed at — and after `times`, how many sightings of
+exactly this range the run made.
+
+A pattern that reaches a second register is implied by the count: a pair of
+registers takes two bytes a unit, and the line names the first. A range is
+recorded wherever its memory address lies — in the image, in work RAM, anywhere
+the engine addressed — since the engine moved it and nothing here needs to read
+it. Both addresses are the machine's: the site is where the CPU executed, and
+the memory address is what the engine drove, so code and data reached through
+a mirror bank are named by the mirror, while the tree's files are named by the
+bank the same bytes are placed at (see [SNES cartridge](snes-cartridge.md)). A range closes at a new trigger for its channel, at the start of a frame for
+the HDMA engine's, at a break in the step, and at the end of the run, so a walk
+the run's end cut short is a range of its own with the bytes it had read.
+
+A cartridge that moves bytes every way the engines can, run for one second of
+its clock:
+
+```
+moved    $00:8025 channel 0 to-register $00:2118 VMDATAL Vram memory $00:9000 increment bytes 32 as dma times 1
+moved    $00:8043 channel 0 to-register $00:2118 VMDATAL Vram memory $00:9100 fixed bytes 64 as dma times 1
+moved    $00:806B channel 1 from-register $00:2139 VMDATALREAD Vram memory $7E:0300 increment bytes 16 as dma times 1
+moved    $00:80B6 channel 2 to-register $00:2122 CGDATA Cgram memory $00:920F decrement bytes 16 as dma times 1
+moved    $00:80B6 channel 3 to-register $00:2150 none none memory $00:9400 increment bytes 8 as dma times 1
+moved    $00:80F7 channel 4 to-register $00:2100 INIDISP Display memory $00:9500 increment bytes 5 as table times 60
+moved    $00:80F7 channel 5 to-register $00:2121 CGADD Cgram memory $00:9510 increment bytes 7 as table times 60
+moved    $00:80F7 channel 5 to-register $00:2121 CGADD Cgram memory $00:9520 increment bytes 2 as indirect times 60
+moved    $00:80F7 channel 5 to-register $00:2121 CGADD Cgram memory $00:9522 increment bytes 2 as indirect times 60
+moved    $00:8128 channel 6 to-register $00:2100 INIDISP Display memory $7E:0400 increment bytes 129 as table times 59
+moved    $00:8128 channel 6 to-register $00:2100 INIDISP Display memory $7E:0400 increment bytes 27 as table times 1
+moved    $00:8183 channel 0 to-register $00:2118 VMDATAL Vram memory $00:9620 increment bytes 16 as dma times 1
+moved    $00:8190 channel 0 to-register $00:2118 VMDATAL Vram memory $00:9600 increment bytes 16 as dma times 1
+moved    $00:8190 channel 0 to-register $00:2118 VMDATAL Vram memory $00:9610 increment bytes 16 as dma times 1
+moved    $00:8326 channel 7 to-register $00:2104 OAMDATA Oam memory $7E:0200 increment bytes 544 as dma times 60
+```
+
+Channel 0 carries a tileset from the image and then fills sixty-four bytes of
+VRAM from the one byte at `$00:9100`; channel 1 reads sixteen bytes of VRAM back
+into work RAM; channels 2 and 3 were started by one write at `$00:80B6`, and
+the register at `$2150` has no name. Channel 5's indirect table at `$00:9510` is
+one range and the two blocks its entries point at are two more, each named by
+the register the channel reaches; the blocks are adjacent in memory, and stay
+two because each frame's walk is its own. Channel 6's table lies in work RAM and
+takes 127 lines to walk: fifty-nine frames walked it whole, and the frame the
+run ended in had read twenty-seven bytes of it. Channel 0 then carries
+forty-eight bytes in three chunks of sixteen: the write at `$00:8190` started
+the first two, one after the other from where the last ended, and they are two
+ranges because a new start is a new range; the third was started by a store to
+`MDMAEN` through bank `$80`, which is the same register. Channel 7 sends the
+sprite table from the vertical-blank handler, once a frame, and the line says so
+once.
+
+The `dma` line says what the code set up and only where the bytes say the
+values; the `moved` line says what the run saw move. The two stand beside each
+other: a channel filled from a pointer has a `dma` line whose source is `none`
+and a `moved` line for every range the run saw it carry.
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -416,6 +498,10 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - every `derived` line, and traces from each as it traces from a `reached`
   line — and derives them again from the bytes, so the set is kept and grows
   with the tree;
+- every `moved` line, and keeps it — a range this run saw again carries this
+  run's count, one it did not see is kept as it was — so what a run saw move
+  outlives it, and a tree disassembled without a run still says where the
+  hardware's bytes came from;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not

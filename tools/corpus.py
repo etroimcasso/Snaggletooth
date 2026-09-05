@@ -19,11 +19,13 @@ seconds; the run takes about as long as it emulates), `--seconds` sets both the
 run's and the replay's length (sixty by default).
 
 `--facts` and `--routines` add the corpus-wide aggregates the manifests carry:
-every hardware access by class and by register, every transfer by destination,
+every hardware access by class and by register, every transfer the code set up
+by destination, every range a run saw move by destination class and by kind,
 and every routine with what it calls and reaches.
 
-Every image's line counts its manifest's `stop`, `reached`, `derived` and `state`
-lines, so a corpus run says how far the trace, the run and the analysis reached.
+Every image's line counts its manifest's `stop`, `reached`, `derived`, `moved`
+and `state` lines, so a corpus run says how far the trace, the run and the
+analysis reached.
 
 An image is OK only when every command exits 0 and the rebuilt image matches;
 the script exits 0 only when every image is OK. A failure's whole output is
@@ -58,8 +60,9 @@ def manifestLines(tree, kind, length):
 
 
 def facts(tree):
-    """The `access` and `dma` lines: counts by class and register, how many
-    accesses carried a value, and the transfers by destination class."""
+    """The `access`, `dma` and `moved` lines: counts by class and register, how
+    many accesses carried a value, the transfers the code set up by destination
+    class, and the ranges a run saw move — each as (class, kind, from the image)."""
     classes = collections.Counter()
     registers = collections.Counter()
     valued = 0
@@ -71,7 +74,24 @@ def facts(tree):
             valued += 1
     # dma <site> channel <n> <direction> <dest> <name> <class> source <src> start <mask>
     dmas = [(w[7], w[9] != "none", w[11] != "none") for w in manifestLines(tree, "dma", 12)]
-    return classes, registers, valued, len(accesses), dmas
+    # moved <site> channel <n> <direction> <register> <name> <class> memory <address>
+    #       <step> bytes <n> as <kind> times <n>
+    moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
+    return classes, registers, valued, len(accesses), dmas, moved
+
+
+def fromImage(address):
+    """Whether a $BB:XXXX address lies in the image rather than in RAM: work
+    RAM is banks $7E-$7F and the first 8 KB of the system banks; save RAM and
+    the registers are not the image either, but a transfer from them is rare
+    enough to count with the image here."""
+    bank = int(address[1:3], 16)
+    offset = int(address[4:8], 16)
+    if bank in (0x7E, 0x7F):
+        return False
+    if (bank <= 0x3F or 0x80 <= bank <= 0xBF) and offset < 0x2000:
+        return False
+    return True
 
 
 def routines(tree):
@@ -96,7 +116,7 @@ def main():
     parser.add_argument("--input-dir", type=pathlib.Path, help="recorded runs, one <name>.txt per image")
     parser.add_argument("--no-lift", action="store_true", help="skip writing the tree's program as <name>.snagir")
     parser.add_argument("--no-differential", action="store_true", help="skip the replay beside the interpreter")
-    parser.add_argument("--facts", action="store_true", help="aggregate the hardware accesses and transfers")
+    parser.add_argument("--facts", action="store_true", help="aggregate the hardware accesses, the transfers set up and the ranges moved")
     parser.add_argument("--routines", action="store_true", help="aggregate the routines")
     args = parser.parse_args()
 
@@ -108,6 +128,8 @@ def main():
     corpusClasses = collections.Counter()
     corpusRegisters = collections.Counter()
     corpusDma = collections.Counter()
+    corpusMoved = collections.Counter()
+    corpusMovedKind = collections.Counter()
     corpusReaches = collections.Counter()
     corpusThrough = collections.Counter()
     factTotals = collections.Counter()
@@ -162,11 +184,11 @@ def main():
             kinds = collections.Counter(line.split()[0] for line in manifest.read_text(errors="replace").splitlines()
                                         if line.strip() and not line.startswith(";"))
             summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['derived']} derived, "
-                        f"{kinds['state']} state lines")
+                        f"{kinds['moved']} moved, {kinds['state']} state lines")
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:
-            classes, registers, valued, accesses, dmas = facts(tree)
+            classes, registers, valued, accesses, dmas, movedLines = facts(tree)
             corpusClasses.update(classes)
             corpusRegisters.update(registers)
             factTotals["accesses"] += accesses
@@ -176,8 +198,17 @@ def main():
                 corpusDma[destination] += 1
                 factTotals["sourced"] += 1 if sourced else 0
                 factTotals["started"] += 1 if startedFlag else 0
+            factTotals["moved"] += len(movedLines)
+            imageRanges = 0
+            for destination, kind, image in movedLines:
+                corpusMoved[destination] += 1
+                corpusMovedKind[kind] += 1
+                if image:
+                    imageRanges += 1
+            factTotals["movedFromImage"] += imageRanges
             top = ", ".join(f"{k} {v}" for k, v in classes.most_common(5))
-            summary += f"; {accesses} accesses ({valued} with a value), {len(dmas)} transfers; {top}"
+            summary += (f"; {accesses} accesses ({valued} with a value), {len(dmas)} transfers, "
+                        f"{len(movedLines)} moved ({imageRanges} from the image); {top}")
         if args.routines:
             found = routines(tree)
             leaf = sum(1 for r in found if not r[3])
@@ -206,12 +237,19 @@ def main():
     if args.facts:
         print(f"{factTotals['accesses']} accesses, {factTotals['valued']} with a value; "
               f"{factTotals['dmas']} transfers, {factTotals['sourced']} with a source, "
-              f"{factTotals['started']} with a start")
+              f"{factTotals['started']} with a start; "
+              f"{factTotals['moved']} ranges moved, {factTotals['movedFromImage']} from the image")
         print("\naccesses by class, whole corpus:")
         for k, v in corpusClasses.most_common():
             print(f"  {k:<12} {v}")
         print("\ntransfers by destination class, whole corpus:")
         for k, v in corpusDma.most_common():
+            print(f"  {k:<12} {v}")
+        print("\nranges moved by destination class, whole corpus:")
+        for k, v in corpusMoved.most_common():
+            print(f"  {k:<12} {v}")
+        print("\nranges moved by kind, whole corpus:")
+        for k, v in corpusMovedKind.most_common():
             print(f"  {k:<12} {v}")
         print("\nthe thirty most-reached registers, whole corpus:")
         for k, v in corpusRegisters.most_common(30):
