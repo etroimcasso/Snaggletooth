@@ -25,6 +25,7 @@ using examples::kUploadedProgram;
 using examples::kUploadedTable;
 using examples::liftingImage;
 using examples::loRomImage;
+using examples::ramCodeImage;
 using examples::wrappingImage;
 using examples::put;
 using examples::threeBankImage;
@@ -532,6 +533,137 @@ TEST(RomDisasm, TheManifestNamesTheImageItWasWrittenFor) {
   changed[0x7FDEu] = 0xCCu;  // the checksum's low byte
   EXPECT_NE(manifestMismatch(*input, changed).find("checksum $EDCB"), std::string::npos);
   EXPECT_NE(manifestMismatch(*input, changed).find("$EDCC"), std::string::npos);
+}
+
+// ---- what a run landed on, and what it saw ---------------------------------------
+
+namespace {
+
+constexpr std::uint64_t kRunFrame = 357'954u;  // one NTSC frame of the master clock, roughly
+
+CartridgeDisassembly disassembleRamCode(bool run, std::vector<TraceEntry> entries = {}) {
+  static const std::vector<std::uint8_t> rom = ramCodeImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = run;
+  request.runMasterCycles = kRunFrame;
+  request.entries = std::move(entries);
+  return disassembleCartridge(request);
+}
+
+}  // namespace
+
+TEST(RomLanding, TheManifestCarriesTheLandingsAndTheValuesSeenAndReadsTheLandingsBack) {
+  const CartridgeDisassembly d = disassembleRamCode(true);
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("ran      $00:803A loc_00803A e=1 m=8 x=8 from $00:8039\n"), std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("ran      $00:804D loc_00804D e=0 m=16 x=16 from $00:804C\n"), std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("ran      $00:802C loc_00802C e=1 m=8 x=8 from $7E:2001\n"), std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("seen     $00:802C D=$4300|$4310 DBR=$00\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("seen     $00:803F D=$4320 DBR=$00\n"), std::string::npos) << manifest;
+
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(manifest, error);
+  ASSERT_TRUE(input.has_value()) << error;
+  ASSERT_EQ(input->ran.size(), 3u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_TRUE(sameLanding(input->ran[i], d.ran[i])) << i;
+    EXPECT_EQ(input->ran[i].name, d.ran[i].name);
+  }
+  EXPECT_TRUE(parseManifest("seen $00:802C D=$4300|$4310 DBR=$00\n", error).has_value())
+      << "a seen line is read past, never read back";
+  EXPECT_FALSE(parseManifest("ran $00:802C loc_00802C e=1 m=8 x=8 at $7E:2001\n", error).has_value());
+  EXPECT_NE(error.find("`from`"), std::string::npos);
+  EXPECT_FALSE(parseManifest("ran $00:802C loc_00802C e=1 m=8 from $7E:2001\n", error).has_value());
+  EXPECT_FALSE(parseManifest("ran $802C loc_00802C e=1 m=8 x=8 from $7E:2001\n", error).has_value());
+}
+
+TEST(RomLanding, TheTraceStartsFromWhereTheRunLanded) {
+  const CartridgeDisassembly without = disassembleRamCode(false);
+  const Listing& before = regionNamed(without, "bank_00.asm").listing;
+  EXPECT_EQ(codeLineAt(before, 0x00802Cu), nullptr) << "after an RTL the bytes name no path";
+  EXPECT_EQ(codeLineAt(before, 0x00803Au), nullptr);
+  EXPECT_EQ(codeLineAt(before, 0x00804Du), nullptr);
+
+  const CartridgeDisassembly with = disassembleRamCode(true);
+  const Listing& after = regionNamed(with, "bank_00.asm").listing;
+  ASSERT_NE(codeLineAt(after, 0x00802Cu), nullptr);
+  ASSERT_NE(codeLineAt(after, 0x00803Au), nullptr);
+  ASSERT_NE(codeLineAt(after, 0x00804Du), nullptr);
+  EXPECT_EQ(after.labels.at(0x00802Cu), "loc_00802C");
+  EXPECT_EQ(after.labels.at(0x00803Au), "loc_00803A");
+  EXPECT_EQ(after.labels.at(0x00804Du), "loc_00804D");
+  EXPECT_EQ(codeLineAt(after, 0x00804Du)->instruction.text, "STP");
+}
+
+TEST(RomLanding, AnEarlierRunsLandingsAreTracedFromWithoutRunning) {
+  const CartridgeDisassembly ran = disassembleRamCode(true);
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(ran), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  static const std::vector<std::uint8_t> rom = ramCodeImage();
+  CartridgeRequest again;
+  again.rom = rom;
+  again.captureSound = false;
+  again.observeRun = false;
+  again.ran = input->ran;
+  const CartridgeDisassembly replayed = disassembleCartridge(again);
+  ASSERT_EQ(replayed.ran.size(), 3u);
+  EXPECT_NE(codeLineAt(regionNamed(replayed, "bank_00.asm").listing, 0x00802Cu), nullptr);
+  EXPECT_TRUE(replayed.seen.empty());
+  // The same landings, once: the run's again and the manifest's are one set.
+  CartridgeRequest merged = again;
+  merged.observeRun = true;
+  merged.runMasterCycles = kRunFrame;
+  EXPECT_EQ(disassembleCartridge(merged).ran.size(), 3u);
+}
+
+TEST(RomLanding, APersonsEntryNamesTheLanding) {
+  const CartridgeDisassembly d = disassembleRamCode(
+      true, {TraceEntry{.address = 0x00802Cu, .mode = Cpu65816Mode::reset(), .name = "after_the_routine"}});
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("ran      $00:802C after_the_routine e=1 m=8 x=8 from $7E:2001\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_EQ(manifest.find("loc_00802C"), std::string::npos);
+}
+
+namespace {
+
+// The rendered line whose instruction text begins with `head`.
+std::string lineOf(const std::string& file, const std::string& head) {
+  const std::size_t at = file.find("        " + head);
+  if (at == std::string::npos) return {};
+  return file.substr(at, file.find('\n', at) - at);
+}
+
+}  // namespace
+
+TEST(RomLanding, ADirectPageOperandUnderTheOneDirectRegisterTheRunSawNamesItsRegister) {
+  const CartridgeDisassembly with = disassembleRamCode(true);
+  const std::string file = renderRegion(regionNamed(with, "bank_00.asm"), with);
+  const std::string one = lineOf(file, "STA $01 ");
+  EXPECT_NE(one.find("BBAD2 (run)"), std::string::npos) << one;
+  // Two direct registers seen: the run names nothing, since either could be it.
+  const std::string two = lineOf(file, "STA $00 ");
+  EXPECT_FALSE(two.empty()) << file;
+  EXPECT_EQ(two.find("(run)"), std::string::npos) << two;
+  EXPECT_EQ(two.find("DMAP"), std::string::npos) << two;
+  // An indexed form: the run does not know X here, and names nothing.
+  const std::string indexed = lineOf(file, "STA $03,X");
+  EXPECT_FALSE(indexed.empty()) << file;
+  EXPECT_EQ(indexed.find("(run)"), std::string::npos) << indexed;
+  // The paths prove the direct register at $801D: the proven name, and not the run's.
+  const std::string proven = lineOf(file, "STA $04 ");
+  EXPECT_NE(proven.find("A1B0"), std::string::npos) << proven;
+  EXPECT_EQ(proven.find("(run)"), std::string::npos) << proven;
+
+  const CartridgeDisassembly without = disassembleRamCode(false);
+  EXPECT_EQ(renderRegion(regionNamed(without, "bank_00.asm"), without).find("(run)"), std::string::npos);
 }
 
 TEST(RomDisasm, AManifestLineThatDoesNotParseNamesItsLine) {

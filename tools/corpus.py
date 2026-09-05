@@ -24,9 +24,9 @@ by destination, every range a run saw move by destination class and by kind,
 every file lifted by its directory with the bytes it holds, and every routine
 with what it calls and reaches.
 
-Every image's line counts its manifest's `stop`, `reached`, `derived`, `moved`,
-`asset` and `state` lines, so a corpus run says how far the trace, the run, the
-analysis and the lift reached.
+Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
+`moved`, `asset`, `state` and `seen` lines, so a corpus run says how far the
+trace, the run, the analysis and the lift reached.
 
 An image is OK only when every command exits 0 and the rebuilt image matches;
 the script exits 0 only when every image is OK. A failure's whole output is
@@ -188,8 +188,9 @@ def main():
         if manifest.exists():
             kinds = collections.Counter(line.split()[0] for line in manifest.read_text(errors="replace").splitlines()
                                         if line.strip() and not line.startswith(";"))
-            summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['derived']} derived, "
-                        f"{kinds['moved']} moved, {kinds['asset']} assets, {kinds['state']} state lines")
+            summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['ran']} ran, "
+                        f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['asset']} assets, "
+                        f"{kinds['state']} state lines, {kinds['seen']} seen lines")
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:

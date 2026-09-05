@@ -47,7 +47,13 @@ It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
 and steps it, recording the destination of every indirect jump or call the run
 took, and the trace starts from each — see the
 [Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)
-section — and recording every range of bytes the two transfer engines moved,
+section — lifting every instruction the CPU executes from the bytes it fetched
+and holding it to the machine through the representation's lockstep, so that
+every place the CPU arrived without an instruction naming it is a `ran` line
+the trace starts from too, and the direct register and the data bank the run
+saw at every site are `seen` lines beside what the paths prove — see
+[Where a run landed, and what it saw](../../docs/snes-disassembler.md#where-a-run-landed-and-what-it-saw)
+— and recording every range of bytes the two transfer engines moved,
 with the instruction that started it, the channel, the register it reached, the
 memory address it began at, its length and how many times the run saw it, as
 `moved` lines the manifest keeps — see
@@ -156,8 +162,8 @@ and open bus. Both read the cartridge through the library's own header functions
 so a tool and the machine never disagree about a byte.
 
 The library target is `snaggletooth_rom`; `tools/` is on its public include path,
-and it links both chip backends and the representation the bank files are
-rendered from.
+and it links both chip backends, the representation the bank files are
+rendered from, and the lockstep the run holds its nodes to the machine with.
 
 ## See also
 

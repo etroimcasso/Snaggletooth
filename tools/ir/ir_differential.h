@@ -13,7 +13,7 @@
 // against the CPU cycles the observer counted. The interpreter cannot copy a
 // write through, because it never sees one; it has to compute every value from
 // the effects, and a run with no divergence says the effects carry the
-// instruction's whole meaning.
+// instruction's whole meaning. The check itself is `ir/ir_lockstep.h`'s.
 //
 // Three things are inputs rather than nodes: a hardware interrupt the machine
 // takes between two instructions, which the interpreter runs as the program's
@@ -21,19 +21,22 @@
 // and a step the CPU spent held off the bus while a transfer ran, which is
 // skipped. An instruction at an address the program has no node for is counted
 // and the interpreter realigned to the machine, since there is nothing to run.
+//
+// A node is looked up, and a site reported, at the address the tree places the
+// instruction: the one home of the image bytes the CPU fetched, so a program
+// that runs through a mirror of its bank is checked against the nodes placed in
+// the bank the image is written for. An address outside the image is its own.
 
 #include <cstddef>
 #include <cstdint>
 #include <map>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "ir/ir.h"
-#include "ir/ir_interpret.h"
+#include "ir/ir_lockstep.h"
 #include "rom/input_script.h"
-#include "snaggletooth/snes/snes.h"
 
 namespace snaggletooth::ir {
 
@@ -48,22 +51,6 @@ struct Replay {
   std::size_t divergenceLimit = 16;
 };
 
-// One place the interpreter and the machine disagreed. `expected` is the
-// machine's value, `actual` the interpreter's. `effect` names the effect whose
-// access diverged, as an index into the node's effects or the interrupt
-// sequence; a register or cycle divergence names none. `name` is the mnemonic,
-// or `NMI` / `IRQ` for a hardware sequence.
-struct Divergence {
-  std::uint64_t instruction = 0;  // the ordinal of the step in the run, from zero
-  Address site = 0;
-  std::string name;
-  Mode mode;
-  std::optional<std::size_t> effect;
-  std::string what;
-  std::uint32_t expected = 0;
-  std::uint32_t actual = 0;
-};
-
 // What a replay found.
 struct DifferentialReport {
   std::uint64_t instructions = 0;   // nodes run and checked
@@ -74,7 +61,7 @@ struct DifferentialReport {
   std::uint64_t cpuCycles = 0;      // CPU cycles checked
   std::uint64_t masterCycles = 0;   // master cycles run
   std::uint64_t unlifted = 0;       // instructions at an address with no node
-  std::vector<Address> unliftedSites;  // those addresses, each once, in address order
+  std::vector<Address> unliftedSites;  // those addresses as the tree places them, each once, in address order
   bool stopped = false;             // the CPU stopped, which ended the run
   std::vector<Divergence> divergences;
   // How many times each instruction form ran, keyed by mnemonic, addressing
@@ -89,8 +76,5 @@ struct DifferentialReport {
 // cartridge's nodes in address order, `Program::find` answering the node for
 // the live flags at every step.
 [[nodiscard]] DifferentialReport differential(const Program& program, const Replay& replay);
-
-// The interpreter's view of a core state.
-[[nodiscard]] Registers registersOf(const Cpu65816State& state) noexcept;
 
 }  // namespace snaggletooth::ir

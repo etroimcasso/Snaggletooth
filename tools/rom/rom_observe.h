@@ -24,10 +24,24 @@
 // were and which instruction started it — the transfers a cartridge sets up from
 // pointers, which the bytes alone never name a source for.
 //
+// The same run lifts every instruction the CPU executes from the bytes it
+// fetched — wherever they lay: the image through any mirror, work RAM, a byte
+// the program rewrote — and holds that node to the machine through the
+// differential's own check (`ir/ir_lockstep.h`), so every fact the run computes
+// from a node is a fact the machine agreed with. From those nodes the run sees
+// two more things. Every place the CPU arrived that the instruction before did
+// not name — a return to an address the code itself put on the stack, an `RTI`
+// into flow the bytes do not carry — is a landing, recorded with the mode the
+// CPU arrived in, and the trace starts from it exactly as it starts from a
+// reached target. And at every site in the image the run executed, the values
+// the direct register and the data bank held are recorded, which is what the
+// run saw against what every path proves.
+//
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
 // reaches what a player does, and the trace follows.
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -108,23 +122,68 @@ struct MovedRange {
 // the table, and a walk the run's end cut short follows the whole one.
 [[nodiscard]] bool rangeBefore(const MovedRange& a, const MovedRange& b);
 
+// One place the CPU arrived that the instruction before it did not name: a
+// return to an address the code itself put on the stack, an `RTI` into flow the
+// bytes do not carry — any successor the node does not name that the four
+// indirect forms do not cover. `target` is where it arrived and `site` the
+// instruction that took it, both as the tree places them; `mode` is the mode
+// the CPU arrived in. A landing outside the image is a note, not a landing. The
+// name is what a reached target's is: `loc_` and the address, unless a person's
+// entry names the same target under the same mode. Empty as the run reports it;
+// the disassembler fills it in.
+struct Landing {
+  Address target = 0;
+  Cpu65816Mode mode;
+  Address site = 0;
+  std::string name;
+};
+
+// Two landings are the same when the same site arrived at the same target under
+// the same mode.
+[[nodiscard]] bool sameLanding(const Landing& a, const Landing& b);
+
+// The values the run saw at one site in the image, before the instruction
+// there ran: every direct register and every data bank, each set in ascending
+// order. A site the run executed under one direct register has one value.
+struct SeenState {
+  Address address = 0;
+  std::vector<std::uint16_t> d;
+  std::vector<std::uint8_t> dbr;
+};
+
 // Everything one run recorded: the targets the indirect jumps took, in site
-// order, then target order, each site/target/mode once; and the ranges the
-// engines moved, in `rangeBefore` order, each distinct range once with its
-// count.
+// order, then target order, each site/target/mode once; the ranges the engines
+// moved, in `rangeBefore` order, each distinct range once with its count; the
+// landings, in site order, then target order, each site/target/mode once; the
+// values seen, in address order; and what the run beside the interpreter
+// checked. `divergences` counts the steps on which the node lifted from the
+// fetches disagreed with the machine — each site once in the notes, the
+// interpreter realigned after — and is zero on every cartridge the lift is
+// right for.
 struct RunObservation {
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
+  std::vector<Landing> ran;
+  std::vector<SeenState> seen;
+  std::uint64_t instructions = 0;  // steps the interpreter ran a node for and checked
+  std::uint64_t interrupts = 0;    // hardware sequences run and checked
+  std::size_t nodes = 0;           // distinct nodes lifted from fetches: an address, a mode, the bytes
+  std::uint64_t divergences = 0;
 };
 
 // Boots `rom` on the machine and steps it for `masterCycles` of the master clock,
-// recording every distinct target the four indirect forms took and every range
-// the transfer engines moved. A site whose pointer lies where the run cannot read
-// it — anything but the image and work RAM — is named once in `notes` and
-// produces nothing; so is a site whose pointer did not match where the CPU then
-// went, which the design does not expect and reports rather than hides. A range
-// is recorded wherever its memory address lies: the engine addressed it, and
-// nothing here needs to read it.
+// recording every distinct target the four indirect forms took, every range
+// the transfer engines moved, every landing the instructions did not name, and
+// the direct register and data bank at every site executed in the image — with
+// every executed instruction lifted from its fetches and checked against the
+// machine. A site whose pointer lies where the run cannot read it — anything
+// but the image and work RAM — is named once in `notes` and produces nothing;
+// so is a site whose pointer did not match where the CPU then went, which the
+// design does not expect and reports rather than hides. A range is recorded
+// wherever its memory address lies: the engine addressed it, and nothing here
+// needs to read it. A landing outside the image is named once in `notes` and
+// not recorded: the tree has nothing to trace there. A step on which the lifted
+// node disagreed with the machine is named once per site in `notes`.
 //
 // `input` is replayed into the controller ports as the run goes: at the start
 // of every frame, counted from power-on, each port is given what the script

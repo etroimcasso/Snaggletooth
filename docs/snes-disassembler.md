@@ -24,13 +24,17 @@ of the image it was read from.
 > cartridges' trees, across all three maps, rebuild their images byte for byte.
 > The cartridge is run on the machine and the destinations its indirect jumps
 > took become entries, so a cartridge whose dispatch goes through pointers is
-> traced past them, and every range of bytes the transfer engines moved is
-> recorded with where it came from, where it went and which instruction sent
-> it, and every such range that begins in the image is lifted out of its bank
-> into a file of its own under a directory named for the memory it went to, the
-> bank file including it where it was; and the lifted program is read for what
-> every path proves, so a jump through a table whose index the bytes bound is
-> traced past without running.
+> traced past them; every instruction the run executes is lifted from the bytes
+> the CPU fetched and checked against the machine, so where the CPU arrived
+> without an instruction naming it — a return to an address the code put on the
+> stack — becomes an entry too, and the direct register and the data bank the
+> run saw at every site are recorded beside what the paths prove; every range
+> of bytes the transfer engines moved is recorded with where it came from,
+> where it went and which instruction sent it, and every such range that begins
+> in the image is lifted out of its bank into a file of its own under a
+> directory named for the memory it went to, the bank file including it where
+> it was; and the lifted program is read for what every path proves, so a jump
+> through a table whose index the bytes bound is traced past without running.
 > The manifest says what the code reaches: every register access, every
 > transfer, every routine with what it calls and what it drives, and the direct
 > register, data bank and stack pointer at every label where the paths settle
@@ -50,6 +54,7 @@ of the image it was read from.
 - [The sound program](#the-sound-program)
 - [Stops, and getting past them](#stops-and-getting-past-them)
 - [Running the cartridge](#running-the-cartridge)
+- [Where a run landed, and what it saw](#where-a-run-landed-and-what-it-saw)
 - [What a run moved](#what-a-run-moved)
 - [The assets](#the-assets)
 - [What is placed](#what-is-placed)
@@ -97,7 +102,7 @@ cannot be read is refused with its line named, and `--input` under `--no-run` is
 refused as well, having nothing to replay into.
 
 When the directory already holds a `project.manifest`, its `entry`, `reached`,
-`derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
+`ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
 it was written for: a manifest written for another image is refused rather than
 applied. See [Stops, and getting past them](#stops-and-getting-past-them).
 
@@ -421,6 +426,83 @@ reach different code. The manifest keeps every `reached` line from one
 disassembly to the next and merges a new run's with them, so an unattended run
 and a played one over the same directory accumulate — and an `entry` a person
 adds still names what no run has taken.
+
+## Where a run landed, and what it saw
+
+The four forms are not the only way a program leaves the bytes' flow. A
+routine dispatches by pushing an address and returning to it; a program builds
+a return frame by hand and enters a routine with `RTL`; an `RTI` returns into
+flow the bytes never carried. None of those reads a pointer the run can read
+ahead, so the run reads the landing instead — and to know what a landing is,
+it has to know what every instruction names. It does: every instruction the
+CPU executes is lifted from the bytes the CPU fetched, wherever they lay,
+through the same lift the tree's program comes from, and run through the
+[interpreter](ir.md#running-beside-the-machine) held to the machine exactly as
+the differential holds it — every access, every register, every cycle — so a
+lift the machine disagrees with is a `note`, never a silent wrong fact. After
+each instruction the run compares where the CPU went with what the instruction
+names: the address after it, its constant target, the pointer the four forms
+read, the vector a `BRK` or `COP` takes, and for a return, an address the run's
+own calls and interrupts said to expect one at. Anything else is a
+[`ran` line](project-manifest.md#213-where-a-run-landed), and the trace starts
+from it as it starts from a `reached` line. A landing in work RAM is a `note`,
+since the tree has nothing to trace there.
+
+A cartridge that copies a routine into work RAM, builds two return frames by
+hand and enters it with `RTL`, lands past a `PEA`/`RTS` pair on both passes of
+a loop, and returns through `RTI` into a frame it built with both widths
+sixteen bits:
+
+```
+$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
+1 files, 41 instructions, 3 entries, 1 stops
+note: run: the CPU arrived at $7E:2000 from $00:802B, which the tree does not hold; not recorded
+```
+
+The stop is the `JSL` into work RAM, which the bytes name and the tree cannot
+hold; the note is the `RTL` that followed it there.
+
+```
+ran      $00:803A loc_00803A e=1 m=8 x=8 from $00:8039
+ran      $00:804D loc_00804D e=0 m=16 x=16 from $00:804C
+ran      $00:802C loc_00802C e=1 m=8 x=8 from $7E:2001
+```
+
+The `RTS` was taken on both passes of the loop and is written once; the `RTI`
+ran with both widths eight and arrived with both sixteen, and the line carries
+the mode the CPU arrived in. Without the run, everything after the `RTL` at
+`$00:802B` is data; with it, all three landings are labels with the code under
+them, and the routine's return from work RAM is one of them:
+
+```
+loc_00802C:
+        STA !$0102                      ; $00:802C  8D 02 01     4
+```
+
+The same lockstep sees the registers at every site. At each instruction the
+run executes in the image, the direct register and the data bank it held are
+recorded as a [`seen` line](project-manifest.md#214-what-a-run-saw), every
+value the run saw, beside the `state` line that says what
+[every path proves](#what-every-path-proves) — the run's answer where the
+paths say `?`, and a disagreement where the run saw a value the paths do not
+prove. A plain direct-page operand the paths prove nothing about, at a site the
+run saw one direct register, carries in its comment the register that value
+lands it on, marked `(run)`; a site the run saw two values at, an indexed form,
+and a site the paths already prove get no such name:
+
+```
+seen     $00:802C D=$4300|$4310 DBR=$00
+seen     $00:803F D=$4320 DBR=$00
+```
+
+```
+        STA $01                         ; $00:803F  85 01        3  BBAD2 (run)
+        STA $03,X                       ; $00:8041  95 03        4
+```
+
+The manifest keeps every `ran` line as it keeps `reached`, and writes the
+`seen` lines fresh on every run: they are what the run saw, and the next run
+sees it again.
 
 ## What a run moved
 
@@ -791,7 +873,12 @@ image the tree describes and counts what is unplaced or placed twice.
 
 `reached` carries [what the run reached](#running-the-cartridge): one
 `ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site`
-that took it, whether it was a `call`, and the `name` the tree gives it. `moved`
+that took it, whether it was a `call`, and the `name` the tree gives it. `ran`
+carries [where the run landed](#where-a-run-landed-and-what-it-saw): one
+`Landing` per place — `target`, `mode`, `site` and `name`, as a reached target's
+— and `seen` one `SeenState` per site the run executed in the image, its
+`address` and the values of `d` and `dbr` seen there; `sameLanding` says
+whether two landings are one. `moved`
 carries [what the run moved](#what-a-run-moved): one `MovedRange` per range —
 `site`, `channel`, `toRegister`, `registerAddress` with `registerName` and
 `registerClass` where the address has one, `memory`, `step` (a `MovedStep`),
@@ -800,13 +887,18 @@ are their names as text, `sameRange` says whether two are one range, and
 `rangeBefore` is the order they are written in. `rom/rom_observe.h` is the run
 itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
 `input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone
-— into the controller ports, and returns a `RunObservation` holding both the
-`reached` sightings in site order and the `moved` ranges. `CartridgeRequest::observeRun`
+— into the controller ports, and returns a `RunObservation` holding the
+`reached` sightings in site order, the `moved` ranges, the `ran` landings, the
+`seen` values, and what the run beside the interpreter checked — the
+`instructions` and `interrupts` it ran a node or a sequence for, the distinct
+`nodes` it lifted from the fetches, and the `divergences` on which a node
+disagreed with the machine, each site once in the notes. `CartridgeRequest::observeRun`
 asks for the run — off unless asked, since it costs about as long as it emulates;
 `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
-`CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`
-and `CartridgeRequest::moved` are what earlier runs found, read back from the
-manifest, which the disassembly merges with this run's.
+`CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`,
+`CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs
+found, read back from the manifest, which the disassembly merges with this
+run's.
 
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
@@ -831,8 +923,8 @@ accesses and the transfers.
 
 The files are text from `renderRegion`, `renderSoundProgram` and
 `renderManifest`; `parseManifest` reads a manifest's entries, reached and
-derived targets, moved ranges, assets, file split, map, sound program and image
-identity back, and `manifestMismatch` says whether that manifest can direct a
+derived targets, landings, moved ranges, assets, file split, map, sound program
+and image identity back, and `manifestMismatch` says whether that manifest can direct a
 run over a given image. `writeProject` writes all of it under a directory, the
 lifted files as bytes under theirs. `renderRegion` lifts the region's listing into the
 [intermediate representation](ir.md) and writes each instruction from it
@@ -877,7 +969,11 @@ what the script plays, and no script plays everything — coverage is what a per
 exercises, run by run, and the manifest accumulates it. The same holds for what
 a run moved: a transfer the run never started has its `dma` line and no `moved`
 line, and a byte the CPU carries to a register itself, a store at a time, is
-not a transfer and is not recorded here.
+not a transfer and is not recorded here. And for where a run landed: a return
+the run never took has no `ran` line, and code the program copied into work RAM
+and ran there is checked by the run and lifted from its fetches, but the tree
+has no file to place it in, so a landing there is a `note` and its bytes stay
+in the bank as the data they were copied from.
 
 The assets are the ranges the run saw leave the image. A range the program built
 in work RAM before sending it — which is most of what a real cartridge sends —

@@ -19,9 +19,10 @@
 // boot; --boot-seconds bounds it (fifteen seconds of the master clock by default).
 //
 // The cartridge is also run, stepped, so the destinations its indirect jumps take
-// become entries. --no-run skips it; --run-seconds bounds it (sixty by default);
-// --input replays a recorded run into the controller ports while it goes, so the
-// run reaches what a player would.
+// and the landings its instructions do not name become entries. --no-run skips
+// it; --run-seconds bounds it (sixty by default); --input replays a recorded run
+// into the controller ports while it goes, so the run reaches what a player
+// would.
 //
 // A copier header, the 512 bytes some dumps carry ahead of the image, is dropped
 // when the file length says one is present.
@@ -169,6 +170,7 @@ int main(int argc, char** argv) {
     request.entries = input->entries;
     request.regions = input->regions;
     request.reached = input->reached;
+    request.ran = input->ran;
     request.moved = input->moved;
     request.assets = input->assets;
     request.derived = input->derived;

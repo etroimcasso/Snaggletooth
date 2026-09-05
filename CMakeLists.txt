@@ -250,7 +250,7 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   )
   target_link_libraries(snaggletooth_rom PUBLIC
     snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
-    snaggletooth_ir)
+    snaggletooth_ir snaggletooth_ir_lockstep)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -262,6 +262,25 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The lockstep — the interpreter held to one step of the machine: the observer
+  # that collects a step, the bus that answers the interpreter with what the
+  # machine read and checks every access, and the register and cycle checks
+  # after. Its own target because it links the machine, which the representation
+  # does not, and because two things drive it: the differential below, and the
+  # cartridge tools' observed run, which lifts what the CPU executes from its own
+  # fetches and holds it to the same check.
+  add_library(snaggletooth_ir_lockstep STATIC
+    tools/ir/ir_lockstep.cpp
+  )
+  target_link_libraries(snaggletooth_ir_lockstep PUBLIC snaggletooth_ir snaggletooth::snaggletooth)
+  target_compile_features(snaggletooth_ir_lockstep PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_ir_lockstep PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_ir_lockstep PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_ir_lockstep PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The differential — a recorded run replayed on the machine beside the
   # interpreter. Its own target because it links the cartridge tools for the run
   # it replays, and the cartridge tools link the representation for the files
@@ -269,7 +288,7 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   add_library(snaggletooth_ir_differential STATIC
     tools/ir/ir_differential.cpp
   )
-  target_link_libraries(snaggletooth_ir_differential PUBLIC snaggletooth_ir snaggletooth_rom)
+  target_link_libraries(snaggletooth_ir_differential PUBLIC snaggletooth_ir_lockstep snaggletooth_rom)
   target_compile_features(snaggletooth_ir_differential PUBLIC cxx_std_20)
   set_target_properties(snaggletooth_ir_differential PROPERTIES CXX_EXTENSIONS OFF)
   if(MSVC)

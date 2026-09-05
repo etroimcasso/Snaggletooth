@@ -110,6 +110,7 @@ int main(int argc, char** argv) {
   request.entries = manifest->entries;
   request.regions = manifest->regions;
   request.reached = manifest->reached;
+  request.ran = manifest->ran;
   request.captureSound = false;
   request.observeRun = false;
   const snaggletooth::disasm::CartridgeDisassembly d =

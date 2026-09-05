@@ -492,7 +492,12 @@ report.divergences.empty();                  // the verdict
 
 `program` is the cartridge's nodes in address order, every region's lifted
 program joined and sorted, so `Program::find` answers the node at the live
-program counter for the live flags at every step.
+program counter for the live flags at every step. The lookup is made at the
+address the tree places the instruction — the one home of the image bytes the
+CPU fetched, under the cartridge's map — so a program that runs through a
+mirror of its bank, `$80:8010` for bytes the tree writes at `$00:8010`, is
+checked against those nodes, and every site the report names is the address a
+reader finds in the tree. An address outside the image is its own.
 
 ### What is checked
 
@@ -524,9 +529,19 @@ is counted as held. A transfer's own accesses, and the work-RAM port's, are
 never held against the interpreter: they are the engines', not the program's.
 
 An instruction at an address the program has no node for — code the trace never
-reached, code copied into RAM — is counted as unlifted, the address recorded,
-and the interpreter realigned to the machine's registers, since there is nothing
-to run. After a divergence the interpreter is realigned the same way, so the run
+reached, code copied into RAM — is counted as unlifted, the address recorded as
+the tree places it, and the interpreter realigned to the machine's registers,
+since there is nothing to run.
+
+The check itself — the observer that collects a step, the bus that answers the
+interpreter with what the machine read and holds every access to it, and the
+register and cycle checks after — is `ir/ir_lockstep.h`, and the differential
+is one of two things that drive it. The other is the cartridge disassembler's
+[run on the machine](snes-disassembler.md#where-a-run-landed-and-what-it-saw),
+which needs no program: it lifts every instruction the CPU executes from the
+bytes the CPU fetched, wherever they lay, and holds that node to the same
+check, so a node the run computes a fact from is a node the machine agreed
+with. Both name a disagreement the same way, as a `Divergence`. After a divergence the interpreter is realigned the same way, so the run
 goes on from the machine's truth rather than compounding one disagreement into
 every step after it; `Replay::divergenceLimit` ends the run once that many have
 been recorded.

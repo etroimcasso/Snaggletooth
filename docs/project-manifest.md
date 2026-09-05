@@ -3,9 +3,9 @@
 `project.manifest` is the file at the root of a source tree the
 [cartridge disassembler](snes-disassembler.md) writes. It says which image the
 tree is of, which files make it up and which bytes of the image each produces,
-where the trace began and where it stopped. Six of its line kinds are read back
-on the next run — which is how a person directs the trace, how a run's findings
-outlive it, and how a name a person gives a file survives.
+where the trace began and where it stopped. Seven of its line kinds are read
+back on the next run — which is how a person directs the trace, how a run's
+findings outlive it, and how a name a person gives a file survives.
 
 > **Status.** The disassembler writes the manifest and reads it back on the next
 > run; `snes_verify` executes it — assembles every file it names, places the
@@ -14,10 +14,13 @@ outlive it, and how a name a person gives a file survives.
 > the traced code reaches: a line per hardware register access, a line per DMA
 > transfer a channel was set up for, and a line per routine with what it calls
 > and what it drives. Run on the machine, it records the destinations the
-> indirect jumps took, and traces from them, and every range of bytes the
-> transfer engines moved — where from, where to, how many, and from which
-> instruction — and lifts every such range that begins in the image into a file
-> of its own, recorded as an `asset` line. Read for what every path proves, it records the direct
+> indirect jumps took, and traces from them, every place the CPU arrived that no
+> instruction named — a return to an address the code put on the stack — and
+> traces from those too, every range of bytes the transfer engines moved —
+> where from, where to, how many, and from which instruction — and lifts every
+> such range that begins in the image into a file of its own, recorded as an
+> `asset` line, and the direct register and the data bank the run saw at every
+> site it executed. Read for what every path proves, it records the direct
 > register, the data bank and the stack pointer at every label where something
 > is proven, and the destinations of every jump through a table the bytes
 > bound, and traces from those too.
@@ -40,6 +43,8 @@ outlive it, and how a name a person gives a file survives.
   - [2.10 What the bytes derive](#210-what-the-bytes-derive)
   - [2.11 What a run moved](#211-what-a-run-moved)
   - [2.12 Assets](#212-assets)
+  - [2.13 Where a run landed](#213-where-a-run-landed)
+  - [2.14 What a run saw](#214-what-a-run-saw)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -528,6 +533,99 @@ here to match, and the next run lifts the same range — the same `from` and
 `bytes` — under that name. The class, the kind and the range are the run's and
 are written fresh.
 
+### 2.13 Where a run landed
+
+```
+ran      <address> <name> e=<0|1> m=<8|16|?> x=<8|16|?> from <address>
+```
+
+A place the CPU, run on the machine, arrived at that the instruction before it
+did not name — a return to an address the code itself put on the stack (`PEA`
+then `RTS`; a frame built by hand, then `RTL`), an `RTI` into flow the bytes do
+not carry, any successor the instruction does not name — with the mode it
+arrived in and the instruction that took it there. The run knows because it
+runs every instruction the CPU executes through the
+[interpreter](ir.md#running-beside-the-machine), lifted from the bytes the CPU
+fetched, and reads where the CPU went against what the instruction names. A
+fall-through, a taken branch, a jump or a call to a constant target, a call's
+return to the address after it, an interrupt handler's `RTI` back to the
+instruction it interrupted, and a `BRK` or `COP` to its vector are all named,
+and produce no line. The four forms whose pointer the run reads ahead are
+[`reached`](#27-what-a-run-reached) lines, never `ran`: `reached` says a pointer
+was read and where it pointed; `ran` says only that the CPU arrived.
+
+It is an entry the trace starts from, exactly as a `reached` line is, after
+the `reached` lines; a person's `entry` naming the same address under the same
+mode gives it its name, and the name is otherwise `loc_` with the address,
+since the CPU arrived and nothing says the place is a routine. Both addresses
+are as the tree places them: a landing through a mirror bank names the home
+bank. A landing outside the image — a return into a routine the program copied
+to work RAM — is a `note` and no line, since the tree has nothing to trace
+there.
+
+A cartridge that copies a routine into work RAM, builds two return frames by
+hand and enters it with `RTL`, lands past a `PEA`/`RTS` pair on both passes of
+a loop, and returns through `RTI` into a frame it built with both widths
+sixteen bits, run for one second of its clock:
+
+```
+ran      $00:803A loc_00803A e=1 m=8 x=8 from $00:8039
+ran      $00:804D loc_00804D e=0 m=16 x=16 from $00:804C
+ran      $00:802C loc_00802C e=1 m=8 x=8 from $7E:2001
+
+note     run: the CPU arrived at $7E:2000 from $00:802B, which the tree does not hold; not recorded
+```
+
+The first line is the `RTS` at `$00:8039` returning to the address the `PEA`
+before it pushed, taken on both passes and written once. The second is the
+`RTI`, which ran with both widths eight and arrived with both sixteen: the
+mode is the CPU's on arrival. The third is the routine's own `RTL`, in work
+RAM, returning to the frame the program built for it; the `RTL` that entered
+the routine landed in work RAM, and is the note. Without the run, everything
+after `$00:802B` is data to the trace; with it, all three landings are labels
+with code under them.
+
+### 2.14 What a run saw
+
+```
+seen     <address> D=<value|…> DBR=<value|…>
+```
+
+At a site in the image the run executed an instruction: every value the direct
+register and the data bank held before it ran, each value once, ascending,
+joined by `|`. One line per site, in address order, and every value the run
+saw is written, however many. The line is written fresh on every run and read
+back by nothing — the next run sees it again — and a disassembly without a run
+writes none.
+
+`seen` and [`state`](#29-what-every-path-proves) say different things about
+the same registers: `state` is what every path into a label proves, `seen` is
+what one run saw at a site. A site whose `state` line says `?` and whose `seen`
+line holds one value is the analysis stopping short of what the run settled; a
+`seen` value the `state` line's set does not hold is the analysis being wrong,
+and the two lines say so beside each other rather than one hiding the other.
+A plain direct-page operand at a site the paths prove nothing about and the
+run saw one direct register at carries, in its comment in the bank file, the
+register that value lands it on, marked `(run)` —
+[snes-disassembler.md §The tree](snes-disassembler.md#the-tree).
+
+The same cartridge, whose loop head at `$00:802C` runs under two direct
+registers and whose store after the loop runs under one:
+
+```
+seen     $00:802C D=$4300|$4310 DBR=$00
+seen     $00:803F D=$4320 DBR=$00
+```
+
+and in `bank_00.asm`, the store through the direct page after the loop, and
+the indexed one beside it, which the run does not name since it does not carry
+`X`:
+
+```
+        STA $01                         ; $00:803F  85 01        3  BBAD2 (run)
+        STA $03,X                       ; $00:8041  95 03        4
+```
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -539,6 +637,8 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - every `reached` line, and traces from each after the entries — so a run's
   findings are kept from one disassembly to the next whether or not the next
   one runs, and a new run's are merged with them;
+- every `ran` line, and traces from each after the `reached` lines, kept and
+  merged the same way;
 - every `derived` line, and traces from each as it traces from a `reached`
   line — and derives them again from the bytes, so the set is kept and grows
   with the tree;
@@ -567,8 +667,8 @@ directory, it reads:
   disassembler does.
 
 Everything else is what the last run found and is written fresh — the `access`,
-`dma`, `routine` and `state` lines among them, which no tool reads back: they
-are what the trace saw, and the next trace sees it again. A `stop` line records;
+`dma`, `routine`, `state` and `seen` lines among them, which no tool reads back:
+they are what the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. The disassembler writes the files fresh
 too: an edit to a bank file is not read back by it, so a person's changes to the
 trace belong in the manifest, and their changes to the code in the sources,
