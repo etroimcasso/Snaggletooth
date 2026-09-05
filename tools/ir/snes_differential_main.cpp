@@ -16,8 +16,8 @@
 // the two values), `forms.txt` (how many times each instruction form ran under
 // each mode), `constructs.txt` (how many times each named construct was
 // exercised, zero where the run never reached one), and `unlifted.txt` (the
-// addresses the run executed that the tree has no instruction for). One line
-// on standard output sums it up.
+// addresses the run executed that the tree has no instruction for, as the tree
+// places them). One line on standard output sums it up.
 //
 // The exit status is 0 when the run diverged nowhere, 1 when it did, 2 on a bad
 // argument or an unreadable input.
@@ -181,6 +181,7 @@ int main(int argc, char** argv) {
   request.entries = manifest->entries;
   request.regions = manifest->regions;
   request.reached = manifest->reached;
+  request.ran = manifest->ran;
   request.captureSound = false;
   request.observeRun = false;
   const snaggletooth::disasm::CartridgeDisassembly d =

@@ -872,12 +872,16 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // from, after the vectors and the person's entries, so a name a person gave a
   // target is the one it keeps.
   std::vector<ReachedTarget> reached = request.reached;
+  // Where a run landed without an instruction naming it: this run's, when
+  // asked for one, and every earlier run's from the manifest, each an entry the
+  // trace starts from after the reached targets.
+  std::vector<Landing> ran = request.ran;
   // What a run saw the engines move: every earlier run's from the manifest, and
   // this run's over them — a range this run saw again carries this run's count,
   // one it did not see is kept as it was.
   out.moved = request.moved;
   if (request.observeRun) {
-    const RunObservation observation =
+    RunObservation observation =
         observeRun(request.rom, request.runMasterCycles, request.input, out.notes);
     for (const ReachedTarget& seen : observation.reached) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
@@ -885,6 +889,13 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       });
       if (!known) reached.push_back(seen);
     }
+    for (const Landing& landing : observation.ran) {
+      const bool known = std::any_of(ran.begin(), ran.end(), [&](const Landing& l) {
+        return sameLanding(l, landing);
+      });
+      if (!known) ran.push_back(landing);
+    }
+    out.seen = std::move(observation.seen);
     for (const MovedRange& range : observation.moved) {
       const auto known = std::find_if(out.moved.begin(), out.moved.end(),
                                       [&](const MovedRange& m) { return sameRange(m, range); });
@@ -896,6 +907,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
   }
   std::sort(reached.begin(), reached.end(), [](const ReachedTarget& a, const ReachedTarget& b) {
+    if (a.site != b.site) return a.site < b.site;
+    if (a.target != b.target) return a.target < b.target;
+    return contextOf(a.mode).bits < contextOf(b.mode).bits;
+  });
+  std::sort(ran.begin(), ran.end(), [](const Landing& a, const Landing& b) {
     if (a.site != b.site) return a.site < b.site;
     if (a.target != b.target) return a.target < b.target;
     return contextOf(a.mode).bits < contextOf(b.mode).bits;
@@ -936,6 +952,24 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     const std::string label = pending[*regionOf(*home)].symbols[*home];
     out.reached.push_back(ReachedTarget{
         .target = *home, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = label});
+  }
+  for (const Landing& landing : ran) {
+    const std::optional<Address> home = canonical(map, imageBytes, landing.target);
+    if (!home) {
+      out.notes.push_back("ran " + address24(landing.target) + " from " + address24(landing.site) +
+                          " is not in the image; not traced");
+      continue;
+    }
+    // The CPU arrived: a location, whatever instruction took it there.
+    const std::optional<bool> added = add(*home, contextOf(landing.mode), "loc_" + hex(*home, 6));
+    if (!added) {
+      out.notes.push_back("ran " + address24(landing.target) + " from " + address24(landing.site) +
+                          " lies in no region; not traced");
+      continue;
+    }
+    const std::string label = pending[*regionOf(*home)].symbols[*home];
+    out.ran.push_back(
+        Landing{.target = *home, .mode = landing.mode, .site = landing.site, .name = label});
   }
 
   // Trace every region that is owed one, and carry each call or jump that leaves
@@ -1167,8 +1201,9 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
 std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
   out += "; A Snaggletooth cartridge project. The next run reads the `entry`, `reached`,\n"
-         "; `derived`, `moved`, `asset` and `file` lines; snes_verify reads `map`, `file`,\n"
-         "; `sound` and `block`; everything else is written fresh from what the run found.\n";
+         "; `ran`, `derived`, `moved`, `asset` and `file` lines; snes_verify reads `map`,\n"
+         "; `file`, `sound` and `block`; everything else is written fresh from what the run\n"
+         "; found.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
   out += "map      " + mapName(disassembly.header.map) + "\n";
   std::string title;
@@ -1205,6 +1240,11 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   for (const ReachedTarget& seen : disassembly.reached) {
     out += "reached  " + address24(seen.target) + " " + seen.name + " " + modeText(seen.mode) +
            " from " + address24(seen.site) + "\n";
+  }
+  if (!disassembly.ran.empty()) out += "\n";
+  for (const Landing& landing : disassembly.ran) {
+    out += "ran      " + address24(landing.target) + " " + landing.name + " " +
+           modeText(landing.mode) + " from " + address24(landing.site) + "\n";
   }
   if (!disassembly.derived.empty()) out += "\n";
   for (const DerivedTarget& derived : disassembly.derived) {
@@ -1329,6 +1369,22 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
     out += "state    " + address24(state.address) + " D=" + valueList(state.d, 4) +
            " DBR=" + valueList(state.dbr, 2) + " S=" + valueList(state.s, 4) + "\n";
   }
+
+  // What the run saw at each site: every value, joined by `|`, since the run
+  // saw each of them and a person reading the line is owed all of it.
+  const auto seenList = [](const auto& values, int digits) {
+    std::string text;
+    for (const auto value : values) {
+      if (!text.empty()) text += "|";
+      text += "$" + hex(value, digits);
+    }
+    return text;
+  };
+  if (!disassembly.seen.empty()) out += "\n";
+  for (const SeenState& seen : disassembly.seen) {
+    out += "seen     " + address24(seen.address) + " D=" + seenList(seen.d, 4) +
+           " DBR=" + seenList(seen.dbr, 2) + "\n";
+  }
   return out;
 }
 
@@ -1374,6 +1430,18 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
                                             .site = *site,
                                             .call = words[2].rfind("sub_", 0) == 0,
                                             .name = words[2]});
+      continue;
+    }
+    if (words[0] == "ran") {
+      if (words.size() != 8 || words[6] != "from") {
+        return fail("a landing is an address, a name, e=, m=, x=, `from` and the site");
+      }
+      const std::optional<Address> target = parseLongAddress(words[1]);
+      const std::optional<Address> site = parseLongAddress(words[7]);
+      if (!target || !site) return fail("addresses are written $BB:XXXX");
+      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
+      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
+      input.ran.push_back(Landing{.target = *target, .mode = *mode, .site = *site, .name = words[2]});
       continue;
     }
     if (words[0] == "moved") {
@@ -1520,8 +1588,8 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.sound->blocks.push_back(block);
       continue;
     }
-    static const std::set<std::string> kKnown = {"title", "stop",   "warning", "note",
-                                                 "access", "dma",   "routine", "state"};
+    static const std::set<std::string> kKnown = {"title",  "stop", "warning", "note",
+                                                 "access", "dma",  "routine", "state", "seen"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   return input;
@@ -1607,6 +1675,22 @@ std::string_view directRegister(const CartridgeDisassembly& disassembly, Address
                              [](const HardwareAccess& a, Address wanted) { return a.site < wanted; });
   if (it != accesses.end() && it->site == site) return it->name;
   return {};
+}
+
+// The register a plain direct-page operand at `site` lands on under the one
+// direct register the run saw there, where the paths proved none: the
+// register's name with `(run)` after it. Empty where the run saw no value or
+// more than one, or the address is no register. The sum wraps as the chip's
+// does, within bank zero.
+std::string runDirectRegister(const CartridgeDisassembly& disassembly, Address site,
+                              std::uint32_t operand) {
+  const std::vector<SeenState>& seen = disassembly.seen;
+  auto it = std::lower_bound(seen.begin(), seen.end(), site,
+                             [](const SeenState& s, Address wanted) { return s.address < wanted; });
+  if (it == seen.end() || it->address != site || it->d.size() != 1) return {};
+  const std::string_view name = cpu65816RegisterName((it->d.front() + operand) & 0xFFFFu);
+  if (name.empty()) return {};
+  return std::string(name) + " (run)";
 }
 
 // A run of bytes execution never reached, as `DB` rows of eight with the bytes
@@ -1832,6 +1916,7 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
     }
 
     ir::SourceNames names;
+    std::string runNote;  // the annotation's text where it is built here rather than borrowed
     const ir::Instruction& instruction = node.instruction;
     if (instruction.target) {
       if (const auto own = lines.labels.find(*instruction.target); own != lines.labels.end()) {
@@ -1848,8 +1933,15 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
       }
     } else if (directData(instruction)) {
       // A direct-page operand stays the offset it is; the register it lands on
-      // under the proven direct register goes in the comment.
+      // under the proven direct register goes in the comment — or, where the
+      // paths prove nothing and the run saw one direct register at a plain
+      // direct-page form, the register that value lands it on, marked as the
+      // run's.
       names.annotation = directRegister(disassembly, line.address);
+      if (names.annotation.empty() && instruction.addressing == ir::Addressing::Direct) {
+        runNote = runDirectRegister(disassembly, line.address, instruction.operand);
+        names.annotation = runNote;
+      }
     }
     out += ir::renderLine(node, names, bytesWidth);
   }

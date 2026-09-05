@@ -7,6 +7,12 @@
 // The same run watches the transfer engines. A second cartridge moves bytes
 // every way they can, and the cases pin each field of what is recorded, how a
 // range is closed and counted, and what the manifest does with it.
+//
+// The same run lifts every instruction the CPU executes from its fetches and
+// holds it to the machine. A third cartridge rewrites a routine in work RAM and
+// returns to addresses the bytes do not name, and the cases pin what is
+// checked, which landings are recorded and which are not, the values seen at a
+// site, and that no example cartridge diverges.
 
 #include <algorithm>
 #include <cstdint>
@@ -18,6 +24,8 @@
 
 #include "examples/example_cartridges.h"
 #include "gtest/gtest.h"
+#include "ir/cpu65816_lift.h"
+#include "ir/ir_differential.h"
 #include "rom/rom_disasm.h"
 #include "rom/rom_observe.h"
 #include "rom/rom_verify.h"
@@ -25,14 +33,37 @@
 namespace snaggletooth::disasm {
 namespace {
 
+using examples::copVectorImage;
 using examples::dispatchingImage;
 using examples::loRomImage;
+using examples::mirroredImage;
+using examples::mixedImage;
 using examples::movingImage;
+using examples::provingImage;
 using examples::put;
+using examples::ramCodeImage;
 using examples::stalledJumpImage;
+using examples::threeBankImage;
 using examples::unreadablePointerImage;
 
 constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
+
+// The manifest without its `seen` block — the last block, written fresh by a
+// run and not at all by a disassembly without one — so what the manifest keeps
+// from one to the next is compared without it.
+std::string withoutSeen(const std::string& manifest) {
+  std::string out;
+  std::size_t position = 0;
+  while (position < manifest.size()) {
+    const std::size_t end = manifest.find('\n', position);
+    const std::string line =
+        manifest.substr(position, end == std::string::npos ? std::string::npos : end - position + 1);
+    position = end == std::string::npos ? manifest.size() : end + 1;
+    if (line.rfind("seen ", 0) != 0) out += line;
+  }
+  while (out.size() >= 2 && out.compare(out.size() - 2, 2, "\n\n") == 0) out.pop_back();
+  return out;
+}
 
 const ReachedTarget* reachedFrom(const std::vector<ReachedTarget>& seen, Address site) {
   for (const ReachedTarget& r : seen) {
@@ -330,7 +361,8 @@ TEST(RomObserve, AnEarlierRunsSightingsAreTracedFromWithoutRunning) {
   again.reached = input->reached;
   const CartridgeDisassembly replayed = disassembleCartridge(again);
   ASSERT_EQ(replayed.reached.size(), ran.reached.size());
-  EXPECT_EQ(renderManifest(replayed), renderManifest(ran));
+  EXPECT_EQ(withoutSeen(renderManifest(replayed)), withoutSeen(renderManifest(ran)));
+  EXPECT_TRUE(replayed.seen.empty()) << "what a run saw is the run's, not read back";
 }
 
 // A manifest's sightings and a new run's are one set: what both saw is written
@@ -741,7 +773,7 @@ TEST(RomMoved, AnEarlierRunsRangesAreKeptWithoutRunning) {
   again.moved = input->moved;
   const CartridgeDisassembly kept = disassembleCartridge(again);
   ASSERT_EQ(kept.moved.size(), ran.moved.size());
-  EXPECT_EQ(renderManifest(kept), renderManifest(ran));
+  EXPECT_EQ(withoutSeen(renderManifest(kept)), withoutSeen(renderManifest(ran)));
 }
 
 // A manifest's ranges and a new run's are one set: a range this run saw again
@@ -798,6 +830,239 @@ TEST(RomMoved, TheTreeStillAssemblesToItsImage) {
   std::map<std::string, std::string> tree;
   for (const RegionListing& region : d.regions) tree[region.region.file] = renderRegion(region, d);
   for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
+  std::string error;
+  const std::optional<ManifestInput> manifest = parseManifest(renderManifest(d), error);
+  ASSERT_TRUE(manifest.has_value()) << error;
+  const VerifyReport report = verifyProject(*manifest, rom, [&tree](const std::string& file) {
+    const auto found = tree.find(file);
+    if (found == tree.end()) return std::optional<std::string>{};
+    return std::optional<std::string>{found->second};
+  });
+  EXPECT_TRUE(report.error.empty()) << report.error;
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+}
+
+// ---- the run beside the interpreter --------------------------------------------
+
+namespace {
+
+RunObservation observe(std::span<const std::uint8_t> rom, std::uint64_t cycles,
+                       std::vector<std::string>* notes = nullptr) {
+  std::vector<std::string> local;
+  return observeRun(rom, cycles, InputScript{}, notes ? *notes : local);
+}
+
+const Landing* landingFrom(const std::vector<Landing>& ran, Address site) {
+  for (const Landing& l : ran) {
+    if (l.site == site) return &l;
+  }
+  return nullptr;
+}
+
+const SeenState* seenAt(const std::vector<SeenState>& seen, Address address) {
+  for (const SeenState& s : seen) {
+    if (s.address == address) return &s;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+// The run's nodes are checked by the machine exactly as the tree's are by the
+// differential: the same steps, the same interrupts, no disagreement in either.
+TEST(RomLockstep, EveryInstructionIsLiftedFromItsFetchesAndCheckedAgainstTheMachine) {
+  const std::vector<std::uint8_t> rom = mixedImage();
+  std::vector<std::string> notes;
+  const RunObservation o = observe(rom, 5u * kFrame, &notes);
+  EXPECT_EQ(o.divergences, 0u);
+  EXPECT_TRUE(notes.empty()) << notes.front();
+  EXPECT_EQ(o.interrupts, 3u);
+  // Thirty-three instructions in the image; the emulation handler's RTI never runs.
+  EXPECT_EQ(o.nodes, 33u);
+
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = false;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ir::Program program;
+  for (const RegionListing& region : d.regions) {
+    std::vector<std::uint8_t> image;
+    for (const Line& line : region.listing.lines) {
+      const std::vector<std::uint8_t>& bytes = line.isCode ? line.instruction.bytes : line.data;
+      image.insert(image.end(), bytes.begin(), bytes.end());
+    }
+    program = ir::lift65816(region.listing, image, region.region.first);
+  }
+  ir::Replay replay;
+  replay.rom = rom;
+  replay.masterCycles = 5u * kFrame;
+  const ir::DifferentialReport report = ir::differential(program, replay);
+  EXPECT_TRUE(report.divergences.empty());
+  EXPECT_EQ(o.instructions, report.instructions) << "every instruction the tree's replay checked";
+  EXPECT_EQ(o.interrupts, report.interrupts);
+}
+
+TEST(RomLockstep, BytesTheProgramRewroteAtAnAddressAreASecondNode) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  const RunObservation o = observe(rom, kFrame);
+  EXPECT_EQ(o.divergences, 0u);
+  // Thirty-nine instructions in the image; in work RAM `INC A`, then `DEC A` at
+  // the same address, and the `RTL` after both.
+  EXPECT_EQ(o.nodes, 42u);
+  // The image's thirty-nine, the loop's eleven once more, and four in work RAM.
+  EXPECT_EQ(o.instructions, 54u);
+}
+
+TEST(RomLockstep, AReturnToAnAddressTheCodePutOnTheStackIsALanding) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  const RunObservation o = observe(rom, kFrame);
+  ASSERT_EQ(o.ran.size(), 3u);
+  const Landing* fromRam = landingFrom(o.ran, 0x7E2001u);  // the routine's RTL
+  ASSERT_NE(fromRam, nullptr);
+  EXPECT_EQ(fromRam->target, 0x00802Cu) << "the frame the program built, not the JSL's";
+  const Landing* pushed = landingFrom(o.ran, 0x008039u);  // PEA $8039 ; RTS, on both passes
+  ASSERT_NE(pushed, nullptr);
+  EXPECT_EQ(pushed->target, 0x00803Au);
+  const Landing* pulled = landingFrom(o.ran, 0x00804Cu);  // RTI into a frame built by hand
+  ASSERT_NE(pulled, nullptr);
+  EXPECT_EQ(pulled->target, 0x00804Du);
+  EXPECT_TRUE(o.ran[0].site < o.ran[1].site && o.ran[1].site < o.ran[2].site) << "in site order";
+}
+
+TEST(RomLockstep, ALandingTakenTwiceIsRecordedOnce) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  const RunObservation o = observe(rom, kFrame);
+  std::size_t fromTheLoop = 0;
+  for (const Landing& l : o.ran) fromTheLoop += l.site == 0x008039u ? 1u : 0u;
+  EXPECT_EQ(fromTheLoop, 1u) << "the RTS ran on both passes of the loop";
+}
+
+TEST(RomLockstep, ALandingInWorkRamIsANoteNotALanding) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  std::vector<std::string> notes;
+  const RunObservation o = observe(rom, kFrame, &notes);
+  for (const Landing& l : o.ran) EXPECT_NE(l.target, 0x7E2000u);
+  ASSERT_EQ(notes.size(), 1u);
+  EXPECT_NE(notes[0].find("$7E:2000"), std::string::npos) << notes[0];
+  EXPECT_NE(notes[0].find("$00:802B"), std::string::npos) << notes[0];
+  EXPECT_NE(notes[0].find("does not hold"), std::string::npos) << notes[0];
+}
+
+TEST(RomLockstep, AnIndirectJumpIsReachedAndNotALanding) {
+  const std::vector<std::uint8_t> rom = dispatchingImage();
+  const RunObservation o = observe(rom, 4u * kFrame);
+  EXPECT_FALSE(o.reached.empty());
+  EXPECT_TRUE(o.ran.empty()) << "the pointer was read ahead; the landing confirmed it";
+  EXPECT_EQ(o.divergences, 0u);
+}
+
+// A fall-through, a branch, a call and its return, a hardware interrupt and its
+// RTI, a software interrupt to a vector in the image and its RTI: every one
+// lands where the run expects.
+TEST(RomLockstep, FlowTheInstructionsNameLandsNowhereNew) {
+  const RunObservation mixed = observe(mixedImage(), 5u * kFrame);
+  EXPECT_EQ(mixed.interrupts, 3u);
+  EXPECT_TRUE(mixed.ran.empty());
+  const RunObservation threeBank = observe(threeBankImage(), 2u * kFrame);
+  EXPECT_TRUE(threeBank.ran.empty());
+  EXPECT_EQ(threeBank.divergences, 0u);
+  // A COP in emulation mode and a BRK in native mode, each to a handler the
+  // header names in the image, each returning after its signature byte.
+  const RunObservation vectors = observe(copVectorImage(), kFrame);
+  EXPECT_TRUE(vectors.ran.empty()) << "a software interrupt reaches the vector the header names";
+  EXPECT_EQ(vectors.instructions, 7u) << "COP, RTI, CLC, XCE, BRK, RTI, STP";
+  EXPECT_EQ(vectors.interrupts, 0u) << "a software interrupt is an instruction, not a hardware sequence";
+  EXPECT_EQ(vectors.divergences, 0u);
+  const RunObservation proving = observe(provingImage(), 2u * kFrame);
+  EXPECT_TRUE(proving.ran.empty());
+  EXPECT_EQ(proving.divergences, 0u);
+}
+
+TEST(RomLockstep, TheLandingCarriesTheModeTheCpuArrivedIn) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  const RunObservation o = observe(rom, kFrame);
+  const Landing* pushed = landingFrom(o.ran, 0x008039u);
+  ASSERT_NE(pushed, nullptr);
+  EXPECT_EQ(pushed->mode, Cpu65816Mode::reset()) << "emulation mode, both widths eight and known";
+  // The RTI ran with both widths eight and pulled a status byte with both
+  // sixteen: the landing carries what the CPU arrived with.
+  const Landing* pulled = landingFrom(o.ran, 0x00804Cu);
+  ASSERT_NE(pulled, nullptr);
+  EXPECT_EQ(pulled->mode, Cpu65816Mode::native(false, false));
+}
+
+TEST(RomLockstep, TheValuesSeenAtASiteAreEveryDirectRegisterAndDataBankTheRunHadThere) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  const RunObservation o = observe(rom, kFrame);
+  const SeenState* twice = seenAt(o.seen, 0x00802Cu);
+  ASSERT_NE(twice, nullptr);
+  EXPECT_EQ(twice->d, (std::vector<std::uint16_t>{0x4300u, 0x4310u}));
+  EXPECT_EQ(twice->dbr, (std::vector<std::uint8_t>{0x00u}));
+  const SeenState* once = seenAt(o.seen, 0x00803Fu);
+  ASSERT_NE(once, nullptr);
+  EXPECT_EQ(once->d, (std::vector<std::uint16_t>{0x4320u}));
+  // The value before the instruction: the PLD at $801C sees the zero it replaces.
+  const SeenState* pull = seenAt(o.seen, 0x00801Cu);
+  ASSERT_NE(pull, nullptr);
+  EXPECT_EQ(pull->d, (std::vector<std::uint16_t>{0x0000u}));
+  EXPECT_EQ(seenAt(o.seen, 0x7E2000u), nullptr) << "a site outside the image is not seen";
+  EXPECT_EQ(o.seen.size(), 39u) << "every instruction in the image, once";
+  for (std::size_t i = 1; i < o.seen.size(); ++i) EXPECT_LT(o.seen[i - 1].address, o.seen[i].address);
+}
+
+TEST(RomLockstep, ASiteRunThroughAMirrorBankIsSeenWhereTheTreePlacesIt) {
+  const std::vector<std::uint8_t> rom = mirroredImage();
+  const RunObservation o = observe(rom, kFrame);
+  EXPECT_EQ(o.divergences, 0u);
+  EXPECT_EQ(o.instructions, 7u);
+  EXPECT_EQ(o.nodes, 7u);
+  EXPECT_TRUE(o.ran.empty());
+  EXPECT_NE(seenAt(o.seen, 0x008010u), nullptr);
+  EXPECT_EQ(seenAt(o.seen, 0x808010u), nullptr);
+}
+
+TEST(RomLockstep, TwoRunsSeeTheSameLandingsAndValues) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  const RunObservation first = observe(rom, kFrame);
+  const RunObservation second = observe(rom, kFrame);
+  ASSERT_EQ(first.ran.size(), second.ran.size());
+  for (std::size_t i = 0; i < first.ran.size(); ++i) EXPECT_TRUE(sameLanding(first.ran[i], second.ran[i]));
+  ASSERT_EQ(first.seen.size(), second.seen.size());
+  for (std::size_t i = 0; i < first.seen.size(); ++i) {
+    EXPECT_EQ(first.seen[i].address, second.seen[i].address);
+    EXPECT_EQ(first.seen[i].d, second.seen[i].d);
+    EXPECT_EQ(first.seen[i].dbr, second.seen[i].dbr);
+  }
+  EXPECT_EQ(first.instructions, second.instructions);
+}
+
+// The lift is held to the machine on every cartridge that is ours: a
+// disagreement anywhere is a finding about the lift, and this is where it
+// would first be seen.
+TEST(RomLockstep, NoExampleCartridgeDivergesFromTheMachine) {
+  for (const examples::Example& example : examples::examples()) {
+    std::vector<std::string> notes;
+    const RunObservation o = observe(example.build(), 4u * kFrame, &notes);
+    EXPECT_EQ(o.divergences, 0u) << example.name;
+    for (const std::string& note : notes) {
+      EXPECT_EQ(note.find("disagreed"), std::string::npos) << example.name << ": " << note;
+    }
+  }
+}
+
+TEST(RomLockstep, TheTreeStillAssemblesToItsImage) {
+  const std::vector<std::uint8_t> rom = ramCodeImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = kFrame;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.ran.size(), 3u);
+
+  std::map<std::string, std::string> tree;
+  for (const RegionListing& region : d.regions) tree[region.region.file] = renderRegion(region, d);
   std::string error;
   const std::optional<ManifestInput> manifest = parseManifest(renderManifest(d), error);
   ASSERT_TRUE(manifest.has_value()) << error;

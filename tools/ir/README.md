@@ -5,7 +5,8 @@ source says about the instruction and the typed effects the chip performs for it
 with no bytes in it. `cpu65816_lift.h` builds a program from a listing the 65816
 disassembler traced — the one place in the toolkit where bytes become meaning —
 `ir_interpret.h` runs a program's effects and nothing else, `ir_render.h` writes
-SNES assembly from its instruction layer, `ir_differential.h` runs it beside the
+SNES assembly from its instruction layer, `ir_lockstep.h` holds the interpreter
+to one step of the machine, `ir_differential.h` runs a program beside the
 machine through a recorded run and reports every disagreement, `ir_dataflow.h`
 runs the effects over every path at once and says what each instruction can
 rely on — the direct register, the data bank, the stack pointer, a stored
@@ -32,6 +33,7 @@ Everything lives in `snaggletooth::ir`.
 | `lift65816(listing, image, base)` | A whole 65816 listing as a program. |
 | `liftInstruction(instruction, mode)` | One decoded instruction as a node. |
 | `Interpreter` | Runs a node or an interrupt sequence over a `Bus` the host implements, and returns the cycles. |
+| `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the machine collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; every disagreement is a `Divergence`. |
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
 | `Dataflow(program, entries, sightings, image, canonical)` | Runs the effects over every path from the entries; `before(address)` is what is proven there, `derived()` every table slot a bounded index selects. |
 | `evaluate(node, before, image)` | One node over a `State`: the state after and every access it can make. |
@@ -101,10 +103,13 @@ The library target is `snaggletooth_ir`; `tools/` is on its public include path.
 It links `snaggletooth_cpu65816` for the lift, which reads a listing and the
 measured cycle tables, and for the renderer, which reads the opcode table and
 follows the widths through the same function the assembler does. The
-interpreter's own translation unit includes neither. The differential is its
-own target, `snaggletooth_ir_differential`, which links the representation and
-`snaggletooth_rom` for the recorded run it replays — and `snaggletooth_rom`
-links the representation for the bank files it renders.
+interpreter's own translation unit includes neither. The lockstep is its own
+target, `snaggletooth_ir_lockstep`, which links the representation and the
+machine, and two things link it: the differential, its own target
+`snaggletooth_ir_differential`, which links `snaggletooth_rom` as well for the
+recorded run it replays; and `snaggletooth_rom` itself, whose run on the
+machine lifts every executed instruction from its fetches and holds it to the
+same check — and which links the representation for the bank files it renders.
 
 ## See also
 
@@ -113,7 +118,7 @@ links the representation for the bank files it renders.
   rendering source, running beside the machine, and how the lift is held to
   the core.
 - [`../rom/`](../rom/README.md) — the cartridge disassembler, whose bank files
-  the renderer writes.
+  the renderer writes and whose run on the machine drives the lockstep.
 - [`../examples/`](../examples/README.md) — the cartridges the examples above
   are run on.
 - [`../cpu65816/`](../cpu65816/README.md) — the disassembler whose listing the

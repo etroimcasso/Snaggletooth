@@ -158,6 +158,14 @@ struct CartridgeDisassembly {
   // The targets a run saw the indirect jumps take, this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_observe.h`.
   std::vector<ReachedTarget> reached;
+  // The landings a run saw the instructions not name — a return to an address
+  // the code put on the stack, an `RTI` into flow the bytes do not carry — this
+  // run's and every earlier manifest's, each traced from as a reached target is.
+  std::vector<Landing> ran;
+  // The direct register and the data bank the run saw at every site it executed
+  // in the image. Written fresh on every run and read back by nothing: the next
+  // run sees it again. Empty without a run.
+  std::vector<SeenState> seen;
   // The ranges a run saw the transfer engines move, this run's and every earlier
   // manifest's, each once with how many times it was seen — see `rom_observe.h`.
   // Nothing is traced from them; they say where the bytes the hardware received
@@ -187,17 +195,19 @@ struct CartridgeRequest {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
   std::vector<ReachedTarget> reached;  // what earlier runs saw, read back from the manifest
+  std::vector<Landing> ran;            // where earlier runs landed, read back the same way
   std::vector<MovedRange> moved;       // what earlier runs saw move, read back the same way
   std::vector<ManifestAsset> assets;   // the paths the manifest gives the lifted files
   std::vector<DerivedTarget> derived;  // what earlier runs derived, read back the same way
   bool captureSound = true;
   std::uint64_t bootMasterCycles = 15u * 21'477'272u;
   // `observeRun` boots the machine and steps it for `runMasterCycles` — sixty
-  // seconds of the master clock — recording the targets the indirect jumps take,
-  // which the trace then starts from beside the vectors and entries, and the
-  // ranges the transfer engines move. Off unless asked for: the run costs about
-  // as long as it emulates, and a caller that wants the trace alone should not
-  // pay it. `snes_disasm` asks for it unless told `--no-run`.
+  // seconds of the master clock — recording the targets the indirect jumps take
+  // and the landings the instructions do not name, which the trace then starts
+  // from beside the vectors and entries, the ranges the transfer engines move,
+  // and the registers seen at every site. Off unless asked for: the run costs
+  // about as long as it emulates, and a caller that wants the trace alone
+  // should not pay it. `snes_disasm` asks for it unless told `--no-run`.
   bool observeRun = false;
   std::uint64_t runMasterCycles = 60u * 21'477'272u;
   // The recorded run replayed into the controller ports while the machine runs —
@@ -244,15 +254,16 @@ struct ManifestSound {
 };
 
 // What a manifest gives the tools that read it. The next disassembly takes the
-// entries, the reached and derived targets, the moved ranges, the assets' paths
-// and the file split; a verification takes the map, the file split, the sound
-// program and its blocks, which together say where every file's bytes land;
-// both take the image identity. Everything else in a manifest is what the last
-// run found, and is written fresh.
+// entries, the reached and derived targets, the landings, the moved ranges, the
+// assets' paths and the file split; a verification takes the map, the file
+// split, the sound program and its blocks, which together say where every
+// file's bytes land; both take the image identity. Everything else in a
+// manifest is what the last run found, and is written fresh.
 struct ManifestInput {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
   std::vector<ReachedTarget> reached;
+  std::vector<Landing> ran;
   std::vector<MovedRange> moved;
   std::vector<ManifestAsset> assets;
   std::vector<DerivedTarget> derived;
@@ -262,10 +273,10 @@ struct ManifestInput {
   std::optional<std::uint16_t> checksum;
 };
 
-// Reads the entries, reached and derived targets, moved ranges, assets, regions,
-// map, sound program and image identity out of a manifest. Nothing, with `error`
-// naming the line, when a line does not parse, or when a block names a file no
-// `sound` line does.
+// Reads the entries, reached and derived targets, landings, moved ranges,
+// assets, regions, map, sound program and image identity out of a manifest.
+// Nothing, with `error` naming the line, when a line does not parse, or when a
+// block names a file no `sound` line does.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
 
 // Why `input` cannot direct a run over `rom`, or an empty string when it can: a
@@ -282,10 +293,11 @@ struct ManifestInput {
 // for every hardware register its absolute operands address and every label
 // another file defines that it refers to, an absolute operand that addresses a
 // register is written as the register's name, a direct-page operand that every
-// path proves lands on a register carries the register's name in its comment, a
-// target with a label anywhere in the tree is written as the label, and each
-// routine that begins in the file carries a comment with its role, what it
-// calls and what calls it.
+// path proves lands on a register carries the register's name in its comment —
+// or, where the paths prove nothing and the run saw one direct register there,
+// the register that value lands it on, marked `(run)` — a target with a label
+// anywhere in the tree is written as the label, and each routine that begins
+// in the file carries a comment with its role, what it calls and what calls it.
 [[nodiscard]] std::string renderRegion(const RegionListing& region,
                                        const CartridgeDisassembly& disassembly);
 

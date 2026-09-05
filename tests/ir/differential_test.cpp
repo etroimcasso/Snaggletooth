@@ -1,9 +1,10 @@
 // The run beside the core: a cartridge built by hand, traced and lifted, then
 // replayed on the machine with the interpreter held to every access, every
 // register and every cycle. The cases pin what a clean run reports, what an
-// interrupt, a released wait, a transfer and an unlifted address do to it, and
-// that a deliberate break in one effect — a wrong value, a wrong address, a
-// dropped flag write, a dropped cycle, a missing or an extra access — is named
+// interrupt, a released wait, a transfer and an unlifted address do to it, that
+// code run through a mirror bank is looked up and reported where the tree places
+// it, and that a deliberate break in one effect — a wrong value, a wrong address,
+// a dropped flag write, a dropped cycle, a missing or an extra access — is named
 // with the node, the effect and the two values.
 
 #include <algorithm>
@@ -24,6 +25,7 @@ namespace snaggletooth::ir {
 namespace {
 
 using examples::hdmaImage;
+using examples::mirroredImage;
 using examples::mixedImage;
 using examples::ramCodeImage;
 using examples::transferImage;
@@ -31,13 +33,15 @@ using examples::waitingImage;
 
 constexpr std::uint64_t kFrame = 262u * 1364u;  // one NTSC frame of the master clock
 
-// A cartridge's program: every region traced from its vectors and lifted, the
+// A cartridge's program: every region traced from its vectors — and, when
+// asked, from what a run of `runCycles` reached and landed on — and lifted, the
 // nodes of all of them in address order.
-Program programOf(const std::vector<std::uint8_t>& rom) {
+Program programOf(const std::vector<std::uint8_t>& rom, std::uint64_t runCycles = 0) {
   disasm::CartridgeRequest request;
   request.rom = rom;
   request.captureSound = false;
-  request.observeRun = false;
+  request.observeRun = runCycles != 0;
+  request.runMasterCycles = runCycles;
   const disasm::CartridgeDisassembly d = disasm::disassembleCartridge(request);
   Program all;
   for (const disasm::RegionListing& region : d.regions) {
@@ -152,16 +156,52 @@ TEST(Differential, AnHdmaEventThatHoldsTheCpuAtABoundaryIsASkippedStep) {
 
 TEST(Differential, AnInstructionWithNoNodeIsCountedAndTheInterpreterRealigned) {
   const std::vector<std::uint8_t> rom = ramCodeImage();
-  const DifferentialReport report = replay(rom, programOf(rom));
+  // The tree traced from what a run landed on, so the stores after the
+  // routine's returns are nodes; the routine itself, in work RAM, never is.
+  const DifferentialReport report = replay(rom, programOf(rom, kFrame));
   ASSERT_TRUE(report.divergences.empty()) << describe(report.divergences.front());
   EXPECT_TRUE(report.stopped);
-  EXPECT_EQ(report.unlifted, 2u) << "INC A and RTL in work RAM";
+  EXPECT_EQ(report.unlifted, 4u) << "INC A and RTL, then DEC A and RTL, in work RAM";
   ASSERT_EQ(report.unliftedSites.size(), 2u);
   EXPECT_EQ(report.unliftedSites[0], 0x7E2000u);
   EXPECT_EQ(report.unliftedSites[1], 0x7E2001u);
-  // The store after the call ran from the registers the routine left: checked,
-  // not diverged.
-  EXPECT_EQ(report.forms.at("STA abs e=1"), 1u);
+  // The stores after each return ran from the registers the routine left:
+  // checked, not diverged.
+  EXPECT_EQ(report.forms.at("STA abs e=1"), 3u);
+  EXPECT_EQ(report.forms.at("STA dp e=1"), 4u);
+  EXPECT_EQ(report.constructs.at("RTI"), 1u) << "the RTI into the frame the program built";
+}
+
+// ---- a program run through a mirror bank -----------------------------------------------
+
+TEST(Differential, CodeRunThroughAMirrorBankIsCheckedAgainstTheNodesTheTreePlaces) {
+  const std::vector<std::uint8_t> rom = mirroredImage();
+  const DifferentialReport report = replay(rom, programOf(rom));
+  ASSERT_TRUE(report.divergences.empty()) << describe(report.divergences.front());
+  EXPECT_TRUE(report.stopped);
+  EXPECT_EQ(report.unlifted, 0u) << "the four instructions at $80:8010 are the nodes at $00:8010";
+  EXPECT_TRUE(report.unliftedSites.empty());
+  EXPECT_EQ(report.forms.at("STA abs e=0 m=8 x=8"), 1u);
+  EXPECT_EQ(report.forms.at("INC abs e=0 m=8 x=8"), 1u);
+  EXPECT_EQ(report.constructs.at("STP"), 1u);
+}
+
+TEST(Differential, ADivergenceInAMirrorBankNamesTheSiteTheTreePlaces) {
+  const std::vector<std::uint8_t> rom = mirroredImage();
+  Program program = programOf(rom);
+  Node* inc = nodeAt(program, 0x008015u);  // INC !$0100, run as $80:8015
+  ASSERT_NE(inc, nullptr);
+  Effect* increment = firstEffect(*inc, Op::Inc);
+  ASSERT_NE(increment, nullptr);
+  increment->op = Op::Dec;
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_FALSE(report.divergences.empty());
+  const Divergence& d = report.divergences.front();
+  EXPECT_EQ(d.site, 0x008015u) << "the address a reader finds in the tree, not $80:8015";
+  EXPECT_EQ(d.name, "INC");
+  EXPECT_EQ(d.what, "write value");
+  EXPECT_EQ(d.expected, 0x13u);
+  EXPECT_EQ(d.actual, 0x11u);
 }
 
 TEST(Differential, TheRunEndsAtTheBudgetWhenTheProgramDoesNotStop) {
@@ -355,6 +395,26 @@ TEST(Differential, ABreakInTheInterruptSequenceIsNamedAsTheSequence) {
   EXPECT_EQ(d.name, "NMI");
   EXPECT_EQ(d.what, "write value");
   ASSERT_TRUE(d.effect.has_value());
+}
+
+// After a divergence the interpreter takes the machine's registers, so the
+// store that follows a wrong load stores what the machine stored, and the run's
+// one disagreement is the load's.
+TEST(Differential, TheStepAfterADivergenceRunsFromTheMachinesRegisters) {
+  const std::vector<std::uint8_t> rom = mixedImage();
+  Program program = programOf(rom);
+  Node* lda = nodeAt(program, 0x008007u);  // LDA #$1234, then STA !$0100
+  ASSERT_NE(lda, nullptr);
+  Effect* load = firstEffect(*lda, Op::SetNZ);
+  ASSERT_NE(load, nullptr);
+  load->a.value = 0x4321u;
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_FALSE(report.divergences.empty());
+  for (const Divergence& d : report.divergences) {
+    EXPECT_EQ(d.site, 0x008007u) << d.what << ": the store after it ran from the machine's A";
+  }
+  EXPECT_EQ(report.forms.at("STA abs e=0 m=16 x=16"), 1u);
+  EXPECT_TRUE(report.stopped);
 }
 
 TEST(Differential, TheRunGoesOnRealignedAfterADivergenceUpToTheLimit) {

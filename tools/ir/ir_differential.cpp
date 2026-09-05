@@ -1,6 +1,7 @@
 #include "ir/ir_differential.h"
 
 #include "ir/ir_text.h"
+#include "snaggletooth/snes/cartridge.h"
 
 #include <algorithm>
 #include <initializer_list>
@@ -11,96 +12,16 @@
 namespace snaggletooth::ir {
 namespace {
 
-// The observer that collects one step's report: the CPU's accesses and its
-// internal cycles, counted; a transfer engine's and the port's are not the
-// CPU's and are left out.
-struct StepObserver final : BusObserver {
-  std::vector<BusAccess> data;  // the CPU's data accesses, fetches left out
-  std::uint32_t cpuCycles = 0;
-  bool cpuRan = false;
-
-  void access(const BusAccess& access) override {
-    if (access.source != AccessSource::Cpu) return;
-    cpuRan = true;
-    ++cpuCycles;
-    if (access.kind == CycleKind::OpcodeFetch || access.kind == CycleKind::OperandFetch) return;
-    data.push_back(access);
-  }
-  void internal(std::uint32_t, std::optional<CycleKind>) override {
-    cpuRan = true;
-    ++cpuCycles;
-  }
-  void clear() {
-    data.clear();
-    cpuCycles = 0;
-    cpuRan = false;
-  }
-};
-
-// Whether an access's declared purpose is the kind the core drove.
-bool kindMatches(Access access, CycleKind kind, bool write) {
-  switch (access) {
-    case Access::Data: return kind == (write ? CycleKind::DataWrite : CycleKind::DataRead);
-    case Access::Rmw: return kind == (write ? CycleKind::RmwWrite : CycleKind::RmwRead);
-    case Access::RmwUnmodified: return write && kind == CycleKind::RmwModifyWrite;
-    case Access::Vector: return !write && kind == CycleKind::VectorRead;
-  }
-  return false;
+// The address the tree places the instruction the machine holds at `address`:
+// the one home of the image bytes it reads, so a bank that mirrors the image
+// finds the node placed in the bank the image is written for. An address
+// outside the image — code in work RAM — is its own.
+Address placed(CartridgeMap map, std::size_t imageBytes, Address address) {
+  const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+  if (!offset) return address;
+  const std::optional<std::uint32_t> home = romAddress(map, *offset);
+  return home ? *home : address;
 }
-
-// The bus the interpreter reads through: the machine's accesses for the step,
-// answered in order. A read's value is the machine's; its address, and every
-// write's address and value, are checked as they come.
-struct CheckingBus final : Bus {
-  const std::vector<BusAccess>& expected;
-  const Interpreter& interpreter;
-  std::size_t cursor = 0;
-  std::vector<Divergence>& out;
-  Divergence prototype;  // the step's identity, copied into every divergence
-
-  CheckingBus(const std::vector<BusAccess>& expected, const Interpreter& interpreter,
-              std::vector<Divergence>& out, Divergence prototype)
-      : expected(expected), interpreter(interpreter), out(out), prototype(std::move(prototype)) {}
-
-  void diverge(std::string what, std::uint32_t machine, std::uint32_t ir) {
-    Divergence d = prototype;
-    d.effect = interpreter.effectIndex;
-    d.what = std::move(what);
-    d.expected = machine;
-    d.actual = ir;
-    out.push_back(std::move(d));
-  }
-
-  std::uint8_t read(Address address, Access access) override {
-    address &= 0xFFFFFFu;
-    if (cursor >= expected.size()) {
-      diverge("a read the machine did not make", 0, address);
-      return 0;
-    }
-    const BusAccess& e = expected[cursor++];
-    if (e.write) diverge("a read where the machine wrote", e.address, address);
-    if (e.address != address) diverge("read address", e.address, address);
-    if (!kindMatches(access, e.kind, false)) {
-      diverge("read kind", static_cast<std::uint32_t>(e.kind), static_cast<std::uint32_t>(access));
-    }
-    return e.value;
-  }
-
-  void write(Address address, std::uint8_t value, Access access) override {
-    address &= 0xFFFFFFu;
-    if (cursor >= expected.size()) {
-      diverge("a write the machine did not make", 0, address);
-      return;
-    }
-    const BusAccess& e = expected[cursor++];
-    if (!e.write) diverge("a write where the machine read", e.address, address);
-    if (e.address != address) diverge("write address", e.address, address);
-    if (e.value != value) diverge("write value", e.value, value);
-    if (!kindMatches(access, e.kind, true)) {
-      diverge("write kind", static_cast<std::uint32_t>(e.kind), static_cast<std::uint32_t>(access));
-    }
-  }
-};
 
 // The constructs the report counts, every one seeded at zero.
 constexpr std::string_view kConstructs[] = {
@@ -265,24 +186,6 @@ void cover(DifferentialReport& report, const Node& node, const Registers& before
 
 }  // namespace
 
-Registers registersOf(const Cpu65816State& s) noexcept {
-  Registers r;
-  r.pc = s.pc;
-  r.s = s.s;
-  r.a = s.a;
-  r.x = s.x;
-  r.y = s.y;
-  r.d = s.d;
-  r.p = s.p;
-  r.dbr = s.dbr;
-  r.pbr = s.pbr;
-  r.e = s.e;
-  r.run = s.run == CpuRunState::Running   ? Run::Running
-          : s.run == CpuRunState::Waiting ? Run::Waiting
-                                          : Run::Stopped;
-  return r;
-}
-
 DifferentialReport differential(const Program& program, const Replay& replay) {
   DifferentialReport report;
   for (const std::string_view name : kConstructs) report.constructs[std::string(name)] = 0;
@@ -292,6 +195,8 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   machine.setObserver(&observer);
   Interpreter interpreter;
   interpreter.registers = registersOf(machine.state().cpu);
+  const CartridgeMap map = detectCartridgeMap(replay.rom);
+  const std::size_t imageBytes = replay.rom.size();
 
   // The recorded run is presented as the cartridge disassembler presents it: the
   // pads for a frame as the frame begins, a frame beginning when the beam wraps to
@@ -339,35 +244,28 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
     }
 
     // What the machine took: a hardware request due at the boundary, or the
-    // instruction at the program counter.
+    // instruction at the program counter. The site is reported, and the node
+    // looked up, at the address the tree places the instruction.
     const bool nmi = before.nmiPending;
     const bool irq = !nmi && before.irqLine && (before.p & kCpuFlagI) == 0;
     const Registers registersBefore = interpreter.registers;
     Divergence prototype;
     prototype.instruction = step;
-    prototype.site = (static_cast<Address>(before.pbr) << 16) | before.pc;
-    const std::size_t divergencesBefore = report.divergences.size();
+    prototype.site =
+        placed(map, imageBytes, (static_cast<Address>(before.pbr) << 16) | before.pc);
     std::uint32_t cycles = 0;
     const Node* node = nullptr;
 
     if (nmi || irq) {
       prototype.name = nmi ? "NMI" : "IRQ";
-      prototype.mode.emulation = before.e;
-      prototype.mode.accumulator8 = registersBefore.accumulator8();
-      prototype.mode.index8 = registersBefore.index8();
-      CheckingBus bus(observer.data, interpreter, report.divergences, prototype);
-      cycles = interpreter.interrupt(nmi ? program.nmi : program.irq, bus);
-      if (bus.cursor < observer.data.size()) {
-        bus.diverge("accesses the machine made that the sequence did not",
-                    observer.data[bus.cursor].address,
-                    static_cast<std::uint32_t>(observer.data.size() - bus.cursor));
-      }
+      cycles = checkInterrupt(interpreter, nmi ? program.nmi : program.irq, observer, after,
+                              prototype, report.divergences);
       ++report.interrupts;
       ++report.constructs[nmi ? "NMI" : "IRQ"];
     } else {
       const Registers& r = interpreter.registers;
-      node = program.find((static_cast<Address>(r.pbr) << 16) | r.pc, r.e, r.accumulator8(),
-                          r.index8());
+      node = program.find(placed(map, imageBytes, (static_cast<Address>(r.pbr) << 16) | r.pc), r.e,
+                          r.accumulator8(), r.index8());
       if (node == nullptr) {
         ++report.unlifted;
         unlifted.insert(prototype.site);
@@ -375,55 +273,17 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
         ++step;
         continue;
       }
-      prototype.name = std::string(node->instruction.mnemonic);
-      prototype.mode = node->mode;
-      CheckingBus bus(observer.data, interpreter, report.divergences, prototype);
-      cycles = interpreter.execute(*node, bus);
-      if (bus.cursor < observer.data.size()) {
-        bus.diverge("accesses the machine made that the node did not",
-                    observer.data[bus.cursor].address,
-                    static_cast<std::uint32_t>(observer.data.size() - bus.cursor));
-      }
+      cycles = checkNode(interpreter, *node, observer, after, prototype, report.divergences);
       ++report.instructions;
       ++report.forms[std::string(node->instruction.mnemonic) + " " +
                      std::string(addressingName(node->instruction.addressing)) + " " +
                      modeName(node->mode)];
     }
-
-    // The registers after, and the cycles.
-    const Registers machineAfter = registersOf(after);
-    const Registers& irAfter = interpreter.registers;
-    auto check = [&](const char* what, std::uint32_t machine, std::uint32_t ir) {
-      if (machine == ir) return;
-      Divergence d = prototype;
-      d.what = what;
-      d.expected = machine;
-      d.actual = ir;
-      report.divergences.push_back(std::move(d));
-    };
-    check("register pc", machineAfter.pc, irAfter.pc);
-    check("register s", machineAfter.s, irAfter.s);
-    check("register a", machineAfter.a, irAfter.a);
-    check("register x", machineAfter.x, irAfter.x);
-    check("register y", machineAfter.y, irAfter.y);
-    check("register d", machineAfter.d, irAfter.d);
-    check("register p", machineAfter.p, irAfter.p);
-    check("register dbr", machineAfter.dbr, irAfter.dbr);
-    check("register pbr", machineAfter.pbr, irAfter.pbr);
-    check("register e", machineAfter.e ? 1u : 0u, irAfter.e ? 1u : 0u);
-    check("run state", static_cast<std::uint32_t>(machineAfter.run),
-          static_cast<std::uint32_t>(irAfter.run));
-    check("cycles", observer.cpuCycles, cycles);
     report.cpuCycles += observer.cpuCycles;
 
     if (node != nullptr) {
-      cover(report, *node, registersBefore, machineAfter, observer.data, cycles, lastMnemonic);
+      cover(report, *node, registersBefore, registersOf(after), observer.data, cycles, lastMnemonic);
       lastMnemonic = std::string(node->instruction.mnemonic);
-    }
-    if (report.divergences.size() != divergencesBefore) {
-      // Realigned, so the run goes on from the machine's truth rather than
-      // compounding one disagreement into every step after it.
-      interpreter.registers = machineAfter;
     }
     if (after.run == CpuRunState::Stopped) report.stopped = true;
     ++step;
