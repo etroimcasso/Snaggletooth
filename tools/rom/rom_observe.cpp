@@ -147,6 +147,18 @@ bool inSystemBank(std::uint32_t address) {
 
 constexpr std::uint16_t kMdmaen = 0x420Bu;
 constexpr std::uint16_t kHdmaen = 0x420Cu;
+constexpr std::uint16_t kWmdata = 0x2180u;
+
+// The cap on an origin's intervals, above which it is widened to its hull:
+// set by exactness — raised until no staged range on a real cartridge is
+// approximate — and never by cost.
+constexpr std::size_t kOriginCap = 64;
+
+// Whether an address is the work-RAM data port.
+bool isPort(std::uint32_t address) {
+  return inSystemBank(address) && (address & 0xFFFFu) == kWmdata;
+}
+
 
 // The address the step says follows `address`.
 Address stepped(Address address, MovedStep step) {
@@ -179,15 +191,25 @@ RangeKey keyOf(const MovedRange& r) {
 // The loop tells the recorder the instruction about to run before every step,
 // so a CPU write to `MDMAEN` or `HDMAEN` — which the observer sees like any
 // other access — names the site every byte the channel then moves belongs to.
+// The recorder also keeps the shadow current for what the engines and the port
+// move, which never passes through the interpreter: an engine's read carries
+// the origin of the byte it read, its write lands that origin in work RAM
+// under the trigger's name, and a byte the port reaches on the CPU's behalf is
+// queued for the interpreter to pair with the CPU's own access. A byte an
+// engine reads out of work RAM is folded into the origin of the range it
+// belongs to, with the writer that put it there.
 struct Recorder final : BusObserver {
   const Snes& machine;
+  ir::Provenance& shadow;
   Address site = 0;  // the instruction about to run
   ir::StepObserver cpu;  // what the CPU did this step: its fetches, its data accesses, its cycles
 
-  // An open range and where its next byte is expected.
+  // An open range, where its next byte is expected, and — for a range read out
+  // of work RAM — who wrote its bytes and where they came from.
   struct Open {
     MovedRange range;
     Address next = 0;
+    std::vector<StagedWriter> writers;
   };
   std::array<std::optional<Open>, 8> dma;       // a general-purpose transfer per channel
   std::array<std::optional<Open>, 8> table;     // an HDMA table per channel
@@ -199,7 +221,19 @@ struct Recorder final : BusObserver {
   std::map<RangeKey, std::size_t> index;  // a closed range's place in `out`
   std::vector<MovedRange> out;
 
-  explicit Recorder(const Snes& m) : machine(m) {}
+  // The origin of the byte an engine is carrying between its read and its
+  // write, and the trigger it moves under.
+  std::optional<ir::Origin> carried;
+  Address carrier = 0;
+
+  // The port's own access to work RAM, held until the access to `$2180` that
+  // caused it says whose it was: the machine reports the port's first.
+  std::optional<BusAccess> port;
+
+  // The staged extents, each accumulating over every range with that extent.
+  std::map<std::pair<Address, std::uint32_t>, StagedRange> staged;
+
+  Recorder(const Snes& m, ir::Provenance& p) : machine(m), shadow(p) {}
 
   void close(std::optional<Open>& open) {
     if (!open) return;
@@ -211,7 +245,62 @@ struct Recorder final : BusObserver {
     } else {
       ++out[found->second].times;
     }
+    if (!open->writers.empty() && open->range.step != MovedStep::Fixed) stage(*open);
     open.reset();
+  }
+
+  // Folds a closed range read out of work RAM into its extent.
+  void stage(const Open& open) {
+    const std::pair<Address, std::uint32_t> extent{extentStart(open.range), open.range.bytes};
+    StagedRange& range = staged[extent];
+    range.memory = extent.first;
+    range.bytes = extent.second;
+    for (const StagedWriter& writer : open.writers) {
+      ir::Origins::merge(range.origin, writer.origin);
+      const auto same = std::find_if(range.writers.begin(), range.writers.end(), [&](const StagedWriter& w) {
+        return w.writer == writer.writer && w.unwritten == writer.unwritten;
+      });
+      if (same == range.writers.end()) {
+        range.writers.push_back(writer);
+      } else {
+        same->bytes += writer.bytes;
+        ir::Origins::merge(same->origin, writer.origin);
+        ir::OriginSet held;
+        held.image = std::move(same->sources);
+        ir::OriginSet more;
+        more.image = writer.sources;
+        ir::Origins::merge(held, more);
+        same->sources = std::move(held.image);
+      }
+    }
+  }
+
+  // A byte an engine read out of work RAM for the range that is open: its
+  // origin and its writer join the range's.
+  void fold(Open& open, Address address) {
+    const std::optional<ir::Origin> origin = shadow.originOf(address);
+    if (!origin) return;
+    const std::optional<ir::Writer> writer = shadow.writerOf(address);
+    const StagedWriter key{.writer = writer.value_or(ir::Writer{}),
+                           .unwritten = !writer.has_value(),
+                           .bytes = 0,
+                           .origin = {},
+                           .sources = {}};
+    auto same = std::find_if(open.writers.begin(), open.writers.end(), [&](const StagedWriter& w) {
+      return w.writer == key.writer && w.unwritten == key.unwritten;
+    });
+    if (same == open.writers.end()) {
+      open.writers.push_back(key);
+      same = open.writers.end() - 1;
+    }
+    ++same->bytes;
+    shadow.origins().accumulate(same->origin, *origin);
+    ir::OriginSet sources;
+    sources.image = shadow.sourcesOf(address);
+    ir::OriginSet held;
+    held.image = std::move(same->sources);
+    ir::Origins::merge(held, sources);
+    same->sources = std::move(held.image);
   }
 
   void closeChannel(std::uint8_t channel) {
@@ -232,8 +321,9 @@ struct Recorder final : BusObserver {
     for (std::uint8_t c = 0; c < 8; ++c) closeChannel(c);
   }
 
-  // A byte of `kind` the channel moved at `address` on the A bus.
-  void moved(std::uint8_t channel, MovedKind kind, Address address) {
+  // A byte of `kind` the channel moved at `address` on the A bus; `read` when
+  // the engine read it there.
+  void moved(std::uint8_t channel, MovedKind kind, Address address, bool read) {
     std::optional<Open>& open =
         kind == MovedKind::Dma ? dma[channel] : kind == MovedKind::Table ? table[channel] : indirect[channel];
     const DmaChannel& ch = machine.state().dma[channel];
@@ -252,6 +342,7 @@ struct Recorder final : BusObserver {
         open->range.step == step) {
       ++open->range.bytes;
       open->next = stepped(address, step);
+      if (read) fold(*open, address);
       return;
     }
     close(open);
@@ -270,10 +361,34 @@ struct Recorder final : BusObserver {
       range.registerName = reg->name;
       range.registerClass = reg->cls;
     }
-    open = Open{.range = range, .next = stepped(address, step)};
+    open = Open{.range = range, .next = stepped(address, step), .writers = {}};
+    if (read) fold(*open, address);
+  }
+
+  // The port's access, now that the access that caused it is here. On an
+  // engine's behalf a write lands the byte the engine is carrying and a read
+  // is what the engine then carries; on the CPU's it is queued for the
+  // interpreter, which pairs it with the CPU's own access to `$2180`.
+  void settlePort(const BusAccess& cause) {
+    const bool engine = (cause.source == AccessSource::Dma || cause.source == AccessSource::Hdma) &&
+                        isPort(cause.address);
+    if (!engine) {
+      (port->write ? shadow.portWrites : shadow.portReads).push_back(port->address);
+    } else if (port->write) {
+      shadow.written(port->address, carried.value_or(ir::kNoOrigin),
+                     ir::Writer{.site = carrier, .engine = true});
+    } else {
+      carried = shadow.originOf(port->address).value_or(ir::kNoOrigin);
+    }
+    port.reset();
   }
 
   void access(const BusAccess& a) override {
+    if (port) settlePort(a);
+    if (a.source == AccessSource::WramPort) {
+      port = a;
+      return;
+    }
     if (a.source == AccessSource::Cpu) {
       cpu.access(a);
       // Only the two start registers matter here: a write to `MDMAEN` names the
@@ -305,11 +420,29 @@ struct Recorder final : BusObserver {
     // The A-bus side of a byte is the read when the byte goes to the register
     // and the write when it comes back from one; the other side is the register.
     const bool toRegister = (machine.state().dma[a.channel].dmap & 0x80u) == 0u;
-    if (a.write == toRegister) return;
     const MovedKind kind = a.source == AccessSource::Dma ? MovedKind::Dma
                            : a.table                     ? MovedKind::Table
                                                          : MovedKind::Indirect;
-    moved(a.channel, kind, a.address);
+    carrier = kind == MovedKind::Dma ? dmaSite[a.channel] : hdmaSite[a.channel];
+    if (a.write == toRegister) {
+      // The register side. A read from a register is what the engine carries
+      // — unless the register is the port, whose own read already said what;
+      // a write ends the byte's journey.
+      if (a.write) {
+        carried.reset();
+      } else if (!isPort(a.address) || !carried) {
+        carried = shadow.at(a.address);
+      }
+      return;
+    }
+    moved(a.channel, kind, a.address, !a.write);
+    if (a.write) {
+      shadow.written(a.address, carried.value_or(ir::kNoOrigin),
+                     ir::Writer{.site = carrier, .engine = true});
+      carried.reset();
+    } else {
+      carried = shadow.at(a.address);
+    }
   }
 
   void internal(std::uint32_t address, std::optional<CycleKind> kind) override {
@@ -333,6 +466,7 @@ bool indirectForm(const ir::Instruction& instruction) {
 struct Lockstep {
   CartridgeMap map;
   std::size_t imageBytes;
+  ir::Provenance& shadow;
   const Cpu65816Backend& backend = cpu65816Backend();
   ir::Interpreter interpreter;
   const std::vector<ir::Effect> nmi = ir::interruptSequence(ir::Interrupt::Nmi);
@@ -359,15 +493,25 @@ struct Lockstep {
   };
   std::map<Address, Values> seen;
   std::set<Address> notedSites;  // a site already named in the notes
+  Address expectedNext = 0;      // where falling through the last instruction leads, raw
   std::vector<ir::Divergence> divergences;
   std::uint64_t instructions = 0;
   std::uint64_t interrupts = 0;
   std::uint64_t diverged = 0;
   std::uint64_t steps = 0;
 
-  Lockstep(CartridgeMap m, std::size_t bytes, const Cpu65816State& start)
-      : map(m), imageBytes(bytes) {
+  Lockstep(CartridgeMap m, std::size_t bytes, const Cpu65816State& start, ir::Provenance& p)
+      : map(m), imageBytes(bytes), shadow(p) {
     interpreter.registers = ir::registersOf(start);
+    interpreter.shadow = &shadow;
+  }
+
+  // What the port did on the CPU's behalf this step is paired with the CPU's
+  // accesses as the interpreter runs them; whatever is left over is dropped
+  // with the step.
+  void clearPort() {
+    shadow.portReads.clear();
+    shadow.portWrites.clear();
   }
 
   std::string modeText(const Cpu65816Mode& mode) const {
@@ -382,11 +526,15 @@ struct Lockstep {
       // A halted cycle: nothing ran. If a line ended the wait, the interpreter's
       // wait ends with it.
       if (after.run == CpuRunState::Running) interpreter.release();
+      clearPort();
       return;
     }
     // A transfer engine held the bus for the whole step; the instruction is
     // still ahead of the CPU and is seen on the step that runs it.
-    if (!observed.cpuRan) return;
+    if (!observed.cpuRan) {
+      clearPort();
+      return;
+    }
 
     const Address rawSite = (static_cast<Address>(before.pbr) << 16) | before.pc;
     const Address site = placed(map, imageBytes, rawSite);
@@ -401,10 +549,17 @@ struct Lockstep {
     const bool irqTaken = !nmiTaken && before.irqLine && (before.p & kCpuFlagI) == 0;
     if (nmiTaken || irqTaken) {
       prototype.name = nmiTaken ? "NMI" : "IRQ";
+      shadow.site = site;
+      shadow.flowBroke();
+      shadow.called();
       ir::checkInterrupt(interpreter, nmiTaken ? nmi : irq, observed, after, prototype, divergences);
       ++interrupts;
       expectedReturns.insert(site);
-      if (divergences.size() != divergencesBefore) noteDivergence(prototype.name, site, before, notes);
+      if (divergences.size() != divergencesBefore) {
+        noteDivergence(prototype.name, site, before, notes);
+        shadow.forgetPlaces();
+      }
+      clearPort();
       return;
     }
 
@@ -426,6 +581,8 @@ struct Lockstep {
                           "; the step is not checked");
         }
         interpreter.registers = ir::registersOf(after);
+        shadow.forgetPlaces();
+        clearPort();
         return;
       }
       found = nodes.emplace(key, ir::liftInstruction(decoded->instruction, mode)).first;
@@ -439,11 +596,22 @@ struct Lockstep {
       values.dbr.insert(before.dbr);
     }
 
+    // The shadow follows the instruction under its site, told when the CPU did
+    // not fall through to it — which is what a stream's straight run means.
+    shadow.site = site;
+    if (rawSite != expectedNext) shadow.flowBroke();
+    expectedNext = backend.following(rawSite, node.instruction.length);
     ir::checkNode(interpreter, node, observed, after, prototype, divergences);
     ++instructions;
     if (divergences.size() != divergencesBefore) {
       noteDivergence(describeNode(node), site, before, notes);
+      shadow.forgetPlaces();
     }
+    clearPort();
+    // An invocation begins at a call and ends at a return, by the chip's own
+    // rules: a `PEA`/`RTS` jump ends one too, and a tail jump does not.
+    if (node.instruction.flow == ir::Flow::Call) shadow.called();
+    if (node.instruction.flow == ir::Flow::Return) shadow.returned();
 
     // Where the CPU went, against what the instruction names: the address
     // after it, for a form that falls through; its constant target; the
@@ -527,6 +695,8 @@ std::string_view movedKindName(MovedKind kind) {
     case MovedKind::Dma: return "dma";
     case MovedKind::Table: return "table";
     case MovedKind::Indirect: return "indirect";
+    case MovedKind::Stream: return "stream";
+    case MovedKind::Staged: return "staged";
   }
   return "dma";
 }
@@ -541,6 +711,21 @@ std::string_view movedStepName(MovedStep step) {
 }
 
 bool sameRange(const MovedRange& a, const MovedRange& b) { return keyOf(a) == keyOf(b); }
+
+Address extentStart(const MovedRange& range) {
+  if (range.step != MovedStep::Decrement) return range.memory;
+  const Address bank = range.memory & 0xFF0000u;
+  return bank | static_cast<std::uint16_t>((range.memory & 0xFFFFu) - (range.bytes - 1u));
+}
+
+bool sameExtent(const StagedRange& a, const StagedRange& b) {
+  return a.memory == b.memory && a.bytes == b.bytes;
+}
+
+bool sameStream(const StreamedRange& a, const StreamedRange& b) {
+  return a.site == b.site && a.registerAddress == b.registerAddress && a.romOffset == b.romOffset &&
+         a.bytes == b.bytes;
+}
 
 bool rangeBefore(const MovedRange& a, const MovedRange& b) {
   if (a.site != b.site) return a.site < b.site;
@@ -567,9 +752,10 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   const CartridgeMap map = header->map;
 
   Snes machine{SnesConfig{.rom = rom}};
-  Recorder recorder{machine};
+  ir::Provenance shadow{map, rom.size(), kOriginCap};
+  Recorder recorder{machine, shadow};
   machine.setObserver(&recorder);
-  Lockstep lockstep{map, rom.size(), machine.state().cpu};
+  Lockstep lockstep{map, rom.size(), machine.state().cpu, shadow};
   std::set<std::tuple<Address, Address, std::uint32_t>> seen;
   std::set<Address> unreadableSites;
   std::set<Address> unconfirmedSites;
@@ -671,6 +857,41 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   observation.interrupts = lockstep.interrupts;
   observation.nodes = lockstep.nodes.size();
   observation.divergences = lockstep.diverged;
+
+  // What was staged: every extent, its writers most bytes first.
+  for (auto& [extent, range] : recorder.staged) {
+    std::sort(range.writers.begin(), range.writers.end(),
+              [](const StagedWriter& a, const StagedWriter& b) {
+                if (a.bytes != b.bytes) return a.bytes > b.bytes;
+                if (a.unwritten != b.unwritten) return !a.unwritten;
+                return a.writer < b.writer;
+              });
+    observation.staged.push_back(std::move(range));
+  }
+  // What the CPU streamed.
+  shadow.finish();
+  for (const ir::Stream& stream : shadow.streams()) {
+    StreamedRange range{.site = stream.site,
+                        .registerAddress = stream.registerAddress,
+                        .registerName = {},
+                        .registerClass = std::nullopt,
+                        .romOffset = stream.first,
+                        .bytes = static_cast<std::uint32_t>(stream.bytes),
+                        .times = stream.times};
+    if (const std::optional<Cpu65816Register> reg = cpu65816Register(range.registerAddress)) {
+      range.registerName = reg->name;
+      range.registerClass = reg->cls;
+    }
+    observation.streamed.push_back(range);
+  }
+  std::sort(observation.streamed.begin(), observation.streamed.end(),
+            [](const StreamedRange& a, const StreamedRange& b) {
+              if (a.site != b.site) return a.site < b.site;
+              if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
+              return a.romOffset < b.romOffset;
+            });
+  observation.originSets = shadow.origins().interned();
+  observation.originCap = shadow.origins().cap();
   return observation;
 }
 

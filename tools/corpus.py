@@ -21,12 +21,14 @@ run's and the replay's length (sixty by default).
 `--facts` and `--routines` add the corpus-wide aggregates the manifests carry:
 every hardware access by class and by register, every transfer the code set up
 by destination, every range a run saw move by destination class and by kind,
-every file lifted by its directory with the bytes it holds, and every routine
-with what it calls and reaches.
+every file lifted by its directory with the bytes it holds, every staged
+extent by what the shadow found of its source — exact, approximate, computed,
+from a register, unwritten — and every routine with what it calls and reaches.
 
 Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
-`moved`, `asset`, `state` and `seen` lines, so a corpus run says how far the
-trace, the run, the analysis and the lift reached.
+`moved`, `asset`, `origin`, `staged`, `streamed`, `state` and `seen` lines, so
+a corpus run says how far the trace, the run, the analysis, the shadow and the
+lift reached.
 
 An image is OK only when every command exits 0 and the rebuilt image matches;
 the script exits 0 only when every image is OK. A failure's whole output is
@@ -79,8 +81,46 @@ def facts(tree):
     #       <step> bytes <n> as <kind> times <n>
     moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
     # asset <path> <class> as <kind> from <address> bytes <n>
-    assets = [(w[1].split("/")[0], int(w[8])) for w in manifestLines(tree, "asset", 9)]
+    assets = [(w[1].split("/")[0], int(w[8]), w[4]) for w in manifestLines(tree, "asset", 9)]
     return classes, registers, valued, len(accesses), dmas, moved, assets
+
+
+def staged(tree):
+    """The `origin` lines by what they say of a source: `exact` or `approximate`
+    with the bytes the source spans and the bytes the origin uses within it,
+    `computed`, `register`, `save`, `unwritten`; and the `staged` and `streamed`
+    lines counted."""
+    kinds = collections.Counter()
+    spanned = 0
+    used = 0
+    manifest = tree / "project.manifest"
+    if not manifest.exists():
+        return kinds, spanned, used, 0, 0
+    stagedLines = 0
+    streamedLines = 0
+    for line in manifest.read_text(errors="replace").splitlines():
+        w = line.split()
+        if not w:
+            continue
+        if w[0] == "staged":
+            stagedLines += 1
+        elif w[0] == "streamed":
+            streamedLines += 1
+        elif w[0] == "origin":
+            # origin <address> bytes <n> from <address> bytes <n> using <n> by <label> exact|approximate
+            # origin <address> bytes <n> from register <address> <name> by <label>
+            # origin <address> bytes <n> from save by <label>
+            # origin <address> bytes <n> computed by <label>
+            # origin <address> bytes <n> unwritten
+            if w[4] == "computed" or w[4] == "unwritten":
+                kinds[w[4]] += 1
+            elif w[5] in ("register", "save"):
+                kinds[w[5]] += 1
+            else:
+                kinds[w[-1]] += 1
+                spanned += int(w[7])
+                used += int(w[9])
+    return kinds, spanned, used, stagedLines, streamedLines
 
 
 def fromImage(address):
@@ -135,6 +175,9 @@ def main():
     corpusMovedKind = collections.Counter()
     corpusAssets = collections.Counter()
     corpusAssetBytes = collections.Counter()
+    corpusAssetKinds = collections.Counter()
+    corpusAssetKindBytes = collections.Counter()
+    corpusSources = collections.Counter()
     corpusReaches = collections.Counter()
     corpusThrough = collections.Counter()
     factTotals = collections.Counter()
@@ -190,6 +233,7 @@ def main():
                                         if line.strip() and not line.startswith(";"))
             summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['ran']} ran, "
                         f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['asset']} assets, "
+                        f"{kinds['origin']} origin, {kinds['staged']} staged, {kinds['streamed']} streamed, "
                         f"{kinds['state']} state lines, {kinds['seen']} seen lines")
         if replayLine:
             summary += f"; {replayLine}"
@@ -213,14 +257,24 @@ def main():
                     imageRanges += 1
             factTotals["movedFromImage"] += imageRanges
             factTotals["assets"] += len(assets)
-            for directory, size in assets:
+            for directory, size, kind in assets:
                 corpusAssets[directory] += 1
                 corpusAssetBytes[directory] += size
+                corpusAssetKinds[kind] += 1
+                corpusAssetKindBytes[kind] += size
                 factTotals["assetBytes"] += size
+            sourceKinds, spanned, used, stagedLines, streamedLines = staged(tree)
+            corpusSources.update(sourceKinds)
+            factTotals["sourceSpanned"] += spanned
+            factTotals["sourceUsed"] += used
+            factTotals["staged"] += stagedLines
+            factTotals["streamed"] += streamedLines
             top = ", ".join(f"{k} {v}" for k, v in classes.most_common(5))
+            sources = ", ".join(f"{k} {v}" for k, v in sourceKinds.most_common())
             summary += (f"; {accesses} accesses ({valued} with a value), {len(dmas)} transfers, "
                         f"{len(movedLines)} moved ({imageRanges} from the image), "
-                        f"{len(assets)} assets ({sum(s for _, s in assets)} bytes); {top}")
+                        f"{len(assets)} assets ({sum(s for _, s, _ in assets)} bytes); {top}"
+                        f"; sources: {sources or 'none'}, {spanned} bytes spanned, {used} used")
         if args.routines:
             found = routines(tree)
             leaf = sum(1 for r in found if not r[3])
@@ -267,6 +321,14 @@ def main():
         print("\nfiles lifted by directory, whole corpus:")
         for k, v in corpusAssets.most_common():
             print(f"  {k:<12} {v} files, {corpusAssetBytes[k]} bytes")
+        print("\nfiles lifted by kind, whole corpus:")
+        for k, v in corpusAssetKinds.most_common():
+            print(f"  {k:<12} {v} files, {corpusAssetKindBytes[k]} bytes")
+        print(f"\nstaged sources, whole corpus ({factTotals['staged']} staged lines, "
+              f"{factTotals['streamed']} streams; {factTotals['sourceSpanned']} bytes spanned, "
+              f"{factTotals['sourceUsed']} used):")
+        for k, v in corpusSources.most_common():
+            print(f"  {k:<12} {v}")
         print("\nthe thirty most-reached registers, whole corpus:")
         for k, v in corpusRegisters.most_common(30):
             print(f"  {k:<16} {v}")

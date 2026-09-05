@@ -34,6 +34,7 @@ std::uint8_t flagMask(Place flag) {
 struct Run65816 {
   Registers& r;
   Bus& bus;
+  Shadow* shadow;  // told every move a value makes, or null
   std::array<std::uint32_t, 4> temps{};
   bool crossed = false;  // the last bank-relative address's low-byte addition carried
   std::uint32_t cycles = 0;
@@ -111,6 +112,17 @@ struct Run65816 {
     }
   }
 
+  // ---- the shadow ----
+  // The three shapes a value moves in between places. Each is one call, made
+  // after the value has moved, so a shadow that reads the registers sees them
+  // as the effect left them.
+  void shadowCopy(Place dst, unsigned bits, Place a) {
+    if (shadow != nullptr) shadow->copy(dst, bits, a);
+  }
+  void shadowCombine(Place dst, unsigned bits, Place a, Place b, Place c = Place::None) {
+    if (shadow != nullptr) shadow->combine(dst, bits, a, b, c);
+  }
+
   // ---- flags ----
   void setNZ(std::uint32_t value, unsigned bits) {
     const std::uint32_t v = value & mask(bits);
@@ -149,41 +161,55 @@ struct Run65816 {
   }
 
   // ---- the bus ----
-  [[nodiscard]] std::uint32_t load(Address address, unsigned bits, Step step, Access access) {
+  // A load lands in `dst` and the shadow is told each byte's address; a store
+  // carries `source`'s bytes and the shadow is told where each landed.
+  [[nodiscard]] std::uint32_t load(Address address, unsigned bits, Step step, Access access,
+                                   Place dst) {
     std::uint32_t value = 0;
     Address at = address & 0xFFFFFFu;
     for (unsigned byte = 0; byte < bits / 8; ++byte) {
       value |= static_cast<std::uint32_t>(bus.read(at, access)) << (8 * byte);
+      if (shadow != nullptr) shadow->load(dst, bits, byte, at);
       at = next(at, step);
     }
     return value;
   }
-  void store(Address address, std::uint32_t value, unsigned bits, Step step, Access access) {
+  void store(Address address, std::uint32_t value, unsigned bits, Step step, Access access,
+             Place source) {
     Address at = address & 0xFFFFFFu;
     for (unsigned byte = 0; byte < bits / 8; ++byte) {
       bus.write(at, static_cast<std::uint8_t>(value >> (8 * byte)), access);
+      if (shadow != nullptr) shadow->store(at, source, byte);
       at = next(at, step);
     }
   }
   // A read-modify-write's write-back: the high byte first, at the stepped
   // address, then the low byte at the address itself.
   void storeHighFirst(Address address, std::uint32_t value, unsigned bits, Step step,
-                      Access access) {
+                      Access access, Place source) {
     const Address low = address & 0xFFFFFFu;
-    if (bits == 16) bus.write(next(low, step), static_cast<std::uint8_t>(value >> 8), access);
+    if (bits == 16) {
+      const Address high = next(low, step);
+      bus.write(high, static_cast<std::uint8_t>(value >> 8), access);
+      if (shadow != nullptr) shadow->store(high, source, 1);
+    }
     bus.write(low, static_cast<std::uint8_t>(value), access);
+    if (shadow != nullptr) shadow->store(low, source, 0);
   }
 
   // ---- the stack ----
-  void pushByte(std::uint8_t value, bool pinned) {
+  void pushByte(std::uint8_t value, bool pinned, Place source, unsigned byte) {
     bus.write(r.s, value, Access::Data);
+    if (shadow != nullptr) shadow->store(r.s, source, byte);
     r.s = (r.e && pinned) ? static_cast<std::uint16_t>(0x0100u | ((r.s - 1u) & 0xFFu))
                           : static_cast<std::uint16_t>(r.s - 1u);
   }
-  std::uint8_t pullByte(bool pinned) {
+  std::uint8_t pullByte(bool pinned, Place dst, unsigned bits, unsigned byte) {
     r.s = (r.e && pinned) ? static_cast<std::uint16_t>(0x0100u | ((r.s + 1u) & 0xFFu))
                           : static_cast<std::uint16_t>(r.s + 1u);
-    return bus.read(r.s, Access::Data);
+    const std::uint8_t value = bus.read(r.s, Access::Data);
+    if (shadow != nullptr) shadow->load(dst, bits, byte, r.s);
+    return value;
   }
   void settle() {
     if (r.e) r.s = static_cast<std::uint16_t>(0x0100u | (r.s & 0xFFu));
@@ -279,19 +305,23 @@ struct Run65816 {
     if (!holds(e.when)) return;
     const unsigned w = bits(e.width);
     switch (e.op) {
-      case Op::Set: put(e.dst.place, at(e.a, w), w); break;
+      case Op::Set:
+        put(e.dst.place, at(e.a, w), w);
+        shadowCopy(e.dst.place, w, e.a.place);
+        break;
       case Op::SetNZ: {
         const std::uint32_t v = at(e.a, w);
         put(e.dst.place, v, w);
+        shadowCopy(e.dst.place, w, e.a.place);
         setNZ(v, w);
         break;
       }
-      case Op::Add: put(e.dst.place, raw(e.a) + raw(e.b), w); break;
-      case Op::Sub: put(e.dst.place, raw(e.a) - raw(e.b), w); break;
-      case Op::And: put(e.dst.place, raw(e.a) & raw(e.b), w); break;
-      case Op::Or: put(e.dst.place, raw(e.a) | raw(e.b), w); break;
-      case Op::Xor: put(e.dst.place, raw(e.a) ^ raw(e.b), w); break;
-      case Op::Shr: put(e.dst.place, raw(e.a) >> raw(e.b), w); break;
+      case Op::Add: put(e.dst.place, raw(e.a) + raw(e.b), w); shadowCombine(e.dst.place, w, e.a.place, e.b.place); break;
+      case Op::Sub: put(e.dst.place, raw(e.a) - raw(e.b), w); shadowCombine(e.dst.place, w, e.a.place, e.b.place); break;
+      case Op::And: put(e.dst.place, raw(e.a) & raw(e.b), w); shadowCombine(e.dst.place, w, e.a.place, e.b.place); break;
+      case Op::Or: put(e.dst.place, raw(e.a) | raw(e.b), w); shadowCombine(e.dst.place, w, e.a.place, e.b.place); break;
+      case Op::Xor: put(e.dst.place, raw(e.a) ^ raw(e.b), w); shadowCombine(e.dst.place, w, e.a.place, e.b.place); break;
+      case Op::Shr: put(e.dst.place, raw(e.a) >> raw(e.b), w); shadowCombine(e.dst.place, w, e.a.place, e.b.place); break;
 
       case Op::DirectAddress: {
         const std::uint32_t offset = raw(e.a) & 0xFFu;
@@ -300,6 +330,7 @@ struct Run65816 {
             directPageWrap() ? ((r.d & 0xFF00u) | ((offset + index) & 0xFFu))
                              : ((r.d + offset + index) & 0xFFFFu);
         put(e.dst.place, address, 24);
+        shadowCombine(e.dst.place, 24, e.a.place, e.b.place, Place::D);
         break;
       }
       case Op::BankAddress: {
@@ -307,26 +338,34 @@ struct Run65816 {
         const std::uint32_t index = raw(e.b);
         crossed = ((offset & 0xFFu) + (index & 0xFFu)) > 0xFFu;
         put(e.dst.place, (static_cast<std::uint32_t>(r.dbr) << 16 | offset) + index, 24);
+        shadowCombine(e.dst.place, 24, e.a.place, e.b.place, Place::DBR);
         break;
       }
-      case Op::LongAddress: put(e.dst.place, (raw(e.a) & 0xFFFFFFu) + raw(e.b), 24); break;
+      case Op::LongAddress:
+        put(e.dst.place, (raw(e.a) & 0xFFFFFFu) + raw(e.b), 24);
+        shadowCombine(e.dst.place, 24, e.a.place, e.b.place);
+        break;
       case Op::ProgramAddress:
         put(e.dst.place, static_cast<std::uint32_t>(r.pbr) << 16 | (raw(e.a) & 0xFFFFu), 24);
+        shadowCombine(e.dst.place, 24, e.a.place, Place::PBR);
         break;
-      case Op::StackAddress: put(e.dst.place, (r.s + raw(e.a)) & 0xFFFFu, 24); break;
+      case Op::StackAddress:
+        put(e.dst.place, (r.s + raw(e.a)) & 0xFFFFu, 24);
+        shadowCombine(e.dst.place, 24, e.a.place, Place::S);
+        break;
 
-      case Op::Load: put(e.dst.place, load(raw(e.a), w, e.step, e.access), w); break;
-      case Op::Store: store(raw(e.a), at(e.b, w), w, e.step, e.access); break;
-      case Op::StoreRmw: storeHighFirst(raw(e.a), at(e.b, w), w, e.step, e.access); break;
+      case Op::Load: put(e.dst.place, load(raw(e.a), w, e.step, e.access, e.dst.place), w); break;
+      case Op::Store: store(raw(e.a), at(e.b, w), w, e.step, e.access, e.b.place); break;
+      case Op::StoreRmw: storeHighFirst(raw(e.a), at(e.b, w), w, e.step, e.access, e.b.place); break;
       case Op::Push: {
         const std::uint32_t v = at(e.a, w);
-        if (w == 16) pushByte(static_cast<std::uint8_t>(v >> 8), e.pinned);
-        pushByte(static_cast<std::uint8_t>(v), e.pinned);
+        if (w == 16) pushByte(static_cast<std::uint8_t>(v >> 8), e.pinned, e.a.place, 1);
+        pushByte(static_cast<std::uint8_t>(v), e.pinned, e.a.place, 0);
         break;
       }
       case Op::Pull: {
-        std::uint32_t v = pullByte(e.pinned);
-        if (w == 16) v |= static_cast<std::uint32_t>(pullByte(e.pinned)) << 8;
+        std::uint32_t v = pullByte(e.pinned, e.dst.place, w, 0);
+        if (w == 16) v |= static_cast<std::uint32_t>(pullByte(e.pinned, e.dst.place, w, 1)) << 8;
         put(e.dst.place, v, w);
         break;
       }
@@ -334,9 +373,11 @@ struct Run65816 {
 
       case Op::Adc:
         put(e.dst.place, addWithCarry(at(e.a, w), at(e.b, w), false, w), w);
+        shadowCombine(e.dst.place, w, e.a.place, e.b.place);
         break;
       case Op::Sbc:
         put(e.dst.place, addWithCarry(at(e.a, w), at(e.b, w), true, w), w);
+        shadowCombine(e.dst.place, w, e.a.place, e.b.place);
         break;
       case Op::Cmp: {
         const std::uint32_t a = at(e.a, w);
@@ -358,6 +399,7 @@ struct Run65816 {
         setFlag(kFlagC, (a & top(w)) != 0);
         const std::uint32_t v = (a << 1) & mask(w);
         put(e.dst.place, v, w);
+        shadowCombine(e.dst.place, w, e.a.place, Place::None);
         setNZ(v, w);
         break;
       }
@@ -366,6 +408,7 @@ struct Run65816 {
         setFlag(kFlagC, (a & 1u) != 0);
         const std::uint32_t v = a >> 1;
         put(e.dst.place, v, w);
+        shadowCombine(e.dst.place, w, e.a.place, Place::None);
         setNZ(v, w);
         break;
       }
@@ -375,6 +418,7 @@ struct Run65816 {
         setFlag(kFlagC, (a & top(w)) != 0);
         const std::uint32_t v = ((a << 1) | cin) & mask(w);
         put(e.dst.place, v, w);
+        shadowCombine(e.dst.place, w, e.a.place, Place::None);
         setNZ(v, w);
         break;
       }
@@ -384,18 +428,21 @@ struct Run65816 {
         setFlag(kFlagC, (a & 1u) != 0);
         const std::uint32_t v = (a >> 1) | cin;
         put(e.dst.place, v, w);
+        shadowCombine(e.dst.place, w, e.a.place, Place::None);
         setNZ(v, w);
         break;
       }
       case Op::Inc: {
         const std::uint32_t v = (at(e.a, w) + 1u) & mask(w);
         put(e.dst.place, v, w);
+        shadowCombine(e.dst.place, w, e.a.place, Place::None);
         setNZ(v, w);
         break;
       }
       case Op::Dec: {
         const std::uint32_t v = (at(e.a, w) - 1u) & mask(w);
         put(e.dst.place, v, w);
+        shadowCombine(e.dst.place, w, e.a.place, Place::None);
         setNZ(v, w);
         break;
       }
@@ -405,6 +452,7 @@ struct Run65816 {
         const std::uint32_t b = at(e.b, w);
         setFlag(kFlagZ, (a & b) == 0);
         put(e.dst.place, e.op == Op::Tsb ? (a | b) : (a & ~b), w);
+        shadowCombine(e.dst.place, w, e.a.place, e.b.place);
         break;
       }
       case Op::WriteP: {
@@ -416,6 +464,7 @@ struct Run65816 {
       }
       case Op::Xba:
         r.a = static_cast<std::uint16_t>(((r.a & 0xFFu) << 8) | ((r.a >> 8) & 0xFFu));
+        if (shadow != nullptr) shadow->exchange();
         setNZ(r.a & 0xFFu, 8);
         break;
       case Op::Xce: {
@@ -439,7 +488,7 @@ struct Run65816 {
 }  // namespace
 
 std::uint32_t Interpreter::execute(const Node& node, Bus& bus) {
-  Run65816 run{registers, bus};
+  Run65816 run{registers, bus, shadow};
   run.normalize();
   run.cycles = node.cost.base[costIndex(registers.accumulator8(), registers.index8())];
   for (effectIndex = 0; effectIndex < node.effects.size(); ++effectIndex) {
@@ -450,7 +499,7 @@ std::uint32_t Interpreter::execute(const Node& node, Bus& bus) {
 
 std::uint32_t Interpreter::interrupt(const std::vector<Effect>& sequence, Bus& bus) {
   release();
-  Run65816 run{registers, bus};
+  Run65816 run{registers, bus, shadow};
   run.normalize();
   for (effectIndex = 0; effectIndex < sequence.size(); ++effectIndex) {
     run.apply(sequence[effectIndex]);

@@ -47,6 +47,7 @@ them, and the interpreter reads the flag when it runs.
 - [Cost](#cost)
 - [Lifting a listing](#lifting-a-listing)
 - [Running a program](#running-a-program)
+- [The shadow](#the-shadow)
 - [Reading a program](#reading-a-program)
 - [Rendering source](#rendering-source)
 - [Running beside the machine](#running-beside-the-machine)
@@ -352,6 +353,48 @@ bus)` runs a hardware sequence the same way and releases a wait first.
 
 The interpreter's own sources include no decoder and no listing, and name no
 byte: the node is all it gets.
+
+## The shadow
+
+The interpreter computes values. A host that wants to follow something else
+about them — where each one came from — sets a `Shadow`, and the interpreter
+tells it every move a value makes: into a place from other places (`copy`,
+`combine`), into a place from the bus (`load`), onto the bus from a place
+(`store`), and the accumulator's halves exchanged. The interpreter never reads
+a shadow back, so a shadow cannot change a value, and a run with none costs one
+null check per effect. Every call names bytes — a place's byte `n` is bits `8n`
+to `8n+7` — and a move `bits` wide touches the low `bits / 8` bytes; a register
+written narrower than it is follows its own rule, which a shadow mirrors for
+what it carries. A flag, the status register and the emulation flag carry
+nothing.
+
+`tools/ir/ir_provenance.h` is the shadow the cartridge disassembler runs: an
+origin beside every value — the image offsets it was computed from, as interned
+interval sets; a mark for a hardware register or the save; nothing for a
+constant — and, byte by byte, the origin and the last writer of work RAM.
+
+```cpp
+#include "ir/ir_provenance.h"
+
+snaggletooth::ir::Provenance shadow{map, imageBytes, /*cap=*/64};
+interpreter.shadow = &shadow;
+shadow.site = placedAddress;      // the instruction about to run, as the tree places it
+interpreter.execute(*node, bus);  // every store to work RAM lands its origin, under `site`
+const std::optional<snaggletooth::ir::Origin> origin = shadow.originOf(0x7F0000u);
+const snaggletooth::ir::OriginSet& set = shadow.origins().of(*origin);  // set.image: the intervals
+```
+
+The rules are data dependence: a load takes the origin of the bytes at the
+address, never of the address; an operation's result takes the union of its
+operands' origins; a constant and a flag have none; a read from a hardware
+register or the save carries the mark. A union wider than the cap is widened to
+its hull and marked `approximate`, and the mark is carried through every union
+after. The shadow also follows every `called()` and `returned()` the host
+reports and keeps each invocation's image reads, which is what makes a decoded
+range's source the whole stream it read; `sourcesOf` answers it for a work-RAM
+byte. What the disassembler does with all of it is
+[snes-disassembler.md §Where the bytes came from](snes-disassembler.md#where-the-bytes-came-from);
+the rules are held by `tests/ir/provenance_test.cpp`, one case each.
 
 ## Reading a program
 
@@ -763,6 +806,9 @@ would mean the layers leak into each other.
 | `Registers`, `Run` | The CPU state the effects name, and whether it is running, waiting or stopped. |
 | `Interpreter::execute(node, bus)`, `interrupt(sequence, bus)`, `release()` | Run a node, run a hardware sequence, release a wait. |
 | `Interpreter::effectIndex` | The index of the effect whose accesses the bus is answering, so a bus can name where an access came from. |
+| `Shadow`, `Interpreter::shadow` | What travels beside a value: told every move the interpreter makes — `copy`, `combine`, `load`, `store`, `exchange` — and never read back. |
+| `Origins`, `Origin`, `OriginSet`, `OriginInterval` | The interned table of origins: an image byte, a hardware register, the save, the union of two; a set's intervals, marks and approximate flag. |
+| `Provenance`, `Writer`, `Stream` | The shadow of a run: work RAM's origin, writer and invocation byte by byte, `originOf`, `writerOf`, `sourcesOf`; `called`, `returned`; the streams the CPU carried. |
 | `differential(program, replay)` | Replay a run on the machine beside the interpreter, held to every access, register and cycle. |
 | `Replay` | The cartridge, the master-cycle budget, the recorded run, and the divergence limit. |
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped; each disagreement with its step, node, effect and the two values; the form and construct histograms. |
@@ -781,11 +827,13 @@ would mean the layers leak into each other.
 The library target is `snaggletooth_ir`; `tools/` is on its public include path,
 so the headers are `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/ir_interpret.h`,
 `ir/ir_render.h`, `ir/ir_text.h` and `ir/ir_dataflow.h`. It links the 65816 disassembler for the
-lift and the renderer. The differential is `snaggletooth_ir_differential`,
+lift and the renderer. The shadow is `snaggletooth_ir_provenance`, header
+`ir/ir_provenance.h`, which links the representation and the cartridge map.
+The differential is `snaggletooth_ir_differential`,
 header `ir/ir_differential.h`, which links the representation and the
 cartridge tools for the recorded run it replays; the cartridge tools link the
-representation for the bank files they render. The commands are `snes_lift`
-and `snes_differential`.
+representation for the bank files they render, and the shadow for the run. The
+commands are `snes_lift` and `snes_differential`.
 
 ## Stability
 

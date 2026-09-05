@@ -49,10 +49,11 @@ using examples::unreadablePointerImage;
 
 constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
-// The manifest without its `seen` block — the last block, written fresh by a
-// run and not at all by a disassembly without one — so what the manifest keeps
-// from one to the next is compared without it.
-std::string withoutSeen(const std::string& manifest) {
+// The manifest without the blocks a run writes fresh and a disassembly without
+// one does not write at all — `origin`, `staged`, `streamed` and `seen` — and
+// without the blank line that stood before each, so what the manifest keeps
+// from one to the next is compared without them.
+std::string withoutRunLines(const std::string& manifest) {
   std::string out;
   std::size_t position = 0;
   while (position < manifest.size()) {
@@ -60,7 +61,14 @@ std::string withoutSeen(const std::string& manifest) {
     const std::string line =
         manifest.substr(position, end == std::string::npos ? std::string::npos : end - position + 1);
     position = end == std::string::npos ? manifest.size() : end + 1;
-    if (line.rfind("seen ", 0) != 0) out += line;
+    const bool fresh = line.rfind("seen ", 0) == 0 || line.rfind("origin ", 0) == 0 ||
+                       line.rfind("staged ", 0) == 0 || line.rfind("streamed ", 0) == 0;
+    if (fresh) continue;
+    if (line == "\n" && out.size() >= 1 && out.back() == '\n' && out.size() >= 2 &&
+        out[out.size() - 2] == '\n') {
+      continue;  // a second blank line in a row
+    }
+    out += line;
   }
   while (out.size() >= 2 && out.compare(out.size() - 2, 2, "\n\n") == 0) out.pop_back();
   return out;
@@ -362,7 +370,7 @@ TEST(RomObserve, AnEarlierRunsSightingsAreTracedFromWithoutRunning) {
   again.reached = input->reached;
   const CartridgeDisassembly replayed = disassembleCartridge(again);
   ASSERT_EQ(replayed.reached.size(), ran.reached.size());
-  EXPECT_EQ(withoutSeen(renderManifest(replayed)), withoutSeen(renderManifest(ran)));
+  EXPECT_EQ(withoutRunLines(renderManifest(replayed)), withoutRunLines(renderManifest(ran)));
   EXPECT_TRUE(replayed.seen.empty()) << "what a run saw is the run's, not read back";
 }
 
@@ -774,7 +782,7 @@ TEST(RomMoved, AnEarlierRunsRangesAreKeptWithoutRunning) {
   again.moved = input->moved;
   const CartridgeDisassembly kept = disassembleCartridge(again);
   ASSERT_EQ(kept.moved.size(), ran.moved.size());
-  EXPECT_EQ(withoutSeen(renderManifest(kept)), withoutSeen(renderManifest(ran)));
+  EXPECT_EQ(withoutRunLines(renderManifest(kept)), withoutRunLines(renderManifest(ran)));
 }
 
 // A manifest's ranges and a new run's are one set: a range this run saw again
@@ -1078,6 +1086,210 @@ TEST(RomLockstep, NoExampleCartridgeDivergesFromTheMachine) {
       EXPECT_EQ(note.find("disagreed"), std::string::npos) << example.name << ": " << note;
     }
   }
+}
+
+// ---- where every byte came from ------------------------------------------------
+//
+// The staging cartridge builds five ranges in work RAM, every way the shadow
+// has a rule for, and sends each; a run of four frames sees all of it. The
+// cases pin what the run says of each extent — its origin, its source, its
+// writer — and the streams the CPU carried.
+
+namespace {
+
+using examples::stagingImage;
+
+const StagedRange* stagedAt(const std::vector<StagedRange>& staged, Address memory,
+                            std::uint32_t bytes) {
+  for (const StagedRange& s : staged) {
+    if (s.memory == memory && s.bytes == bytes) return &s;
+  }
+  return nullptr;
+}
+
+std::vector<ir::OriginInterval> intervals(std::initializer_list<ir::OriginInterval> list) {
+  return list;
+}
+
+}  // namespace
+
+TEST(RomStaged, EveryExtentCarriedOutOfWorkRamIsRecordedOnce) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  ASSERT_EQ(o.staged.size(), 6u);
+  // In address order, then by count.
+  EXPECT_EQ(o.staged[0].memory, 0x7E0400u);
+  EXPECT_EQ(o.staged[1].memory, 0x7E0500u);
+  EXPECT_EQ(o.staged[2].memory, 0x7F0000u);
+  EXPECT_EQ(o.staged[3].memory, 0x7F0100u);
+  EXPECT_EQ(o.staged[4].memory, 0x7F0300u);
+  EXPECT_EQ(o.staged[5].memory, 0x7F0600u);
+  // The table HDMA walks every frame is one extent however many frames walked it.
+  EXPECT_EQ(o.staged[5].bytes, 3u);
+  // The transfer into work RAM through the port is not an extent: its memory
+  // is the image, and nothing was carried out of work RAM by it.
+  EXPECT_EQ(stagedAt(o.staged, 0x009300u, 32), nullptr);
+}
+
+TEST(RomStaged, ADecodedRangesOriginIsTheValueBytesAndItsSourceIsTheStreamWhole) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* tiles = stagedAt(o.staged, 0x7F0000u, 32);
+  ASSERT_NE(tiles, nullptr);
+  // Five runs, each from one value byte: a comb of five, the counts not in it.
+  EXPECT_EQ(tiles->origin.image,
+            intervals({{0x1001u, 0x1001u}, {0x1003u, 0x1003u}, {0x1005u, 0x1005u}, {0x1007u, 0x1007u}, {0x1009u, 0x1009u}}));
+  EXPECT_FALSE(tiles->origin.approximate);
+  EXPECT_TRUE(tiles->origin.registers.empty());
+  // One writer: the decoder's store, thirty-two bytes, every one.
+  ASSERT_EQ(tiles->writers.size(), 1u);
+  const StagedWriter& writer = tiles->writers.front();
+  EXPECT_EQ(writer.writer.site, 0x008116u);
+  EXPECT_FALSE(writer.writer.engine);
+  EXPECT_FALSE(writer.unwritten);
+  EXPECT_EQ(writer.bytes, 32u);
+  // Its source is the stream the decoder read, whole: the counts, the values
+  // and the zero that ended it.
+  EXPECT_EQ(writer.sources, intervals({{0x1000u, 0x100Au}}));
+}
+
+TEST(RomStaged, ACopiedRangesOriginIsExactAndItsSourceIsItself) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* copy = stagedAt(o.staged, 0x7F0100u, 32);
+  ASSERT_NE(copy, nullptr);
+  EXPECT_EQ(copy->origin.image, intervals({{0x1100u, 0x111Fu}}));
+  ASSERT_EQ(copy->writers.size(), 1u);
+  EXPECT_EQ(copy->writers.front().writer.site, 0x008149u);
+  EXPECT_EQ(copy->writers.front().sources, intervals({{0x1100u, 0x111Fu}}));
+}
+
+TEST(RomStaged, ATableAnEngineWalksOutOfWorkRamIsStagedLikeATransfer) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* table = stagedAt(o.staged, 0x7F0600u, 3);
+  ASSERT_NE(table, nullptr);
+  EXPECT_EQ(table->origin.image, intervals({{0x1400u, 0x1402u}}));
+  ASSERT_EQ(table->writers.size(), 1u);
+  EXPECT_EQ(table->writers.front().writer.site, 0x008389u);
+  EXPECT_EQ(table->writers.front().sources, intervals({{0x1400u, 0x1402u}}));
+}
+
+TEST(RomStaged, ARangeBuiltFromConstantsHasNoOrigin) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* fill = stagedAt(o.staged, 0x7F0300u, 16);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_TRUE(fill->origin.empty());
+  ASSERT_EQ(fill->writers.size(), 1u);
+  EXPECT_EQ(fill->writers.front().writer.site, 0x0081A7u);
+  EXPECT_TRUE(fill->writers.front().sources.empty());
+}
+
+TEST(RomStaged, ARangeAnEngineWroteThroughThePortIsTheEnginesAndExact) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* port = stagedAt(o.staged, 0x7E0400u, 32);
+  ASSERT_NE(port, nullptr);
+  EXPECT_EQ(port->origin.image, intervals({{0x1300u, 0x131Fu}}));
+  ASSERT_EQ(port->writers.size(), 1u);
+  EXPECT_TRUE(port->writers.front().writer.engine);
+  EXPECT_EQ(port->writers.front().writer.site, 0x0081FCu);  // the write to MDMAEN
+  EXPECT_EQ(port->writers.front().sources, intervals({{0x1300u, 0x131Fu}}));
+}
+
+TEST(RomStaged, BytesTheCpuWroteThroughThePortAreTheStoresOwn) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* two = stagedAt(o.staged, 0x7E0500u, 2);
+  ASSERT_NE(two, nullptr);
+  EXPECT_EQ(two->origin.image, intervals({{0x1100u, 0x1101u}}));
+  ASSERT_EQ(two->writers.size(), 2u);
+  EXPECT_EQ(two->writers[0].writer.site, 0x008316u);
+  EXPECT_EQ(two->writers[1].writer.site, 0x00831Eu);
+  // Each byte's origin is its own; its source is the run the routine read,
+  // which both stores' invocation read as one.
+  EXPECT_EQ(two->writers[0].origin.image, intervals({{0x1100u, 0x1100u}}));
+  EXPECT_EQ(two->writers[1].origin.image, intervals({{0x1101u, 0x1101u}}));
+  EXPECT_EQ(two->writers[0].sources, intervals({{0x1100u, 0x1101u}}));
+  EXPECT_EQ(two->writers[1].sources, intervals({{0x1100u, 0x1101u}}));
+}
+
+TEST(RomStaged, BytesNothingWroteAreUnwritten) {
+  // The moving cartridge sends a sprite table it never fills whole.
+  const RunObservation o = observe(movingImage(), 3u * kFrame);
+  const StagedRange* table = stagedAt(o.staged, 0x7E0200u, 544);
+  ASSERT_NE(table, nullptr);
+  const auto unwritten = std::find_if(table->writers.begin(), table->writers.end(),
+                                      [](const StagedWriter& w) { return w.unwritten; });
+  ASSERT_NE(unwritten, table->writers.end());
+  EXPECT_TRUE(unwritten->origin.empty());
+  EXPECT_GT(unwritten->bytes, 0u);
+}
+
+TEST(RomStaged, TwoRunsSeeTheSameExtents) {
+  const RunObservation first = observe(stagingImage(), 4u * kFrame);
+  const RunObservation second = observe(stagingImage(), 4u * kFrame);
+  ASSERT_EQ(first.staged.size(), second.staged.size());
+  for (std::size_t i = 0; i < first.staged.size(); ++i) {
+    EXPECT_TRUE(sameExtent(first.staged[i], second.staged[i]));
+    EXPECT_EQ(first.staged[i].origin, second.staged[i].origin);
+    ASSERT_EQ(first.staged[i].writers.size(), second.staged[i].writers.size());
+    for (std::size_t w = 0; w < first.staged[i].writers.size(); ++w) {
+      EXPECT_EQ(first.staged[i].writers[w].sources, second.staged[i].writers[w].sources);
+    }
+  }
+  EXPECT_EQ(first.originSets, second.originSets);
+  EXPECT_GT(first.originSets, 0u);
+  EXPECT_EQ(first.originCap, 64u);
+}
+
+TEST(RomStreamed, ALoopOfStoresFromConsecutiveBytesIsOneStream) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  ASSERT_EQ(o.streamed.size(), 1u);
+  const StreamedRange& stream = o.streamed.front();
+  EXPECT_EQ(stream.site, 0x00818Fu);
+  EXPECT_EQ(stream.registerAddress, 0x002122u);
+  EXPECT_EQ(stream.registerName, "CGDATA");
+  ASSERT_TRUE(stream.registerClass.has_value());
+  EXPECT_EQ(*stream.registerClass, RegisterClass::Cgram);
+  EXPECT_EQ(stream.romOffset, 0x1200u);
+  EXPECT_EQ(stream.bytes, 16u);
+  EXPECT_EQ(stream.times, 1u);
+  EXPECT_TRUE(sameStream(stream, stream));
+}
+
+TEST(RomStreamed, TheLiftingCartridgeStreamsNothing) {
+  // Everything it sends goes through the engines.
+  const RunObservation o = observe(examples::liftingImage(), 3u * kFrame);
+  EXPECT_TRUE(o.streamed.empty());
+}
+
+TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
+  const std::vector<std::uint8_t> rom = stagingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("origin   $7F:0000 bytes 32 from $00:9000 bytes 11 using 5 by sub_008100 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("origin   $7F:0100 bytes 32 from $00:9100 bytes 32 using 32 by sub_008140 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("origin   $7F:0300 bytes 16 computed by sub_0081A0\n"), std::string::npos);
+  EXPECT_NE(manifest.find("origin   $7E:0400 bytes 32 from $00:9300 bytes 32 using 32 by none exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("origin   $7E:0500 bytes 2 from $00:9100 bytes 2 using 2 by sub_008300 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("staged   vram/00_9000.bin at $7F:0000 bytes 32 by sub_008100 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("origin   $7F:0600 bytes 3 from $00:9400 bytes 3 using 3 by sub_008380 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("staged   hdma/00_9400.bin at $7F:0600 bytes 3 by sub_008380 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1\n"),
+            std::string::npos);
+  // The lines are read past, never read back: the next run sees them again.
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(manifest, error);
+  ASSERT_TRUE(input.has_value()) << error;
+  EXPECT_FALSE(parseManifest("origin $7F:0000 bytes 32 nonsense\n", error).has_value() == false &&
+               error.empty());
 }
 
 TEST(RomLockstep, TheTreeStillAssemblesToItsImage) {

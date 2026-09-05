@@ -250,7 +250,7 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   )
   target_link_libraries(snaggletooth_rom PUBLIC
     snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
-    snaggletooth_ir snaggletooth_ir_lockstep)
+    snaggletooth_ir snaggletooth_ir_lockstep snaggletooth_ir_provenance)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -285,6 +285,21 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   # interpreter. Its own target because it links the cartridge tools for the run
   # it replays, and the cartridge tools link the representation for the files
   # they render.
+  # The provenance shadow: the origin beside every value the interpreter
+  # computes and the shadow of work RAM, read by the observed run. It links the
+  # representation and the machine's cartridge map, nothing else.
+  add_library(snaggletooth_ir_provenance STATIC
+    tools/ir/ir_provenance.cpp
+  )
+  target_link_libraries(snaggletooth_ir_provenance PUBLIC snaggletooth_ir snaggletooth::snaggletooth)
+  target_compile_features(snaggletooth_ir_provenance PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_ir_provenance PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_ir_provenance PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_ir_provenance PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   add_library(snaggletooth_ir_differential STATIC
     tools/ir/ir_differential.cpp
   )
@@ -431,6 +446,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/ir/differential_test.cpp
     tests/ir/render_test.cpp
     tests/ir/dataflow_test.cpp
+    tests/ir/provenance_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/observer_test.cpp
     tests/snes/timing_test.cpp

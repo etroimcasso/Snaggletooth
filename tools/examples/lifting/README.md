@@ -24,8 +24,10 @@ two-byte blocks at `$9712` and `$9710`.
 What it shows: a file under each directory the pass writes; ranges that share
 bytes as one file and ranges that touch as two; a range read downward lifted
 in image order; each refusal and its note; a transfer that leaves the image
-lifted as far as it was in it; and the tree still assembling to the image
-through the `INCBIN` lines.
+lifted as far as it was in it — and, since `$01:0000` is work RAM holding what
+the port copied in from `$9900`, those sixteen bytes lifted as the source they
+were staged from; and the tree still assembling to the image through the
+`INCBIN` lines.
 
 Read by `tests/rom/rom_disasm_test.cpp` and `tests/rom/verify_test.cpp`; the
 source of the `asset` lines in

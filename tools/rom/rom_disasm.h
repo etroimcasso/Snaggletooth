@@ -112,12 +112,13 @@ struct SoundProgram {
 };
 
 // A file of bytes the tree lifts out of a bank file: a range a run saw a
-// transfer engine carry from the image to the hardware, written once, as the
-// bytes are in the image, under a directory named for the memory they went to —
-// `vram/`, `cgram/`, `oam/`, `apu/`, and `hdma/` for a table and for a block an
-// indirect entry pointed at — and named by the address of its first byte. The
-// bank file refers to it with `INCBIN` where the bytes were. Ranges that share a
-// byte are one file, the union; ranges that touch are not.
+// transfer engine carry from the image to the hardware — or the image source of
+// a range it carried out of work RAM, or a stream the CPU carried — written
+// once, as the bytes are in the image, under a directory named for the memory
+// they went to — `vram/`, `cgram/`, `oam/`, `apu/`, and `hdma/` for a table and
+// for a block an indirect entry pointed at — and named by the address of its
+// first byte. The bank file refers to it with `INCBIN` where the bytes were.
+// Ranges that share a byte are one file, the union; ranges that touch are not.
 struct AssetFile {
   std::string file;  // relative to the manifest: `vram/00_9000.bin`
   RegisterClass cls = RegisterClass::Display;  // of the register the bytes went to
@@ -128,13 +129,17 @@ struct AssetFile {
   std::vector<std::uint8_t> bytes;
 };
 
-// An asset as the manifest records it, read back for its path: a person's
+// An asset as the manifest records it, read back for its path — a person's
 // rename survives a run when the file it names is lifted again with the same
-// first byte and length.
+// first byte and length — and, for a file the run's shadow named (`staged`,
+// `stream`), for the file itself: its evidence is written fresh by a run, so
+// the line is what keeps it from one disassembly to the next.
 struct ManifestAsset {
   std::string file;
   Address first = 0;
   std::size_t bytes = 0;
+  RegisterClass cls = RegisterClass::Display;
+  MovedKind kind = MovedKind::Dma;
 };
 
 // A whole cartridge, disassembled.
@@ -182,6 +187,12 @@ struct CartridgeDisassembly {
   // manifest's, each traced from as an entry — see `rom_facts.h`. A jump every
   // one of whose destinations is derived is not among `stops`.
   std::vector<DerivedTarget> derived;
+  // Where every range the run saw carried out of work RAM came from, and the
+  // streams the CPU carried a byte at a time — see `rom_observe.h`. Both are
+  // written fresh on every run and read back by nothing; a staged range with
+  // an image source is lifted as that source, and a stream as its bytes.
+  std::vector<StagedRange> staged;
+  std::vector<StreamedRange> streamed;
 };
 
 // What to disassemble. `entries` are the entry points beyond the vectors, which
