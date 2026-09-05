@@ -15,6 +15,7 @@
 // the result is a set of address ranges with bytes, not a relocatable object.
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -112,9 +113,19 @@ class Dialect {
                                        Address at, const Evaluator& evaluator) = 0;
 };
 
-// Assembles `source` under `dialect`. `file` names the source in diagnostics.
+// How an assembly reads a file an `INCBIN` names: the file's bytes, or nothing
+// when it cannot be read. The path it is given is the directive's, joined with
+// the directory of the file the directive is in and normalised — so a reader
+// keyed by paths relative to a tree's root is asked for exactly those. The
+// verifier passes the reader it reads the tree's sources through; the
+// command-line assemblers read beside the source.
+using Reader = std::function<std::optional<std::string>(const std::string& path)>;
+
+// Assembles `source` under `dialect`. `file` names the source in diagnostics and
+// is what an `INCBIN` path is relative to; `reader` answers those. Without one,
+// an `INCBIN` is an error saying the assembly reads no files.
 [[nodiscard]] Assembly assemble(Dialect& dialect, std::string_view source,
-                                std::string_view file = "");
+                                std::string_view file = "", const Reader& reader = {});
 
 // The assembly's ranges laid into one image `size` bytes long whose first byte
 // occupies `base`, the gaps holding `fill`. Returns nothing when a range lies
@@ -124,6 +135,10 @@ class Dialect {
                                                              std::uint8_t fill = 0);
 
 // ---- helpers for dialects ------------------------------------------------------
+
+// Whether an upper-cased name is a directive of the common layer — `ORG`, `DB`,
+// `DW`, `DL`, `DS`, `EQU`, `INCBIN` — and so may not be a label in any dialect.
+[[nodiscard]] bool coreDirective(std::string_view upperName) noexcept;
 
 // `text` upper-cased, ASCII only.
 [[nodiscard]] std::string upper(std::string_view text);

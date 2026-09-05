@@ -3,9 +3,9 @@
 `assembler.h` is the part of an assembler that does not depend on which chip the
 code is for: the common layer of the assembly language in
 [docs/assembly-lexicon.md](../../docs/assembly-lexicon.md) — lines, comments,
-numbers, character and string literals, labels, `EQU`, expressions, `ORG` and
-the data directives, the second pass that resolves forward references, and the
-diagnostics. A chip's assembler is a dialect over it, beside that chip's
+numbers, character and string literals, labels, `EQU`, expressions, `ORG`, the
+data directives and `INCBIN`, the second pass that resolves forward references,
+and the diagnostics. A chip's assembler is a dialect over it, beside that chip's
 disassembler, built from the same instruction table.
 
 Assembly is absolute: every byte's address is known while it is assembled, and
@@ -28,7 +28,9 @@ Everything lives in `snaggletooth::assembler`.
 | `Diagnostic` | A file, a line counted from 1, and what was expected. |
 | `Dialect` | The interface a chip's assembler implements. |
 | `Evaluator` | What a dialect evaluates the expressions in its operands with. |
-| `assemble(dialect, source, file)` | Assembles a file under a dialect. |
+| `Reader` | How an assembly reads a file an `INCBIN` names: a path, relative to the including file, to the file's bytes. |
+| `assemble(dialect, source, file, reader)` | Assembles a file under a dialect, reading included files through `reader`. |
+| `coreDirective(upperName)` | Whether a name is a directive of the common layer. |
 | `image(assembly, base, size, fill)` | The ranges laid into one buffer. |
 | `compact`, `expressionEnd`, `fits`, `hex`, `upper` | What a dialect builds its syntax and diagnostics on. |
 

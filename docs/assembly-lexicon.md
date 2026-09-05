@@ -35,6 +35,7 @@ original source ever existing.
   - [5.1 `ORG`](#51-org)
   - [5.2 `DB`, `DW`, `DL`](#52-db-dw-dl)
   - [5.3 `DS`](#53-ds)
+  - [5.4 `INCBIN`](#54-incbin)
 - [6. Round-trip](#6-round-trip)
 - [7. Diagnostics](#7-diagnostics)
 - [8. Stability](#8-stability)
@@ -43,8 +44,9 @@ original source ever existing.
 ## 1. Scope
 
 The language covers an instruction set, symbolic labels, and absolute placement. It
-has no macros, no include mechanism, no conditional assembly, no sections and no
-relocation. Assembly is absolute: every byte's address is known while it is being
+has no macros, no source include mechanism, no conditional assembly, no sections
+and no relocation; `INCBIN` places a file's bytes, which is placement, not
+assembly. Assembly is absolute: every byte's address is known while it is being
 assembled.
 
 A program needing more than this generates its source with a program.
@@ -225,12 +227,34 @@ addresses are 24 bits wide:
 Emits a run of a repeated byte. The fill defaults to `$00`. The count must be
 resolvable when the directive is read.
 
+### 5.4 `INCBIN`
+
+```
+        INCBIN "vram/00_9000.bin"
+        INCBIN "vram/00_9000.bin", 32, 16     ; sixteen bytes from offset thirty-two
+```
+
+Emits the bytes of a file. The path is a string literal, with the escapes of
+§3.1, and is relative to the file the directive is in. With an offset and a
+length, only that part of the file is emitted: both must be resolvable when the
+directive is read, the offset must lie within the file, and the length must be
+at least one and reach no further than the file's end. A file that cannot be
+read is an error naming the path.
+
+`INCBIN` is a data directive: a region begins after it, as after `DB`.
+
+An assembly reads files only through the reader its caller gives it — see
+[assemblers.md](assemblers.md#library). The command-line assemblers read
+beside the source; `snes_verify` reads from the tree it verifies; an assembly
+given no reader reports the directive as an error rather than open anything.
+
 ---
 
 ## 6. Round-trip
 
-The guarantee: for any byte range a disassembler emitted as code or as `DB`,
-assembling its output reproduces those bytes exactly.
+The guarantee: for any byte range a disassembler emitted as code, as `DB`, or as
+an `INCBIN` of a file it wrote, assembling its output reproduces those bytes
+exactly.
 
 What round-trip preserves: every emitted byte, at its original address.
 

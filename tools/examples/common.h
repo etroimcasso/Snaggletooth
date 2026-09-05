@@ -1,7 +1,8 @@
 #pragma once
 
-// What every example cartridge is built from: a LoROM image with a header, a
-// way to place bytes in it, and the vector layout the replay cartridges share.
+// What every example cartridge is built from: a LoROM or a HiROM image with a
+// header, a way to place bytes in it, and the vector layout the replay
+// cartridges share.
 
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,23 @@ inline std::vector<std::uint8_t> loRomImage(std::size_t banks) {
   const std::size_t site = 0x7FC0u;
   for (std::size_t i = 0; i < 21; ++i) rom[site + i] = 'A';
   rom[site + 0x15] = 0x20u;  // the map-mode byte: LoROM
+  rom[site + 0x1C] = 0x34u;  // a complement and checksum that agree
+  rom[site + 0x1D] = 0x12u;
+  rom[site + 0x1E] = 0xCBu;
+  rom[site + 0x1F] = 0xEDu;
+  rom[site + 0x3C] = 0x00u;  // reset -> $8000
+  rom[site + 0x3D] = 0x80u;
+  return rom;
+}
+
+// A HiROM image of `banks` 64 KB banks whose header names reset at $8000 and
+// leaves every other vector unused. The header sits at $FFC0 of the first bank,
+// where the HiROM map puts it, and its map-mode byte says so.
+inline std::vector<std::uint8_t> hiRomImage(std::size_t banks) {
+  std::vector<std::uint8_t> rom(banks * 0x10000u, 0u);
+  const std::size_t site = 0xFFC0u;
+  for (std::size_t i = 0; i < 21; ++i) rom[site + i] = 'A';
+  rom[site + 0x15] = 0x21u;  // the map-mode byte: HiROM
   rom[site + 0x1C] = 0x34u;  // a complement and checksum that agree
   rom[site + 0x1D] = 0x12u;
   rom[site + 0x1E] = 0xCBu;

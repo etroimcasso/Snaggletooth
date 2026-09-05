@@ -383,6 +383,7 @@ TEST(RomObserve, TheTreeStillAssemblesToItsImage) {
 
   std::map<std::string, std::string> tree;
   for (const RegionListing& region : d.regions) tree[region.region.file] = renderRegion(region, d);
+  for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
   std::string error;
   const std::optional<ManifestInput> manifest = parseManifest(renderManifest(d), error);
   ASSERT_TRUE(manifest.has_value()) << error;
@@ -796,6 +797,7 @@ TEST(RomMoved, TheTreeStillAssemblesToItsImage) {
 
   std::map<std::string, std::string> tree;
   for (const RegionListing& region : d.regions) tree[region.region.file] = renderRegion(region, d);
+  for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
   std::string error;
   const std::optional<ManifestInput> manifest = parseManifest(renderManifest(d), error);
   ASSERT_TRUE(manifest.has_value()) << error;

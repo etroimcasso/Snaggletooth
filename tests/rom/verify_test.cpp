@@ -18,6 +18,7 @@
 namespace snaggletooth::disasm {
 namespace {
 
+using examples::liftingImage;
 using examples::threeBankImage;
 using examples::uploadingImage;
 
@@ -34,7 +35,22 @@ Tree treeOf(const CartridgeDisassembly& d) {
     tree.files[region.region.file] = renderRegion(region, d);
   }
   if (d.sound) tree.files[d.sound->file] = renderSoundProgram(*d.sound);
+  for (const AssetFile& asset : d.assets) {
+    tree.files[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
+  }
   return tree;
+}
+
+// A tree of a cartridge run on the machine for a few frames, so the ranges the
+// engines moved are lifted into files of their own.
+Tree treeOfRun(std::span<const std::uint8_t> rom, std::vector<SourceRegion> regions = {}) {
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 3u * 357'954u;  // three NTSC frames of the master clock, roughly
+  request.regions = std::move(regions);
+  return treeOf(disassembleCartridge(request));
 }
 
 Tree treeOf(std::span<const std::uint8_t> rom, bool sound) {
@@ -386,6 +402,93 @@ TEST(RomVerify, TheTreeOnDiskVerifies) {
   EXPECT_NE(verifyTree(dir, threeBankImage()).error.find("written for"), std::string::npos);
   EXPECT_NE(verifyTree(dir / "missing", rom).error.find("cannot read"), std::string::npos);
   std::filesystem::remove_all(dir, ec);
+}
+
+// ---- the lifted files ----------------------------------------------------------
+
+// A bank file's `INCBIN` lines carry a lifted file's bytes into the bank's own
+// ranges, so a tree with assets verifies as one without: every byte once, none
+// differing, and nothing new for the verifier to read from the manifest.
+TEST(RomVerify, ATreeWithLiftedFilesAssemblesToItsImage) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  const Tree tree = treeOfRun(rom);
+  ASSERT_NE(tree.files.find("vram/00_9000.bin"), tree.files.end());
+  EXPECT_NE(tree.files.at("bank_00.asm").find("        INCBIN \"vram/00_9000.bin\"\n"), std::string::npos);
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  EXPECT_EQ(report.compared, rom.size());
+  ASSERT_EQ(report.files.size(), 2u);
+  for (const VerifiedFile& file : report.files) {
+    EXPECT_EQ(file.runs, 1u) << file.file;  // an INCBIN continues the range it sits in
+    EXPECT_EQ(file.bytes, 0x8000u) << file.file;
+  }
+}
+
+TEST(RomVerify, AMissingLiftedFileIsTheBankFilesError) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  Tree tree = treeOfRun(rom);
+  tree.files.erase("vram/00_9000.bin");
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_FALSE(report.identical());
+  const VerifiedFile bank = fileNamed(report, "bank_00.asm");
+  ASSERT_FALSE(bank.errors.empty());
+  EXPECT_NE(bank.errors.front().message.find("cannot read vram/00_9000.bin"), std::string::npos);
+  EXPECT_EQ(report.unplaced, 0x8000u) << "a bank file that does not assemble produces nothing";
+  EXPECT_TRUE(fileNamed(report, "bank_01.asm").errors.empty());
+}
+
+TEST(RomVerify, AChangedByteInALiftedFileDiffersAtItsOffset) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  Tree tree = treeOfRun(rom);
+  std::string& palette = tree.files.at("cgram/00_9200.bin");
+  ASSERT_EQ(palette.size(), 16u);
+  palette[3] = static_cast<char>(palette[3] ^ 0x01);
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_FALSE(report.identical());
+  EXPECT_EQ(report.differing, 1u);
+  ASSERT_EQ(report.mismatches.size(), 1u);
+  EXPECT_EQ(report.mismatches.front().file, "bank_00.asm");
+  EXPECT_EQ(report.mismatches.front().firstDifference, 0x1203u);
+}
+
+TEST(RomVerify, TheTreeOnDiskVerifiesWithItsLiftedFiles) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 3u * 357'954u;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_FALSE(d.assets.empty());
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "snaggletooth_verify_lifted_tree";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  EXPECT_TRUE(std::filesystem::exists(dir / "vram" / "00_9000.bin"));
+  EXPECT_EQ(std::filesystem::file_size(dir / "vram" / "00_9000.bin"), 80u);
+  const VerifyReport report = verifyTree(dir, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  std::filesystem::remove_all(dir, ec);
+}
+
+// A file split that cuts across a lifted file: each bank file includes its part
+// with an offset and a length, and the path is relative to the including file.
+TEST(RomVerify, APartIncludedFileVerifiesFromANestedBankFile) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  const std::vector<SourceRegion> split = {
+      SourceRegion{.file = "code/low.asm", .first = 0x008000u, .last = 0x009027u},
+      SourceRegion{.file = "high.asm", .first = 0x009028u, .last = 0x00FFFFu},
+      SourceRegion{.file = "bank_01.asm", .first = 0x018000u, .last = 0x01FFFFu},
+  };
+  const Tree tree = treeOfRun(rom, split);
+  EXPECT_NE(tree.files.at("code/low.asm").find("        INCBIN \"../vram/00_9000.bin\", 0, 40\n"),
+            std::string::npos) << tree.files.at("code/low.asm");
+  EXPECT_NE(tree.files.at("high.asm").find("        INCBIN \"vram/00_9000.bin\", 40, 40\n"),
+            std::string::npos) << tree.files.at("high.asm");
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
 }
 
 }  // namespace snaggletooth::disasm

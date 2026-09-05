@@ -83,7 +83,7 @@ void verifyBankFile(Rebuild& rebuild, CartridgeMap map, const SourceRegion& regi
     report.files.push_back(std::move(file));
     return;
   }
-  const assembler::Assembly assembly = assembler::assembleCpu65816(*source, region.file);
+  const assembler::Assembly assembly = assembler::assembleCpu65816(*source, region.file, read);
   file.errors = assembly.errors;
   if (!assembly.ok()) {
     report.files.push_back(std::move(file));
@@ -127,7 +127,7 @@ void verifySoundFile(Rebuild& rebuild, const ManifestSound& sound, const SourceR
     report.files.push_back(std::move(file));
     return;
   }
-  const assembler::Assembly assembly = assembler::assembleSpc700(*source, sound.file);
+  const assembler::Assembly assembly = assembler::assembleSpc700(*source, sound.file, read);
   file.errors = assembly.errors;
   if (!assembly.ok()) {
     report.files.push_back(std::move(file));

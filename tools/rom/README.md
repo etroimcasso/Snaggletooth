@@ -21,8 +21,10 @@ snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [-
 ```
 
 Writes one source file per bank, the sound program the cartridge uploads at boot as
-`apu/driver.asm`, and `project.manifest`, which names the files, where the trace
-began, and where it stopped. The trace starts at the vectors and follows control
+`apu/driver.asm`, the bytes the run saw the cartridge send from the image to the
+hardware as files of their own under `vram/`, `cgram/`, `oam/`, `apu/` and
+`hdma/`, and `project.manifest`, which names the files, where the trace began,
+and where it stopped. The trace starts at the vectors and follows control
 flow across banks; the sound program is captured by booting the cartridge on the
 machine and matched back to the image bytes it was read from. A manifest already in
 the directory supplies entries a person added and the file split, which is how the
@@ -49,7 +51,11 @@ section — and recording every range of bytes the two transfer engines moved,
 with the instruction that started it, the channel, the register it reached, the
 memory address it began at, its length and how many times the run saw it, as
 `moved` lines the manifest keeps — see
-[What a run moved](../../docs/snes-disassembler.md#what-a-run-moved). `--no-run`
+[What a run moved](../../docs/snes-disassembler.md#what-a-run-moved) — and
+lifting every such range that begins in the image out of its bank into a file
+of its own, the bank file including it with `INCBIN` and the manifest recording
+it as an `asset` line, read back so a name a person gives a file survives — see
+[The assets](../../docs/snes-disassembler.md#the-assets). `--no-run`
 skips the run; `--run-seconds N` bounds it; `--input <script>` plays it,
 replaying an [input script](../../docs/input-script.md) — which buttons are held
 on which port from which frame — into the controller ports, so the run reaches
@@ -71,7 +77,8 @@ table is traced past without running the cartridge.
 
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count, and the
-renderers and `writeProject` for the files. Full page:
+renderers and `writeProject` for the files, the lifted ones (`AssetFile`)
+included. Full page:
 [docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
 grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 

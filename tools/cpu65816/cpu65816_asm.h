@@ -49,6 +49,7 @@ class Cpu65816Dialect final : public Dialect {
 };
 
 // Assembles 65816 source. `file` names it in diagnostics.
-[[nodiscard]] Assembly assembleCpu65816(std::string_view source, std::string_view file = "");
+[[nodiscard]] Assembly assembleCpu65816(std::string_view source, std::string_view file = "",
+                                        const Reader& reader = {});
 
 }  // namespace snaggletooth::assembler

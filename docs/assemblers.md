@@ -54,7 +54,9 @@ A whole tree at once, every file placed where its manifest says and compared
 with the image, is [`snes_verify`](snes-disassembler.md#verifying-the-tree),
 which runs these assemblers as a library.
 
-Numbers on the command line are decimal, or hexadecimal behind `0x` or `$`.
+Numbers on the command line are decimal, or hexadecimal behind `0x` or `$`. A
+file an `INCBIN` names is read beside the source, by the path the directive
+gives relative to the source's own directory.
 
 ## What is written
 
@@ -130,7 +132,27 @@ assembly.symbols;  // every label and EQU with its value
 
 `assembleCpu65816` is the same call for the other dialect. `image(assembly,
 base, size, fill)` lays the ranges into one buffer, or returns nothing when a
-range lies outside it. `assemble(dialect, source, file)` takes any `Dialect`.
+range lies outside it. `assemble(dialect, source, file, reader)` takes any
+`Dialect`.
+
+A file an `INCBIN` names is read through the `Reader` the caller passes — a
+function from a path to the file's bytes, or nothing when it cannot be read.
+The path it is asked for is the directive's, joined with the directory of the
+file the directive is in and normalised, so a reader keyed by paths relative to
+a tree's root is asked for exactly those: `bank_00.asm` including
+`vram/tiles.bin` asks for `vram/tiles.bin`; `code/bank_00.asm` including
+`../vram/tiles.bin` asks for the same. Without a reader an `INCBIN` is an error
+saying the assembly reads no files; the assembler never opens the filesystem
+itself, so a front end that holds a tree in memory assembles it whole.
+
+```cpp
+const snaggletooth::assembler::Reader reader =
+    [&](const std::string& path) -> std::optional<std::string> {
+      return tree.contains(path) ? std::optional(tree.at(path)) : std::nullopt;
+    };
+const snaggletooth::assembler::Assembly assembly =
+    snaggletooth::assembler::assembleCpu65816(sourceText, "bank_00.asm", reader);
+```
 
 | Symbol | Purpose |
 |---|---|
@@ -141,6 +163,8 @@ range lies outside it. `assemble(dialect, source, file)` takes any `Dialect`.
 | `Evaluator` | What a dialect evaluates its operands' expressions with. |
 | `Spc700Dialect`, `Cpu65816Dialect` | The two dialects; `Cpu65816Dialect::mode()` is the mode the next instruction assembles under. |
 | `assembleSpc700`, `assembleCpu65816` | The two calls that name their dialect. |
+| `Reader` | How an assembly reads a file an `INCBIN` names. |
+| `coreDirective` | Whether a name is a directive of the common layer, and so may not be a label. |
 | `image` | The ranges laid into one buffer. |
 
 ## Writing a dialect

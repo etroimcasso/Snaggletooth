@@ -23,7 +23,9 @@ namespace {
 
 using examples::kUploadedProgram;
 using examples::kUploadedTable;
+using examples::liftingImage;
 using examples::loRomImage;
+using examples::wrappingImage;
 using examples::put;
 using examples::threeBankImage;
 using examples::uploadingImage;
@@ -571,6 +573,312 @@ TEST(RomDisasm, TheProjectIsWrittenAsOneFilePerRegionPlusTheManifest) {
   }
   EXPECT_EQ(bank0, renderRegion(regionNamed(d, "bank_00.asm"), d));
   std::filesystem::remove_all(dir, ec);
+}
+
+// ---- the assets ---------------------------------------------------------------
+//
+// The lifting cartridge sends the image's bytes to the hardware every way the
+// rules have a case for; a run of three frames sees all of it, the HDMA table
+// included.
+
+namespace {
+
+constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
+
+CartridgeDisassembly lifted(std::span<const std::uint8_t> rom, CartridgeRequest request = {}) {
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 3u * kFrame;
+  return disassembleCartridge(request);
+}
+
+const AssetFile* assetNamed(const CartridgeDisassembly& d, const std::string& file) {
+  for (const AssetFile& asset : d.assets) {
+    if (asset.file == file) return &asset;
+  }
+  return nullptr;
+}
+
+bool anyNote(const CartridgeDisassembly& d, const std::string& text) {
+  return std::any_of(d.notes.begin(), d.notes.end(),
+                     [&](const std::string& note) { return note.find(text) != std::string::npos; });
+}
+
+}  // namespace
+
+TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  const CartridgeDisassembly d = lifted(rom);
+  ASSERT_EQ(d.assets.size(), 9u) << renderManifest(d);
+  struct Expected {
+    const char* file;
+    RegisterClass cls;
+    MovedKind kind;
+    Address first;
+    std::size_t bytes;
+  };
+  const Expected expected[] = {
+      {"vram/00_9000.bin", RegisterClass::Vram, MovedKind::Dma, 0x009000u, 80},
+      {"cgram/00_9200.bin", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
+      {"oam/00_9300.bin", RegisterClass::Oam, MovedKind::Dma, 0x009300u, 544},
+      {"apu/00_9600.bin", RegisterClass::Apu, MovedKind::Dma, 0x009600u, 8},
+      {"hdma/00_9700.bin", RegisterClass::Cgram, MovedKind::Table, 0x009700u, 7},
+      {"hdma/00_9710.bin", RegisterClass::Cgram, MovedKind::Indirect, 0x009710u, 2},
+      {"hdma/00_9712.bin", RegisterClass::Cgram, MovedKind::Indirect, 0x009712u, 2},
+      {"vram/01_8000.bin", RegisterClass::Vram, MovedKind::Dma, 0x018000u, 32},
+      {"vram/01_FFF0.bin", RegisterClass::Vram, MovedKind::Dma, 0x01FFF0u, 16},
+  };
+  for (std::size_t i = 0; i < 9; ++i) {
+    const AssetFile& asset = d.assets[i];
+    EXPECT_EQ(asset.file, expected[i].file);
+    EXPECT_EQ(asset.cls, expected[i].cls) << asset.file;
+    EXPECT_EQ(asset.kind, expected[i].kind) << asset.file;
+    EXPECT_EQ(asset.first, expected[i].first) << asset.file;
+    EXPECT_EQ(asset.bytes.size(), expected[i].bytes) << asset.file;
+    // The bytes are the image's at the offset the address reads from.
+    const std::optional<std::size_t> offset = romOffset(CartridgeMap::LoRom, asset.first, rom.size());
+    ASSERT_TRUE(offset.has_value());
+    EXPECT_EQ(asset.romOffset, *offset);
+    EXPECT_TRUE(std::equal(asset.bytes.begin(), asset.bytes.end(), rom.begin() + static_cast<std::ptrdiff_t>(*offset)))
+        << asset.file;
+  }
+}
+
+TEST(RomAssets, RangesThatShareBytesAreOneFileAndRangesThatTouchAreTwo) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  // 64 from $9000, 16 from $9010 inside it, 32 from $9030 across its end: one
+  // file of 80.
+  const AssetFile* tileset = assetNamed(d, "vram/00_9000.bin");
+  ASSERT_NE(tileset, nullptr);
+  EXPECT_EQ(tileset->bytes.size(), 80u);
+  EXPECT_EQ(assetNamed(d, "vram/00_9010.bin"), nullptr);
+  EXPECT_EQ(assetNamed(d, "vram/00_9030.bin"), nullptr);
+  // The two blocks the indirect table points at end to end: two files.
+  EXPECT_NE(assetNamed(d, "hdma/00_9710.bin"), nullptr);
+  EXPECT_NE(assetNamed(d, "hdma/00_9712.bin"), nullptr);
+}
+
+TEST(RomAssets, ARangeReadDownwardIsLiftedInImageOrder) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
+  ASSERT_NE(palette, nullptr);
+  ASSERT_EQ(palette->bytes.size(), 16u);
+  for (std::size_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(palette->bytes[i], 0xE0u + i);
+  }
+}
+
+TEST(RomAssets, ARefusedRangeIsNotedAndStaysInItsBank) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  // Sent to VRAM and then to CGRAM.
+  EXPECT_EQ(assetNamed(d, "vram/00_9800.bin"), nullptr);
+  EXPECT_EQ(assetNamed(d, "cgram/00_9800.bin"), nullptr);
+  EXPECT_TRUE(anyNote(d, "the bytes at $00:9800 were sent to VMDATAL and CGDATA; not lifted"));
+  // The reset routine's own bytes.
+  EXPECT_EQ(assetNamed(d, "vram/00_8000.bin"), nullptr);
+  EXPECT_TRUE(anyNote(d, "$00:8000-$00:800F overlaps an instruction the trace decoded; not lifted"));
+  const std::string bank0 = renderRegion(regionNamed(d, "bank_00.asm"), d);
+  // The bytes stay as DB rows: the row that begins four bytes before them.
+  EXPECT_NE(bank0.find("        DB $00,$00,$00,$00,$60,$61,$62,$63  ; $00:97FC  |"), std::string::npos) << bank0;
+  EXPECT_EQ(bank0.find("INCBIN \"vram/00_9800.bin\""), std::string::npos);
+  EXPECT_EQ(bank0.find("INCBIN \"cgram/00_9800.bin\""), std::string::npos);
+}
+
+TEST(RomAssets, WhatIsNotAnAssetIsLeftWithoutAWord) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  // A copy into work RAM through the port, a fill from one byte, and a read
+  // from a register back into the image, which takes nothing.
+  for (const AssetFile& asset : d.assets) {
+    EXPECT_NE(asset.first, 0x009900u);
+    EXPECT_NE(asset.first, 0x009A00u);
+    EXPECT_NE(asset.first, 0x009B00u);
+  }
+  EXPECT_FALSE(anyNote(d, "$00:9900"));
+  EXPECT_FALSE(anyNote(d, "$00:9A00"));
+  EXPECT_FALSE(anyNote(d, "$00:9B00"));
+}
+
+TEST(RomAssets, TheSameBytesSentToTwoRegistersOfOneClassAreRefused) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  EXPECT_EQ(assetNamed(d, "vram/00_9C00.bin"), nullptr);
+  EXPECT_TRUE(anyNote(d, "the bytes at $00:9C00 were sent to VMDATAL and VMDATAH; not lifted"));
+}
+
+TEST(RomAssets, ARangeOverABlockOfTheSoundProgramIsRefused) {
+  // The uploading cartridge's first block is 24 bytes at image offset $A0,
+  // which is $00:80A0; a range laid over it, as an earlier run might have
+  // recorded one, is not lifted.
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = false;
+  MovedRange over{.site = 0x008000u,
+                  .channel = 0,
+                  .toRegister = true,
+                  .registerAddress = 0x002118u,
+                  .registerName = "VMDATAL",
+                  .registerClass = RegisterClass::Vram,
+                  .memory = 0x008098u,
+                  .step = MovedStep::Increment,
+                  .bytes = 16,
+                  .kind = MovedKind::Dma,
+                  .times = 1};
+  request.moved = {over};
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_TRUE(d.sound.has_value());
+  EXPECT_TRUE(d.assets.empty());
+  EXPECT_TRUE(anyNote(d, "$00:8098-$00:80A7 overlaps a block of the sound program; not lifted"));
+}
+
+TEST(RomAssets, AHiRomTransferThatWrapsItsBankIsLiftedAsItsPieces) {
+  const std::vector<std::uint8_t> rom = wrappingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = kFrame;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.moved.size(), 1u);
+  EXPECT_EQ(d.moved.front().memory, 0xC1FFF0u);
+  EXPECT_EQ(d.moved.front().bytes, 32u);
+  ASSERT_EQ(d.assets.size(), 2u) << renderManifest(d);
+  EXPECT_EQ(d.assets[0].file, "vram/C1_0000.bin");
+  EXPECT_EQ(d.assets[0].first, 0xC10000u);
+  EXPECT_EQ(d.assets[0].bytes.size(), 16u);
+  EXPECT_EQ(d.assets[0].bytes.front(), 0xB0u);
+  EXPECT_EQ(d.assets[1].file, "vram/C1_FFF0.bin");
+  EXPECT_EQ(d.assets[1].first, 0xC1FFF0u);
+  EXPECT_EQ(d.assets[1].bytes.front(), 0xA0u);
+  EXPECT_FALSE(anyNote(d, "not the image")) << "both pieces are the image";
+  const std::string bank1 = renderRegion(regionNamed(d, "bank_C1.asm"), d);
+  EXPECT_NE(bank1.find("        ORG $C1:0000\n\n; ---- $C1:0000-$C1:000F: 16 bytes a transfer carried to VMDATAL, in vram/C1_0000.bin\n"
+                       "        INCBIN \"vram/C1_0000.bin\"\n"), std::string::npos) << bank1;
+  EXPECT_NE(bank1.find("        INCBIN \"vram/C1_FFF0.bin\"\n"), std::string::npos);
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.unplaced, 0u);
+  EXPECT_EQ(placement.placedTwice, 0u);
+}
+
+TEST(RomAssets, ATransferThatLeavesTheImageIsLiftedAsFarAsItWasInIt) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  const AssetFile* edge = assetNamed(d, "vram/01_FFF0.bin");
+  ASSERT_NE(edge, nullptr);
+  EXPECT_EQ(edge->bytes.size(), 16u);
+  EXPECT_TRUE(anyNote(d, "memory $01:FFF0 bytes 32: 16 of its bytes are not the image and are not lifted"));
+}
+
+TEST(RomAssets, TheBankFileIncludesEachFileWhereItsBytesWere) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  const std::string bank0 = renderRegion(regionNamed(d, "bank_00.asm"), d);
+  EXPECT_NE(bank0.find("\n; ---- $00:9000-$00:904F: 80 bytes a transfer carried to VMDATAL, in vram/00_9000.bin\n"
+                       "        INCBIN \"vram/00_9000.bin\"\n"),
+            std::string::npos) << bank0;
+  EXPECT_NE(bank0.find("; ---- $00:9700-$00:9706: an HDMA table walked to CGADD, in hdma/00_9700.bin\n"
+                       "        INCBIN \"hdma/00_9700.bin\"\n"),
+            std::string::npos);
+  EXPECT_NE(bank0.find("; ---- $00:9710-$00:9711: a block an HDMA entry pointed at, sent to CGADD, in hdma/00_9710.bin\n"),
+            std::string::npos);
+  EXPECT_EQ(bank0.find("; $00:9000  |"), std::string::npos) << "the lifted bytes are no longer DB rows";
+  EXPECT_EQ(bank0.find("; $00:9040  |"), std::string::npos);
+  EXPECT_NE(bank0.find("; $00:9050  |"), std::string::npos) << "the byte after the file is";
+  // An INCBIN continues the range: one ORG per bank still.
+  EXPECT_EQ(std::count(bank0.begin(), bank0.end(), '\n') > 0, true);
+  std::size_t orgs = 0;
+  for (std::size_t at = bank0.find("        ORG "); at != std::string::npos; at = bank0.find("        ORG ", at + 1)) ++orgs;
+  EXPECT_EQ(orgs, 1u);
+  // A file at the very end of a bank is included after the last data row.
+  const std::string bank1 = renderRegion(regionNamed(d, "bank_01.asm"), d);
+  const std::size_t include = bank1.find("        INCBIN \"vram/01_FFF0.bin\"\n");
+  ASSERT_NE(include, std::string::npos);
+  EXPECT_EQ(bank1.find("        DB ", include), std::string::npos);
+}
+
+TEST(RomAssets, EveryByteIsPlacedOnce) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.unplaced, 0u);
+  EXPECT_EQ(placement.placedTwice, 0u);
+  EXPECT_EQ(placement.image, liftingImage());
+}
+
+TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
+  const CartridgeDisassembly d = lifted(liftingImage());
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 80\n"), std::string::npos);
+  EXPECT_NE(manifest.find("asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2\n"), std::string::npos);
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(manifest, error);
+  ASSERT_TRUE(input.has_value()) << error;
+  ASSERT_EQ(input->assets.size(), 9u);
+  EXPECT_EQ(input->assets[0].file, "vram/00_9000.bin");
+  EXPECT_EQ(input->assets[0].first, 0x009000u);
+  EXPECT_EQ(input->assets[0].bytes, 80u);
+
+  EXPECT_FALSE(parseManifest("asset vram/x.bin Vram dma from $00:9000 bytes 80\n", error).has_value());
+  EXPECT_NE(error.find("an asset is a path"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset vram/x.bin Tiles as dma from $00:9000 bytes 80\n", error).has_value());
+  EXPECT_NE(error.find("not a register class"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as copy from $00:9000 bytes 80\n", error).has_value());
+  EXPECT_NE(error.find("not dma, table or indirect"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $9000 bytes 80\n", error).has_value());
+  EXPECT_NE(error.find("$BB:XXXX"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $00:9000 bytes 0\n", error).has_value());
+  EXPECT_NE(error.find("not a byte count"), std::string::npos);
+}
+
+TEST(RomAssets, APersonsPathSurvivesARunAndAnOrphanIsDropped) {
+  CartridgeRequest request;
+  request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80},
+                    ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5},
+                    ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64}};
+  const CartridgeDisassembly d = lifted(liftingImage(), request);
+  EXPECT_NE(assetNamed(d, "vram/tiles.bin"), nullptr);
+  EXPECT_EQ(assetNamed(d, "vram/00_9000.bin"), nullptr);
+  EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d).find("        INCBIN \"vram/tiles.bin\"\n"),
+            std::string::npos);
+  EXPECT_NE(renderManifest(d).find("asset    vram/tiles.bin Vram as dma from $00:9000 bytes 80\n"),
+            std::string::npos);
+  EXPECT_TRUE(anyNote(d, "asset vram/nowhere.bin at $00:C000 names no range this run lifted; dropped"));
+  // The same first byte with another length is another range, not this file.
+  EXPECT_EQ(assetNamed(d, "vram/short.bin"), nullptr);
+  EXPECT_TRUE(anyNote(d, "asset vram/short.bin at $00:9000 names no range this run lifted; dropped"));
+}
+
+TEST(RomAssets, ATreeWithoutARunLiftsWhatItReadBack) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  const CartridgeDisassembly first = lifted(rom);
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = false;
+  request.moved = first.moved;
+  const CartridgeDisassembly again = disassembleCartridge(request);
+  ASSERT_EQ(again.assets.size(), first.assets.size());
+  for (std::size_t i = 0; i < first.assets.size(); ++i) {
+    EXPECT_EQ(again.assets[i].file, first.assets[i].file);
+    EXPECT_EQ(again.assets[i].bytes, first.assets[i].bytes);
+  }
+  EXPECT_EQ(renderRegion(regionNamed(again, "bank_00.asm"), again),
+            renderRegion(regionNamed(first, "bank_00.asm"), first));
+}
+
+TEST(RomAssets, TheInstructionsTextDoesNotChange) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  const CartridgeDisassembly with = lifted(rom);
+  const CartridgeDisassembly without = disassembleWithoutSound(rom);
+  EXPECT_TRUE(without.assets.empty());
+  const std::string lifted0 = renderRegion(regionNamed(with, "bank_00.asm"), with);
+  const std::string plain0 = renderRegion(regionNamed(without, "bank_00.asm"), without);
+  // The reset routine runs from $8000 to the first data run; that whole prefix
+  // is identical, and only what follows — the cuts — differs.
+  const std::size_t liftedData = lifted0.find("\n; ---- ");
+  const std::size_t plainData = plain0.find("\n; ---- ");
+  ASSERT_NE(liftedData, std::string::npos);
+  ASSERT_EQ(liftedData, plainData);
+  EXPECT_EQ(lifted0.substr(0, liftedData), plain0.substr(0, plainData));
+  EXPECT_NE(lifted0, plain0);
 }
 
 }  // namespace snaggletooth::disasm

@@ -3,9 +3,9 @@
 `project.manifest` is the file at the root of a source tree the
 [cartridge disassembler](snes-disassembler.md) writes. It says which image the
 tree is of, which files make it up and which bytes of the image each produces,
-where the trace began and where it stopped. Five of its line kinds are read back
-on the next run — which is how a person directs the trace, and how a run's
-findings outlive it.
+where the trace began and where it stopped. Six of its line kinds are read back
+on the next run — which is how a person directs the trace, how a run's findings
+outlive it, and how a name a person gives a file survives.
 
 > **Status.** The disassembler writes the manifest and reads it back on the next
 > run; `snes_verify` executes it — assembles every file it names, places the
@@ -16,7 +16,8 @@ findings outlive it.
 > and what it drives. Run on the machine, it records the destinations the
 > indirect jumps took, and traces from them, and every range of bytes the
 > transfer engines moved — where from, where to, how many, and from which
-> instruction. Read for what every path proves, it records the direct
+> instruction — and lifts every such range that begins in the image into a file
+> of its own, recorded as an `asset` line. Read for what every path proves, it records the direct
 > register, the data bank and the stack pointer at every label where something
 > is proven, and the destinations of every jump through a table the bytes
 > bound, and traces from those too.
@@ -38,6 +39,7 @@ findings outlive it.
   - [2.9 What every path proves](#29-what-every-path-proves)
   - [2.10 What the bytes derive](#210-what-the-bytes-derive)
   - [2.11 What a run moved](#211-what-a-run-moved)
+  - [2.12 Assets](#212-assets)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -484,6 +486,48 @@ values; the `moved` line says what the run saw move. The two stand beside each
 other: a channel filled from a pointer has a `dma` line whose source is `none`
 and a `moved` line for every range the run saw it carry.
 
+### 2.12 Assets
+
+```
+asset    <path> <class> as dma | table | indirect from <address> bytes <n>
+```
+
+A file lifted out of a bank file: a range the run saw an engine carry from the
+image to the hardware, written once, as the bytes are, under a directory named
+for the memory it went to, and included from the bank file where it was with
+[`INCBIN`](assembly-lexicon.md#54-incbin). The path is relative to the
+manifest; then the [class](65816-disassembler.md#hardware-registers) of the
+register the bytes reached and, after `as`, what the range was to the engine,
+as the `moved` line says them; after `from`, the address the tree places the
+file's first byte at, and after `bytes`, how many it holds. The `moved` lines
+whose memory lies within a file are its uses, and say which instruction sent it
+where and how many times. One line per file, in address order. Which ranges are
+lifted, and which stay in their bank with a `note` saying why, is
+[snes-disassembler.md §The assets](snes-disassembler.md#the-assets).
+
+A cartridge that sends bytes from the image every way the rules have a case
+for, run for one second of its clock:
+
+```
+asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 80
+asset    cgram/00_9200.bin Cgram as dma from $00:9200 bytes 16
+asset    oam/00_9300.bin Oam as dma from $00:9300 bytes 544
+asset    apu/00_9600.bin Apu as dma from $00:9600 bytes 8
+asset    hdma/00_9700.bin Cgram as table from $00:9700 bytes 7
+asset    hdma/00_9710.bin Cgram as indirect from $00:9710 bytes 2
+asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2
+asset    vram/01_8000.bin Vram as dma from $01:8000 bytes 32
+asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
+```
+
+Three transfers from `$9000` that share bytes are the one file of eighty; the
+two blocks the HDMA table at `$9700` points at lie end to end and are two files.
+
+The line is read back for its path: a person renames the file, changes the path
+here to match, and the next run lifts the same range — the same `from` and
+`bytes` — under that name. The class, the kind and the range are the run's and
+are written fresh.
+
 ## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -501,7 +545,11 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - every `moved` line, and keeps it — a range this run saw again carries this
   run's count, one it did not see is kept as it was — so what a run saw move
   outlives it, and a tree disassembled without a run still says where the
-  hardware's bytes came from;
+  hardware's bytes came from, and lifts the same files;
+- every `asset` line, for its path — a file lifted again with the same first
+  address and length takes the path the line gives it, so a name a person gave
+  a file survives; a line matching no file this run lifts is dropped, and a
+  `note` says so;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not

@@ -54,6 +54,7 @@ class Spc700Dialect final : public Dialect {
 };
 
 // Assembles SPC700 source. `file` names it in diagnostics.
-[[nodiscard]] Assembly assembleSpc700(std::string_view source, std::string_view file = "");
+[[nodiscard]] Assembly assembleSpc700(std::string_view source, std::string_view file = "",
+                                      const Reader& reader = {});
 
 }  // namespace snaggletooth::assembler
