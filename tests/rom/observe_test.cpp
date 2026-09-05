@@ -521,7 +521,9 @@ TEST(RomMoved, AnIndirectTableAndTheBlocksItPointsAtAreSeparateRanges) {
   EXPECT_EQ(second->bytes, 2u) << "not joined to the next frame's first block";
   EXPECT_EQ(first->registerName, "CGADD") << "a block is named by the register its channel reaches";
   for (const MovedRange* r : rangesAt(seen, kTables, 5)) {
-    if (r->kind == MovedKind::Indirect) EXPECT_EQ(r->bytes, 2u) << "no block joined to another frame's";
+    if (r->kind == MovedKind::Indirect) {
+      EXPECT_EQ(r->bytes, 2u) << "no block joined to another frame's";
+    }
   }
 }
 
