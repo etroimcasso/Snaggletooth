@@ -3,9 +3,10 @@
 // Cartridge images built by hand: a LoROM header, a few banks of 65816 code that
 // call and jump across them, one whose reset code speaks the audio upload
 // protocol, ones that dispatch through pointers, read the controllers, run a
-// transfer, wait for an interrupt, copy code into work RAM, or prove their
-// registers the way real code does and dispatch through bounded tables. The tests of the
-// cartridge tools read them, and `snes_examples` writes them to disk, so every
+// transfer, wait for an interrupt, copy code into work RAM, prove their
+// registers the way real code does and dispatch through bounded tables, or send
+// the image's bytes to the hardware every way the asset pass has a rule for. The
+// tests of the cartridge tools read them, and `snes_examples` writes them to disk, so every
 // example a page shows is the real output of a tool on a cartridge that is ours
 // to publish.
 
@@ -29,6 +30,8 @@
 #include "examples/frame_press/frame_press.h"
 #include "examples/proving/proving.h"
 #include "examples/moving/moving.h"
+#include "examples/lifting/lifting.h"
+#include "examples/wrapping/wrapping.h"
 
 namespace snaggletooth::examples {
 
@@ -59,6 +62,8 @@ inline const std::vector<Example>& examples() {
       {"frame_press", "a Start press that counts only on the one frame the tenth interrupt reads", &framePressImage},
       {"proving", "every register proved the way real code proves it, and three jump tables, two of them bounded", &provingImage},
       {"moving", "bytes moved every way the transfer engines can, and a sprite table sent every frame", &movingImage},
+      {"lifting", "bytes sent from the image to the hardware every way the asset pass has a rule for", &liftingImage},
+      {"wrapping", "a HiROM transfer that runs off its bank's end and on from the bank's start", &wrappingImage},
   };
   return all;
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <set>
 #include <utility>
 
@@ -31,12 +32,6 @@ std::string_view trim(std::string_view text) {
   while (!text.empty() && isSpace(text.front())) text.remove_prefix(1);
   while (!text.empty() && isSpace(text.back())) text.remove_suffix(1);
   return text;
-}
-
-// The directives every dialect has.
-bool coreDirective(std::string_view upperName) {
-  return upperName == "ORG" || upperName == "DB" || upperName == "DW" || upperName == "DL" ||
-         upperName == "DS" || upperName == "EQU";
 }
 
 // ---- literals --------------------------------------------------------------------
@@ -300,6 +295,45 @@ Statement parseStatement(std::string_view raw) {
   return out;
 }
 
+// A double-quoted string literal, whole: its characters with the escapes
+// resolved, or nothing with `error` set when it is not one.
+std::optional<std::string> readString(std::string_view item, std::string& error) {
+  if (item.empty() || item.front() != '"') {
+    error = "expected a string in double quotes";
+    return std::nullopt;
+  }
+  std::string out;
+  std::size_t pos = 1;
+  bool closed = false;
+  while (pos < item.size()) {
+    if (item[pos] == '"') {
+      closed = true;
+      ++pos;
+      break;
+    }
+    char character = 0;
+    if (!readEscaped(item, pos, character, error)) return std::nullopt;
+    out.push_back(character);
+  }
+  if (!error.empty()) return std::nullopt;
+  if (!closed) {
+    error = "the string is not closed";
+    return std::nullopt;
+  }
+  if (pos != item.size()) {
+    error = "text after the closing quote of a string";
+    return std::nullopt;
+  }
+  return out;
+}
+
+// The path an `INCBIN` in `file` asks its reader for: the directive's path joined
+// with the file's directory and normalised, in the generic form.
+std::string includedPath(std::string_view file, const std::string& path) {
+  const std::filesystem::path directory = std::filesystem::path(std::string(file)).parent_path();
+  return (directory / std::filesystem::path(path)).lexically_normal().generic_string();
+}
+
 // The items of a data directive's operand list, split at the commas outside
 // literals and trimmed.
 std::vector<std::string_view> splitItems(std::string_view text) {
@@ -346,6 +380,11 @@ class Pass final : public Evaluator {
 };
 
 }  // namespace
+
+bool coreDirective(std::string_view upperName) noexcept {
+  return upperName == "ORG" || upperName == "DB" || upperName == "DW" || upperName == "DL" ||
+         upperName == "DS" || upperName == "EQU" || upperName == "INCBIN";
+}
 
 std::string upper(std::string_view text) {
   std::string out(text);
@@ -438,10 +477,12 @@ std::string hex(std::uint32_t value, unsigned digits) {
   return buffer;
 }
 
-Assembly assemble(Dialect& dialect, std::string_view source, std::string_view file) {
+Assembly assemble(Dialect& dialect, std::string_view source, std::string_view file,
+                  const Reader& reader) {
   Assembly out;
   const unsigned bits = dialect.addressBits();
   const std::uint64_t spaceEnd = std::uint64_t{1} << bits;
+  std::map<std::string, std::optional<std::string>> included;  // every file an INCBIN named, read once
 
   // The lines, taken apart once.
   std::vector<Statement> statements;
@@ -603,26 +644,13 @@ Assembly assemble(Dialect& dialect, std::string_view source, std::string_view fi
               report(index, "a string is a run of bytes and belongs to DB");
               continue;
             }
-            std::size_t pos = 1;
             std::string error;
-            bool closed = false;
-            while (pos < item.size()) {
-              if (item[pos] == '"') {
-                closed = true;
-                ++pos;
-                break;
-              }
-              char character = 0;
-              if (!readEscaped(item, pos, character, error)) break;
-              bytes.push_back(static_cast<std::uint8_t>(character));
-            }
-            if (!error.empty()) {
+            const std::optional<std::string> text = readString(item, error);
+            if (!text) {
               report(index, error);
-            } else if (!closed) {
-              report(index, "the string is not closed");
-            } else if (pos != item.size()) {
-              report(index, "text after the closing quote of a string");
+              continue;
             }
+            for (const char character : *text) bytes.push_back(static_cast<std::uint8_t>(character));
             continue;
           }
           std::string error;
@@ -666,6 +694,70 @@ Assembly assemble(Dialect& dialect, std::string_view source, std::string_view fi
           fill = static_cast<std::uint8_t>(value->value & 0xFFu);
         }
         emit(index, std::vector<std::uint8_t>(*count, fill));
+        dialect.beginRegion();
+        continue;
+      }
+
+      if (mnemonic == "INCBIN") {
+        const std::vector<std::string_view> items = splitItems(operands);
+        if (items.empty() || items.front().empty() || items.size() == 2 || items.size() > 3) {
+          report(index, "INCBIN takes a quoted path, and optionally an offset and a length");
+          continue;
+        }
+        std::string error;
+        const std::optional<std::string> path = readString(items.front(), error);
+        if (!path) {
+          report(index, error);
+          continue;
+        }
+        const std::string resolved = includedPath(file, *path);
+        if (!reader) {
+          report(index, "INCBIN \"" + *path + "\": this assembly reads no files");
+          continue;
+        }
+        // Read once, on the first pass, and kept: the second pass emits the
+        // same bytes, and a file that changed between the passes is not a case.
+        auto found = included.find(resolved);
+        if (found == included.end()) {
+          found = included.emplace(resolved, reader(resolved)).first;
+        }
+        if (!found->second) {
+          report(index, "cannot read " + resolved);
+          continue;
+        }
+        const std::string& contents = *found->second;
+        std::size_t from = 0;
+        std::size_t length = contents.size();
+        if (items.size() == 3) {
+          const std::optional<std::uint32_t> offset = known(index, items[1], "an INCBIN offset");
+          const std::optional<std::uint32_t> count = known(index, items[2], "an INCBIN length");
+          if (!offset || !count) continue;
+          if (*offset >= contents.size()) {
+            report(index, "the offset " + std::to_string(*offset) + " lies past the end of " +
+                              resolved + " (" + std::to_string(contents.size()) + " bytes)");
+            continue;
+          }
+          if (*count == 0) {
+            report(index, "INCBIN emits at least one byte");
+            continue;
+          }
+          if (*offset + static_cast<std::size_t>(*count) > contents.size()) {
+            report(index, std::to_string(*count) + " bytes from offset " + std::to_string(*offset) +
+                              " reach past the end of " + resolved + " (" +
+                              std::to_string(contents.size()) + " bytes)");
+            continue;
+          }
+          from = *offset;
+          length = *count;
+        } else if (contents.empty()) {
+          report(index, resolved + " is empty; INCBIN emits at least one byte");
+          continue;
+        }
+        std::vector<std::uint8_t> bytes(length);
+        for (std::size_t i = 0; i < length; ++i) {
+          bytes[i] = static_cast<std::uint8_t>(contents[from + i]);
+        }
+        emit(index, bytes);
         dialect.beginRegion();
         continue;
       }

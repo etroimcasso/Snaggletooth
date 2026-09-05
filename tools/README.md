@@ -70,7 +70,9 @@ it runs the reverse, assembling every file of a tree through the two dialects
 and comparing the result with the image. It runs the cartridge on the machine
 to find the destinations of the jumps the bytes do not name, and traces from
 them, and to record every range of bytes the transfer engines moved — where
-from, where to, how many, and from which instruction. It also reports what the
+from, where to, how many, and from which instruction — and lifts every such
+range that begins in the image into a file of its own kind, the bank file
+including it where it was. It also reports what the
 traced code reaches: the hardware register behind every instruction that
 touches one, the DMA transfers those add up to, and the routines the
 instructions belong to, each with the routines it calls and the hardware it

@@ -103,7 +103,14 @@ int assemblerMain(int argc, char** argv, Dialect& dialect) {
   }
   const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
-  const Assembly assembly = assemble(dialect, source, sourcePath);
+  // An INCBIN's path arrives joined with the source's own directory, so it is
+  // read exactly as the source was.
+  const Reader reader = [](const std::string& path) -> std::optional<std::string> {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return std::nullopt;
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  };
+  const Assembly assembly = assemble(dialect, source, sourcePath, reader);
   if (!assembly.ok()) {
     for (const Diagnostic& error : assembly.errors) {
       std::cerr << error.file << ":" << error.line << ": " << error.message << "\n";

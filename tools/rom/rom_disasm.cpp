@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
@@ -365,9 +366,48 @@ std::vector<Range> without(const SourceRegion& region, const std::vector<Range>&
   return keep;
 }
 
-// The region's listing with the sound program's bytes left out.
+// A range of a region's bytes that its file does not write itself: a
+// sound-program block's, written in the sound file, or a lifted file's, written
+// there and included here. `fileOffset` and `length` are the part of the lifted
+// file the region holds — the whole of it unless a file split cuts across it.
+struct Cut {
+  Range range;
+  const AssetFile* asset = nullptr;  // null for a sound-program block
+  std::size_t fileOffset = 0;
+  std::size_t length = 0;
+};
+
+// Every cut of a region, in address order.
+std::vector<Cut> cutsOf(const CartridgeDisassembly& disassembly, const SourceRegion& region) {
+  std::vector<Cut> cuts;
+  for (const Range& range : placedBlockRanges(disassembly, region)) {
+    cuts.push_back(Cut{.range = range, .asset = nullptr, .fileOffset = 0, .length = 0});
+  }
+  for (const AssetFile& asset : disassembly.assets) {
+    const Address last = asset.first + static_cast<Address>(asset.bytes.size()) - 1u;
+    const Address from = std::max(asset.first, region.first);
+    const Address to = std::min(last, region.last);
+    if (from > to) continue;
+    cuts.push_back(Cut{.range = Range{.first = from, .last = to},
+                       .asset = &asset,
+                       .fileOffset = from - asset.first,
+                       .length = static_cast<std::size_t>(to - from) + 1u});
+  }
+  std::sort(cuts.begin(), cuts.end(),
+            [](const Cut& a, const Cut& b) { return a.range.first < b.range.first; });
+  return cuts;
+}
+
+std::vector<Range> rangesOf(const std::vector<Cut>& cuts) {
+  std::vector<Range> ranges;
+  for (const Cut& cut : cuts) ranges.push_back(cut.range);
+  return ranges;
+}
+
+// The region's listing with the sound program's bytes and the lifted files'
+// bytes left out.
 Listing regionLines(const RegionListing& region, const CartridgeDisassembly& disassembly) {
-  return keepRanges(region.listing, without(region.region, placedBlockRanges(disassembly, region.region)));
+  return keepRanges(region.listing, without(region.region, rangesOf(cutsOf(disassembly, region.region))));
 }
 
 std::vector<std::string> tokens(std::string_view line) {
@@ -460,6 +500,15 @@ bool parseWidth(const std::string& token, char letter, bool& known, bool& eight)
   return false;
 }
 
+// A register class from its name as a manifest writes it.
+std::optional<RegisterClass> parseRegisterClass(const std::string& word) {
+  for (int c = 0; c <= static_cast<int>(RegisterClass::Speed); ++c) {
+    const RegisterClass cls = static_cast<RegisterClass>(c);
+    if (cpu65816RegisterClassName(cls) == word) return cls;
+  }
+  return std::nullopt;
+}
+
 std::optional<Cpu65816Mode> parseMode(const std::vector<std::string>& words, std::size_t from) {
   if (words.size() < from + 3) return std::nullopt;
   const std::string& e = words[from];
@@ -504,6 +553,210 @@ std::vector<SourceRegion> bankRegions(CartridgeMap map, std::size_t imageBytes) 
   }
   return regions;
 }
+
+namespace {
+
+// ---- the assets -------------------------------------------------------------------
+
+// The directory a lifted file lives under: the memory its bytes went to. A
+// general-purpose transfer to any other register — a copy into work RAM, a
+// register fill — carries bytes that could be anything, and is not an asset.
+std::optional<std::string_view> assetDirectory(RegisterClass cls, MovedKind kind) {
+  if (kind != MovedKind::Dma) return "hdma";
+  switch (cls) {
+    case RegisterClass::Vram: return "vram";
+    case RegisterClass::Cgram: return "cgram";
+    case RegisterClass::Oam: return "oam";
+    case RegisterClass::Apu: return "apu";
+    default: return std::nullopt;
+  }
+}
+
+// One piece of a moved range that reads consecutive image offsets, in image
+// order, with what the range was to the engine.
+struct Piece {
+  std::size_t offset = 0;
+  std::size_t length = 0;
+  RegisterClass cls = RegisterClass::Display;
+  MovedKind kind = MovedKind::Dma;
+  Address registerAddress = 0;
+  Address site = 0;
+};
+
+std::string movedText(const MovedRange& range) {
+  return "moved " + address24(range.site) + " channel " + std::to_string(range.channel) + " memory " +
+         address24(range.memory) + " bytes " + std::to_string(range.bytes);
+}
+
+// Lifts every `moved` range the rules admit into `out.assets`. The rules are the
+// page's (`docs/snes-disassembler.md` §The assets): a range is lifted when it goes
+// to a register, steps up or down, its bytes are in the image, and it is a
+// general-purpose transfer to VRAM, CGRAM, OAM or the audio port or an HDMA
+// table or block to any register. A fill from one byte, a read back into memory,
+// bytes outside the image and a transfer to any other register are left where
+// they are, without a word; a range over an instruction the trace decoded, over
+// a sound-program block, or sent two places is refused with a note. Ranges that
+// share a byte are one file.
+void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
+  const CartridgeMap map = out.header.map;
+  const std::size_t imageBytes = out.imageBytes;
+
+  // Every instruction's bytes and every placed block's, as image offsets.
+  std::vector<std::pair<std::size_t, std::size_t>> code;
+  for (const RegionListing& region : out.regions) {
+    for (const Line& line : region.listing.lines) {
+      if (!line.isCode) continue;
+      if (const std::optional<std::size_t> at = romOffset(map, line.address, imageBytes)) {
+        code.emplace_back(*at, line.instruction.length);
+      }
+    }
+  }
+  std::sort(code.begin(), code.end());
+  auto overlapsCode = [&](std::size_t offset, std::size_t length) {
+    auto it = std::lower_bound(code.begin(), code.end(), std::make_pair(offset + length, std::size_t{0}));
+    // Every instruction that starts before the piece ends, walked back to the
+    // first that could still reach into it: an instruction is four bytes at most.
+    while (it != code.begin()) {
+      --it;
+      if (it->first + it->second > offset) return true;
+      if (it->first + 4u < offset) break;
+    }
+    return false;
+  };
+  std::vector<std::pair<std::size_t, std::size_t>> blocks;
+  if (out.sound) {
+    for (const UploadBlock& block : out.sound->capture.blocks) {
+      if (block.romOffset) blocks.emplace_back(*block.romOffset, block.bytes.size());
+    }
+  }
+  auto overlapsBlock = [&](std::size_t offset, std::size_t length) {
+    for (const auto& [at, size] : blocks) {
+      if (at < offset + length && offset < at + size) return true;
+    }
+    return false;
+  };
+
+  // The pieces: each range's bytes in transfer order, split where the next byte
+  // is not the next image offset.
+  std::vector<Piece> pieces;
+  for (const MovedRange& range : out.moved) {
+    if (!range.toRegister || range.step == MovedStep::Fixed || !range.registerClass) continue;
+    if (!assetDirectory(*range.registerClass, range.kind)) continue;
+    const bool up = range.step == MovedStep::Increment;
+    const Address bank = range.memory & 0xFF0000u;
+    std::vector<Piece> mine;
+    std::optional<std::size_t> previous;
+    std::uint32_t outside = 0;
+    for (std::uint32_t i = 0; i < range.bytes; ++i) {
+      const std::uint16_t offset16 = static_cast<std::uint16_t>(up ? range.memory + i : range.memory - i);
+      const std::optional<std::size_t> at = romOffset(map, bank | offset16, imageBytes);
+      if (!at) {
+        ++outside;
+        previous.reset();
+        continue;
+      }
+      if (previous && (up ? *at == *previous + 1u : *at + 1u == *previous)) {
+        ++mine.back().length;
+        if (!up) --mine.back().offset;
+      } else {
+        mine.push_back(Piece{.offset = *at,
+                             .length = 1,
+                             .cls = *range.registerClass,
+                             .kind = range.kind,
+                             .registerAddress = range.registerAddress,
+                             .site = range.site});
+      }
+      previous = at;
+    }
+    if (outside != 0 && !mine.empty()) {
+      out.notes.push_back(movedText(range) + ": " + std::to_string(outside) +
+                          " of its bytes are not the image and are not lifted");
+    }
+    for (const Piece& piece : mine) {
+      const Address home = romAddress(map, piece.offset).value_or(0);
+      const Address last = home + static_cast<Address>(piece.length) - 1u;
+      if (overlapsCode(piece.offset, piece.length)) {
+        out.notes.push_back(movedText(range) + ": " + address24(home) + "-" + address24(last) +
+                            " overlaps an instruction the trace decoded; not lifted");
+        continue;
+      }
+      if (overlapsBlock(piece.offset, piece.length)) {
+        out.notes.push_back(movedText(range) + ": " + address24(home) + "-" + address24(last) +
+                            " overlaps a block of the sound program; not lifted");
+        continue;
+      }
+      pieces.push_back(piece);
+    }
+  }
+  std::sort(pieces.begin(), pieces.end(), [](const Piece& a, const Piece& b) {
+    if (a.offset != b.offset) return a.offset < b.offset;
+    return a.length > b.length;
+  });
+
+  // The groups: pieces that share a byte are one file, if they agree on what
+  // the bytes were for.
+  out.assets.clear();
+  for (std::size_t i = 0; i < pieces.size();) {
+    std::size_t end = pieces[i].offset + pieces[i].length;
+    std::size_t j = i + 1;
+    while (j < pieces.size() && pieces[j].offset < end) {
+      end = std::max(end, pieces[j].offset + pieces[j].length);
+      ++j;
+    }
+    const Piece& first = pieces[i];
+    bool agree = true;
+    for (std::size_t k = i + 1; k < j; ++k) {
+      const Piece& other = pieces[k];
+      if (other.cls != first.cls || other.kind != first.kind ||
+          other.registerAddress != first.registerAddress) {
+        agree = false;
+      }
+    }
+    const std::optional<Address> home = romAddress(map, first.offset);
+    if (!agree) {
+      std::string places;
+      for (std::size_t k = i; k < j; ++k) {
+        const std::string_view name = cpu65816RegisterName(pieces[k].registerAddress);
+        const std::string place = name.empty() ? address24(pieces[k].registerAddress) : std::string(name);
+        if (places.find(place) == std::string::npos) places += (places.empty() ? "" : " and ") + place;
+      }
+      out.notes.push_back("the bytes at " + address24(home.value_or(0)) + " were sent to " + places +
+                          "; not lifted");
+      i = j;
+      continue;
+    }
+    if (home) {
+      const std::string_view directory = *assetDirectory(first.cls, first.kind);
+      AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
+                              hex(*home & 0xFFFFu, 4) + ".bin",
+                      .cls = first.cls,
+                      .kind = first.kind,
+                      .registerAddress = first.registerAddress,
+                      .first = *home,
+                      .romOffset = first.offset,
+                      .bytes = {}};
+      asset.bytes.assign(request.rom.begin() + static_cast<std::ptrdiff_t>(first.offset),
+                         request.rom.begin() + static_cast<std::ptrdiff_t>(end));
+      out.assets.push_back(std::move(asset));
+    }
+    i = j;
+  }
+
+  // A person's path for a file lifted again.
+  for (const ManifestAsset& named : request.assets) {
+    const auto found = std::find_if(out.assets.begin(), out.assets.end(), [&](const AssetFile& a) {
+      return a.first == named.first && a.bytes.size() == named.bytes;
+    });
+    if (found == out.assets.end()) {
+      out.notes.push_back("asset " + named.file + " at " + address24(named.first) +
+                          " names no range this run lifted; dropped");
+      continue;
+    }
+    found->file = named.file;
+  }
+}
+
+}  // namespace
 
 std::optional<UploadCapture> captureUpload(std::span<const std::uint8_t> rom,
                                            std::uint64_t masterCycles, std::string& reason) {
@@ -861,6 +1114,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
   }
 
+  // The files lifted out of the banks: what the run saw the engines carry from
+  // the image, now that the listings say where the instructions are and the
+  // sound program says where its blocks are.
+  liftAssets(out, request);
+
   // What the traced code reaches, the routines that reach it, and what every
   // path proves. Read off the finished listings and the program proven over
   // them, so a byte the trace never entered contributes nothing.
@@ -896,6 +1154,9 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
       for (std::size_t i = 0; i < block.bytes.size(); ++i) place(*block.romOffset + i, block.bytes[i]);
     }
   }
+  for (const AssetFile& asset : disassembly.assets) {
+    for (std::size_t i = 0; i < asset.bytes.size(); ++i) place(asset.romOffset + i, asset.bytes[i]);
+  }
   for (const std::uint8_t c : count) {
     if (c == 0) ++placement.unplaced;
     if (c > 1) ++placement.placedTwice;
@@ -906,8 +1167,8 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
 std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
   out += "; A Snaggletooth cartridge project. The next run reads the `entry`, `reached`,\n"
-         "; `derived`, `moved` and `file` lines; snes_verify reads `map`, `file`, `sound`\n"
-         "; and `block`; everything else is written fresh from what the run found.\n";
+         "; `derived`, `moved`, `asset` and `file` lines; snes_verify reads `map`, `file`,\n"
+         "; `sound` and `block`; everything else is written fresh from what the run found.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
   out += "map      " + mapName(disassembly.header.map) + "\n";
   std::string title;
@@ -1011,6 +1272,14 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            " memory " + address24(range.memory) + " " + std::string(movedStepName(range.step)) +
            " bytes " + std::to_string(range.bytes) + " as " + std::string(movedKindName(range.kind)) +
            " times " + std::to_string(range.times) + "\n";
+  }
+
+  // The files lifted out of the banks. The `moved` lines are their uses.
+  if (!disassembly.assets.empty()) out += "\n";
+  for (const AssetFile& asset : disassembly.assets) {
+    out += "asset    " + asset.file + " " + std::string(cpu65816RegisterClassName(asset.cls)) + " as " +
+           std::string(movedKindName(asset.kind)) + " from " + address24(asset.first) + " bytes " +
+           std::to_string(asset.bytes.size()) + "\n";
   }
 
   // The routines. A list is one field, its names joined by commas; an empty
@@ -1152,6 +1421,22 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.moved.push_back(range);
       continue;
     }
+    if (words[0] == "asset") {
+      // asset <path> <class> as <kind> from <address> bytes <n>
+      if (words.size() != 9 || words[3] != "as" || words[5] != "from" || words[7] != "bytes") {
+        return fail("an asset is a path, a class, `as` a kind, `from` an address and `bytes` n");
+      }
+      if (!parseRegisterClass(words[2])) return fail(words[2] + " is not a register class");
+      if (words[4] != "dma" && words[4] != "table" && words[4] != "indirect") {
+        return fail(words[4] + " is not dma, table or indirect");
+      }
+      const std::optional<Address> first = parseLongAddress(words[6]);
+      if (!first) return fail(words[6] + " is not a $BB:XXXX address");
+      const std::optional<std::size_t> bytes = parseCount(words[8]);
+      if (!bytes || *bytes == 0) return fail(words[8] + " is not a byte count");
+      input.assets.push_back(ManifestAsset{.file = words[1], .first = *first, .bytes = *bytes});
+      continue;
+    }
     if (words[0] == "derived") {
       if (words.size() != 10 || words[6] != "from" || words[8] != "via") {
         return fail("a derived target is an address, a name, e=, m=, x=, `from` the site and `via` the pointer");
@@ -1265,7 +1550,6 @@ namespace {
 // and not a mnemonic, a register or a directive.
 bool symbolName(std::string_view name) {
   static const assembler::Cpu65816Dialect dialect;
-  static const std::set<std::string> kCoreDirectives = {"ORG", "DB", "DW", "DL", "DS", "EQU"};
   if (name.empty()) return false;
   auto letter = [](char c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '.';
@@ -1275,7 +1559,7 @@ bool symbolName(std::string_view name) {
     if (!letter(c) && !(c >= '0' && c <= '9')) return false;
   }
   const std::string upper = assembler::upper(name);
-  return !dialect.reserved(upper) && kCoreDirectives.find(upper) == kCoreDirectives.end();
+  return !dialect.reserved(upper) && !assembler::coreDirective(upper);
 }
 
 // The register the absolute operand at `site` addresses, from the access facts:
@@ -1465,23 +1749,57 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
   const std::size_t bytesWidth = longest * 3;
 
   // One piece per run of consecutive lines, each under its own `ORG`; a gap is
-  // the sound program's bytes. Every piece is a region to an assembler, and so is
-  // whatever follows a run of data.
-  std::optional<Address> previousEnd;
+  // a cut — the sound program's bytes, which are its file's, or a lifted file's,
+  // included where they were. Every piece is a region to an assembler, and so
+  // is whatever follows a run of data or an `INCBIN`.
+  const std::vector<Cut> cuts = cutsOf(disassembly, region.region);
+  std::size_t nextCut = 0;
   bool open = false;
   ir::SourceMode mode;
-  for (const Line& line : lines.lines) {
-    if (previousEnd && line.address != *previousEnd) {
-      out += "\n; ---- " + address24(*previousEnd) + "-" + address24(line.address - 1u) +
-             ": the sound program, see " + soundFile + "\n";
-      open = false;
+  auto writeCutsBefore = [&](Address until) {
+    while (nextCut < cuts.size() && cuts[nextCut].range.first < until) {
+      const Cut& cut = cuts[nextCut++];
+      const std::string span = address24(cut.range.first) + "-" + address24(cut.range.last);
+      if (cut.asset == nullptr) {
+        out += "\n; ---- " + span + ": the sound program, see " + soundFile + "\n";
+        open = false;
+        continue;
+      }
+      if (!open) {
+        out += "        ORG " + address24(cut.range.first) + "\n";
+        open = true;
+      }
+      const AssetFile& asset = *cut.asset;
+      const std::string_view name = cpu65816RegisterName(asset.registerAddress);
+      const std::string to = name.empty() ? address24(asset.registerAddress) : std::string(name);
+      std::string what;
+      switch (asset.kind) {
+        case MovedKind::Dma: what = counted(asset.bytes.size(), "byte") + " a transfer carried to " + to; break;
+        case MovedKind::Table: what = "an HDMA table walked to " + to; break;
+        case MovedKind::Indirect: what = "a block an HDMA entry pointed at, sent to " + to; break;
+      }
+      // The path as the lexicon reads it: relative to this file, which for a
+      // file at the tree's root is the manifest's own path.
+      const std::string included =
+          std::filesystem::path(asset.file)
+              .lexically_relative(std::filesystem::path(region.region.file).parent_path())
+              .generic_string();
+      out += "\n; ---- " + span + ": " + what + ", in " + asset.file + "\n";
+      out += "        INCBIN \"" + included + "\"";
+      if (cut.length != asset.bytes.size()) {
+        out += ", " + std::to_string(cut.fileOffset) + ", " + std::to_string(cut.length);
+      }
+      out += "\n";
+      mode.reset();
     }
+  };
+  for (const Line& line : lines.lines) {
+    writeCutsBefore(line.address);
     if (!open) {
       out += "        ORG " + address24(line.address) + "\n";
       open = true;
       mode.reset();
     }
-    previousEnd = lineEnd(line);
 
     if (!line.isCode) {
       if (!line.data.empty()) out += renderDataRun(line);
@@ -1535,6 +1853,7 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
     }
     out += ir::renderLine(node, names, bytesWidth);
   }
+  writeCutsBefore(region.region.last + 1u);
   return out;
 }
 
@@ -1582,6 +1901,9 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
     if (!write(directory / disassembly.sound->file, renderSoundProgram(*disassembly.sound))) {
       return false;
     }
+  }
+  for (const AssetFile& asset : disassembly.assets) {
+    if (!write(directory / asset.file, std::string(asset.bytes.begin(), asset.bytes.end()))) return false;
   }
   return true;
 }

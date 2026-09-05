@@ -111,6 +111,32 @@ struct SoundProgram {
   Listing listing;
 };
 
+// A file of bytes the tree lifts out of a bank file: a range a run saw a
+// transfer engine carry from the image to the hardware, written once, as the
+// bytes are in the image, under a directory named for the memory they went to —
+// `vram/`, `cgram/`, `oam/`, `apu/`, and `hdma/` for a table and for a block an
+// indirect entry pointed at — and named by the address of its first byte. The
+// bank file refers to it with `INCBIN` where the bytes were. Ranges that share a
+// byte are one file, the union; ranges that touch are not.
+struct AssetFile {
+  std::string file;  // relative to the manifest: `vram/00_9000.bin`
+  RegisterClass cls = RegisterClass::Display;  // of the register the bytes went to
+  MovedKind kind = MovedKind::Dma;
+  Address registerAddress = 0;  // the register itself, for the comment beside the `INCBIN`
+  Address first = 0;            // the address the tree places its first byte at
+  std::size_t romOffset = 0;
+  std::vector<std::uint8_t> bytes;
+};
+
+// An asset as the manifest records it, read back for its path: a person's
+// rename survives a run when the file it names is lifted again with the same
+// first byte and length.
+struct ManifestAsset {
+  std::string file;
+  Address first = 0;
+  std::size_t bytes = 0;
+};
+
 // A whole cartridge, disassembled.
 struct CartridgeDisassembly {
   CartridgeHeader header;
@@ -137,6 +163,12 @@ struct CartridgeDisassembly {
   // Nothing is traced from them; they say where the bytes the hardware received
   // came from.
   std::vector<MovedRange> moved;
+  // The files lifted out of the bank files, in address order: every `moved`
+  // range that begins in the image and goes to a memory a file can be named for,
+  // by the rules `docs/snes-disassembler.md` states. A range that is refused —
+  // over an instruction, over a sound-program block, or sent two places — is
+  // named in `notes` and stays in its bank.
+  std::vector<AssetFile> assets;
   // The targets the bytes prove the indirect jumps take — a pointer in the image
   // selected by an index every path bounds — this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_facts.h`. A jump every
@@ -156,6 +188,7 @@ struct CartridgeRequest {
   std::vector<SourceRegion> regions;
   std::vector<ReachedTarget> reached;  // what earlier runs saw, read back from the manifest
   std::vector<MovedRange> moved;       // what earlier runs saw move, read back the same way
+  std::vector<ManifestAsset> assets;   // the paths the manifest gives the lifted files
   std::vector<DerivedTarget> derived;  // what earlier runs derived, read back the same way
   bool captureSound = true;
   std::uint64_t bootMasterCycles = 15u * 21'477'272u;
@@ -211,16 +244,17 @@ struct ManifestSound {
 };
 
 // What a manifest gives the tools that read it. The next disassembly takes the
-// entries, the reached and derived targets, the moved ranges, and the file
-// split; a verification takes the map, the file split, the sound program and
-// its blocks, which together say where every file's bytes land; both take the
-// image identity. Everything else in a manifest is what the last run found, and
-// is written fresh.
+// entries, the reached and derived targets, the moved ranges, the assets' paths
+// and the file split; a verification takes the map, the file split, the sound
+// program and its blocks, which together say where every file's bytes land;
+// both take the image identity. Everything else in a manifest is what the last
+// run found, and is written fresh.
 struct ManifestInput {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
+  std::vector<ManifestAsset> assets;
   std::vector<DerivedTarget> derived;
   std::optional<CartridgeMap> map;
   std::optional<ManifestSound> sound;
@@ -228,9 +262,10 @@ struct ManifestInput {
   std::optional<std::uint16_t> checksum;
 };
 
-// Reads the entries, reached and derived targets, moved ranges, regions, map,
-// sound program and image identity out of a manifest. Nothing, with `error` naming the line, when a line does not parse,
-// or when a block names a file no `sound` line does.
+// Reads the entries, reached and derived targets, moved ranges, assets, regions,
+// map, sound program and image identity out of a manifest. Nothing, with `error`
+// naming the line, when a line does not parse, or when a block names a file no
+// `sound` line does.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
 
 // Why `input` cannot direct a run over `rom`, or an empty string when it can: a
@@ -241,8 +276,9 @@ struct ManifestInput {
 
 // A region's source file. The instructions are written from the representation
 // the listing lifts to (`ir/ir_render.h`), in pieces with an `ORG` where a piece
-// starts and a comment where a sound-program block's bytes are left out; the
-// data runs and the labels are the listing's. The file opens with an `EQU` line
+// starts, a comment where a sound-program block's bytes are left out, and an
+// `INCBIN` where a lifted file's bytes were; the data runs and the labels are
+// the listing's. The file opens with an `EQU` line
 // for every hardware register its absolute operands address and every label
 // another file defines that it refers to, an absolute operand that addresses a
 // register is written as the register's name, a direct-page operand that every
@@ -256,8 +292,9 @@ struct ManifestInput {
 // The sound program's source file: its blocks, each under its own `ORG`.
 [[nodiscard]] std::string renderSoundProgram(const SoundProgram& sound);
 
-// Writes the manifest and every source file under `directory`, creating it.
-// False, with `error` set, when a file cannot be written.
+// Writes the manifest, every source file and every lifted file under
+// `directory`, creating it and their directories. False, with `error` set, when
+// a file cannot be written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
                   std::string& error);
 

@@ -489,9 +489,9 @@ Encoded Cpu65816Dialect::encode(std::string_view mnemonic, std::string_view oper
   return out;
 }
 
-Assembly assembleCpu65816(std::string_view source, std::string_view file) {
+Assembly assembleCpu65816(std::string_view source, std::string_view file, const Reader& reader) {
   Cpu65816Dialect dialect;
-  return assemble(dialect, source, file);
+  return assemble(dialect, source, file, reader);
 }
 
 }  // namespace snaggletooth::assembler

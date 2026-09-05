@@ -8,7 +8,10 @@
 // instruction set beyond one or two instructions used as bytes.
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -221,6 +224,109 @@ TEST(Assembler, OrgPlacesBytesAndNeverOverwrites) {
             std::string::npos);
   EXPECT_NE(firstError("        ORG $FFFF\n        DW 1\n").message.find("past the end"),
             std::string::npos);
+}
+
+// §5.4: INCBIN emits a file's bytes, whole or a part, read through the reader
+// the caller gives; the path is relative to the including file; every way it
+// can fail names what went wrong; and a region begins after it.
+namespace {
+
+// A reader over a few files by their tree-relative path.
+Reader readerOver(std::map<std::string, std::string> files) {
+  return [files = std::move(files)](const std::string& path) -> std::optional<std::string> {
+    const auto found = files.find(path);
+    if (found == files.end()) return std::nullopt;
+    return found->second;
+  };
+}
+
+}  // namespace
+
+TEST(Assembler, IncbinEmitsAFilesBytesWholeOrInPart) {
+  const Reader reader = readerOver({{"vram/tiles.bin", std::string("\x10\x11\x12\x13\x14", 5)}});
+  const Assembly whole = assembleSpc700("        ORG $0400\n        INCBIN \"vram/tiles.bin\"\n",
+                                        "bank_00.asm", reader);
+  ASSERT_TRUE(whole.ok()) << (whole.errors.empty() ? "" : whole.errors.front().message);
+  ASSERT_EQ(whole.ranges.size(), 1u);
+  EXPECT_EQ(whole.ranges.front().start, 0x0400u);
+  EXPECT_EQ(whole.ranges.front().bytes, (Bytes{0x10, 0x11, 0x12, 0x13, 0x14}));
+
+  const Assembly part = assembleSpc700(
+      "        DB 1\n        INCBIN \"vram/tiles.bin\", 1, 3\n        DB 2\n", "bank_00.asm", reader);
+  ASSERT_TRUE(part.ok()) << (part.errors.empty() ? "" : part.errors.front().message);
+  ASSERT_EQ(part.ranges.size(), 1u);
+  EXPECT_EQ(part.ranges.front().bytes, (Bytes{1, 0x11, 0x12, 0x13, 2}));
+
+  // The offset and the length are expressions, resolvable when read.
+  const Assembly named = assembleSpc700(
+      "skip    EQU 4\n        INCBIN \"vram/tiles.bin\", skip, 1\n", "bank_00.asm", reader);
+  ASSERT_TRUE(named.ok()) << (named.errors.empty() ? "" : named.errors.front().message);
+  EXPECT_EQ(named.ranges.front().bytes, (Bytes{0x14}));
+}
+
+TEST(Assembler, IncbinPathIsRelativeToTheIncludingFile) {
+  const Reader reader = readerOver({{"vram/a.bin", "A"}, {"code/deeper/b.bin", "B"}});
+  // A file at the tree's root asks for the path as written.
+  EXPECT_TRUE(assembleSpc700("        INCBIN \"vram/a.bin\"\n", "bank_00.asm", reader).ok());
+  // A file in a directory joins its directory first, and `..` walks up.
+  EXPECT_TRUE(assembleSpc700("        INCBIN \"../vram/a.bin\"\n", "code/bank_00.asm", reader).ok());
+  EXPECT_TRUE(assembleSpc700("        INCBIN \"deeper/b.bin\"\n", "code/bank_00.asm", reader).ok());
+  // The path is joined, not searched: a root-relative path from a nested file
+  // names a file the reader does not have.
+  const Assembly wrong = assembleSpc700("        INCBIN \"vram/a.bin\"\n", "code/bank_00.asm", reader);
+  ASSERT_FALSE(wrong.ok());
+  EXPECT_NE(wrong.errors.front().message.find("cannot read code/vram/a.bin"), std::string::npos);
+}
+
+TEST(Assembler, IncbinNamesEveryWayItCanFail) {
+  const Reader reader = readerOver({{"x.bin", "abc"}, {"empty.bin", ""}});
+  auto error = [&](const char* source) {
+    const Assembly assembly = assembleSpc700(source, "bank_00.asm", reader);
+    EXPECT_FALSE(assembly.ok()) << "assembled without error";
+    return assembly.errors.empty() ? std::string() : assembly.errors.front().message;
+  };
+  EXPECT_NE(error("        INCBIN \"missing.bin\"\n").find("cannot read missing.bin"), std::string::npos);
+  EXPECT_NE(error("        INCBIN x.bin\n").find("string in double quotes"), std::string::npos);
+  EXPECT_NE(error("        INCBIN\n").find("quoted path"), std::string::npos);
+  EXPECT_NE(error("        INCBIN \"x.bin\", 1\n").find("quoted path"), std::string::npos);
+  EXPECT_NE(error("        INCBIN \"x.bin\", 3, 1\n").find("offset 3 lies past the end of x.bin (3 bytes)"),
+            std::string::npos);
+  EXPECT_NE(error("        INCBIN \"x.bin\", 0, 0\n").find("at least one byte"), std::string::npos);
+  EXPECT_NE(error("        INCBIN \"x.bin\", 2, 2\n").find("2 bytes from offset 2 reach past the end of x.bin (3 bytes)"),
+            std::string::npos);
+  EXPECT_NE(error("        INCBIN \"empty.bin\"\n").find("empty.bin is empty"), std::string::npos);
+  EXPECT_NE(error("        INCBIN \"x.bin\", later, 1\nlater:  NOP\n").find("must be known"),
+            std::string::npos);
+  // The name is a directive of the common layer, and so cannot be a label.
+  EXPECT_NE(error("INCBIN: NOP\n").find("cannot be a label"), std::string::npos);
+  // No reader: the directive is an error saying so, whatever the path.
+  const Assembly none = assembleSpc700("        INCBIN \"x.bin\"\n", "bank_00.asm");
+  ASSERT_FALSE(none.ok());
+  EXPECT_NE(none.errors.front().message.find("this assembly reads no files"), std::string::npos);
+  // A file read once is read once: the second pass does not ask again.
+  int reads = 0;
+  const Reader counting = [&](const std::string&) -> std::optional<std::string> {
+    ++reads;
+    return std::string("z");
+  };
+  EXPECT_TRUE(assembleSpc700("        INCBIN \"x.bin\"\n        INCBIN \"x.bin\"\n", "b.asm", counting).ok());
+  EXPECT_EQ(reads, 1);
+}
+
+TEST(Assembler, IncbinBeginsARegion) {
+  // Under the 65816 dialect an immediate after INCBIN is under a width the
+  // directive above did not settle, exactly as after DB.
+  const Reader reader = readerOver({{"x.bin", "a"}});
+  const Assembly after = assembleCpu65816(
+      "        ORG $00:8000\n        A8\n        LDA #1\n        INCBIN \"x.bin\"\n        LDA #1\n",
+      "bank_00.asm", reader);
+  ASSERT_FALSE(after.ok());
+  EXPECT_EQ(after.errors.front().line, 5u);
+  EXPECT_NE(after.errors.front().message.find("width"), std::string::npos);
+  const Assembly restated = assembleCpu65816(
+      "        ORG $00:8000\n        A8\n        LDA #1\n        INCBIN \"x.bin\"\n        A8\n        LDA #1\n",
+      "bank_00.asm", reader);
+  EXPECT_TRUE(restated.ok()) << (restated.errors.empty() ? "" : restated.errors.front().message);
 }
 
 // §5.2 and §5.3: DB emits bytes and strings, DW words low byte first, DL 24-bit

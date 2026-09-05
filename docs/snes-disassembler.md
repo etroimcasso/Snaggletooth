@@ -1,7 +1,8 @@
 # Cartridge disassembler
 
 `snes_disasm` disassembles a whole cartridge into a source tree: one file per
-bank, the sound program the cartridge uploads at boot as a file of its own, and a
+bank, the sound program the cartridge uploads at boot as a file of its own, the
+bytes the cartridge sends to the hardware as files of their own kind, and a
 manifest that says where every file's bytes land in the image, where the trace
 began, and where it stopped. `snes_verify` does the reverse: it assembles every
 file the manifest names, places the bytes where the manifest says, and reports
@@ -25,8 +26,11 @@ of the image it was read from.
 > took become entries, so a cartridge whose dispatch goes through pointers is
 > traced past them, and every range of bytes the transfer engines moved is
 > recorded with where it came from, where it went and which instruction sent
-> it; and the lifted program is read for what every path proves, so a jump
-> through a table whose index the bytes bound is traced past without running.
+> it, and every such range that begins in the image is lifted out of its bank
+> into a file of its own under a directory named for the memory it went to, the
+> bank file including it where it was; and the lifted program is read for what
+> every path proves, so a jump through a table whose index the bytes bound is
+> traced past without running.
 > The manifest says what the code reaches: every register access, every
 > transfer, every routine with what it calls and what it drives, and the direct
 > register, data bank and stack pointer at every label where the paths settle
@@ -47,6 +51,7 @@ of the image it was read from.
 - [Stops, and getting past them](#stops-and-getting-past-them)
 - [Running the cartridge](#running-the-cartridge)
 - [What a run moved](#what-a-run-moved)
+- [The assets](#the-assets)
 - [What is placed](#what-is-placed)
 - [Verifying the tree](#verifying-the-tree)
 - [What the code reaches](#what-the-code-reaches)
@@ -92,7 +97,7 @@ cannot be read is refused with its line named, and `--input` under `--no-run` is
 refused as well, having nothing to replay into.
 
 When the directory already holds a `project.manifest`, its `entry`, `reached`,
-`derived` and `file` lines are read first, and the manifest must name the image
+`derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
 it was written for: a manifest written for another image is refused rather than
 applied. See [Stops, and getting past them](#stops-and-getting-past-them).
 
@@ -106,11 +111,16 @@ cartridge/
   …
   bank_0F.asm
   apu/driver.asm
+  vram/00_9000.bin
+  cgram/00_9200.bin
+  oam/00_9300.bin
+  hdma/00_9700.bin
 ```
 
 **One file per bank.** Each `bank_XX.asm` covers the ROM window of one bank
 whole, from its first byte to its last, under one `ORG`: instructions where the
-trace reached, `DB` runs everywhere else. Every image byte is placed once, at the
+trace reached, `DB` runs everywhere else, and an `INCBIN` where a range was
+lifted into a file of its own. Every image byte is placed once, at the
 address `romAddress` reports for its offset, so a mirror is never written twice —
 a bank reached through `$80`–`$FF` is written as `$00`–`$7F` under LoROM, and
 under HiROM the banks are `$C0`–`$FF`. The instructions are written from the
@@ -210,6 +220,23 @@ destination — which the main CPU reads and the audio unit never receives; the
 block itself is in the sound program's file. A bank file therefore carries an
 `ORG` wherever a range was left out, and the lexicon's `ORG` rule, forward only
 and never over emitted bytes, is what makes the file one program.
+
+**The assets as files of their own.** A range the cartridge, run on the machine,
+was seen to send from the image to the hardware is written once, as the bytes
+are, in a file under a directory named for the memory it went to, and the bank
+file includes it where it was — from `bank_00.asm` of the `lifting` cartridge:
+
+```
+; ---- $00:9000-$00:904F: 80 bytes a transfer carried to VMDATAL, in vram/00_9000.bin
+        INCBIN "vram/00_9000.bin"
+
+; ---- 432 bytes execution did not reach
+```
+
+The `INCBIN` emits the file's bytes at that address, so the bank's range runs on
+through it; the comment says what the run saw the bytes were for, and the file
+they are in. [The assets](#the-assets) says which ranges are lifted and which are
+not.
 
 **The manifest.** `project.manifest` names the image, every file and the range it
 covers, the sound program and each of its blocks with the image offset it was read
@@ -456,6 +483,95 @@ was, and a run skipped with `--no-run` keeps them all. So a tree carries where
 the hardware's bytes came from whether or not the disassembly that wrote it ran
 the cartridge.
 
+## The assets
+
+Every range the run saw an engine carry begins somewhere, and where it begins in
+the image, the bytes are the cartridge's own — a tileset, a palette, a sprite
+table, an HDMA table — and are lifted out of their bank into a file of their
+own. The bank file includes the file where the bytes were, with `INCBIN`, so the
+tree still assembles to the image; the manifest records the file as an
+[`asset` line](project-manifest.md#212-assets); and the `moved` lines are its
+uses, joined on the address.
+
+**What is lifted.** A `moved` range whose bytes went to a register, stepping up
+or down through memory that is the image: a general-purpose transfer to VRAM, to
+CGRAM, to OAM or to the audio port, or an HDMA table or a block an indirect entry
+pointed at, to any register. The file lives under `vram/`, `cgram/`, `oam/` or
+`apu/` for a transfer, `hdma/` for a table or a block, and is named
+`<bank>_<offset>.bin` after the address of its first byte. A range read
+downward is lifted in image order, which is how its bytes lie. Ranges that share
+a byte are one file, the union of them — a tileset sent whole and then sent
+piece by piece is one tileset; ranges that only touch are two files, since the
+run cannot say whether a chunked upload is one asset or two.
+
+**What is not, without a word.** A fill from one byte, which is not a range of
+anything; a read from a register back into memory, whose memory is the
+destination; a range in work RAM, save RAM or a register window — the program
+built it, and the image holds it in another form or not at all; and a
+general-purpose transfer to any other register, such as a copy into work RAM
+through its port, whose bytes could be anything. A transfer whose address runs
+past the end of its bank and on from the bank's start is lifted as far as its
+bytes were in the image, and a `note` says how many were not; under HiROM the
+bytes after the wrap are the image too, the bank's own first bytes, and are a
+file of their own — the `wrapping` cartridge lifts `vram/C1_FFF0.bin` and
+`vram/C1_0000.bin` from one transfer of thirty-two.
+
+**What is refused, with a note.** A range over an instruction the trace decoded
+— the instruction is the trace's reading of those bytes, and a file cut through
+it would change what the tree says the code is; a range over a block of the
+sound program, which is already another file's; and a range whose overlapping
+ranges the run sent two places, or two ways, since a file is one thing. Each is
+left as `DB` rows in its bank, and the manifest says why.
+
+The `lifting` cartridge from [`tools/examples/`](../tools/examples/README.md),
+which sends bytes every way the rules have a case for, run for one second:
+
+```
+$ snes_disasm lifting.smc -o lifting --no-sound --run-seconds 1
+2 files, 271 instructions, 1 entries, 0 stops
+note: moved $00:8165 channel 0 memory $00:8000 bytes 16: $00:8000-$00:800F overlaps an instruction the trace decoded; not lifted
+note: moved $00:8205 channel 0 memory $01:FFF0 bytes 32: 16 of its bytes are not the image and are not lifted
+note: the bytes at $00:9800 were sent to VMDATAL and CGDATA; not lifted
+note: the bytes at $00:9C00 were sent to VMDATAL and VMDATAH; not lifted
+65536 of 65536 bytes placed -> lifting
+```
+
+```
+asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 80
+asset    cgram/00_9200.bin Cgram as dma from $00:9200 bytes 16
+asset    oam/00_9300.bin Oam as dma from $00:9300 bytes 544
+asset    apu/00_9600.bin Apu as dma from $00:9600 bytes 8
+asset    hdma/00_9700.bin Cgram as table from $00:9700 bytes 7
+asset    hdma/00_9710.bin Cgram as indirect from $00:9710 bytes 2
+asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2
+asset    vram/01_8000.bin Vram as dma from $01:8000 bytes 32
+asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
+```
+
+Three transfers from `$9000` — sixty-four bytes, sixteen inside them, thirty-two
+across their end — are the one file of eighty; the two blocks the HDMA table
+points at lie end to end and are two files; the transfer from `$01:FFF0` read
+its last sixteen bytes from `$01:0000`, which is not the image, and its file
+holds the sixteen that were. The three notes are the three refusals: the same
+bytes sent two places, twice — once to two classes, once to two registers of
+one — and the reset routine's own bytes sent to VRAM.
+
+**A name is a person's.** The disassembler writes every source file fresh, so a
+path edited in a bank file is gone on the next run; the manifest is where a
+name lives. Rename the file, change its `asset` line to match, and the next run
+writes the file under that name and includes it by it, since a line whose
+address and length match a file lifted again gives it its path. The old file is
+not removed — the disassembler never deletes anything — and an `asset` line
+that matches no range the run lifts is dropped, with a `note` saying so. A tree
+disassembled with `--no-run` lifts what its manifest's `moved` lines say, so the
+files are kept from one run to the next whether or not the cartridge ran.
+
+The pass reaches what the run saw leave the image. Most of what a cartridge
+sends is built in work RAM first — decompressed, drawn, assembled from pieces —
+and those ranges are recorded as `moved` lines whose memory is work RAM, and are
+not lifted: the image holds them in another form, which this pass does not
+follow.
+
 ## What is placed
 
 The tree is complete when every image byte is in exactly one file at its offset.
@@ -466,8 +582,8 @@ The tool reports it on every run:
 ```
 
 The count is made from the listings' own byte records — an instruction's bytes or
-a data run, placed at the offset its address reads from — and from the sound
-program's placed blocks. Bytes no file carries, and bytes two files carry, are
+a data run, placed at the offset its address reads from — from the sound
+program's placed blocks, and from the lifted files' bytes. Bytes no file carries, and bytes two files carry, are
 counted and reported when there are any; a region split that leaves a bank
 without a file is the usual way to have bytes nobody carries.
 
@@ -527,6 +643,12 @@ The sound file's blocks are compared only where the manifest placed them; an
 `unplaced` block's bytes are in its bank, and are compared there. A placed
 block the sound file does not emit whole is reported rather than compared
 against the fill.
+
+A lifted file needs no line of its own: a bank file's `INCBIN` emits the file's
+bytes into the bank's own range, read from the tree's directory as the sources
+are, so a tree with assets verifies exactly as one without. A lifted file that
+cannot be read is that bank file's assembly error, reported with its line, and
+the bank's bytes are then among those no file produced.
 
 ## What the code reaches
 
@@ -656,8 +778,13 @@ snaggletooth::disasm::writeProject(tree, "cartridge", error);
 
 `disassembleCartridge` returns the header, the entries traced from, one
 `RegionListing` per region — its `SourceRegion` and its `Listing`, whole — the
-`SoundProgram` when one was captured, the `TraceStop`s, and `notes` for what the
-run could not do. `bankRegions(map, imageBytes)` is the default split.
+`SoundProgram` when one was captured, the `assets` lifted out of the banks, the
+`TraceStop`s, and `notes` for what the run could not do. Each `AssetFile` is its
+path, the class and `registerAddress` of the register its bytes went to, its
+`kind` (a `MovedKind`), the address of its `first` byte, its `romOffset` and its
+`bytes`; `CartridgeRequest::assets` is the `ManifestAsset`s read back from the
+manifest — a path with the first address and length it names — which give a file
+lifted again its path. `bankRegions(map, imageBytes)` is the default split.
 `captureUpload(rom, masterCycles, reason)` is the boot alone: the entry and the
 blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the
 image the tree describes and counts what is unplaced or placed twice.
@@ -704,10 +831,10 @@ accesses and the transfers.
 
 The files are text from `renderRegion`, `renderSoundProgram` and
 `renderManifest`; `parseManifest` reads a manifest's entries, reached and
-derived targets, moved ranges, file split, map, sound program and image identity
-back, and `manifestMismatch` says whether that manifest can direct a run over a
-given image. `writeProject` writes all of it
-under a directory. `renderRegion` lifts the region's listing into the
+derived targets, moved ranges, assets, file split, map, sound program and image
+identity back, and `manifestMismatch` says whether that manifest can direct a
+run over a given image. `writeProject` writes all of it under a directory, the
+lifted files as bytes under theirs. `renderRegion` lifts the region's listing into the
 [intermediate representation](ir.md) and writes each instruction from it
 (`ir/ir_render.h`), with the labels, the register names from `accesses` and the
 `routines` attached; the data runs and the sound-program cut are the listing's.
@@ -751,6 +878,14 @@ exercises, run by run, and the manifest accumulates it. The same holds for what
 a run moved: a transfer the run never started has its `dma` line and no `moved`
 line, and a byte the CPU carries to a register itself, a store at a time, is
 not a transfer and is not recorded here.
+
+The assets are the ranges the run saw leave the image. A range the program built
+in work RAM before sending it — which is most of what a real cartridge sends —
+is recorded as a `moved` line and is not lifted; the image holds it compressed,
+or in pieces, or not at all, and nothing here follows the program back to that
+form. A transfer the run never started has no `moved` line and no file; the
+static `dma` line names its source where the bytes say it, but not its length,
+so nothing is lifted from it either.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or

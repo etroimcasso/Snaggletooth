@@ -265,9 +265,9 @@ Encoded Spc700Dialect::encode(std::string_view mnemonic, std::string_view operan
   return out;
 }
 
-Assembly assembleSpc700(std::string_view source, std::string_view file) {
+Assembly assembleSpc700(std::string_view source, std::string_view file, const Reader& reader) {
   Spc700Dialect dialect;
-  return assemble(dialect, source, file);
+  return assemble(dialect, source, file, reader);
 }
 
 }  // namespace snaggletooth::assembler
