@@ -476,9 +476,11 @@ struct Lockstep {
       }
       return;
     }
+    // The landing is where the CPU arrived, in the bank it arrived in; the
+    // disassembler places it to trace from it.
     const Cpu65816Mode arrived = modeOf(after);
-    if (!landings.insert({site, landed, contextOf(arrived).bits}).second) return;
-    ran.push_back(Landing{.target = landed, .mode = arrived, .site = site, .name = {}});
+    if (!landings.insert({site, rawLanded, contextOf(arrived).bits}).second) return;
+    ran.push_back(Landing{.target = rawLanded, .mode = arrived, .site = site, .name = {}});
   }
 
   // The mode the CPU is in, as the trace carries one: the widths are known —

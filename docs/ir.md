@@ -643,9 +643,11 @@ known to be zero (a shift left clears the low bit; a mask says which bits it
 admits) or a `Symbol`, a name for what the register held when the routine under
 examination was entered. A `RegisterState` holds the accumulator and the index
 registers as two bytes each, the direct register and the stack pointer whole,
-and the data bank; a `State` adds the compare the last instruction made against
-an immediate, for the branch on the carry after it, and the bytes the path has
-pushed and not yet pulled.
+the data bank, and the program bank — the bank the CPU runs in, which is the
+bank the program places the instruction in only when the code does not run
+through a mirror, so what `PHK` pushes is what the chip pushes; a `State` adds
+the compare the last instruction made against an immediate, for the branch on
+the carry after it, and the bytes the path has pushed and not yet pulled.
 
 `evaluate(node, before, image)` runs one node's effects over a state. It follows
 `Set`, the address arithmetic, the shifts, `Inc`, `Dec`, `And`, `Or`, `Xor`,
@@ -660,21 +662,29 @@ zero while the index registers are eight bits wide, the stack in page one under
 emulation — are re-established before every node from the node's own mode.
 
 `Dataflow(program, entries, sightings, image, canonical)` runs to a fixed point
-from the entries — `resetState()` for the reset vector, with the direct register
-and the data bank zero; `nothingProven()` for every other — along the program's
-own flow and the `Sighting`s a run saw or an earlier analysis derived, with
-`canonical` placing every successor where the program places its nodes. Two
-paths meeting take the union of what each proves; a value one path does not
-know is not known. A branch on the carry after `CMP #n`, `CPX #n` or `CPY #n`
-bounds the compared register on each edge. A call carries the caller's state
-into the routine and brings back what every return of the routine proves, except
-a register the routine gives back as it took it, which comes back as the caller
-left it: each routine is run once from a named entry, and a register whose name
-comes back whole — never written, or pushed and pulled around the routine's own
-work — is one it gives back; a stack pointer whose name comes back moved by
-exactly the return's own pull makes the routine balanced, and the caller's stack
-pointer comes back too. A call the bytes do not resolve, a `BRK` or `COP`, and a
-routine that reaches a jump the bytes do not name bring back nothing known.
+from the entries — `resetState()` for the reset vector, with the direct
+register, the data bank and the program bank zero; `handlerState()` for an
+interrupt vector, with the program bank zero, which the chip clears to take the
+interrupt; `entryState(address)` for an entry a person added, with the program
+bank the address names; `nothingProven()` knows nothing — along the program's
+own flow and the `Sighting`s a run saw or an earlier analysis derived: the
+destinations of the indirect jumps and calls, the places the returns landed, and
+the table slots the bytes bound, each from the instruction that took it. A
+sighting's target is where the CPU arrived, in the bank it arrived in, and the
+path arrives there in that bank; a long jump or call writes its operand's bank;
+a fall-through, a branch and a jump within the bank keep it. Two paths meeting take the union of what each proves; a value one
+path does not know is not known. A branch on the carry after `CMP #n`, `CPX #n`
+or `CPY #n` bounds the compared register on each edge. A call carries the
+caller's state into the routine and brings back what every return of the
+routine proves, except a register the routine gives back as it took it, which
+comes back as the caller left it: each routine is run once from a named entry,
+and a register whose name comes back whole — never written, or pushed and
+pulled around the routine's own work — is one it gives back; a stack pointer
+whose name comes back moved by exactly the return's own pull makes the routine
+balanced, and the caller's stack pointer comes back too; the caller's program
+bank always comes back, since a routine returns to the bank it was called from.
+A call the bytes do not resolve, a `BRK` or `COP`, and a routine that reaches a
+jump the bytes do not name bring back nothing known but that bank.
 
 `before(address)` is what is proven before the first node at an address, or
 nothing for an address no path reached. `derived()` is every `DerivedTarget` —
@@ -684,7 +694,9 @@ index selects is read as the chip reads it. The plain and long indirect forms
 read a value in memory rather than a slot of a table and derive nothing.
 
 The `proving` cartridge under [`tools/examples/`](../tools/examples/README.md)
-runs every rule above; `tests/ir/dataflow_test.cpp` pins each.
+runs every rule above, and `running_bank` runs a HiROM program through the
+mirror of the bank the tree places it in, proving its data bank from every kind
+of arrival; `tests/ir/dataflow_test.cpp` pins each.
 
 ## How it is checked
 

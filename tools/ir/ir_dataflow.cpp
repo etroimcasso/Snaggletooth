@@ -152,7 +152,8 @@ RegisterState meet(const RegisterState& a, const RegisterState& b) {
                        .yHigh = unionOf(a.yHigh, b.yHigh),
                        .d = unionOf(a.d, b.d),
                        .s = unionOf(a.s, b.s),
-                       .dbr = unionOf(a.dbr, b.dbr)};
+                       .dbr = unionOf(a.dbr, b.dbr),
+                       .pbr = unionOf(a.pbr, b.pbr)};
 }
 
 State meet(const State& a, const State& b) {
@@ -184,7 +185,6 @@ struct Abstract {
   const StackReach& stack;
   State state;
   Values pc;
-  Values pbr;
   std::array<Values, 4> temps;
   // Of a temporary holding a bank-relative address whose bank is not known, the
   // sixteen-bit offsets it can hold — enough to say whether a store through it
@@ -195,8 +195,10 @@ struct Abstract {
 
   Abstract(const Node& n, const State& before, const ImageReader& reader, const StackReach& reach)
       : node(n), image(reader), stack(reach), state(before), emulation(n.mode.emulation) {
+    // The program counter is the instruction's own; the program bank is the
+    // path's, since the bank the CPU runs in is not the bank the tree places
+    // the instruction in when the program runs through a mirror.
     pc = Values::one(n.instruction.address & 0xFFFFu);
-    pbr = Values::one(n.instruction.address >> 16);
     for (Values& t : temps) t = Values::one(0);
     for (Values& o : offsets) o = Values::none();
     state.compare = std::nullopt;
@@ -242,7 +244,7 @@ struct Abstract {
       case Place::S: return r.s;
       case Place::D: return r.d;
       case Place::PC: return pc;
-      case Place::PBR: return pbr;
+      case Place::PBR: return r.pbr;
       case Place::DBR: return r.dbr;
       case Place::T0: return temps[0];
       case Place::T1: return temps[1];
@@ -311,7 +313,7 @@ struct Abstract {
       case Place::S: r.s = word(v); break;
       case Place::D: r.d = word(v); break;
       case Place::PC: pc = word(v); break;
-      case Place::PBR: pbr = lowByte(v); break;
+      case Place::PBR: r.pbr = lowByte(v); break;
       case Place::DBR: r.dbr = lowByte(v); break;
       case Place::T0: temps[0] = v; offsets[0] = Values::none(); break;
       case Place::T1: temps[1] = v; offsets[1] = Values::none(); break;
@@ -342,7 +344,7 @@ struct Abstract {
       case Place::D: r.d = Values::none(); break;
       case Place::DBR: r.dbr = Values::none(); break;
       case Place::PC: pc = Values::none(); break;
-      case Place::PBR: pbr = Values::none(); break;
+      case Place::PBR: r.pbr = Values::none(); break;
       case Place::T0: temps[0] = Values::none(); break;
       case Place::T1: temps[1] = Values::none(); break;
       case Place::T2: temps[2] = Values::none(); break;
@@ -544,7 +546,8 @@ struct Abstract {
         break;
       case Op::ProgramAddress:
         put(e.dst.place,
-            product(pbr, raw(e.a), [](std::uint32_t bank, std::uint32_t a) { return (bank << 16) | (a & 0xFFFFu); }),
+            product(state.registers.pbr, raw(e.a),
+                    [](std::uint32_t bank, std::uint32_t a) { return (bank << 16) | (a & 0xFFFFu); }),
             24);
         break;
       case Op::StackAddress:
@@ -732,6 +735,19 @@ State resetState() {
   State state;
   state.registers.d = Values::one(0);
   state.registers.dbr = Values::one(0);
+  state.registers.pbr = Values::one(0);
+  return state;
+}
+
+State handlerState() {
+  State state;
+  state.registers.pbr = Values::one(0);
+  return state;
+}
+
+State entryState(Address address) {
+  State state;
+  state.registers.pbr = Values::one((address >> 16) & 0xFFu);
   return state;
 }
 
@@ -753,7 +769,6 @@ Evaluation evaluate(const Node& node, const State& before, const ImageReader& im
   out.after = std::move(run.state);
   out.accesses = std::move(run.accesses);
   out.pc = std::move(run.pc);
-  out.pbr = std::move(run.pbr);
   return out;
 }
 
@@ -778,12 +793,19 @@ struct Summary {
   bool opaque = false;
 };
 
+// A destination a sighting proved: the node the CPU arrived at, and the bank it
+// arrived in — the bank the sighting names, which the tree may place elsewhere.
+struct Arrival {
+  std::size_t node = 0;
+  std::uint32_t bank = 0;
+};
+
 struct Graph {
   const Program& program;
   const Canonical& canonical;
-  std::vector<std::vector<std::size_t>> sightingsOf;  // per node: the sighting targets' nodes
-  std::vector<std::optional<std::size_t>> next;       // per node: the node after it
-  std::vector<std::optional<std::size_t>> target;     // per node: its constant target's node
+  std::vector<std::vector<Arrival>> sightingsOf;   // per node: where its sightings arrive
+  std::vector<std::optional<std::size_t>> next;    // per node: the node after it
+  std::vector<std::optional<std::size_t>> target;  // per node: its constant target's node
 
   // The nodes at an address: the range of indexes.
   [[nodiscard]] std::pair<std::size_t, std::size_t> at(Address address) const {
@@ -836,7 +858,7 @@ struct Graph {
         if (target[i]) {
           out.push_back(*target[i]);
         } else if (!sightingsOf[i].empty()) {
-          out.insert(out.end(), sightingsOf[i].begin(), sightingsOf[i].end());
+          for (const Arrival& arrival : sightingsOf[i]) out.push_back(arrival.node);
         } else {
           beyond = true;
         }
@@ -853,9 +875,19 @@ struct Graph {
     const Node& node = program.nodes[i];
     if (node.instruction.flow != Flow::Call || softwareInterrupt(node)) return {};
     if (target[i]) return {*target[i]};
-    return sightingsOf[i];
+    std::vector<std::size_t> out;
+    for (const Arrival& arrival : sightingsOf[i]) out.push_back(arrival.node);
+    return out;
   }
 };
+
+// The state a sighting carries to where it arrives: the site's, in the bank the
+// CPU arrived in.
+State arriving(const State& state, const Arrival& arrival) {
+  State out = state;
+  out.registers.pbr = Values::one(arrival.bank);
+  return out;
+}
 
 Summary walk(const Graph& graph, std::size_t root) {
   Summary summary;
@@ -886,8 +918,10 @@ State unknownState() { return State{}; }
 // held before and after the call instruction and what the routine's return
 // proves: a register the routine gives back as it took it is the caller's, the
 // stack pointer is the caller's before the call when the routine is balanced,
-// and everything else is the return's. A routine beyond the analysis never
-// reaches here; its caller is given nothing known.
+// the program bank is the caller's before the call always — a routine returns
+// to the bank it was called from, `RTL` by pulling it and `RTS` by never having
+// left it — and everything else is the return's. A routine beyond the analysis
+// never reaches here; its caller is given nothing known.
 State returned(const Summary& summary, const State& callerBefore, const State& callerAfter,
                const std::optional<State>& atReturn) {
   State state = atReturn ? *atReturn : unknownState();
@@ -899,6 +933,7 @@ State returned(const Summary& summary, const State& callerBefore, const State& c
   if (summary.transparent & TD) r.d = c.d;
   if (summary.transparent & TDBR) r.dbr = c.dbr;
   if (summary.balanced) r.s = callerBefore.registers.s;
+  r.pbr = callerBefore.registers.pbr;
   state.compare = std::nullopt;
   state.pushed.clear();
   return state;
@@ -949,6 +984,8 @@ class Propagation {
       // point near.
       if (++visits_[i] > 2048u) {
         RegisterState& r = in_[i]->registers;
+        // The program bank is left alone: it holds at most the banks the program
+        // runs in, so it cannot be what keeps the fixed point away.
         for (Values* v : {&r.aLow, &r.aHigh, &r.xLow, &r.xHigh, &r.yLow, &r.yHigh, &r.d, &r.s, &r.dbr}) {
           if (v->known && v->values.size() > 1) *v = Values::none();
         }
@@ -978,19 +1015,23 @@ class Propagation {
           if (graph_.target[i]) {
             join(*graph_.target[i], ev.after);
           } else {
-            for (const std::size_t s : graph_.sightingsOf[i]) join(s, ev.after);
+            for (const Arrival& arrival : graph_.sightingsOf[i]) join(arrival.node, arriving(ev.after, arrival));
           }
           break;
         case Flow::Call: {
           if (softwareInterrupt(node)) {
-            if (graph_.next[i]) join(*graph_.next[i], unknownState());
+            if (graph_.next[i]) join(*graph_.next[i], unknownAfter(i));
             break;
           }
           if (!held_) {
             State into = ev.after;
             into.compare = std::nullopt;
             into.pushed.clear();
-            for (const std::size_t root : graph_.callees(i)) join(root, into);
+            if (graph_.target[i]) {
+              join(*graph_.target[i], into);
+            } else {
+              for (const Arrival& arrival : graph_.sightingsOf[i]) join(arrival.node, arriving(into, arrival));
+            }
           }
           fireReturns(i);
           break;
@@ -999,6 +1040,9 @@ class Propagation {
           if (callersOf) {
             for (const std::size_t site : (*callersOf)[i]) fireReturns(site);
           }
+          // A return a run saw land somewhere the code itself put on the stack:
+          // the registers go there as they are, in the bank the CPU arrived in.
+          for (const Arrival& arrival : graph_.sightingsOf[i]) join(arrival.node, arriving(ev.after, arrival));
           break;
       }
     }
@@ -1038,13 +1082,13 @@ class Propagation {
     if (!graph_.next[site] || !out_[site]) return;
     const std::vector<std::size_t> roots = graph_.callees(site);
     if (roots.empty()) {
-      join(*graph_.next[site], unknownState());
+      join(*graph_.next[site], unknownAfter(site));
       return;
     }
     for (const std::size_t root : roots) {
       const auto found = summaries_.find(root);
       if (found == summaries_.end() || found->second.opaque) {
-        join(*graph_.next[site], unknownState());
+        join(*graph_.next[site], unknownAfter(site));
         continue;
       }
       const Summary& summary = found->second;
@@ -1058,6 +1102,16 @@ class Propagation {
         if (out_[r]) join(*graph_.next[site], returned(summary, *in_[site], *out_[site], out_[r]));
       }
     }
+  }
+
+  // What a call the analysis cannot follow, or a software interrupt, leaves at
+  // the instruction after it: nothing known, except the program bank — a
+  // routine that returns at all returns to the bank it was called from, and a
+  // handler's `RTI` pulls the bank it interrupted — so what the site held stays.
+  [[nodiscard]] State unknownAfter(std::size_t site) const {
+    State state = unknownState();
+    if (in_[site]) state.registers.pbr = in_[site]->registers.pbr;
+    return state;
   }
 
   // A jump or call through a table the bytes place in the image: every pointer
@@ -1074,18 +1128,22 @@ class Propagation {
         const Values one = probe.load(Values::one(pointer), *width, node.effects[access.effect].step);
         const std::optional<std::uint32_t> read = one.single();
         // The pointer of an indexed form is in the program bank and names an
-        // address in it.
-        const std::optional<std::uint32_t> bank = ev.pbr.single();
-        if (!read || !bank) continue;
-        const Address target = (*bank << 16) | (*read & 0xFFFFu);
+        // address in it, so the pointer's bank is the bank the jump lands in —
+        // one destination per bank the site runs in, when it runs in more than
+        // one; the tree may place the destination elsewhere, and whoever traces
+        // from it places it.
+        if (!read) continue;
+        const Address target = (pointer & 0xFF0000u) | (*read & 0xFFFFu);
         if (seen.insert({node.instruction.address, target, pointer}).second) {
           derived.push_back(DerivedTarget{.site = node.instruction.address,
                                           .pointer = pointer,
                                           .target = target,
                                           .call = node.instruction.flow == Flow::Call});
         }
-        // A destination that is already code takes the site's state now; one
-        // that is not is traced on the next run, and takes it then.
+        // A destination that is already code takes the site's state now — every
+        // bank the site runs in reads the same slot, so the destination begins
+        // in all of them; one that is not is traced on the next run, and takes
+        // it then.
         if (node.instruction.flow == Flow::Jump) {
           if (const std::optional<std::size_t> to = graph_.nodeFor(i, target)) join(*to, ev.after);
         }
@@ -1125,6 +1183,7 @@ void probe(const Graph& graph, const ImageReader& image, const StackReach& stack
   entry.registers.d = Values::entry(Place::D, 2);
   entry.registers.s = Values::entry(Place::S, 2);
   entry.registers.dbr = Values::entry(Place::DBR, 0);
+  entry.registers.pbr = Values::entry(Place::PBR, 0);
 
   Propagation run(graph, image, stack, summaries);
   run.restrict(summary.held);
@@ -1176,14 +1235,15 @@ Dataflow::Dataflow(const Program& program, const std::vector<FlowEntry>& entries
     graph.next[i] = graph.nodeFor(i, after);
     if (instruction.target) graph.target[i] = graph.nodeFor(i, *instruction.target);
   }
-  // The edges a run or an earlier analysis proved.
+  // The edges a run or an earlier analysis proved, each arriving in the bank
+  // the sighting names.
   for (const Sighting& sighting : sightings) {
     const std::optional<Address> site = canonical(sighting.site);
     if (!site) continue;
     const auto [first, last] = graph.at(*site);
     for (std::size_t i = first; i < last; ++i) {
       const std::optional<std::size_t> to = graph.nodeFor(i, sighting.target);
-      if (to) graph.sightingsOf[i].push_back(*to);
+      if (to) graph.sightingsOf[i].push_back(Arrival{.node = *to, .bank = (sighting.target >> 16) & 0xFFu});
     }
   }
 

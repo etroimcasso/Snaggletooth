@@ -161,7 +161,10 @@ sixteen, or `?` for a width the trace does not know and must not guess. The
 vectors are written first, each in the mode the CPU takes it in — the
 emulation-mode set, reset among them, `e=1 m=8 x=8`; the native set
 `e=0 m=? x=?`, since the image cannot say what widths the interrupted code had —
-then every entry a person added.
+then every entry a person added. A vector's entry is written where the tree
+places its handler; a person's is written as they gave it, in the bank they say
+the CPU enters in, which is where [what every path proves](#29-what-every-path-proves)
+begins, and the trace places it to start from it.
 
 ### 2.5 Stops, warnings and notes
 
@@ -242,7 +245,12 @@ and the instruction that took it. It is an entry the trace starts from, exactly
 as an `entry` line is, and the vectors and entries come first: a person's
 `entry` naming the same address under the same mode gives it its name, which the
 `reached` line then carries. The name is otherwise `sub_` for a call's target and
-`loc_` for a jump's, with the address.
+`loc_` for a jump's, with the address. Both addresses are written as the CPU
+ran them, in the bank it ran in: a cartridge that dispatches through a mirror
+bank has its `reached` lines in that bank, the trace places the destination to
+start from it, so the label is the placed address's, and
+[what every path proves](#29-what-every-path-proves) at the destination begins in
+the bank the CPU arrived in.
 
 A cartridge that dispatches through a table, run for one second of its clock:
 
@@ -321,22 +329,39 @@ on the same straight path, with no call and no store the stack could be under
 between them. A value loaded from memory is proven only when the memory is the
 image. The reset vector begins with the direct register and the data bank both
 zero, which the chip clears on reset, and nothing else proven; an interrupt
-vector and an entry a person added begin with nothing proven; a target a run
-[reached](#27-what-a-run-reached) or the bytes [derived](#210-what-the-bytes-derive)
-begins with what the site that jumped to it proves.
+vector and an entry a person added begin with nothing proven beyond the program
+bank, below; a target a run [reached](#27-what-a-run-reached) or the bytes
+[derived](#210-what-the-bytes-derive), and a place a run
+[landed](#213-where-a-run-landed), begins with what the site that took the CPU
+there proves.
 
 A call carries the caller's values into the routine it names. What comes back
 is what every return of that routine proves — except a register the routine and
 everything it calls never write, which comes back as it went in. A call whose
 target the bytes do not name, a `BRK` or `COP`, and a routine that reaches a
-jump the bytes do not name bring nothing back. A hardware interrupt is not a
+jump the bytes do not name bring nothing back but the program bank, since
+whatever returns returns to the bank it was called from. A hardware interrupt is not a
 path: its handler's own paths begin at its vector, and what the handler does to
 the registers between two of the program's instructions is the handler's to
 restore, as the program itself assumes.
 
-The program bank is the bank the tree places the instruction in. A cartridge
-that runs its code through a mirror of that bank reads the same bytes, and a
-data bank proven from the program bank names the same registers.
+The program bank is the bank the CPU runs the instruction in, which is the bank
+the tree places it in only when the program does not run through a mirror: a
+cartridge whose code runs in bank `$80` pushes `$80` with `PHK`, and the data
+bank it proves from that is `$80`. Where a mirror and its home read different
+memory below `$8000` — under HiROM `$00:2100` is a register and `$C0:2100` the
+image — a proven data bank names what the CPU's bank names, and a bank that
+mirrors the image reads the image where the map says and the system area where
+it says. The program bank begins as the reset vector's, zero; an interrupt
+vector's handler begins in zero too, since the chip clears the bank to take the
+interrupt; an entry a person added begins in the bank of the address they wrote;
+a long jump or call takes its operand's bank; a destination a run
+[reached](#27-what-a-run-reached), a place it [landed](#213-where-a-run-landed)
+and a target the bytes [derived](#210-what-the-bytes-derive) begin in the bank
+the CPU arrived in, which their lines carry; a fall-through, a branch and a
+jump within the bank keep it; and a call brings the caller's bank back, since a
+routine returns to the bank it was called from. Two paths that run one
+instruction in two banks are two values, reported as any other disagreement is.
 
 The value proven at a site is also what the `access` lines of
 [2.6](#26-what-the-code-reaches) carry: a register written from a value every
@@ -392,7 +417,10 @@ different things — `reached` that a run saw the destination taken, `derived`
 that the bytes prove it can be — and a destination both saw has both lines. A
 jump every one of whose destinations is derived is not a stop, and has no `stop`
 line; a jump the bytes bound but whose pointers lie outside the image keeps its
-`stop`.
+`stop`. The target and the pointer are written in the bank the CPU runs the jump
+in — the program bank [every path proves](#29-what-every-path-proves) there — and
+the trace places the target to start from it, so the label is the placed
+address's.
 
 The same cartridge's reset code masks a value nothing knows to three bits,
 doubles it, and dispatches through an eight-entry table at `$00:8200`:
@@ -557,11 +585,14 @@ was read and where it pointed; `ran` says only that the CPU arrived.
 It is an entry the trace starts from, exactly as a `reached` line is, after
 the `reached` lines; a person's `entry` naming the same address under the same
 mode gives it its name, and the name is otherwise `loc_` with the address,
-since the CPU arrived and nothing says the place is a routine. Both addresses
-are as the tree places them: a landing through a mirror bank names the home
-bank. A landing outside the image — a return into a routine the program copied
-to work RAM — is a `note` and no line, since the tree has nothing to trace
-there.
+since the CPU arrived and nothing says the place is a routine. The landing is
+written where the CPU arrived, in the bank it arrived in — a landing through a
+mirror bank names the mirror, and [what every path proves](#29-what-every-path-proves)
+there is what the paths prove at the instruction that took the CPU there, in
+that bank — and the site as the tree places it; the trace
+places the landing to start from it, so its label is the placed address's. A
+landing outside the image — a return into a routine the program copied to work
+RAM — is a `note` and no line, since the tree has nothing to trace there.
 
 A cartridge that copies a routine into work RAM, builds two return frames by
 hand and enters it with `RTL`, lands past a `PEA`/`RTS` pair on both passes of

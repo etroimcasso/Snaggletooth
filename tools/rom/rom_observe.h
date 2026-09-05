@@ -55,10 +55,11 @@
 
 namespace snaggletooth::disasm {
 
-// One destination a run saw an indirect jump or call take: where it landed, the
-// mode it arrived in, and the instruction that took it. `call` says which of the
-// four forms it was — a call's target is a routine, a jump's a location — which
-// is what names the label.
+// One destination a run saw an indirect jump or call take: where it landed, in
+// the bank the CPU arrived in — the disassembler places it to trace from it and
+// to name it — the mode it arrived in, and the instruction that took it, as the
+// tree places it. `call` says which of the four forms it was — a call's target
+// is a routine, a jump's a location — which is what names the label.
 struct ReachedTarget {
   Address target = 0;
   Cpu65816Mode mode;
@@ -125,9 +126,10 @@ struct MovedRange {
 // One place the CPU arrived that the instruction before it did not name: a
 // return to an address the code itself put on the stack, an `RTI` into flow the
 // bytes do not carry — any successor the node does not name that the four
-// indirect forms do not cover. `target` is where it arrived and `site` the
-// instruction that took it, both as the tree places them; `mode` is the mode
-// the CPU arrived in. A landing outside the image is a note, not a landing. The
+// indirect forms do not cover. `target` is where it arrived, in the bank the CPU
+// arrived in — the disassembler places it to trace from it — and `site` the
+// instruction that took it, as the tree places it; `mode` is the mode the CPU
+// arrived in. A landing outside the image is a note, not a landing. The
 // name is what a reached target's is: `loc_` and the address, unless a person's
 // entry names the same target under the same mode. Empty as the run reports it;
 // the disassembler fills it in.

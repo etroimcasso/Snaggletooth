@@ -34,6 +34,7 @@
 #include "examples/lifting/lifting.h"
 #include "examples/wrapping/wrapping.h"
 #include "examples/mirrored/mirrored.h"
+#include "examples/running_bank/running_bank.h"
 
 namespace snaggletooth::examples {
 
@@ -67,6 +68,7 @@ inline const std::vector<Example>& examples() {
       {"lifting", "bytes sent from the image to the hardware every way the asset pass has a rule for", &liftingImage},
       {"wrapping", "a HiROM transfer that runs off its bank's end and on from the bank's start", &wrappingImage},
       {"mirrored", "a program that runs through the fast mirror of the bank the tree places it in", &mirroredImage},
+      {"running_bank", "a HiROM program that proves its data bank from the bank the CPU runs in, every way a path arrives", &runningBankImage},
   };
   return all;
 }

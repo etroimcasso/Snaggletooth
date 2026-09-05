@@ -10,6 +10,14 @@
 // follow leaves behind; what the manifest writes, reads back and traces from;
 // and that the rule the value facts had before is a subset of the rule they have
 // now, over every example cartridge.
+//
+// A second cartridge, `tools/examples/running_bank/`, runs through a mirror of
+// the bank the tree places it in, and its cases pin that the program bank the
+// analysis carries is the bank the CPU runs in: what `PHK` proves, what a load
+// through the data bank then reads, and the bank every kind of arrival — a long
+// call and its return, a destination a run saw, a landing, a derived target, an
+// entry a person gave, an interrupt vector — begins in; and that, over every
+// example cartridge, every value a run saw is one the paths prove.
 
 #include <algorithm>
 #include <cstdint>
@@ -35,7 +43,11 @@ using disasm::CartridgeRequest;
 using disasm::Cpu65816Mode;
 using disasm::HardwareAccess;
 using disasm::StateFact;
+using disasm::TraceEntry;
 using examples::provingImage;
+using examples::runningBankImage;
+
+constexpr std::uint64_t kRunFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
 CartridgeDisassembly disassemble(std::span<const std::uint8_t> rom, CartridgeRequest request = {}) {
   request.rom = rom;
@@ -86,6 +98,40 @@ const std::vector<std::uint8_t>& proving() {
 const CartridgeDisassembly& provingTree() {
   static const CartridgeDisassembly tree = disassemble(proving());
   return tree;
+}
+
+const std::vector<std::uint8_t>& runningBank() {
+  static const std::vector<std::uint8_t> rom = runningBankImage();
+  return rom;
+}
+
+// The running-bank cartridge with two entries a person adds — one written in
+// the mirror bank the CPU enters it in, one where the tree places it — with or
+// without the run that follows its jump through work RAM.
+CartridgeDisassembly runningBankTree(bool run, CartridgeRequest request = {}) {
+  request.observeRun = run;
+  request.runMasterCycles = kRunFrame;
+  request.entries.push_back(TraceEntry{.address = 0x008600u,
+                                       .mode = Cpu65816Mode::native(true, true),
+                                       .name = "entered_through_the_mirror"});
+  request.entries.push_back(TraceEntry{.address = 0xC08700u,
+                                       .mode = Cpu65816Mode::native(true, true),
+                                       .name = "entered_where_placed"});
+  return disassemble(runningBank(), std::move(request));
+}
+
+const disasm::ReachedTarget* reachedFrom(const CartridgeDisassembly& d, Address site) {
+  for (const disasm::ReachedTarget& r : d.reached) {
+    if (r.site == site) return &r;
+  }
+  return nullptr;
+}
+
+const disasm::Landing* landingFrom(const CartridgeDisassembly& d, Address site) {
+  for (const disasm::Landing& l : d.ran) {
+    if (l.site == site) return &l;
+  }
+  return nullptr;
 }
 
 // One instruction placed at `address`, decoded under `mode` and lifted.
@@ -352,6 +398,212 @@ TEST(Dataflow, AnUnknownKindIsStillAnErrorAndAMalformedDerivedLineNamesItself) {
   EXPECT_NE(error.find("via"), std::string::npos);
   EXPECT_FALSE(disasm::parseManifest("proven $00:8000 D=$0000\n", error).has_value());
   EXPECT_NE(error.find("not a manifest line"), std::string::npos);
+}
+
+// ---- the bank the CPU runs in ---------------------------------------------------------
+
+TEST(Dataflow, ThePushedProgramBankIsTheBankTheCpuRunsInNotTheBankTheTreePlacesTheCodeIn) {
+  const CartridgeDisassembly d = runningBankTree(false);
+  // Reset enters at $00:8000; the tree places it at $C0:8000. PHK then PLB
+  // proves the data bank $00, and a load through it from $1000 reads work RAM,
+  // which the image cannot answer — where the placed bank would have read $5A.
+  const StateFact* after = stateAt(d, 0xC08020u);
+  ASSERT_NE(after, nullptr);
+  EXPECT_EQ(after->dbr, std::vector<std::uint32_t>{0x00u});
+  const HardwareAccess* mirror = accessAt(d, 0xC08007u, "INIDISP");
+  ASSERT_NE(mirror, nullptr);
+  EXPECT_FALSE(mirror->value.has_value()) << "$00:1000 is work RAM, not the image's $5A";
+  // The routine called long into $C0 proves $C0, and the same load reads the image.
+  const HardwareAccess* placed = accessAt(d, 0xC08205u, "INIDISP");
+  ASSERT_NE(placed, nullptr);
+  ASSERT_TRUE(placed->value.has_value());
+  EXPECT_EQ(*placed->value, 0x5Au);
+}
+
+TEST(Dataflow, ALongCallsRoutineRunsInItsOperandsBankAndTheCallerGetsItsOwnBankBack) {
+  const CartridgeDisassembly d = runningBankTree(false);
+  // The caller's data bank flows into the routine as it was; the routine's own
+  // PHK proves $C0 (the store above); and after the return the caller's PHK
+  // proves $00 again, not the bank the routine ran in.
+  const StateFact* routine = stateAt(d, 0xC08200u);
+  ASSERT_NE(routine, nullptr);
+  EXPECT_EQ(routine->dbr, std::vector<std::uint32_t>{0x00u});
+  const StateFact* back = stateAt(d, 0xC08020u);
+  ASSERT_NE(back, nullptr);
+  EXPECT_EQ(back->dbr, std::vector<std::uint32_t>{0x00u});
+}
+
+TEST(Dataflow, TwoPathsThatRunOneRoutineInTwoBanksAreReportedAsBoth) {
+  const CartridgeDisassembly d = runningBankTree(false);
+  // $8A00 is called from the reset code in $00 and from the routine in $C0; its
+  // PHK proves each caller's bank on each path, and the label after it holds both.
+  const StateFact* both = stateAt(d, 0xC08A10u);
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->dbr, (std::vector<std::uint32_t>{0x00u, 0xC0u}));
+  const std::string manifest = disasm::renderManifest(d);
+  EXPECT_NE(manifest.find("state    $C0:8A10 D=$0000 DBR=$00|$C0 S=?\n"), std::string::npos) << manifest;
+  // The table the routine jumps through is read in each bank it runs in, and
+  // its one slot is a destination in each: two lines, one label.
+  const std::vector<const disasm::DerivedTarget*> derived = derivedFrom(d, 0xC08A04u);
+  ASSERT_EQ(derived.size(), 2u);
+  EXPECT_EQ(derived[0]->target, 0x008A10u);
+  EXPECT_EQ(derived[0]->pointer, 0x008B00u);
+  EXPECT_EQ(derived[1]->target, 0xC08A10u);
+  EXPECT_EQ(derived[1]->pointer, 0xC08B00u);
+  EXPECT_EQ(derived[0]->name, "loc_C08A10");
+  EXPECT_EQ(derived[1]->name, "loc_C08A10");
+  EXPECT_NE(manifest.find("derived  $00:8A10 loc_C08A10 e=0 m=8 x=8 from $C0:8A04 via $00:8B00\n"), std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("derived  $C0:8A10 loc_C08A10 e=0 m=8 x=8 from $C0:8A04 via $C0:8B00\n"), std::string::npos)
+      << manifest;
+  // Each caller gets its own bank back, not the meet of both.
+  const StateFact* reset = stateAt(d, 0xC08020u);
+  ASSERT_NE(reset, nullptr);
+  EXPECT_EQ(reset->dbr, std::vector<std::uint32_t>{0x00u});
+}
+
+TEST(Dataflow, ADestinationTheRunSawBeginsInTheBankTheCpuArrivedIn) {
+  const CartridgeDisassembly d = runningBankTree(true);
+  // The jump long through a pointer in work RAM: the bytes cannot say where it
+  // goes, the run saw $00:8400, and the analysis arrives there in bank $00. The
+  // run names the site as the CPU ran it, in the mirror.
+  const disasm::ReachedTarget* seen = reachedFrom(d, 0x00802Fu);
+  ASSERT_NE(seen, nullptr);
+  EXPECT_EQ(seen->target, 0x008400u) << "the bank the CPU arrived in, not the bank the tree places";
+  EXPECT_EQ(seen->name, "loc_C08400");
+  const StateFact* proven = stateAt(d, 0xC08410u);
+  ASSERT_NE(proven, nullptr);
+  EXPECT_EQ(proven->dbr, std::vector<std::uint32_t>{0x00u});
+  EXPECT_EQ(stateAt(runningBankTree(false), 0xC08410u), nullptr) << "without the run nothing reaches it";
+}
+
+TEST(Dataflow, ATableReadInTheBankTheCpuRunsInDerivesItsTargetThere) {
+  const CartridgeDisassembly d = runningBankTree(true);
+  const std::vector<const disasm::DerivedTarget*> derived = derivedFrom(d, 0xC08412u);
+  ASSERT_EQ(derived.size(), 1u);
+  EXPECT_EQ(derived[0]->target, 0x008900u) << "the slot names an address in the bank the CPU runs in";
+  EXPECT_EQ(derived[0]->pointer, 0x008300u) << "read where the CPU reads it";
+  EXPECT_EQ(derived[0]->name, "loc_C08900");
+  const StateFact* target = stateAt(d, 0xC08900u);
+  ASSERT_NE(target, nullptr);
+  EXPECT_EQ(target->dbr, std::vector<std::uint32_t>{0x00u});
+  EXPECT_FALSE(stopsAt(d, 0xC08412u));
+}
+
+TEST(Dataflow, ALandingBeginsWithWhatTheReturnThatTookItThereProvesInTheBankTheCpuArrivedIn) {
+  const CartridgeDisassembly d = runningBankTree(true);
+  const disasm::Landing* landed = landingFrom(d, 0xC08905u);
+  ASSERT_NE(landed, nullptr);
+  EXPECT_EQ(landed->target, 0x008500u) << "the frame the code built names $84FF in the bank it runs in";
+  EXPECT_EQ(landed->name, "loc_C08500");
+  // The RTS carries the registers as they are: the direct register and the data
+  // bank the derived target's code left, in bank $00, where the landing's own
+  // PHK proves the bank again for the label after it.
+  const StateFact* arrived = stateAt(d, 0xC08500u);
+  ASSERT_NE(arrived, nullptr);
+  EXPECT_EQ(arrived->d, std::vector<std::uint32_t>{0x0000u});
+  EXPECT_EQ(arrived->dbr, std::vector<std::uint32_t>{0x00u});
+  const StateFact* proven = stateAt(d, 0xC08510u);
+  ASSERT_NE(proven, nullptr);
+  EXPECT_EQ(proven->dbr, std::vector<std::uint32_t>{0x00u});
+  EXPECT_EQ(proven->d, std::vector<std::uint32_t>{0x0000u});
+}
+
+TEST(Dataflow, AnEntryAPersonAddsBeginsInTheBankTheyWrote) {
+  const CartridgeDisassembly d = runningBankTree(false);
+  const StateFact* mirror = stateAt(d, 0xC08610u);
+  ASSERT_NE(mirror, nullptr);
+  EXPECT_EQ(mirror->dbr, std::vector<std::uint32_t>{0x00u}) << "entered as $00:8600";
+  const StateFact* placed = stateAt(d, 0xC08710u);
+  ASSERT_NE(placed, nullptr);
+  EXPECT_EQ(placed->dbr, std::vector<std::uint32_t>{0xC0u}) << "entered as $C0:8700";
+  EXPECT_EQ(stateAt(d, 0xC08600u), nullptr) << "the entry itself proves nothing else";
+}
+
+TEST(Dataflow, AnInterruptVectorBeginsInBankZeroAndProvesNothingElse) {
+  const CartridgeDisassembly d = runningBankTree(false);
+  EXPECT_EQ(stateAt(d, 0xC08800u), nullptr);
+  const StateFact* handler = stateAt(d, 0xC08810u);
+  ASSERT_NE(handler, nullptr);
+  EXPECT_EQ(handler->dbr, std::vector<std::uint32_t>{0x00u}) << "the chip clears the program bank to take an interrupt";
+  EXPECT_TRUE(handler->d.empty());
+  EXPECT_TRUE(handler->s.empty());
+}
+
+TEST(Dataflow, TheManifestKeepsEveryArrivalInTheBankTheCpuArrivedInAndPlacesItToTraceFrom) {
+  const CartridgeDisassembly d = runningBankTree(true);
+  const std::string manifest = disasm::renderManifest(d);
+  EXPECT_NE(manifest.find("entry    $C0:8000 reset e=1 m=8 x=8\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("entry    $00:8600 entered_through_the_mirror e=0 m=8 x=8\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("entry    $C0:8700 entered_where_placed e=0 m=8 x=8\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("reached  $00:8400 loc_C08400 e=0 m=8 x=8 from $00:802F\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("reached  $00:8900 loc_C08900 e=0 m=8 x=8 from $00:8412\n"), std::string::npos)
+      << "the run saw the table jump too: a destination both saw has both lines";
+  EXPECT_NE(manifest.find("ran      $00:8500 loc_C08500 e=0 m=8 x=8 from $C0:8905\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("derived  $00:8900 loc_C08900 e=0 m=8 x=8 from $C0:8412 via $00:8300\n"), std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("state    $C0:8410 D=$0000 DBR=$00 S=?\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("state    $C0:8510 D=$0000 DBR=$00 S=?\n"), std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("state    $C0:8710 D=? DBR=$C0 S=?\n"), std::string::npos) << manifest;
+
+  // Read back without a run, the same lines trace the same code and carry the
+  // same banks, once.
+  std::string error;
+  const std::optional<disasm::ManifestInput> input = disasm::parseManifest(manifest, error);
+  ASSERT_TRUE(input.has_value()) << error;
+  CartridgeRequest request;
+  request.reached = input->reached;
+  request.ran = input->ran;
+  request.derived = input->derived;
+  const CartridgeDisassembly again = runningBankTree(false, request);
+  EXPECT_EQ(again.reached.size(), 4u) << "the pointer jump, the table jump, and the shared table jump in two banks";
+  EXPECT_EQ(again.ran.size(), 1u);
+  EXPECT_EQ(again.derived.size(), 3u);
+  EXPECT_EQ(again.reached.front().target, 0x008400u);
+  EXPECT_EQ(again.reached.back().target, 0xC08A10u);
+  EXPECT_EQ(again.ran.front().target, 0x008500u);
+  EXPECT_TRUE(labelAt(again, 0xC08400u).has_value());
+  EXPECT_TRUE(labelAt(again, 0xC08500u).has_value());
+  EXPECT_TRUE(labelAt(again, 0xC08900u).has_value());
+  const StateFact* proven = stateAt(again, 0xC08410u);
+  ASSERT_NE(proven, nullptr);
+  EXPECT_EQ(proven->dbr, std::vector<std::uint32_t>{0x00u});
+  const StateFact* landed = stateAt(again, 0xC08510u);
+  ASSERT_NE(landed, nullptr);
+  EXPECT_EQ(landed->dbr, std::vector<std::uint32_t>{0x00u});
+}
+
+// The measure the run gives the analysis: at every site a run saw and every
+// path proves, the values the run saw are among the values proven.
+TEST(Dataflow, EveryValueARunSawIsOneThePathsProveOnEveryExampleCartridge) {
+  std::size_t compared = 0;
+  for (const examples::Example& example : examples::examples()) {
+    const std::vector<std::uint8_t> rom = example.build();
+    CartridgeRequest request;
+    request.observeRun = true;
+    request.runMasterCycles = 4u * kRunFrame;
+    const CartridgeDisassembly d = disassemble(rom, std::move(request));
+    for (const disasm::SeenState& seen : d.seen) {
+      const StateFact* state = stateAt(d, seen.address);
+      if (!state) continue;
+      ++compared;
+      if (!state->dbr.empty()) {
+        for (const std::uint8_t bank : seen.dbr) {
+          EXPECT_NE(std::find(state->dbr.begin(), state->dbr.end(), bank), state->dbr.end())
+              << example.name << ": the run saw DBR $" << std::hex << unsigned{bank} << " at $" << seen.address
+              << " and the paths do not prove it";
+        }
+      }
+      if (!state->d.empty()) {
+        for (const std::uint16_t direct : seen.d) {
+          EXPECT_NE(std::find(state->d.begin(), state->d.end(), direct), state->d.end())
+              << example.name << ": the run saw D $" << std::hex << direct << " at $" << seen.address
+              << " and the paths do not prove it";
+        }
+      }
+    }
+  }
+  EXPECT_GT(compared, 20u);
 }
 
 // ---- the rule before is inside the rule now -------------------------------------------

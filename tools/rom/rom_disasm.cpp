@@ -856,6 +856,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   };
 
   std::vector<TraceEntry> entries = vectorTraceEntries(*header);
+  const std::size_t vectors = entries.size();
   for (TraceEntry entry : request.entries) {
     // A person's name that the dialect reserves is renamed the same way, and
     // the rename is said, since it was theirs.
@@ -918,7 +919,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   });
   std::sort(out.moved.begin(), out.moved.end(), rangeBefore);
 
-  for (const TraceEntry& entry : entries) {
+  // A vector's entry is written where the tree places its handler; a person's
+  // is written as they gave it, in the bank they say the CPU enters in, and the
+  // tree places it to trace it.
+  for (std::size_t n = 0; n < entries.size(); ++n) {
+    const TraceEntry& entry = entries[n];
     const std::optional<Address> home = canonical(map, imageBytes, entry.address);
     if (!home) {
       out.notes.push_back("entry " + entry.name + " at " + address24(entry.address) +
@@ -932,8 +937,12 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       continue;
     }
     if (!*added) continue;  // the same address under the same mode, already an entry
-    out.entries.push_back(TraceEntry{.address = *home, .mode = entry.mode, .name = entry.name});
+    out.entries.push_back(
+        TraceEntry{.address = n < vectors ? *home : entry.address, .mode = entry.mode, .name = entry.name});
   }
+  // A target a run reached, a place it landed and a destination the bytes derive
+  // are each kept as the CPU arrives there, in the bank it runs in; the tree
+  // places each to trace it and to name it.
   for (const ReachedTarget& seen : reached) {
     const std::optional<Address> home = canonical(map, imageBytes, seen.target);
     if (!home) {
@@ -951,7 +960,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     // The label the target carries: a person's, when their entry named it first.
     const std::string label = pending[*regionOf(*home)].symbols[*home];
     out.reached.push_back(ReachedTarget{
-        .target = *home, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = label});
+        .target = seen.target, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = label});
   }
   for (const Landing& landing : ran) {
     const std::optional<Address> home = canonical(map, imageBytes, landing.target);
@@ -969,7 +978,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
     const std::string label = pending[*regionOf(*home)].symbols[*home];
     out.ran.push_back(
-        Landing{.target = *home, .mode = landing.mode, .site = landing.site, .name = label});
+        Landing{.target = landing.target, .mode = landing.mode, .site = landing.site, .name = label});
   }
 
   // Trace every region that is owed one, and carry each call or jump that leaves
@@ -1068,7 +1077,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       }
       any = any || *added;
       const std::string label = pending[*regionOf(*home)].symbols[*home];
-      out.derived.push_back(DerivedTarget{.target = *home,
+      out.derived.push_back(DerivedTarget{.target = derived.target,
                                           .mode = derived.mode,
                                           .site = derived.site,
                                           .pointer = derived.pointer,
