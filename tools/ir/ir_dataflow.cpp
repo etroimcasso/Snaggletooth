@@ -506,8 +506,8 @@ struct Abstract {
 
       case Op::DirectAddress: {
         const Values offset = lowByte(raw(e.a));
-        const Values index = raw(e.b);
-        const Values sum = product(offset, index, [](std::uint32_t o, std::uint32_t i) { return o + i; });
+        const Values indexed = raw(e.b);
+        const Values sum = product(offset, indexed, [](std::uint32_t o, std::uint32_t i) { return o + i; });
         const bool e1 = emulation;
         put(e.dst.place,
             product(state.registers.d, sum,
