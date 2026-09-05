@@ -66,7 +66,7 @@ struct Machine {
   void run(std::vector<std::uint8_t> bytes) {
     const Registers& r = interpreter.registers;
     const Address at = (static_cast<Address>(r.pbr) << 16) | r.pc;
-    for (std::size_t i = 0; i < bytes.size(); ++i) bus.mem[at + i] = bytes[i];
+    for (std::size_t i = 0; i < bytes.size(); ++i) bus.mem[at + static_cast<Address>(i)] = bytes[i];
     const Cpu65816Mode mode =
         r.e ? Cpu65816Mode::reset() : Cpu65816Mode::native((r.p & 0x20u) != 0, (r.p & 0x10u) != 0);
     const std::optional<disasm::Instruction> decoded = disasm::decodeAt(bytes, at, at, mode);
@@ -82,7 +82,7 @@ struct Machine {
 
   // The bytes at an image address, as data the program reads.
   void image(Address address, std::vector<std::uint8_t> bytes) {
-    for (std::size_t i = 0; i < bytes.size(); ++i) bus.mem[address + i] = bytes[i];
+    for (std::size_t i = 0; i < bytes.size(); ++i) bus.mem[address + static_cast<Address>(i)] = bytes[i];
   }
 
   const OriginSet& originAt(Address address) {

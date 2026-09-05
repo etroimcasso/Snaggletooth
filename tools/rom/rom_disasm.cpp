@@ -879,9 +879,14 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
           "asset " + kept.file);
   }
 
+  // A total order, so two pieces of the same bytes sent two places stand in
+  // register order whatever the library's sort does with equals.
   std::sort(pieces.begin(), pieces.end(), [](const Piece& a, const Piece& b) {
     if (a.offset != b.offset) return a.offset < b.offset;
-    return a.length > b.length;
+    if (a.length != b.length) return a.length > b.length;
+    if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
+    if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
+    return a.site < b.site;
   });
 
   // The groups: pieces that share a byte are one file, if they agree on what
