@@ -42,9 +42,11 @@
 // and the last writer of every byte, and the engines' and the port's moves
 // keep the shadow current. So a range an engine carries out of work RAM — the
 // tiles a routine decompressed, the sprite table a frame assembled — names the
-// image bytes it was built from and the routine that built it, and a sequence
-// of stores the CPU made to a data register from consecutive image bytes is
-// recorded as the stream it is.
+// image bytes it was built from and the routine that built it; a buffer the
+// CPU carries out itself, a store at a time, is such a range too; and a
+// sequence of stores the CPU made to a data register from consecutive image
+// bytes is recorded as the stream it is, with the run of image bytes its
+// carrier read as the file it is lifted as.
 //
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
@@ -185,11 +187,11 @@ struct StagedWriter {
   std::vector<ir::OriginInterval> sources;
 };
 
-// One extent of work RAM an engine carried to a register, and where its bytes
-// came from: the lowest address and the count, the origin of every byte
-// together over every sighting of every range with that extent, and the
-// writers, most bytes first. An extent whose origin is empty was built from
-// constants alone.
+// One extent of work RAM carried to a register — by an engine, or by the CPU
+// a store at a time — and where its bytes came from: the lowest address and
+// the count, the origin of every byte together over every sighting of every
+// range and stream with that extent, and the writers, most bytes first. An
+// extent whose origin is empty was built from constants alone.
 struct StagedRange {
   Address memory = 0;
   std::uint32_t bytes = 0;
@@ -203,12 +205,18 @@ struct StagedRange {
 
 // A stream the CPU carried a byte at a time: consecutive stores to one data
 // register — `VMDATAL`/`VMDATAH` as one, `CGDATA`, `OAMDATA`, the audio ports
-// in pairs — from values whose origins are consecutive image bytes, made at one
-// site or by instructions one after another. `site` is the first store's, as
-// the tree places it; `registerAddress` is the register the stream names, with
-// its name and class; `romOffset` is the image offset of the first byte and
-// `bytes` how many consecutive ones followed; `times` is how many sightings of
-// exactly this stream the run made.
+// in pairs — of consecutive bytes, made at one site or by instructions one
+// after another. `site` is the first store's, as the tree places it;
+// `registerAddress` is the register the stream names, with its name and class;
+// `bytes` how many consecutive bytes were carried and `times` how many
+// sightings of exactly this stream the run made. The bytes were one of two
+// things. Loaded from work RAM and stored as they were, they are the buffer at
+// `memory` — an extent among `RunObservation::staged`, exactly as if an engine
+// had carried it, whose sources are what is lifted. Otherwise they are the
+// image from `romOffset`, and `source` is the run holding the first among
+// those the invocation that carried them read, followed out through its
+// callers as a staged byte's source is (`ir/ir_provenance.h`): the file the
+// stream is lifted as, which may be wider than the bytes carried.
 struct StreamedRange {
   Address site = 0;
   Address registerAddress = 0;
@@ -217,9 +225,11 @@ struct StreamedRange {
   std::size_t romOffset = 0;
   std::uint32_t bytes = 0;
   std::uint32_t times = 1;
+  ir::OriginInterval source;
+  std::optional<Address> memory;
 };
 
-// Two streams are the same when every field but the count agrees.
+// Two streams are the same when every field but the count and the source agrees.
 [[nodiscard]] bool sameStream(const StreamedRange& a, const StreamedRange& b);
 
 // Everything one run recorded: the targets the indirect jumps took, in site
@@ -227,7 +237,8 @@ struct StreamedRange {
 // moved, in `rangeBefore` order, each distinct range once with its count; the
 // landings, in site order, then target order, each site/target/mode once; the
 // values seen, in address order; the staged extents, in address order, then
-// by count; the streams, in site order, then register, then offset; and what
+// by count; the streams, in site order, then register, then where the bytes
+// came from; and what
 // the run beside the interpreter checked. `divergences` counts the steps on
 // which the node lifted from the fetches disagreed with the machine — each site
 // once in the notes, the interpreter realigned after — and is zero on every

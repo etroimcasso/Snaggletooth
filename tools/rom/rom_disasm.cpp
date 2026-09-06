@@ -578,7 +578,7 @@ std::optional<std::string_view> assetDirectory(RegisterClass cls, MovedKind kind
 // One piece of a moved range that reads consecutive image offsets, in image
 // order, with what the range was to the engine. For a staged source, `kind`
 // is `Staged` and `use` is what the range built from it went as, which is
-// what places the file.
+// what places the file; for a stream, both are `Stream`.
 struct Piece {
   std::size_t offset = 0;
   std::size_t length = 0;
@@ -592,6 +592,57 @@ struct Piece {
 std::string movedText(const MovedRange& range) {
   return "moved " + address24(range.site) + " channel " + std::to_string(range.channel) + " memory " +
          address24(range.memory) + " bytes " + std::to_string(range.bytes);
+}
+
+// A class list as the manifest writes it — `Vram`, or `Vram+Cgram` for a file
+// built into data for two — and as a comment reads it.
+std::string classesText(const std::vector<RegisterClass>& classes, std::string_view joint) {
+  std::string out;
+  for (const RegisterClass cls : classes) {
+    if (!out.empty()) out += joint;
+    out += std::string(cpu65816RegisterClassName(cls));
+  }
+  return out;
+}
+
+// One way an extent of work RAM was carried out: the register it reached, as
+// a transfer or a table walk (`Dma`, `Table`, `Indirect`) or as the CPU's own
+// stores (`Stream`), and the instruction that sent it.
+struct ExtentUse {
+  RegisterClass cls = RegisterClass::Display;
+  MovedKind kind = MovedKind::Dma;
+  Address registerAddress = 0;
+  Address site = 0;
+};
+
+// Every distinct way an extent went, as the `moved` and `streamed` lines say —
+// only those a file can be named for.
+std::vector<ExtentUse> extentUses(const CartridgeDisassembly& out, const StagedRange& range) {
+  std::vector<ExtentUse> uses;
+  const auto add = [&](const ExtentUse& use) {
+    const bool known = std::any_of(uses.begin(), uses.end(), [&](const ExtentUse& u) {
+      return u.cls == use.cls && u.kind == use.kind && u.registerAddress == use.registerAddress;
+    });
+    if (!known) uses.push_back(use);
+  };
+  for (const MovedRange& moved : out.moved) {
+    if (!moved.toRegister || moved.step == MovedStep::Fixed || !moved.registerClass) continue;
+    if (extentStart(moved) != range.memory || moved.bytes != range.bytes) continue;
+    if (!assetDirectory(*moved.registerClass, moved.kind)) continue;
+    add(ExtentUse{.cls = *moved.registerClass,
+                  .kind = moved.kind,
+                  .registerAddress = moved.registerAddress,
+                  .site = moved.site});
+  }
+  for (const StreamedRange& stream : out.streamed) {
+    if (!stream.memory || *stream.memory != range.memory || stream.bytes != range.bytes) continue;
+    if (!stream.registerClass || !assetDirectory(*stream.registerClass, MovedKind::Stream)) continue;
+    add(ExtentUse{.cls = *stream.registerClass,
+                  .kind = MovedKind::Stream,
+                  .registerAddress = stream.registerAddress,
+                  .site = stream.site});
+  }
+  return uses;
 }
 
 // ---- where a staged range came from ------------------------------------------------
@@ -692,9 +743,11 @@ std::string streamText(const StreamedRange& stream) {
 // share a byte are one file.
 //
 // A range in work RAM the run knows the source of is lifted as that source: for
-// each routine that wrote it, the hull of the image bytes its bytes were
-// computed from, under the rules of the register the range went to. A stream
-// the CPU carried is lifted as the image bytes it carried, the same way.
+// each routine that wrote it, every run of image bytes its bytes were drawn
+// from, under the rules of the register the range went to — whether an engine
+// carried it or the CPU did, a store at a time. A stream the CPU carried from
+// the image is lifted as the run its carrier read, the same way. A source
+// whose bytes went to two classes is one file under `staged/`, named for both.
 void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   const CartridgeMap map = out.header.map;
   const std::size_t imageBytes = out.imageBytes;
@@ -806,44 +859,36 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   };
 
   // The staged ranges: for every extent in work RAM the run carried to a
-  // register a file can be named for, each source's hull.
+  // register a file can be named for, each source's runs, once per use.
   const std::map<Address, std::string> routineOf = routineByLine(out);
   for (const StagedRange& range : out.staged) {
-    std::vector<const MovedRange*> uses;
-    for (const MovedRange& moved : out.moved) {
-      if (!moved.toRegister || moved.step == MovedStep::Fixed || !moved.registerClass) continue;
-      if (extentStart(moved) != range.memory || moved.bytes != range.bytes) continue;
-      if (!assetDirectory(*moved.registerClass, moved.kind)) continue;
-      const bool known = std::any_of(uses.begin(), uses.end(), [&](const MovedRange* u) {
-        return u->registerClass == moved.registerClass && u->kind == moved.kind &&
-               u->registerAddress == moved.registerAddress;
-      });
-      if (!known) uses.push_back(&moved);
-    }
+    const std::vector<ExtentUse> uses = extentUses(out, range);
     if (uses.empty()) continue;
     for (const StagedSource& source : stagedSources(range, routineOf)) {
       for (const ir::OriginInterval& run : source.sources) {
         if (run.last >= imageBytes) continue;
-        for (const MovedRange* use : uses) {
+        for (const ExtentUse& use : uses) {
           admit(Piece{.offset = run.first,
                       .length = run.last - run.first + 1u,
-                      .cls = *use->registerClass,
+                      .cls = use.cls,
                       .kind = MovedKind::Staged,
-                      .use = use->kind,
-                      .registerAddress = use->registerAddress,
-                      .site = use->site},
+                      .use = use.kind == MovedKind::Stream ? MovedKind::Dma : use.kind,
+                      .registerAddress = use.registerAddress,
+                      .site = use.site},
                 stagedText(range, source));
         }
       }
     }
   }
 
-  // The streams: the image bytes the CPU carried to a data register.
+  // The streams from the image: the run the carrier read. A stream from work
+  // RAM is its buffer's, lifted above as the buffer's source.
   for (const StreamedRange& stream : out.streamed) {
+    if (stream.memory) continue;
     if (!stream.registerClass || !assetDirectory(*stream.registerClass, MovedKind::Stream)) continue;
-    if (stream.romOffset + stream.bytes > imageBytes) continue;
-    admit(Piece{.offset = stream.romOffset,
-                .length = stream.bytes,
+    if (stream.source.last >= imageBytes) continue;
+    admit(Piece{.offset = stream.source.first,
+                .length = stream.source.last - stream.source.first + 1u,
                 .cls = *stream.registerClass,
                 .kind = MovedKind::Stream,
                 .use = MovedKind::Stream,
@@ -865,18 +910,21 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     if (covered) continue;
     // The line does not say what the range went as; a class only HDMA reaches
     // is placed as a table, the rest as a transfer. The path is the line's
-    // own either way.
-    const bool hdmaOnly = !assetDirectory(kept.cls, MovedKind::Dma).has_value();
-    admit(Piece{.offset = *offset,
-                .length = kept.bytes,
-                .cls = kept.cls,
-                .kind = kept.kind,
-                .use = kept.kind == MovedKind::Stream ? MovedKind::Stream
-                       : hdmaOnly                    ? MovedKind::Table
-                                                     : MovedKind::Dma,
-                .registerAddress = 0,
-                .site = 0},
-          "asset " + kept.file);
+    // own either way. A file named for two classes is one piece per class,
+    // which group back into the one file.
+    for (const RegisterClass cls : kept.classes) {
+      const bool hdmaOnly = !assetDirectory(cls, MovedKind::Dma).has_value();
+      admit(Piece{.offset = *offset,
+                  .length = kept.bytes,
+                  .cls = cls,
+                  .kind = kept.kind,
+                  .use = kept.kind == MovedKind::Stream ? MovedKind::Stream
+                         : hdmaOnly                    ? MovedKind::Table
+                                                       : MovedKind::Dma,
+                  .registerAddress = 0,
+                  .site = 0},
+            "asset " + kept.file);
+    }
   }
 
   // A total order, so two pieces of the same bytes sent two places stand in
@@ -886,13 +934,17 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     if (a.length != b.length) return a.length > b.length;
     if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
     if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
+    if (a.cls != b.cls) return static_cast<int>(a.cls) < static_cast<int>(b.cls);
     return a.site < b.site;
   });
 
   // The groups: pieces that share a byte are one file, if they agree on what
   // the bytes were for. A piece the shadow named agrees with any piece of its
   // class — the same bytes sent directly and sent after staging are one file —
-  // and a group with an engine's piece in it is of that piece's kind.
+  // and a group with an engine's piece in it is of that piece's kind. A group
+  // the shadow named whose pieces went to two classes is one file too, under
+  // `staged/`, named for every class; only the engines' own pieces sent two
+  // places, or two ways, are refused.
   out.assets.clear();
   for (std::size_t i = 0; i < pieces.size();) {
     std::size_t end = pieces[i].offset + pieces[i].length;
@@ -906,20 +958,32 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       return piece.kind == MovedKind::Staged || piece.kind == MovedKind::Stream;
     };
     const Piece* engine = nullptr;
+    bool staged = false;
     for (std::size_t k = i; k < j; ++k) {
       if (!shadowed(pieces[k])) {
-        engine = &pieces[k];
-        break;
+        if (engine == nullptr) engine = &pieces[k];
+      } else if (pieces[k].kind == MovedKind::Staged) {
+        staged = true;
       }
     }
+    std::vector<RegisterClass> classes;
     bool agree = true;
     for (std::size_t k = i; k < j; ++k) {
       const Piece& other = pieces[k];
-      if (other.cls != first.cls) agree = false;
+      if (std::find(classes.begin(), classes.end(), other.cls) == classes.end()) classes.push_back(other.cls);
       if (engine != nullptr && !shadowed(other) &&
           (other.kind != engine->kind || other.registerAddress != engine->registerAddress)) {
         agree = false;
       }
+    }
+    std::sort(classes.begin(), classes.end());
+    const bool mixed = classes.size() > 1;
+    if (mixed && engine != nullptr && !staged) {
+      // The engines sent the bytes two places, and nothing was built from
+      // them that a stream's run would explain: refused.
+      bool anyStream = false;
+      for (std::size_t k = i; k < j; ++k) anyStream = anyStream || pieces[k].kind == MovedKind::Stream;
+      if (!anyStream) agree = false;
     }
     const std::optional<Address> home = romAddress(map, first.offset);
     if (!agree) {
@@ -936,11 +1000,12 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
     if (home) {
       const Piece& named = engine != nullptr ? *engine : first;
-      const std::string_view directory = *assetDirectory(named.cls, named.use);
+      const std::string_view directory = mixed ? std::string_view("staged") : *assetDirectory(named.cls, named.use);
       AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
                               hex(*home & 0xFFFFu, 4) + ".bin",
-                      .cls = named.cls,
-                      .kind = named.kind,
+                      .classes = classes,
+                      .kind = mixed && engine == nullptr ? (staged ? MovedKind::Staged : MovedKind::Stream)
+                                                         : named.kind,
                       .registerAddress = named.registerAddress,
                       .first = *home,
                       .romOffset = first.offset,
@@ -1577,33 +1642,42 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   // The files lifted out of the banks. The `moved` lines are their uses.
   if (!disassembly.assets.empty()) out += "\n";
   for (const AssetFile& asset : disassembly.assets) {
-    out += "asset    " + asset.file + " " + std::string(cpu65816RegisterClassName(asset.cls)) + " as " +
+    out += "asset    " + asset.file + " " + classesText(asset.classes, "+") + " as " +
            std::string(movedKindName(asset.kind)) + " from " + address24(asset.first) + " bytes " +
            std::to_string(asset.bytes.size()) + "\n";
   }
 
-  // What the run built from each file: one line per file and staged extent
-  // whose source lies in it.
+  // What the run built from each file: one line per file, staged extent whose
+  // source lies in it, class the extent went to, and writer.
   std::vector<std::string> stagedLines;
   for (const StagedRange& range : disassembly.staged) {
+    std::vector<RegisterClass> classes;
+    for (const ExtentUse& use : extentUses(disassembly, range)) {
+      if (std::find(classes.begin(), classes.end(), use.cls) == classes.end()) classes.push_back(use.cls);
+    }
+    std::sort(classes.begin(), classes.end());
     for (const StagedSource& source : stagedSources(range, routineOf)) {
       for (const ir::OriginInterval& run : source.sources) {
-      for (const AssetFile& asset : disassembly.assets) {
-        if (run.first < asset.romOffset || run.last >= asset.romOffset + asset.bytes.size()) continue;
-        const std::string line = "staged   " + asset.file + " at " + address24(range.memory) + " bytes " +
-                                 std::to_string(range.bytes) + " by " + source.label + " " +
-                                 std::string(originMark(source.origin)) + "\n";
-        if (std::find(stagedLines.begin(), stagedLines.end(), line) == stagedLines.end()) {
-          stagedLines.push_back(line);
+        for (const AssetFile& asset : disassembly.assets) {
+          if (run.first < asset.romOffset || run.last >= asset.romOffset + asset.bytes.size()) continue;
+          for (const RegisterClass cls : classes) {
+            const std::string line = "staged   " + asset.file + " at " + address24(range.memory) + " bytes " +
+                                     std::to_string(range.bytes) + " to " +
+                                     std::string(cpu65816RegisterClassName(cls)) + " by " + source.label + " " +
+                                     std::string(originMark(source.origin)) + "\n";
+            if (std::find(stagedLines.begin(), stagedLines.end(), line) == stagedLines.end()) {
+              stagedLines.push_back(line);
+            }
+          }
         }
-      }
       }
     }
   }
   if (!stagedLines.empty()) out += "\n";
   for (const std::string& line : stagedLines) out += line;
 
-  // What the CPU streamed a byte at a time.
+  // What the CPU streamed a byte at a time: from the image, or from a buffer
+  // in work RAM.
   if (!disassembly.streamed.empty()) out += "\n";
   for (const StreamedRange& stream : disassembly.streamed) {
     out += "streamed " + address24(stream.site) + " " + address24(stream.registerAddress) + " " +
@@ -1611,8 +1685,9 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            " " +
            (stream.registerClass ? std::string(cpu65816RegisterClassName(*stream.registerClass))
                                  : std::string("none")) +
-           " from " + address24(romAddress(map, stream.romOffset).value_or(0)) + " bytes " +
-           std::to_string(stream.bytes) + " times " + std::to_string(stream.times) + "\n";
+           " from " +
+           address24(stream.memory ? *stream.memory : romAddress(map, stream.romOffset).value_or(0)) +
+           " bytes " + std::to_string(stream.bytes) + " times " + std::to_string(stream.times) + "\n";
   }
 
   // The routines. A list is one field, its names joined by commas; an empty
@@ -1787,8 +1862,19 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       if (words.size() != 9 || words[3] != "as" || words[5] != "from" || words[7] != "bytes") {
         return fail("an asset is a path, a class, `as` a kind, `from` an address and `bytes` n");
       }
-      const std::optional<RegisterClass> cls = parseRegisterClass(words[2]);
-      if (!cls) return fail(words[2] + " is not a register class");
+      // The class, or several joined by `+` for a file built into data for
+      // two.
+      std::vector<RegisterClass> classes;
+      for (std::size_t from = 0; from <= words[2].size();) {
+        const std::size_t joint = words[2].find('+', from);
+        const std::string word = words[2].substr(from, joint == std::string::npos ? std::string::npos : joint - from);
+        const std::optional<RegisterClass> cls = parseRegisterClass(word);
+        if (!cls) return fail(word + " is not a register class");
+        if (std::find(classes.begin(), classes.end(), *cls) == classes.end()) classes.push_back(*cls);
+        if (joint == std::string::npos) break;
+        from = joint + 1u;
+      }
+      std::sort(classes.begin(), classes.end());
       std::optional<MovedKind> kind;
       for (const MovedKind k : {MovedKind::Dma, MovedKind::Table, MovedKind::Indirect, MovedKind::Stream,
                                 MovedKind::Staged}) {
@@ -1800,7 +1886,7 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       const std::optional<std::size_t> bytes = parseCount(words[8]);
       if (!bytes || *bytes == 0) return fail(words[8] + " is not a byte count");
       input.assets.push_back(
-          ManifestAsset{.file = words[1], .first = *first, .bytes = *bytes, .cls = *cls, .kind = *kind});
+          ManifestAsset{.file = words[1], .first = *first, .bytes = *bytes, .classes = classes, .kind = *kind});
       continue;
     }
     if (words[0] == "derived") {
@@ -2157,13 +2243,13 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
       const std::string to = name.empty() ? address24(asset.registerAddress) : std::string(name);
       // A file the shadow named is described by the class it went to, which
       // its line keeps; the register is the run's and is not.
-      const std::string cls = std::string(cpu65816RegisterClassName(asset.cls));
+      const std::string cls = classesText(asset.classes, " and ");
       std::string what;
       switch (asset.kind) {
         case MovedKind::Dma: what = counted(asset.bytes.size(), "byte") + " a transfer carried to " + to; break;
         case MovedKind::Table: what = "an HDMA table walked to " + to; break;
         case MovedKind::Indirect: what = "a block an HDMA entry pointed at, sent to " + to; break;
-        case MovedKind::Stream: what = counted(asset.bytes.size(), "byte") + " the CPU carried to " + cls; break;
+        case MovedKind::Stream: what = counted(asset.bytes.size(), "byte") + " a routine carried " + cls + " data from"; break;
         case MovedKind::Staged: what = counted(asset.bytes.size(), "byte") + " a routine built " + cls + " data from"; break;
       }
       // The path as the lexicon reads it: relative to this file, which for a

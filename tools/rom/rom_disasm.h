@@ -113,15 +113,17 @@ struct SoundProgram {
 
 // A file of bytes the tree lifts out of a bank file: a range a run saw a
 // transfer engine carry from the image to the hardware — or the image source of
-// a range it carried out of work RAM, or a stream the CPU carried — written
-// once, as the bytes are in the image, under a directory named for the memory
-// they went to — `vram/`, `cgram/`, `oam/`, `apu/`, and `hdma/` for a table and
-// for a block an indirect entry pointed at — and named by the address of its
-// first byte. The bank file refers to it with `INCBIN` where the bytes were.
-// Ranges that share a byte are one file, the union; ranges that touch are not.
+// a range it carried out of work RAM, or the run of image bytes a stream the
+// CPU carried was read from — written once, as the bytes are in the image,
+// under a directory named for the memory they went to — `vram/`, `cgram/`,
+// `oam/`, `apu/`, `hdma/` for a table and for a block an indirect entry pointed
+// at, and `staged/` for a source whose bytes were built into data for two
+// classes — and named by the address of its first byte. The bank file refers
+// to it with `INCBIN` where the bytes were. Ranges that share a byte are one
+// file, the union; ranges that touch are not.
 struct AssetFile {
   std::string file;  // relative to the manifest: `vram/00_9000.bin`
-  RegisterClass cls = RegisterClass::Display;  // of the register the bytes went to
+  std::vector<RegisterClass> classes;  // of the registers the bytes went to, ascending, one for every file but a `staged/` one
   MovedKind kind = MovedKind::Dma;
   Address registerAddress = 0;  // the register itself, for the comment beside the `INCBIN`
   Address first = 0;            // the address the tree places its first byte at
@@ -138,7 +140,7 @@ struct ManifestAsset {
   std::string file;
   Address first = 0;
   std::size_t bytes = 0;
-  RegisterClass cls = RegisterClass::Display;
+  std::vector<RegisterClass> classes;
   MovedKind kind = MovedKind::Dma;
 };
 
@@ -190,7 +192,8 @@ struct CartridgeDisassembly {
   // Where every range the run saw carried out of work RAM came from, and the
   // streams the CPU carried a byte at a time — see `rom_observe.h`. Both are
   // written fresh on every run and read back by nothing; a staged range with
-  // an image source is lifted as that source, and a stream as its bytes.
+  // an image source is lifted as that source, and a stream as the run its
+  // carrier read — or, for a buffer the CPU carried out, as the buffer's source.
   std::vector<StagedRange> staged;
   std::vector<StreamedRange> streamed;
 };

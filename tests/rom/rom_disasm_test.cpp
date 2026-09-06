@@ -768,7 +768,7 @@ TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
   for (std::size_t i = 0; i < 10; ++i) {
     const AssetFile& asset = d.assets[i];
     EXPECT_EQ(asset.file, expected[i].file);
-    EXPECT_EQ(asset.cls, expected[i].cls) << asset.file;
+    EXPECT_EQ(asset.classes, std::vector<RegisterClass>{expected[i].cls}) << asset.file;
     EXPECT_EQ(asset.kind, expected[i].kind) << asset.file;
     EXPECT_EQ(asset.first, expected[i].first) << asset.file;
     EXPECT_EQ(asset.bytes.size(), expected[i].bytes) << asset.file;
@@ -970,9 +970,12 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
 
 TEST(RomAssets, APersonsPathSurvivesARunAndAnOrphanIsDropped) {
   CartridgeRequest request;
-  request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80},
-                    ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5},
-                    ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64}};
+  request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80,
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                    ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5,
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                    ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64,
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma}};
   const CartridgeDisassembly d = lifted(liftingImage(), request);
   EXPECT_NE(assetNamed(d, "vram/tiles.bin"), nullptr);
   EXPECT_EQ(assetNamed(d, "vram/00_9000.bin"), nullptr);
@@ -1013,7 +1016,9 @@ TEST(RomAssets, ATreeWithoutARunLiftsWhatItReadBack) {
 //
 // The staging cartridge builds ranges in work RAM and sends them; the cases pin
 // that each is lifted as its source, that a computed range is not, that a
-// stream is lifted as its bytes, that the lines survive a pass without a run,
+// stream is lifted as the run its carrier read, that a buffer the CPU carries
+// out is lifted as its source, that a source built into data for two classes
+// is one file under `staged/`, that the lines survive a pass without a run,
 // and that the tree still assembles.
 
 namespace {
@@ -1033,12 +1038,12 @@ CartridgeDisassembly stagedLift(CartridgeRequest request = {}) {
 
 TEST(RomAssets, AStagedRangeIsLiftedAsItsSourceWhole) {
   const CartridgeDisassembly d = stagedLift();
-  ASSERT_EQ(d.assets.size(), 5u) << renderManifest(d);
+  ASSERT_EQ(d.assets.size(), 7u) << renderManifest(d);
   // The decoder's stream: the counts, the values and the terminator, eleven bytes.
   const AssetFile* stream = assetNamed(d, "vram/00_9000.bin");
   ASSERT_NE(stream, nullptr);
   EXPECT_EQ(stream->kind, MovedKind::Staged);
-  EXPECT_EQ(stream->cls, RegisterClass::Vram);
+  EXPECT_EQ(stream->classes, std::vector<RegisterClass>{RegisterClass::Vram});
   EXPECT_EQ(stream->first, 0x009000u);
   EXPECT_EQ(stream->bytes, (std::vector<std::uint8_t>{0x08u, 0x11u, 0x08u, 0x22u, 0x04u, 0x33u, 0x04u, 0x44u,
                                                       0x08u, 0x55u, 0x00u}));
@@ -1053,7 +1058,7 @@ TEST(RomAssets, AStagedRangeIsLiftedAsItsSourceWhole) {
   ASSERT_NE(port, nullptr);
   EXPECT_EQ(port->bytes.size(), 32u);
   EXPECT_EQ(port->kind, MovedKind::Staged);
-  EXPECT_NE(renderManifest(d).find("staged   vram/00_9300.bin at $7E:0400 bytes 32 by none exact\n"),
+  EXPECT_NE(renderManifest(d).find("staged   vram/00_9300.bin at $7E:0400 bytes 32 to Vram by none exact\n"),
             std::string::npos);
 }
 
@@ -1064,7 +1069,7 @@ TEST(RomAssets, AStagedTableIsPlacedWhereItsUseWent) {
   const AssetFile* table = assetNamed(d, "hdma/00_9400.bin");
   ASSERT_NE(table, nullptr);
   EXPECT_EQ(table->kind, MovedKind::Staged);
-  EXPECT_EQ(table->cls, RegisterClass::Display);
+  EXPECT_EQ(table->classes, std::vector<RegisterClass>{RegisterClass::Display});
   EXPECT_EQ(table->bytes, (std::vector<std::uint8_t>{0x01u, 0x0Fu, 0x00u}));
   EXPECT_NE(renderManifest(d).find("asset    hdma/00_9400.bin Display as staged from $00:9400 bytes 3\n"),
             std::string::npos);
@@ -1079,20 +1084,60 @@ TEST(RomAssets, AComputedRangeIsNotLifted) {
   EXPECT_FALSE(anyNote(d, "$7F:0300"));
 }
 
-TEST(RomAssets, AStreamIsLiftedAsTheBytesTheCpuCarried) {
+TEST(RomAssets, AStreamIsLiftedAsTheRunItsInvocationRead) {
+  // The loop carried sixteen bytes and read the end mark after them: the file
+  // is the seventeen, and the `streamed` line still says sixteen.
   const CartridgeDisassembly d = stagedLift();
   const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
   ASSERT_NE(palette, nullptr);
   EXPECT_EQ(palette->kind, MovedKind::Stream);
-  EXPECT_EQ(palette->cls, RegisterClass::Cgram);
+  EXPECT_EQ(palette->classes, std::vector<RegisterClass>{RegisterClass::Cgram});
   EXPECT_EQ(palette->first, 0x009200u);
-  EXPECT_EQ(palette->bytes.size(), 16u);
+  EXPECT_EQ(palette->bytes.size(), 17u);
   EXPECT_EQ(palette->bytes[0], 0xE0u);
-  EXPECT_NE(renderManifest(d).find("asset    cgram/00_9200.bin Cgram as stream from $00:9200 bytes 16\n"),
+  EXPECT_EQ(palette->bytes[16], 0xFFu);
+  EXPECT_NE(renderManifest(d).find("asset    cgram/00_9200.bin Cgram as stream from $00:9200 bytes 17\n"),
+            std::string::npos);
+  EXPECT_NE(renderManifest(d).find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1\n"),
             std::string::npos);
   EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d)
-                .find("; ---- $00:9200-$00:920F: 16 bytes the CPU carried to Cgram, in cgram/00_9200.bin\n"
+                .find("; ---- $00:9200-$00:9210: 17 bytes a routine carried Cgram data from, in cgram/00_9200.bin\n"
                       "        INCBIN \"cgram/00_9200.bin\"\n"),
+            std::string::npos);
+}
+
+TEST(RomAssets, ABufferTheCpuCarriesOutIsLiftedAsItsSourceNotAsAStream) {
+  const CartridgeDisassembly d = stagedLift();
+  const AssetFile* buffer = assetNamed(d, "vram/00_9600.bin");
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_EQ(buffer->kind, MovedKind::Staged);
+  EXPECT_EQ(buffer->classes, std::vector<RegisterClass>{RegisterClass::Vram});
+  EXPECT_EQ(buffer->bytes.size(), 16u);
+  EXPECT_EQ(buffer->bytes[0], 0xB0u);
+  for (const AssetFile& asset : d.assets) {
+    EXPECT_FALSE(asset.first == 0x009600u && asset.kind == MovedKind::Stream) << asset.file;
+  }
+  EXPECT_TRUE(d.notes.empty()) << d.notes.front();  // and nothing was refused in its place
+  EXPECT_NE(renderManifest(d).find("asset    vram/00_9600.bin Vram as staged from $00:9600 bytes 16\n"),
+            std::string::npos);
+}
+
+TEST(RomAssets, ASourceSentToTwoClassesIsOneFileUnderStaged) {
+  const CartridgeDisassembly d = stagedLift();
+  const AssetFile* both = assetNamed(d, "staged/00_9500.bin");
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->kind, MovedKind::Staged);
+  EXPECT_EQ(both->classes, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Cgram}));
+  EXPECT_EQ(both->first, 0x009500u);
+  EXPECT_EQ(both->bytes.size(), 8u);
+  EXPECT_EQ(assetNamed(d, "vram/00_9500.bin"), nullptr);
+  EXPECT_EQ(assetNamed(d, "cgram/00_9500.bin"), nullptr);
+  EXPECT_FALSE(anyNote(d, "$00:9500"));
+  EXPECT_NE(renderManifest(d).find("asset    staged/00_9500.bin Vram+Cgram as staged from $00:9500 bytes 8\n"),
+            std::string::npos);
+  EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d)
+                .find("; ---- $00:9500-$00:9507: 8 bytes a routine built Vram and Cgram data from, in staged/00_9500.bin\n"
+                      "        INCBIN \"staged/00_9500.bin\"\n"),
             std::string::npos);
 }
 
@@ -1101,12 +1146,16 @@ TEST(RomAssets, TheStagedAndStreamLinesAreReadBackAndKeptWithoutARun) {
   std::string error;
   const std::optional<ManifestInput> input = parseManifest(renderManifest(ran), error);
   ASSERT_TRUE(input.has_value()) << error;
-  ASSERT_EQ(input->assets.size(), 5u);
+  ASSERT_EQ(input->assets.size(), 7u);
   EXPECT_EQ(input->assets[0].kind, MovedKind::Staged);
-  EXPECT_EQ(input->assets[0].cls, RegisterClass::Vram);
+  EXPECT_EQ(input->assets[0].classes, std::vector<RegisterClass>{RegisterClass::Vram});
   EXPECT_EQ(input->assets[2].kind, MovedKind::Stream);
-  EXPECT_EQ(input->assets[2].cls, RegisterClass::Cgram);
-  EXPECT_EQ(input->assets[4].cls, RegisterClass::Display);
+  EXPECT_EQ(input->assets[2].classes, std::vector<RegisterClass>{RegisterClass::Cgram});
+  EXPECT_EQ(input->assets[4].classes, std::vector<RegisterClass>{RegisterClass::Display});
+  EXPECT_EQ(input->assets[5].classes, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Cgram}));
+  EXPECT_EQ(input->assets[5].file, "staged/00_9500.bin");
+  EXPECT_FALSE(parseManifest("asset staged/x.bin Vram+Nowhere as staged from $00:9500 bytes 8\n", error).has_value());
+  EXPECT_NE(error.find("Nowhere"), std::string::npos);
 
   CartridgeRequest again;
   static const std::vector<std::uint8_t> rom = stagingImage();
@@ -1116,8 +1165,8 @@ TEST(RomAssets, TheStagedAndStreamLinesAreReadBackAndKeptWithoutARun) {
   again.moved = input->moved;
   again.assets = input->assets;
   const CartridgeDisassembly kept = disassembleCartridge(again);
-  ASSERT_EQ(kept.assets.size(), 5u) << renderManifest(kept);
-  for (std::size_t i = 0; i < 5; ++i) {
+  ASSERT_EQ(kept.assets.size(), 7u) << renderManifest(kept);
+  for (std::size_t i = 0; i < 7; ++i) {
     EXPECT_EQ(kept.assets[i].file, ran.assets[i].file);
     EXPECT_EQ(kept.assets[i].kind, ran.assets[i].kind);
     EXPECT_EQ(kept.assets[i].bytes, ran.assets[i].bytes);
@@ -1134,7 +1183,7 @@ TEST(RomAssets, AStagedFileTheNextRunLiftsWiderIsTheWiderFile) {
   // file over the same bytes names the wider file, and no note is owed.
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "vram/two.bin", .first = 0x009100u, .bytes = 2,
-                                  .cls = RegisterClass::Vram, .kind = MovedKind::Staged}};
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Staged}};
   const CartridgeDisassembly d = stagedLift(request);
   EXPECT_EQ(assetNamed(d, "vram/two.bin"), nullptr);
   EXPECT_NE(assetNamed(d, "vram/00_9100.bin"), nullptr);
