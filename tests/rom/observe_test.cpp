@@ -1090,10 +1090,11 @@ TEST(RomLockstep, NoExampleCartridgeDivergesFromTheMachine) {
 
 // ---- where every byte came from ------------------------------------------------
 //
-// The staging cartridge builds five ranges in work RAM, every way the shadow
-// has a rule for, and sends each; a run of four frames sees all of it. The
-// cases pin what the run says of each extent — its origin, its source, its
-// writer — and the streams the CPU carried.
+// The staging cartridge builds eight ranges in work RAM, every way the shadow
+// has a rule for, and sends each — by the engines, and one by the CPU itself
+// a word at a time; a run of four frames sees all of it. The cases pin what
+// the run says of each extent — its origin, its source, its writer — and the
+// streams the CPU carried, from the image and from a buffer.
 
 namespace {
 
@@ -1115,7 +1116,7 @@ std::vector<ir::OriginInterval> intervals(std::initializer_list<ir::OriginInterv
 
 TEST(RomStaged, EveryExtentCarriedOutOfWorkRamIsRecordedOnce) {
   const RunObservation o = observe(stagingImage(), 4u * kFrame);
-  ASSERT_EQ(o.staged.size(), 6u);
+  ASSERT_EQ(o.staged.size(), 8u);
   // In address order, then by count.
   EXPECT_EQ(o.staged[0].memory, 0x7E0400u);
   EXPECT_EQ(o.staged[1].memory, 0x7E0500u);
@@ -1123,8 +1124,12 @@ TEST(RomStaged, EveryExtentCarriedOutOfWorkRamIsRecordedOnce) {
   EXPECT_EQ(o.staged[3].memory, 0x7F0100u);
   EXPECT_EQ(o.staged[4].memory, 0x7F0300u);
   EXPECT_EQ(o.staged[5].memory, 0x7F0600u);
+  EXPECT_EQ(o.staged[6].memory, 0x7F0700u);
+  EXPECT_EQ(o.staged[7].memory, 0x7F0800u);
   // The table HDMA walks every frame is one extent however many frames walked it.
   EXPECT_EQ(o.staged[5].bytes, 3u);
+  // The range two transfers sent two places is one extent.
+  EXPECT_EQ(o.staged[6].bytes, 8u);
   // The transfer into work RAM through the port is not an extent: its memory
   // is the image, and nothing was carried out of work RAM by it.
   EXPECT_EQ(stagedAt(o.staged, 0x009300u, 32), nullptr);
@@ -1200,12 +1205,13 @@ TEST(RomStaged, BytesTheCpuWroteThroughThePortAreTheStoresOwn) {
   ASSERT_EQ(two->writers.size(), 2u);
   EXPECT_EQ(two->writers[0].writer.site, 0x008316u);
   EXPECT_EQ(two->writers[1].writer.site, 0x00831Eu);
-  // Each byte's origin is its own; its source is the run the routine read,
-  // which both stores' invocation read as one.
+  // Each byte's origin is its own; its source is the run holding it among
+  // the routine's own reads and the caller's they joined — and the caller's
+  // run over `$9100` is the whole block the copy read, which is the wider.
   EXPECT_EQ(two->writers[0].origin.image, intervals({{0x1100u, 0x1100u}}));
   EXPECT_EQ(two->writers[1].origin.image, intervals({{0x1101u, 0x1101u}}));
-  EXPECT_EQ(two->writers[0].sources, intervals({{0x1100u, 0x1101u}}));
-  EXPECT_EQ(two->writers[1].sources, intervals({{0x1100u, 0x1101u}}));
+  EXPECT_EQ(two->writers[0].sources, intervals({{0x1100u, 0x111Fu}}));
+  EXPECT_EQ(two->writers[1].sources, intervals({{0x1100u, 0x111Fu}}));
 }
 
 TEST(RomStaged, BytesNothingWroteAreUnwritten) {
@@ -1239,7 +1245,7 @@ TEST(RomStaged, TwoRunsSeeTheSameExtents) {
 
 TEST(RomStreamed, ALoopOfStoresFromConsecutiveBytesIsOneStream) {
   const RunObservation o = observe(stagingImage(), 4u * kFrame);
-  ASSERT_EQ(o.streamed.size(), 1u);
+  ASSERT_EQ(o.streamed.size(), 2u);
   const StreamedRange& stream = o.streamed.front();
   EXPECT_EQ(stream.site, 0x00818Fu);
   EXPECT_EQ(stream.registerAddress, 0x002122u);
@@ -1249,7 +1255,43 @@ TEST(RomStreamed, ALoopOfStoresFromConsecutiveBytesIsOneStream) {
   EXPECT_EQ(stream.romOffset, 0x1200u);
   EXPECT_EQ(stream.bytes, 16u);
   EXPECT_EQ(stream.times, 1u);
+  EXPECT_FALSE(stream.memory.has_value());
+  // The loop read the end mark after the palette: its source is the seventeen.
+  EXPECT_EQ(stream.source, (ir::OriginInterval{0x1200u, 0x1210u}));
   EXPECT_TRUE(sameStream(stream, stream));
+}
+
+TEST(RomStreamed, ABufferTheCpuCarriesOutIsAStreamFromWorkRamAndAStagedExtent) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  ASSERT_EQ(o.streamed.size(), 2u);
+  const StreamedRange& carry = o.streamed.back();
+  EXPECT_EQ(carry.site, 0x0084C8u);
+  EXPECT_EQ(carry.registerAddress, 0x002118u);
+  EXPECT_EQ(carry.registerName, "VMDATAL");
+  ASSERT_TRUE(carry.memory.has_value());
+  EXPECT_EQ(*carry.memory, 0x7F0800u);
+  EXPECT_EQ(carry.bytes, 16u);
+  EXPECT_EQ(carry.times, 1u);
+  // The buffer is an extent the run carried out, exactly as an engine's: its
+  // writer is the copy, its source the sixteen bytes the copy read.
+  const StagedRange* buffer = stagedAt(o.staged, 0x7F0800u, 16);
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_EQ(buffer->origin.image, intervals({{0x1600u, 0x160Fu}}));
+  ASSERT_EQ(buffer->writers.size(), 1u);
+  EXPECT_EQ(buffer->writers.front().writer.site, 0x008489u);
+  EXPECT_EQ(buffer->writers.front().bytes, 16u);
+  EXPECT_EQ(buffer->writers.front().sources, intervals({{0x1600u, 0x160Fu}}));
+}
+
+TEST(RomStaged, ARangeSentTwoPlacesIsOneExtentWithOneSource) {
+  const RunObservation o = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* both = stagedAt(o.staged, 0x7F0700u, 8);
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->origin.image, intervals({{0x1500u, 0x1507u}}));
+  ASSERT_EQ(both->writers.size(), 1u);
+  EXPECT_EQ(both->writers.front().writer.site, 0x0083C9u);
+  // Two sightings, one per transfer: the writer's count is the bytes over both.
+  EXPECT_EQ(both->writers.front().bytes, 16u);
 }
 
 TEST(RomStreamed, TheLiftingCartridgeStreamsNothing) {
@@ -1274,15 +1316,30 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
   EXPECT_NE(manifest.find("origin   $7F:0300 bytes 16 computed by sub_0081A0\n"), std::string::npos);
   EXPECT_NE(manifest.find("origin   $7E:0400 bytes 32 from $00:9300 bytes 32 using 32 by none exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("origin   $7E:0500 bytes 2 from $00:9100 bytes 2 using 2 by sub_008300 exact\n"),
+  EXPECT_NE(manifest.find("origin   $7E:0500 bytes 2 from $00:9100 bytes 32 using 2 by sub_008300 exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("staged   vram/00_9000.bin at $7F:0000 bytes 32 by sub_008100 exact\n"),
+  EXPECT_NE(manifest.find("staged   vram/00_9000.bin at $7F:0000 bytes 32 to Vram by sub_008100 exact\n"),
             std::string::npos);
   EXPECT_NE(manifest.find("origin   $7F:0600 bytes 3 from $00:9400 bytes 3 using 3 by sub_008380 exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("staged   hdma/00_9400.bin at $7F:0600 bytes 3 by sub_008380 exact\n"),
+  EXPECT_NE(manifest.find("staged   hdma/00_9400.bin at $7F:0600 bytes 3 to Display by sub_008380 exact\n"),
             std::string::npos);
   EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1\n"),
+            std::string::npos);
+  // A source sent two places: one file, a `staged` line per class it fed.
+  EXPECT_NE(manifest.find("origin   $7F:0700 bytes 8 from $00:9500 bytes 8 using 8 by sub_0083C0 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Vram by sub_0083C0 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Cgram by sub_0083C0 exact\n"),
+            std::string::npos);
+  // A buffer the CPU carried out: the stream names the buffer, the buffer's
+  // source is the file.
+  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("origin   $7F:0800 bytes 16 from $00:9600 bytes 16 using 16 by sub_008480 exact\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("staged   vram/00_9600.bin at $7F:0800 bytes 16 to Vram by sub_008480 exact\n"),
             std::string::npos);
   // The lines are read past, never read back: the next run sees them again.
   std::string error;

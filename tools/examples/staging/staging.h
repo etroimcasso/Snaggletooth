@@ -12,12 +12,15 @@ namespace snaggletooth::examples {
 // carries sixteen bytes from `$9200` to `CGDATA` one store at a time; a fill of
 // sixteen bytes of `$AA` at `$7F:0300`; a transfer of thirty-two bytes from
 // `$9300` into `$7E:0400` through the work-RAM port; two stores through the
-// same port, of the first two bytes of `$9100`, into `$7E:0500`; and a copy of
-// a three-byte HDMA table from `$9400` to `$7F:0600`. Then five transfers send
-// each range to the hardware: `$7F:0000` and `$7F:0100` to VRAM, `$7F:0300` to
-// OAM, `$7E:0400` to VRAM, `$7E:0500` to VRAM — and channel 1 walks the table
-// in `$7F:0600` to `INIDISP` every frame while the program idles. Every site
-// the tests name is commented with its address.
+// same port, of the first two bytes of `$9100`, into `$7E:0500`; a copy of a
+// three-byte HDMA table from `$9400` to `$7F:0600`; a copy of eight bytes from
+// `$9500` to `$7F:0700`; and a copy of sixteen bytes from `$9600` to `$7F:0800`.
+// Then the transfers send each range to the hardware: `$7F:0000` and `$7F:0100`
+// to VRAM, `$7F:0300` to OAM, `$7E:0400` to VRAM, `$7E:0500` to VRAM, `$7F:0700`
+// to VRAM and then to CGRAM, and a loop carries `$7F:0800` to `VMDATAL` a word
+// at a time — and channel 1 walks the table in `$7F:0600` to `INIDISP` every
+// frame while the program idles. Every site the tests name is commented with
+// its address.
 inline std::vector<std::uint8_t> stagingImage() {
   std::vector<std::uint8_t> rom = loRomImage(1);
   put(rom, 0x0000u, {
@@ -36,8 +39,13 @@ inline std::vector<std::uint8_t> stagingImage() {
       0x20u, 0x90u, 0x82u,         // $8020 JSR !$8290      $7F:0300 -> OAM
       0x20u, 0xD0u, 0x82u,         // $8023 JSR !$82D0      $7E:0400 -> VRAM
       0x20u, 0x40u, 0x83u,         // $8026 JSR !$8340      $7E:0500 -> VRAM
-      0x20u, 0x80u, 0x83u,         // $8029 JSR !$8380      copy $9400 -> $7F:0600 and walk it to INIDISP
-      0x80u, 0xFEu,                // $802C BRA *           idle while the frames walk the table
+      0x20u, 0xC0u, 0x83u,         // $8029 JSR !$83C0      copy $9500 -> $7F:0700
+      0x20u, 0x00u, 0x84u,         // $802C JSR !$8400      $7F:0700 -> VRAM
+      0x20u, 0x40u, 0x84u,         // $802F JSR !$8440      $7F:0700 -> CGRAM
+      0x20u, 0x80u, 0x84u,         // $8032 JSR !$8480      copy $9600 -> $7F:0800
+      0x20u, 0xC0u, 0x84u,         // $8035 JSR !$84C0      carry $7F:0800 -> VMDATAL a word at a time
+      0x20u, 0x80u, 0x83u,         // $8038 JSR !$8380      copy $9400 -> $7F:0600 and walk it to INIDISP
+      0x80u, 0xFEu,                // $803B BRA *           idle while the frames walk the table
   });
   // The decoder: pairs of a count and a value until a count of zero. The count
   // goes to a counter in the direct page; only the value reaches the output.
@@ -80,8 +88,9 @@ inline std::vector<std::uint8_t> stagingImage() {
       0xE8u,                       // $8193 INX
       0xE0u, 0x10u, 0x00u,         // $8194 CPX #$0010
       0xD0u, 0xF2u,                // $8197 BNE $818B
-      0xE2u, 0x10u,                // $8199 SEP #$10
-      0x60u,                       // $819B RTS
+      0xAFu, 0x10u, 0x92u, 0x00u,  // $8199 LDA $00:9210    the end mark after the palette
+      0xE2u, 0x10u,                // $819D SEP #$10
+      0x60u,                       // $819F RTS
   });
   put(rom, 0x01A0u, {
       0xC2u, 0x10u,                // $81A0 REP #$10        sub_0081A0
@@ -187,12 +196,53 @@ inline std::vector<std::uint8_t> stagingImage() {
       0x8Fu, 0x0Cu, 0x42u, 0x00u,  // $83B0 STA $00:420C    HDMAEN = $02 (the write at $83B0)
       0x60u,                       // $83B4 RTS
   });
+  // A copy of eight bytes that two transfers then send two places.
+  put(rom, 0x03C0u, {
+      0xC2u, 0x10u,                // $83C0 REP #$10        sub_0083C0
+      0xA2u, 0x00u, 0x00u,         // $83C2 LDX #$0000
+      0xBFu, 0x00u, 0x95u, 0x00u,  // $83C5 LDA $00:9500,X
+      0x9Du, 0x00u, 0x07u,         // $83C9 STA !$0700,X    $7F:0700+X
+      0xE8u,                       // $83CC INX
+      0xE0u, 0x08u, 0x00u,         // $83CD CPX #$0008
+      0xD0u, 0xF3u,                // $83D0 BNE $83C5
+      0xE2u, 0x10u,                // $83D2 SEP #$10
+      0x60u,                       // $83D4 RTS
+  });
+  transfer(0x0400u, 0x01u, 0x18u, 0x00u, 0x07u, 0x7Fu, 0x08u);  // $8400: $7F:0700, 8 -> VMDATAL (the write at $842C)
+  transfer(0x0440u, 0x00u, 0x22u, 0x00u, 0x07u, 0x7Fu, 0x08u);  // $8440: $7F:0700, 8 -> CGDATA (the write at $846C)
+  // A copy of sixteen bytes the CPU then carries out itself.
+  put(rom, 0x0480u, {
+      0xC2u, 0x10u,                // $8480 REP #$10        sub_008480
+      0xA2u, 0x00u, 0x00u,         // $8482 LDX #$0000
+      0xBFu, 0x00u, 0x96u, 0x00u,  // $8485 LDA $00:9600,X
+      0x9Du, 0x00u, 0x08u,         // $8489 STA !$0800,X    $7F:0800+X
+      0xE8u,                       // $848C INX
+      0xE0u, 0x10u, 0x00u,         // $848D CPX #$0010
+      0xD0u, 0xF3u,                // $8490 BNE $8485
+      0xE2u, 0x10u,                // $8492 SEP #$10
+      0x60u,                       // $8494 RTS
+  });
+  put(rom, 0x04C0u, {
+      0xC2u, 0x30u,                // $84C0 REP #$30        sub_0084C0: A16, X16
+      0xA2u, 0x00u, 0x00u,         // $84C2 LDX #$0000
+      0xBDu, 0x00u, 0x08u,         // $84C5 LDA !$0800,X    a word of $7F:0800+X
+      0x8Fu, 0x18u, 0x21u, 0x00u,  // $84C8 STA $00:2118    VMDATAL/VMDATAH: the carry's site
+      0xE8u,                       // $84CC INX
+      0xE8u,                       // $84CD INX
+      0xE0u, 0x10u, 0x00u,         // $84CE CPX #$0010
+      0xD0u, 0xF2u,                // $84D1 BNE $84C5
+      0xE2u, 0x30u,                // $84D3 SEP #$30
+      0x60u,                       // $84D5 RTS
+  });
   // The data.
   put(rom, 0x1000u, {0x08u, 0x11u, 0x08u, 0x22u, 0x04u, 0x33u, 0x04u, 0x44u, 0x08u, 0x55u, 0x00u});  // $9000: five runs, then the end
   for (std::size_t i = 0; i < 32; ++i) rom[0x1100u + i] = static_cast<std::uint8_t>(0x40u + i);  // $9100: copied whole
   for (std::size_t i = 0; i < 16; ++i) rom[0x1200u + i] = static_cast<std::uint8_t>(0xE0u + i);  // $9200: the palette streamed
+  rom[0x1210u] = 0xFFu;  // $9210: the end mark the stream's loop reads after it
   for (std::size_t i = 0; i < 32; ++i) rom[0x1300u + i] = static_cast<std::uint8_t>(0x70u + i);  // $9300: through the port
   put(rom, 0x1400u, {0x01u, 0x0Fu, 0x00u});  // $9400: the HDMA table: one line, brightness $0F, end
+  for (std::size_t i = 0; i < 8; ++i) rom[0x1500u + i] = static_cast<std::uint8_t>(0x90u + i);   // $9500: sent two places
+  for (std::size_t i = 0; i < 16; ++i) rom[0x1600u + i] = static_cast<std::uint8_t>(0xB0u + i);  // $9600: carried out by the CPU
   return rom;
 }
 

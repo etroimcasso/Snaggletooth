@@ -197,8 +197,11 @@ RangeKey keyOf(const MovedRange& r) {
 // under the trigger's name, and a byte the port reaches on the CPU's behalf is
 // queued for the interpreter to pair with the CPU's own access. A byte an
 // engine reads out of work RAM is folded into the origin of the range it
-// belongs to, with the writer that put it there.
-struct Recorder final : BusObserver {
+// belongs to, with the writer that put it there — and so is a byte the CPU
+// carries out of work RAM to a data register, which the shadow tells the
+// recorder about as the CPU goes, so the buffer the CPU carried is an extent
+// exactly as one an engine carried.
+struct Recorder final : BusObserver, ir::CarrySink {
   const Snes& machine;
   ir::Provenance& shadow;
   Address site = 0;  // the instruction about to run
@@ -233,6 +236,15 @@ struct Recorder final : BusObserver {
   // The staged extents, each accumulating over every range with that extent.
   std::map<std::pair<Address, std::uint32_t>, StagedRange> staged;
 
+  // A buffer the CPU is carrying out to a data register, by register: where
+  // it begins, how many bytes so far, and who wrote them.
+  struct Carry {
+    Address memory = 0;
+    std::uint32_t bytes = 0;
+    std::vector<StagedWriter> writers;
+  };
+  std::map<std::uint32_t, Carry> carries;
+
   Recorder(const Snes& m, ir::Provenance& p) : machine(m), shadow(p) {}
 
   void close(std::optional<Open>& open) {
@@ -245,17 +257,19 @@ struct Recorder final : BusObserver {
     } else {
       ++out[found->second].times;
     }
-    if (!open->writers.empty() && open->range.step != MovedStep::Fixed) stage(*open);
+    if (!open->writers.empty() && open->range.step != MovedStep::Fixed) {
+      stage(extentStart(open->range), open->range.bytes, open->writers);
+    }
     open.reset();
   }
 
   // Folds a closed range read out of work RAM into its extent.
-  void stage(const Open& open) {
-    const std::pair<Address, std::uint32_t> extent{extentStart(open.range), open.range.bytes};
+  void stage(Address first, std::uint32_t bytes, const std::vector<StagedWriter>& writers) {
+    const std::pair<Address, std::uint32_t> extent{first, bytes};
     StagedRange& range = staged[extent];
     range.memory = extent.first;
     range.bytes = extent.second;
-    for (const StagedWriter& writer : open.writers) {
+    for (const StagedWriter& writer : writers) {
       ir::Origins::merge(range.origin, writer.origin);
       const auto same = std::find_if(range.writers.begin(), range.writers.end(), [&](const StagedWriter& w) {
         return w.writer == writer.writer && w.unwritten == writer.unwritten;
@@ -275,9 +289,9 @@ struct Recorder final : BusObserver {
     }
   }
 
-  // A byte an engine read out of work RAM for the range that is open: its
-  // origin and its writer join the range's.
-  void fold(Open& open, Address address) {
+  // A byte read out of work RAM for the range or the carry that is open: its
+  // origin and its writer join the writers.
+  void fold(std::vector<StagedWriter>& writers, Address address) {
     const std::optional<ir::Origin> origin = shadow.originOf(address);
     if (!origin) return;
     const std::optional<ir::Writer> writer = shadow.writerOf(address);
@@ -286,12 +300,12 @@ struct Recorder final : BusObserver {
                            .bytes = 0,
                            .origin = {},
                            .sources = {}};
-    auto same = std::find_if(open.writers.begin(), open.writers.end(), [&](const StagedWriter& w) {
+    auto same = std::find_if(writers.begin(), writers.end(), [&](const StagedWriter& w) {
       return w.writer == key.writer && w.unwritten == key.unwritten;
     });
-    if (same == open.writers.end()) {
-      open.writers.push_back(key);
-      same = open.writers.end() - 1;
+    if (same == writers.end()) {
+      writers.push_back(key);
+      same = writers.end() - 1;
     }
     ++same->bytes;
     shadow.origins().accumulate(same->origin, *origin);
@@ -301,6 +315,25 @@ struct Recorder final : BusObserver {
     held.image = std::move(same->sources);
     ir::Origins::merge(held, sources);
     same->sources = std::move(held.image);
+  }
+
+  // The CPU carried a byte of work RAM out to a data register: the byte is
+  // folded now, under the shadow as it stands, since the buffer may be rebuilt
+  // before the carry ends.
+  void carriedByte(std::uint32_t registerAddress, Address memory, bool continues) override {
+    Carry& carry = carries[registerAddress];
+    if (!continues) carry = Carry{.memory = memory, .bytes = 0, .writers = {}};
+    fold(carry.writers, memory);
+    ++carry.bytes;
+  }
+
+  void carryEnded(std::uint32_t registerAddress, bool recorded) override {
+    const auto found = carries.find(registerAddress);
+    if (found == carries.end()) return;
+    if (recorded && !found->second.writers.empty()) {
+      stage(found->second.memory, found->second.bytes, found->second.writers);
+    }
+    carries.erase(found);
   }
 
   void closeChannel(std::uint8_t channel) {
@@ -342,7 +375,7 @@ struct Recorder final : BusObserver {
         open->range.step == step) {
       ++open->range.bytes;
       open->next = stepped(address, step);
-      if (read) fold(*open, address);
+      if (read) fold(open->writers, address);
       return;
     }
     close(open);
@@ -362,7 +395,7 @@ struct Recorder final : BusObserver {
       range.registerClass = reg->cls;
     }
     open = Open{.range = range, .next = stepped(address, step), .writers = {}};
-    if (read) fold(*open, address);
+    if (read) fold(open->writers, address);
   }
 
   // The port's access, now that the access that caused it is here. On an
@@ -723,8 +756,8 @@ bool sameExtent(const StagedRange& a, const StagedRange& b) {
 }
 
 bool sameStream(const StreamedRange& a, const StreamedRange& b) {
-  return a.site == b.site && a.registerAddress == b.registerAddress && a.romOffset == b.romOffset &&
-         a.bytes == b.bytes;
+  return a.site == b.site && a.registerAddress == b.registerAddress && a.memory == b.memory &&
+         a.romOffset == b.romOffset && a.bytes == b.bytes;
 }
 
 bool rangeBefore(const MovedRange& a, const MovedRange& b) {
@@ -754,6 +787,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   Snes machine{SnesConfig{.rom = rom}};
   ir::Provenance shadow{map, rom.size(), kOriginCap};
   Recorder recorder{machine, shadow};
+  shadow.carries = &recorder;
   machine.setObserver(&recorder);
   Lockstep lockstep{map, rom.size(), machine.state().cpu, shadow};
   std::set<std::tuple<Address, Address, std::uint32_t>> seen;
@@ -858,7 +892,13 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   observation.nodes = lockstep.nodes.size();
   observation.divergences = lockstep.diverged;
 
-  // What was staged: every extent, its writers most bytes first.
+  // The shadow closes the stream still open, and the recorder folds the last
+  // carry with it, before the extents are read out.
+  shadow.finish();
+  shadow.carries = nullptr;
+
+  // What was staged: every extent, in address order then by count, its
+  // writers most bytes first.
   for (auto& [extent, range] : recorder.staged) {
     std::sort(range.writers.begin(), range.writers.end(),
               [](const StagedWriter& a, const StagedWriter& b) {
@@ -869,7 +909,6 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
     observation.staged.push_back(std::move(range));
   }
   // What the CPU streamed.
-  shadow.finish();
   for (const ir::Stream& stream : shadow.streams()) {
     StreamedRange range{.site = stream.site,
                         .registerAddress = stream.registerAddress,
@@ -877,7 +916,9 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
                         .registerClass = std::nullopt,
                         .romOffset = stream.first,
                         .bytes = static_cast<std::uint32_t>(stream.bytes),
-                        .times = stream.times};
+                        .times = stream.times,
+                        .source = stream.source,
+                        .memory = stream.memory};
     if (const std::optional<Cpu65816Register> reg = cpu65816Register(range.registerAddress)) {
       range.registerName = reg->name;
       range.registerClass = reg->cls;
@@ -888,6 +929,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
             [](const StreamedRange& a, const StreamedRange& b) {
               if (a.site != b.site) return a.site < b.site;
               if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
+              if (a.memory != b.memory) return a.memory < b.memory;
               return a.romOffset < b.romOffset;
             });
   observation.originSets = shadow.origins().interned();

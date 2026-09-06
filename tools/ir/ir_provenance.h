@@ -24,11 +24,26 @@
 // An origin is exact and is not the whole story: a decoder's output takes its
 // values from the literal bytes of a compressed stream, and the counts and
 // lengths between them decide only how many. So the shadow also follows every
-// call and return and keeps, for each invocation, the image bytes it read —
-// its helpers' reads joining it when they return. The source of a staged byte
-// is then the run of image bytes its writer's invocation read that holds the
-// byte's origin: the compressed stream whole, counts included, and not a table
-// the decoder consulted whose values never reached the output.
+// call and return and keeps, for each invocation, the stretches of the image
+// it read as runs: a run is a maximal stretch of image bytes the invocation
+// read — a read inside a run changes nothing, any other read starts a run of
+// the one byte, and runs that come to touch are one run — and a helper's runs
+// join its caller's, when it returns, as if the caller had read them. So two
+// files read a chunk at a time turn and turn about stay two runs, a decoder's
+// stream stays one however many tables it consults and however often it
+// re-reads a byte, and a copy that walks its source from the end reads one
+// run. The source of a staged byte is the run holding its origin among the
+// writer's invocation's runs, followed outward: a caller's run that begins or
+// ends where it does replaces it — that caller read on from it, so a decoder
+// called once per chunk has the whole file for its source — and the search
+// ends at a caller whose run holds it strictly inside, or holds none: the
+// compressed stream whole, counts included, and not a table the decoder
+// consulted whose values never reached the output.
+//
+// A byte the CPU loads from work RAM keeps, beside its origin, the address it
+// was loaded from until something computes with it, so a store of it to a data
+// register is the buffer being carried out, and the host is told byte by byte
+// — the buffer is an extent the run carried exactly as an engine would have.
 //
 // The shadow is beside the interpreter, never in it: nothing here reads a
 // value, and a run with a shadow is checked against the machine exactly as a
@@ -122,20 +137,44 @@ struct Writer {
   friend auto operator<=>(const Writer&, const Writer&) = default;
 };
 
-// One store the CPU made to a data register from a value with one image byte
-// as its origin, and the stores after it that continued the sequence: the site
-// of the first, the register — the first of a pair, for `VMDATAL`/`VMDATAH`
-// and the audio ports — the image offset the first byte came from and how many
-// consecutive offsets followed it. A store continues the sequence when its
-// value's origin is the next image offset and it was made at the same site as
+// One store the CPU made to a data register, and the stores after it that
+// continued the sequence: the site of the first, the register — the first of a
+// pair, for `VMDATAL`/`VMDATAH` and the audio ports — where the first byte came
+// from and how many consecutive ones followed it. A store continues the
+// sequence when its value is the next byte and it was made at the same site as
 // the last store or on one straight run from it — no jump, branch, call or
-// return between the two.
+// return between the two. A sequence is one of two kinds. A value loaded from
+// work RAM and stored as it was is the buffer at `memory` being carried out,
+// and the next byte is the next address; the host is told each byte through
+// `CarrySink`, and `first` and `source` mean nothing. Otherwise a value with
+// exactly one image byte as its origin is the image at `first` being carried,
+// the next byte the next offset, and `source` is the run holding `first`
+// among those the invocation that carried it read, followed out through its
+// callers exactly as a staged byte's source is — the file the stream is
+// lifted as, which may be wider than the bytes carried.
 struct Stream {
   Address site = 0;
   std::uint32_t registerAddress = 0;  // as `$00:XXXX`
   std::size_t first = 0;
   std::size_t bytes = 0;
   std::uint32_t times = 1;
+  OriginInterval source;
+  std::optional<Address> memory;
+};
+
+// What a host does with the bytes the CPU carries out of work RAM to a data
+// register, told as they go so it can read the shadow under each byte at that
+// moment — the buffer may be rebuilt before the sequence ends.
+class CarrySink {
+ public:
+  virtual ~CarrySink() = default;
+  // The CPU stored the byte it had loaded from work RAM at `memory` to the
+  // register; `continues` says it was the next byte of the sequence open for
+  // the register rather than the first of a new one.
+  virtual void carriedByte(std::uint32_t registerAddress, Address memory, bool continues) = 0;
+  // The sequence open for the register ended; `recorded` says it was two
+  // bytes or more and is among `streams()`.
+  virtual void carryEnded(std::uint32_t registerAddress, bool recorded) = 0;
 };
 
 // The shadow of a run: every place's origin byte by byte, work RAM's origin and
@@ -155,6 +194,9 @@ class Provenance final : public Shadow {
   Address site = 0;
   void flowBroke() noexcept { broken_ = true; }
 
+  // Told about every byte the CPU carries out of work RAM, or nobody.
+  CarrySink* carries = nullptr;
+
   // The origin of what the bus holds at `address`: the image byte's, through
   // any mirror; the shadow's, for work RAM through any mirror; a register mark
   // for the hardware registers; the save mark for the save window; nothing
@@ -171,16 +213,17 @@ class Provenance final : public Shadow {
   [[nodiscard]] std::optional<Origin> originOf(Address address) const noexcept;
   [[nodiscard]] std::optional<Writer> writerOf(Address address) const noexcept;
 
-  // The source of a work-RAM byte: for each interval of its origin, the run of
-  // image bytes the invocation that wrote it read that holds the interval, or
-  // the interval itself when no read holds it — the byte was staged through
-  // work RAM, or an engine wrote it. An approximate origin takes every run the
-  // hull overlaps. Ascending, no two touching; empty when the byte has no
-  // image origin.
+  // The source of a work-RAM byte: for each interval of its origin, the run
+  // holding the interval among those the invocation that wrote it read,
+  // followed out through the callers whose run grew from it, or the interval
+  // itself when no run holds it — the byte was staged through work RAM, or an
+  // engine wrote it. An
+  // approximate origin takes every run the hull overlaps. Ascending, no two
+  // touching; empty when the byte has no image origin.
   [[nodiscard]] std::vector<OriginInterval> sourcesOf(Address address) const;
 
   // A call the CPU made, and a return: an invocation begins, and ends with its
-  // reads joining its caller's. A hardware interrupt taken is a call.
+  // runs joining its caller's. A hardware interrupt taken is a call.
   void called();
   void returned();
 
@@ -216,49 +259,82 @@ class Provenance final : public Shadow {
   static constexpr std::size_t kPlaces = 24;
   static constexpr std::size_t kBytes = 4;
 
-  [[nodiscard]] static bool carries(Place place) noexcept;
+  static constexpr std::uint32_t kNotLoaded = 0xFFFFFFFFu;
+
+  [[nodiscard]] static bool carriesOrigin(Place place) noexcept;
   [[nodiscard]] Origin& slot(Place place, unsigned byte) noexcept;
+  [[nodiscard]] std::uint32_t& loaded(Place place, unsigned byte) noexcept;
   [[nodiscard]] Origin unionOf(Place place);
   void wrote(Place place, unsigned bits) noexcept;
   [[nodiscard]] static std::optional<std::size_t> workRamIndex(Address address) noexcept;
+  [[nodiscard]] static Address workRamAddress(std::size_t index) noexcept;
   [[nodiscard]] static bool inSystemBank(Address address) noexcept;
   [[nodiscard]] static std::optional<std::uint32_t> dataRegister(Address address) noexcept;
-  void streamed(std::uint32_t registerAddress, Origin origin);
+  void streamed(std::uint32_t registerAddress, Origin origin, std::uint32_t loadedFrom);
   void closeStream(std::uint32_t registerAddress);
 
   // What the bus holds at an address, as `at` says, recorded as a read of the
-  // running invocation when it is the image.
+  // running invocation when it is the image; `reached_` is the work-RAM byte
+  // it was, when it was one.
   [[nodiscard]] Origin read(Address address);
   void noteRead(std::size_t offset);
   void release(std::uint32_t invocation);
+  void hold(std::uint32_t invocation);
+
+  // One run of image bytes an invocation read, inclusive at both ends.
+  struct Run {
+    std::size_t first = 0;
+    std::size_t last = 0;
+  };
+  // The runs of one invocation, by first byte, no two overlapping or
+  // touching.
+  struct Runs {
+    std::map<std::size_t, Run> byFirst;
+    void read(std::size_t offset);
+    void join(const Run& run);
+    [[nodiscard]] std::optional<OriginInterval> holding(std::size_t offset) const;
+    void place(Run run);  // enters `run`, taking into it every run it touches or overlaps
+  };
+
+  // The invocations: the call stack, the root first, each with its runs; the
+  // ones that returned and are still held — by a byte of work RAM tagged with
+  // them, by a returned invocation whose runs joined theirs, or by an open
+  // stream they carried — with the invocation their runs joined; and the tag
+  // of every work-RAM byte, zero for an engine's write. `refs_` counts what
+  // holds each invocation, so a returned one is dropped when nothing does.
+  struct Invocation {
+    std::uint32_t id = 0;
+    Runs runs;
+  };
+  struct Kept {
+    Runs runs;
+    std::uint32_t parent = 0;
+  };
+  std::vector<Invocation> frames_;
+  std::unordered_map<std::uint32_t, std::size_t> frameIndex_;  // a live invocation's place on the stack
+  std::uint32_t nextInvocation_ = 1;
+  std::unordered_map<std::uint32_t, Kept> kept_;
+  std::unordered_map<std::uint32_t, std::uint32_t> refs_;
+  std::vector<std::uint32_t> invocation_;
+
+  // The run holding `offset` among the invocation's own, followed out through
+  // the callers whose run begins or ends where it does.
+  [[nodiscard]] std::optional<OriginInterval> sourceRun(std::uint32_t invocation, std::size_t offset) const;
 
   CartridgeMap map_;
   std::size_t imageBytes_;
   Origins origins_;
   Origin places_[kPlaces][kBytes]{};
+  std::uint32_t loaded_[kPlaces][kBytes]{};  // the work-RAM index each byte was loaded from, or `kNotLoaded`
+  std::optional<std::size_t> reached_;
   std::vector<Origin> workRam_;
   std::vector<Writer> writers_;
   std::vector<bool> written_;
 
-  // The invocations: the call stack, the root first, each with the image bytes
-  // it has read as intervals; the ones that returned having written a byte of
-  // work RAM still tagged with them; and the tag of every work-RAM byte, zero
-  // for an engine's write. `refs_` counts the bytes each invocation still
-  // owns, so a returned one is dropped when its last byte is overwritten.
-  struct Invocation {
-    std::uint32_t id = 0;
-    std::map<std::size_t, std::size_t> reads;  // first -> last
-    bool wrote = false;
-  };
-  std::vector<Invocation> frames_;
-  std::uint32_t nextInvocation_ = 1;
-  std::unordered_map<std::uint32_t, std::vector<OriginInterval>> kept_;
-  std::unordered_map<std::uint32_t, std::uint32_t> refs_;
-  std::vector<std::uint32_t> invocation_;
-
   struct OpenStream {
     Stream stream;
-    Address lastSite = 0;  // the site of the last store that continued it
+    Address lastSite = 0;      // the site of the last store that continued it
+    std::uint32_t carrier = 0;  // the invocation running at the last store, held while open
   };
   std::map<std::uint32_t, OpenStream> open_;
   std::vector<Stream> streams_;

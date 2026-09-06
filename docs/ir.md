@@ -390,9 +390,20 @@ operands' origins; a constant and a flag have none; a read from a hardware
 register or the save carries the mark. A union wider than the cap is widened to
 its hull and marked `approximate`, and the mark is carried through every union
 after. The shadow also follows every `called()` and `returned()` the host
-reports and keeps each invocation's image reads, which is what makes a decoded
-range's source the whole stream it read; `sourcesOf` answers it for a work-RAM
-byte. What the disassembler does with all of it is
+reports and keeps each invocation's image reads as runs, by the rule
+[project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from)
+states — a read inside a run changes nothing, any other read starts one, runs
+that touch are one, a helper's runs join its caller's as if the caller had
+read them — which is what makes a
+decoded range's source the whole stream it read, and a chunked decoder's the
+whole file its caller read; `sourcesOf` answers it for a work-RAM byte with the
+run holding its origin, followed outward through each caller whose run begins
+or ends where it does. A byte loaded from work RAM keeps the
+address it came from until something computes with it, so a store of it to a
+data register is the buffer being carried out, told to a `CarrySink` the host
+sets byte by byte; `streams()` is every sequence of such stores, from a buffer
+or from the image, an image stream carrying the run its carrier read as its
+`source`. What the disassembler does with all of it is
 [snes-disassembler.md §Where the bytes came from](snes-disassembler.md#where-the-bytes-came-from);
 the rules are held by `tests/ir/provenance_test.cpp`, one case each.
 

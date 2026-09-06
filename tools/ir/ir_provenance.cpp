@@ -7,11 +7,6 @@
 namespace snaggletooth::ir {
 namespace {
 
-std::size_t intervalFirst(const OriginInterval& i) { return i.first; }
-std::size_t intervalLast(const OriginInterval& i) { return i.last; }
-std::size_t intervalFirst(const std::pair<const std::size_t, std::size_t>& i) { return i.first; }
-std::size_t intervalLast(const std::pair<const std::size_t, std::size_t>& i) { return i.second; }
-
 // Merges `from`'s intervals into `into`'s, keeping them ascending and joining
 // any two that touch.
 void mergeIntervals(std::vector<OriginInterval>& into, const std::vector<OriginInterval>& from) {
@@ -44,37 +39,6 @@ void mergeSets(OriginSet& into, const OriginSet& from) {
   mergeRegisters(into.registers, from.registers);
   into.save = into.save || from.save;
   into.approximate = into.approximate || from.approximate;
-}
-
-// Adds [first, last] to a map of intervals, joining it with any it touches.
-void insertInterval(std::map<std::size_t, std::size_t>& into, std::size_t first, std::size_t last) {
-  auto it = into.upper_bound(first);
-  if (it != into.begin()) {
-    auto before = std::prev(it);
-    if (before->second + 1u >= first) {
-      // Touches the one before: extend it.
-      first = before->first;
-      last = std::max(last, before->second);
-      into.erase(before);
-    }
-  }
-  it = into.lower_bound(first);
-  while (it != into.end() && it->first <= last + 1u) {
-    last = std::max(last, it->second);
-    it = into.erase(it);
-  }
-  into.emplace(first, last);
-}
-
-// The interval in a sorted, disjoint list that holds `offset`, if one does.
-template <typename Range>
-std::optional<OriginInterval> holding(const Range& intervals, std::size_t offset) {
-  auto it = std::upper_bound(intervals.begin(), intervals.end(), offset,
-                             [](std::size_t o, const auto& interval) { return o < intervalFirst(interval); });
-  if (it == intervals.begin()) return std::nullopt;
-  --it;
-  if (intervalLast(*it) < offset) return std::nullopt;
-  return OriginInterval{.first = intervalFirst(*it), .last = intervalLast(*it)};
 }
 
 }  // namespace
@@ -153,15 +117,60 @@ void Origins::accumulate(OriginSet& into, Origin origin) const {
 
 void Origins::merge(OriginSet& into, const OriginSet& from) { mergeSets(into, from); }
 
+// ---- the runs an invocation reads ----------------------------------------------
+
+// Enters a run, taking into it the run it begins inside or just past, and
+// every run that begins within it or just past its last — so no two runs
+// ever overlap or touch.
+void Provenance::Runs::place(Run run) {
+  if (auto before = byFirst.upper_bound(run.first); before != byFirst.begin()) {
+    --before;
+    if (before->second.last + 1u >= run.first) {
+      run.first = before->first;
+      run.last = std::max(run.last, before->second.last);
+      byFirst.erase(before);
+    }
+  }
+  for (auto it = byFirst.lower_bound(run.first); it != byFirst.end() && it->first <= run.last + 1u;) {
+    run.last = std::max(run.last, it->second.last);
+    it = byFirst.erase(it);
+  }
+  byFirst[run.first] = run;
+}
+
+// A read inside a run changes nothing; any other read starts a run of the
+// one byte, which `place` joins to whatever it touches.
+void Provenance::Runs::read(std::size_t offset) {
+  if (holding(offset)) return;
+  place(Run{.first = offset, .last = offset});
+}
+
+// A helper's run joining its caller's: exactly as if the caller had read
+// its bytes.
+void Provenance::Runs::join(const Run& run) { place(run); }
+
+// The run holding `offset`: at most one, since no two overlap.
+std::optional<OriginInterval> Provenance::Runs::holding(std::size_t offset) const {
+  auto it = byFirst.upper_bound(offset);
+  if (it == byFirst.begin()) return std::nullopt;
+  --it;
+  if (it->second.last < offset) return std::nullopt;
+  return OriginInterval{.first = it->second.first, .last = it->second.last};
+}
+
 // ---- the shadow of a run --------------------------------------------------------
 
 Provenance::Provenance(CartridgeMap map, std::size_t imageBytes, std::size_t cap)
-    : map_(map), imageBytes_(imageBytes), origins_(cap), workRam_(0x20000u, kNoOrigin),
-      writers_(0x20000u), written_(0x20000u, false), invocation_(0x20000u, 0u) {
-  frames_.push_back(Invocation{.id = nextInvocation_++, .reads = {}, .wrote = false});
+    : invocation_(0x20000u, 0u), map_(map), imageBytes_(imageBytes), origins_(cap),
+      workRam_(0x20000u, kNoOrigin), writers_(0x20000u), written_(0x20000u, false) {
+  frames_.push_back(Invocation{.id = nextInvocation_++, .runs = {}});
+  frameIndex_.emplace(frames_.back().id, 0u);
+  for (auto& place : loaded_) {
+    for (std::uint32_t& byte : place) byte = kNotLoaded;
+  }
 }
 
-bool Provenance::carries(Place place) noexcept {
+bool Provenance::carriesOrigin(Place place) noexcept {
   switch (place) {
     case Place::A:
     case Place::X:
@@ -185,8 +194,12 @@ Origin& Provenance::slot(Place place, unsigned byte) noexcept {
   return places_[static_cast<std::size_t>(place)][byte];
 }
 
+std::uint32_t& Provenance::loaded(Place place, unsigned byte) noexcept {
+  return loaded_[static_cast<std::size_t>(place)][byte];
+}
+
 Origin Provenance::unionOf(Place place) {
-  if (!carries(place)) return kNoOrigin;
+  if (!carriesOrigin(place)) return kNoOrigin;
   Origin out = kNoOrigin;
   for (unsigned byte = 0; byte < kBytes; ++byte) out = origins_.unite(out, slot(place, byte));
   return out;
@@ -195,14 +208,18 @@ Origin Provenance::unionOf(Place place) {
 // After a write of `bits` to `place`: the register's own rule for the bytes
 // above the write — the accumulator keeps its high byte, the rest clear theirs.
 void Provenance::wrote(Place place, unsigned bits) noexcept {
-  if (!carries(place)) {
-    for (unsigned byte = 0; byte < kBytes; ++byte) slot(place, byte) = kNoOrigin;
+  if (!carriesOrigin(place)) {
+    for (unsigned byte = 0; byte < kBytes; ++byte) {
+      slot(place, byte) = kNoOrigin;
+      loaded(place, byte) = kNotLoaded;
+    }
     return;
   }
   const bool keepsHigh = place == Place::A && bits == 8;
   for (unsigned byte = bits / 8; byte < kBytes; ++byte) {
     if (keepsHigh && byte == 1) continue;
     slot(place, byte) = kNoOrigin;
+    loaded(place, byte) = kNotLoaded;
   }
 }
 
@@ -212,6 +229,10 @@ std::optional<std::size_t> Provenance::workRamIndex(Address address) noexcept {
   if (bank == 0x7Eu || bank == 0x7Fu) return ((bank - 0x7Eu) << 16) | offset;
   if (inSystemBank(address) && offset < 0x2000u) return offset;
   return std::nullopt;
+}
+
+Address Provenance::workRamAddress(std::size_t index) noexcept {
+  return 0x7E0000u + static_cast<Address>(index);
 }
 
 bool Provenance::inSystemBank(Address address) noexcept {
@@ -243,7 +264,11 @@ std::optional<std::uint32_t> Provenance::dataRegister(Address address) noexcept 
 
 Origin Provenance::at(Address address) {
   address &= 0xFFFFFFu;
-  if (const std::optional<std::size_t> index = workRamIndex(address)) return workRam_[*index];
+  reached_.reset();
+  if (const std::optional<std::size_t> index = workRamIndex(address)) {
+    reached_ = index;
+    return workRam_[*index];
+  }
   if (inSystemBank(address)) {
     const std::uint32_t offset = address & 0xFFFFu;
     if (offset == 0x2180u) {
@@ -252,7 +277,9 @@ Origin Provenance::at(Address address) {
       const Address reached = portReads.front();
       portReads.erase(portReads.begin());
       const std::optional<std::size_t> index = workRamIndex(reached);
-      return index ? workRam_[*index] : kNoOrigin;
+      if (!index) return kNoOrigin;
+      reached_ = index;
+      return workRam_[*index];
     }
     if ((offset >= 0x2100u && offset <= 0x21FFu) || (offset >= 0x4000u && offset <= 0x43FFu)) {
       return origins_.hardwareRegister(offset);
@@ -278,21 +305,28 @@ void Provenance::written(Address address, Origin origin, Writer writer) {
     invocation_[*index] = 0;
     return;
   }
-  Invocation& running = frames_.back();
-  running.wrote = true;
+  const Invocation& running = frames_.back();
   invocation_[*index] = running.id;
-  ++refs_[running.id];
+  hold(running.id);
 }
 
+void Provenance::hold(std::uint32_t invocation) { ++refs_[invocation]; }
+
+// One less thing holds the invocation; a returned one nothing holds is
+// dropped, and lets go of the invocation its runs joined.
 void Provenance::release(std::uint32_t invocation) {
   const auto found = refs_.find(invocation);
   if (found == refs_.end()) return;
   if (--found->second != 0) return;
   refs_.erase(found);
-  kept_.erase(invocation);
+  const auto kept = kept_.find(invocation);
+  if (kept == kept_.end()) return;
+  const std::uint32_t parent = kept->second.parent;
+  kept_.erase(kept);
+  release(parent);
 }
 
-void Provenance::noteRead(std::size_t offset) { insertInterval(frames_.back().reads, offset, offset); }
+void Provenance::noteRead(std::size_t offset) { frames_.back().runs.read(offset); }
 
 Origin Provenance::read(Address address) {
   address &= 0xFFFFFFu;
@@ -301,20 +335,55 @@ Origin Provenance::read(Address address) {
 }
 
 void Provenance::called() {
-  frames_.push_back(Invocation{.id = nextInvocation_++, .reads = {}, .wrote = false});
+  frames_.push_back(Invocation{.id = nextInvocation_++, .runs = {}});
+  frameIndex_.emplace(frames_.back().id, frames_.size() - 1u);
 }
 
 void Provenance::returned() {
   if (frames_.size() < 2) return;  // the root never returns; a return with nothing to pop is the code's own stack play
   Invocation ended = std::move(frames_.back());
   frames_.pop_back();
+  frameIndex_.erase(ended.id);
   Invocation& caller = frames_.back();
-  for (const auto& [first, last] : ended.reads) insertInterval(caller.reads, first, last);
-  if (!ended.wrote || refs_.find(ended.id) == refs_.end()) return;
-  std::vector<OriginInterval> reads;
-  reads.reserve(ended.reads.size());
-  for (const auto& [first, last] : ended.reads) reads.push_back(OriginInterval{.first = first, .last = last});
-  kept_.emplace(ended.id, std::move(reads));
+  for (const auto& [first, run] : ended.runs.byFirst) caller.runs.join(run);
+  if (refs_.find(ended.id) == refs_.end()) return;
+  // Something still holds it: its runs stay readable, and it holds the caller
+  // its runs joined so the source can be followed there.
+  hold(caller.id);
+  kept_.emplace(ended.id, Kept{.runs = std::move(ended.runs), .parent = caller.id});
+}
+
+std::optional<OriginInterval> Provenance::sourceRun(std::uint32_t invocation, std::size_t offset) const {
+  std::optional<OriginInterval> best;
+  // A caller's run that begins or ends where the run found so far does grew
+  // from it, and is the run to follow; one that holds it strictly inside had
+  // the bytes already, and the search ends.
+  const auto follow = [&](const Runs& runs) {
+    const std::optional<OriginInterval> run = runs.holding(offset);
+    if (!run) return best.has_value() ? false : true;
+    if (!best) {
+      best = run;
+      return true;
+    }
+    if (run->first != best->first && run->last != best->last) return false;
+    if (run->last - run->first > best->last - best->first) best = run;
+    return true;
+  };
+  // The returned invocations first, each holding the one its runs joined,
+  // until one that is still on the stack; then every frame below it.
+  std::uint32_t id = invocation;
+  while (id != 0) {
+    const auto kept = kept_.find(id);
+    if (kept == kept_.end()) break;
+    if (!follow(kept->second.runs)) return best;
+    id = kept->second.parent;
+  }
+  const auto live = frameIndex_.find(id);
+  if (live == frameIndex_.end()) return best;
+  for (std::size_t i = live->second + 1u; i-- > 0;) {
+    if (!follow(frames_[i].runs)) return best;
+  }
+  return best;
 }
 
 std::vector<OriginInterval> Provenance::sourcesOf(Address address) const {
@@ -323,38 +392,18 @@ std::vector<OriginInterval> Provenance::sourcesOf(Address address) const {
   if (!index) return out;
   const OriginSet& origin = origins_.of(workRam_[*index]);
   if (origin.image.empty()) return out;
-  // The reads of the invocation that wrote the byte: on the stack still, or kept.
   const std::uint32_t id = invocation_[*index];
-  const std::map<std::size_t, std::size_t>* live = nullptr;
-  const std::vector<OriginInterval>* kept = nullptr;
-  if (id != 0) {
-    for (const Invocation& frame : frames_) {
-      if (frame.id == id) live = &frame.reads;
-    }
-    if (live == nullptr) {
-      const auto found = kept_.find(id);
-      if (found != kept_.end()) kept = &found->second;
-    }
-  }
-  auto holder = [&](std::size_t offset) -> std::optional<OriginInterval> {
-    if (live != nullptr) return holding(*live, offset);
-    if (kept != nullptr) return holding(*kept, offset);
-    return std::nullopt;
-  };
   std::vector<OriginInterval> found;
   for (const OriginInterval& interval : origin.image) {
     if (!origin.approximate) {
-      if (const std::optional<OriginInterval> run = holder(interval.first)) {
-        found.push_back(*run);
-      } else {
-        found.push_back(interval);
-      }
+      const std::optional<OriginInterval> run = id != 0 ? sourceRun(id, interval.first) : std::nullopt;
+      found.push_back(run.value_or(interval));
       continue;
     }
     // A hull: every run it overlaps, and the hull itself where none does.
     bool any = false;
     for (std::size_t offset = interval.first; offset <= interval.last;) {
-      const std::optional<OriginInterval> run = holder(offset);
+      const std::optional<OriginInterval> run = id != 0 ? sourceRun(id, offset) : std::nullopt;
       if (run) {
         found.push_back(*run);
         any = true;
@@ -386,29 +435,38 @@ void Provenance::forgetPlaces() noexcept {
   for (auto& place : places_) {
     for (Origin& byte : place) byte = kNoOrigin;
   }
+  for (auto& place : loaded_) {
+    for (std::uint32_t& byte : place) byte = kNotLoaded;
+  }
 }
 
 void Provenance::copy(Place dst, unsigned bits, Place a) {
   for (unsigned byte = 0; byte < bits / 8; ++byte) {
-    slot(dst, byte) = carries(a) ? slot(a, byte) : kNoOrigin;
+    slot(dst, byte) = carriesOrigin(a) ? slot(a, byte) : kNoOrigin;
+    loaded(dst, byte) = carriesOrigin(a) ? loaded(a, byte) : kNotLoaded;
   }
   wrote(dst, bits);
 }
 
 void Provenance::combine(Place dst, unsigned bits, Place a, Place b, Place c) {
   const Origin all = origins_.unite(unionOf(a), origins_.unite(unionOf(b), unionOf(c)));
-  for (unsigned byte = 0; byte < bits / 8; ++byte) slot(dst, byte) = all;
+  for (unsigned byte = 0; byte < bits / 8; ++byte) {
+    slot(dst, byte) = all;
+    loaded(dst, byte) = kNotLoaded;  // computed: not the byte at any address
+  }
   wrote(dst, bits);
 }
 
 void Provenance::load(Place dst, unsigned bits, unsigned byte, Address address) {
   slot(dst, byte) = read(address);
+  loaded(dst, byte) = reached_ ? static_cast<std::uint32_t>(*reached_) : kNotLoaded;
   if (byte + 1u == bits / 8) wrote(dst, bits);
 }
 
 void Provenance::store(Address address, Place source, unsigned byte) {
   address &= 0xFFFFFFu;
-  const Origin origin = carries(source) ? slot(source, byte) : kNoOrigin;
+  const Origin origin = carriesOrigin(source) ? slot(source, byte) : kNoOrigin;
+  const std::uint32_t loadedFrom = carriesOrigin(source) ? loaded(source, byte) : kNotLoaded;
   if (inSystemBank(address) && (address & 0xFFFFu) == 0x2180u) {
     // The port: the byte landed where the port reached.
     if (portWrites.empty()) return;
@@ -418,60 +476,95 @@ void Provenance::store(Address address, Place source, unsigned byte) {
     return;
   }
   if (const std::optional<std::uint32_t> reg = dataRegister(address)) {
-    streamed(*reg, origin);
+    streamed(*reg, origin, loadedFrom);
     return;
   }
   written(address, origin, Writer{.site = site, .engine = false});
 }
 
-void Provenance::exchange() { std::swap(slot(Place::A, 0), slot(Place::A, 1)); }
+void Provenance::exchange() {
+  std::swap(slot(Place::A, 0), slot(Place::A, 1));
+  std::swap(loaded(Place::A, 0), loaded(Place::A, 1));
+}
 
 // A store to a data register: the sequence its register has open continues
-// when the value came from exactly the next image byte and the store was made
-// at the same site as the last or on one straight run from it; otherwise the
-// sequence closes, and a value from exactly one image byte opens a new one.
-void Provenance::streamed(std::uint32_t registerAddress, Origin origin) {
+// when the value is the next byte — of the buffer, for a byte loaded from work
+// RAM; of the image, for a value with exactly one image byte as its origin —
+// and the store was made at the same site as the last or on one straight run
+// from it; otherwise the sequence closes, and a value of either kind opens a
+// new one.
+void Provenance::streamed(std::uint32_t registerAddress, Origin origin, std::uint32_t loadedFrom) {
+  const bool fromBuffer = loadedFrom != kNotLoaded;
   const OriginSet& set = origins_.of(origin);
   const bool single = set.image.size() == 1 && set.image.front().first == set.image.front().last &&
                       set.registers.empty() && !set.save && !set.approximate;
   const auto found = open_.find(registerAddress);
   const bool straight = !broken_;
   broken_ = false;
+  const std::uint32_t running = frames_.back().id;
   if (found != open_.end()) {
     OpenStream& open = found->second;
-    const bool next = single && set.image.front().first == open.stream.first + open.stream.bytes;
-    if (next && (site == open.lastSite || straight)) {
+    const bool sameKind = open.stream.memory.has_value() == fromBuffer;
+    const std::size_t next = open.stream.memory ? *workRamIndex(*open.stream.memory) + open.stream.bytes
+                                                : open.stream.first + open.stream.bytes;
+    const bool nextByte = fromBuffer ? loadedFrom == next : single && set.image.front().first == next;
+    if (sameKind && nextByte && (site == open.lastSite || straight)) {
       ++open.stream.bytes;
       open.lastSite = site;
+      if (open.carrier != running) {
+        release(open.carrier);
+        open.carrier = running;
+        hold(running);
+      }
+      if (fromBuffer && carries != nullptr) carries->carriedByte(registerAddress, workRamAddress(loadedFrom), true);
       return;
     }
     closeStream(registerAddress);
   }
-  if (!single) return;
-  open_.emplace(registerAddress, OpenStream{.stream = Stream{.site = site,
-                                                            .registerAddress = registerAddress,
-                                                            .first = set.image.front().first,
-                                                            .bytes = 1,
-                                                            .times = 1},
-                                           .lastSite = site});
+  if (!fromBuffer && !single) return;
+  Stream stream{.site = site,
+                .registerAddress = registerAddress,
+                .first = single ? set.image.front().first : 0,
+                .bytes = 1,
+                .times = 1,
+                .source = {},
+                .memory = fromBuffer ? std::optional<Address>{workRamAddress(loadedFrom)} : std::nullopt};
+  open_.emplace(registerAddress, OpenStream{.stream = stream, .lastSite = site, .carrier = running});
+  hold(running);
+  if (fromBuffer && carries != nullptr) carries->carriedByte(registerAddress, workRamAddress(loadedFrom), false);
 }
 
 void Provenance::closeStream(std::uint32_t registerAddress) {
   const auto found = open_.find(registerAddress);
   if (found == open_.end()) return;
-  const Stream& stream = found->second.stream;
-  if (stream.bytes >= 2) {
+  Stream stream = found->second.stream;
+  const std::uint32_t carrier = found->second.carrier;
+  const bool recorded = stream.bytes >= 2;
+  if (recorded) {
+    if (!stream.memory) {
+      // The file the stream is lifted as: the run its carrier read that holds
+      // the first byte, or the bytes themselves where no run does.
+      stream.source = sourceRun(carrier, stream.first)
+                          .value_or(OriginInterval{.first = stream.first, .last = stream.first + stream.bytes - 1u});
+    }
     const auto same = std::find_if(streams_.begin(), streams_.end(), [&](const Stream& s) {
-      return s.site == stream.site && s.registerAddress == stream.registerAddress &&
+      return s.site == stream.site && s.registerAddress == stream.registerAddress && s.memory == stream.memory &&
              s.first == stream.first && s.bytes == stream.bytes;
     });
     if (same == streams_.end()) {
       streams_.push_back(stream);
     } else {
       ++same->times;
+      // The run may have grown since: the wider source stands.
+      if (stream.source.last - stream.source.first > same->source.last - same->source.first) {
+        same->source = stream.source;
+      }
     }
   }
+  const bool fromBuffer = stream.memory.has_value();
   open_.erase(found);
+  release(carrier);
+  if (fromBuffer && carries != nullptr) carries->carryEnded(registerAddress, recorded);
 }
 
 void Provenance::finish() {
