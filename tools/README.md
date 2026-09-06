@@ -77,7 +77,10 @@ from, where to, how many, and from which instruction — and lifts every such
 range that begins in the image into a file of its own kind, the bank file
 including it where it was. It also reports what the
 traced code reaches: the hardware register behind every instruction that
-touches one, the DMA transfers those add up to, and the routines the
+touches one, the DMA transfers those add up to — one per start, with the
+source, the step and the count where every path proves them, a transfer
+proven whole that no run took lifted from the code's word and one the run
+did take checked against what it moved — and the routines the
 instructions belong to, each with the routines it calls and the hardware it
 drives itself and through them.
 `ir/` lifts the 65816 listings a cartridge disassembly produces into a form

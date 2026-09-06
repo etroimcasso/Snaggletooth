@@ -34,7 +34,7 @@ what is unstarted.
 | Play a cartridge through the disassembler so the trace reaches what a player does | [input-script.md](input-script.md) |
 | See where the bytes the hardware received came from — every range the transfer engines moved as the cartridge ran | [snes-disassembler.md §What a run moved](snes-disassembler.md#what-a-run-moved), [project-manifest.md §2.11](project-manifest.md#211-what-a-run-moved) |
 | Get the bytes the hardware received as files of their own — tilesets, palettes, sprite tables, HDMA tables — with the bank file including each where it was | [snes-disassembler.md §The assets](snes-disassembler.md#the-assets), [project-manifest.md §2.12](project-manifest.md#212-assets) |
-| See what hardware a cartridge's code drives, and which routine drives what | [snes-disassembler.md §What the code reaches](snes-disassembler.md#what-the-code-reaches) |
+| See what hardware a cartridge's code drives, which routine drives what, and what each transfer the code sets up carries — its source, step and count — with a transfer the run never took lifted from the code's word | [snes-disassembler.md §What the code reaches](snes-disassembler.md#what-the-code-reaches), [snes-disassembler.md §The assets](snes-disassembler.md#the-assets) |
 | See what the direct register, the data bank and the stack pointer are at a label, and what a store writes | [snes-disassembler.md §What every path proves](snes-disassembler.md#what-every-path-proves), [project-manifest.md §2.9](project-manifest.md#29-what-every-path-proves) |
 | Assemble source back into bytes | [assemblers.md](assemblers.md) |
 | Lift a cartridge's code into a form with no bytes in it, and run that form | [ir.md](ir.md) |

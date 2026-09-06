@@ -730,6 +730,7 @@ std::string_view movedKindName(MovedKind kind) {
     case MovedKind::Indirect: return "indirect";
     case MovedKind::Stream: return "stream";
     case MovedKind::Staged: return "staged";
+    case MovedKind::Proven: return "proven";
   }
   return "dma";
 }

@@ -90,14 +90,16 @@ struct ReachedTarget {
 // What a range of bytes was to the engine that moved it: a general-purpose
 // transfer; an HDMA channel's table, read as the frame walked it — the line
 // counts, a direct table's inline values, an indirect table's pointers; or the
-// block an indirect entry pointed at. The last two are not an engine's: they
+// block an indirect entry pointed at. The last three are not an engine's: they
 // name a lifted file whose bytes the CPU carried to a data register itself,
-// one store at a time (`Stream`), or the image source of a range a routine
-// built in work RAM before an engine carried it (`Staged`); no range an engine
-// moved is ever of either kind.
-enum class MovedKind : std::uint8_t { Dma, Table, Indirect, Stream, Staged };
+// one store at a time (`Stream`), the image source of a range a routine built
+// in work RAM before an engine carried it (`Staged`), or a range the code
+// proves a channel was set up to carry that no run has moved (`Proven`,
+// `rom_facts.h`); no range an engine moved is ever of those kinds.
+enum class MovedKind : std::uint8_t { Dma, Table, Indirect, Stream, Staged, Proven };
 
-// A kind as a manifest names it: `dma`, `table`, `indirect`, `stream`, `staged`.
+// A kind as a manifest names it: `dma`, `table`, `indirect`, `stream`,
+// `staged`, `proven`.
 [[nodiscard]] std::string_view movedKindName(MovedKind kind);
 
 // How the memory address moved from one byte to the next, as the channel's

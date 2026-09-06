@@ -93,8 +93,8 @@ access   $00:8017 A1T0L DmaChannel write $00
 access   $00:8024 MDMAEN DmaControl write $01
 access   $01:8002 BBAD2 DmaChannel write $22
 
-dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
-dma      $01:8002 channel 2 direction-unknown $00:2122 CGDATA Cgram source none start none
+dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 increment bytes none start $01 from $00:8024
+dma      $01:8002 channel 2 direction-unknown $00:2122 CGDATA Cgram source none none bytes none start none from none
 
 routine  $00:8000 reset lines 26 bytes 66 calls sub_018000 reaches Display,Vram,Oam,Interrupt,DmaControl,DmaChannel through Cgram,DmaChannel
 routine  $01:8000 sub_018000 lines 3 bytes 6 calls none reaches Cgram,DmaChannel through none
@@ -189,7 +189,8 @@ all: no sound program within the boot's time, an entry that lies in no file, a
 ```
 access   <address> <register> <class> read | write | read-write   $XX | none
 dma      <address> channel <n> <direction> <register address> <register> <class>
-                   source <address> start | start-hdma <mask>
+                   source <address> increment | decrement | fixed bytes <n>
+                   start | start-hdma <mask> from <address>
 ```
 
 An `access` is one instruction reaching one hardware register: where the
@@ -201,14 +202,39 @@ reaches two registers and has a line for each.
 A `dma` is a transfer a channel was set up for: the channel, which way it moves
 bytes (`to-register`, `from-register`, or `direction-unknown`), the B-bus register
 it reaches — the address the channel's `BBAD` names, with that register's own name
-and class — the A-bus address it moves from, and the mask that started it, from
-`MDMAEN` as `start` or from `HDMAEN` as `start-hdma`.
+and class — the A-bus address it moves from and how that address steps from one
+byte to the next as the channel's `DMAP` says, `increment`, `decrement`, or
+`fixed`, a fill from one byte; after `bytes`, the count the channel's `DAS` was
+written with, which for a general-purpose transfer is how many bytes it moves,
+zero standing for 65536; and the write that started it — the mask, from
+`MDMAEN` as `start` or from `HDMAEN` as `start-hdma`, and after `from` the
+instruction that wrote it. The first address is where the channel's `BBAD` was
+written, or its `DMAP` where `BBAD` was not, or the first of its registers
+written for this transfer. An HDMA channel takes its counts from its table and
+the engine writes `DAS` itself, so a `start-hdma` line's count is what the code
+happened to write there, not a length.
+
+One line per start. The registers a channel holds are what its last writes left,
+so a channel set up and started three times in one stretch of straight-line
+code is three lines, each with the registers as they stood when its start was
+written — a second start that rewrote only the source and the count is a
+transfer to the same destination, and one that rewrote nothing is the same
+transfer again, under the same first address; a channel whose direction or
+destination was written after its last start, or never started before the
+code branches, is a line whose start is `none`. A channel started with neither
+its direction nor its destination known in that stretch has no line, since the
+line could say nothing but the start; one that had only its source or count
+rewritten and was not started is not a transfer of that stretch either.
 
 Every field is present on every line. `none` is a field the bytes did not say,
 which is a fact about the cartridge rather than a gap in the format: a value is
-written only where the instruction immediately before loaded it as an immediate,
-or where the instruction is `STZ` and carries its own zero, and a channel
-configured from a table says `none` rather than a guess.
+written only where every path into the instruction proves it — the instruction
+immediately before loaded it as an immediate, the instruction is `STZ` and
+carries its own zero, or a load however far back settled it and nothing since
+touched the register (see [2.9](#29-what-every-path-proves)) — and a register
+written with a value the bytes do not say is unknown from then on, so a channel
+configured from a table says `none` rather than the value an earlier set-up
+left.
 
 A routine that blanks the screen and sends a sprite table, and the lines it
 produces:
@@ -225,14 +251,16 @@ access   $00:801D A1T0H DmaChannel write $00
 access   $00:801D A1B0 DmaChannel write $7F
 access   $00:8024 MDMAEN DmaControl write $01
 
-dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
+dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 increment bytes none start $01 from $00:8024
 ```
 
 `$00:8011`, `$00:8017` and `$00:801D` are each one instruction under a
 sixteen-bit accumulator, so each has two lines: `STZ !$2102` clears both halves
 of the OAM address, and `STA !$4301` writes `$04` to the channel's B-bus address
 and `$00` to the low byte of its source. `$04` in `BBAD0` is what makes the
-destination `OAMDATA`, and the three source bytes together make `$7F:0000`.
+destination `OAMDATA`, the three source bytes together make `$7F:0000`, `$00` in
+`DMAP0` steps the address up, nothing wrote the count, and the write at `$00:8024`
+started it.
 
 ### 2.7 What a run reached
 
@@ -519,18 +547,22 @@ once.
 The `dma` line says what the code set up and only where the bytes say the
 values; the `moved` line says what the run saw move. The two stand beside each
 other: a channel filled from a pointer has a `dma` line whose source is `none`
-and a `moved` line for every range the run saw it carry.
+and a `moved` line for every range the run saw it carry, and a transfer the
+code proves whole that the run started has a `moved` line from the same start
+that agrees with it — the same source, step and count — or, where the run saw
+something else, a `note` saying what each said. The two are never merged.
 
 ### 2.12 Assets
 
 ```
-asset    <path> <class> as dma | table | indirect | staged | stream from <address> bytes <n>
+asset    <path> <class> as dma | table | indirect | staged | stream | proven from <address> bytes <n>
 ```
 
 A file lifted out of a bank file: a range the run saw an engine carry from the
 image to the hardware, the image source of a range a routine built in work RAM
-before it was carried out, or the run of image bytes a routine read while
-carrying a stream to a data register itself — written once, as the bytes are,
+before it was carried out, the run of image bytes a routine read while
+carrying a stream to a data register itself, or a range the code proves a
+channel was set up to carry from the image and no run has moved — written once, as the bytes are,
 under a directory named for the memory it went to, and included from the bank
 file where it was with [`INCBIN`](assembly-lexicon.md#54-incbin). The path is
 relative to the manifest; then the
@@ -539,11 +571,15 @@ reached — two classes joined by `+`, `Vram+Cgram`, for a source a routine buil
 into data for both, which lives under `staged/` — and, after `as`, what the
 file is: `dma`, `table` or `indirect`, what the range was to the engine as the
 `moved` line says it; `staged`, the source a routine built its range from
-(§2.15); `stream`, the run the CPU carried a stream from (§2.16). After `from`,
+(§2.15); `stream`, the run the CPU carried a stream from (§2.16); `proven`, a
+transfer the code proves whole — its destination, source, step, count and a
+general-purpose start every path settles (§2.6) — that no run has started, the
+one kind of file whose evidence is the code alone. After `from`,
 the address the tree places the file's first byte at, and after `bytes`, how
 many it holds. The `moved` lines whose memory lies within a file are its uses,
 and say which instruction sent it where and how many times; a `staged` line
-says what a routine built from it. One line per file, in address order. Which
+says what a routine built from it; a `proven` file's use is the `dma` line
+whose source and count name its bytes. One line per file, in address order. Which
 ranges are lifted, and which stay in their bank with a `note` saying why, is
 [snes-disassembler.md §The assets](snes-disassembler.md#the-assets).
 
@@ -574,7 +610,8 @@ The line is read back for its path: a person renames the file, changes the path
 here to match, and the next run lifts the same range — the same `from` and
 `bytes` — under that name. For a `dma`, `table` or `indirect` file the class,
 the kind and the range are the run's and are written fresh, the `moved` lines
-being what keeps the file; a `staged` or `stream` file's evidence is written
+being what keeps the file, and for a `proven` file they are the trace's, which
+finds the same transfer every time; a `staged` or `stream` file's evidence is written
 fresh (§2.15, §2.16), so its line is read back whole and keeps the file from
 one disassembly to the next until a run lifts a wider file over its bytes.
 
@@ -844,7 +881,7 @@ When the disassembler runs over a directory that holds a manifest, it reads:
   hardware's bytes came from, and lifts the same files;
 - every `asset` line, for its path — a file lifted again with the same first
   address and length takes the path the line gives it, so a name a person gave
-  a file survives; a `dma`, `table` or `indirect` line matching no file this
+  a file survives; a `dma`, `table`, `indirect` or `proven` line matching no file this
   run lifts is dropped, and a `note` says so — and a `staged` or `stream` line
   whole, the file lifted again as the line records it unless this run lifts a
   file over its bytes;

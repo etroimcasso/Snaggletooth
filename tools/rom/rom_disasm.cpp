@@ -858,6 +858,79 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     pieces.push_back(piece);
   };
 
+  // The transfers the code proves whole: to a register a file can be named
+  // for, stepping through the image, with a source, a count and a
+  // general-purpose start every path settles. Where the run started the same
+  // transfer — a range from the same start on the same channel — the run's
+  // word stands: a range that agrees confirms the proof and the file is the
+  // run's; one that differs is noted beside it and the proof lifts nothing.
+  const auto dmaText = [](const DmaTransfer& dma) {
+    return "dma " + address24(dma.site) + " channel " + std::to_string(dma.channel);
+  };
+  for (const DmaTransfer& dma : out.dmas) {
+    const bool started = dma.startMask.has_value() && dma.startSite.has_value() && !dma.hdma;
+    if (!started || !dma.source || !dma.bytes || !dma.step) continue;
+    if (dma.direction != DmaDirection::ToBBus || *dma.step == MovedStep::Fixed || !dma.destinationClass) continue;
+    if (!assetDirectory(*dma.destinationClass, MovedKind::Dma)) continue;
+    // The start's site, which a `moved` range of the same transfer carries.
+    const Address start = dma.startSite.value_or(dma.site);
+    bool confirmed = false;
+    const MovedRange* differing = nullptr;
+    for (const MovedRange& range : out.moved) {
+      if (range.channel != dma.channel) continue;
+      if (canonical(map, imageBytes, range.site) != std::optional<Address>{start}) continue;
+      if (range.toRegister && range.memory == *dma.source && range.step == *dma.step && range.bytes == *dma.bytes) {
+        confirmed = true;
+      } else if (differing == nullptr) {
+        differing = &range;
+      }
+    }
+    if (confirmed) continue;
+    if (differing != nullptr) {
+      out.notes.push_back(dmaText(dma) + ": the code proves " + address24(*dma.source) + " " +
+                          std::string(movedStepName(*dma.step)) + " bytes " + std::to_string(*dma.bytes) +
+                          "; the run moved " + address24(differing->memory) + " " +
+                          std::string(movedStepName(differing->step)) + " bytes " +
+                          std::to_string(differing->bytes));
+      continue;
+    }
+    const bool up = *dma.step == MovedStep::Increment;
+    const Address bank = *dma.source & 0xFF0000u;
+    std::vector<Piece> mine;
+    std::optional<std::size_t> previous;
+    std::uint32_t outside = 0;
+    for (std::uint32_t i = 0; i < *dma.bytes; ++i) {
+      const std::uint16_t offset16 = static_cast<std::uint16_t>(up ? *dma.source + i : *dma.source - i);
+      const std::optional<std::size_t> at = romOffset(map, bank | offset16, imageBytes);
+      if (!at) {
+        ++outside;
+        previous.reset();
+        continue;
+      }
+      if (previous && (up ? *at == *previous + 1u : *at + 1u == *previous)) {
+        ++mine.back().length;
+        if (!up) --mine.back().offset;
+      } else {
+        mine.push_back(Piece{.offset = *at,
+                             .length = 1,
+                             .cls = *dma.destinationClass,
+                             .kind = MovedKind::Proven,
+                             .use = MovedKind::Dma,
+                             .registerAddress = dma.destination.value_or(0),
+                             .site = dma.site});
+      }
+      previous = at;
+    }
+    if (outside != 0 && !mine.empty()) {
+      out.notes.push_back(dmaText(dma) + " source " + address24(*dma.source) + " bytes " +
+                          std::to_string(*dma.bytes) + ": " + std::to_string(outside) +
+                          " of its bytes are not the image and are not lifted");
+    }
+    for (const Piece& piece : mine) {
+      admit(piece, dmaText(dma) + " source " + address24(*dma.source) + " bytes " + std::to_string(*dma.bytes));
+    }
+  }
+
   // The staged ranges: for every extent in work RAM the run carried to a
   // register a file can be named for, each source's runs, once per use.
   const std::map<Address, std::string> routineOf = routineByLine(out);
@@ -941,10 +1014,12 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // The groups: pieces that share a byte are one file, if they agree on what
   // the bytes were for. A piece the shadow named agrees with any piece of its
   // class — the same bytes sent directly and sent after staging are one file —
-  // and a group with an engine's piece in it is of that piece's kind. A group
-  // the shadow named whose pieces went to two classes is one file too, under
-  // `staged/`, named for every class; only the engines' own pieces sent two
-  // places, or two ways, are refused.
+  // and a group with an engine's piece in it is of that piece's kind; a piece
+  // the code proves agrees with an engine's piece to the same register and
+  // yields the kind to it, and a group of proven pieces alone is `proven`. A
+  // group the shadow named whose pieces went to two classes is one file too,
+  // under `staged/`, named for every class; only the engines' own pieces, and
+  // the code's, sent two places, or two ways, are refused.
   out.assets.clear();
   for (std::size_t i = 0; i < pieces.size();) {
     std::size_t end = pieces[i].offset + pieces[i].length;
@@ -957,28 +1032,35 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     const auto shadowed = [](const Piece& piece) {
       return piece.kind == MovedKind::Staged || piece.kind == MovedKind::Stream;
     };
-    const Piece* engine = nullptr;
+    const auto moved = [](const Piece& piece) {
+      return piece.kind == MovedKind::Dma || piece.kind == MovedKind::Table || piece.kind == MovedKind::Indirect;
+    };
+    const Piece* engine = nullptr;    // the first piece an engine moved
+    const Piece* declared = nullptr;  // else the first the code proves
     bool staged = false;
     for (std::size_t k = i; k < j; ++k) {
-      if (!shadowed(pieces[k])) {
+      if (moved(pieces[k])) {
         if (engine == nullptr) engine = &pieces[k];
+      } else if (pieces[k].kind == MovedKind::Proven) {
+        if (declared == nullptr) declared = &pieces[k];
       } else if (pieces[k].kind == MovedKind::Staged) {
         staged = true;
       }
     }
+    const Piece* named = engine != nullptr ? engine : declared;
     std::vector<RegisterClass> classes;
     bool agree = true;
     for (std::size_t k = i; k < j; ++k) {
       const Piece& other = pieces[k];
       if (std::find(classes.begin(), classes.end(), other.cls) == classes.end()) classes.push_back(other.cls);
-      if (engine != nullptr && !shadowed(other) &&
-          (other.kind != engine->kind || other.registerAddress != engine->registerAddress)) {
-        agree = false;
+      if (named != nullptr && !shadowed(other)) {
+        if (other.registerAddress != named->registerAddress) agree = false;
+        if (engine != nullptr && moved(other) && other.kind != engine->kind) agree = false;
       }
     }
     std::sort(classes.begin(), classes.end());
     const bool mixed = classes.size() > 1;
-    if (mixed && engine != nullptr && !staged) {
+    if (mixed && named != nullptr && !staged) {
       // The engines sent the bytes two places, and nothing was built from
       // them that a stream's run would explain: refused.
       bool anyStream = false;
@@ -999,14 +1081,14 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       continue;
     }
     if (home) {
-      const Piece& named = engine != nullptr ? *engine : first;
-      const std::string_view directory = mixed ? std::string_view("staged") : *assetDirectory(named.cls, named.use);
+      const Piece& lead = named != nullptr ? *named : first;
+      const std::string_view directory = mixed ? std::string_view("staged") : *assetDirectory(lead.cls, lead.use);
       AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
                               hex(*home & 0xFFFFu, 4) + ".bin",
                       .classes = classes,
-                      .kind = mixed && engine == nullptr ? (staged ? MovedKind::Staged : MovedKind::Stream)
-                                                         : named.kind,
-                      .registerAddress = named.registerAddress,
+                      .kind = mixed && named == nullptr ? (staged ? MovedKind::Staged : MovedKind::Stream)
+                                                        : lead.kind,
+                      .registerAddress = lead.registerAddress,
                       .first = *home,
                       .romOffset = first.offset,
                       .bytes = {}};
@@ -1584,8 +1666,11 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            (dma.destinationClass ? std::string(cpu65816RegisterClassName(*dma.destinationClass))
                                  : std::string("none")) +
            " source " + (dma.source ? address24(*dma.source) : std::string("none")) + " " +
+           (dma.step ? std::string(movedStepName(*dma.step)) : std::string("none")) + " bytes " +
+           (dma.bytes ? std::to_string(*dma.bytes) : std::string("none")) + " " +
            (dma.startMask ? (dma.hdma ? "start-hdma" : "start") : "start") + " " +
-           (dma.startMask ? "$" + hex(*dma.startMask, 2) : std::string("none")) + "\n";
+           (dma.startMask ? "$" + hex(*dma.startMask, 2) : std::string("none")) + " from " +
+           (dma.startSite ? address24(*dma.startSite) : std::string("none")) + "\n";
   }
 
   // What a run saw move. Every field is present; a B-bus address no register
@@ -1877,10 +1962,10 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       std::sort(classes.begin(), classes.end());
       std::optional<MovedKind> kind;
       for (const MovedKind k : {MovedKind::Dma, MovedKind::Table, MovedKind::Indirect, MovedKind::Stream,
-                                MovedKind::Staged}) {
+                                MovedKind::Staged, MovedKind::Proven}) {
         if (movedKindName(k) == words[4]) kind = k;
       }
-      if (!kind) return fail(words[4] + " is not dma, table, indirect, stream or staged");
+      if (!kind) return fail(words[4] + " is not dma, table, indirect, stream, staged or proven");
       const std::optional<Address> first = parseLongAddress(words[6]);
       if (!first) return fail(words[6] + " is not a $BB:XXXX address");
       const std::optional<std::size_t> bytes = parseCount(words[8]);
@@ -2251,6 +2336,7 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
         case MovedKind::Indirect: what = "a block an HDMA entry pointed at, sent to " + to; break;
         case MovedKind::Stream: what = counted(asset.bytes.size(), "byte") + " a routine carried " + cls + " data from"; break;
         case MovedKind::Staged: what = counted(asset.bytes.size(), "byte") + " a routine built " + cls + " data from"; break;
+        case MovedKind::Proven: what = counted(asset.bytes.size(), "byte") + " a transfer the code sets up to carry to " + to; break;
       }
       // The path as the lexicon reads it: relative to this file, which for a
       // file at the tree's root is the manifest's own path.
