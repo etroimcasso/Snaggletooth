@@ -970,9 +970,12 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
 
 TEST(RomAssets, APersonsPathSurvivesARunAndAnOrphanIsDropped) {
   CartridgeRequest request;
-  request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80},
-                    ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5},
-                    ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64}};
+  request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80,
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                    ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5,
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                    ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64,
+                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma}};
   const CartridgeDisassembly d = lifted(liftingImage(), request);
   EXPECT_NE(assetNamed(d, "vram/tiles.bin"), nullptr);
   EXPECT_EQ(assetNamed(d, "vram/00_9000.bin"), nullptr);
