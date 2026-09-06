@@ -119,12 +119,9 @@ std::optional<std::uint16_t> immediateBefore(const Line* previous, std::string_v
   return std::nullopt;
 }
 
-// A channel's register addresses. The eight channels sit sixteen bytes apart
-// from $4300, and the five that describe a transfer are the first five slots.
+// The channels' registers: eight channels sixteen bytes apart from $4300, the
+// eight slots that describe a transfer first in each.
 constexpr Address kDmaBase = 0x4300u;
-constexpr Address channelRegister(std::uint8_t channel, std::uint8_t slot) {
-  return kDmaBase + static_cast<Address>(channel) * 0x10u + slot;
-}
 
 }  // namespace
 
@@ -251,94 +248,144 @@ std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disasse
   return out;
 }
 
+namespace {
+
+// One channel's registers as a run of straight-line code leaves them, and the
+// set-up in progress since the channel last started: which registers were
+// written and where. A slot holds the value the last write proved, or nothing
+// when the last write proved none — a register written from a variable is
+// unknown from then on, whatever an earlier write left.
+struct ChannelState {
+  std::array<std::optional<std::uint8_t>, 8> slots;  // DMAP, BBAD, A1TL, A1TH, A1B, DASL, DASH, DASB
+  bool written = false;    // any register, since the run began
+  bool described = false;  // the direction or the destination, with a value, since the last start
+  bool started = false;    // a start since the last register write: the sites are the last set-up's
+  std::optional<Address> dmapSite;   // the write that proved `DMAP`
+  std::optional<Address> bbadSite;   // the write that proved `BBAD`
+  std::optional<Address> firstSite;  // the first register written for this set-up
+};
+
+// The transfer a channel's registers describe, as they stand.
+DmaTransfer transferFrom(const ChannelState& state, std::uint8_t channel, std::uint32_t run) {
+  DmaTransfer transfer{.site = state.bbadSite ? *state.bbadSite
+                               : state.dmapSite ? *state.dmapSite
+                                                : state.firstSite.value_or(0),
+                       .channel = channel,
+                       .direction = DmaDirection::Unknown,
+                       .destination = std::nullopt,
+                       .destinationName = {},
+                       .destinationClass = std::nullopt,
+                       .source = std::nullopt,
+                       .step = std::nullopt,
+                       .bytes = std::nullopt,
+                       .startMask = std::nullopt,
+                       .startSite = std::nullopt,
+                       .hdma = false,
+                       .run = run};
+  if (const std::optional<std::uint8_t> dmap = state.slots[0]) {
+    transfer.direction = (*dmap & 0x80u) ? DmaDirection::ToABus : DmaDirection::ToBBus;
+    // The A-bus step: bit 3 holds the address still, bit 4 walks it down.
+    transfer.step = (*dmap & 0x08u)   ? MovedStep::Fixed
+                    : (*dmap & 0x10u) ? MovedStep::Decrement
+                                      : MovedStep::Increment;
+  }
+  // The destination is the value in `BBAD`, not `BBAD` itself: the channel
+  // moves bytes to the B-bus register that value selects.
+  if (const std::optional<std::uint8_t> bbad = state.slots[1]) {
+    const Address destination = 0x2100u | *bbad;
+    transfer.destination = destination;
+    if (const std::optional<Cpu65816Register> reg = cpu65816Register(destination)) {
+      transfer.destinationName = reg->name;
+      transfer.destinationClass = reg->cls;
+    }
+  }
+  if (state.slots[2] && state.slots[3] && state.slots[4]) {
+    transfer.source = (static_cast<Address>(*state.slots[4]) << 16) |
+                      (static_cast<Address>(*state.slots[3]) << 8) | static_cast<Address>(*state.slots[2]);
+  }
+  // The count is sixteen bits, and the engine moves the whole bank's worth on
+  // a zero: it counts down before it tests.
+  if (state.slots[5] && state.slots[6]) {
+    const std::uint32_t count = (static_cast<std::uint32_t>(*state.slots[6]) << 8) | *state.slots[5];
+    transfer.bytes = count == 0 ? 0x10000u : count;
+  }
+  return transfer;
+}
+
+}  // namespace
+
 std::vector<DmaTransfer> dmaTransfers(const std::vector<HardwareAccess>& accesses) {
-  // What one straight-line run wrote: the value of each register it set, and the
-  // site each channel's `BBAD` and `DMAP` were written at.
-  struct RunState {
-    std::map<Address, std::uint8_t> values;
-    std::array<std::optional<Address>, 8> bbadSite;
-    std::array<std::optional<Address>, 8> dmapSite;
-    std::optional<std::uint8_t> mdmaen;
-    std::optional<std::uint8_t> hdmaen;
-    std::uint32_t run = 0;
-  };
-
+  // The accesses are in site order, and a run's sites are contiguous in it, so
+  // each run is walked in the order its instructions execute.
   std::vector<DmaTransfer> out;
-  std::map<std::uint32_t, RunState> runs;
+  std::map<std::uint32_t, std::vector<const HardwareAccess*>> runs;
   for (const HardwareAccess& access : accesses) {
-    if (access.kind == AccessKind::Read || !access.value) continue;
-    RunState& state = runs[access.run];
-    state.run = access.run;
-    state.values[access.registerAddress] = *access.value;
-    if (access.registerAddress == 0x420Bu) state.mdmaen = *access.value;
-    if (access.registerAddress == 0x420Cu) state.hdmaen = *access.value;
-    for (std::uint8_t channel = 0; channel < 8; ++channel) {
-      if (access.registerAddress == channelRegister(channel, 0) && !state.dmapSite[channel]) {
-        state.dmapSite[channel] = access.site;
-      }
-      if (access.registerAddress == channelRegister(channel, 1) && !state.bbadSite[channel]) {
-        state.bbadSite[channel] = access.site;
-      }
-    }
+    if (access.kind == AccessKind::Read) continue;
+    runs[access.run].push_back(&access);
   }
 
-  for (const auto& [number, state] : runs) {
-    for (std::uint8_t channel = 0; channel < 8; ++channel) {
-      // A transfer is a destination the bytes named. Where only the direction and
-      // pattern were written, the site is that, and the destination is absent.
-      const std::optional<Address> site =
-          state.bbadSite[channel] ? state.bbadSite[channel] : state.dmapSite[channel];
-      if (!site) continue;
-
-      auto valueOf = [&state](Address address) -> std::optional<std::uint8_t> {
-        const auto found = state.values.find(address);
-        if (found == state.values.end()) return std::nullopt;
-        return found->second;
-      };
-
-      DmaTransfer transfer{.site = *site,
-                           .channel = channel,
-                           .direction = DmaDirection::Unknown,
-                           .destination = std::nullopt,
-                           .destinationName = {},
-                           .destinationClass = std::nullopt,
-                           .source = std::nullopt,
-                           .startMask = std::nullopt,
-                           .hdma = false,
-                           .run = number};
-
-      if (const std::optional<std::uint8_t> dmap = valueOf(channelRegister(channel, 0))) {
-        transfer.direction = (*dmap & 0x80u) ? DmaDirection::ToABus : DmaDirection::ToBBus;
-      }
-      // The destination is the value in `BBAD`, not `BBAD` itself: the channel
-      // moves bytes to the B-bus register that value selects.
-      if (const std::optional<std::uint8_t> bbad = valueOf(channelRegister(channel, 1))) {
-        const Address destination = 0x2100u | *bbad;
-        transfer.destination = destination;
-        if (const std::optional<Cpu65816Register> reg = cpu65816Register(destination)) {
-          transfer.destinationName = reg->name;
-          transfer.destinationClass = reg->cls;
+  for (const auto& [number, writes] : runs) {
+    std::array<ChannelState, 8> channels{};
+    for (const HardwareAccess* write : writes) {
+      const Address reg = write->registerAddress;
+      if (reg >= kDmaBase && reg < kDmaBase + 0x80u) {
+        const std::uint8_t channel = static_cast<std::uint8_t>((reg - kDmaBase) / 0x10u);
+        const std::uint8_t slot = static_cast<std::uint8_t>((reg - kDmaBase) % 0x10u);
+        if (slot >= 8) continue;  // the engine's own current-address registers
+        ChannelState& state = channels[channel];
+        // The first write after a start begins a new set-up: the sites are
+        // its own from here, and a start with no write since is the last
+        // set-up started again, under its sites.
+        if (state.started) {
+          state.started = false;
+          state.dmapSite.reset();
+          state.bbadSite.reset();
+          state.firstSite.reset();
         }
+        state.slots[slot] = write->value;
+        state.written = true;
+        if (!state.firstSite) state.firstSite = write->site;
+        // A direction or a destination the bytes say describes a transfer, and
+        // the write that said it is the site; a write whose value the bytes do
+        // not say — a store from a variable, a read-modify-write of `DMAP` —
+        // describes nothing, though it leaves the register unknown.
+        if (slot == 0 && write->value && !state.dmapSite) state.dmapSite = write->site;
+        if (slot == 1 && write->value && !state.bbadSite) state.bbadSite = write->site;
+        if (slot <= 1 && write->value) state.described = true;
+        continue;
       }
-      const std::optional<std::uint8_t> low = valueOf(channelRegister(channel, 2));
-      const std::optional<std::uint8_t> high = valueOf(channelRegister(channel, 3));
-      const std::optional<std::uint8_t> bank = valueOf(channelRegister(channel, 4));
-      if (low && high && bank) {
-        transfer.source = (static_cast<Address>(*bank) << 16) |
-                          (static_cast<Address>(*high) << 8) | static_cast<Address>(*low);
+      if (reg != 0x420Bu && reg != 0x420Cu) continue;
+      // A start whose mask the bytes do not say starts nothing the analysis can
+      // name; one that names channels emits a transfer for each channel this
+      // run has given a direction or a destination, with its registers as they
+      // stand — a channel whose every register came from values the bytes do
+      // not say is a transfer of nothing the line could state.
+      if (!write->value) continue;
+      const bool hdma = reg == 0x420Cu;
+      for (std::uint8_t channel = 0; channel < 8; ++channel) {
+        ChannelState& state = channels[channel];
+        const std::uint8_t bit = static_cast<std::uint8_t>(1u << channel);
+        if (!(*write->value & bit) || !state.written) continue;
+        if (!state.slots[0] && !state.slots[1]) continue;
+        DmaTransfer transfer = transferFrom(state, channel, number);
+        transfer.startMask = *write->value;
+        transfer.startSite = write->site;
+        transfer.hdma = hdma;
+        out.push_back(transfer);
+        state.described = false;
+        state.started = true;
       }
-      const std::uint8_t bit = static_cast<std::uint8_t>(1u << channel);
-      if (state.mdmaen && (*state.mdmaen & bit)) {
-        transfer.startMask = *state.mdmaen;
-      } else if (state.hdmaen && (*state.hdmaen & bit)) {
-        transfer.startMask = *state.hdmaen;
-        transfer.hdma = true;
-      }
-      out.push_back(transfer);
+    }
+    // What the run set up and did not start: a channel whose direction or
+    // destination it wrote. One that had only its source or its count rewritten
+    // reaches whatever an earlier stretch settled, and is that stretch's.
+    for (std::uint8_t channel = 0; channel < 8; ++channel) {
+      if (!channels[channel].described) continue;
+      out.push_back(transferFrom(channels[channel], channel, number));
     }
   }
 
-  std::sort(out.begin(), out.end(), [](const DmaTransfer& a, const DmaTransfer& b) {
+  std::stable_sort(out.begin(), out.end(), [](const DmaTransfer& a, const DmaTransfer& b) {
     if (a.site != b.site) return a.site < b.site;
     return a.channel < b.channel;
   });

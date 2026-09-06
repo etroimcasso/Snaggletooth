@@ -961,7 +961,7 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
   EXPECT_FALSE(parseManifest("asset vram/x.bin Tiles as dma from $00:9000 bytes 80\n", error).has_value());
   EXPECT_NE(error.find("not a register class"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as copy from $00:9000 bytes 80\n", error).has_value());
-  EXPECT_NE(error.find("not dma, table, indirect, stream or staged"), std::string::npos);
+  EXPECT_NE(error.find("not dma, table, indirect, stream, staged or proven"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $9000 bytes 80\n", error).has_value());
   EXPECT_NE(error.find("$BB:XXXX"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $00:9000 bytes 0\n", error).has_value());
@@ -1202,7 +1202,13 @@ TEST(RomAssets, TheInstructionsTextDoesNotChange) {
   const std::vector<std::uint8_t> rom = liftingImage();
   const CartridgeDisassembly with = lifted(rom);
   const CartridgeDisassembly without = disassembleWithoutSound(rom);
-  EXPECT_TRUE(without.assets.empty());
+  // Without a run the code's own word lifts what it proves: the six files the
+  // sixteen starts declare, less the fill, the copy, the read-back and the
+  // refusals.
+  EXPECT_EQ(without.assets.size(), 6u) << renderManifest(without);
+  for (const AssetFile& asset : without.assets) {
+    EXPECT_EQ(asset.kind, MovedKind::Proven) << asset.file;
+  }
   const std::string lifted0 = renderRegion(regionNamed(with, "bank_00.asm"), with);
   const std::string plain0 = renderRegion(regionNamed(without, "bank_00.asm"), without);
   // The reset routine runs from $8000 to the first data run; that whole prefix
@@ -1213,6 +1219,166 @@ TEST(RomAssets, TheInstructionsTextDoesNotChange) {
   ASSERT_EQ(liftedData, plainData);
   EXPECT_EQ(lifted0.substr(0, liftedData), plain0.substr(0, plainData));
   EXPECT_NE(lifted0, plain0);
+}
+
+// ---- what the code proves ------------------------------------------------------
+//
+// The declaring cartridge starts channel 0 four times from one stretch of code
+// and, behind a button the run never presses, sets five more channels up whole;
+// the cases pin that a transfer the code proves whole is lifted as a file of
+// kind `proven`, that a fill, an unproven source and a table are not, that a
+// proven piece and the run's piece of the same bytes are one file of the run's
+// kind, that the run confirms every proven transfer it took and a
+// contradiction is noted, and that the line is read back for its path.
+
+namespace {
+
+using examples::declaringImage;
+
+CartridgeDisassembly declared(CartridgeRequest request = {}, bool run = true) {
+  static const std::vector<std::uint8_t> rom = declaringImage();
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = run;
+  request.runMasterCycles = 3u * kFrame;
+  return disassembleCartridge(request);
+}
+
+}  // namespace
+
+TEST(RomAssets, AProvenTransferIsLiftedAsItsFile) {
+  const CartridgeDisassembly d = declared();
+  ASSERT_EQ(d.assets.size(), 5u) << renderManifest(d);
+  struct Expected {
+    const char* file;
+    RegisterClass cls;
+    MovedKind kind;
+    Address first;
+    std::size_t bytes;
+  };
+  // The 48 bytes at `$9100` are proven by channel 1's routine, and the run
+  // sent sixteen of them on channel 7: one file, the run's kind.
+  const Expected expected[] = {
+      {"vram/00_9000.bin", RegisterClass::Vram, MovedKind::Dma, 0x009000u, 32},
+      {"vram/00_9040.bin", RegisterClass::Vram, MovedKind::Dma, 0x009040u, 16},
+      {"vram/00_9100.bin", RegisterClass::Vram, MovedKind::Dma, 0x009100u, 48},
+      {"cgram/00_9200.bin", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
+      {"oam/00_9300.bin", RegisterClass::Oam, MovedKind::Proven, 0x009300u, 544},
+  };
+  const std::vector<std::uint8_t> rom = declaringImage();
+  for (std::size_t i = 0; i < 5; ++i) {
+    const AssetFile& asset = d.assets[i];
+    EXPECT_EQ(asset.file, expected[i].file);
+    EXPECT_EQ(asset.classes, std::vector<RegisterClass>{expected[i].cls}) << asset.file;
+    EXPECT_EQ(asset.kind, expected[i].kind) << asset.file;
+    EXPECT_EQ(asset.first, expected[i].first) << asset.file;
+    EXPECT_EQ(asset.bytes.size(), expected[i].bytes) << asset.file;
+    const std::optional<std::size_t> offset = romOffset(CartridgeMap::LoRom, asset.first, rom.size());
+    ASSERT_TRUE(offset.has_value());
+    EXPECT_TRUE(std::equal(asset.bytes.begin(), asset.bytes.end(), rom.begin() + static_cast<std::ptrdiff_t>(*offset)))
+        << asset.file;
+  }
+  // The run confirmed the five it took, so nothing is noted.
+  EXPECT_TRUE(d.notes.empty()) << d.notes.front();
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("asset    oam/00_9300.bin Oam as proven from $00:9300 bytes 544\n"), std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("asset    vram/00_9100.bin Vram as dma from $00:9100 bytes 48\n"), std::string::npos)
+      << "the proven piece joins the run's, and the file is the run's kind";
+  EXPECT_NE(manifest.find("asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 32\n"), std::string::npos);
+  const std::string bank0 = renderRegion(regionNamed(d, "bank_00.asm"), d);
+  EXPECT_NE(bank0.find("\n; ---- $00:9300-$00:951F: 544 bytes a transfer the code sets up to carry to OAMDATA, in oam/00_9300.bin\n"
+                       "        INCBIN \"oam/00_9300.bin\"\n"),
+            std::string::npos)
+      << bank0;
+  EXPECT_NE(bank0.find("\n; ---- $00:9100-$00:912F: 48 bytes a transfer carried to VMDATAL, in vram/00_9100.bin\n"),
+            std::string::npos)
+      << bank0;
+}
+
+TEST(RomAssets, WhatTheCodeDoesNotProveWholeIsNotLifted) {
+  const CartridgeDisassembly d = declared();
+  for (const AssetFile& asset : d.assets) {
+    EXPECT_NE(asset.first, 0x009080u) << "a transfer set up whole and never started";
+    EXPECT_NE(asset.first, 0x009600u) << "a fill";
+    EXPECT_NE(asset.first, 0x009700u) << "a table, whose count is not a length";
+    EXPECT_NE(asset.first, 0x009800u) << "a source the code does not prove";
+  }
+  EXPECT_TRUE(d.notes.empty());
+}
+
+TEST(RomAssets, WithoutARunEveryProvenTransferIsLifted) {
+  const CartridgeDisassembly d = declared({}, false);
+  ASSERT_EQ(d.assets.size(), 5u) << renderManifest(d);
+  for (const AssetFile& asset : d.assets) {
+    EXPECT_EQ(asset.kind, MovedKind::Proven) << asset.file;
+  }
+  // Channel 7's sixteen bytes lie inside channel 1's forty-eight: one file.
+  const AssetFile* block = assetNamed(d, "vram/00_9100.bin");
+  ASSERT_NE(block, nullptr);
+  EXPECT_EQ(block->bytes.size(), 48u);
+  EXPECT_EQ(assetNamed(d, "vram/00_9120.bin"), nullptr);
+  const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
+  ASSERT_NE(palette, nullptr);
+  ASSERT_EQ(palette->bytes.size(), 16u);
+  EXPECT_EQ(palette->bytes[0], 0xE0u) << "read downward from $920F, lifted in image order";
+  EXPECT_TRUE(d.notes.empty());
+}
+
+TEST(RomAssets, AProvenTransferTheRunContradictsIsNotedAndTheRunsRangeIsLifted) {
+  // A range read back as an earlier run's record: the same start, a shorter
+  // count. The code's word and the run's stand beside each other, and the
+  // run's is the file — sixteen bytes, not the thirty-two the proof would add.
+  CartridgeRequest request;
+  request.moved = {MovedRange{.site = 0x008025u,
+                              .channel = 0,
+                              .toRegister = true,
+                              .registerAddress = 0x002118u,
+                              .registerName = "VMDATAL",
+                              .registerClass = RegisterClass::Vram,
+                              .memory = 0x009000u,
+                              .step = MovedStep::Increment,
+                              .bytes = 16,
+                              .kind = MovedKind::Dma,
+                              .times = 1}};
+  const CartridgeDisassembly d = declared(request, false);
+  const AssetFile* tileset = assetNamed(d, "vram/00_9000.bin");
+  ASSERT_NE(tileset, nullptr);
+  EXPECT_EQ(tileset->kind, MovedKind::Dma);
+  EXPECT_EQ(tileset->bytes.size(), 16u);
+  EXPECT_TRUE(anyNote(d, "dma $00:8007 channel 0: the code proves $00:9000 increment bytes 32; "
+                         "the run moved $00:9000 increment bytes 16"))
+      << (d.notes.empty() ? std::string("no notes") : d.notes.front());
+  EXPECT_EQ(assetNamed(d, "vram/00_9040.bin")->kind, MovedKind::Proven) << "the others are untouched";
+}
+
+TEST(RomAssets, AProvenFilesPathSurvivesAndAnOrphanIsDropped) {
+  CartridgeRequest request;
+  request.assets = {ManifestAsset{.file = "oam/sprites.bin", .first = 0x009300u, .bytes = 544,
+                                  .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven},
+                    ManifestAsset{.file = "oam/gone.bin", .first = 0x009500u, .bytes = 5,
+                                  .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven}};
+  const CartridgeDisassembly d = declared(request);
+  EXPECT_NE(assetNamed(d, "oam/sprites.bin"), nullptr);
+  EXPECT_EQ(assetNamed(d, "oam/00_9300.bin"), nullptr);
+  EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d).find("        INCBIN \"oam/sprites.bin\"\n"),
+            std::string::npos);
+  EXPECT_TRUE(anyNote(d, "asset oam/gone.bin at $00:9500 names no range this run lifted; dropped"));
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(d), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  const auto sprites = std::find_if(input->assets.begin(), input->assets.end(),
+                                    [](const ManifestAsset& a) { return a.file == "oam/sprites.bin"; });
+  ASSERT_NE(sprites, input->assets.end());
+  EXPECT_EQ(sprites->kind, MovedKind::Proven);
+}
+
+TEST(RomAssets, TheProvenTreeStillAssemblesToItsImage) {
+  const CartridgeDisassembly d = declared();
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.unplaced, 0u);
+  EXPECT_EQ(placement.placedTwice, 0u);
+  EXPECT_EQ(placement.image, declaringImage());
 }
 
 }  // namespace snaggletooth::disasm

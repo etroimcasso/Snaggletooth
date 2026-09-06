@@ -103,6 +103,10 @@ disasm::VerifyReport verifyInMemory(const CartridgeDisassembly& d, std::span<con
     files[region.region.file] = disasm::renderRegion(region, d);
   }
   if (d.sound) files[d.sound->file] = disasm::renderSoundProgram(*d.sound);
+  // The files the code's word lifts without a run, which the bank files include.
+  for (const disasm::AssetFile& asset : d.assets) {
+    files[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
+  }
   std::string error;
   const std::optional<disasm::ManifestInput> manifest =
       disasm::parseManifest(disasm::renderManifest(d), error);

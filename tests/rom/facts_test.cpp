@@ -10,6 +10,7 @@
 // more channels half-described so the absent fields have something to be absent
 // on.
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -690,7 +691,357 @@ TEST(RomFacts, AStartNamesTheChannelsItsMaskNames) {
   EXPECT_EQ(*dmas[1].startMask, 0x02u);
 }
 
+// ---- one transfer per start ---------------------------------------------------
+//
+// The declaring cartridge sets channel 0 up and starts it four times in one
+// stretch of straight-line code, leaves channel 6 half described, and behind a
+// button sets five more channels up whole: the cases pin one transfer per start
+// with the registers as they stood when the start was written, the step and
+// the count, and the start's site.
+
+namespace {
+
+using examples::declaringImage;
+using examples::liftingImage;
+
+const DmaTransfer* transferAt(const std::vector<DmaTransfer>& dmas, Address site) {
+  for (const DmaTransfer& dma : dmas) {
+    if (dma.site == site) return &dma;
+  }
+  return nullptr;
+}
+
+std::size_t transfersOn(const std::vector<DmaTransfer>& dmas, std::uint8_t channel) {
+  std::size_t count = 0;
+  for (const DmaTransfer& dma : dmas) {
+    if (dma.channel == channel) ++count;
+  }
+  return count;
+}
+
+}  // namespace
+
+TEST(RomFacts, EveryStartInARunIsItsOwnTransfer) {
+  const std::vector<std::uint8_t> rom = declaringImage();
+  const CartridgeDisassembly disassembly = disassembled(rom);
+  EXPECT_EQ(transfersOn(disassembly.dmas, 0), 4u) << renderManifest(disassembly);
+
+  const DmaTransfer* tileset = transferAt(disassembly.dmas, 0x008007u);
+  ASSERT_NE(tileset, nullptr);
+  EXPECT_EQ(tileset->channel, 0u);
+  EXPECT_EQ(tileset->destinationName, "VMDATAL");
+  ASSERT_TRUE(tileset->source.has_value());
+  EXPECT_EQ(*tileset->source, 0x009000u);
+  ASSERT_TRUE(tileset->step.has_value());
+  EXPECT_EQ(*tileset->step, MovedStep::Increment);
+  ASSERT_TRUE(tileset->bytes.has_value());
+  EXPECT_EQ(*tileset->bytes, 32u);
+  ASSERT_TRUE(tileset->startMask.has_value());
+  EXPECT_EQ(*tileset->startMask, 0x01u);
+  ASSERT_TRUE(tileset->startSite.has_value());
+  EXPECT_EQ(*tileset->startSite, 0x008025u);
+
+  // The second start rewrote only the source and the count: the destination
+  // is the one the first left, and the site is the first register written
+  // since the start.
+  const DmaTransfer* second = transferAt(disassembly.dmas, 0x00802Au);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(second->direction, DmaDirection::ToBBus);
+  EXPECT_EQ(second->destinationName, "VMDATAL");
+  ASSERT_TRUE(second->source.has_value());
+  EXPECT_EQ(*second->source, 0x009040u);
+  ASSERT_TRUE(second->bytes.has_value());
+  EXPECT_EQ(*second->bytes, 16u);
+  ASSERT_TRUE(second->startSite.has_value());
+  EXPECT_EQ(*second->startSite, 0x00803Eu);
+
+  const DmaTransfer* palette = transferAt(disassembly.dmas, 0x008048u);
+  ASSERT_NE(palette, nullptr);
+  EXPECT_EQ(palette->destinationName, "CGDATA");
+  ASSERT_TRUE(palette->source.has_value());
+  EXPECT_EQ(*palette->source, 0x00920Fu);
+  ASSERT_TRUE(palette->step.has_value());
+  EXPECT_EQ(*palette->step, MovedStep::Decrement);
+  ASSERT_TRUE(palette->bytes.has_value());
+  EXPECT_EQ(*palette->bytes, 16u);
+  ASSERT_TRUE(palette->startSite.has_value());
+  EXPECT_EQ(*palette->startSite, 0x008066u);
+
+  const DmaTransfer* fill = transferAt(disassembly.dmas, 0x008070u);
+  ASSERT_NE(fill, nullptr);
+  ASSERT_TRUE(fill->step.has_value());
+  EXPECT_EQ(*fill->step, MovedStep::Fixed);
+  ASSERT_TRUE(fill->bytes.has_value());
+  EXPECT_EQ(*fill->bytes, 64u);
+  ASSERT_TRUE(fill->startSite.has_value());
+  EXPECT_EQ(*fill->startSite, 0x00808Eu);
+}
+
+TEST(RomFacts, TheCountIsWhatDasHoldsAndZeroIsSixtyFourKilobytes) {
+  const std::vector<std::uint8_t> rom = declaringImage();
+  const CartridgeDisassembly disassembly = disassembled(rom);
+  const DmaTransfer* one = transferAt(disassembly.dmas, 0x008107u);
+  ASSERT_NE(one, nullptr);
+  EXPECT_EQ(one->channel, 1u);
+  ASSERT_TRUE(one->bytes.has_value());
+  EXPECT_EQ(*one->bytes, 48u);
+  ASSERT_TRUE(one->source.has_value());
+  EXPECT_EQ(*one->source, 0x009100u);
+  const DmaTransfer* two = transferAt(disassembly.dmas, 0x008147u);
+  ASSERT_NE(two, nullptr);
+  EXPECT_EQ(two->destinationName, "OAMDATA");
+  ASSERT_TRUE(two->bytes.has_value());
+  EXPECT_EQ(*two->bytes, 544u);
+  const DmaTransfer* three = transferAt(disassembly.dmas, 0x008187u);
+  ASSERT_NE(three, nullptr);
+  ASSERT_TRUE(three->bytes.has_value());
+  EXPECT_EQ(*three->bytes, 65536u) << "a count of zero moves the whole sixty-four kilobytes";
+  ASSERT_TRUE(three->step.has_value());
+  EXPECT_EQ(*three->step, MovedStep::Fixed);
+}
+
+TEST(RomFacts, AWriteWithoutAProvenValueLeavesTheRegisterUnknown) {
+  const std::vector<std::uint8_t> rom = declaringImage();
+  const CartridgeDisassembly disassembly = disassembled(rom);
+  const DmaTransfer* four = transferAt(disassembly.dmas, 0x0081C7u);
+  ASSERT_NE(four, nullptr);
+  EXPECT_FALSE(four->source.has_value()) << "the source's low byte was rewritten from a variable";
+  ASSERT_TRUE(four->bytes.has_value());
+  EXPECT_EQ(*four->bytes, 16u);
+  ASSERT_TRUE(four->startMask.has_value());
+  EXPECT_EQ(*four->startMask, 0x10u);
+}
+
+TEST(RomFacts, AChannelWrittenAndNeverStartedHasNoStart) {
+  const std::vector<std::uint8_t> rom = declaringImage();
+  const CartridgeDisassembly disassembly = disassembled(rom);
+  const DmaTransfer* six = transferAt(disassembly.dmas, 0x008098u);
+  ASSERT_NE(six, nullptr);
+  EXPECT_EQ(six->channel, 6u);
+  EXPECT_EQ(six->direction, DmaDirection::ToBBus);
+  EXPECT_EQ(six->destinationName, "VMDATAL");
+  ASSERT_TRUE(six->step.has_value());
+  EXPECT_EQ(*six->step, MovedStep::Increment);
+  ASSERT_TRUE(six->source.has_value());
+  EXPECT_EQ(*six->source, 0x009080u);
+  ASSERT_TRUE(six->bytes.has_value());
+  EXPECT_EQ(*six->bytes, 16u);
+  EXPECT_FALSE(six->startMask.has_value());
+  EXPECT_FALSE(six->startSite.has_value());
+  EXPECT_EQ(transfersOn(disassembly.dmas, 6), 1u);
+}
+
+TEST(RomFacts, AnHdmaChannelsCountIsWhatTheCodeWroteThere) {
+  const std::vector<std::uint8_t> rom = declaringImage();
+  const CartridgeDisassembly disassembly = disassembled(rom);
+  const DmaTransfer* five = transferAt(disassembly.dmas, 0x008207u);
+  ASSERT_NE(five, nullptr);
+  EXPECT_TRUE(five->hdma);
+  EXPECT_EQ(five->destinationName, "CGDATA");
+  ASSERT_TRUE(five->startMask.has_value());
+  EXPECT_EQ(*five->startMask, 0x20u);
+  ASSERT_TRUE(five->startSite.has_value());
+  EXPECT_EQ(*five->startSite, 0x008225u);
+  ASSERT_TRUE(five->bytes.has_value());
+  EXPECT_EQ(*five->bytes, 3u) << "what the code wrote, which the engine overwrites";
+  ASSERT_TRUE(five->source.has_value());
+  EXPECT_EQ(*five->source, 0x009700u);
+}
+
+// A count is two registers; one of them proven is no count, as one of three
+// address registers is no source.
+TEST(RomFacts, ACountMissingHalfIsNoCount) {
+  const auto write = [](Address site, Address reg, std::string_view name, RegisterClass cls,
+                        std::uint8_t value) {
+    return HardwareAccess{.site = site,
+                          .registerAddress = reg,
+                          .name = name,
+                          .cls = cls,
+                          .kind = AccessKind::Write,
+                          .value = value,
+                          .run = 1u};
+  };
+  std::vector<HardwareAccess> accesses = {
+      write(0x008000u, 0x4301u, "BBAD0", RegisterClass::DmaChannel, 0x18u),
+      write(0x008003u, 0x4305u, "DAS0L", RegisterClass::DmaChannel, 0x20u),
+      write(0x008006u, 0x420Bu, "MDMAEN", RegisterClass::DmaControl, 0x01u),
+  };
+  ASSERT_EQ(dmaTransfers(accesses).size(), 1u);
+  EXPECT_FALSE(dmaTransfers(accesses)[0].bytes.has_value()) << "the high byte was never written";
+
+  accesses.insert(accesses.begin() + 2, write(0x008005u, 0x4306u, "DAS0H", RegisterClass::DmaChannel, 0x02u));
+  ASSERT_EQ(dmaTransfers(accesses).size(), 1u);
+  ASSERT_TRUE(dmaTransfers(accesses)[0].bytes.has_value());
+  EXPECT_EQ(*dmaTransfers(accesses)[0].bytes, 544u);
+}
+
+// The engine's own registers — the table's current address, the line counter —
+// are the channel's too, and a write to them describes no transfer and changes
+// none.
+TEST(RomFacts, TheEnginesOwnRegistersAreNotATransfersFields) {
+  const auto write = [](Address site, Address reg, std::string_view name, RegisterClass cls,
+                        std::uint8_t value) {
+    return HardwareAccess{.site = site,
+                          .registerAddress = reg,
+                          .name = name,
+                          .cls = cls,
+                          .kind = AccessKind::Write,
+                          .value = value,
+                          .run = 1u};
+  };
+  const std::vector<HardwareAccess> accesses = {
+      write(0x008000u, 0x4301u, "BBAD0", RegisterClass::DmaChannel, 0x18u),
+      write(0x008003u, 0x4308u, "A2A0L", RegisterClass::DmaChannel, 0x34u),
+      write(0x008006u, 0x430Au, "NTRL0", RegisterClass::DmaChannel, 0x7Fu),
+      write(0x008009u, 0x420Bu, "MDMAEN", RegisterClass::DmaControl, 0x01u),
+      write(0x00800Cu, 0x4318u, "A2A1L", RegisterClass::DmaChannel, 0x34u),
+      write(0x00800Fu, 0x420Bu, "MDMAEN", RegisterClass::DmaControl, 0x02u),
+  };
+  const std::vector<DmaTransfer> dmas = dmaTransfers(accesses);
+  ASSERT_EQ(dmas.size(), 1u) << "channel 1 had nothing but the engine's own register written";
+  EXPECT_EQ(dmas[0].channel, 0u);
+  EXPECT_EQ(dmas[0].site, 0x008000u);
+  EXPECT_EQ(dmas[0].destinationName, "VMDATAL");
+  EXPECT_EQ(dmas[0].direction, DmaDirection::Unknown);
+  EXPECT_FALSE(dmas[0].source.has_value());
+  EXPECT_FALSE(dmas[0].bytes.has_value());
+  ASSERT_TRUE(dmas[0].startSite.has_value());
+  EXPECT_EQ(*dmas[0].startSite, 0x008009u);
+}
+
+// A channel started with neither its direction nor its destination known in
+// the run is no transfer of that run: the line could say nothing but the
+// start. With the destination written in the run, the start is a transfer,
+// sited at the write that proved the destination.
+TEST(RomFacts, AStartWithNeitherDirectionNorDestinationKnownIsNoTransfer) {
+  const auto write = [](Address site, Address reg, std::string_view name, RegisterClass cls,
+                        std::uint8_t value, std::uint32_t run) {
+    return HardwareAccess{.site = site,
+                          .registerAddress = reg,
+                          .name = name,
+                          .cls = cls,
+                          .kind = AccessKind::Write,
+                          .value = value,
+                          .run = run};
+  };
+  std::vector<HardwareAccess> accesses = {
+      write(0x008000u, 0x4301u, "BBAD0", RegisterClass::DmaChannel, 0x18u, 1u),
+      write(0x008010u, 0x4302u, "A1T0L", RegisterClass::DmaChannel, 0x00u, 2u),
+      write(0x008013u, 0x4303u, "A1T0H", RegisterClass::DmaChannel, 0x80u, 2u),
+      write(0x008016u, 0x4304u, "A1B0", RegisterClass::DmaChannel, 0x01u, 2u),
+      write(0x008019u, 0x420Bu, "MDMAEN", RegisterClass::DmaControl, 0x01u, 2u),
+  };
+  ASSERT_EQ(dmaTransfers(accesses).size(), 1u) << "the second run's start names nothing the line could state";
+
+  accesses.push_back(write(0x008018u, 0x4301u, "BBAD0", RegisterClass::DmaChannel, 0x22u, 2u));
+  std::sort(accesses.begin(), accesses.end(),
+            [](const HardwareAccess& a, const HardwareAccess& b) { return a.site < b.site; });
+  const std::vector<DmaTransfer> dmas = dmaTransfers(accesses);
+  ASSERT_EQ(dmas.size(), 2u);
+  EXPECT_EQ(dmas[1].site, 0x008018u) << "the write that proved the destination";
+  EXPECT_EQ(dmas[1].destinationName, "CGDATA");
+  ASSERT_TRUE(dmas[1].source.has_value());
+  EXPECT_EQ(*dmas[1].source, 0x018000u);
+  ASSERT_TRUE(dmas[1].startSite.has_value());
+  EXPECT_EQ(*dmas[1].startSite, 0x008019u);
+}
+
+// A start with no register written since the last is the same set-up started
+// again, under the same site.
+TEST(RomFacts, ASecondStartOfTheSameSetUpIsATransferUnderTheSameSite) {
+  const auto write = [](Address site, Address reg, std::string_view name, RegisterClass cls,
+                        std::uint8_t value) {
+    return HardwareAccess{.site = site,
+                          .registerAddress = reg,
+                          .name = name,
+                          .cls = cls,
+                          .kind = AccessKind::Write,
+                          .value = value,
+                          .run = 1u};
+  };
+  const std::vector<HardwareAccess> accesses = {
+      write(0x008000u, 0x4301u, "BBAD0", RegisterClass::DmaChannel, 0x18u),
+      write(0x008003u, 0x420Bu, "MDMAEN", RegisterClass::DmaControl, 0x01u),
+      write(0x008006u, 0x420Bu, "MDMAEN", RegisterClass::DmaControl, 0x01u),
+  };
+  const std::vector<DmaTransfer> dmas = dmaTransfers(accesses);
+  ASSERT_EQ(dmas.size(), 2u);
+  EXPECT_EQ(dmas[0].site, 0x008000u);
+  EXPECT_EQ(dmas[1].site, 0x008000u);
+  ASSERT_TRUE(dmas[0].startSite.has_value());
+  ASSERT_TRUE(dmas[1].startSite.has_value());
+  EXPECT_EQ(*dmas[0].startSite, 0x008003u);
+  EXPECT_EQ(*dmas[1].startSite, 0x008006u);
+}
+
+// Every transfer the run started from a proven set-up is the range the run
+// moved from that start: the lifting cartridge's sixteen general-purpose
+// starts in one straight run, and its one HDMA enable, are seventeen
+// transfers, each general-purpose one equal to its twin.
+TEST(RomFacts, EveryTransferTheRunStartedAgreesWithTheRangeItMoved) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 3u * 357'954u;
+  const CartridgeDisassembly disassembly = disassembleCartridge(request);
+  EXPECT_EQ(disassembly.dmas.size(), 17u) << renderManifest(disassembly);
+  std::size_t twins = 0;
+  for (const DmaTransfer& dma : disassembly.dmas) {
+    if (!dma.startSite || dma.hdma) continue;
+    for (const MovedRange& range : disassembly.moved) {
+      if (range.site != *dma.startSite || range.channel != dma.channel) continue;
+      ++twins;
+      ASSERT_TRUE(dma.source.has_value()) << renderManifest(disassembly);
+      EXPECT_EQ(*dma.source, range.memory);
+      ASSERT_TRUE(dma.step.has_value());
+      EXPECT_EQ(*dma.step, range.step);
+      ASSERT_TRUE(dma.bytes.has_value());
+      EXPECT_EQ(*dma.bytes, range.bytes);
+    }
+  }
+  EXPECT_EQ(twins, 16u);
+  for (const std::string& note : disassembly.notes) {
+    EXPECT_EQ(note.find("the code proves"), std::string::npos) << note;
+  }
+}
+
 // ---- the manifest -----------------------------------------------------------
+
+TEST(RomFacts, TheDmaLineSaysTheStepTheCountAndTheStart) {
+  const std::vector<std::uint8_t> rom = declaringImage();
+  const CartridgeDisassembly disassembly = disassembled(rom);
+  const std::string manifest = renderManifest(disassembly);
+  EXPECT_NE(manifest.find("dma      $00:8007 channel 0 to-register $00:2118 VMDATAL Vram source $00:9000 "
+                          "increment bytes 32 start $01 from $00:8025\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("dma      $00:802A channel 0 to-register $00:2118 VMDATAL Vram source $00:9040 "
+                          "increment bytes 16 start $01 from $00:803E\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("dma      $00:8048 channel 0 to-register $00:2122 CGDATA Cgram source $00:920F "
+                          "decrement bytes 16 start $01 from $00:8066\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("dma      $00:8098 channel 6 to-register $00:2118 VMDATAL Vram source $00:9080 "
+                          "increment bytes 16 start none from none\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("dma      $00:8187 channel 3 to-register $00:2118 VMDATAL Vram source $00:9600 "
+                          "fixed bytes 65536 start $08 from $00:81A5\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("dma      $00:81C7 channel 4 to-register $00:2118 VMDATAL Vram source none "
+                          "increment bytes 16 start $10 from $00:81EA\n"),
+            std::string::npos)
+      << manifest;
+  EXPECT_NE(manifest.find("dma      $00:8207 channel 5 to-register $00:2122 CGDATA Cgram source $00:9700 "
+                          "increment bytes 3 start-hdma $20 from $00:8225\n"),
+            std::string::npos)
+      << manifest;
+}
 
 TEST(RomFacts, TheManifestCarriesEveryFactWithEveryFieldPresent) {
   const std::vector<std::uint8_t> rom = hardwareImage();
@@ -705,11 +1056,15 @@ TEST(RomFacts, TheManifestCarriesEveryFactWithEveryFieldPresent) {
       << manifest;
   EXPECT_NE(
       manifest.find("dma      $00:8016 channel 0 to-register $00:2118 VMDATAL Vram source $01:8000 "
-                    "start $01\n"),
+                    "increment bytes none start $01 from $00:802A\n"),
       std::string::npos)
       << manifest;
+  EXPECT_NE(manifest.find("dma      $00:808A channel 2 direction-unknown $00:2133 SETINI Display source none "
+                          "none bytes none start none from none\n"),
+            std::string::npos)
+      << manifest;
   EXPECT_NE(manifest.find("dma      $00:808F channel 3 to-register none none none source none "
-                          "start-hdma $08\n"),
+                          "increment bytes none start-hdma $08 from $00:8094\n"),
             std::string::npos)
       << manifest;
 }

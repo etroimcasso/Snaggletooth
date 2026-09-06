@@ -75,8 +75,9 @@ def facts(tree):
         classes[words[3]] += 1
         if words[5] != "none":
             valued += 1
-    # dma <site> channel <n> <direction> <dest> <name> <class> source <src> start <mask>
-    dmas = [(w[7], w[9] != "none", w[11] != "none") for w in manifestLines(tree, "dma", 12)]
+    # dma <site> channel <n> <direction> <dest> <name> <class> source <src> <step> bytes <n>
+    #     start|start-hdma <mask> from <site>
+    dmas = [(w[7], w[9] != "none", w[14] != "none", w[12] != "none") for w in manifestLines(tree, "dma", 17)]
     # moved <site> channel <n> <direction> <register> <name> <class> memory <address>
     #       <step> bytes <n> as <kind> times <n>
     moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
@@ -244,10 +245,16 @@ def main():
             factTotals["accesses"] += accesses
             factTotals["valued"] += valued
             factTotals["dmas"] += len(dmas)
-            for destination, sourced, startedFlag in dmas:
+            for destination, sourced, startedFlag, counted in dmas:
                 corpusDma[destination] += 1
                 factTotals["sourced"] += 1 if sourced else 0
                 factTotals["started"] += 1 if startedFlag else 0
+                factTotals["counted"] += 1 if counted else 0
+            # A transfer the code proves that the run moved another way is a
+            # note beside the two; the count is what the check found.
+            factTotals["contradicted"] += sum(
+                1 for line in manifest.read_text(errors="replace").splitlines()
+                if line.startswith("note") and "the code proves" in line) if manifest.exists() else 0
             factTotals["moved"] += len(movedLines)
             imageRanges = 0
             for destination, kind, image in movedLines:
@@ -303,7 +310,8 @@ def main():
     if args.facts:
         print(f"{factTotals['accesses']} accesses, {factTotals['valued']} with a value; "
               f"{factTotals['dmas']} transfers, {factTotals['sourced']} with a source, "
-              f"{factTotals['started']} with a start; "
+              f"{factTotals['counted']} with a count, {factTotals['started']} with a start, "
+              f"{factTotals['contradicted']} the run contradicted; "
               f"{factTotals['moved']} ranges moved, {factTotals['movedFromImage']} from the image; "
               f"{factTotals['assets']} files lifted, {factTotals['assetBytes']} bytes")
         print("\naccesses by class, whole corpus:")

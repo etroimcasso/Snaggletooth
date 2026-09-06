@@ -34,6 +34,7 @@
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
 #include "ir/ir_dataflow.h"
+#include "rom/rom_observe.h"
 
 namespace snaggletooth::disasm {
 
@@ -142,25 +143,48 @@ enum class DmaDirection : std::uint8_t {
 // A direction as a manifest names it.
 [[nodiscard]] std::string_view dmaDirectionName(DmaDirection direction);
 
-// A transfer a channel was set up for. The destination is the register the
-// channel's `BBAD` names — that value, not the `BBAD` register itself, is what
-// the transfer reaches — so its class is what the transfer is: `Vram` is a
-// tileset or a tilemap, `Cgram` a palette, `Oam` sprite tables, `Apu` a driver
-// or its samples.
+// A transfer a channel was set up for, as the channel's registers stood when
+// it was started. The destination is the register the channel's `BBAD` names —
+// that value, not the `BBAD` register itself, is what the transfer reaches — so
+// its class is what the transfer is: `Vram` is a tileset or a tilemap, `Cgram`
+// a palette, `Oam` sprite tables, `Apu` a driver or its samples. `step` is how
+// the A-bus address moves from one byte to the next, as `DMAP` says; `bytes`
+// is what `DAS` was written with, which for a general-purpose transfer is the
+// count it moves, a zero standing for 65536 — an HDMA channel takes its counts
+// from its table and the engine writes `DAS` itself, so on an `hdma` transfer
+// it is a value the code happened to write and not a length.
 //
-// A field is absent where the bytes did not say it. `destination` is absent when
-// no value for `BBAD` was found, `source` when the three address registers were
-// not all written with values in the same run, and `startMask` when no write to
-// `MDMAEN` or `HDMAEN` with a value follows in that run. None of them is guessed.
+// One transfer per start: a run of straight-line code that starts a channel
+// three times yields three, each with the registers as they stood at its
+// start, a register a start left standing carrying into the next; a channel
+// whose direction or destination was written after its last start, or never
+// started, yields one with no start; a channel started with neither its
+// direction nor its destination known in the run yields nothing, since the
+// line could say nothing. `site` is the write that proved the transfer's
+// `BBAD`, else its `DMAP`, else the first of its registers written for this
+// set-up — a start with no write since the last is the last set-up started
+// again, under the same site; `startSite` is the write to `MDMAEN` or `HDMAEN`
+// that started it, which is the site a `moved` line of the same transfer
+// carries.
+//
+// A field is absent where the bytes did not say it: `destination` when no value
+// for `BBAD` stood, `direction` and `step` when none for `DMAP`, `source` when
+// the three address registers did not all hold values, `bytes` when the two
+// count registers did not, `startMask` and `startSite` when nothing started it.
+// A register written with a value the bytes do not say holds none from then
+// on. Nothing is guessed.
 struct DmaTransfer {
-  Address site = 0;  // where the channel's `BBAD`, or its `DMAP` alone, was written
+  Address site = 0;
   std::uint8_t channel = 0;
   DmaDirection direction = DmaDirection::Unknown;
   std::optional<Address> destination;
   std::string_view destinationName;
   std::optional<RegisterClass> destinationClass;
   std::optional<Address> source;
+  std::optional<MovedStep> step;
+  std::optional<std::uint32_t> bytes;
   std::optional<std::uint8_t> startMask;
+  std::optional<Address> startSite;
   bool hdma = false;  // the start came from `HDMAEN` rather than `MDMAEN`
   std::uint32_t run = 0;
 };
@@ -182,8 +206,9 @@ struct DmaTransfer {
 [[nodiscard]] std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disassembly,
                                                            const ProvenProgram* proven = nullptr);
 
-// The transfers those accesses set up, in address order — one per site that wrote
-// a channel's `BBAD` or, where none did, its `DMAP`.
+// The transfers those accesses set up, in site order then channel order — one
+// per start within a run, and one per channel whose direction or destination
+// the run wrote after its last start.
 [[nodiscard]] std::vector<DmaTransfer> dmaTransfers(const std::vector<HardwareAccess>& accesses);
 
 // A routine: the lines execution reaches from a label by falling through, by

@@ -114,7 +114,8 @@ struct SoundProgram {
 // A file of bytes the tree lifts out of a bank file: a range a run saw a
 // transfer engine carry from the image to the hardware — or the image source of
 // a range it carried out of work RAM, or the run of image bytes a stream the
-// CPU carried was read from — written once, as the bytes are in the image,
+// CPU carried was read from, or a range the code proves a channel was set up
+// to carry that no run started — written once, as the bytes are in the image,
 // under a directory named for the memory they went to — `vram/`, `cgram/`,
 // `oam/`, `apu/`, `hdma/` for a table and for a block an indirect entry pointed
 // at, and `staged/` for a source whose bytes were built into data for two
@@ -180,9 +181,11 @@ struct CartridgeDisassembly {
   std::vector<MovedRange> moved;
   // The files lifted out of the bank files, in address order: every `moved`
   // range that begins in the image and goes to a memory a file can be named for,
-  // by the rules `docs/snes-disassembler.md` states. A range that is refused —
-  // over an instruction, over a sound-program block, or sent two places — is
-  // named in `notes` and stays in its bank.
+  // every source the shadow named, and every transfer the code proves whole
+  // that no run started, by the rules `docs/snes-disassembler.md` states. A
+  // range that is refused — over an instruction, over a sound-program block, or
+  // sent two places — is named in `notes` and stays in its bank; so is a
+  // proven transfer the run moved another way.
   std::vector<AssetFile> assets;
   // The targets the bytes prove the indirect jumps take — a pointer in the image
   // selected by an index every path bounds — this run's and every earlier

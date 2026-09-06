@@ -22,7 +22,8 @@ snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [-
 
 Writes one source file per bank, the sound program the cartridge uploads at boot as
 `apu/driver.asm`, the bytes the run saw the cartridge send from the image to the
-hardware as files of their own under `vram/`, `cgram/`, `oam/`, `apu/` and
+hardware — and the ones the code proves a channel was set up to send — as files
+of their own under `vram/`, `cgram/`, `oam/`, `apu/` and
 `hdma/`, and `project.manifest`, which names the files, where the trace began,
 and where it stopped. The trace starts at the vectors and follows control
 flow across banks; the sound program is captured by booting the cartridge on the
@@ -76,14 +77,19 @@ what a player would. `rom/input_script.h` reads the script (`parseInputScript`)
 and says what a port holds at a frame (`InputScript::padAt`).
 
 The facts it attaches to addresses — the hardware each instruction reaches, the
-DMA transfers those add up to, the routines the instructions belong to, each
+DMA transfers those add up to (one per start, with the channel's registers as
+they stood: the destination, the source and its step, the count, and the write
+that started it), the routines the instructions belong to, each
 with what it calls and what it drives, and what every path proves about the
 direct register, the data bank and the stack pointer at each label — come from
 `rom/rom_facts.h`: `proveProgram(disassembly, rom)` lifts every region and runs
 the [dataflow](../ir/README.md) over it, then `hardwareAccesses(disassembly,
 &proven)`, `dmaTransfers(accesses)`, `routines(disassembly)` and
 `stateFacts(disassembly, proven)`, written into the manifest as `access`, `dma`,
-`routine` and `state` lines. `derivedTargets(disassembly, proven)` is every
+`routine` and `state` lines. A transfer the code proves whole that the run
+never started is lifted from the code's word as a file of kind `proven`, and
+one the run did start is checked against the range the run moved — see
+[The assets](../../docs/snes-disassembler.md#the-assets). `derivedTargets(disassembly, proven)` is every
 destination of a jump through a table whose index the bytes bound; the
 disassembler traces from each and writes it as a `derived` line, so a bounded
 table is traced past without running the cartridge.

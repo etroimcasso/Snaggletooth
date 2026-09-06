@@ -528,14 +528,15 @@ $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 ```
 
 ```
-dma      $00:8132 channel 7 to-register $00:2104 OAMDATA Oam source none start none
+dma      $00:8132 channel 7 to-register $00:2104 OAMDATA Oam source none increment bytes none start none from none
 
 moved    $00:8326 channel 7 to-register $00:2104 OAMDATA Oam memory $7E:0200 increment bytes 544 as dma times 60
 ```
 
-The `dma` line stands where the channel's `BBAD` was written, and its source is
-`none` because the address registers are filled elsewhere — here in the
-vertical-blank handler, which writes them and starts the channel every frame.
+The `dma` line stands where the channel's `BBAD` was written, and its source,
+its count and its start are `none` because the address registers are filled
+and the channel started elsewhere — here in the vertical-blank handler, which
+writes them and starts the channel every frame.
 The `moved` line stands at the handler's write to `MDMAEN`, names the 544 bytes
 from `$7E:0200`, and says the run saw them go sixty times. A range in work RAM
 is a table the program builds; a range in the image is bytes the cartridge
@@ -654,6 +655,34 @@ not removed — the disassembler never deletes anything — and an `asset` line
 that matches no range the run lifts is dropped, with a `note` saying so. A tree
 disassembled with `--no-run` lifts what its manifest's `moved` lines say, so the
 files are kept from one run to the next whether or not the cartridge ran.
+
+**What the code proves is lifted too.** A `dma` line whose every field the
+paths settle — a general-purpose start, a destination in VRAM, CGRAM, OAM or
+the audio port, a source stepping up or down through the image, and a count
+— names a range as exactly as a `moved` line does, and where no run started
+it, the file is lifted from the code's word: the same directory, the same
+name, an `asset` line of kind `proven`, and an `INCBIN` in the bank file. A
+fill, a transfer whose start the code does not prove, an HDMA enable (whose
+count is not a length) and a source outside the image lift nothing, and say
+nothing. Where the run did start the transfer, the `moved` range is the file
+and the proof is only checked against it. The `declaring` cartridge, whose
+reset code sets five channels up behind a button the run never presses:
+
+```
+asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 32
+asset    vram/00_9040.bin Vram as dma from $00:9040 bytes 16
+asset    vram/00_9100.bin Vram as dma from $00:9100 bytes 48
+asset    cgram/00_9200.bin Cgram as dma from $00:9200 bytes 16
+asset    oam/00_9300.bin Oam as proven from $00:9300 bytes 544
+```
+
+The run took five transfers and confirmed each; the sprite table at `$9300`
+is lifted because the code proves it whole. The 48 bytes at `$9100` are
+proven whole too, and the run sent sixteen from inside them: a proven range
+and a range the run moved that share bytes are one file, the run's kind, as
+two of the run's ranges would be. The fill from `$9600`, the HDMA table at
+`$9700`, the transfer whose source came from a variable and the one set up
+and never started are left where they are.
 
 Most of what a cartridge sends is built in work RAM first — decompressed, drawn,
 assembled from pieces — and those ranges are recorded as `moved` lines whose
@@ -802,7 +831,9 @@ In the bank file, a staged file's `INCBIN` says what it is:
 
 A `staged` or `stream` file's evidence is the run's, written fresh; its `asset`
 line is read back whole, so the file is kept through a disassembly without a
-run and until a run lifts a wider file over its bytes.
+run and until a run lifts a wider file over its bytes. A `proven` file's
+evidence is the code's, which every trace finds again, so its line is read
+back for its path alone, as a `dma` file's is.
 
 **Cost.** The shadow runs beside the interpreter on every instruction: on a
 commercial cartridge's sixty seconds it adds about five seconds of wall time
@@ -894,8 +925,9 @@ A listing says which registers an instruction names. The manifest says what that
 adds up to: for every instruction the trace decoded that reaches a hardware
 register, an `access` line with the register, the part of the machine it belongs
 to, whether the instruction reads or writes it, and the value it wrote where the
-bytes say what that was; and for every DMA channel a routine set up, a `dma` line
-with the transfer those accesses describe. Both are
+bytes say what that was; and for every transfer a routine set a channel up for
+and started, a `dma` line with the transfer those accesses describe — the
+channel's registers as they stood when the start was written. Both are
 [manifest lines](project-manifest.md#26-what-the-code-reaches), written fresh on
 every run.
 
@@ -904,13 +936,30 @@ value written there, not `BBAD` itself — so its class is what the transfer is
 for. A transfer to `OAMDATA` is a sprite table, one to `VMDATAL` a tileset or a
 tilemap, one to `CGDATA` a palette, one to `APUIO0` a sound driver or its
 samples — each named by where it is sent, rather than by anything a person has
-labelled yet:
+labelled yet. The source is where the bytes come from and how the address
+steps, as `DMAP` says; the count is what `DAS` was written with, which for a
+general-purpose transfer is how many bytes move, a zero standing for 65536;
+and the start is the write to `MDMAEN` or `HDMAEN` that set the channel going.
+A stretch of straight-line code that starts one channel four times has four
+lines, each with the registers as they stood — a start that rewrote only the
+source and the count sends to the destination the last one left — and a
+channel written and never started has a line whose start is `none`:
 
 ```
-dma      $00:8017 channel 0 to-register $00:2104 OAMDATA Oam source $7F:0000 start $01
-dma      $00:8045 channel 1 to-register $00:2118 VMDATAL Vram source none start $02
-dma      $00:8082 channel 2 direction-unknown $00:2122 CGDATA Cgram source none start none
+dma      $00:8007 channel 0 to-register $00:2118 VMDATAL Vram source $00:9000 increment bytes 32 start $01 from $00:8025
+dma      $00:802A channel 0 to-register $00:2118 VMDATAL Vram source $00:9040 increment bytes 16 start $01 from $00:803E
+dma      $00:8048 channel 0 to-register $00:2122 CGDATA Cgram source $00:920F decrement bytes 16 start $01 from $00:8066
+dma      $00:8070 channel 0 to-register $00:2118 VMDATAL Vram source $00:9600 fixed bytes 64 start $01 from $00:808E
+dma      $00:8098 channel 6 to-register $00:2118 VMDATAL Vram source $00:9080 increment bytes 16 start none from none
+dma      $00:81C7 channel 4 to-register $00:2118 VMDATAL Vram source none increment bytes 16 start $10 from $00:81EA
+dma      $00:8207 channel 5 to-register $00:2122 CGDATA Cgram source $00:9700 increment bytes 3 start-hdma $20 from $00:8225
 ```
+
+These are among the `declaring` cartridge's, whose reset code starts channel 0
+four times from one stretch of code — a tileset, then sixteen more bytes to
+the same place with only the source and the count rewritten, a palette read
+downward, a fill — then sets channel 6 up whole and branches before starting
+it.
 
 **A value is what the bytes prove and no more.** It is recorded where the
 instruction immediately before loaded it as an immediate, with no label between
@@ -919,11 +968,20 @@ the instruction is `STZ`, which carries its own zero, and where every path into
 the store proves the register's value, however far back the load was and
 whatever was called in between, as long as the calls give the register back
 (see [What every path proves](#what-every-path-proves)). Anything else leaves
-the field `none`: the second transfer above has no source because its address
-registers were filled from a table, and the third's direction is unknown because
-nothing wrote its `DMAP` with a value the bytes settle. Pieces of one channel are
-joined only within a run of straight-line code, so a channel set up across a
-label is two transfers' worth of lines.
+the field `none`, and a register written with a value the bytes do not say is
+`none` from then on, whatever an earlier write left: the sixth transfer above
+has no source because the low byte of its address was rewritten from a
+variable. The last is an HDMA enable, and its count is the three the code
+wrote and not a length — an HDMA channel takes its counts from its table, and
+the engine writes that register itself. Pieces of one channel are joined only
+within a run of straight-line code, so a channel set up across a label is two
+transfers' worth of lines.
+
+A transfer the code proves whole and the run also started is checked against
+the [`moved` line](#what-a-run-moved) from the same start: where the two agree
+the run confirms the proof, and where they do not, a `note` says what each
+said and neither is changed. A transfer proven whole that no run started is
+lifted from the code's word alone — see [The assets](#the-assets).
 
 An instruction under a sixteen-bit register reaches two registers and produces a
 line for each, which is how one `STA !$4301` sets both a channel's B-bus address
@@ -1161,9 +1219,10 @@ be wider than the asset a person would cut and the `staged` lines say which
 parts were used; a range
 staged twice through work RAM keeps only its origin's own intervals, and a
 routine the trace holds no label at is named by its site. A transfer the run
-never started has no `moved` line and no file; the static `dma` line names its
-source where the bytes say it, but not its length, so nothing is lifted from
-it either.
+never started has no `moved` line, and is a file only where the code proves
+it whole — a `dma` line with its source, its step, its count and a
+general-purpose start every path settles; one the code sets up from a table,
+or starts from a handler the paths do not reach, stays in its bank.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or
