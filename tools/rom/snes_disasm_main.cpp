@@ -24,9 +24,10 @@
 // into the controller ports while it goes, so the run reaches what a player
 // would.
 //
-// A copier header, the 512 bytes some dumps carry ahead of the image, is dropped
-// when the file length says one is present.
+// A copier's header ahead of the image is dropped, and the report says which
+// copier wrote it and what it declares.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -39,6 +40,7 @@
 #include <vector>
 
 #include "rom/rom_disasm.h"
+#include "snaggletooth/snes/cartridge.h"
 
 namespace {
 
@@ -137,7 +139,10 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::vector<std::uint8_t> rom(bytes.begin(), bytes.end());
-  if (rom.size() % 1024 == 512) rom.erase(rom.begin(), rom.begin() + 512);
+  if (const std::optional<snaggletooth::CopierHeader> copier = snaggletooth::readCopierHeader(rom)) {
+    rom.erase(rom.begin(), rom.begin() + static_cast<std::ptrdiff_t>(snaggletooth::kCopierHeaderBytes));
+    std::cout << "dropped " << snaggletooth::describeCopierHeader(*copier, rom.size()) << "\n";
+  }
   if (rom.empty()) {
     std::cerr << imagePath << " holds no cartridge image\n";
     return 1;

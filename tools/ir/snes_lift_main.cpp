@@ -17,8 +17,9 @@
 // The exit status is 0 when the tree lifted, 2 on a bad argument or an
 // unreadable input.
 //
-// A copier header, the 512 bytes some dumps carry ahead of the image, is dropped
-// when the file length says one is present.
+// A copier's header ahead of the image is dropped, and a line on standard error
+// says which copier wrote it and what it declares — standard output is the
+// lift's when `-o` is not given.
 
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,7 @@
 #include "ir/ir.h"
 #include "ir/ir_text.h"
 #include "rom/rom_disasm.h"
+#include "snaggletooth/snes/cartridge.h"
 
 namespace {
 
@@ -78,7 +81,10 @@ int main(int argc, char** argv) {
     }
     rom.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   }
-  if (rom.size() % 1024 == 512) rom.erase(rom.begin(), rom.begin() + 512);
+  if (const std::optional<snaggletooth::CopierHeader> copier = snaggletooth::readCopierHeader(rom)) {
+    rom.erase(rom.begin(), rom.begin() + static_cast<std::ptrdiff_t>(snaggletooth::kCopierHeaderBytes));
+    std::cerr << "dropped " << snaggletooth::describeCopierHeader(*copier, rom.size()) << "\n";
+  }
   if (rom.empty()) {
     std::cerr << imagePath << " holds no cartridge image\n";
     return 2;

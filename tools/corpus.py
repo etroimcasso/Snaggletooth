@@ -43,13 +43,6 @@ import sys
 import time
 
 
-def sha(path):
-    data = path.read_bytes()
-    if len(data) % 1024 == 512:
-        data = data[512:]
-    return hashlib.sha256(data).hexdigest()
-
-
 def manifestLines(tree, kind, length):
     manifest = tree / "project.manifest"
     if not manifest.exists():
@@ -60,6 +53,22 @@ def manifestLines(tree, kind, length):
         if len(words) == length and words[0] == kind:
             out.append(words)
     return out
+
+
+def rebuiltMatches(rom, rebuilt, tree):
+    """Whether the rebuilt image is the file's image: the file's last `image`
+    bytes as the manifest counts them, so a copier header ahead of the image is
+    left out here exactly as the tools left it out."""
+    if not rebuilt.exists():
+        return False
+    sizes = manifestLines(tree, "image", 2)
+    if not sizes:
+        return False
+    data = rom.read_bytes()
+    size = int(sizes[0][1])
+    if size > len(data):
+        return False
+    return hashlib.sha256(data[len(data) - size:]).digest() == hashlib.sha256(rebuilt.read_bytes()).digest()
 
 
 def facts(tree):
@@ -211,7 +220,7 @@ def main():
         rebuilt = args.output / f"{name}-rebuilt{rom.suffix}"
         results.append(subprocess.run([str(c) for c in [args.build / "snes_verify", tree, rom, "-o", rebuilt]],
                                       capture_output=True, text=True))
-        same = rebuilt.exists() and sha(rom) == sha(rebuilt)
+        same = rebuiltMatches(rom, rebuilt, tree)
 
         replayLine = ""
         if not args.no_differential:
@@ -220,7 +229,8 @@ def main():
             if script is not None:
                 replay += ["--input", script]
             results.append(subprocess.run([str(c) for c in replay], capture_output=True, text=True))
-            replayLine = results[-1].stdout.strip()
+            # The replay's last line sums it up; a dropped copier header is reported ahead of it.
+            replayLine = results[-1].stdout.strip().splitlines()[-1] if results[-1].stdout.strip() else ""
 
         elapsed = time.time() - started
         ok = same and all(r.returncode == 0 for r in results)

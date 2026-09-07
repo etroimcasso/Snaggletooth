@@ -86,7 +86,16 @@ A cartridge that uploads a sound program at boot reports that too, on a line of
 its own: the entry the audio CPU started it at, how many blocks were sent, and
 how many of those were matched back to bytes of the image.
 
-A 512-byte copier header is dropped when the file length says one is present.
+A copier's header ahead of the image — the 512 bytes a Super Wild Card, a Pro Fighter, a Game
+Doctor or a Super UFO wrote so it could load the file again — is dropped, and a line says which
+copier wrote it and what it declares:
+
+```
+dropped a Super Wild Card header: 512 KB, HiROM, 8 KB of save RAM mapped HiROM, a program; the image is 3584 bytes longer than declared
+```
+
+[The cartridge](snes-cartridge.md#a-copiers-header) says how each copier's header is recognised
+and read.
 
 `--no-sound` skips the boot, so no sound program is looked for and the banks keep
 every byte. `--boot-seconds N` bounds the boot at N seconds of the master clock;
@@ -905,8 +914,8 @@ whatever the bytes say.
 
 `-o` writes the image the tree assembled to, whatever the verdict, with a byte
 nobody produced as `$00`. A manifest written for another image is refused, as
-the disassembler refuses it. A copier header on the image is dropped the same
-way.
+the disassembler refuses it. A copier's header ahead of the image is dropped and
+reported the same way.
 
 The sound file's blocks are compared only where the manifest placed them; an
 `unplaced` block's bytes are in its bank, and are compared there. A placed

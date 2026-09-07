@@ -9,18 +9,21 @@
 // and runs forward verbatim — no warm-up, no skip, no fade — so the opening seconds
 // are whatever the game does before it starts its driver, silence included.
 //
-// A copier header, the 512 bytes some dumps carry ahead of the image, is dropped
-// when the file length says one is present. Progress goes to stdout a second at a
-// time unless --quiet is given; the WAV goes to the named file.
+// A copier's header ahead of the image is dropped and reported. Progress goes to
+// stdout a second at a time unless --quiet is given; the WAV goes to the named
+// file.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/snes.h"
 #include "spc/wav_writer.h"
 
@@ -80,7 +83,10 @@ int main(int argc, char** argv) {
   }
   std::vector<std::uint8_t> rom((std::istreambuf_iterator<char>(in)),
                                 std::istreambuf_iterator<char>());
-  if (rom.size() % 1024 == 512) rom.erase(rom.begin(), rom.begin() + 512);
+  if (const std::optional<snaggletooth::CopierHeader> copier = snaggletooth::readCopierHeader(rom)) {
+    rom.erase(rom.begin(), rom.begin() + static_cast<std::ptrdiff_t>(snaggletooth::kCopierHeaderBytes));
+    if (!quiet) std::cout << "dropped " << snaggletooth::describeCopierHeader(*copier, rom.size()) << "\n";
+  }
   if (rom.empty()) {
     std::cerr << inPath << " holds no cartridge image\n";
     return 1;
