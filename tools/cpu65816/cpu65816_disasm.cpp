@@ -499,7 +499,10 @@ CycleCost costUnder(std::uint8_t opcode, const Cpu65816Mode& mode) {
 }
 
 // The eight DMA channels' register names, built once: the table names them with
-// the channel digit in the middle.
+// the channel digit in the middle. The channel's unused byte answers at `$43xB`
+// and again at `$43xF`; the documents agree it is one byte, and the second
+// address takes the name fullsnes gives it, `MIRRx`, where the register table
+// repeats `UNUSEDx`, so that a tree naming both addresses defines two symbols.
 const std::array<std::array<std::string, 16>, 8>& dmaRegisterNames() {
   static const std::array<std::array<std::string, 16>, 8> names = [] {
     std::array<std::array<std::string, 16>, 8> out{};
@@ -517,7 +520,7 @@ const std::array<std::array<std::string, 16>, 8>& dmaRegisterNames() {
       out[channel][0x9] = "A2A" + n + "H";
       out[channel][0xA] = "NLTR" + n;
       out[channel][0xB] = "UNUSED" + n;
-      out[channel][0xF] = "UNUSED" + n;
+      out[channel][0xF] = "MIRR" + n;
     }
     return out;
   }();

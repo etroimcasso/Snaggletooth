@@ -244,6 +244,28 @@ TEST(RomFacts, DmaChannelIsEveryChannelsOwnRegisters) {
   EXPECT_EQ(at(0x437A).name, "NLTR7");
 }
 
+// A channel's unused byte answers at two addresses, and each has a name of its
+// own: the byte's, and its mirror's. A tree opens with an `EQU` per register it
+// names, so two addresses under one name would define the symbol twice.
+TEST(RomFacts, AChannelsUnusedByteAndItsMirrorAreNamedApart) {
+  EXPECT_EQ(at(0x430B).name, "UNUSED0");
+  EXPECT_EQ(at(0x430F).name, "MIRR0");
+  EXPECT_EQ(at(0x430F).cls, at(0x430B).cls);
+  EXPECT_EQ(at(0x430F).reads, at(0x430B).reads);
+  EXPECT_EQ(at(0x430F).writes, at(0x430B).writes);
+  EXPECT_EQ(at(0x436F).name, "MIRR6");
+}
+
+TEST(RomFacts, NoTwoAddressesTheTableNamesShareAName) {
+  std::map<std::string, Address> seen;
+  for (Address offset = 0x2100; offset <= 0x43FF; ++offset) {
+    const std::optional<Cpu65816Register> reg = cpu65816Register(offset);
+    if (!reg) continue;
+    const auto [where, inserted] = seen.emplace(std::string(reg->name), offset);
+    EXPECT_TRUE(inserted) << std::hex << reg->name << " names $" << where->second << " and $" << offset;
+  }
+}
+
 TEST(RomFacts, IoIsTheGeneralPurposeBitsOfTheControllerPorts) {
   EXPECT_EQ(at(0x4201).cls, RegisterClass::Io);  // WRIO
   EXPECT_EQ(at(0x4213).cls, RegisterClass::Io);  // RDIO
@@ -269,7 +291,7 @@ TEST(RomFacts, TheRangesEndWhereTheStagedTableEndsThem) {
   EXPECT_FALSE(cpu65816Register(0x4220).has_value());         // past the last of the $42xx set
   EXPECT_FALSE(cpu65816Register(0x42FFu).has_value());
   EXPECT_EQ(at(0x4300).name, "DMAP0");
-  EXPECT_EQ(at(0x437F).name, "UNUSED7");                      // the last DMA slot with a name
+  EXPECT_EQ(at(0x437F).name, "MIRR7");                        // the last DMA slot with a name
   EXPECT_FALSE(cpu65816Register(0x4380).has_value());
 }
 
@@ -280,7 +302,7 @@ TEST(RomFacts, TheUnnamedSlotsOfAChannelAreNotRegisters) {
   EXPECT_FALSE(cpu65816Register(0x430C).has_value());
   EXPECT_FALSE(cpu65816Register(0x430D).has_value());
   EXPECT_FALSE(cpu65816Register(0x430E).has_value());
-  EXPECT_EQ(at(0x430F).name, "UNUSED0");
+  EXPECT_EQ(at(0x430F).name, "MIRR0");
 }
 
 // A register is a register only in the banks that show it.
