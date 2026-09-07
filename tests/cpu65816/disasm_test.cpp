@@ -598,7 +598,7 @@ TEST(Cpu65816Disasm, RegistersAreNamedOnlyInTheBanksThatShowThem) {
   EXPECT_EQ(noteOf({0xA9, 0x00}), "");                      // LDA #$00 — a value
 
   EXPECT_EQ(cpu65816RegisterName(0x00213F), "STAT78");
-  EXPECT_EQ(cpu65816RegisterName(0x00437F), "UNUSED7");
+  EXPECT_EQ(cpu65816RegisterName(0x00437F), "MIRR7");
   EXPECT_EQ(cpu65816RegisterName(0x00437C), "");
   EXPECT_EQ(cpu65816RegisterName(0x002143), "APUIO3");
   EXPECT_EQ(cpu65816RegisterName(0x002180), "WMDATA");

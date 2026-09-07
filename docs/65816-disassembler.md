@@ -241,8 +241,9 @@ The console's registers sit at `$2100`–`$21FF` and `$4000`–`$43FF` of banks
 `$00`–`$3F` and `$80`–`$BF`; the same offsets in any other bank are memory. An
 operand that lands on one is annotated with the register's name from the documented
 register table — `INIDISP` through `STAT78` for the picture, `APUIO0`–`APUIO3`,
-`WMDATA`–`WMADDH`, `NMITIMEN` through `JOY4H`, and `DMAP0`–`UNUSED7` for the eight
-DMA channels:
+`WMDATA`–`WMADDH`, `NMITIMEN` through `JOY4H`, and `DMAP0`–`MIRR7` for the eight
+DMA channels (a channel's unused byte is `UNUSEDx` at `$43xB` and `MIRRx` at its
+second address, `$43xF`):
 
 ```
         STA !$2100                      ; $00:8000  8D 00 21     4  INIDISP
