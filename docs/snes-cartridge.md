@@ -13,6 +13,7 @@ never a machine at all.
 ## Contents
 
 - [Surface](#surface)
+- [A copier's header](#a-copiers-header)
 - [The header](#the-header)
 - [The three maps](#the-three-maps)
 - [Where an address lands](#where-an-address-lands)
@@ -35,11 +36,52 @@ Everything lives in `snaggletooth`.
 | `parseCartridgeHeader(rom)` | The header the image carries, or nothing when the image is too small to hold one. |
 | `detectCartridgeMap(rom)` | The map alone. |
 | `declaredSaveRamBytes(rom)` | The save-RAM size alone. |
+| `Copier` | `SuperWildCard`, `ProFighter`, `GameDoctor`, `SuperUfo`, or `Unnamed` for a header no copier signed. |
+| `CopierHeader` | What a copier's header declares: the copier, the ROM size, the mappings, the save, the file type, the entry, whether further files follow. |
+| `kCopierHeaderBytes` | 512 — every copier's header is this long. |
+| `readCopierHeader(file)` | The copier's header a file carries ahead of its image, or nothing when the file begins with the image. |
+| `describeCopierHeader(header, imageBytes)` | One line saying what the header declares, and how the image that follows differs from it. |
 | `CartridgeRegion` | `System`, `WorkRam`, `Rom`, `SaveRam` or `Unmapped` — what a bus address reaches. |
 | `cartridgeRegion(map, address)` | The region an address lands in under a map. |
 | `romOffset(map, address, imageBytes)` | The image byte a ROM address reads, mirrored across the image. |
 | `romAddress(map, offset)` | The bus address that reads an image offset whole. |
 | `saveRamOffset(map, address)` | The offset into the save an address reaches, before the save's size reduces it. |
+
+## A copier's header
+
+A dump that came through a copier — a device of the cartridge era that read a cartridge into a file,
+or ran a file in a cartridge's place — carries 512 bytes of the copier's own ahead of the image, written
+so the device could load the file again. The console never sees them, and every header site is 512
+bytes off until they are dropped. `readCopierHeader` reads a file's first 512 bytes as the copier that
+wrote them laid them out, and names the copier by its own bytes: the Super Wild Card by the file ID
+`$AA $BB` at bytes 8–9, the Game Doctor by the sixteen-byte ID it opens with, the Super UFO by
+`SUPERUFO` at bytes 8–15, the Pro Fighter by one of its three mode words at bytes 4–5 (`$8377` ROM,
+`$8347` ROM and a DSP-1, `$82FD` ROM, a DSP-1 and save RAM) under a ROM-mode byte at 3 of `$00` or
+`$80`. A file none of them signed carries an unnamed header when its length is 512 past a multiple of
+1 KB, the size every headerless dump has; otherwise the file begins with the image.
+
+```cpp
+std::vector<std::uint8_t> file = /* the dump, as read from disk */;
+if (const std::optional<CopierHeader> copier = readCopierHeader(file)) {
+  file.erase(file.begin(), file.begin() + kCopierHeaderBytes);
+  describeCopierHeader(*copier, file.size());
+  // "a Super Wild Card header: 512 KB, HiROM, 8 KB of save RAM mapped HiROM, a program;
+  //  the image is 3584 bytes longer than declared"
+}
+const std::optional<CartridgeHeader> header = parseCartridgeHeader(file);
+```
+
+Every field the copier's layout documents is read and reported as written. `declaredRomBytes` is the
+ROM size the Super Wild Card, the Pro Fighter and an unnamed header write at bytes 0–1 in 8 KB
+units. The Super Wild Card's mode byte gives `programMapping` and `saveMapping` (LoROM or HiROM),
+`saveRamBytes` (32 KB, 8 KB, 2 KB or none), `jumpEntry` (the file starts at `$8000` rather than the
+reset vector) and `multiFile` (further files follow); `fileType` is its byte 10 — `$04` a program, `$05`
+a battery save, `$08` a real-time save. The Pro Fighter's `modeWord` is reported as written with `dsp1`
+and `hasSaveRam` what it names, its ROM-mode byte gives `programMapping`, and its own multi-file byte
+sets `multiFile`. The Game Doctor and the Super UFO carry an ID and nothing this reads. The declared
+size is a fact about the copier, not about the image: a dump a translation patch grew, or one padded
+after the image, disagrees with it, so `describeCopierHeader` says by how much and the image that is
+there is the one read.
 
 ## The header
 
@@ -59,7 +101,7 @@ whose title is not text, still comes back — `checksumAgrees` and `title` are h
 #include "snaggletooth/snes/cartridge.h"
 using namespace snaggletooth;
 
-std::vector<std::uint8_t> image = /* a cartridge image, copier header removed */;
+std::vector<std::uint8_t> image = /* a cartridge image, any copier's header dropped */;
 const std::optional<CartridgeHeader> header = parseCartridgeHeader(image);
 if (!header) { /* too small to be a cartridge at all */ }
 
@@ -201,8 +243,10 @@ saveRamOffset(CartridgeMap::HiRom, 0x205FFF);   // nothing: below the window
 
 ## Gotchas
 
-- Remove a copier header first. Some dumps carry 512 bytes ahead of the image; an image whose length
-  is 512 past a multiple of 1 KB has one, and every site is off by 512 until it is dropped.
+- A copier's header is the file's, not the cartridge's. Drop it through `readCopierHeader` before
+  reading anything else; every site is 512 bytes off while it is there. Two shapes it cannot tell
+  apart: a headerless dump padded to a length 512 past a kilobyte reads as carrying an unnamed
+  header, and a copier no layout names, on a padded dump, is not seen at all.
 - `map` comes from the site, not the map-mode byte. A header that claims one map from another map's
   site is reported with the site's map and the byte as written.
 - `detectCartridgeMap` and `declaredSaveRamBytes` answer for any image, even one too small to hold a

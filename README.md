@@ -84,7 +84,7 @@ API has not been started. Each row links to the page that describes the componen
 |---|---|
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
 | [SNES machine](docs/snes-machine.md) | in progress — the three cartridge maps, work RAM and its data port, the APU ports, region-priced cycles at both clock rates, exact master-cycle budgeting, video counters with the NMI and the timer IRQ, the multiply/divide unit, the PPU register file, eight DMA/HDMA channels, the controller ports, the audio boot handshake, and an observer told every access; the rendering PPU remains |
-| [Cartridge](docs/snes-cartridge.md) | built — the header's map, size, title, checksum and vectors; LoROM, HiROM and ExHiROM; where every bus address lands in the image; the save windows |
+| [Cartridge](docs/snes-cartridge.md) | built — the header's map, size, title, checksum and vectors; a copier's header ahead of a dump, read and dropped; LoROM, HiROM and ExHiROM; where every bus address lands in the image; the save windows |
 | Public embedding API | not started |
 | PPU | future — see the [roadmap](#roadmap) |
 

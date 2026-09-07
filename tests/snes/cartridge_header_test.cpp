@@ -4,8 +4,10 @@
 // pins a documented fact about where a byte or a field is — never whatever a
 // real cartridge happened to hold.
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -554,6 +556,183 @@ TEST(CartridgeHeader, SaveWindowsUnderEachMap) {
 
 // Boots an ExHiROM image and copies bytes from both halves into work RAM, so the
 // machine's bus is shown serving the second 4 MB where the map puts it.
+// ---- the copier header ---------------------------------------------------------
+
+// A dump as a copier wrote it: 512 bytes of the copier's own, then an authored
+// 512 KB LoROM image, then — when asked — a tail of zero bytes, the shape that
+// hides a header from the file's length.
+std::vector<std::uint8_t> dumpWith(const std::vector<std::uint8_t>& copierBytes, std::size_t tailBytes = 0) {
+  std::vector<std::uint8_t> file(kCopierHeaderBytes, 0u);
+  std::copy(copierBytes.begin(), copierBytes.end(), file.begin());
+  const std::vector<std::uint8_t> image = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+  file.insert(file.end(), image.begin(), image.end());
+  file.insert(file.end(), tailBytes, 0u);
+  return file;
+}
+
+constexpr std::size_t kTail = 3584u;  // 512 KB + 512 + 3584 is a multiple of 1 KB: the length says nothing
+
+TEST(CartridgeHeader, ASuperWildCardHeaderIsNamedByItsFileIdWhateverTheLength) {
+  // 64 units of 8 KB; mode $34: program and save mapped HiROM, an 8 KB save; a program.
+  const std::vector<std::uint8_t> file = dumpWith({0x40, 0x00, 0x34, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x04}, kTail);
+  ASSERT_EQ(file.size() % 1024u, 0u);
+  const std::optional<CopierHeader> h = readCopierHeader(file);
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->copier, Copier::SuperWildCard);
+  EXPECT_EQ(h->declaredRomBytes, 512u * 1024u);
+  EXPECT_EQ(h->programMapping, CartridgeMap::HiRom);
+  EXPECT_EQ(h->saveMapping, CartridgeMap::HiRom);
+  EXPECT_EQ(h->saveRamBytes, 8u * 1024u);
+  EXPECT_EQ(h->fileType, 0x04u);
+  EXPECT_FALSE(h->jumpEntry);
+  EXPECT_FALSE(h->multiFile);
+}
+
+TEST(CartridgeHeader, TheSuperWildCardModeByteIsReadBitByBit) {
+  // $C0: entered at $8000, further files follow, both mappings LoROM, a 32 KB save.
+  std::optional<CopierHeader> h = readCopierHeader(dumpWith({0x40, 0x00, 0xC0, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x05}));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_TRUE(h->jumpEntry);
+  EXPECT_TRUE(h->multiFile);
+  EXPECT_EQ(h->programMapping, CartridgeMap::LoRom);
+  EXPECT_EQ(h->saveMapping, CartridgeMap::LoRom);
+  EXPECT_EQ(h->saveRamBytes, 32u * 1024u);
+  EXPECT_EQ(h->fileType, 0x05u);
+  // The two mapping bits are each their own: $10 maps the program HiROM and the save LoROM, $20 the reverse.
+  h = readCopierHeader(dumpWith({0x40, 0x00, 0x10, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x04}));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->programMapping, CartridgeMap::HiRom);
+  EXPECT_EQ(h->saveMapping, CartridgeMap::LoRom);
+  h = readCopierHeader(dumpWith({0x40, 0x00, 0x20, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x04}));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->programMapping, CartridgeMap::LoRom);
+  EXPECT_EQ(h->saveMapping, CartridgeMap::HiRom);
+  // The save-size code in bits 3-2: 1 is 8 KB, 2 is 2 KB, 3 is none.
+  h = readCopierHeader(dumpWith({0x40, 0x00, 0x08, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x04}));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->saveRamBytes, 2u * 1024u);
+  h = readCopierHeader(dumpWith({0x40, 0x00, 0x0C, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x08}));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->saveRamBytes, 0u);
+  EXPECT_EQ(h->fileType, 0x08u);
+}
+
+TEST(CartridgeHeader, AProFighterHeaderIsNamedByItsModeWord) {
+  // HiROM, ROM with a DSP-1 and save RAM: the word $82FD, low byte first.
+  std::optional<CopierHeader> h = readCopierHeader(dumpWith({0x40, 0x00, 0x00, 0x80, 0xFD, 0x82}, kTail));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->copier, Copier::ProFighter);
+  EXPECT_EQ(h->declaredRomBytes, 512u * 1024u);
+  EXPECT_EQ(h->programMapping, CartridgeMap::HiRom);
+  EXPECT_EQ(h->modeWord, 0x82FDu);
+  EXPECT_TRUE(h->dsp1);
+  EXPECT_TRUE(h->hasSaveRam);
+  EXPECT_FALSE(h->multiFile);
+  // LoROM, further files follow, a DSP-1 without save RAM.
+  h = readCopierHeader(dumpWith({0x40, 0x00, 0x40, 0x00, 0x47, 0x83}, kTail));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->programMapping, CartridgeMap::LoRom);
+  EXPECT_TRUE(h->multiFile);
+  EXPECT_TRUE(h->dsp1);
+  EXPECT_FALSE(h->hasSaveRam);
+  // ROM alone.
+  h = readCopierHeader(dumpWith({0x40, 0x00, 0x00, 0x00, 0x77, 0x83}, kTail));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_FALSE(h->dsp1);
+  EXPECT_FALSE(h->hasSaveRam);
+  EXPECT_FALSE(h->saveRamBytes.has_value());  // the Pro Fighter names no size
+  // A word the layout does not list, or a ROM-mode byte it does not, names no copier.
+  EXPECT_FALSE(readCopierHeader(dumpWith({0x40, 0x00, 0x00, 0x80, 0xDD, 0x82}, kTail)).has_value());
+  EXPECT_FALSE(readCopierHeader(dumpWith({0x40, 0x00, 0x00, 0x01, 0x77, 0x83}, kTail)).has_value());
+}
+
+TEST(CartridgeHeader, TheGameDoctorAndTheSuperUfoAreNamedByTheirIds) {
+  std::vector<std::uint8_t> gd(16u);
+  std::copy_n("GAME DOCTOR SF 3", 16, gd.begin());
+  std::optional<CopierHeader> h = readCopierHeader(dumpWith(gd, kTail));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->copier, Copier::GameDoctor);
+  EXPECT_EQ(h->declaredRomBytes, 0u);  // its layout declares no size this reads
+  std::vector<std::uint8_t> ufo(16u, 0u);
+  ufo[0] = 0x20u;
+  std::copy_n("SUPERUFO", 8, ufo.begin() + 8);
+  h = readCopierHeader(dumpWith(ufo, kTail));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->copier, Copier::SuperUfo);
+  EXPECT_FALSE(h->programMapping.has_value());
+}
+
+// The Super Wild Card's ID outranks a Pro Fighter shape in the same header: a
+// dump can carry both, and the ID is the explicit one.
+TEST(CartridgeHeader, TheFileIdOutranksAModeWord) {
+  const std::optional<CopierHeader> h =
+      readCopierHeader(dumpWith({0x40, 0x00, 0x00, 0x80, 0x77, 0x83, 0, 0, 0xAA, 0xBB, 0x04}, kTail));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->copier, Copier::SuperWildCard);
+}
+
+TEST(CartridgeHeader, AHeaderNoCopierSignedIsKnownByTheLength) {
+  std::optional<CopierHeader> h = readCopierHeader(dumpWith({0x40, 0x00}));
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->copier, Copier::Unnamed);
+  EXPECT_EQ(h->declaredRomBytes, 512u * 1024u);
+  EXPECT_FALSE(h->programMapping.has_value());
+  // With a tail the length says nothing, and nothing else names it.
+  EXPECT_FALSE(readCopierHeader(dumpWith({0x40, 0x00}, kTail)).has_value());
+}
+
+TEST(CartridgeHeader, AFileThatBeginsWithTheImageHasNoCopierHeader) {
+  EXPECT_FALSE(readCopierHeader(authored(512u * 1024u, kLoRomSite, 0x20u, 0u)).has_value());
+  EXPECT_FALSE(readCopierHeader(std::vector<std::uint8_t>(100u, 0u)).has_value());
+  // Half the file ID is not the ID.
+  EXPECT_FALSE(readCopierHeader(dumpWith({0x40, 0x00, 0x34, 0, 0, 0, 0, 0, 0xAA, 0x00, 0x04}, kTail)).has_value());
+  EXPECT_FALSE(readCopierHeader(dumpWith({0x40, 0x00, 0x34, 0, 0, 0, 0, 0, 0x00, 0xBB, 0x04}, kTail)).has_value());
+  // A header with nothing behind it is still a header; what follows is the caller's to judge.
+  std::vector<std::uint8_t> bare(kCopierHeaderBytes, 0u);
+  bare[8] = 0xAAu;
+  bare[9] = 0xBBu;
+  EXPECT_TRUE(readCopierHeader(bare).has_value());
+  // One byte short of a header, the ID is not read at all.
+  bare.pop_back();
+  EXPECT_FALSE(readCopierHeader(bare).has_value());
+}
+
+TEST(CartridgeHeader, TheImageBehindACopierHeaderReadsAsItself) {
+  const std::vector<std::uint8_t> file = dumpWith({0x40, 0x00, 0x34, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x04}, kTail);
+  const std::span<const std::uint8_t> image = std::span(file).subspan(kCopierHeaderBytes);
+  const std::optional<CartridgeHeader> h = parseCartridgeHeader(image);
+  ASSERT_TRUE(h.has_value());
+  EXPECT_EQ(h->title, "AUTHORED TITLE");
+  EXPECT_EQ(h->offset, kLoRomSite);
+  EXPECT_TRUE(h->checksumAgrees);
+  // Read with the copier's bytes still ahead of it, every site is 512 bytes off.
+  const std::optional<CartridgeHeader> off = parseCartridgeHeader(file);
+  ASSERT_TRUE(off.has_value());
+  EXPECT_NE(off->title, "AUTHORED TITLE");
+  EXPECT_FALSE(off->checksumAgrees);
+}
+
+TEST(CartridgeHeader, TheDescriptionSaysWhatTheHeaderDeclares) {
+  const std::vector<std::uint8_t> swc = dumpWith({0x40, 0x00, 0x34, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x04}, kTail);
+  EXPECT_EQ(describeCopierHeader(*readCopierHeader(swc), swc.size() - kCopierHeaderBytes),
+            "a Super Wild Card header: 512 KB, HiROM, 8 KB of save RAM mapped HiROM, a program; "
+            "the image is 3584 bytes longer than declared");
+  const std::vector<std::uint8_t> plain = dumpWith({0x40, 0x00, 0xC0, 0, 0, 0, 0, 0, 0xAA, 0xBB, 0x05});
+  EXPECT_EQ(describeCopierHeader(*readCopierHeader(plain), plain.size() - kCopierHeaderBytes),
+            "a Super Wild Card header: 512 KB, LoROM, 32 KB of save RAM mapped LoROM, a battery save, "
+            "entered at $8000, further files follow");
+  const std::vector<std::uint8_t> fig = dumpWith({0x80, 0x00, 0x40, 0x80, 0xFD, 0x82});
+  EXPECT_EQ(describeCopierHeader(*readCopierHeader(fig), fig.size() - kCopierHeaderBytes),
+            "a Pro Fighter header: 1 MB, HiROM, a DSP-1 and save RAM, further files follow; "
+            "the image is 524288 bytes shorter than declared");
+  const std::vector<std::uint8_t> unnamed = dumpWith({0x40, 0x00});
+  EXPECT_EQ(describeCopierHeader(*readCopierHeader(unnamed), unnamed.size() - kCopierHeaderBytes),
+            "a copier header no copier signed, known by the file's length: 512 KB");
+  std::vector<std::uint8_t> gd(16u);
+  std::copy_n("GAME DOCTOR SF 3", 16, gd.begin());
+  EXPECT_EQ(describeCopierHeader(*readCopierHeader(dumpWith(gd)), 512u * 1024u), "a Game Doctor header");
+}
+
 TEST(CartridgeHeader, TheMachineServesAnExHiRomImageWhereTheHeaderSaysItIs) {
   std::vector<std::uint8_t> rom = authored(6u * kMegabyte, kExHiRomSite, 0x25u, 0u);
   // Bank $00 at $8000 mirrors the second 4 MB's first bank, so the program goes

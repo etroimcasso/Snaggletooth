@@ -134,6 +134,49 @@ struct CartridgeHeader {
 // is reported as LoROM, the denser layout.
 [[nodiscard]] CartridgeMap detectCartridgeMap(std::span<const std::uint8_t> rom) noexcept;
 
+// The copier that wrote a dump's own file header. A copier was a device that
+// read a cartridge into a file, or ran a file in the cartridge's place, and it
+// wrote 512 bytes of its own ahead of the image so it could load the file
+// again. The console never sees those bytes. `Unnamed` is a header no copier
+// signed, known only by the file's length.
+enum class Copier : std::uint8_t { SuperWildCard, ProFighter, GameDoctor, SuperUfo, Unnamed };
+
+// Every copier's header is this long, and the image starts right after it.
+constexpr std::size_t kCopierHeaderBytes = 512u;
+
+// What a copier's header says, read as its layout lays it out. Which fields are
+// written depends on the copier: the Super Wild Card and the Pro Fighter declare
+// the ROM size and the mapping; the Game Doctor and the Super UFO carry an ID
+// and nothing this reads. A field a copier does not write keeps its default.
+struct CopierHeader {
+  Copier copier = Copier::Unnamed;
+  std::size_t declaredRomBytes = 0;   // bytes 0-1 in 8 KB units: the Super Wild Card, the Pro Fighter, and an unnamed header, which shares the site
+  std::optional<CartridgeMap> programMapping;  // LoROM or HiROM: the Super Wild Card's mode bit 4, the Pro Fighter's byte 3
+  std::optional<CartridgeMap> saveMapping;     // the Super Wild Card's mode bit 5
+  std::optional<std::size_t> saveRamBytes;     // the Super Wild Card's mode bits 3-2: 32 KB, 8 KB, 2 KB or none
+  bool jumpEntry = false;    // the Super Wild Card's mode bit 7: start at $8000 rather than the reset vector
+  bool multiFile = false;    // further files follow: the Super Wild Card's mode bit 6, the Pro Fighter's byte 2
+  std::uint8_t fileType = 0; // the Super Wild Card's byte 10 as written: $04 a program, $05 a battery save, $08 a real-time save
+  std::uint16_t modeWord = 0;  // the Pro Fighter's bytes 4-5 as written: $8377 ROM, $8347 ROM and a DSP-1, $82FD ROM, a DSP-1 and save RAM
+  bool dsp1 = false;         // the Pro Fighter's mode word names a DSP-1
+  bool hasSaveRam = false;   // the Pro Fighter's mode word names save RAM
+};
+
+// The copier header a file carries ahead of its image, or nothing when the file
+// begins with the image. A copier is named by its own bytes: the Super Wild Card
+// by its file ID at bytes 8-9, the Game Doctor by the sixteen-byte ID it opens
+// with, the Super UFO by the ID at bytes 8-15, the Pro Fighter by one of its
+// three mode words at bytes 4-5 under a ROM-mode byte at 3 of $00 or $80. A
+// file none of them signed carries an unnamed header when its length is 512
+// past a multiple of 1 KB, the size every headerless dump has. A file shorter
+// than a header carries none.
+[[nodiscard]] std::optional<CopierHeader> readCopierHeader(std::span<const std::uint8_t> file) noexcept;
+
+// One line saying what the header is and declares, for a tool's report: the
+// copier, the ROM size it declares, the mappings and save it names, and, when
+// the image that follows is not the size declared, the difference.
+[[nodiscard]] std::string describeCopierHeader(const CopierHeader& header, std::size_t imageBytes);
+
 // The bytes of save RAM a cartridge header declares, from its size code: zero for
 // a cartridge with none, otherwise 1 KB shifted by the code. Sizes beyond what a
 // cartridge can address are clamped to 128 KB.

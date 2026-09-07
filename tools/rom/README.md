@@ -138,7 +138,8 @@ Boots the cartridge, runs it for the requested length, and writes the S-DSP's
 32 kHz stereo output as a canonical PCM WAV. Rendering starts at power-on and runs
 forward verbatim — no warm-up, no skip, no fade — so the opening seconds are
 whatever the game does before it starts its sound driver, silence included. A
-512-byte copier header is dropped when the file length says one is present.
+copier's header ahead of the image is dropped and reported, as every tool here
+does ([docs/snes-cartridge.md §A copier's header](../../docs/snes-cartridge.md#a-copiers-header)).
 
 ```
 rom_render game.sfc --seconds 90 -o game.wav

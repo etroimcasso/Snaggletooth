@@ -1,6 +1,8 @@
 #include "snaggletooth/snes/cartridge.h"
 
 #include <bit>
+#include <string>
+#include <string_view>
 
 namespace snaggletooth {
 namespace {
@@ -296,6 +298,149 @@ std::optional<CartridgeHeader> parseCartridgeHeader(std::span<const std::uint8_t
 CartridgeMap detectCartridgeMap(std::span<const std::uint8_t> rom) noexcept {
   const std::optional<Site> site = bestSite(rom);
   return site.has_value() ? site->map : CartridgeMap::LoRom;
+}
+
+namespace {
+
+// The copier headers' fields, as offsets into the 512 bytes. The Super Wild
+// Card, the Pro Fighter and an unnamed header share the ROM-size word; the rest
+// is each copier's own.
+constexpr std::size_t kCopierRomSize = 0x00u;      // in 8 KB units
+constexpr std::size_t kCopierRomSizeUnit = 8u * 1024u;
+constexpr std::size_t kSwcMode = 0x02u;
+constexpr std::size_t kSwcFileId = 0x08u;          // $AA $BB
+constexpr std::size_t kSwcFileType = 0x0Au;
+constexpr std::uint8_t kSwcModeJumpEntry = 0x80u;
+constexpr std::uint8_t kSwcModeMultiFile = 0x40u;
+constexpr std::uint8_t kSwcModeSaveHiRom = 0x20u;
+constexpr std::uint8_t kSwcModeProgramHiRom = 0x10u;
+constexpr std::uint8_t kSwcModeSaveSizeShift = 2u;  // bits 3-2
+constexpr std::size_t kFigMultiFile = 0x02u;
+constexpr std::size_t kFigRomMode = 0x03u;         // $00 LoROM, $80 HiROM
+constexpr std::size_t kFigModeWord = 0x04u;
+constexpr std::uint8_t kFigMultiFileMore = 0x40u;
+constexpr std::uint8_t kFigRomModeHiRom = 0x80u;
+constexpr std::uint16_t kFigRom = 0x8377u;
+constexpr std::uint16_t kFigRomDsp1 = 0x8347u;
+constexpr std::uint16_t kFigRomDsp1SaveRam = 0x82FDu;
+constexpr std::size_t kGameDoctorId = 0x00u;
+constexpr std::size_t kSuperUfoId = 0x08u;
+
+// The Super Wild Card's save-size code: 32 KB, 8 KB, 2 KB, none.
+[[nodiscard]] std::size_t swcSaveBytes(std::uint8_t code) noexcept {
+  switch (code) {
+    case 0u: return 32u * 1024u;
+    case 1u: return 8u * 1024u;
+    case 2u: return 2u * 1024u;
+    default: return 0u;
+  }
+}
+
+[[nodiscard]] bool bytesAt(std::span<const std::uint8_t> file, std::size_t at,
+                           std::string_view text) noexcept {
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (file[at + i] != static_cast<std::uint8_t>(text[i])) return false;
+  }
+  return true;
+}
+
+[[nodiscard]] std::string sizeText(std::size_t bytes) {
+  if (bytes >= 1024u * 1024u && bytes % (1024u * 1024u) == 0u) return std::to_string(bytes / (1024u * 1024u)) + " MB";
+  if (bytes >= 1024u && bytes % 1024u == 0u) return std::to_string(bytes / 1024u) + " KB";
+  return std::to_string(bytes) + " bytes";
+}
+
+[[nodiscard]] const char* mapText(CartridgeMap map) noexcept {
+  return map == CartridgeMap::HiRom ? "HiROM" : "LoROM";
+}
+
+}  // namespace
+
+std::optional<CopierHeader> readCopierHeader(std::span<const std::uint8_t> file) noexcept {
+  if (file.size() < kCopierHeaderBytes) return std::nullopt;
+  CopierHeader header;
+  const bool swc = file[kSwcFileId] == 0xAAu && file[kSwcFileId + 1] == 0xBBu;
+  const std::uint16_t figWord = word(file, kFigModeWord);
+  const bool fig = (file[kFigRomMode] == 0u || file[kFigRomMode] == kFigRomModeHiRom) &&
+                   (figWord == kFigRom || figWord == kFigRomDsp1 || figWord == kFigRomDsp1SaveRam);
+  if (swc) {
+    header.copier = Copier::SuperWildCard;
+  } else if (bytesAt(file, kGameDoctorId, "GAME DOCTOR SF 3")) {
+    header.copier = Copier::GameDoctor;
+  } else if (bytesAt(file, kSuperUfoId, "SUPERUFO")) {
+    header.copier = Copier::SuperUfo;
+  } else if (fig) {
+    header.copier = Copier::ProFighter;
+  } else if (file.size() % 1024u == kCopierHeaderBytes) {
+    header.copier = Copier::Unnamed;
+  } else {
+    return std::nullopt;
+  }
+  switch (header.copier) {
+    case Copier::SuperWildCard: {
+      header.declaredRomBytes = word(file, kCopierRomSize) * kCopierRomSizeUnit;
+      const std::uint8_t mode = file[kSwcMode];
+      header.jumpEntry = (mode & kSwcModeJumpEntry) != 0u;
+      header.multiFile = (mode & kSwcModeMultiFile) != 0u;
+      header.saveMapping = (mode & kSwcModeSaveHiRom) != 0u ? CartridgeMap::HiRom : CartridgeMap::LoRom;
+      header.programMapping = (mode & kSwcModeProgramHiRom) != 0u ? CartridgeMap::HiRom : CartridgeMap::LoRom;
+      header.saveRamBytes = swcSaveBytes(static_cast<std::uint8_t>((mode >> kSwcModeSaveSizeShift) & 0x03u));
+      header.fileType = file[kSwcFileType];
+      break;
+    }
+    case Copier::ProFighter:
+      header.declaredRomBytes = word(file, kCopierRomSize) * kCopierRomSizeUnit;
+      header.multiFile = file[kFigMultiFile] == kFigMultiFileMore;
+      header.programMapping = file[kFigRomMode] == kFigRomModeHiRom ? CartridgeMap::HiRom : CartridgeMap::LoRom;
+      header.modeWord = figWord;
+      header.dsp1 = figWord != kFigRom;
+      header.hasSaveRam = figWord == kFigRomDsp1SaveRam;
+      break;
+    case Copier::Unnamed:
+      header.declaredRomBytes = word(file, kCopierRomSize) * kCopierRomSizeUnit;
+      break;
+    case Copier::GameDoctor:
+    case Copier::SuperUfo:
+      break;
+  }
+  return header;
+}
+
+std::string describeCopierHeader(const CopierHeader& header, std::size_t imageBytes) {
+  std::string text;
+  switch (header.copier) {
+    case Copier::SuperWildCard: text = "a Super Wild Card header"; break;
+    case Copier::ProFighter: text = "a Pro Fighter header"; break;
+    case Copier::GameDoctor: text = "a Game Doctor header"; break;
+    case Copier::SuperUfo: text = "a Super UFO header"; break;
+    case Copier::Unnamed: text = "a copier header no copier signed, known by the file's length"; break;
+  }
+  if (header.copier == Copier::GameDoctor || header.copier == Copier::SuperUfo) return text;
+  text += ": " + sizeText(header.declaredRomBytes);
+  if (header.programMapping) text += std::string(", ") + mapText(*header.programMapping);
+  if (header.copier == Copier::SuperWildCard) {
+    if (header.saveRamBytes.value_or(0) == 0) {
+      text += ", no save RAM";
+    } else {
+      text += ", " + sizeText(*header.saveRamBytes) + " of save RAM mapped " + mapText(*header.saveMapping);
+    }
+    switch (header.fileType) {
+      case 0x04u: text += ", a program"; break;
+      case 0x05u: text += ", a battery save"; break;
+      case 0x08u: text += ", a real-time save"; break;
+      default: text += ", file type " + std::to_string(header.fileType); break;
+    }
+    if (header.jumpEntry) text += ", entered at $8000";
+  } else if (header.copier == Copier::ProFighter) {
+    text += header.hasSaveRam ? ", a DSP-1 and save RAM" : header.dsp1 ? ", a DSP-1" : ", ROM alone";
+  }
+  if (header.multiFile) text += ", further files follow";
+  if (imageBytes > header.declaredRomBytes) {
+    text += "; the image is " + std::to_string(imageBytes - header.declaredRomBytes) + " bytes longer than declared";
+  } else if (imageBytes < header.declaredRomBytes) {
+    text += "; the image is " + std::to_string(header.declaredRomBytes - imageBytes) + " bytes shorter than declared";
+  }
+  return text;
 }
 
 std::size_t declaredSaveRamBytes(std::span<const std::uint8_t> rom) noexcept {

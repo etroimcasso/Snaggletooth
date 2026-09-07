@@ -14,19 +14,22 @@
 // assembled, every byte produced exactly once, none differing. A manifest
 // written for another image is refused.
 //
-// A copier header, the 512 bytes some dumps carry ahead of the image, is dropped
-// when the file length says one is present.
+// A copier's header ahead of the image is dropped, and the report says which
+// copier wrote it and what it declares.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "rom/rom_verify.h"
+#include "snaggletooth/snes/cartridge.h"
 
 namespace {
 
@@ -69,7 +72,10 @@ int main(int argc, char** argv) {
     }
     rom.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   }
-  if (rom.size() % 1024 == 512) rom.erase(rom.begin(), rom.begin() + 512);
+  if (const std::optional<snaggletooth::CopierHeader> copier = snaggletooth::readCopierHeader(rom)) {
+    rom.erase(rom.begin(), rom.begin() + static_cast<std::ptrdiff_t>(snaggletooth::kCopierHeaderBytes));
+    std::cout << "dropped " << snaggletooth::describeCopierHeader(*copier, rom.size()) << "\n";
+  }
   if (rom.empty()) {
     std::cerr << imagePath << " holds no cartridge image\n";
     return 1;
