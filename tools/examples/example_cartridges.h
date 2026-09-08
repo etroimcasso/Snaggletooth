@@ -7,7 +7,8 @@
 // registers the way real code does and dispatch through bounded tables, send
 // the image's bytes to the hardware every way the asset pass has a rule for,
 // run through a mirror of the bank the tree places them in, build what they
-// send in work RAM first, or declare transfers the run never takes. The
+// send in work RAM first, declare transfers the run never takes, or upload to
+// every video memory and set the bases afterwards. The
 // tests of the cartridge tools read them, and `snes_examples` writes them to disk, so every
 // example a page shows is the real output of a tool on a cartridge that is ours
 // to publish.
@@ -38,6 +39,7 @@
 #include "examples/running_bank/running_bank.h"
 #include "examples/staging/staging.h"
 #include "examples/declaring/declaring.h"
+#include "examples/landing/landing.h"
 
 namespace snaggletooth::examples {
 
@@ -74,6 +76,7 @@ inline const std::vector<Example>& examples() {
       {"running_bank", "a HiROM program that proves its data bank from the bank the CPU runs in, every way a path arrives", &runningBankImage},
       {"staging", "ranges built in work RAM every way the shadow has a rule for, then sent to the hardware", &stagingImage},
       {"declaring", "transfers set up and started several times in one stretch of code, and five the code proves that the run never takes", &declaringImage},
+      {"landing", "uploads to every video memory in forced blank, the bases set afterwards, then a base flipped behind an upload, Mode 7, and an upload no frame draws", &landingImage},
   };
   return all;
 }

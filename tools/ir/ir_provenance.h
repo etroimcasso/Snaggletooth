@@ -151,7 +151,11 @@ struct Writer {
 // the next byte the next offset, and `source` is the run holding `first`
 // among those the invocation that carried it read, followed out through its
 // callers exactly as a staged byte's source is — the file the stream is
-// lifted as, which may be wider than the bytes carried.
+// lifted as, which may be wider than the bytes carried. Where the bytes went
+// on the other side of the port — the lowest and the highest VRAM word,
+// palette word or OAM byte the port put one at — is what the host reported
+// for each store through `CarrySink::landedAt`; a stream to the audio ports
+// has none.
 struct Stream {
   Address site = 0;
   std::uint32_t registerAddress = 0;  // as `$00:XXXX`
@@ -160,11 +164,15 @@ struct Stream {
   std::uint32_t times = 1;
   OriginInterval source;
   std::optional<Address> memory;
+  bool landed = false;
+  std::uint16_t lowest = 0;
+  std::uint16_t highest = 0;
 };
 
 // What a host does with the bytes the CPU carries out of work RAM to a data
 // register, told as they go so it can read the shadow under each byte at that
-// moment — the buffer may be rebuilt before the sequence ends.
+// moment — the buffer may be rebuilt before the sequence ends; and what it
+// knows about the port the bytes went through, which the shadow does not.
 class CarrySink {
  public:
   virtual ~CarrySink() = default;
@@ -175,6 +183,17 @@ class CarrySink {
   // The sequence open for the register ended; `recorded` says it was two
   // bytes or more and is among `streams()`.
   virtual void carryEnded(std::uint32_t registerAddress, bool recorded) = 0;
+  // Where the port put the byte the instruction being run stored to the
+  // register — the pair's first, for `VMDATAL`/`VMDATAH` and the audio ports
+  // — as the machine reported it for that store; nothing for a register whose
+  // bytes land in no memory, or for a host that does not know.
+  virtual std::optional<std::uint16_t> landedAt(std::uint32_t registerAddress) {
+    (void)registerAddress;
+    return std::nullopt;
+  }
+  // A stream of two bytes or more closed, as this closing saw it: its count
+  // is one, and its landing is this closing's own.
+  virtual void streamClosed(const Stream& stream) { (void)stream; }
 };
 
 // The shadow of a run: every place's origin byte by byte, work RAM's origin and

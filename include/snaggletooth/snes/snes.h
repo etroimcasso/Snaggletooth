@@ -111,7 +111,9 @@ enum class AccessSource : std::uint8_t { Cpu, Dma, Hdma, WramPort };
 // the bus, which way, what the cycle was for, and who made it. A transfer
 // engine's accesses are plain data reads and writes; the CPU's carry the kind
 // the core drove. An engine's access also says which of the eight channels it
-// served, and the HDMA engine's whether it was reading its own table.
+// served, and the HDMA engine's whether it was reading its own table. A write
+// to a video data port says where the port put the byte, which the address
+// and the value alone cannot tell.
 struct BusAccess {
   std::uint32_t address = 0;
   std::uint8_t value = 0;
@@ -120,6 +122,11 @@ struct BusAccess {
   AccessSource source = AccessSource::Cpu;
   std::uint8_t channel = 0;  // the channel an engine's access served, 0-7; 0 for the CPU's and the port's
   bool table = false;        // the HDMA engine reading its table — a line count, a direct table's inline value, an indirect entry's pointer — rather than a byte an indirect entry points at, or any write
+  // Where a write to a video data port landed: the VRAM word address for a
+  // write to $2118 or $2119, after any address translation; the palette word
+  // for a write to $2122, on both halves; the OAM byte for a write to $2104,
+  // on both halves, within the 544 bytes. Absent on every other access.
+  std::optional<std::uint16_t> landed;
 };
 
 // What a machine tells about every access it makes, and every CPU cycle that
@@ -240,11 +247,17 @@ struct SnesState {
   // ---- the PPU register-file stub -------------------------------------------
   // Video memory and the register fields that reach it. Nothing renders — the arrays
   // are exposed for a host to read, and the ports store into them the way the console
-  // does, so a program that fills VRAM or the palette leaves the memory a real PPU
-  // would have seen.
+  // does, so a program that fills VRAM, the palette or the sprite table leaves the
+  // memory a real PPU would have seen.
   std::array<std::uint8_t, 65536> vram{};  // 64 KB video RAM (32K words)
   std::array<std::uint8_t, 512> cgram{};   // 512 B palette RAM (256 words)
+  std::array<std::uint8_t, 544> oam{};     // 512 B of sprite entries and the 32 B of high bits
   std::uint8_t inidisp = 0x80;  // $2100: bit7 forced blank (set at power-on), bits3-0 brightness
+  std::uint8_t objsel = 0;      // $2101: sprite sizes, name select and name base
+  std::uint16_t oamadd = 0;     // $2102/$2103 as written: the 9-bit reload value, the priority-rotation bit above it
+  std::uint16_t oamAddress = 0; // the 10-bit OAM byte address the port is at: the reload value doubled on a write to $2102/$2103 and at the start of vblank, stepped by every access
+  std::uint8_t oamLatch = 0;    // the low byte held between the two halves of a write below $200
+  std::uint8_t bgmode = 0;      // $2105: the screen mode and the tile sizes
   std::uint8_t vmain = 0;       // $2115: VRAM address increment mode and translation
   std::uint16_t vmadd = 0;      // $2116/$2117: the VRAM word address
   std::uint16_t vramLatch = 0;  // the 16-bit read-prefetch register behind $2139/$213A
@@ -332,9 +345,11 @@ class Snes {
 
   // The video memory a host reads to see what the program drew. Nothing renders it —
   // the register ports store here the way the console does, and these faces hand the
-  // bytes back. VRAM is 64 KB (32K words), CGRAM 512 bytes (256 palette words).
+  // bytes back. VRAM is 64 KB (32K words), CGRAM 512 bytes (256 palette words), OAM
+  // 544 bytes (128 four-byte sprite entries and 32 bytes of their high bits).
   [[nodiscard]] std::span<const std::uint8_t> vram() const noexcept { return state_.vram; }
   [[nodiscard]] std::span<const std::uint8_t> cgram() const noexcept { return state_.cgram; }
+  [[nodiscard]] std::span<const std::uint8_t> oam() const noexcept { return state_.oam; }
 
   // The observer told every access the machine makes and every internal CPU
   // cycle, or none, which is how the machine starts. It is the host's object and
@@ -373,8 +388,12 @@ class Snes {
 
   // Reports one access to the observer, when one is set. `channel` and `table`
   // are an engine's to say; the CPU's accesses leave them at their defaults.
+  // Where a video data port put the byte is what the port recorded as the
+  // access routed through it, taken here so the next access starts clear.
   void observe(std::uint32_t address, std::uint8_t value, bool write, CycleKind kind,
                AccessSource source, std::uint8_t channel = 0, bool table = false) {
+    const std::optional<std::uint16_t> landed = portLanding_;
+    portLanding_.reset();
     if (observer_ == nullptr) return;
     BusAccess access;
     access.address = address;
@@ -384,6 +403,7 @@ class Snes {
     access.source = source;
     access.channel = channel;
     access.table = table;
+    access.landed = landed;
     observer_->access(access);
   }
 
@@ -490,10 +510,18 @@ class Snes {
   std::uint8_t readWramPort(std::uint16_t offset);
   void writeWramPort(std::uint16_t offset, std::uint8_t value);
 
-  // The PPU register file ($2100-$213F): the forced-blank and background fields, the
-  // VRAM and CGRAM ports with their address translation and prefetch. Nothing renders.
+  // The PPU register file ($2100-$213F): the forced-blank, mode and base fields, the
+  // VRAM and CGRAM ports with their address translation and prefetch, and the OAM
+  // port with its reload. Nothing renders. A write to a data port records where the
+  // port put the byte in `portLanding_`, for the access's report.
   std::uint8_t readPpuReg(std::uint16_t offset);
   void writePpuReg(std::uint16_t offset, std::uint8_t value);
+  // Reinitialises the OAM address from the reload value: at the start of vblank
+  // when the screen is on, and when forced blank is released during vblank's
+  // first line.
+  void reloadOamAddress() noexcept {
+    state_.oamAddress = static_cast<std::uint16_t>((state_.oamadd & 0x1FFu) << 1);
+  }
 
   // The CPU-side registers ($4200-$421F): interrupt enables and flags, the H/V timer
   // settings, the multiply/divide unit, and the auto-joypad read.
@@ -549,6 +577,7 @@ class Snes {
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
   bool videoAdvanced_ = false;       // whether this cycle's access already ticked the machine's events
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
+  std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported
 };
 
 }  // namespace snaggletooth

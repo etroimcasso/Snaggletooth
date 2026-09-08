@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -180,6 +181,100 @@ RangeKey keyOf(const MovedRange& r) {
           r.memory, static_cast<std::uint8_t>(r.step), r.bytes, static_cast<std::uint8_t>(r.kind)};
 }
 
+// The memory a video data port reaches, by the B-bus address written: nothing
+// for a register whose bytes land in no memory.
+std::optional<PortMemory> portMemory(std::uint32_t address) {
+  if (!inSystemBank(address)) return std::nullopt;
+  switch (address & 0xFFFFu) {
+    case 0x2118u:
+    case 0x2119u: return PortMemory::Vram;
+    case 0x2122u: return PortMemory::Cgram;
+    case 0x2104u: return PortMemory::Oam;
+    default: return std::nullopt;
+  }
+}
+
+// Where the port put one more byte, folded into a landing's extent.
+void foldLanding(std::optional<PortLanding>& landing, PortMemory memory, std::uint16_t at) {
+  if (!landing || landing->memory != memory) {
+    landing = PortLanding{.memory = memory, .lowest = at, .highest = at, .shown = false, .areas = 0};
+    return;
+  }
+  landing->lowest = std::min(landing->lowest, at);
+  landing->highest = std::max(landing->highest, at);
+}
+
+// Whether the words `lowest`-`highest` meet an area of `words` words at
+// `base`, the area wrapping at the end of VRAM as the address does.
+bool meets(std::uint16_t lowest, std::uint16_t highest, std::uint32_t base, std::uint32_t words) {
+  constexpr std::uint32_t kVramWords = 0x8000u;
+  const std::uint32_t start = base % kVramWords;
+  const std::uint32_t end = start + std::min(words, kVramWords);  // exclusive
+  const auto overlaps = [&](std::uint32_t from, std::uint32_t to) {
+    return from < to && lowest < to && from <= highest;
+  };
+  if (overlaps(start, std::min(end, kVramWords))) return true;
+  return end > kVramWords && overlaps(0, end - kVramWords);
+}
+
+// What the PPU used the words `lowest`-`highest` as, from the screen mode and
+// the bases as they stand: each layer the mode has, its screen and its name
+// base at the layer's colour depth in that mode; the sprite tiles; the whole
+// of VRAM under Mode 7.
+std::uint16_t vramAreas(const SnesState& state, std::uint16_t lowest, std::uint16_t highest) {
+  const std::uint8_t mode = state.bgmode & 7u;
+  if (mode == 7u) return kAreaMode7;
+  // Per mode, each layer's colour depth in bits — zero for a layer the mode
+  // does not have — and whether the layer has a screen without tiles of its
+  // own, which is BG3 under the offset-per-tile modes.
+  static constexpr std::uint8_t kDepth[8][4] = {{2, 2, 2, 2}, {4, 4, 2, 0}, {4, 4, 0, 0}, {8, 4, 0, 0},
+                                                {8, 2, 0, 0}, {4, 2, 0, 0}, {4, 0, 0, 0}, {0, 0, 0, 0}};
+  const bool offsetPerTile = mode == 2u || mode == 4u || mode == 6u;
+  const std::uint8_t screens[4] = {state.bg1sc, state.bg2sc, state.bg3sc, state.bg4sc};
+  const std::uint8_t bases[4] = {static_cast<std::uint8_t>(state.bg12nba & 0x0Fu),
+                                 static_cast<std::uint8_t>(state.bg12nba >> 4),
+                                 static_cast<std::uint8_t>(state.bg34nba & 0x0Fu),
+                                 static_cast<std::uint8_t>(state.bg34nba >> 4)};
+  std::uint16_t areas = 0;
+  for (std::size_t layer = 0; layer < 4; ++layer) {
+    const std::uint8_t depth = kDepth[mode][layer];
+    const bool screenOnly = layer == 2 && offsetPerTile;
+    if (depth == 0u && !screenOnly) continue;
+    const std::uint32_t screenBase = static_cast<std::uint32_t>(screens[layer] & 0xFCu) << 8;  // 1K-word steps
+    const std::uint8_t size = screens[layer] & 3u;
+    const std::uint32_t screenWords = size == 0u ? 0x400u : size == 3u ? 0x1000u : 0x800u;
+    if (meets(lowest, highest, screenBase, screenWords)) areas |= static_cast<std::uint16_t>(kAreaTilemap1 << layer);
+    if (depth == 0u) continue;
+    const std::uint32_t nameBase = static_cast<std::uint32_t>(bases[layer]) << 12;  // 4K-word steps
+    const std::uint32_t nameWords = 1024u * 4u * depth;                             // a thousand tiles of 4 words per bit
+    if (meets(lowest, highest, nameBase, nameWords)) areas |= static_cast<std::uint16_t>(kAreaTiles1 << layer);
+  }
+  const std::uint32_t spriteBase = static_cast<std::uint32_t>(state.objsel & 7u) << 13;  // 8K-word steps
+  const std::uint32_t gap = static_cast<std::uint32_t>((state.objsel >> 3) & 3u) << 12;   // 4K-word steps
+  if (meets(lowest, highest, spriteBase, 0x1000u) || meets(lowest, highest, spriteBase + 0x1000u + gap, 0x1000u)) {
+    areas |= kAreaSprites;
+  }
+  return areas;
+}
+
+// Every field of a landing, as a key.
+using LandingKey = std::tuple<Address, std::uint8_t, Address, std::uint32_t, std::uint8_t, std::uint8_t,
+                              std::uint16_t, std::uint16_t, bool, std::uint16_t>;
+LandingKey keyOf(const LandedRange& l) {
+  return {l.site,           l.channel,          l.memory,         l.bytes,        static_cast<std::uint8_t>(l.kind),
+          static_cast<std::uint8_t>(l.landing.memory), l.landing.lowest, l.landing.highest, l.landing.shown, l.landing.areas};
+}
+
+// A stream's identity with its landing, as a key.
+using StreamKey = std::tuple<Address, Address, std::size_t, std::uint32_t, bool, Address, bool, std::uint8_t,
+                             std::uint16_t, std::uint16_t, bool, std::uint16_t>;
+StreamKey keyOf(const StreamedRange& s) {
+  const PortLanding landing = s.landing.value_or(PortLanding{});
+  return {s.site,   s.registerAddress, s.romOffset, s.bytes, s.memory.has_value(), s.memory.value_or(0),
+          s.landing.has_value(), static_cast<std::uint8_t>(landing.memory), landing.lowest, landing.highest,
+          landing.shown, landing.areas};
+}
+
 // The observer the run sets on the machine: it follows every byte the two
 // transfer engines move and groups them into ranges, and hands every CPU
 // access and cycle to the step observer the lockstep reads. A range is open
@@ -201,28 +296,55 @@ RangeKey keyOf(const MovedRange& r) {
 // carries out of work RAM to a data register, which the shadow tells the
 // recorder about as the CPU goes, so the buffer the CPU carried is an extent
 // exactly as one an engine carried.
+//
+// Every write through a video data port says where the port put the byte,
+// and the recorder folds it into the landing of the range open on that
+// channel — or, for the CPU's own store, holds it for the shadow's stream to
+// take. A landing in VRAM is read at the first start of a frame with the
+// screen on after its bytes landed, against the mode and the bases as they
+// then stand, whether the range is still open or has closed; bytes that land
+// after that reading are read at the next such frame, and the areas are the
+// union. A landing none of whose bytes a frame was drawn after is unshown. A
+// palette or OAM landing is read as it lands.
 struct Recorder final : BusObserver, ir::CarrySink {
   const Snes& machine;
   ir::Provenance& shadow;
   Address site = 0;  // the instruction about to run
   ir::StepObserver cpu;  // what the CPU did this step: its fetches, its data accesses, its cycles
 
-  // An open range, where its next byte is expected, and — for a range read out
-  // of work RAM — who wrote its bytes and where they came from.
+  // An open range, where its next byte is expected, who wrote its bytes and
+  // where they came from — for a range read out of work RAM — and where its
+  // bytes landed.
   struct Open {
     MovedRange range;
     Address next = 0;
     std::vector<StagedWriter> writers;
+    std::optional<PortLanding> landing;
+    bool unread = false;  // bytes landed in VRAM since the landing was last read at a drawn frame
   };
   std::array<std::optional<Open>, 8> dma;       // a general-purpose transfer per channel
   std::array<std::optional<Open>, 8> table;     // an HDMA table per channel
   std::array<std::optional<Open>, 8> indirect;  // an indirect block per channel
   std::array<Address, 8> dmaSite{};             // the last `MDMAEN` write naming each channel
   std::array<Address, 8> hdmaSite{};            // the `HDMAEN` write that enabled each channel
+  std::array<MovedKind, 8> lastKind{};          // what the channel's last A-bus byte was, for its B-bus write
   std::uint8_t hdmaEnabled = 0;                 // the last `HDMAEN` value
 
   std::map<RangeKey, std::size_t> index;  // a closed range's place in `out`
   std::vector<MovedRange> out;
+
+  // The landings: those waiting for a drawn frame, and those read, each
+  // distinct one once with its count; the streams the same way.
+  std::vector<LandedRange> pendingLandings;
+  std::map<LandingKey, std::size_t> landedIndex;
+  std::vector<LandedRange> landed;
+  std::vector<StreamedRange> pendingStreams;
+  std::map<StreamKey, std::size_t> streamIndex;
+  std::vector<StreamedRange> streams;
+
+  // Where the port put the bytes the CPU stored this step, in order, for the
+  // shadow's streams to take by register.
+  std::deque<std::pair<std::uint32_t, std::uint16_t>> stepLandings;
 
   // The origin of the byte an engine is carrying between its read and its
   // write, and the trigger it moves under.
@@ -247,6 +369,50 @@ struct Recorder final : BusObserver, ir::CarrySink {
 
   Recorder(const Snes& m, ir::Provenance& p) : machine(m), shadow(p) {}
 
+  // A step begins: what the CPU did last step is cleared, and so are the port
+  // landings the shadow did not take.
+  void stepBegan(Address at) {
+    site = at;
+    cpu.clear();
+    stepLandings.clear();
+  }
+
+  // A landing read — or given up as unshown — joins the count of its kind.
+  void record(LandedRange landing) {
+    const LandingKey key = keyOf(landing);
+    const auto found = landedIndex.find(key);
+    if (found == landedIndex.end()) {
+      landedIndex.emplace(key, landed.size());
+      landed.push_back(landing);
+    } else {
+      ++landed[found->second].times;
+    }
+  }
+  void record(StreamedRange stream) {
+    const StreamKey key = keyOf(stream);
+    const auto found = streamIndex.find(key);
+    if (found == streamIndex.end()) {
+      streamIndex.emplace(key, streams.size());
+      streams.push_back(stream);
+    } else {
+      ++streams[found->second].times;
+    }
+  }
+
+  // Reads a landing: a palette or OAM landing is what it is; a VRAM landing
+  // takes the areas its extent lies in under the mode and the bases as they
+  // stand, joined to any it was read into before.
+  void readLanding(PortLanding& landing) {
+    landing.shown = true;
+    switch (landing.memory) {
+      case PortMemory::Cgram: landing.areas = kAreaPalette; return;
+      case PortMemory::Oam: landing.areas = kAreaOam; return;
+      case PortMemory::Vram:
+        landing.areas |= vramAreas(machine.state(), landing.lowest, landing.highest);
+        return;
+    }
+  }
+
   void close(std::optional<Open>& open) {
     if (!open) return;
     const RangeKey key = keyOf(open->range);
@@ -260,7 +426,92 @@ struct Recorder final : BusObserver, ir::CarrySink {
     if (!open->writers.empty() && open->range.step != MovedStep::Fixed) {
       stage(extentStart(open->range), open->range.bytes, open->writers);
     }
+    if (open->landing) {
+      LandedRange landing{.site = open->range.site,
+                          .channel = open->range.channel,
+                          .memory = open->range.memory,
+                          .bytes = open->range.bytes,
+                          .kind = open->range.kind,
+                          .landing = *open->landing,
+                          .times = 1};
+      if (open->unread) {
+        pendingLandings.push_back(landing);
+      } else {
+        record(landing);
+      }
+    }
     open.reset();
+  }
+
+  // The start of a frame with the screen on reads every landing with bytes
+  // not yet read — a range still open on a channel, and every range and
+  // stream that closed since the last such frame — against the mode and the
+  // bases as they stand.
+  void frameDrawn() {
+    if ((machine.state().inidisp & 0x80u) != 0u) return;
+    for (std::uint8_t c = 0; c < 8; ++c) {
+      for (std::optional<Open>* open : {&dma[c], &table[c], &indirect[c]}) {
+        if (!*open || !(*open)->landing || !(*open)->unread) continue;
+        readLanding(*(*open)->landing);
+        (*open)->unread = false;
+      }
+    }
+    for (LandedRange& landing : pendingLandings) {
+      readLanding(landing.landing);
+      record(landing);
+    }
+    pendingLandings.clear();
+    for (StreamedRange& stream : pendingStreams) {
+      readLanding(*stream.landing);
+      record(stream);
+    }
+    pendingStreams.clear();
+  }
+
+  // Where the port put the byte the CPU stored to `registerAddress` — or to
+  // the second of its pair — this step, the first such store not yet taken.
+  std::optional<std::uint16_t> landedAt(std::uint32_t registerAddress) override {
+    for (auto it = stepLandings.begin(); it != stepLandings.end(); ++it) {
+      if (it->first == registerAddress || it->first == registerAddress + 1u) {
+        const std::uint16_t at = it->second;
+        stepLandings.erase(it);
+        return at;
+      }
+    }
+    return std::nullopt;
+  }
+
+  // A stream closed: with its landing, it waits for a drawn frame as a range
+  // does, or is read at once; without one, it is counted as it is.
+  void streamClosed(const ir::Stream& stream) override {
+    StreamedRange range{.site = stream.site,
+                        .registerAddress = stream.registerAddress,
+                        .registerName = {},
+                        .registerClass = std::nullopt,
+                        .romOffset = stream.first,
+                        .bytes = static_cast<std::uint32_t>(stream.bytes),
+                        .times = 1,
+                        .source = stream.source,
+                        .memory = stream.memory,
+                        .landing = std::nullopt};
+    if (const std::optional<Cpu65816Register> reg = cpu65816Register(range.registerAddress)) {
+      range.registerName = reg->name;
+      range.registerClass = reg->cls;
+    }
+    const std::optional<PortMemory> memory = portMemory(range.registerAddress);
+    if (stream.landed && memory) {
+      range.landing = PortLanding{.memory = *memory,
+                                  .lowest = stream.lowest,
+                                  .highest = stream.highest,
+                                  .shown = false,
+                                  .areas = 0};
+      if (*memory == PortMemory::Vram) {
+        pendingStreams.push_back(range);
+        return;
+      }
+      readLanding(*range.landing);
+    }
+    record(range);
   }
 
   // Folds a closed range read out of work RAM into its extent.
@@ -342,16 +593,24 @@ struct Recorder final : BusObserver, ir::CarrySink {
     close(indirect[channel]);
   }
 
-  // A new frame's HDMA walks every table from its start again.
+  // A new frame's HDMA walks every table from its start again; and, with the
+  // screen on, the frame reads every landing waiting for it.
   void frameBegan() {
     for (std::uint8_t c = 0; c < 8; ++c) {
       close(table[c]);
       close(indirect[c]);
     }
+    frameDrawn();
   }
 
+  // The run's end: every range closes, and a landing still waiting for a
+  // drawn frame is unshown.
   void finish() {
     for (std::uint8_t c = 0; c < 8; ++c) closeChannel(c);
+    for (LandedRange& landing : pendingLandings) record(landing);
+    pendingLandings.clear();
+    for (StreamedRange& stream : pendingStreams) record(stream);
+    pendingStreams.clear();
   }
 
   // A byte of `kind` the channel moved at `address` on the A bus; `read` when
@@ -394,7 +653,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
       range.registerName = reg->name;
       range.registerClass = reg->cls;
     }
-    open = Open{.range = range, .next = stepped(address, step), .writers = {}};
+    open = Open{.range = range, .next = stepped(address, step), .writers = {}, .landing = std::nullopt, .unread = false};
     if (read) fold(open->writers, address);
   }
 
@@ -424,11 +683,14 @@ struct Recorder final : BusObserver, ir::CarrySink {
     }
     if (a.source == AccessSource::Cpu) {
       cpu.access(a);
+      if (!a.write) return;
+      // A store through a video data port: where the port put the byte is
+      // held for the shadow's stream.
+      if (a.landed) stepLandings.emplace_back(a.address & 0xFFFFu, *a.landed);
       // Only the two start registers matter here: a write to `MDMAEN` names the
       // site of every byte the channels it selects then move, and closes what
       // those channels had open; a write to `HDMAEN` does the same for the
       // channels it newly enables.
-      if (!a.write) return;
       const std::uint16_t offset = static_cast<std::uint16_t>(a.address & 0xFFFFu);
       if ((offset != kMdmaen && offset != kHdmaen) || !inSystemBank(a.address)) return;
       for (std::uint8_t c = 0; c < 8; ++c) {
@@ -460,14 +722,30 @@ struct Recorder final : BusObserver, ir::CarrySink {
     if (a.write == toRegister) {
       // The register side. A read from a register is what the engine carries
       // — unless the register is the port, whose own read already said what;
-      // a write ends the byte's journey.
+      // a write ends the byte's journey, and where a video data port put the
+      // byte joins the landing of the range the byte belongs to.
       if (a.write) {
         carried.reset();
+        if (a.landed) {
+          const MovedKind was = lastKind[a.channel];
+          std::optional<Open>& open =
+              was == MovedKind::Dma ? dma[a.channel] : was == MovedKind::Table ? table[a.channel] : indirect[a.channel];
+          const std::optional<PortMemory> memory = portMemory(a.address);
+          if (open && memory) {
+            foldLanding(open->landing, *memory, *a.landed);
+            if (*memory == PortMemory::Vram) {
+              open->unread = true;
+            } else {
+              readLanding(*open->landing);
+            }
+          }
+        }
       } else if (!isPort(a.address) || !carried) {
         carried = shadow.at(a.address);
       }
       return;
     }
+    lastKind[a.channel] = kind;
     moved(a.channel, kind, a.address, !a.write);
     if (a.write) {
       shadow.written(a.address, carried.value_or(ir::kNoOrigin),
@@ -758,7 +1036,10 @@ bool sameExtent(const StagedRange& a, const StagedRange& b) {
 
 bool sameStream(const StreamedRange& a, const StreamedRange& b) {
   return a.site == b.site && a.registerAddress == b.registerAddress && a.memory == b.memory &&
-         a.romOffset == b.romOffset && a.bytes == b.bytes;
+         a.romOffset == b.romOffset && a.bytes == b.bytes && a.landing.has_value() == b.landing.has_value() &&
+         (!a.landing || (a.landing->memory == b.landing->memory && a.landing->lowest == b.landing->lowest &&
+                         a.landing->highest == b.landing->highest && a.landing->shown == b.landing->shown &&
+                         a.landing->areas == b.landing->areas));
 }
 
 bool rangeBefore(const MovedRange& a, const MovedRange& b) {
@@ -767,6 +1048,45 @@ bool rangeBefore(const MovedRange& a, const MovedRange& b) {
   if (a.memory != b.memory) return a.memory < b.memory;
   if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
   return a.bytes > b.bytes;  // the whole walk, then what the run's end cut
+}
+
+bool landedBefore(const LandedRange& a, const LandedRange& b) {
+  if (a.site != b.site) return a.site < b.site;
+  if (a.channel != b.channel) return a.channel < b.channel;
+  if (a.memory != b.memory) return a.memory < b.memory;
+  if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
+  if (a.bytes != b.bytes) return a.bytes > b.bytes;
+  if (a.landing.memory != b.landing.memory) return static_cast<int>(a.landing.memory) < static_cast<int>(b.landing.memory);
+  if (a.landing.lowest != b.landing.lowest) return a.landing.lowest < b.landing.lowest;
+  if (a.landing.highest != b.landing.highest) return a.landing.highest < b.landing.highest;
+  if (a.landing.shown != b.landing.shown) return a.landing.shown;
+  return a.landing.areas < b.landing.areas;
+}
+
+std::string areaText(const PortLanding& landing) {
+  if (!landing.shown) return "unshown";
+  static constexpr std::pair<std::uint16_t, const char*> kNames[] = {
+      {kAreaTilemap1, "tilemap1"}, {kAreaTilemap2, "tilemap2"}, {kAreaTilemap3, "tilemap3"},
+      {kAreaTilemap4, "tilemap4"}, {kAreaTiles1, "tiles1"},     {kAreaTiles2, "tiles2"},
+      {kAreaTiles3, "tiles3"},     {kAreaTiles4, "tiles4"},     {kAreaSprites, "sprites"},
+      {kAreaMode7, "mode7"},       {kAreaPalette, "palette"},   {kAreaOam, "oam"}};
+  std::string out;
+  for (const auto& [bit, name] : kNames) {
+    if ((landing.areas & bit) == 0u) continue;
+    if (!out.empty()) out += '+';
+    out += name;
+  }
+  return out.empty() ? "none" : out;
+}
+
+std::string portAddressText(PortMemory memory, std::uint16_t address) {
+  char text[8];
+  switch (memory) {
+    case PortMemory::Vram: std::snprintf(text, sizeof text, "$%04X", address); break;
+    case PortMemory::Cgram: std::snprintf(text, sizeof text, "$%02X", address); break;
+    case PortMemory::Oam: std::snprintf(text, sizeof text, "$%03X", address); break;
+  }
+  return text;
 }
 
 bool sameSighting(const ReachedTarget& a, const ReachedTarget& b) {
@@ -818,8 +1138,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
                       " reads its pointer from memory the run cannot see; not recorded");
     }
 
-    recorder.site = site;
-    recorder.cpu.clear();
+    recorder.stepBegan(site);
     spent += machine.step();
 
     // A step runs one instruction, or one cycle of a transfer, never a whole
@@ -872,10 +1191,18 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
     return contextOf(a.mode).bits < contextOf(b.mode).bits;
   });
 
+  // The shadow closes the stream still open — the recorder folds the last
+  // carry with it and takes its landing — and then the recorder closes every
+  // range, so what the run's end cut short is counted, and a landing no frame
+  // drew is unshown.
+  shadow.finish();
   recorder.finish();
+  shadow.carries = nullptr;
   machine.setObserver(nullptr);
   observation.moved = std::move(recorder.out);
   std::sort(observation.moved.begin(), observation.moved.end(), rangeBefore);
+  observation.landed = std::move(recorder.landed);
+  std::sort(observation.landed.begin(), observation.landed.end(), landedBefore);
 
   observation.ran = std::move(lockstep.ran);
   std::sort(observation.ran.begin(), observation.ran.end(), [](const Landing& a, const Landing& b) {
@@ -893,11 +1220,6 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   observation.nodes = lockstep.nodes.size();
   observation.divergences = lockstep.diverged;
 
-  // The shadow closes the stream still open, and the recorder folds the last
-  // carry with it, before the extents are read out.
-  shadow.finish();
-  shadow.carries = nullptr;
-
   // What was staged: every extent, in address order then by count, its
   // writers most bytes first.
   for (auto& [extent, range] : recorder.staged) {
@@ -909,29 +1231,31 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
               });
     observation.staged.push_back(std::move(range));
   }
-  // What the CPU streamed.
-  for (const ir::Stream& stream : shadow.streams()) {
-    StreamedRange range{.site = stream.site,
-                        .registerAddress = stream.registerAddress,
-                        .registerName = {},
-                        .registerClass = std::nullopt,
-                        .romOffset = stream.first,
-                        .bytes = static_cast<std::uint32_t>(stream.bytes),
-                        .times = stream.times,
-                        .source = stream.source,
-                        .memory = stream.memory};
-    if (const std::optional<Cpu65816Register> reg = cpu65816Register(range.registerAddress)) {
-      range.registerName = reg->name;
-      range.registerClass = reg->cls;
+  // What the CPU streamed: each distinct stream and landing once with its
+  // count, as the recorder took them from the shadow's closings; the source
+  // is the shadow's, which stands as the widest run it found.
+  observation.streamed = std::move(recorder.streams);
+  for (StreamedRange& range : observation.streamed) {
+    for (const ir::Stream& stream : shadow.streams()) {
+      if (stream.site == range.site && stream.registerAddress == range.registerAddress &&
+          stream.memory == range.memory && stream.first == range.romOffset && stream.bytes == range.bytes) {
+        range.source = stream.source;
+        break;
+      }
     }
-    observation.streamed.push_back(range);
   }
   std::sort(observation.streamed.begin(), observation.streamed.end(),
             [](const StreamedRange& a, const StreamedRange& b) {
               if (a.site != b.site) return a.site < b.site;
               if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
               if (a.memory != b.memory) return a.memory < b.memory;
-              return a.romOffset < b.romOffset;
+              if (a.romOffset != b.romOffset) return a.romOffset < b.romOffset;
+              if (a.landing.has_value() != b.landing.has_value()) return !a.landing.has_value();
+              if (!a.landing) return false;
+              if (a.landing->lowest != b.landing->lowest) return a.landing->lowest < b.landing->lowest;
+              if (a.landing->highest != b.landing->highest) return a.landing->highest < b.landing->highest;
+              if (a.landing->shown != b.landing->shown) return a.landing->shown;
+              return a.landing->areas < b.landing->areas;
             });
   observation.originSets = shadow.origins().interned();
   observation.originCap = shadow.origins().cap();

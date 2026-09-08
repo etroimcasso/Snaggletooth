@@ -347,17 +347,30 @@ remainder.
 ## The video registers (a stub)
 
 There is no rendering PPU, but the register file that feeds one is here so a program can fill video
-memory and a host can read what it drew. `vram()` returns the 64 KB of video RAM and `cgram()` the
-512-byte palette; both are read faces, filled through the ports the console uses.
+memory and a host can read what it drew. `vram()` returns the 64 KB of video RAM, `cgram()` the
+512-byte palette and `oam()` the 544-byte sprite table; all three are read faces, filled through the
+ports the console uses.
 
 The VRAM port is a word address at `$2116/$2117` and a data pair at `$2118/$2119`. `$2115` selects the
 increment (after the low or the high byte, by 1, 32, or 128 words) and an optional address translation
 for bitmap layouts. Reads come through `$2139/$213A` and carry the hardware's prefetch behaviour: the
 first word after setting the address is returned twice, because the prefetch register fills before the
 address steps rather than after. The palette port is an address at `$2121` and a two-write word at `$2122`
-(read back through `$213B`); the high byte keeps seven bits. `$2100` (forced blank and brightness), the
-background base registers (`$2107-$210C`), and the main-screen enables (`$212C`) store their values for a
-PPU to read. The screen powers on in forced blank.
+(read back through `$213B`); the high byte keeps seven bits.
+
+The OAM port is an address at `$2102/$2103` and a byte at `$2104` (read back through `$2138`). The
+address written is a nine-bit reload value, doubled into the ten-bit byte address the port is at, so a
+write always lands on an even byte; each access steps the address. Below `$200` a write to an even byte
+is held and the odd byte after it commits the pair, as the palette port does; from `$200` a write is one
+byte, and `$220-$3FF` mirror the thirty-two bytes of high bits at `$200-$21F`. The PPU takes the address
+back to the reload value at the start of every vertical blank while the screen is on, and when forced
+blank is released during the first line of vertical blank — so a program that sets the address once and
+sends its sprite table every frame lands it at the same place every frame, and one that sends while the
+screen is off continues from wherever the last access left the address.
+
+`$2100` (forced blank and brightness), `$2101` (the sprite sizes and their name base), `$2105` (the
+screen mode and the tile sizes), the background base registers (`$2107-$210C`), and the main-screen
+enables (`$212C`) store their values for a PPU to read. The screen powers on in forced blank.
 
 ## DMA and HDMA
 
@@ -467,8 +480,9 @@ machine.setObserver(nullptr);
 A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what the bus answered for a
 read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an
 opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and
-write-back, a vector pull — who made it, and, for an engine's access, which of the eight channels it
-served (`channel`) and whether the HDMA engine was reading its own table (`table`):
+write-back, a vector pull — who made it, for an engine's access, which of the eight channels it
+served (`channel`) and whether the HDMA engine was reading its own table (`table`), and, for a write
+through a video data port, where the port put the byte (`landed`):
 
 | `AccessSource` | Who |
 |---|---|
@@ -484,6 +498,14 @@ points at is read from where the pointer says and is not the table's, and a writ
 together let a host follow every byte an engine moves back to the channel and the table it came from,
 which is how the [cartridge disassembler](snes-disassembler.md#what-a-run-moved) records what a run
 moved.
+
+`landed` is set on a write through a video data port, whoever made it, and says where the port put
+the byte: the VRAM word address for a write to `$2118` or `$2119`, after any address translation; the
+palette word for a write to `$2122`, on both halves; the OAM byte for a write to `$2104`, on both
+halves, within the 544. It is absent on every other access — a read, a write to any other register, a
+write to memory. The address and the value alone cannot tell it, since the port's address steps and
+translates as it goes; the port can, and the disassembler reads it to say
+[where a transfer landed](snes-disassembler.md#what-a-run-moved).
 
 `internal` is called for a CPU cycle that drives an address without a valid access; `kind` is set when
 the pins say what the cycle was for — a read-modify-write's modify cycle — and absent for a plain
