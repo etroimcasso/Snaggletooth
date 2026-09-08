@@ -445,6 +445,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/ir/ir_vector_test.cpp
     tests/ir/differential_test.cpp
     tests/ir/render_test.cpp
+    tests/ir/text_test.cpp
     tests/ir/dataflow_test.cpp
     tests/ir/provenance_test.cpp
     tests/snes/machine_test.cpp
