@@ -307,7 +307,7 @@ TEST(Text, EveryAddressingModeRoundTrips) {
     Node node = nodeOf(bytes, address, native);
     seen.push_back(node.instruction.addressing);
     nodes.push_back(node);
-    address += bytes.size();
+    address += static_cast<Address>(bytes.size());
   }
   EXPECT_EQ(seen.size(), static_cast<std::size_t>(Addressing::PushRelative) + 1u);
   for (std::size_t i = 0; i < seen.size(); ++i) EXPECT_EQ(seen[i], static_cast<Addressing>(i)) << i;
