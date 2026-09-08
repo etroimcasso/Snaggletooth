@@ -1,13 +1,17 @@
 // snes_disasm — disassembles a whole cartridge into a source tree.
 //
 //   snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
-//                                      [--no-run] [--run-seconds N] [--input <script>]
+//                                      [--no-run] [--run-seconds N]
+//                                      [--input <script> | --input-dir <directory>]
 //
-// The tree is one source file per bank, the sound program the cartridge uploads
-// at boot as a file of its own, and `project.manifest`, which says where every
-// file's bytes land in the image, where the trace began, and where it stopped.
-// The trace starts at the handlers the cartridge header names and follows
-// control flow across banks; bytes execution cannot reach are written as data.
+// The tree is `program.snagir`, the whole program in the intermediate
+// representation; `project.manifest`, which says where every file's bytes land
+// in the image, where the trace began, and where it stopped; the files lifted
+// out of the banks; one source file per bank, rendered from the program file
+// read back; and the sound program the cartridge uploads at boot as a file of
+// its own. The trace starts at the handlers the cartridge header names and
+// follows control flow across banks; bytes execution cannot reach are written
+// as data.
 //
 // When the directory already holds a manifest, its `entry` and `file` lines are
 // read first: an entry a person added is traced with the vectors, and the file
@@ -22,7 +26,9 @@
 // and the landings its instructions do not name become entries. --no-run skips
 // it; --run-seconds bounds it (sixty by default); --input replays a recorded run
 // into the controller ports while it goes, so the run reaches what a player
-// would.
+// would; --input-dir names a directory of recorded runs, and the one named for
+// the image (`rom/input_script.h`, `scriptPathFor`) is replayed when it is
+// there and the ports stay empty when it is not.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
@@ -49,9 +55,10 @@ constexpr std::uint64_t kMasterPerSecond = 21'477'272ull;
 [[noreturn]] void usage(const char* prog) {
   std::cerr << "usage: " << prog
             << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]"
-               " [--input <script>]\n"
+               " [--input <script> | --input-dir <directory>]\n"
                "  the directory's project.manifest, when present, supplies entries and the file split\n"
-               "  --input replays a recorded run into the controller ports while the cartridge runs\n";
+               "  --input replays a recorded run into the controller ports while the cartridge runs;\n"
+               "  --input-dir replays the run named for the image under that directory, if there is one\n";
   std::exit(2);
 }
 
@@ -72,6 +79,7 @@ int main(int argc, char** argv) {
   bool run = true;
   std::uint64_t runSeconds = 60;
   std::string inputPath;
+  std::string inputDir;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -95,6 +103,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--input") {
       inputPath = next("--input");
+    } else if (arg == "--input-dir") {
+      inputDir = next("--input-dir");
     } else if (arg == "--no-sound") {
       sound = false;
     } else if (arg == "--boot-seconds") {
@@ -111,9 +121,22 @@ int main(int argc, char** argv) {
     }
   }
   if (imagePath.empty() || outDir.empty()) usage(argv[0]);
-  if (!inputPath.empty() && !run) {
+  if (!inputPath.empty() && !inputDir.empty()) {
+    std::cerr << "--input and --input-dir both name a recorded run; give one\n";
+    return 2;
+  }
+  if ((!inputPath.empty() || !inputDir.empty()) && !run) {
     std::cerr << "--input replays a run; it has nothing to do under --no-run\n";
     return 2;
+  }
+  if (!inputDir.empty()) {
+    const std::filesystem::path script = snaggletooth::disasm::scriptPathFor(inputDir, imagePath);
+    if (std::filesystem::is_regular_file(script)) {
+      inputPath = script.string();
+      std::cout << "replaying " << script.string() << "\n";
+    } else {
+      std::cout << "no recorded run at " << script.string() << "; the ports stay empty\n";
+    }
   }
 
   snaggletooth::disasm::InputScript script;
@@ -200,6 +223,7 @@ int main(int argc, char** argv) {
   const snaggletooth::disasm::Placement placement = snaggletooth::disasm::placeBytes(disassembly);
   std::cout << disassembly.regions.size() << " files, " << instructions << " instructions, "
             << disassembly.entries.size() << " entries, " << disassembly.stops.size() << " stops\n";
+  std::cout << "program.snagir: " << disassembly.program.nodes.size() << " nodes\n";
   if (disassembly.sound) {
     std::size_t placed = 0;
     for (const snaggletooth::disasm::UploadBlock& block : disassembly.sound->capture.blocks) {

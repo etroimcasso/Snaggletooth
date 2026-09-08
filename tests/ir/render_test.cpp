@@ -1,9 +1,10 @@
 // SNES assembly from the instruction layer, and the bank files written from it.
 //
 // The first cases hold the renderer to the listing over every example
-// cartridge: the bytes it writes back from a node are the bytes the node was
-// lifted from, the text it writes with no names is the text the listing carries,
-// the cost reads the same, and the directives land where the listing put them.
+// cartridge, each code line beside its node in the disassembly's program: the
+// bytes it writes back from the node are the line's, the text it writes with no
+// names is the text the listing carries, the cost reads the same, and the
+// directives land where the listing put them.
 // The rest pin what the bank file adds — the names in place of addresses, the
 // prologue that defines them, the routine headers — and that every example tree
 // still assembles back to its image.
@@ -74,8 +75,22 @@ std::string listingCost(const disasm::CycleCost& cost) {
   return text;
 }
 
-// Every code line of every region of every example cartridge, each beside the
-// node lifted from it.
+// The node the disassembly's program holds for the code line at `address`: the
+// first at that address, which is the listing's reading.
+const Node& nodeAt(const CartridgeDisassembly& d, Address address) {
+  const Node* found = d.program.find(address, true, true, true);
+  for (const Node& node : d.program.nodes) {
+    if (node.instruction.address == address) {
+      found = &node;
+      break;
+    }
+  }
+  EXPECT_NE(found, nullptr) << "no node at " << address;
+  return *found;
+}
+
+// Every code line of every region of every example cartridge, each beside its
+// node in the disassembly's program.
 template <typename Visit>
 void everyExampleLine(Visit visit) {
   std::size_t lines = 0;
@@ -83,12 +98,9 @@ void everyExampleLine(Visit visit) {
     const std::vector<std::uint8_t> rom = example.build();
     const CartridgeDisassembly d = disassemble(rom);
     for (const RegionListing& region : d.regions) {
-      const Program program = lift65816(region.listing);
-      std::size_t index = 0;
       for (const Line& line : region.listing.lines) {
         if (!line.isCode) continue;
-        ASSERT_LT(index, program.nodes.size());
-        visit(std::string(example.name), line, program.nodes[index++]);
+        visit(std::string(example.name), line, nodeAt(d, line.address));
         ++lines;
       }
     }
@@ -150,15 +162,13 @@ TEST(Render, DirectivesLandWhereTheListingPutThem) {
     const std::vector<std::uint8_t> rom = example.build();
     const CartridgeDisassembly d = disassemble(rom);
     for (const RegionListing& region : d.regions) {
-      const Program program = lift65816(region.listing);
       SourceMode mode;
-      std::size_t index = 0;
       for (const Line& line : region.listing.lines) {
         if (!line.isCode) {
           mode.reset();
           continue;
         }
-        EXPECT_EQ(mode.directives(program.nodes[index++]), line.directives)
+        EXPECT_EQ(mode.directives(nodeAt(d, line.address)), line.directives)
             << example.name << " " << line.instruction.text;
       }
     }

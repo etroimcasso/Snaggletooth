@@ -217,5 +217,11 @@ TEST(InputScriptReplay, TheRequestCarriesTheScriptIntoTheTree) {
       << manifest;
 }
 
+TEST(InputScript, ADirectoryKeepsAnImagesRunUnderItsNameWithSpacesAsUnderscores) {
+  EXPECT_EQ(scriptPathFor("runs", "Some Game (U) [!].sfc").generic_string(), "runs/Some_Game_(U)_[!].txt");
+  EXPECT_EQ(scriptPathFor("runs", "/images/plain.smc").generic_string(), "runs/plain.txt");
+  EXPECT_EQ(scriptPathFor("a/b", "two  spaces.smc").generic_string(), "a/b/two__spaces.txt");
+}
+
 }  // namespace
 }  // namespace snaggletooth::disasm

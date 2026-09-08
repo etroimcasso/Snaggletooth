@@ -1,7 +1,8 @@
 // snes_differential — replays a cartridge's recorded run beside the interpreter
 // and reports where the lifted program and the machine disagree.
 //
-//   snes_differential <directory> <image> -o <report> [--seconds N] [--input <script>]
+//   snes_differential <directory> <image> -o <report> [--seconds N]
+//                                                     [--input <script> | --input-dir <directory>]
 //
 // Reads the directory's `project.manifest`, traces the image as the manifest
 // directs — its entries, its file split, the targets earlier runs saw — lifts
@@ -9,7 +10,9 @@
 // for `--seconds` of the master clock (sixty by default) with the interpreter
 // beside it, held to every access, every register and every cycle. `--input`
 // replays a recorded run into the controller ports, exactly as `snes_disasm
-// --input` does, so the same run is checked that produced the tree.
+// --input` does, so the same run is checked that produced the tree;
+// `--input-dir` finds the run named for the image under that directory, as
+// `snes_disasm --input-dir` does, and leaves the ports empty when there is none.
 //
 // The report is written under `-o`: `summary.txt` (what was checked and how
 // much), `divergences.txt` (each disagreement with its step, node, effect and
@@ -49,7 +52,7 @@ namespace {
 
 [[noreturn]] void usage(const char* prog) {
   std::cerr << "usage: " << prog
-            << " <directory> <image> -o <report> [--seconds N] [--input <script>]\n"
+            << " <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]\n"
                "  replays the tree's recorded run on the machine beside the interpreter\n";
   std::exit(2);
 }
@@ -97,10 +100,11 @@ int main(int argc, char** argv) {
   std::string imagePath;
   std::string outPath;
   std::string inputPath;
+  std::string inputDir;
   double seconds = 60.0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "-o" || arg == "--seconds" || arg == "--input") {
+    if (arg == "-o" || arg == "--seconds" || arg == "--input" || arg == "--input-dir") {
       if (i + 1 >= argc) {
         std::cerr << arg << " needs a value\n";
         usage(argv[0]);
@@ -110,6 +114,8 @@ int main(int argc, char** argv) {
         outPath = value;
       } else if (arg == "--input") {
         inputPath = value;
+      } else if (arg == "--input-dir") {
+        inputDir = value;
       } else {
         seconds = std::strtod(value.c_str(), nullptr);
         if (seconds <= 0.0) {
@@ -126,6 +132,19 @@ int main(int argc, char** argv) {
     }
   }
   if (directory.empty() || imagePath.empty() || outPath.empty()) usage(argv[0]);
+  if (!inputPath.empty() && !inputDir.empty()) {
+    std::cerr << "--input and --input-dir both name a recorded run; give one\n";
+    return 2;
+  }
+  if (!inputDir.empty()) {
+    const std::filesystem::path script = snaggletooth::disasm::scriptPathFor(inputDir, imagePath);
+    if (std::filesystem::is_regular_file(script)) {
+      inputPath = script.string();
+      std::cout << "replaying " << script.string() << "\n";
+    } else {
+      std::cout << "no recorded run at " << script.string() << "; the ports stay empty\n";
+    }
+  }
 
   std::vector<std::uint8_t> rom;
   {

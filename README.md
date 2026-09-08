@@ -154,11 +154,12 @@ The public headers are under [`include/snaggletooth/`](include/snaggletooth); th
 
 ### Running the tools
 
-A cartridge into a source tree, the tree proved against the image, and its program written out
-as the lifted form:
+A cartridge into its program file and manifest, the source tree rendered from the program file,
+the tree proved against the image, and the program printed out:
 
 ```
 snes_disasm game.sfc -o game
+snes_render game
 snes_verify game game.sfc
 snes_lift game game.sfc -o game.snagir
 ```

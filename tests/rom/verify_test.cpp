@@ -394,6 +394,10 @@ TEST(RomVerify, TheTreeOnDiskVerifies) {
   std::filesystem::remove_all(dir, ec);
   std::string error;
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  // The bank files come from the renderer, over the program file the
+  // disassembler wrote.
+  std::size_t rendered = 0;
+  ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
 
   const VerifyReport report = verifyTree(dir, rom);
   EXPECT_TRUE(report.identical()) << renderReport(report);
@@ -468,6 +472,8 @@ TEST(RomVerify, TheTreeOnDiskVerifiesWithItsLiftedFiles) {
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
   EXPECT_TRUE(std::filesystem::exists(dir / "vram" / "00_9000.bin"));
   EXPECT_EQ(std::filesystem::file_size(dir / "vram" / "00_9000.bin"), 80u);
+  std::size_t rendered = 0;
+  ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
   const VerifyReport report = verifyTree(dir, rom);
   EXPECT_TRUE(report.identical()) << renderReport(report);
   std::filesystem::remove_all(dir, ec);

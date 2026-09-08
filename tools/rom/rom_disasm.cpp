@@ -12,11 +12,20 @@
 #include "cpu65816/cpu65816_asm.h"
 #include "ir/cpu65816_lift.h"
 #include "ir/ir_render.h"
+#include "ir/ir_text.h"
 #include "rom/cartridge_entries.h"
+#include "rom/rom_text.h"
 #include "snaggletooth/snes/snes.h"
 #include "spc700/spc700_disasm.h"
 
 namespace snaggletooth::disasm {
+
+using text::address16;
+using text::address24;
+using text::classesText;
+using text::hex;
+using text::mapName;
+
 namespace {
 
 // The upload stub's window in audio memory. The audio CPU runs there until the
@@ -30,24 +39,6 @@ constexpr std::uint16_t kRegisterPageEnd = 0x0100u;
 
 // About a millisecond of the master clock: the step the boot is watched at.
 constexpr std::uint64_t kWatchStep = 21'477u;
-
-std::string hex(std::uint32_t value, int digits) {
-  char buffer[12];
-  std::snprintf(buffer, sizeof buffer, "%0*X", digits, static_cast<unsigned>(value));
-  return buffer;
-}
-
-std::string address24(Address address) { return formatAddress(address, 24); }
-std::string address16(Address address) { return formatAddress(address, 16); }
-
-std::string mapName(CartridgeMap map) {
-  switch (map) {
-    case CartridgeMap::LoRom: return "LoROM";
-    case CartridgeMap::HiRom: return "HiROM";
-    case CartridgeMap::ExHiRom: return "ExHiROM";
-  }
-  return "LoROM";
-}
 
 // A mode as the manifest writes it: the backend's own words for a context.
 std::string modeText(const Cpu65816Mode& mode) {
@@ -83,58 +74,6 @@ bool contiguous(CartridgeMap map, std::size_t imageBytes, const SourceRegion& re
     if (!offset || *offset != *start + i) return false;
   }
   return true;
-}
-
-// An inclusive address range.
-struct Range {
-  Address first = 0;
-  Address last = 0;
-};
-
-// The lines of `listing` that fall inside `keep`, in order. A data run is cut to
-// the parts inside. An instruction is kept when the whole of it is inside one
-// range, and a label only when its instruction is, so the cut listing defines
-// every label it holds; an instruction that runs past a range's edge is not an
-// instruction of the cut listing, and the bytes of it that are inside are kept
-// as data, so no byte inside a range goes unwritten.
-Listing keepRanges(const Listing& listing, const std::vector<Range>& keep) {
-  Listing kept;
-  kept.warnings = listing.warnings;
-  kept.addressBits = listing.addressBits;
-  auto keepData = [&](Address address, const std::vector<std::uint8_t>& data) {
-    const Address end = address + static_cast<Address>(data.size()) - 1u;
-    for (const Range& range : keep) {
-      const Address from = std::max(address, range.first);
-      const Address to = std::min(end, range.last);
-      if (from > to) continue;
-      Line piece;
-      piece.isCode = false;
-      piece.address = from;
-      piece.data.assign(data.begin() + static_cast<std::ptrdiff_t>(from - address),
-                        data.begin() + static_cast<std::ptrdiff_t>(to - address) + 1);
-      kept.lines.push_back(std::move(piece));
-    }
-  };
-  for (const Line& line : listing.lines) {
-    if (line.isCode) {
-      const Address end = line.address + line.instruction.length - 1u;
-      bool whole = false;
-      for (const Range& range : keep) {
-        if (line.address >= range.first && end <= range.last) {
-          kept.lines.push_back(line);
-          if (const auto label = listing.labels.find(line.address); label != listing.labels.end()) {
-            kept.labels.insert(*label);
-          }
-          whole = true;
-          break;
-        }
-      }
-      if (!whole) keepData(line.address, line.instruction.bytes);
-      continue;
-    }
-    if (!line.data.empty()) keepData(line.address, line.data);
-  }
-  return kept;
 }
 
 // `ranges` sorted, with every run of ranges that touch end to end joined into
@@ -331,204 +270,6 @@ std::vector<TraceEntry> vectorTraceEntries(const CartridgeHeader& header) {
   return entries;
 }
 
-// The uploaded blocks' bytes as address ranges within a region, for the bytes
-// the region's file leaves to the sound program.
-std::vector<Range> placedBlockRanges(const CartridgeDisassembly& disassembly,
-                                     const SourceRegion& region) {
-  std::vector<Range> ranges;
-  if (!disassembly.sound) return ranges;
-  const CartridgeMap map = disassembly.header.map;
-  const std::optional<std::size_t> start = romOffset(map, region.first, disassembly.imageBytes);
-  if (!start) return ranges;
-  const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
-  for (const UploadBlock& block : disassembly.sound->capture.blocks) {
-    if (!block.romOffset) continue;
-    const std::size_t from = std::max(*block.romOffset, *start);
-    const std::size_t to = std::min(*block.romOffset + block.bytes.size(), *start + length);
-    if (from >= to) continue;
-    ranges.push_back(Range{.first = region.first + static_cast<Address>(from - *start),
-                           .last = region.first + static_cast<Address>(to - *start) - 1u});
-  }
-  std::sort(ranges.begin(), ranges.end(),
-            [](const Range& a, const Range& b) { return a.first < b.first; });
-  return ranges;
-}
-
-// The region's range with `cut` taken out.
-std::vector<Range> without(const SourceRegion& region, const std::vector<Range>& cut) {
-  std::vector<Range> keep;
-  Address next = region.first;
-  for (const Range& range : cut) {
-    if (range.first > next) keep.push_back(Range{.first = next, .last = range.first - 1u});
-    next = std::max(next, range.last + 1u);
-  }
-  if (next <= region.last) keep.push_back(Range{.first = next, .last = region.last});
-  return keep;
-}
-
-// A range of a region's bytes that its file does not write itself: a
-// sound-program block's, written in the sound file, or a lifted file's, written
-// there and included here. `fileOffset` and `length` are the part of the lifted
-// file the region holds — the whole of it unless a file split cuts across it.
-struct Cut {
-  Range range;
-  const AssetFile* asset = nullptr;  // null for a sound-program block
-  std::size_t fileOffset = 0;
-  std::size_t length = 0;
-};
-
-// Every cut of a region, in address order.
-std::vector<Cut> cutsOf(const CartridgeDisassembly& disassembly, const SourceRegion& region) {
-  std::vector<Cut> cuts;
-  for (const Range& range : placedBlockRanges(disassembly, region)) {
-    cuts.push_back(Cut{.range = range, .asset = nullptr, .fileOffset = 0, .length = 0});
-  }
-  for (const AssetFile& asset : disassembly.assets) {
-    const Address last = asset.first + static_cast<Address>(asset.bytes.size()) - 1u;
-    const Address from = std::max(asset.first, region.first);
-    const Address to = std::min(last, region.last);
-    if (from > to) continue;
-    cuts.push_back(Cut{.range = Range{.first = from, .last = to},
-                       .asset = &asset,
-                       .fileOffset = from - asset.first,
-                       .length = static_cast<std::size_t>(to - from) + 1u});
-  }
-  std::sort(cuts.begin(), cuts.end(),
-            [](const Cut& a, const Cut& b) { return a.range.first < b.range.first; });
-  return cuts;
-}
-
-std::vector<Range> rangesOf(const std::vector<Cut>& cuts) {
-  std::vector<Range> ranges;
-  for (const Cut& cut : cuts) ranges.push_back(cut.range);
-  return ranges;
-}
-
-// The region's listing with the sound program's bytes and the lifted files'
-// bytes left out.
-Listing regionLines(const RegionListing& region, const CartridgeDisassembly& disassembly) {
-  return keepRanges(region.listing, without(region.region, rangesOf(cutsOf(disassembly, region.region))));
-}
-
-std::vector<std::string> tokens(std::string_view line) {
-  std::vector<std::string> out;
-  std::string current;
-  bool quoted = false;
-  for (const char c : line) {
-    if (c == '"') {
-      quoted = !quoted;
-      continue;
-    }
-    if (!quoted && (c == ' ' || c == '\t')) {
-      if (!current.empty()) out.push_back(current);
-      current.clear();
-      continue;
-    }
-    current.push_back(c);
-  }
-  if (!current.empty()) out.push_back(current);
-  return out;
-}
-
-// `digits` as a hexadecimal number, or nothing when a character is not a digit.
-std::optional<std::uint32_t> parseHex(std::string_view digits) {
-  if (digits.empty() || digits.size() > 8) return std::nullopt;
-  std::uint32_t value = 0;
-  for (const char c : digits) {
-    value <<= 4;
-    if (c >= '0' && c <= '9') value |= static_cast<std::uint32_t>(c - '0');
-    else if (c >= 'A' && c <= 'F') value |= static_cast<std::uint32_t>(c - 'A' + 10);
-    else if (c >= 'a' && c <= 'f') value |= static_cast<std::uint32_t>(c - 'a' + 10);
-    else return std::nullopt;
-  }
-  return value;
-}
-
-// A 24-bit address in the dialect's long form, `$BB:XXXX`.
-std::optional<Address> parseLongAddress(const std::string& text) {
-  if (text.size() != 8 || text[0] != '$' || text[3] != ':') return std::nullopt;
-  return parseHex(text.substr(1, 2) + text.substr(4, 4));
-}
-
-// A 16-bit address in the SPC700 dialect's form, `$XXXX`.
-std::optional<std::uint16_t> parseShortAddress(const std::string& text) {
-  if (text.size() != 5 || text[0] != '$') return std::nullopt;
-  const std::optional<std::uint32_t> value = parseHex(text.substr(1));
-  if (!value) return std::nullopt;
-  return static_cast<std::uint16_t>(*value);
-}
-
-// An image offset as the manifest writes one: `$` and six hexadecimal digits.
-std::optional<std::size_t> parseOffset(const std::string& text) {
-  if (text.size() != 7 || text[0] != '$') return std::nullopt;
-  const std::optional<std::uint32_t> value = parseHex(text.substr(1));
-  if (!value) return std::nullopt;
-  return static_cast<std::size_t>(*value);
-}
-
-// A decimal count.
-std::optional<std::size_t> parseCount(const std::string& text) {
-  if (text.empty()) return std::nullopt;
-  std::size_t value = 0;
-  for (const char c : text) {
-    if (c < '0' || c > '9') return std::nullopt;
-    value = value * 10 + static_cast<std::size_t>(c - '0');
-  }
-  return value;
-}
-
-// A width as the manifest writes it: `8`, `16`, or `?` for one the trace does
-// not know. Returns whether it parsed; `known` and `eight` say what it said.
-bool parseWidth(const std::string& token, char letter, bool& known, bool& eight) {
-  if (token.size() < 3 || token[0] != letter || token[1] != '=') return false;
-  const std::string value = token.substr(2);
-  if (value == "?") {
-    known = false;
-    eight = true;
-    return true;
-  }
-  if (value == "8") {
-    known = true;
-    eight = true;
-    return true;
-  }
-  if (value == "16") {
-    known = true;
-    eight = false;
-    return true;
-  }
-  return false;
-}
-
-// A register class from its name as a manifest writes it.
-std::optional<RegisterClass> parseRegisterClass(const std::string& word) {
-  for (int c = 0; c <= static_cast<int>(RegisterClass::Speed); ++c) {
-    const RegisterClass cls = static_cast<RegisterClass>(c);
-    if (cpu65816RegisterClassName(cls) == word) return cls;
-  }
-  return std::nullopt;
-}
-
-std::optional<Cpu65816Mode> parseMode(const std::vector<std::string>& words, std::size_t from) {
-  if (words.size() < from + 3) return std::nullopt;
-  const std::string& e = words[from];
-  if (e != "e=0" && e != "e=1") return std::nullopt;
-  bool accumulatorKnown = true;
-  bool accumulator8 = true;
-  bool indexKnown = true;
-  bool index8 = true;
-  if (!parseWidth(words[from + 1], 'm', accumulatorKnown, accumulator8)) return std::nullopt;
-  if (!parseWidth(words[from + 2], 'x', indexKnown, index8)) return std::nullopt;
-  if (e == "e=1") return Cpu65816Mode::reset();
-  return Cpu65816Mode{.emulation = false,
-                      .accumulator8 = accumulator8,
-                      .index8 = index8,
-                      .accumulatorKnown = accumulatorKnown,
-                      .indexKnown = indexKnown,
-                      .carryKnown = false,
-                      .carry = false};
-}
-
 }  // namespace
 
 std::vector<SourceRegion> bankRegions(CartridgeMap map, std::size_t imageBytes) {
@@ -632,17 +373,6 @@ std::string_view vramDirectory(const std::vector<Piece>& group) {
 std::string movedText(const MovedRange& range) {
   return "moved " + address24(range.site) + " channel " + std::to_string(range.channel) + " memory " +
          address24(range.memory) + " bytes " + std::to_string(range.bytes);
-}
-
-// A class list as the manifest writes it — `Vram`, or `Vram+Cgram` for a file
-// built into data for two — and as a comment reads it.
-std::string classesText(const std::vector<RegisterClass>& classes, std::string_view joint) {
-  std::string out;
-  for (const RegisterClass cls : classes) {
-    if (!out.empty()) out += joint;
-    out += std::string(cpu65816RegisterClassName(cls));
-  }
-  return out;
 }
 
 // One way an extent of work RAM was carried out: the register it reached, as
@@ -1225,6 +955,32 @@ std::optional<UploadCapture> captureUpload(std::span<const std::uint8_t> rom,
   return capture;
 }
 
+namespace {
+
+// The one lift: every region with its image bytes — both readings of an address
+// two paths read two ways, the listing's first — into one program in address
+// order, with the interrupt sequences. Run again whenever the regions change.
+void liftProgram(CartridgeDisassembly& out, std::span<const std::uint8_t> rom) {
+  const CartridgeMap map = out.header.map;
+  ir::Program program;
+  for (const RegionListing& region : out.regions) {
+    const std::optional<std::size_t> start = romOffset(map, region.region.first, rom.size());
+    if (!start) continue;
+    const std::size_t length = static_cast<std::size_t>(region.region.last - region.region.first) + 1u;
+    ir::Program lifted = ir::lift65816(region.listing, rom.subspan(*start, length), region.region.first);
+    program.nodes.insert(program.nodes.end(), std::make_move_iterator(lifted.nodes.begin()),
+                         std::make_move_iterator(lifted.nodes.end()));
+    program.nmi = std::move(lifted.nmi);
+    program.irq = std::move(lifted.irq);
+  }
+  std::stable_sort(program.nodes.begin(), program.nodes.end(), [](const ir::Node& a, const ir::Node& b) {
+    return a.instruction.address < b.instruction.address;
+  });
+  out.program = std::move(program);
+}
+
+}  // namespace
+
 CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   CartridgeDisassembly out;
   out.imageBytes = request.rom.size();
@@ -1528,6 +1284,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   }
   std::optional<ProvenProgram> proven;
   for (;;) {
+    liftProgram(out, request.rom);
     proven = proveProgram(out, request.rom);
     if (!addDerived(derivedTargets(out, *proven))) break;
     traceOwed();
@@ -1611,8 +1368,9 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
     placement.image[offset] = byte;
     if (count[offset] < 2) ++count[offset];
   };
-  for (const RegionListing& region : disassembly.regions) {
-    const Listing lines = regionLines(region, disassembly);
+  const RenderInput input = renderInputOf(disassembly);
+  for (const RenderRegion& region : input.regions) {
+    const Listing lines = regionLines(region, input);
     for (const Line& line : lines.lines) {
       const std::optional<std::size_t> start = romOffset(map, line.address, disassembly.imageBytes);
       if (!start) continue;
@@ -1923,590 +1681,6 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   return out;
 }
 
-std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error) {
-  ManifestInput input;
-  std::size_t number = 0;
-  std::size_t position = 0;
-  while (position <= text.size()) {
-    const std::size_t end = text.find('\n', position);
-    std::string_view line = text.substr(position, end == std::string_view::npos ? std::string_view::npos
-                                                                                : end - position);
-    position = end == std::string_view::npos ? text.size() + 1 : end + 1;
-    ++number;
-    if (const std::size_t comment = line.find(';'); comment != std::string_view::npos) {
-      line = line.substr(0, comment);
-    }
-    const std::vector<std::string> words = tokens(line);
-    if (words.empty()) continue;
-    auto fail = [&](const std::string& what) {
-      error = "line " + std::to_string(number) + ": " + what;
-      return std::nullopt;
-    };
-    if (words[0] == "entry") {
-      if (words.size() != 6) return fail("an entry is an address, a name, and e=, m=, x=");
-      const std::optional<Address> address = parseLongAddress(words[1]);
-      if (!address) return fail(words[1] + " is not a $BB:XXXX address");
-      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
-      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
-      input.entries.push_back(TraceEntry{.address = *address, .mode = *mode, .name = words[2]});
-      continue;
-    }
-    if (words[0] == "reached") {
-      if (words.size() != 8 || words[6] != "from") {
-        return fail("a reached target is an address, a name, e=, m=, x=, `from` and the site");
-      }
-      const std::optional<Address> target = parseLongAddress(words[1]);
-      const std::optional<Address> site = parseLongAddress(words[7]);
-      if (!target || !site) return fail("addresses are written $BB:XXXX");
-      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
-      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
-      input.reached.push_back(ReachedTarget{.target = *target,
-                                            .mode = *mode,
-                                            .site = *site,
-                                            .call = words[2].rfind("sub_", 0) == 0,
-                                            .name = words[2]});
-      continue;
-    }
-    if (words[0] == "ran") {
-      if (words.size() != 8 || words[6] != "from") {
-        return fail("a landing is an address, a name, e=, m=, x=, `from` and the site");
-      }
-      const std::optional<Address> target = parseLongAddress(words[1]);
-      const std::optional<Address> site = parseLongAddress(words[7]);
-      if (!target || !site) return fail("addresses are written $BB:XXXX");
-      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
-      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
-      input.ran.push_back(Landing{.target = *target, .mode = *mode, .site = *site, .name = words[2]});
-      continue;
-    }
-    if (words[0] == "moved") {
-      // moved <site> channel <n> <direction> <register> <name> <class> memory
-      // <address> <step> bytes <n> as <kind> times <n>
-      if (words.size() != 17 || words[2] != "channel" || words[8] != "memory" ||
-          words[11] != "bytes" || words[13] != "as" || words[15] != "times") {
-        return fail("a moved range is a site, `channel` n, a direction, a register with its name and "
-                    "class, `memory` an address, a step, `bytes` n, `as` a kind and `times` n");
-      }
-      const std::optional<Address> site = parseLongAddress(words[1]);
-      const std::optional<Address> registerAddress = parseLongAddress(words[5]);
-      const std::optional<Address> memory = parseLongAddress(words[9]);
-      if (!site || !registerAddress || !memory) return fail("addresses are written $BB:XXXX");
-      const std::optional<std::size_t> channel = parseCount(words[3]);
-      const std::optional<std::size_t> bytes = parseCount(words[12]);
-      const std::optional<std::size_t> times = parseCount(words[16]);
-      if (!channel || *channel > 7u) return fail(words[3] + " is not a channel 0-7");
-      if (!bytes || !times) return fail("bytes and times are counts");
-      MovedRange range{.site = *site,
-                       .channel = static_cast<std::uint8_t>(*channel),
-                       .toRegister = true,
-                       .registerAddress = *registerAddress,
-                       .registerName = {},
-                       .registerClass = std::nullopt,
-                       .memory = *memory,
-                       .step = MovedStep::Increment,
-                       .bytes = static_cast<std::uint32_t>(*bytes),
-                       .kind = MovedKind::Dma,
-                       .times = static_cast<std::uint32_t>(*times)};
-      if (words[4] == "from-register") range.toRegister = false;
-      else if (words[4] != "to-register") return fail(words[4] + " is not to-register or from-register");
-      if (words[10] == "decrement") range.step = MovedStep::Decrement;
-      else if (words[10] == "fixed") range.step = MovedStep::Fixed;
-      else if (words[10] != "increment") return fail(words[10] + " is not increment, decrement or fixed");
-      if (words[14] == "table") range.kind = MovedKind::Table;
-      else if (words[14] == "indirect") range.kind = MovedKind::Indirect;
-      else if (words[14] != "dma") return fail(words[14] + " is not dma, table or indirect");
-      // The name and the class are the register table's, from the address; the
-      // words on the line are what the last run wrote from the same table.
-      if (const std::optional<Cpu65816Register> reg = cpu65816Register(*registerAddress)) {
-        range.registerName = reg->name;
-        range.registerClass = reg->cls;
-      }
-      input.moved.push_back(range);
-      continue;
-    }
-    if (words[0] == "asset") {
-      // asset <path> <class> as <kind> from <address> bytes <n>
-      if (words.size() != 9 || words[3] != "as" || words[5] != "from" || words[7] != "bytes") {
-        return fail("an asset is a path, a class, `as` a kind, `from` an address and `bytes` n");
-      }
-      // The class, or several joined by `+` for a file built into data for
-      // two.
-      std::vector<RegisterClass> classes;
-      for (std::size_t from = 0; from <= words[2].size();) {
-        const std::size_t joint = words[2].find('+', from);
-        const std::string word = words[2].substr(from, joint == std::string::npos ? std::string::npos : joint - from);
-        const std::optional<RegisterClass> cls = parseRegisterClass(word);
-        if (!cls) return fail(word + " is not a register class");
-        if (std::find(classes.begin(), classes.end(), *cls) == classes.end()) classes.push_back(*cls);
-        if (joint == std::string::npos) break;
-        from = joint + 1u;
-      }
-      std::sort(classes.begin(), classes.end());
-      std::optional<MovedKind> kind;
-      for (const MovedKind k : {MovedKind::Dma, MovedKind::Table, MovedKind::Indirect, MovedKind::Stream,
-                                MovedKind::Staged, MovedKind::Proven}) {
-        if (movedKindName(k) == words[4]) kind = k;
-      }
-      if (!kind) return fail(words[4] + " is not dma, table, indirect, stream, staged or proven");
-      const std::optional<Address> first = parseLongAddress(words[6]);
-      if (!first) return fail(words[6] + " is not a $BB:XXXX address");
-      const std::optional<std::size_t> bytes = parseCount(words[8]);
-      if (!bytes || *bytes == 0) return fail(words[8] + " is not a byte count");
-      input.assets.push_back(
-          ManifestAsset{.file = words[1], .first = *first, .bytes = *bytes, .classes = classes, .kind = *kind});
-      continue;
-    }
-    if (words[0] == "derived") {
-      if (words.size() != 10 || words[6] != "from" || words[8] != "via") {
-        return fail("a derived target is an address, a name, e=, m=, x=, `from` the site and `via` the pointer");
-      }
-      const std::optional<Address> target = parseLongAddress(words[1]);
-      const std::optional<Address> site = parseLongAddress(words[7]);
-      const std::optional<Address> pointer = parseLongAddress(words[9]);
-      if (!target || !site || !pointer) return fail("addresses are written $BB:XXXX");
-      const std::optional<Cpu65816Mode> mode = parseMode(words, 3);
-      if (!mode) return fail("the mode is e=0|1 m=8|16|? x=8|16|?");
-      input.derived.push_back(DerivedTarget{.target = *target,
-                                            .mode = *mode,
-                                            .site = *site,
-                                            .pointer = *pointer,
-                                            .call = words[2].rfind("sub_", 0) == 0,
-                                            .name = words[2]});
-      continue;
-    }
-    if (words[0] == "file") {
-      if (words.size() != 5) return fail("a file is a path, 65816, and its first and last address");
-      if (words[2] != "65816") return fail(words[2] + " is not a chip a file can be written for");
-      const std::optional<Address> first = parseLongAddress(words[3]);
-      const std::optional<Address> last = parseLongAddress(words[4]);
-      if (!first || !last) return fail("addresses are written $BB:XXXX");
-      if (*last < *first) return fail("the last address is before the first");
-      if ((*first >> 16) != (*last >> 16)) return fail("a file lies within one bank");
-      input.regions.push_back(SourceRegion{.file = words[1], .first = *first, .last = *last});
-      continue;
-    }
-    if (words[0] == "image") {
-      if (words.size() != 2) return fail("image is a byte count");
-      const std::optional<std::size_t> count = parseCount(words[1]);
-      if (!count) return fail(words[1] + " is not a byte count");
-      input.imageBytes = *count;
-      continue;
-    }
-    if (words[0] == "checksum") {
-      if (words.size() != 3) return fail("checksum is $XXXX $XXXX");
-      const std::optional<std::uint16_t> value = parseShortAddress(words[1]);
-      if (!value) return fail(words[1] + " is not a $XXXX value");
-      input.checksum = *value;
-      continue;
-    }
-    if (words[0] == "map") {
-      if (words.size() != 2) return fail("map is LoROM, HiROM or ExHiROM");
-      if (words[1] == "LoROM") input.map = CartridgeMap::LoRom;
-      else if (words[1] == "HiROM") input.map = CartridgeMap::HiRom;
-      else if (words[1] == "ExHiROM") input.map = CartridgeMap::ExHiRom;
-      else return fail(words[1] + " is not a map");
-      continue;
-    }
-    if (words[0] == "sound") {
-      if (words.size() != 5 || words[2] != "SPC700" || words[3] != "entry") {
-        return fail("sound is a path, SPC700, entry, and the entry address");
-      }
-      const std::optional<std::uint16_t> entry = parseShortAddress(words[4]);
-      if (!entry) return fail(words[4] + " is not a $XXXX address");
-      std::vector<ManifestBlock> kept = input.sound ? input.sound->blocks : std::vector<ManifestBlock>{};
-      input.sound = ManifestSound{.file = words[1], .entry = *entry, .blocks = std::move(kept)};
-      continue;
-    }
-    if (words[0] == "block") {
-      const bool placed = words.size() == 6 && words[4] == "at";
-      const bool unplaced = words.size() == 5 && words[4] == "unplaced";
-      if (!placed && !unplaced) {
-        return fail("a block is a path, its address, its length, and `at` an offset or `unplaced`");
-      }
-      const std::optional<std::uint16_t> address = parseShortAddress(words[2]);
-      if (!address) return fail(words[2] + " is not a $XXXX address");
-      const std::optional<std::size_t> length = parseCount(words[3]);
-      if (!length) return fail(words[3] + " is not a length");
-      ManifestBlock block{.apuAddress = *address, .length = *length, .romOffset = std::nullopt};
-      if (placed) {
-        block.romOffset = parseOffset(words[5]);
-        if (!block.romOffset) return fail(words[5] + " is not a $XXXXXX offset");
-      }
-      if (!input.sound) input.sound = ManifestSound{.file = words[1], .entry = 0, .blocks = {}};
-      if (input.sound->file != words[1]) {
-        return fail("block " + words[1] + " names a file the sound line does not");
-      }
-      input.sound->blocks.push_back(block);
-      continue;
-    }
-    static const std::set<std::string> kKnown = {"title",  "stop",   "warning", "note",   "access",
-                                                 "dma",    "routine", "state",  "seen",   "origin",
-                                                 "staged", "streamed", "landed"};
-    if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
-  }
-  return input;
-}
-
-std::string manifestMismatch(const ManifestInput& input, std::span<const std::uint8_t> rom) {
-  if (input.imageBytes && *input.imageBytes != rom.size()) {
-    return "the manifest was written for an image of " + std::to_string(*input.imageBytes) +
-           " bytes; this one is " + std::to_string(rom.size());
-  }
-  if (input.checksum) {
-    const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
-    if (!header || header->checksum != *input.checksum) {
-      return "the manifest was written for an image with checksum $" + hex(*input.checksum, 4) +
-             "; this one has " + (header ? "$" + hex(header->checksum, 4) : std::string("no header"));
-    }
-  }
-  return {};
-}
-
-namespace {
-
-// ---- a bank file, from the representation -------------------------------------
-
-// Whether `name` can be a symbol of the 65816 dialect: the lexicon's name form,
-// and not a mnemonic, a register or a directive.
-bool symbolName(std::string_view name) {
-  static const assembler::Cpu65816Dialect dialect;
-  if (name.empty()) return false;
-  auto letter = [](char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '.';
-  };
-  if (!letter(name.front())) return false;
-  for (const char c : name) {
-    if (!letter(c) && !(c >= '0' && c <= '9')) return false;
-  }
-  const std::string upper = assembler::upper(name);
-  return !dialect.reserved(upper) && !assembler::coreDirective(upper);
-}
-
-// The register the absolute operand at `site` addresses, from the access facts:
-// the fact at the site whose register is the operand's own address. Empty where
-// no fact names one.
-std::string_view operandRegister(const CartridgeDisassembly& disassembly, Address site,
-                                 std::uint32_t operand) {
-  const std::vector<HardwareAccess>& accesses = disassembly.accesses;
-  auto it = std::lower_bound(accesses.begin(), accesses.end(), site,
-                             [](const HardwareAccess& a, Address wanted) { return a.site < wanted; });
-  for (; it != accesses.end() && it->site == site; ++it) {
-    if (it->registerAddress == operand) return it->name;
-  }
-  return {};
-}
-
-// The label an address carries in any of the tree's listings, or nothing.
-std::optional<std::string> labelAnywhere(const CartridgeDisassembly& disassembly, Address address) {
-  for (const RegionListing& region : disassembly.regions) {
-    const auto found = region.listing.labels.find(address);
-    if (found != region.listing.labels.end()) return found->second;
-  }
-  return std::nullopt;
-}
-
-bool absoluteData(const ir::Instruction& instruction) {
-  const bool absolute = instruction.addressing == ir::Addressing::Absolute ||
-                        instruction.addressing == ir::Addressing::AbsoluteX ||
-                        instruction.addressing == ir::Addressing::AbsoluteY;
-  return absolute && !instruction.target;
-}
-
-bool directData(const ir::Instruction& instruction) {
-  return instruction.addressing == ir::Addressing::Direct ||
-         instruction.addressing == ir::Addressing::DirectX ||
-         instruction.addressing == ir::Addressing::DirectY;
-}
-
-// The register a direct-page operand at `site` lands on under the direct
-// register every path proves, from the access facts: the first fact at the
-// site. Empty where none names one.
-std::string_view directRegister(const CartridgeDisassembly& disassembly, Address site) {
-  const std::vector<HardwareAccess>& accesses = disassembly.accesses;
-  auto it = std::lower_bound(accesses.begin(), accesses.end(), site,
-                             [](const HardwareAccess& a, Address wanted) { return a.site < wanted; });
-  if (it != accesses.end() && it->site == site) return it->name;
-  return {};
-}
-
-// The register a plain direct-page operand at `site` lands on under the one
-// direct register the run saw there, where the paths proved none: the
-// register's name with `(run)` after it. Empty where the run saw no value or
-// more than one, or the address is no register. The sum wraps as the chip's
-// does, within bank zero.
-std::string runDirectRegister(const CartridgeDisassembly& disassembly, Address site,
-                              std::uint32_t operand) {
-  const std::vector<SeenState>& seen = disassembly.seen;
-  auto it = std::lower_bound(seen.begin(), seen.end(), site,
-                             [](const SeenState& s, Address wanted) { return s.address < wanted; });
-  if (it == seen.end() || it->address != site || it->d.size() != 1) return {};
-  const std::string_view name = cpu65816RegisterName((it->d.front() + operand) & 0xFFFFu);
-  if (name.empty()) return {};
-  return std::string(name) + " (run)";
-}
-
-// A run of bytes execution never reached, as `DB` rows of eight with the bytes
-// as text beside them — the framework's own form, so a bank file and a listing
-// read alike.
-std::string renderDataRun(const Line& line) {
-  constexpr std::size_t kCommentColumn = 40;
-  constexpr std::size_t kPerRow = 8;
-  std::string out = "\n; ---- " + std::to_string(line.data.size()) +
-                    " bytes execution did not reach\n";
-  for (std::size_t i = 0; i < line.data.size(); i += kPerRow) {
-    const std::size_t end = std::min(i + kPerRow, line.data.size());
-    std::string row = "        DB ";
-    std::string ascii;
-    for (std::size_t j = i; j < end; ++j) {
-      if (j != i) row += ",";
-      row += "$" + hex(line.data[j], 2);
-      const std::uint8_t byte = line.data[j];
-      ascii += (byte >= 0x20 && byte < 0x7F) ? static_cast<char>(byte) : '.';
-    }
-    if (row.size() < kCommentColumn) {
-      row.append(kCommentColumn - row.size(), ' ');
-    } else {
-      row += "  ";
-    }
-    row += "; " + address24(line.address + static_cast<Address>(i)) + "  |" + ascii + "|";
-    out += row + "\n";
-  }
-  return out;
-}
-
-std::string classList(const std::vector<RegisterClass>& classes) {
-  if (classes.empty()) return "none";
-  std::string text;
-  for (const RegisterClass cls : classes) {
-    if (!text.empty()) text += ", ";
-    text += std::string(cpu65816RegisterClassName(cls));
-  }
-  return text;
-}
-
-std::string nameList(const std::vector<std::string>& names) {
-  if (names.empty()) return "none";
-  std::string text;
-  for (const std::string& name : names) {
-    if (!text.empty()) text += ", ";
-    text += name;
-  }
-  return text;
-}
-
-std::string counted(std::size_t count, const char* noun) {
-  return std::to_string(count) + " " + noun + (count == 1 ? "" : "s");
-}
-
-}  // namespace
-
-std::string renderRegion(const RegionListing& region, const CartridgeDisassembly& disassembly) {
-  const Listing lines = regionLines(region, disassembly);
-  const std::string soundFile = disassembly.sound ? disassembly.sound->file : std::string();
-
-  // The instructions as the representation holds them: one node per code line,
-  // the first reading where an address was read two ways.
-  const ir::Program program = ir::lift65816(lines);
-  std::map<Address, const ir::Node*> nodes;
-  for (const ir::Node& node : program.nodes) nodes.emplace(node.instruction.address, &node);
-  auto nodeAt = [&](Address address) -> const ir::Node& {
-    const auto found = nodes.find(address);
-    if (found == nodes.end()) {
-      throw std::logic_error("no node was lifted for the instruction at " + address24(address));
-    }
-    return *found->second;
-  };
-
-  // What the file names: the labels it defines, the registers its absolute
-  // operands address, and the labels other files define that it refers to. A
-  // register is named only where its name can be a symbol and the file defines
-  // no label of that name.
-  std::set<std::string> defined;
-  for (const auto& [address, label] : lines.labels) defined.insert(label);
-  std::map<std::uint32_t, std::string_view> registers;
-  std::map<Address, std::string> foreign;
-  for (const Line& line : lines.lines) {
-    if (!line.isCode) continue;
-    const ir::Instruction& instruction = nodeAt(line.address).instruction;
-    // A target is looked up as the bytes name it: a jump through a mirror bank
-    // finds no label there, and keeps its address, since a symbol would carry
-    // the bank the bytes are placed in rather than the one they name.
-    if (instruction.target) {
-      if (lines.labels.find(*instruction.target) != lines.labels.end()) continue;
-      const std::optional<std::string> label = labelAnywhere(disassembly, *instruction.target);
-      if (label && defined.find(*label) == defined.end()) foreign[*instruction.target] = *label;
-      continue;
-    }
-    if (!absoluteData(instruction)) continue;
-    const std::string_view name = operandRegister(disassembly, line.address, instruction.operand);
-    if (!name.empty() && symbolName(name) && defined.find(std::string(name)) == defined.end()) {
-      registers[instruction.operand] = name;
-    }
-  }
-
-  // The routines that begin in this file, and who calls each.
-  std::map<Address, const Routine*> routines;
-  std::map<Address, std::string> routineLabels;
-  std::map<Address, std::vector<std::string>> callers;
-  for (const Routine& routine : disassembly.routines) routineLabels[routine.address] = routine.label;
-  for (const Routine& routine : disassembly.routines) {
-    if (lines.labels.find(routine.address) != lines.labels.end()) {
-      routines[routine.address] = &routine;
-    }
-    for (const Address callee : routine.calls) callers[callee].push_back(routine.label);
-  }
-
-  std::string out;
-  for (const std::string& warning : lines.warnings) out += "; warning: " + warning + "\n";
-  if (!lines.warnings.empty()) out += "\n";
-
-  if (!registers.empty() || !foreign.empty()) {
-    std::size_t width = 0;
-    for (const auto& [address, name] : registers) width = std::max(width, name.size());
-    for (const auto& [address, name] : foreign) width = std::max(width, name.size());
-    auto equ = [&](std::string_view name, const std::string& value) {
-      std::string row(name);
-      row.append(width + 2 - name.size(), ' ');
-      out += row + "EQU " + value + "\n";
-    };
-    out += "; The hardware registers this file names, and the labels other files\n"
-           "; define that it refers to.\n";
-    for (const auto& [address, name] : registers) equ(name, "$" + hex(address, 4));
-    for (const auto& [address, name] : foreign) equ(name, "$" + hex(address, 6));
-    out += "\n";
-  }
-
-  // The raw-bytes field is as wide as the longest instruction in the file, and
-  // never narrower than three bytes, so the cycle costs stay aligned.
-  std::size_t longest = 3;
-  for (const Line& line : lines.lines) {
-    if (line.isCode) longest = std::max<std::size_t>(longest, line.instruction.length);
-  }
-  const std::size_t bytesWidth = longest * 3;
-
-  // One piece per run of consecutive lines, each under its own `ORG`; a gap is
-  // a cut — the sound program's bytes, which are its file's, or a lifted file's,
-  // included where they were. Every piece is a region to an assembler, and so
-  // is whatever follows a run of data or an `INCBIN`.
-  const std::vector<Cut> cuts = cutsOf(disassembly, region.region);
-  std::size_t nextCut = 0;
-  bool open = false;
-  ir::SourceMode mode;
-  auto writeCutsBefore = [&](Address until) {
-    while (nextCut < cuts.size() && cuts[nextCut].range.first < until) {
-      const Cut& cut = cuts[nextCut++];
-      const std::string span = address24(cut.range.first) + "-" + address24(cut.range.last);
-      if (cut.asset == nullptr) {
-        out += "\n; ---- " + span + ": the sound program, see " + soundFile + "\n";
-        open = false;
-        continue;
-      }
-      if (!open) {
-        out += "        ORG " + address24(cut.range.first) + "\n";
-        open = true;
-      }
-      const AssetFile& asset = *cut.asset;
-      const std::string_view name = cpu65816RegisterName(asset.registerAddress);
-      const std::string to = name.empty() ? address24(asset.registerAddress) : std::string(name);
-      // A file the shadow named is described by the class it went to, which
-      // its line keeps; the register is the run's and is not.
-      const std::string cls = classesText(asset.classes, " and ");
-      std::string what;
-      switch (asset.kind) {
-        case MovedKind::Dma: what = counted(asset.bytes.size(), "byte") + " a transfer carried to " + to; break;
-        case MovedKind::Table: what = "an HDMA table walked to " + to; break;
-        case MovedKind::Indirect: what = "a block an HDMA entry pointed at, sent to " + to; break;
-        case MovedKind::Stream: what = counted(asset.bytes.size(), "byte") + " a routine carried " + cls + " data from"; break;
-        case MovedKind::Staged: what = counted(asset.bytes.size(), "byte") + " a routine built " + cls + " data from"; break;
-        case MovedKind::Proven: what = counted(asset.bytes.size(), "byte") + " a transfer the code sets up to carry to " + to; break;
-      }
-      // The path as the lexicon reads it: relative to this file, which for a
-      // file at the tree's root is the manifest's own path.
-      const std::string included =
-          std::filesystem::path(asset.file)
-              .lexically_relative(std::filesystem::path(region.region.file).parent_path())
-              .generic_string();
-      out += "\n; ---- " + span + ": " + what + ", in " + asset.file + "\n";
-      out += "        INCBIN \"" + included + "\"";
-      if (cut.length != asset.bytes.size()) {
-        out += ", " + std::to_string(cut.fileOffset) + ", " + std::to_string(cut.length);
-      }
-      out += "\n";
-      mode.reset();
-    }
-  };
-  for (const Line& line : lines.lines) {
-    writeCutsBefore(line.address);
-    if (!open) {
-      out += "        ORG " + address24(line.address) + "\n";
-      open = true;
-      mode.reset();
-    }
-
-    if (!line.isCode) {
-      if (!line.data.empty()) out += renderDataRun(line);
-      mode.reset();
-      continue;
-    }
-
-    const ir::Node& node = nodeAt(line.address);
-    // A routine's header sits directly above its label: its size, its role, and
-    // the call graph either way.
-    bool headed = false;
-    if (const auto routine = routines.find(line.address); routine != routines.end()) {
-      const Routine& r = *routine->second;
-      std::vector<std::string> calls;
-      for (const Address callee : r.calls) calls.push_back(routineLabels.at(callee));
-      const auto called = callers.find(r.address);
-      out += "\n; routine " + r.label + ": " + counted(r.lines.size(), "line") + ", " +
-             counted(r.bytes, "byte") + "\n";
-      out += ";   reaches " + classList(r.reaches) + "; through " + classList(r.through) + "\n";
-      out += ";   calls " + nameList(calls) + "; called by " +
-             nameList(called == callers.end() ? std::vector<std::string>{} : called->second) +
-             "\n";
-      headed = true;
-    }
-    if (const auto label = lines.labels.find(line.address); label != lines.labels.end()) {
-      out += (headed ? "" : "\n") + label->second + ":\n";
-    }
-    for (const std::string& directive : mode.directives(node)) {
-      out += "        " + directive + "\n";
-    }
-
-    ir::SourceNames names;
-    std::string runNote;  // the annotation's text where it is built here rather than borrowed
-    const ir::Instruction& instruction = node.instruction;
-    if (instruction.target) {
-      if (const auto own = lines.labels.find(*instruction.target); own != lines.labels.end()) {
-        names.target = own->second;
-      } else if (const auto other = foreign.find(*instruction.target); other != foreign.end()) {
-        names.target = other->second;
-      }
-    } else if (absoluteData(instruction)) {
-      const std::string_view name = operandRegister(disassembly, line.address, instruction.operand);
-      if (registers.find(instruction.operand) != registers.end()) {
-        names.operand = name;
-      } else {
-        names.annotation = name;
-      }
-    } else if (directData(instruction)) {
-      // A direct-page operand stays the offset it is; the register it lands on
-      // under the proven direct register goes in the comment — or, where the
-      // paths prove nothing and the run saw one direct register at a plain
-      // direct-page form, the register that value lands it on, marked as the
-      // run's.
-      names.annotation = directRegister(disassembly, line.address);
-      if (names.annotation.empty() && instruction.addressing == ir::Addressing::Direct) {
-        runNote = runDirectRegister(disassembly, line.address, instruction.operand);
-        names.annotation = runNote;
-      }
-    }
-    out += ir::renderLine(node, names, bytesWidth);
-  }
-  writeCutsBefore(region.region.last + 1u);
-  return out;
-}
-
 std::string renderSoundProgram(const SoundProgram& sound) {
   std::string out;
   out += "; The sound program the cartridge uploads at boot, traced from " +
@@ -2525,6 +1699,104 @@ std::string renderSoundProgram(const SoundProgram& sound) {
   return out;
 }
 
+namespace {
+
+// What the program file carries beside the program: the image line, and each
+// region with its file, its range, its warnings, its labels and its data runs.
+ir::ProgramFile programFileOf(const CartridgeDisassembly& disassembly) {
+  ir::ProgramFile file;
+  file.imageBytes = disassembly.imageBytes;
+  file.map = mapName(disassembly.header.map);
+  for (const RegionListing& region : disassembly.regions) {
+    ir::ProgramRegion out;
+    out.file = region.region.file;
+    out.first = region.region.first;
+    out.last = region.region.last;
+    out.warnings = region.listing.warnings;
+    for (const auto& [address, name] : region.listing.labels) out.labels.push_back({address, name});
+    for (const Line& line : region.listing.lines) {
+      if (!line.isCode && !line.data.empty()) out.data.push_back({line.address, line.data});
+    }
+    file.regions.push_back(std::move(out));
+  }
+  return file;
+}
+
+bool writeFile(const std::filesystem::path& path, std::string_view text, std::string& error) {
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    error = "cannot write " + path.string();
+    return false;
+  }
+  out << text;
+  if (!out) {
+    error = "cannot write " + path.string();
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+RenderInput renderInputOf(const CartridgeDisassembly& disassembly) {
+  RenderInput input;
+  input.map = disassembly.header.map;
+  input.imageBytes = disassembly.imageBytes;
+  for (const RegionListing& region : disassembly.regions) {
+    input.regions.push_back(RenderRegion{.file = region.region.file,
+                                         .first = region.region.first,
+                                         .last = region.region.last,
+                                         .listing = region.listing});
+  }
+  for (const HardwareAccess& access : disassembly.accesses) {
+    input.accesses.push_back(
+        RenderAccess{.site = access.site, .registerAddress = access.registerAddress, .name = access.name});
+  }
+  for (const SeenState& seen : disassembly.seen) {
+    input.seen.push_back(RenderSeen{.address = seen.address, .d = seen.d});
+  }
+  for (const Routine& routine : disassembly.routines) {
+    input.routines.push_back(RenderRoutine{.address = routine.address,
+                                           .label = routine.label,
+                                           .lines = routine.lines.size(),
+                                           .bytes = routine.bytes,
+                                           .calls = routine.calls,
+                                           .reaches = routine.reaches,
+                                           .through = routine.through});
+  }
+  for (const AssetFile& asset : disassembly.assets) {
+    input.assets.push_back(RenderAsset{.file = asset.file,
+                                       .classes = asset.classes,
+                                       .kind = asset.kind,
+                                       .registerAddress = asset.registerAddress,
+                                       .first = asset.first,
+                                       .bytes = asset.bytes.size()});
+  }
+  if (disassembly.sound) {
+    RenderSound sound;
+    sound.file = disassembly.sound->file;
+    for (const UploadBlock& block : disassembly.sound->capture.blocks) {
+      if (block.romOffset) sound.blocks.push_back(RenderBlock{.romOffset = *block.romOffset, .bytes = block.bytes.size()});
+    }
+    input.sound = std::move(sound);
+  }
+  return input;
+}
+
+std::string renderRegion(const RegionListing& region, const CartridgeDisassembly& disassembly) {
+  const RenderInput input = renderInputOf(disassembly);
+  for (const RenderRegion& candidate : input.regions) {
+    if (candidate.file == region.region.file) return renderRegion(candidate, input, disassembly.program);
+  }
+  throw std::logic_error("the disassembly has no region " + region.region.file);
+}
+
+std::string renderProgramFile(const CartridgeDisassembly& disassembly) {
+  return ir::renderProgram(disassembly.program, programFileOf(disassembly));
+}
+
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
                   std::string& error) {
   std::error_code ec;
@@ -2533,27 +1805,18 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
     error = "cannot create " + directory.string() + ": " + ec.message();
     return false;
   }
-  auto write = [&](const std::filesystem::path& path, const std::string& text) {
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-      error = "cannot write " + path.string();
-      return false;
-    }
-    out << text;
-    return static_cast<bool>(out);
-  };
-  if (!write(directory / "project.manifest", renderManifest(disassembly))) return false;
-  for (const RegionListing& region : disassembly.regions) {
-    if (!write(directory / region.region.file, renderRegion(region, disassembly))) return false;
+  // The program file is the first thing under the directory; everything after
+  // it is what the disassembly found beside the program.
+  if (!writeFile(directory / "program.snagir", renderProgramFile(disassembly), error)) return false;
+  if (!writeFile(directory / "project.manifest", renderManifest(disassembly), error)) return false;
+  for (const AssetFile& asset : disassembly.assets) {
+    const std::string_view bytes(reinterpret_cast<const char*>(asset.bytes.data()), asset.bytes.size());
+    if (!writeFile(directory / asset.file, bytes, error)) return false;
   }
   if (disassembly.sound) {
-    if (!write(directory / disassembly.sound->file, renderSoundProgram(*disassembly.sound))) {
+    if (!writeFile(directory / disassembly.sound->file, renderSoundProgram(*disassembly.sound), error)) {
       return false;
     }
-  }
-  for (const AssetFile& asset : disassembly.assets) {
-    if (!write(directory / asset.file, std::string(asset.bytes.begin(), asset.bytes.end()))) return false;
   }
   return true;
 }

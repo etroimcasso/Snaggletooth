@@ -39,7 +39,8 @@ Everything lives in `snaggletooth::ir`.
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
 | `Dataflow(program, entries, sightings, image, canonical)` | Runs the effects over every path from the entries; `before(address)` is what is proven there, `derived()` every table slot a bounded index selects. |
 | `evaluate(node, before, image)` | One node over a `State`: the state after and every access it can make. |
-| `renderNode(node)`, `renderEffect(effect)` | A node, an effect, as text. |
+| `renderProgram(program, file)`, `parseProgram(text, error)` | The program file (`docs/snagir.md`) written from a program and what it does not carry, and read back to both. |
+| `renderNode(node)`, `renderEffect(effect)`, `equivalent(a, b)` | A node and an effect as the file has them; two programs compared as the file carries them. |
 | `renderInstruction(instruction, names)`, `renderLine(node, names, bytesWidth)` | An instruction as source, with a label, a register name and an annotation in place of addresses where given; a line with its comment. |
 | `encode(instruction)`, `renderCost(node)` | The bytes an instruction assembles to; the cost as a listing prints it. |
 | `SourceMode` | The mode a region of source carries in file order, and the directives each instruction needs before it. |
@@ -51,9 +52,10 @@ snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
 ```
 
 Lifts a cartridge tree — the directory's `project.manifest` and the image it
-was written for — and writes the summary, then every node with its effects,
-region by region in address order. `--file` limits it to one region's file;
-`-o` writes to a file, which carries the `.snagir` extension.
+was written for — and writes the summary, then the program file
+([docs/snagir.md](../../docs/snagir.md)): every region with its labels, its
+data runs and its nodes in address order, and the interrupt sequences.
+`--file` limits both to one region's file; `-o` writes the file there.
 
 ```
 snes_lift mixed mixed.smc
@@ -61,16 +63,17 @@ regions 1
 code lines 34
 nodes 34
 …
-$00:800A  STA abs  operand $100  length 3  e=0 m=16 x=16  base 4/4/5/5
-    Set PC <- $800D  [16]
-    BankAddress T0 <- $100  [24]
-    Store T0, A  [16 flat]
+  $00:800A STA abs operand $100 length 3 flow continue e=0 m=16 x=16 base 4/4/5/5 {
+    Set PC <- $800D [16];
+    BankAddress T0 <- $100 [24];
+    Store T0, A [16 flat];
+  }
 ```
 
 ## `snes_differential`
 
 ```
-snes_differential <directory> <image> -o <report> [--seconds N] [--input <script>]
+snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]
 ```
 
 Lifts the tree the same way, runs the machine for `--seconds` of the master

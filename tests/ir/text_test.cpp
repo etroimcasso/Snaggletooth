@@ -150,7 +150,7 @@ CartridgeDisassembly disassemble(std::span<const std::uint8_t> rom) {
 
 TEST(Text, TheFileOpensWithTheVersionAndTheImage) {
   const std::string text = renderProgram(programOf({}), bankZero());
-  EXPECT_TRUE(text.starts_with("snagir 1\nimage 32768 LoROM\n\nregion bank_00.asm $00:8000-$00:FFFF\n"))
+  EXPECT_TRUE(text.starts_with("snagir 1;\nimage 32768 LoROM;\n\nregion bank_00.asm $00:8000-$00:FFFF {\n"))
       << text;
   roundTrip(programOf({}), bankZero(), "an empty program");
 }
@@ -190,10 +190,10 @@ TEST(Text, EveryPlaceRoundTripsAndAFlagIsWrittenQualified) {
   node.effects = effects;
   roundTrip(programOf({node}), bankZero(), "every place");
 
-  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::X), imm(2u), {}, Width::Word)), "Set X <- $2  [16]");
-  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagX), imm(1u), {}, Width::Byte)), "Set P.X <- $1  [8]");
-  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::D), imm(0u), {}, Width::Word)), "Set D <- $0  [16]");
-  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagD), imm(0u), {}, Width::Byte)), "Set P.D <- $0  [8]");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::X), imm(2u), {}, Width::Word)), "Set X <- $2 [16];");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagX), imm(1u), {}, Width::Byte)), "Set P.X <- $1 [8];");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::D), imm(0u), {}, Width::Word)), "Set D <- $0 [16];");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagD), imm(0u), {}, Width::Byte)), "Set P.D <- $0 [8];");
   EXPECT_EQ(placeName(Place::FlagX), "X");  // the vocabulary's own name is not qualified
 }
 
@@ -221,9 +221,9 @@ TEST(Text, EveryWidthStepAccessAndPinRoundTrips) {
   Node node = nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset());
   node.effects = effects;
   roundTrip(programOf({node}), bankZero(), "every width, step, access and pin");
-  EXPECT_EQ(renderEffect(pinned), "Push PC  [16 pinned]");
-  EXPECT_EQ(renderEffect(unpinned), "Pull A <-  [byM unpinned]");
-  EXPECT_EQ(renderEffect(effects[3]), "StoreRmw T0, A  [8 flat rmw]");
+  EXPECT_EQ(renderEffect(pinned), "Push PC [16 pinned];");
+  EXPECT_EQ(renderEffect(unpinned), "Pull A <- [byM unpinned];");
+  EXPECT_EQ(renderEffect(effects[3]), "StoreRmw T0, A [8 flat rmw];");
 }
 
 TEST(Text, EveryConditionRoundTrips) {
@@ -245,9 +245,9 @@ TEST(Text, EveryConditionRoundTrips) {
   Node node = nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset());
   node.effects = effects;
   roundTrip(programOf({node}), bankZero(), "every condition");
-  EXPECT_EQ(renderEffect(effects[6]), "Cycles $1  [8]  if set P.Z and e");
-  EXPECT_EQ(renderEffect(effects[11]), "Cycles $1  [8]  if is not DBR $7E");
-  EXPECT_EQ(renderEffect(effects[13]), "Cycles $1  [8]  if D.lo");
+  EXPECT_EQ(renderEffect(effects[6]), "Cycles $1 [8] if set P.Z and e;");
+  EXPECT_EQ(renderEffect(effects[11]), "Cycles $1 [8] if is not DBR $7E;");
+  EXPECT_EQ(renderEffect(effects[13]), "Cycles $1 [8] if D.lo;");
 }
 
 // An effect that always runs, and the emulation flag is set, is `if e`: the
@@ -255,7 +255,7 @@ TEST(Text, EveryConditionRoundTrips) {
 TEST(Text, AlwaysAndEmulationIsWrittenAsIfEmulation) {
   Effect always = effect(Op::Cycles, {}, imm(1u), {}, Width::Byte);
   always.when.andEmulation = true;
-  EXPECT_EQ(renderEffect(always), "Cycles $1  [8]  if e");
+  EXPECT_EQ(renderEffect(always), "Cycles $1 [8] if e;");
   Node node = nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset());
   node.effects = {always};
   std::string error;
@@ -316,10 +316,10 @@ TEST(Text, EveryAddressingModeRoundTrips) {
   // A block move carries both banks; the two `rel16` forms are told apart by
   // their mnemonics.
   const std::string text = renderProgram(programOf(nodes), bankZero());
-  EXPECT_NE(text.find("MVN src,dst  operand $0 operand2 $7E  length 3"), std::string::npos) << text;
-  EXPECT_NE(text.find("$00:803A  BRL rel16  operand $804D  length 3  flow jump target $00:804D"), std::string::npos)
+  EXPECT_NE(text.find("MVN src,dst operand $0 operand2 $7E length 3"), std::string::npos) << text;
+  EXPECT_NE(text.find("$00:803A BRL rel16 operand $804D length 3 flow jump target $00:804D"), std::string::npos)
       << text;
-  EXPECT_NE(text.find("$00:8043  PER rel16  operand $8056  length 3  flow continue  e=0"), std::string::npos)
+  EXPECT_NE(text.find("$00:8043 PER rel16 operand $8056 length 3 flow continue e=0"), std::string::npos)
       << text;
 }
 
@@ -341,9 +341,9 @@ TEST(Text, EveryFlowAndATargetRoundTrip) {
   EXPECT_FALSE(nodes[6].instruction.target.has_value());
   roundTrip(programOf(nodes), bankZero(), "every flow");
   const std::string text = renderProgram(programOf(nodes), bankZero());
-  EXPECT_NE(text.find("BNE rel  operand $8005  length 2  flow branch target $00:8005  e=0"), std::string::npos)
+  EXPECT_NE(text.find("BNE rel operand $8005 length 2 flow branch target $00:8005 e=0"), std::string::npos)
       << text;
-  EXPECT_NE(text.find("JMP (abs)  operand $8000  length 3  flow jump  e=0"), std::string::npos) << text;
+  EXPECT_NE(text.find("JMP (abs) operand $8000 length 3 flow jump e=0"), std::string::npos) << text;
 }
 
 TEST(Text, ARegisterNameAndThePatchedMarkRoundTrip) {
@@ -353,10 +353,10 @@ TEST(Text, ARegisterNameAndThePatchedMarkRoundTrip) {
   EXPECT_EQ(named.registerName, "INIDISP");
   roundTrip(programOf({named, patched}), bankZero(), "a register name and a patched node");
   const std::string text = renderProgram(programOf({named, patched}), bankZero());
-  EXPECT_NE(text.find("$00:8000  STA long  operand $2100  length 4  flow continue  e=0 m=8 x=8  base 5/5/6/6  INIDISP\n"),
+  EXPECT_NE(text.find("$00:8000 STA long operand $2100 length 4 flow continue e=0 m=8 x=8 base 5/5/6/6 INIDISP {\n"),
             std::string::npos)
       << text;
-  EXPECT_NE(text.find("  e=0 m=8 x=8  base 2/2/2/2  patched\n"), std::string::npos) << text;
+  EXPECT_NE(text.find(" e=0 m=8 x=8 base 2/2/2/2 patched {\n"), std::string::npos) << text;
 
   // The name read back is the register table's own storage.
   std::string error;
@@ -383,10 +383,10 @@ TEST(Text, EveryModeRoundTrips) {
   nodes.push_back(nodeOf({0xEAu}, address++, half));
   roundTrip(programOf(nodes), bankZero(), "every mode");
   const std::string text = renderProgram(programOf(nodes), bankZero());
-  EXPECT_NE(text.find("  e=1  base"), std::string::npos);
-  EXPECT_NE(text.find("  e=0 m=16 x=8  base"), std::string::npos);
-  EXPECT_NE(text.find("  e=0 m=? x=?  base"), std::string::npos);
-  EXPECT_NE(text.find("  e=0 m=8 x=?  base"), std::string::npos);
+  EXPECT_NE(text.find(" e=1 base"), std::string::npos);
+  EXPECT_NE(text.find(" e=0 m=16 x=8 base"), std::string::npos);
+  EXPECT_NE(text.find(" e=0 m=? x=? base"), std::string::npos);
+  EXPECT_NE(text.find(" e=0 m=8 x=? base"), std::string::npos);
 }
 
 // The file writes `?` for a width the trace did not know, and the bit behind
@@ -448,7 +448,7 @@ TEST(Text, TheCostsAreWrittenInCostIndexOrder) {
   Node node = nodeOf({0xA9u, 0x01u}, 0x008000u, Cpu65816Mode::native(true, true));  // LDA #imm
   node.cost.base = {2, 3, 4, 5};
   roundTrip(programOf({node}), bankZero(), "the costs");
-  EXPECT_NE(renderNode(node).find("  base 2/3/4/5\n"), std::string::npos) << renderNode(node);
+  EXPECT_NE(renderNode(node).find(" base 2/3/4/5 {\n"), std::string::npos) << renderNode(node);
 }
 
 TEST(Text, TheInterruptSequencesRoundTrip) {
@@ -458,8 +458,8 @@ TEST(Text, TheInterruptSequencesRoundTrip) {
   EXPECT_NE(program.nmi, program.irq);
   roundTrip(program, bankZero(), "the sequences");
   const std::string text = renderProgram(program, bankZero());
-  EXPECT_NE(text.find("\nnmi\n    "), std::string::npos) << text;
-  EXPECT_NE(text.find("\nirq\n    "), std::string::npos) << text;
+  EXPECT_NE(text.find("\nnmi {\n  "), std::string::npos) << text;
+  EXPECT_NE(text.find("}\nirq {\n  "), std::string::npos) << text;
 }
 
 // ---- what the file carries that the program does not ---------------------------------
@@ -488,15 +488,26 @@ TEST(Text, ADataRunALabelAWarningAndTwoRegionsRoundTrip) {
   };
   roundTrip(programOf(nodes), file, "two regions");
   const std::string text = renderProgram(programOf(nodes), file);
-  EXPECT_NE(text.find("\nregion bank_00.asm $00:8000-$00:FFFF\n"
-                      "warning bank_00.asm $00:8010 is reached with e=0 m=8 x=8 and with e=0 m=16 x=8\n"
-                      "\nlabel $00:8000 reset\n$00:8000  JMP abs"),
+  EXPECT_NE(text.find("\nregion bank_00.asm $00:8000-$00:FFFF {\n"
+                      "  warning \"$00:8010 is reached with e=0 m=8 x=8 and with e=0 m=16 x=8\";\n"
+                      "  label $00:8000 reset;\n  $00:8000 JMP abs"),
             std::string::npos)
       << text;
-  EXPECT_NE(text.find("\nlabel $00:8003 loc_008003\n$00:8003  NOP   operand"), std::string::npos) << text;
-  EXPECT_NE(text.find("\ndata $00:8004 00FF7E\n\nregion bank_01.asm"), std::string::npos) << text;
-  EXPECT_NE(text.find("\nlabel $01:8000 sub_018000\n$01:8000  RTS"), std::string::npos) << text;
-  EXPECT_NE(text.find("\ndata $01:8001 60\n\nnmi\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("  label $00:8003 loc_008003;\n  $00:8003 NOP operand"), std::string::npos) << text;
+  EXPECT_NE(text.find("  data $00:8004 00FF7E;\n}\n\nregion bank_01.asm"), std::string::npos) << text;
+  EXPECT_NE(text.find("  label $01:8000 sub_018000;\n  $01:8000 RTS"), std::string::npos) << text;
+  EXPECT_NE(text.find("  data $01:8001 60;\n}\n\nnmi {\n"), std::string::npos) << text;
+}
+
+TEST(Text, AWarningWithAQuoteOrABackslashRoundTrips) {
+  ProgramFile file = bankZero();
+  file.regions[0].warnings = {"a \"quoted\" word", "a back\\slash", "a ; and a } inside"};
+  const Program program = programOf({nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset())});
+  roundTrip(program, file, "escaped warnings");
+  const std::string text = renderProgram(program, file);
+  EXPECT_NE(text.find("  warning \"a \\\"quoted\\\" word\";\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("  warning \"a back\\\\slash\";\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("  warning \"a ; and a } inside\";\n"), std::string::npos) << text;
 }
 
 TEST(Text, ATwoWayAddressIsTwoNodesInOrder) {
@@ -505,8 +516,8 @@ TEST(Text, ATwoWayAddressIsTwoNodesInOrder) {
   EXPECT_NE(first, second);
   roundTrip(programOf({first, second}), bankZero(), "a two-way address");
   const std::string text = renderProgram(programOf({first, second}), bankZero());
-  const std::size_t one = text.find("$00:8000  LDA #imm(M)  operand $1  length 2");
-  const std::size_t two = text.find("$00:8000  LDA #imm(M)  operand $1  length 3");
+  const std::size_t one = text.find("$00:8000 LDA #imm(M) operand $1 length 2");
+  const std::size_t two = text.find("$00:8000 LDA #imm(M) operand $1 length 3");
   ASSERT_NE(one, std::string::npos) << text;
   ASSERT_NE(two, std::string::npos) << text;
   EXPECT_LT(one, two);
@@ -524,7 +535,7 @@ TEST(Text, TheNodesComeBackInAddressOrderWhateverOrderTheRegionsCameIn) {
   const Program program = programOf({nodeOf({0xEAu}, 0x008000u, native), nodeOf({0x60u}, 0x018000u, native)});
   const std::string text = renderProgram(program, file);
   EXPECT_LT(text.find("region bank_01.asm"), text.find("region bank_00.asm"));
-  EXPECT_LT(text.find("$01:8000  RTS"), text.find("$00:8000  NOP"));
+  EXPECT_LT(text.find("$01:8000 RTS"), text.find("$00:8000 NOP"));
   roundTrip(program, file, "regions out of address order");
 }
 
@@ -536,58 +547,101 @@ TEST(Text, ANodeNoRegionHoldsIsRefusedByTheWriter) {
 // ---- what a reader refuses, each naming its line ----------------------------------------
 
 TEST(Text, AnUnknownVersionIsRefused) {
-  EXPECT_EQ(refusal("snagir 2\nimage 1 LoROM\nnmi\nirq\n"), "line 1: version 2 is not one this reader knows");
-  EXPECT_EQ(refusal("image 1 LoROM\n"), "line 1: the first line is not `snagir 1`");
-  EXPECT_EQ(refusal(""), "line 1: the first line is not `snagir 1`");
+  EXPECT_EQ(refusal("snagir 2;\nimage 1 LoROM;\nnmi {}\nirq {}\n"), "line 1: version 2 is not one this reader knows");
+  EXPECT_EQ(refusal("image 1 LoROM;\n"), "line 1: the file does not open with `snagir 1;`");
+  EXPECT_EQ(refusal(""), "line 1: the file does not open with `snagir 1;`");
+  EXPECT_EQ(refusal("snagir 1\nimage 1 LoROM;\n"), "line 2: `image` where `;` belongs");
 }
 
 TEST(Text, AnUnknownRecordIsRefusedWithItsLine) {
   const std::string text = renderProgram(programOf({}), bankZero());
   const std::size_t lines = static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n'));
-  EXPECT_EQ(refusal(text + "routine $00:8000 reset\n"),
-            "line " + std::to_string(lines + 1) + ": `routine` is not a record");
-  EXPECT_EQ(refusal("snagir 1\nimage 1 LoROM\n\nfact one\n"), "line 4: `fact` is not a record");
+  EXPECT_EQ(refusal(text + "routine $00:8000 reset;\n"),
+            "line " + std::to_string(lines + 1) + ": `routine` after the irq sequence");
+  EXPECT_EQ(refusal("snagir 1;\nimage 1 LoROM;\n\nfact one;\n"), "line 4: `fact` where `nmi` belongs");
+  EXPECT_EQ(refusal("snagir 1;\nimage 1 LoROM;\nregion bank_00.asm $00:8000-$00:FFFF {\n  fact one;\n}\n"),
+            "line 4: `fact` is not a record");
 }
 
-TEST(Text, ATruncatedNodeLineIsRefusedWithItsLine) {
-  const std::string head = "snagir 1\nimage 32768 LoROM\n\nregion bank_00.asm $00:8000-$00:FFFF\n\n";
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1\n"), "line 6: the node lacks its flow");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  flow continue  e=1  base 2/2/2/2\n"),
+TEST(Text, ATruncatedNodeIsRefusedWithItsLine) {
+  const std::string head = "snagir 1;\nimage 32768 LoROM;\n\nregion bank_00.asm $00:8000-$00:FFFF {\n\n";
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 }\n"), "line 6: `}` where `flow` belongs");
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 flow continue e=1 base 2/2/2/2 {}\n}\n"),
             "line 6: `flow` where `length` belongs");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1  flow continue  e=1  base 2/2/2\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2 {}\n}\n"),
             "line 6: `2/2/2` is not four costs");
-  EXPECT_EQ(refusal(head + "$00:8000  NOQ   operand $0  length 1  flow continue  e=1  base 2/2/2/2\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOQ operand $0 length 1 flow continue e=1 base 2/2/2/2 {}\n}\n"),
             "line 6: `NOQ` is not a mnemonic");
-  EXPECT_EQ(refusal(head + "$00:8000  LDA (abs)  operand $0  length 3  flow continue  e=1  base 2/2/2/2\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 LDA (abs) operand $0 length 3 flow continue e=1 base 2/2/2/2 {}\n}\n"),
             "line 6: `LDA` with `(abs)` names no opcode");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1  flow continue  e=1  base 2/2/2/2  INIDISP\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 INIDISP {}\n}\n"),
             "line 6: `INIDISP` is not the register at $0");
-  EXPECT_EQ(refusal(head + "$00:8000  STA long  operand $2100  length 4  flow continue  e=1  base 5/5/5/5  NMITIMEN\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 STA long operand $2100 length 4 flow continue e=1 base 5/5/5/5 NMITIMEN {}\n}\n"),
             "line 6: `NMITIMEN` is not the register at $2100");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1  flow continue  e=1  base 2/2/2/2\n"
-                           "    Sett PC <- $8001  [16]\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Sett PC <- $8001 [16];\n  }\n}\n"),
             "line 7: `Sett` is not an operation");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1  flow continue  e=1  base 2/2/2/2\n"
-                           "    Set imm <- $8001  [16]\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Set imm <- $8001 [16];\n  }\n}\n"),
             "line 7: `imm` is not a place");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1  flow continue  e=1  base 2/2/2/2\n"
-                           "    Set PC <- $8001  [16 flat]\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Set PC <- $8001 [16 flat];\n  }\n}\n"),
             "line 7: a step on an operation that carries none");
-  EXPECT_EQ(refusal(head + "$00:8000  NOP   operand $0  length 1  flow continue  e=1  base 2/2/2/2\n"
-                           "    Set PC <- $8001  [16]  if maybe\n"),
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Set PC <- $8001 [16] if maybe;\n  }\n}\n"),
             "line 7: `if maybe` is not a condition");
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Set PC <- $8001 [16]\n  }\n}\n"),
+            "line 8: `}` before an effect's `;`");
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"),
+            "line 7: the file ends where an effect or `}` belongs");
 }
 
 TEST(Text, ARecordOutOfItsPlaceIsRefused) {
-  EXPECT_EQ(refusal("snagir 1\nimage 1 LoROM\n\nlabel $00:8000 reset\n"), "line 4: a label before any region");
-  EXPECT_EQ(refusal("snagir 1\nimage 1 LoROM\n\n    Set PC <- $1  [16]\n"),
-            "line 4: an effect with no node or sequence above it");
-  const std::string head = "snagir 1\nimage 32768 LoROM\n\nregion bank_00.asm $00:8000-$00:FFFF\n";
-  EXPECT_EQ(refusal(head + "data $01:8000 00\n"), "line 5: $01:8000 lies outside bank_00.asm's range");
-  EXPECT_EQ(refusal(head + "data $00:8004 00\nlabel $00:8000 reset\n"), "line 6: $00:8000 is out of address order");
-  EXPECT_EQ(refusal(head + "nmi\nirq\nnmi\n"), "line 7: `nmi` is written once, after the last region");
-  EXPECT_EQ(refusal(head + "nmi\n"), "line 6: the file ends before its irq sequence");
-  EXPECT_EQ(refusal(head + "nmi\nirq\nlabel $00:8000 reset\n"), "line 7: a label after the interrupt sequences");
+  EXPECT_EQ(refusal("snagir 1;\nimage 1 LoROM;\n\nlabel $00:8000 reset;\n"), "line 4: a label outside any region");
+  EXPECT_EQ(refusal("snagir 1;\nimage 1 LoROM;\n\nSet PC <- $1 [16];\n"), "line 4: `Set` where `nmi` belongs");
+  const std::string head = "snagir 1;\nimage 32768 LoROM;\n\nregion bank_00.asm $00:8000-$00:FFFF {\n";
+  EXPECT_EQ(refusal(head + "  data $01:8000 00;\n}\n"), "line 5: $01:8000 lies outside bank_00.asm's range");
+  EXPECT_EQ(refusal(head + "  data $00:8004 00;\n  label $00:8000 reset;\n}\n"),
+            "line 6: $00:8000 is out of address order");
+  EXPECT_EQ(refusal(head + "  label $00:8000 reset;\n  warning \"late\";\n}\n"),
+            "line 6: a warning must come before the region's labels, data and nodes");
+  EXPECT_EQ(refusal(head + "  warning \"open;\n}\n"), "line 5: a string that does not close on its line");
+  EXPECT_EQ(refusal(head + "}\nnmi {}\nirq {}\nnmi {}\n"), "line 8: `nmi` after the irq sequence");
+  EXPECT_EQ(refusal(head + "}\nnmi {}\n"), "line 7: the file ends before its irq sequence");
+  EXPECT_EQ(refusal(head + "}\nnmi {}\nirq {}\nlabel $00:8000 reset;\n"), "line 8: `label` after the irq sequence");
+  EXPECT_EQ(refusal(head + "  nmi {}\n}\n"), "line 5: `nmi` inside a region");
+}
+
+// Whitespace separates words and means nothing else: the file on one line, or
+// with every run of spaces stretched and comments between the records, is the
+// same program.
+TEST(Text, WhitespaceAndCommentsCarryNoMeaning) {
+  const CartridgeDisassembly d = disassemble(examples::mixedImage());
+  const Program program = programOfTree(d);
+  const ProgramFile file = fileOfTree(d);
+  const std::string text = renderProgram(program, file);
+
+  std::string oneLine = text;
+  std::replace(oneLine.begin(), oneLine.end(), '\n', ' ');
+  std::string error;
+  std::optional<Parsed> parsed = parseProgram(oneLine, error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  EXPECT_TRUE(equivalent(parsed->program, program));
+  EXPECT_EQ(parsed->file, file);
+
+  std::string stretched;
+  for (const char c : text) {
+    stretched += c;
+    if (c == ' ') stretched += "\t  ";
+    if (c == ';') stretched += "  // a comment to the end of the line\n";
+    if (c == '{') stretched += "\n\n";
+  }
+  parsed = parseProgram("// a comment before everything\n" + stretched, error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  EXPECT_TRUE(equivalent(parsed->program, program));
+  EXPECT_EQ(parsed->file, file);
+  EXPECT_EQ(renderProgram(parsed->program, parsed->file), text);
 }
 
 // ---- the round trip over the example cartridges ----------------------------------------

@@ -8,7 +8,6 @@
 #include <string>
 #include <utility>
 
-#include "ir/cpu65816_lift.h"
 #include "rom/cartridge_entries.h"
 #include "rom/rom_disasm.h"
 #include "snaggletooth/snes/cartridge.h"
@@ -24,8 +23,8 @@ struct SiteProof {
   ir::Evaluation evaluation;
 };
 
-std::optional<SiteProof> proofAt(const ProvenProgram& proven, Address site) {
-  const std::vector<ir::Node>& nodes = proven.program->nodes;
+std::optional<SiteProof> proofAt(const ir::Program& program, const ProvenProgram& proven, Address site) {
+  const std::vector<ir::Node>& nodes = program.nodes;
   auto it = std::lower_bound(nodes.begin(), nodes.end(), site, [](const ir::Node& n, Address a) {
     return n.instruction.address < a;
   });
@@ -180,7 +179,7 @@ std::vector<HardwareAccess> hardwareAccesses(const CartridgeDisassembly& disasse
       std::optional<SiteProof> proof;
       const ir::ProvenAccess* access = nullptr;
       if (proven && kind) {
-        proof = proofAt(*proven, instruction.address);
+        proof = proofAt(disassembly.program, *proven, instruction.address);
         if (proof) access = operandAccess(*proof);
       }
 
@@ -554,23 +553,6 @@ ProvenProgram proveProgram(const CartridgeDisassembly& disassembly, std::span<co
   const CartridgeMap map = disassembly.header.map;
   const std::size_t imageBytes = rom.size();
 
-  // One program over every region, in address order, each address's readings
-  // in the order the listing gives them.
-  auto program = std::make_unique<ir::Program>();
-  for (const RegionListing& region : disassembly.regions) {
-    const std::optional<std::size_t> start = romOffset(map, region.region.first, imageBytes);
-    if (!start) continue;
-    const std::size_t length = static_cast<std::size_t>(region.region.last - region.region.first) + 1u;
-    ir::Program lifted = ir::lift65816(region.listing, rom.subspan(*start, length), region.region.first);
-    program->nodes.insert(program->nodes.end(), std::make_move_iterator(lifted.nodes.begin()),
-                          std::make_move_iterator(lifted.nodes.end()));
-    program->nmi = std::move(lifted.nmi);
-    program->irq = std::move(lifted.irq);
-  }
-  std::stable_sort(program->nodes.begin(), program->nodes.end(), [](const ir::Node& a, const ir::Node& b) {
-    return a.instruction.address < b.instruction.address;
-  });
-
   // Every vector begins in bank zero, which the chip clears to take it — reset
   // with the direct register and the data bank cleared too, the others knowing
   // nothing else. An entry a person added begins in the bank of the address they
@@ -631,8 +613,7 @@ ProvenProgram proveProgram(const CartridgeDisassembly& disassembly, std::span<co
   ProvenProgram proven;
   proven.image = image;
   proven.stack = stack;
-  proven.flow = std::make_unique<ir::Dataflow>(*program, entries, sightings, image, canonical, stack);
-  proven.program = std::move(program);
+  proven.flow = std::make_unique<ir::Dataflow>(disassembly.program, entries, sightings, image, canonical, stack);
   return proven;
 }
 
@@ -641,10 +622,10 @@ bool sameDerivation(const DerivedTarget& a, const DerivedTarget& b) {
          contextOf(a.mode).bits == contextOf(b.mode).bits;
 }
 
-std::vector<DerivedTarget> derivedTargets(const CartridgeDisassembly& /*disassembly*/,
+std::vector<DerivedTarget> derivedTargets(const CartridgeDisassembly& disassembly,
                                           const ProvenProgram& proven) {
   std::vector<DerivedTarget> out;
-  const std::vector<ir::Node>& nodes = proven.program->nodes;
+  const std::vector<ir::Node>& nodes = disassembly.program.nodes;
   for (const ir::DerivedTarget& derived : proven.flow->derived()) {
     // The mode a jump through a pointer carries in is the mode it runs under:
     // none of the four forms moves a flag.
@@ -663,7 +644,7 @@ std::vector<DerivedTarget> derivedTargets(const CartridgeDisassembly& /*disassem
 
 std::vector<StateFact> stateFacts(const CartridgeDisassembly& disassembly, const ProvenProgram& proven) {
   std::vector<StateFact> out;
-  const std::vector<ir::Node>& nodes = proven.program->nodes;
+  const std::vector<ir::Node>& nodes = disassembly.program.nodes;
   for (const RegionListing& region : disassembly.regions) {
     for (const auto& [address, label] : region.listing.labels) {
       const ir::State* state = proven.flow->before(address);

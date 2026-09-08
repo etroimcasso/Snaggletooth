@@ -72,6 +72,16 @@ bool carriesStep(Op op) { return op == Op::Load || op == Op::Store || op == Op::
 bool carriesPin(Op op) { return op == Op::Push || op == Op::Pull; }
 bool carriesValue(When when) { return when == When::PlaceIs || when == When::PlaceIsNot; }
 
+// A string as the file writes one: in double quotes, with `"` and `\` escaped.
+std::string quotedText(std::string_view text) {
+  std::string out = "\"";
+  for (const char c : text) {
+    if (c == '"' || c == '\\') out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
 // The representation's addressing mode for the backend's.
 Addressing addressingOf(disasm::Cpu65816Addressing mode) {
   using M = disasm::Cpu65816Addressing;
@@ -110,18 +120,14 @@ Addressing addressingOf(disasm::Cpu65816Addressing mode) {
 
 // ---- the reader --------------------------------------------------------------
 
-// The words of a line, split at runs of spaces and tabs.
-std::vector<std::string_view> words(std::string_view line) {
-  std::vector<std::string_view> out;
-  std::size_t i = 0;
-  while (i < line.size()) {
-    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
-    const std::size_t start = i;
-    while (i < line.size() && line[i] != ' ' && line[i] != '\t') ++i;
-    if (i > start) out.push_back(line.substr(start, i - start));
-  }
-  return out;
-}
+// One token of the file: a word, one of the three delimiters `{` `}` `;`, or a
+// string, with the line it begins on. A string's text is what the quotes held,
+// unescaped, and `quoted` says it was one.
+struct Token {
+  std::string text;
+  std::size_t line = 0;
+  bool quoted = false;
+};
 
 // `digits` as a hexadecimal number of at most eight digits, or nothing.
 std::optional<std::uint32_t> hexValue(std::string_view digits) {
@@ -187,26 +193,23 @@ std::optional<Place> place(std::string_view text) {
   return std::nullopt;
 }
 
+bool isDelimiter(char c) { return c == '{' || c == '}' || c == ';'; }
+
 class Reader {
  public:
   explicit Reader(std::string& error) : error_(error) {}
 
   std::optional<Parsed> read(std::string_view text) {
-    std::size_t pos = 0;
-    while (pos <= text.size()) {
-      const std::size_t end = text.find('\n', pos);
-      std::string_view line = text.substr(pos, end == std::string_view::npos ? std::string_view::npos : end - pos);
-      if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-      ++lineNo_;
-      if (!readLine(line)) return std::nullopt;
-      if (end == std::string_view::npos) break;
-      pos = end + 1;
+    if (!tokenize(text)) return std::nullopt;
+    if (!readVersion() || !readImage()) return std::nullopt;
+    while (peekIs("region")) {
+      if (!readRegion()) return std::nullopt;
     }
-    if (phase_ != Phase::Irq) {
-      fail(phase_ == Phase::Version ? "the first line is not `snagir 1`"
-           : phase_ == Phase::Image ? "`image` must follow the version"
-           : phase_ == Phase::Regions ? "the file ends before its nmi sequence"
-                                      : "the file ends before its irq sequence");
+    if (!readSequence("nmi", parsed_.program.nmi) || !readSequence("irq", parsed_.program.irq)) {
+      return std::nullopt;
+    }
+    if (pos_ < tokens_.size()) {
+      fail(quoted(tokens_[pos_].text) + " after the irq sequence");
       return std::nullopt;
     }
     std::stable_sort(parsed_.program.nodes.begin(), parsed_.program.nodes.end(),
@@ -217,259 +220,355 @@ class Reader {
   }
 
  private:
-  enum class Phase { Version, Image, Regions, Nmi, Irq };
   enum class Kind { Label, Data, Node };
 
-  bool fail(const std::string& what) {
-    error_ = "line " + std::to_string(lineNo_) + ": " + what;
+  // ---- tokens ------------------------------------------------------------------
+
+  bool tokenize(std::string_view text) {
+    std::size_t line = 1;
+    std::size_t i = 0;
+    while (i < text.size()) {
+      const char c = text[i];
+      if (c == '\n') {
+        ++line;
+        ++i;
+        continue;
+      }
+      if (c == ' ' || c == '\t' || c == '\r') {
+        ++i;
+        continue;
+      }
+      if (c == '/' && i + 1 < text.size() && text[i + 1] == '/') {
+        while (i < text.size() && text[i] != '\n') ++i;
+        continue;
+      }
+      if (isDelimiter(c)) {
+        tokens_.push_back(Token{.text = std::string(1, c), .line = line, .quoted = false});
+        ++i;
+        continue;
+      }
+      if (c == '"') {
+        std::string out;
+        ++i;
+        bool closed = false;
+        while (i < text.size()) {
+          const char d = text[i++];
+          if (d == '\\' && i < text.size()) {
+            out += text[i++];
+          } else if (d == '"') {
+            closed = true;
+            break;
+          } else if (d == '\n') {
+            break;
+          } else {
+            out += d;
+          }
+        }
+        if (!closed) return failAt(line, "a string that does not close on its line");
+        tokens_.push_back(Token{.text = std::move(out), .line = line, .quoted = true});
+        continue;
+      }
+      const std::size_t start = i;
+      while (i < text.size() && text[i] != ' ' && text[i] != '\t' && text[i] != '\r' && text[i] != '\n' &&
+             !isDelimiter(text[i]) && text[i] != '"') {
+        ++i;
+      }
+      tokens_.push_back(Token{.text = std::string(text.substr(start, i - start)), .line = line, .quoted = false});
+    }
+    lastLine_ = line;
+    return true;
+  }
+
+  bool failAt(std::size_t line, const std::string& what) {
+    error_ = "line " + std::to_string(line) + ": " + what;
     return false;
   }
 
+  // The line of the token at hand — or the last line of the file when the
+  // tokens have run out.
+  std::size_t here() const { return pos_ < tokens_.size() ? tokens_[pos_].line : lastLine_; }
+
+  bool fail(const std::string& what) { return failAt(here(), what); }
+
   static std::string quoted(std::string_view word) { return "`" + std::string(word) + "`"; }
 
-  bool readLine(std::string_view line) {
-    if (line.empty() || line[0] == '#') return true;
-    if (line.starts_with("    ")) return readEffect(line.substr(4));
-    if (line[0] == '$') return readNode(line);
-    const std::vector<std::string_view> w = words(line);
-    if (w.empty()) return true;  // spaces alone are a blank line
-    effects_ = nullptr;
-    const std::string_view kind = w.front();
-    if (phase_ == Phase::Version) {
-      if (kind != "snagir") return fail("the first line is not `snagir 1`");
-      if (w.size() != 2) return fail("`snagir` takes one field, the version");
-      if (w[1] != "1") return fail("version " + std::string(w[1]) + " is not one this reader knows");
-      phase_ = Phase::Image;
-      return true;
-    }
-    if (phase_ == Phase::Image) {
-      if (kind != "image") return fail("`image` must follow the version");
-      if (w.size() != 3) return fail("`image` takes two fields, the size in bytes and the map");
-      const std::optional<std::uint32_t> bytes = decimal(w[1], 0xFFFFFFFFu);
-      if (!bytes) return fail(quoted(w[1]) + " is not a byte count");
-      parsed_.file.imageBytes = *bytes;
-      parsed_.file.map = std::string(w[2]);
-      phase_ = Phase::Regions;
-      return true;
-    }
-    if (kind == "region") return readRegion(line, w);
-    if (kind == "warning") return readWarning(line);
-    if (kind == "label") return readLabel(w);
-    if (kind == "data") return readData(w);
-    if (kind == "nmi" || kind == "irq") return readSequence(w);
-    if (kind == "image") return fail("`image` is written once, after the version");
-    if (kind == "snagir") return fail("the version is written once, on the first line");
-    return fail(quoted(kind) + " is not a record");
+  bool peekIs(std::string_view word) const {
+    return pos_ < tokens_.size() && !tokens_[pos_].quoted && tokens_[pos_].text == word;
   }
 
-  bool inRegion(std::string_view what) {
-    if (phase_ != Phase::Regions) return fail(std::string(what) + " after the interrupt sequences");
-    if (parsed_.file.regions.empty()) return fail(std::string(what) + " before any region");
+  // The next token, a word or a delimiter, or nothing at the end of the file.
+  const Token* next() {
+    if (pos_ >= tokens_.size()) return nullptr;
+    return &tokens_[pos_++];
+  }
+
+  // The next word, which must not be a delimiter or a string.
+  const Token* word(const char* what) {
+    const Token* t = next();
+    if (t == nullptr) {
+      fail(std::string("the file ends where ") + what + " belongs");
+      return nullptr;
+    }
+    if (t->quoted || isDelimiter(t->text[0])) {
+      --pos_;
+      fail(quoted(t->quoted ? "\"" + t->text + "\"" : t->text) + " where " + what + " belongs");
+      return nullptr;
+    }
+    return t;
+  }
+
+  bool expect(std::string_view text) {
+    const Token* t = next();
+    if (t == nullptr) return fail("the file ends where `" + std::string(text) + "` belongs");
+    if (t->quoted || t->text != text) {
+      --pos_;
+      return fail(quoted(t->text) + " where `" + std::string(text) + "` belongs");
+    }
     return true;
+  }
+
+  // ---- the head ------------------------------------------------------------------
+
+  bool readVersion() {
+    if (!peekIs("snagir")) return fail("the file does not open with `snagir 1;`");
+    ++pos_;
+    const Token* version = word("the version");
+    if (version == nullptr) return false;
+    if (version->text != "1") return failAt(version->line, "version " + version->text + " is not one this reader knows");
+    return expect(";");
+  }
+
+  bool readImage() {
+    if (!peekIs("image")) return fail("`image` must follow the version");
+    ++pos_;
+    const Token* bytes = word("the image's size");
+    if (bytes == nullptr) return false;
+    const std::optional<std::uint32_t> count = decimal(bytes->text, 0xFFFFFFFFu);
+    if (!count) return failAt(bytes->line, quoted(bytes->text) + " is not a byte count");
+    const Token* map = word("the image's map");
+    if (map == nullptr) return false;
+    parsed_.file.imageBytes = *count;
+    parsed_.file.map = map->text;
+    return expect(";");
+  }
+
+  // ---- a region ------------------------------------------------------------------
+
+  bool readRegion() {
+    ++pos_;  // `region`
+    const Token* file = next();
+    if (file == nullptr || (!file->quoted && isDelimiter(file->text[0]))) {
+      if (file != nullptr) --pos_;
+      return fail("`region` takes a file and a range");
+    }
+    const Token* range = word("the region's range");
+    if (range == nullptr) return false;
+    const std::size_t dash = range->text.find('-');
+    if (dash == std::string::npos) return failAt(range->line, quoted(range->text) + " is not a range");
+    const std::optional<Address> first = address(std::string_view(range->text).substr(0, dash));
+    const std::optional<Address> last = address(std::string_view(range->text).substr(dash + 1));
+    if (!first || !last || *first > *last) return failAt(range->line, quoted(range->text) + " is not a range");
+    if (!expect("{")) return false;
+    ProgramRegion region;
+    region.file = file->text;
+    region.first = *first;
+    region.last = *last;
+    parsed_.file.regions.push_back(std::move(region));
+    last_.reset();
+    bool opened = false;  // whether a label, a data run or a node has been read
+    for (;;) {
+      const Token* t = next();
+      if (t == nullptr) return fail("the file ends inside " + parsed_.file.regions.back().file + "'s region");
+      if (!t->quoted && t->text == "}") return true;
+      if (t->quoted) return failAt(t->line, "a string where a record belongs");
+      if (t->text == "warning") {
+        if (opened) return failAt(t->line, "a warning must come before the region's labels, data and nodes");
+        const Token* text = next();
+        if (text == nullptr || !text->quoted) {
+          if (text != nullptr) --pos_;
+          return fail("`warning` takes its text in double quotes");
+        }
+        parsed_.file.regions.back().warnings.push_back(text->text);
+        if (!expect(";")) return false;
+        continue;
+      }
+      opened = true;
+      if (t->text == "label") {
+        if (!readLabel()) return false;
+      } else if (t->text == "data") {
+        if (!readData()) return false;
+      } else if (t->text[0] == '$') {
+        if (!readNode(*t)) return false;
+      } else if (t->text == "region" || t->text == "nmi" || t->text == "irq" || t->text == "image" ||
+                 t->text == "snagir") {
+        return failAt(t->line, quoted(t->text) + " inside a region");
+      } else {
+        return failAt(t->line, quoted(t->text) + " is not a record");
+      }
+    }
   }
 
   // A record's address must lie in the region and follow the record before it:
   // a label, then a data run, then the nodes, at one address.
-  bool inOrder(Address at, Kind kind) {
+  bool inOrder(std::size_t line, Address at, Kind kind) {
     const ProgramRegion& region = parsed_.file.regions.back();
     if (at < region.first || at > region.last) {
-      return fail(addressText(at) + " lies outside " + region.file + "'s range");
+      return failAt(line, addressText(at) + " lies outside " + region.file + "'s range");
     }
     if (last_ && (at < last_->first || (at == last_->first && kind < last_->second))) {
-      return fail(addressText(at) + " is out of address order");
+      return failAt(line, addressText(at) + " is out of address order");
     }
     last_ = std::pair{at, kind};
     return true;
   }
 
-  bool readRegion(std::string_view line, const std::vector<std::string_view>& w) {
-    if (phase_ != Phase::Regions) return fail("a region after the interrupt sequences");
-    if (w.size() < 3) return fail("`region` takes a file and a range");
-    const std::string_view range = w.back();
-    const std::size_t dash = range.find('-');
-    if (dash == std::string_view::npos) return fail(quoted(range) + " is not a range");
-    const std::optional<Address> first = address(range.substr(0, dash));
-    const std::optional<Address> last = address(range.substr(dash + 1));
-    if (!first || !last || *first > *last) return fail(quoted(range) + " is not a range");
-    ProgramRegion region;
-    region.file = std::string(line.substr(7, line.rfind(' ') - 7));
-    region.first = *first;
-    region.last = *last;
-    parsed_.file.regions.push_back(std::move(region));
-    last_.reset();
-    return true;
+  bool readLabel() {
+    const Token* at = word("the label's address");
+    if (at == nullptr) return false;
+    const std::optional<Address> a = address(at->text);
+    if (!a) return failAt(at->line, quoted(at->text) + " is not an address");
+    const Token* name = word("the label's name");
+    if (name == nullptr) return false;
+    if (!inOrder(at->line, *a, Kind::Label)) return false;
+    parsed_.file.regions.back().labels.push_back({*a, name->text});
+    return expect(";");
   }
 
-  bool readWarning(std::string_view line) {
-    if (!inRegion("a warning")) return false;
-    ProgramRegion& region = parsed_.file.regions.back();
-    const std::string lead = "warning " + region.file + " ";
-    if (!line.starts_with(lead)) return fail("a warning must name its region's file");
-    if (last_) return fail("a warning must follow its region's line");
-    region.warnings.emplace_back(line.substr(lead.size()));
-    return true;
-  }
-
-  bool readLabel(const std::vector<std::string_view>& w) {
-    if (!inRegion("a label")) return false;
-    if (w.size() != 3) return fail("`label` takes an address and a name");
-    const std::optional<Address> at = address(w[1]);
-    if (!at) return fail(quoted(w[1]) + " is not an address");
-    if (!inOrder(*at, Kind::Label)) return false;
-    parsed_.file.regions.back().labels.push_back({*at, std::string(w[2])});
-    return true;
-  }
-
-  bool readData(const std::vector<std::string_view>& w) {
-    if (!inRegion("a data run")) return false;
-    if (w.size() != 3) return fail("`data` takes an address and the bytes");
-    const std::optional<Address> at = address(w[1]);
-    if (!at) return fail(quoted(w[1]) + " is not an address");
-    if (!inOrder(*at, Kind::Data)) return false;
-    const std::string_view digits = w[2];
-    if (digits.size() % 2 != 0) return fail("the bytes of a data run come in pairs of digits");
+  bool readData() {
+    const Token* at = word("the data run's address");
+    if (at == nullptr) return false;
+    const std::optional<Address> a = address(at->text);
+    if (!a) return failAt(at->line, quoted(at->text) + " is not an address");
+    const Token* digits = word("the data run's bytes");
+    if (digits == nullptr) return false;
+    if (digits->text.size() % 2 != 0) return failAt(digits->line, "the bytes of a data run come in pairs of digits");
+    if (!inOrder(at->line, *a, Kind::Data)) return false;
     DataRun run;
-    run.address = *at;
-    run.bytes.reserve(digits.size() / 2);
-    for (std::size_t i = 0; i < digits.size(); i += 2) {
-      const std::optional<std::uint32_t> byte = hexValue(digits.substr(i, 2));
-      if (!byte) return fail(quoted(digits.substr(i, 2)) + " is not a byte");
+    run.address = *a;
+    run.bytes.reserve(digits->text.size() / 2);
+    for (std::size_t i = 0; i < digits->text.size(); i += 2) {
+      const std::optional<std::uint32_t> byte = hexValue(std::string_view(digits->text).substr(i, 2));
+      if (!byte) return failAt(digits->line, quoted(std::string_view(digits->text).substr(i, 2)) + " is not a byte");
       run.bytes.push_back(static_cast<std::uint8_t>(*byte));
     }
     parsed_.file.regions.back().data.push_back(std::move(run));
-    return true;
+    return expect(";");
   }
 
-  bool readSequence(const std::vector<std::string_view>& w) {
-    if (w.size() != 1) return fail(quoted(w[0]) + " takes no field");
-    if (w[0] == "nmi") {
-      if (phase_ != Phase::Regions) return fail("`nmi` is written once, after the last region");
-      phase_ = Phase::Nmi;
-      effects_ = &parsed_.program.nmi;
-    } else {
-      if (phase_ != Phase::Nmi) return fail("`irq` is written once, after `nmi`");
-      phase_ = Phase::Irq;
-      effects_ = &parsed_.program.irq;
-    }
-    return true;
-  }
+  // ---- a node --------------------------------------------------------------------
 
-  bool readNode(std::string_view line) {
-    if (!inRegion("a node")) return false;
-    const std::vector<std::string_view> w = words(line);
-    std::size_t i = 0;
-    auto more = [&](const char* what) {
-      if (i < w.size()) return true;
-      return fail(std::string("the node lacks its ") + what);
-    };
-    auto expect = [&](std::string_view word) {
-      if (!more(word.data())) return false;
-      if (w[i] != word) return fail(quoted(w[i]) + " where `" + std::string(word) + "` belongs");
-      ++i;
-      return true;
-    };
-
+  bool readNode(const Token& first) {
     Node node;
     Instruction& instruction = node.instruction;
-    const std::optional<Address> at = address(w[i++]);
-    if (!at) return fail(quoted(w[0]) + " is not an address");
+    const std::optional<Address> at = address(first.text);
+    if (!at) return failAt(first.line, quoted(first.text) + " is not an address");
     instruction.address = *at;
-    if (!more("mnemonic")) return false;
-    const std::string_view mnemonic = w[i++];
-    std::string_view addressing;
-    if (i < w.size() && w[i] != "operand") addressing = w[i++];
-    if (!resolve(mnemonic, addressing, instruction)) return false;
+    const Token* mnemonic = word("the node's mnemonic");
+    if (mnemonic == nullptr) return false;
+    std::string addressing;
+    if (!peekIs("operand")) {
+      const Token* form = word("the node's addressing mode");
+      if (form == nullptr) return false;
+      addressing = form->text;
+    }
+    if (!resolve(*mnemonic, addressing, instruction)) return false;
 
     if (!expect("operand")) return false;
-    if (!more("operand")) return false;
-    const std::optional<std::uint32_t> operand = value(w[i]);
-    if (!operand) return fail(quoted(w[i]) + " is not a value");
-    instruction.operand = *operand;
-    ++i;
-    if (i < w.size() && w[i] == "operand2") {
+    const Token* operand = word("the operand");
+    if (operand == nullptr) return false;
+    const std::optional<std::uint32_t> operandValue = value(operand->text);
+    if (!operandValue) return failAt(operand->line, quoted(operand->text) + " is not a value");
+    instruction.operand = *operandValue;
+    if (peekIs("operand2")) {
+      const Token* key = next();
       if (instruction.addressing != Addressing::BlockMove) {
-        return fail("`operand2` belongs to a block move alone");
+        return failAt(key->line, "`operand2` belongs to a block move alone");
       }
-      ++i;
-      if (!more("operand2")) return false;
-      const std::optional<std::uint32_t> operand2 = value(w[i]);
-      if (!operand2 || *operand2 > 0xFFu) return fail(quoted(w[i]) + " is not a bank");
+      const Token* bank = word("the block move's destination bank");
+      if (bank == nullptr) return false;
+      const std::optional<std::uint32_t> operand2 = value(bank->text);
+      if (!operand2 || *operand2 > 0xFFu) return failAt(bank->line, quoted(bank->text) + " is not a bank");
       instruction.operand2 = static_cast<std::uint8_t>(*operand2);
-      ++i;
     } else if (instruction.addressing == Addressing::BlockMove) {
       return fail("a block move lacks its `operand2`");
     }
 
     if (!expect("length")) return false;
-    if (!more("length")) return false;
-    const std::optional<std::uint32_t> length = decimal(w[i], 4);
-    if (!length || *length == 0) return fail(quoted(w[i]) + " is not a length");
-    instruction.length = static_cast<std::uint8_t>(*length);
-    ++i;
+    const Token* length = word("the length");
+    if (length == nullptr) return false;
+    const std::optional<std::uint32_t> lengthValue = decimal(length->text, 4);
+    if (!lengthValue || *lengthValue == 0) return failAt(length->line, quoted(length->text) + " is not a length");
+    instruction.length = static_cast<std::uint8_t>(*lengthValue);
 
     if (!expect("flow")) return false;
-    if (!more("flow")) return false;
-    const std::optional<Flow> flow = named<Flow>(kFlows, w[i]);
-    if (!flow) return fail(quoted(w[i]) + " is not a flow");
-    instruction.flow = *flow;
-    ++i;
-    if (i < w.size() && w[i] == "target") {
-      ++i;
-      if (!more("target")) return false;
-      const std::optional<Address> target = address(w[i]);
-      if (!target) return fail(quoted(w[i]) + " is not an address");
-      instruction.target = *target;
-      ++i;
+    const Token* flow = word("the flow");
+    if (flow == nullptr) return false;
+    const std::optional<Flow> flowValue = named<Flow>(kFlows, flow->text);
+    if (!flowValue) return failAt(flow->line, quoted(flow->text) + " is not a flow");
+    instruction.flow = *flowValue;
+    if (peekIs("target")) {
+      ++pos_;
+      const Token* target = word("the target");
+      if (target == nullptr) return false;
+      const std::optional<Address> targetValue = address(target->text);
+      if (!targetValue) return failAt(target->line, quoted(target->text) + " is not an address");
+      instruction.target = *targetValue;
     }
 
-    if (!more("mode")) return false;
-    if (w[i] == "e=1") {
+    const Token* e = word("the mode");
+    if (e == nullptr) return false;
+    if (e->text == "e=1") {
       node.mode = Mode{};
-      ++i;
-    } else if (w[i] == "e=0") {
-      ++i;
-      if (i + 1 >= w.size() || !width(w[i], 'm', node.mode.accumulatorKnown, node.mode.accumulator8) ||
-          !width(w[i + 1], 'x', node.mode.indexKnown, node.mode.index8)) {
-        return fail("a native mode is `e=0 m=<8|16|?> x=<8|16|?>`");
+    } else if (e->text == "e=0") {
+      const Token* m = word("the accumulator width");
+      const Token* x = m == nullptr ? nullptr : word("the index width");
+      if (m == nullptr || x == nullptr) return false;
+      if (!width(m->text, 'm', node.mode.accumulatorKnown, node.mode.accumulator8) ||
+          !width(x->text, 'x', node.mode.indexKnown, node.mode.index8)) {
+        return failAt(m->line, "a native mode is `e=0 m=<8|16|?> x=<8|16|?>`");
       }
       node.mode.emulation = false;
-      i += 2;
     } else {
-      return fail(quoted(w[i]) + " is not a mode");
+      return failAt(e->line, quoted(e->text) + " is not a mode");
     }
 
     if (!expect("base")) return false;
-    if (!more("base")) return false;
-    if (!costs(w[i], node.cost)) return fail(quoted(w[i]) + " is not four costs");
-    ++i;
+    const Token* base = word("the costs");
+    if (base == nullptr) return false;
+    if (!costs(base->text, node.cost)) return failAt(base->line, quoted(base->text) + " is not four costs");
 
-    if (i < w.size() && w[i] != "patched") {
-      const std::string_view name = disasm::cpu65816RegisterName(instruction.operand);
+    if (!peekIs("{") && !peekIs("patched")) {
+      const Token* name = word("the register name");
+      if (name == nullptr) return false;
+      const std::string_view tableName = disasm::cpu65816RegisterName(instruction.operand);
       const bool longForm = instruction.addressing == Addressing::AbsoluteLong ||
                             instruction.addressing == Addressing::AbsoluteLongX;
-      if (!longForm || name.empty() || name != w[i]) {
-        return fail(quoted(w[i]) + " is not the register at " + hex(instruction.operand));
+      if (!longForm || tableName.empty() || tableName != name->text) {
+        return failAt(name->line, quoted(name->text) + " is not the register at " + hex(instruction.operand));
       }
-      node.registerName = name;
-      ++i;
+      node.registerName = tableName;
     }
-    if (i < w.size() && w[i] == "patched") {
+    if (peekIs("patched")) {
+      ++pos_;
       node.patched = true;
-      ++i;
     }
-    if (i < w.size()) return fail(quoted(w[i]) + " is not a field of a node");
-
-    if (!inOrder(instruction.address, Kind::Node)) return false;
+    if (!peekIs("{")) {
+      const Token* stray = next();
+      if (stray == nullptr) return fail("the file ends where the node's `{` belongs");
+      return failAt(stray->line, quoted(stray->text) + " is not a field of a node");
+    }
+    ++pos_;
+    if (!readEffects(node.effects)) return false;
+    if (!inOrder(first.line, instruction.address, Kind::Node)) return false;
     parsed_.program.nodes.push_back(std::move(node));
-    effects_ = &parsed_.program.nodes.back().effects;
     return true;
   }
 
   // The mnemonic and the addressing mode as the one opcode they name together;
   // the mnemonic the table's own, so the view outlives the text.
-  bool resolve(std::string_view mnemonic, std::string_view addressing, Instruction& instruction) {
+  bool resolve(const Token& mnemonic, std::string_view addressing, Instruction& instruction) {
     for (const disasm::Cpu65816Opcode& row : disasm::cpu65816Opcodes()) {
-      if (mnemonic != row.mnemonic) continue;
+      if (mnemonic.text != row.mnemonic) continue;
       const Addressing candidate = addressingOf(row.mode);
       if (addressingName(candidate) != addressing) continue;
       instruction.mnemonic = row.mnemonic;
@@ -477,11 +576,11 @@ class Reader {
       return true;
     }
     for (const disasm::Cpu65816Opcode& row : disasm::cpu65816Opcodes()) {
-      if (mnemonic == row.mnemonic) {
-        return fail(quoted(mnemonic) + " with " + quoted(addressing) + " names no opcode");
+      if (mnemonic.text == row.mnemonic) {
+        return failAt(mnemonic.line, quoted(mnemonic.text) + " with " + quoted(addressing) + " names no opcode");
       }
     }
-    return fail(quoted(mnemonic) + " is not a mnemonic");
+    return failAt(mnemonic.line, quoted(mnemonic.text) + " is not a mnemonic");
   }
 
   static bool width(std::string_view text, char letter, bool& known, bool& eight) {
@@ -508,89 +607,128 @@ class Reader {
     return true;
   }
 
-  bool readEffect(std::string_view body) {
-    if (effects_ == nullptr) return fail("an effect with no node or sequence above it");
-    // `<op> [<dst> <-] [<a>[, <b>]]  [<bracket>]  [<condition>]`
-    const std::size_t open = body.find("  [");
-    if (open == std::string_view::npos) return fail("an effect lacks its bracket");
-    const std::size_t close = body.find(']', open);
-    if (close == std::string_view::npos) return fail("an effect lacks its bracket");
-    const std::string_view head = body.substr(0, open);
-    const std::string_view bracket = body.substr(open + 3, close - open - 3);
-    const std::string_view tail = body.substr(close + 1);
+  // ---- effects ---------------------------------------------------------------------
 
+  // The effects between a `{` already read and its `}`, each ended by `;`.
+  bool readEffects(std::vector<Effect>& effects) {
+    for (;;) {
+      const Token* t = next();
+      if (t == nullptr) return fail("the file ends where an effect or `}` belongs");
+      if (!t->quoted && t->text == "}") return true;
+      --pos_;
+      if (!readEffect(effects)) return false;
+    }
+  }
+
+  // `<op> [<dst> <-] [<a>[, <b>]] [<width> [<step> [<access>]] [pinned|unpinned]] [<condition>] ;`
+  bool readEffect(std::vector<Effect>& effects) {
+    // The words up to the `;`.
+    std::vector<const Token*> w;
+    for (;;) {
+      const Token* t = next();
+      if (t == nullptr) return fail("the file ends before an effect's `;`");
+      if (t->quoted) return failAt(t->line, "a string inside an effect");
+      if (t->text == ";") break;
+      if (t->text == "{" || t->text == "}") return failAt(t->line, quoted(t->text) + " before an effect's `;`");
+      w.push_back(t);
+    }
+    if (w.empty()) return fail("an effect with no operation");
+    const std::size_t line = w.front()->line;
     Effect effect;
-    const std::vector<std::string_view> h = words(head);
-    if (h.empty()) return fail("an effect lacks its operation");
-    const std::optional<Op> op = named<Op>(kOps, h[0]);
-    if (!op) return fail(quoted(h[0]) + " is not an operation");
+    const std::optional<Op> op = named<Op>(kOps, w[0]->text);
+    if (!op) return failAt(line, quoted(w[0]->text) + " is not an operation");
     effect.op = *op;
+
+    // The bracket: from the word that opens with `[` to the word that closes with `]`.
+    std::size_t open = w.size();
+    std::size_t close = w.size();
+    for (std::size_t i = 1; i < w.size(); ++i) {
+      if (open == w.size() && w[i]->text.front() == '[') open = i;
+      if (open != w.size() && w[i]->text.back() == ']') {
+        close = i;
+        break;
+      }
+    }
+    if (open == w.size() || close == w.size()) return failAt(line, "an effect lacks its bracket");
+
     std::size_t i = 1;
-    if (i + 1 < h.size() && h[i + 1] == "<-") {
-      if (!operand(h[i], effect.dst)) return false;
+    if (i + 1 < open && w[i + 1]->text == "<-") {
+      if (!operand(*w[i], effect.dst)) return false;
       i += 2;
     }
-    std::vector<std::string_view> rest(h.begin() + static_cast<std::ptrdiff_t>(i), h.end());
+    std::vector<const Token*> rest(w.begin() + static_cast<std::ptrdiff_t>(i), w.begin() + static_cast<std::ptrdiff_t>(open));
     if (!rest.empty()) {
       if (rest.size() == 1) {
-        if (rest[0].back() == ',') return fail("an effect's operands come in a pair or alone");
-        if (!operand(rest[0], effect.a)) return false;
-      } else if (rest.size() == 2 && rest[0].size() > 1 && rest[0].back() == ',') {
-        if (!operand(rest[0].substr(0, rest[0].size() - 1), effect.a)) return false;
-        if (!operand(rest[1], effect.b)) return false;
+        if (rest[0]->text.back() == ',') return failAt(line, "an effect's operands come in a pair or alone");
+        if (!operand(*rest[0], effect.a)) return false;
+      } else if (rest.size() == 2 && rest[0]->text.size() > 1 && rest[0]->text.back() == ',') {
+        Token a = *rest[0];
+        a.text.pop_back();
+        if (!operand(a, effect.a)) return false;
+        if (!operand(*rest[1], effect.b)) return false;
       } else {
-        return fail("an effect's operands come in a pair or alone");
+        return failAt(line, "an effect's operands come in a pair or alone");
       }
     }
 
-    const std::vector<std::string_view> b = words(bracket);
-    if (b.empty()) return fail("an effect's bracket lacks its width");
+    std::vector<std::string> b;
+    for (std::size_t k = open; k <= close; ++k) {
+      std::string text = w[k]->text;
+      if (k == open) text.erase(0, 1);
+      if (k == close && !text.empty() && text.back() == ']') text.pop_back();
+      if (!text.empty()) b.push_back(text);
+    }
+    if (b.empty()) return failAt(line, "an effect's bracket lacks its width");
     const std::optional<Width> width = named<Width>(kWidths, b[0]);
-    if (!width) return fail(quoted(b[0]) + " is not a width");
+    if (!width) return failAt(line, quoted(b[0]) + " is not a width");
     effect.width = *width;
     bool stepGiven = false;
     bool pinGiven = false;
     for (std::size_t k = 1; k < b.size(); ++k) {
       if (const std::optional<Step> step = named<Step>(kSteps, b[k])) {
-        if (!carriesStep(effect.op) || stepGiven) return fail("a step on an operation that carries none");
+        if (!carriesStep(effect.op) || stepGiven) return failAt(line, "a step on an operation that carries none");
         effect.step = *step;
         stepGiven = true;
       } else if (const std::optional<Access> access = named<Access>(kAccesses, b[k], 1)) {
-        if (!stepGiven || effect.access != Access::Data) return fail("an access kind that follows no step");
+        if (!stepGiven || effect.access != Access::Data) return failAt(line, "an access kind that follows no step");
         effect.access = *access;
       } else if (b[k] == "pinned" || b[k] == "unpinned") {
-        if (!carriesPin(effect.op) || pinGiven) return fail("a pin on an operation that carries none");
+        if (!carriesPin(effect.op) || pinGiven) return failAt(line, "a pin on an operation that carries none");
         effect.pinned = b[k] == "pinned";
         pinGiven = true;
       } else {
-        return fail(quoted(b[k]) + " is not a step, an access kind or a pin");
+        return failAt(line, quoted(b[k]) + " is not a step, an access kind or a pin");
       }
     }
-    if (carriesStep(effect.op) && !stepGiven) return fail("a load or store lacks its step");
-    if (carriesPin(effect.op) && !pinGiven) return fail("a push or pull lacks its pin");
+    if (carriesStep(effect.op) && !stepGiven) return failAt(line, "a load or store lacks its step");
+    if (carriesPin(effect.op) && !pinGiven) return failAt(line, "a push or pull lacks its pin");
 
-    if (!tail.empty()) {
-      if (!tail.starts_with("  ")) return fail("a condition follows the bracket after two spaces");
-      if (!condition(tail.substr(2), effect.when)) return false;
+    if (close + 1 < w.size()) {
+      std::string tail;
+      for (std::size_t k = close + 1; k < w.size(); ++k) {
+        if (!tail.empty()) tail += ' ';
+        tail += w[k]->text;
+      }
+      if (!condition(line, tail, effect.when)) return false;
     }
-    effects_->push_back(std::move(effect));
+    effects.push_back(std::move(effect));
     return true;
   }
 
-  bool operand(std::string_view text, Operand& out) {
-    if (text.starts_with('$')) {
-      const std::optional<std::uint32_t> v = value(text);
-      if (!v) return fail(quoted(text) + " is not a value");
+  bool operand(const Token& t, Operand& out) {
+    if (t.text.starts_with('$')) {
+      const std::optional<std::uint32_t> v = value(t.text);
+      if (!v) return failAt(t.line, quoted(t.text) + " is not a value");
       out = Operand{Place::Imm, *v};
       return true;
     }
-    const std::optional<Place> p = place(text);
-    if (!p) return fail(quoted(text) + " is not a place");
+    const std::optional<Place> p = place(t.text);
+    if (!p) return failAt(t.line, quoted(t.text) + " is not a place");
     out = Operand{*p, 0};
     return true;
   }
 
-  bool condition(std::string_view text, Cond& when) {
+  bool condition(std::size_t line, std::string_view text, Cond& when) {
     // The longest condition word that opens the text, then its fields.
     std::size_t best = 0;
     for (std::size_t i = 1; i < sizeof kWhens / sizeof kWhens[0]; ++i) {
@@ -600,38 +738,65 @@ class Reader {
         best = i;
       }
     }
-    if (best == 0) return fail(quoted(text) + " is not a condition");
+    if (best == 0) return failAt(line, quoted(text) + " is not a condition");
     when.when = static_cast<When>(best);
-    std::vector<std::string_view> f = words(text.substr(kWhens[best].size()));
+    std::vector<std::string_view> f;
+    {
+      std::string_view rest = text.substr(kWhens[best].size());
+      std::size_t i = 0;
+      while (i < rest.size()) {
+        while (i < rest.size() && rest[i] == ' ') ++i;
+        const std::size_t start = i;
+        while (i < rest.size() && rest[i] != ' ') ++i;
+        if (i > start) f.push_back(rest.substr(start, i - start));
+      }
+    }
     std::size_t i = 0;
     if (i < f.size() && f[i] != "and" && !f[i].starts_with('$')) {
       const std::optional<Place> p = place(f[i]);
-      if (!p) return fail(quoted(f[i]) + " is not a place");
+      if (!p) return failAt(line, quoted(f[i]) + " is not a place");
       when.place = *p;
       ++i;
     }
     if (carriesValue(when.when)) {
-      if (i >= f.size() || !f[i].starts_with('$')) return fail("`if is` lacks its value");
+      if (i >= f.size() || !f[i].starts_with('$')) return failAt(line, "`if is` lacks its value");
       const std::optional<std::uint32_t> v = value(f[i]);
-      if (!v) return fail(quoted(f[i]) + " is not a value");
+      if (!v) return failAt(line, quoted(f[i]) + " is not a value");
       when.value = *v;
       ++i;
     } else if (i < f.size() && f[i].starts_with('$')) {
-      return fail("a value on a condition that takes none");
+      return failAt(line, "a value on a condition that takes none");
     }
     if (i + 1 < f.size() && f[i] == "and" && f[i + 1] == "e") {
       when.andEmulation = true;
       i += 2;
     }
-    if (i < f.size()) return fail(quoted(f[i]) + " is not a field of a condition");
+    if (i < f.size()) return failAt(line, quoted(f[i]) + " is not a field of a condition");
     return true;
   }
 
+  // ---- the sequences ---------------------------------------------------------------
+
+  bool readSequence(const char* name, std::vector<Effect>& effects) {
+    if (!peekIs(name)) {
+      if (pos_ >= tokens_.size()) return fail(std::string("the file ends before its ") + name + " sequence");
+      const Token& t = tokens_[pos_];
+      if (!t.quoted && (t.text == "label" || t.text == "data" || t.text[0] == '$')) {
+        return failAt(t.line, "a " + std::string(t.text == "label" ? "label" : t.text == "data" ? "data run" : "node") +
+                                  " outside any region");
+      }
+      return failAt(t.line, quoted(t.text) + " where `" + name + "` belongs");
+    }
+    ++pos_;
+    if (!expect("{")) return false;
+    return readEffects(effects);
+  }
+
   std::string& error_;
-  std::size_t lineNo_ = 0;
-  Phase phase_ = Phase::Version;
+  std::vector<Token> tokens_;
+  std::size_t pos_ = 0;
+  std::size_t lastLine_ = 1;
   Parsed parsed_;
-  std::vector<Effect>* effects_ = nullptr;
   std::optional<std::pair<Address, Kind>> last_;
 };
 
@@ -664,7 +829,7 @@ std::string renderEffect(const Effect& e) {
   if (e.dst.place != Place::None) line += " " + operandText(e.dst) + " <-";
   if (e.a.place != Place::None) line += " " + operandText(e.a);
   if (e.b.place != Place::None) line += ", " + operandText(e.b);
-  line += "  [";
+  line += " [";
   line += widthName(e.width);
   if (carriesStep(e.op)) {
     line += " ";
@@ -679,9 +844,9 @@ std::string renderEffect(const Effect& e) {
   if (e.when.when == When::Always && e.when.andEmulation) {
     // An effect that always runs, and the emulation flag is set: `if e` is what
     // that is, and the interpreter reads the two alike.
-    line += "  if e";
+    line += " if e";
   } else if (e.when.when != When::Always) {
-    line += "  ";
+    line += " ";
     line += whenName(e.when.when);
     if (e.when.place != Place::None) {
       line += " ";
@@ -690,38 +855,38 @@ std::string renderEffect(const Effect& e) {
     if (carriesValue(e.when.when)) line += " " + hex(e.when.value);
     if (e.when.andEmulation) line += " and e";
   }
-  return line;
+  return line + ";";
 }
 
 std::string renderNode(const Node& node) {
   const Instruction& i = node.instruction;
-  std::string out = addressText(i.address) + "  " + std::string(i.mnemonic) + " " +
-                    std::string(addressingName(i.addressing)) + "  operand " + hex(i.operand);
+  std::string out = "  " + addressText(i.address) + " " + std::string(i.mnemonic);
+  if (i.addressing != Addressing::Implied) out += " " + std::string(addressingName(i.addressing));
+  out += " operand " + hex(i.operand);
   if (i.addressing == Addressing::BlockMove) out += " operand2 " + hex(i.operand2);
-  out += "  length " + std::to_string(i.length) + "  flow " + std::string(flowName(i.flow));
+  out += " length " + std::to_string(i.length) + " flow " + std::string(flowName(i.flow));
   if (i.target) out += " target " + addressText(*i.target);
-  out += "  " + modeName(node.mode) + "  base " + std::to_string(node.cost.base[0]) + "/" +
+  out += " " + modeName(node.mode) + " base " + std::to_string(node.cost.base[0]) + "/" +
          std::to_string(node.cost.base[1]) + "/" + std::to_string(node.cost.base[2]) + "/" +
          std::to_string(node.cost.base[3]);
   if (!node.registerName.empty()) {
-    out += "  ";
+    out += " ";
     out += node.registerName;
   }
-  if (node.patched) out += "  patched";
-  out += "\n";
+  if (node.patched) out += " patched";
+  out += " {\n";
   for (const Effect& e : node.effects) out += "    " + renderEffect(e) + "\n";
+  out += "  }\n";
   return out;
 }
 
 std::string renderProgram(const Program& program, const ProgramFile& file) {
-  std::string out = "snagir 1\nimage " + std::to_string(file.imageBytes) + " " + file.map + "\n";
+  std::string out = "snagir 1;\nimage " + std::to_string(file.imageBytes) + " " + file.map + ";\n";
   std::size_t written = 0;
+  char b[4];
   for (const ProgramRegion& region : file.regions) {
-    out += "\nregion " + region.file + " " + addressText(region.first) + "-" +
-           addressText(region.last) + "\n";
-    for (const std::string& warning : region.warnings) {
-      out += "warning " + region.file + " " + warning + "\n";
-    }
+    out += "\nregion " + region.file + " " + addressText(region.first) + "-" + addressText(region.last) + " {\n";
+    for (const std::string& warning : region.warnings) out += "  warning " + quotedText(warning) + ";\n";
     std::vector<const Node*> nodes;
     for (const Node& node : program.nodes) {
       const Address at = node.instruction.address;
@@ -729,43 +894,38 @@ std::string renderProgram(const Program& program, const ProgramFile& file) {
     }
     written += nodes.size();
     // The three sequences merged by address — a label, then a data run, then
-    // the nodes, at one address — with a blank line before each data run and
-    // before each node, except a node under its own label.
+    // the nodes, at one address.
     std::size_t l = 0;
     std::size_t d = 0;
     std::size_t n = 0;
-    bool labelled = false;
     while (l < region.labels.size() || d < region.data.size() || n < nodes.size()) {
       const Address la = l < region.labels.size() ? region.labels[l].address : 0xFFFFFFFFu;
       const Address da = d < region.data.size() ? region.data[d].address : 0xFFFFFFFFu;
       const Address na = n < nodes.size() ? nodes[n]->instruction.address : 0xFFFFFFFFu;
       if (la <= da && la <= na) {
-        out += "\nlabel " + addressText(la) + " " + region.labels[l++].name + "\n";
-        labelled = true;
+        out += "  label " + addressText(la) + " " + region.labels[l++].name + ";\n";
       } else if (da <= na) {
         const DataRun& run = region.data[d++];
-        out += "\ndata " + addressText(run.address) + " ";
-        char b[4];
+        out += "  data " + addressText(run.address) + " ";
         for (const std::uint8_t byte : run.bytes) {
           std::snprintf(b, sizeof b, "%02X", byte);
           out += b;
         }
-        out += "\n";
-        labelled = false;
+        out += ";\n";
       } else {
-        if (!labelled) out += "\n";
         out += renderNode(*nodes[n++]);
-        labelled = false;
       }
     }
+    out += "}\n";
   }
   if (written != program.nodes.size()) {
     throw std::invalid_argument("a node lies in no region of the program file");
   }
-  out += "\nnmi\n";
-  for (const Effect& e : program.nmi) out += "    " + renderEffect(e) + "\n";
-  out += "\nirq\n";
-  for (const Effect& e : program.irq) out += "    " + renderEffect(e) + "\n";
+  out += "\nnmi {\n";
+  for (const Effect& e : program.nmi) out += "  " + renderEffect(e) + "\n";
+  out += "}\nirq {\n";
+  for (const Effect& e : program.irq) out += "  " + renderEffect(e) + "\n";
+  out += "}\n";
   return out;
 }
 

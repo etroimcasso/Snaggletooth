@@ -412,26 +412,32 @@ the rules are held by `tests/ir/provenance_test.cpp`, one case each.
 ## Reading a program
 
 `tools/ir/ir_text.h` names every value of the vocabulary — `opName`, `placeName`,
-`widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` —
-and writes a node out with `renderNode`: a header line with the address, the
-mnemonic and its addressing mode, the operand, the length, the mode and the
-measured costs under each width setting, then each effect on a line of its own
-from `renderEffect`. The text is for reading; nothing parses it back.
+`widthName`, `stepName`, `accessName`, `whenName`, `flowName`, `addressingName`,
+`modeName` — and writes and reads the program file: `renderProgram` writes a
+whole program with what the program does not carry — the image, each region's
+file and range, its labels, its data runs and its warnings — as a `.snagir`
+file, and `parseProgram` reads one back into the same program. The file's
+grammar, record by record, is [snagir.md](snagir.md): braces open a region, a
+node's effects and each interrupt sequence, a semicolon ends every record and
+every effect, and whitespace separates words and means nothing else.
+`renderNode` and `renderEffect` write one node and one effect as the file has
+them, and `equivalent` compares two programs as the file carries them.
 
-`snes_lift` does it for a whole cartridge tree:
+`snes_disasm` writes the file as `program.snagir` at the root of every tree,
+and `snes_render` writes the tree's source files from it. `snes_lift` writes a
+tree's program from the tree and its image, for a person to read:
 
 ```
 snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
 ```
 
 It reads the directory's `project.manifest`, traces the image as the manifest
-directs, lifts every 65816 region, and writes the summary and then every node,
-region by region, in address order. `--file` limits it to one region's file and
-`-o` writes to a file; the text form carries the `.snagir` extension, and a
-whole cartridge's is large — ten times the image, since every instruction is
-written with each of its effects on a line. On the `mixed` cartridge from
-[`tools/examples/`](../tools/examples/README.md), after `snes_disasm mixed.smc
--o mixed --no-run --no-sound`:
+directs, lifts every 65816 region, and writes the summary and then the program
+file. `--file` limits both to one region's file and `-o` writes the file there,
+standard output keeping the summary. A whole cartridge's file is large — ten
+times the image, since every instruction is written with each of its effects.
+On the `mixed` cartridge from [`tools/examples/`](../tools/examples/README.md),
+after `snes_disasm mixed.smc -o mixed --no-run --no-sound`:
 
 ```
 snes_lift mixed mixed.smc
@@ -443,41 +449,45 @@ nodes naming a hardware register 0
 nodes lifted from patched bytes 0
 effects 125
 
-== bank_00.asm
+snagir 1;
+image 32768 LoROM;
 
-$00:8000  CLC   operand $0  length 1  e=1  base 2/2/2/2
-    Set PC <- $8001  [16]
-    Set C <- $0  [8]
-
-$00:8001  XCE   operand $0  length 1  e=1  base 2/2/2/2
-    Set PC <- $8002  [16]
-    Xce  [8]
-
-$00:8002  REP #byte  operand $30  length 2  e=0 m=8 x=8  base 3/3/3/3
-    Set PC <- $8004  [16]
-    Set T0 <- P  [8]
-    And T0 <- T0, $CF  [8]
-    WriteP T0  [8]
-
-$00:8004  LDX #imm(X)  operand $2  length 3  e=0 m=16 x=16  base 2/3/2/3
-    Set PC <- $8007  [16]
-    SetNZ X <- $2  [16]
-
-$00:8007  LDA #imm(M)  operand $1234  length 3  e=0 m=16 x=16  base 2/2/3/3
-    Set PC <- $800A  [16]
-    SetNZ A <- $1234  [16]
-
-$00:800A  STA abs  operand $100  length 3  e=0 m=16 x=16  base 4/4/5/5
-    Set PC <- $800D  [16]
-    BankAddress T0 <- $100  [24]
-    Store T0, A  [16 flat]
+region bank_00.asm $00:8000-$00:FFFF {
+  label $00:8000 reset;
+  $00:8000 CLC operand $0 length 1 flow continue e=1 base 2/2/2/2 {
+    Set PC <- $8001 [16];
+    Set P.C <- $0 [8];
+  }
+  $00:8001 XCE operand $0 length 1 flow continue e=1 base 2/2/2/2 {
+    Set PC <- $8002 [16];
+    Xce [8];
+  }
+  $00:8002 REP #byte operand $30 length 2 flow continue e=0 m=8 x=8 base 3/3/3/3 {
+    Set PC <- $8004 [16];
+    Set T0 <- P [8];
+    And T0 <- T0, $CF [8];
+    WriteP T0 [8];
+  }
+  $00:8004 LDX #imm(X) operand $2 length 3 flow continue e=0 m=16 x=16 base 2/3/2/3 {
+    Set PC <- $8007 [16];
+    SetNZ X <- $2 [16];
+  }
+  $00:8007 LDA #imm(M) operand $1234 length 3 flow continue e=0 m=16 x=16 base 2/2/3/3 {
+    Set PC <- $800A [16];
+    SetNZ A <- $1234 [16];
+  }
+  $00:800A STA abs operand $100 length 3 flow continue e=0 m=16 x=16 base 4/4/5/5 {
+    Set PC <- $800D [16];
+    BankAddress T0 <- $100 [24];
+    Store T0, A [16 flat];
+  }
 ```
 
 Each effect's bracket carries the width, then the step for a load or store and
 the access kind where it is not plain data, or `pinned` / `unpinned` for a push
-or pull; a condition follows the bracket. The four costs are the measured base
-under each setting of the widths, in `costIndex` order: both eight, index
-sixteen, accumulator sixteen, both sixteen.
+or pull; a condition follows the bracket, and the semicolon ends the effect. The
+four costs are the measured base under each setting of the widths, in
+`costIndex` order: both eight, index sixteen, accumulator sixteen, both sixteen.
 
 ## Rendering source
 
@@ -624,13 +634,14 @@ reached reads zero, and is known to rest on the vector proof alone.
 `snes_differential` does all of it from a tree:
 
 ```
-snes_differential <directory> <image> -o <report> [--seconds N] [--input <script>]
+snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]
 ```
 
 It traces and lifts the tree as `snes_lift` does, runs the machine for
 `--seconds` of the master clock (sixty by default), replays `--input` into the
 controller ports exactly as `snes_disasm --input` does — so the run checked is
-the run that produced the tree — and writes the report under `-o`:
+the run that produced the tree — or finds the run named for the image under
+`--input-dir` as `snes_disasm --input-dir` does, and writes the report under `-o`:
 `summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt` and
 `unlifted.txt`. One line on standard output sums it up, and the exit status is
 0 only when the run diverged nowhere. On the `mixed` cartridge, which stops on
@@ -827,7 +838,8 @@ would mean the layers leak into each other.
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped; each disagreement with its step, node, effect and the two values; the form and construct histograms. |
 | `registersOf(state)` | A core state as the interpreter's registers. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
-| `renderEffect(effect)`, `renderNode(node)` | An effect on one line; a node with its header and every effect. |
+| `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed` | The program file written from a program and what it does not carry, and read back to both; the grammar is [snagir.md](snagir.md). |
+| `renderEffect(effect)`, `renderNode(node)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the file carries them. |
 | `opcodeOf(instruction)`, `encode(instruction)` | The opcode the mnemonic and mode name; the bytes the instruction assembles to. |
 | `renderInstruction(instruction, names)`, `SourceNames` | The instruction as source, with a label, a register name and an annotation in place of addresses where given. |
 | `renderCost(node)`, `renderLine(node, names, bytesWidth)` | The cost as a listing prints it; one line of source with its comment. |
