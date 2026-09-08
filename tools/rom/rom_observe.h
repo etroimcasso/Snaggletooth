@@ -22,7 +22,14 @@
 // or an HDMA channel moves crosses the bus in the engine's name, and the run
 // records where each range of them came from, where it went, how many there
 // were and which instruction started it — the transfers a cartridge sets up from
-// pointers, which the bytes alone never name a source for.
+// pointers, which the bytes alone never name a source for. Where a range's
+// bytes went on the other side of a video data port — which words of VRAM,
+// which palette entries, which bytes of OAM — is what the machine reports
+// for every write through the port, and the run keeps each range's extent
+// and reads, at the first frame the PPU draws after the range closed, what
+// the screen mode and the bases then say the memory was: a layer's map, a
+// name base, the sprite tiles, or nothing; a run that ends before a frame is
+// drawn says so.
 //
 // The same run lifts every instruction the CPU executes from the bytes it
 // fetched — wherever they lay: the image through any mirror, work RAM, a byte
@@ -205,6 +212,77 @@ struct StagedRange {
 // and run for the same count.
 [[nodiscard]] bool sameExtent(const StagedRange& a, const StagedRange& b);
 
+// The video memory a data port reaches: `VMDATAL`/`VMDATAH` VRAM, `CGDATA`
+// the palette, `OAMDATA` the sprite table.
+enum class PortMemory : std::uint8_t { Vram, Cgram, Oam };
+
+// What the PPU used a stretch of video memory as, one bit per area, as the
+// screen mode and the bases said at the first frame the PPU drew after a
+// landing: a layer's screen (its one, two or four screens of a thousand
+// words), a layer's name base (the eight, sixteen or thirty-two thousand words
+// its thousand tiles take at the layer's colour depth in that mode), the
+// sprite tiles (four thousand words at the base and four thousand after the
+// gap), the whole of VRAM under Mode 7, where the map and the tiles are
+// interleaved; and, for the other two memories, the palette and the sprite
+// table, which depend on no base.
+constexpr std::uint16_t kAreaTilemap1 = 1u << 0;
+constexpr std::uint16_t kAreaTilemap2 = 1u << 1;
+constexpr std::uint16_t kAreaTilemap3 = 1u << 2;
+constexpr std::uint16_t kAreaTilemap4 = 1u << 3;
+constexpr std::uint16_t kAreaTiles1 = 1u << 4;
+constexpr std::uint16_t kAreaTiles2 = 1u << 5;
+constexpr std::uint16_t kAreaTiles3 = 1u << 6;
+constexpr std::uint16_t kAreaTiles4 = 1u << 7;
+constexpr std::uint16_t kAreaSprites = 1u << 8;
+constexpr std::uint16_t kAreaMode7 = 1u << 9;
+constexpr std::uint16_t kAreaPalette = 1u << 10;
+constexpr std::uint16_t kAreaOam = 1u << 11;
+constexpr std::uint16_t kAreaTilemaps = kAreaTilemap1 | kAreaTilemap2 | kAreaTilemap3 | kAreaTilemap4;
+constexpr std::uint16_t kAreaTiles = kAreaTiles1 | kAreaTiles2 | kAreaTiles3 | kAreaTiles4 | kAreaSprites;
+
+// Where the bytes of a range or a stream went on the other side of the port:
+// the memory, the lowest and the highest address the port put a byte at — a
+// VRAM word, a palette word, an OAM byte — and what the PPU used that memory
+// as. A VRAM landing is read at the first frame the PPU drew after its bytes
+// landed — bytes that land after a reading are read at the next drawn frame,
+// and the areas are the union — so `shown` is false for a landing no frame
+// was drawn after, and `areas` is then nothing; a palette or OAM landing is
+// read as it lands. `areas` empty with `shown` set is a stretch of VRAM no
+// base reaches.
+struct PortLanding {
+  PortMemory memory = PortMemory::Vram;
+  std::uint16_t lowest = 0;
+  std::uint16_t highest = 0;
+  bool shown = false;
+  std::uint16_t areas = 0;
+};
+
+// The areas as a manifest writes them: the names joined by `+`, `none` for a
+// shown landing in no area, `unshown` for one no frame drew.
+[[nodiscard]] std::string areaText(const PortLanding& landing);
+
+// A port address as a manifest writes it: four hexadecimal digits for a VRAM
+// word, two for a palette word, three for an OAM byte.
+[[nodiscard]] std::string portAddressText(PortMemory memory, std::uint16_t address);
+
+// One landing of one range the engines moved: the fields that identify the
+// range — its `moved` line's site, channel, memory address, count and kind —
+// the landing, and how many sightings of exactly this landing the run made. A
+// range sent to two places is two landings.
+struct LandedRange {
+  Address site = 0;
+  std::uint8_t channel = 0;
+  Address memory = 0;
+  std::uint32_t bytes = 0;
+  MovedKind kind = MovedKind::Dma;
+  PortLanding landing;
+  std::uint32_t times = 1;
+};
+
+// The order landings are reported and written in: their ranges' order, then
+// by memory, lowest address, highest address, and what the memory was used as.
+[[nodiscard]] bool landedBefore(const LandedRange& a, const LandedRange& b);
+
 // A stream the CPU carried a byte at a time: consecutive stores to one data
 // register — `VMDATAL`/`VMDATAH` as one, `CGDATA`, `OAMDATA`, the audio ports
 // in pairs — of consecutive bytes, made at one site or by instructions one
@@ -218,7 +296,10 @@ struct StagedRange {
 // image from `romOffset`, and `source` is the run holding the first among
 // those the invocation that carried them read, followed out through its
 // callers as a staged byte's source is (`ir/ir_provenance.h`): the file the
-// stream is lifted as, which may be wider than the bytes carried.
+// stream is lifted as, which may be wider than the bytes carried. `landing`
+// is where the bytes went on the other side of the port, absent for a stream
+// to the audio ports; a stream seen again landing somewhere else is another
+// stream, with its own count.
 struct StreamedRange {
   Address site = 0;
   Address registerAddress = 0;
@@ -229,6 +310,7 @@ struct StreamedRange {
   std::uint32_t times = 1;
   ir::OriginInterval source;
   std::optional<Address> memory;
+  std::optional<PortLanding> landing;
 };
 
 // Two streams are the same when every field but the count and the source agrees.
@@ -236,11 +318,13 @@ struct StreamedRange {
 
 // Everything one run recorded: the targets the indirect jumps took, in site
 // order, then target order, each site/target/mode once; the ranges the engines
-// moved, in `rangeBefore` order, each distinct range once with its count; the
+// moved, in `rangeBefore` order, each distinct range once with its count;
+// where those ranges landed, in `landedBefore` order, each distinct landing
+// once with its count; the
 // landings, in site order, then target order, each site/target/mode once; the
 // values seen, in address order; the staged extents, in address order, then
 // by count; the streams, in site order, then register, then where the bytes
-// came from; and what
+// came from, then where they landed; and what
 // the run beside the interpreter checked. `divergences` counts the steps on
 // which the node lifted from the fetches disagreed with the machine — each site
 // once in the notes, the interpreter realigned after — and is zero on every
@@ -249,6 +333,7 @@ struct StreamedRange {
 struct RunObservation {
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
+  std::vector<LandedRange> landed;
   std::vector<Landing> ran;
   std::vector<SeenState> seen;
   std::vector<StagedRange> staged;

@@ -19,8 +19,9 @@ findings outlive it, and how a name a person gives a file survives.
 > traces from those too, every range of bytes the transfer engines moved —
 > where from, where to, how many, and from which instruction — and lifts every
 > such range that begins in the image into a file of its own, recorded as an
-> `asset` line, and the direct register and the data bank the run saw at every
-> site it executed. Read for what every path proves, it records the direct
+> `asset` line, where every range landed on the other side of the port and what
+> the PPU used that memory as, and the direct register and the data bank the
+> run saw at every site it executed. Read for what every path proves, it records the direct
 > register, the data bank and the stack pointer at every label where something
 > is proven, and the destinations of every jump through a table the bytes
 > bound, and traces from those too.
@@ -43,10 +44,11 @@ findings outlive it, and how a name a person gives a file survives.
   - [2.10 What the bytes derive](#210-what-the-bytes-derive)
   - [2.11 What a run moved](#211-what-a-run-moved)
   - [2.12 Assets](#212-assets)
-  - [2.13 Where a run landed](#213-where-a-run-landed)
+  - [2.13 Where the CPU arrived](#213-where-the-cpu-arrived)
   - [2.14 What a run saw](#214-what-a-run-saw)
   - [2.15 Where a staged range came from](#215-where-a-staged-range-came-from)
   - [2.16 What the CPU streamed](#216-what-the-cpu-streamed)
+  - [2.17 Where a transfer landed](#217-where-a-transfer-landed)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -361,8 +363,8 @@ image. The reset vector begins with the direct register and the data bank both
 zero, which the chip clears on reset, and nothing else proven; an interrupt
 vector and an entry a person added begin with nothing proven beyond the program
 bank, below; a target a run [reached](#27-what-a-run-reached) or the bytes
-[derived](#210-what-the-bytes-derive), and a place a run
-[landed](#213-where-a-run-landed), begins with what the site that took the CPU
+[derived](#210-what-the-bytes-derive), and a place the CPU
+[arrived](#213-where-the-cpu-arrived), begins with what the site that took the CPU
 there proves.
 
 A call carries the caller's values into the routine it names. What comes back
@@ -386,7 +388,7 @@ it says. The program bank begins as the reset vector's, zero; an interrupt
 vector's handler begins in zero too, since the chip clears the bank to take the
 interrupt; an entry a person added begins in the bank of the address they wrote;
 a long jump or call takes its operand's bank; a destination a run
-[reached](#27-what-a-run-reached), a place it [landed](#213-where-a-run-landed)
+[reached](#27-what-a-run-reached), a place the CPU [arrived](#213-where-the-cpu-arrived)
 and a target the bytes [derived](#210-what-the-bytes-derive) begin in the bank
 the CPU arrived in, which their lines carry; a fall-through, a branch and a
 jump within the bank keep it; and a call brings the caller's bank back, since a
@@ -551,6 +553,9 @@ and a `moved` line for every range the run saw it carry, and a transfer the
 code proves whole that the run started has a `moved` line from the same start
 that agrees with it — the same source, step and count — or, where the run saw
 something else, a `note` saying what each said. The two are never merged.
+Where the bytes went on the other side of the port — the words of VRAM, the
+palette entries, the bytes of OAM — is the [`landed` line](#217-where-a-transfer-landed)
+beside it.
 
 ### 2.12 Assets
 
@@ -563,7 +568,11 @@ image to the hardware, the image source of a range a routine built in work RAM
 before it was carried out, the run of image bytes a routine read while
 carrying a stream to a data register itself, or a range the code proves a
 channel was set up to carry from the image and no run has moved — written once, as the bytes are,
-under a directory named for the memory it went to, and included from the bank
+under a directory named for the memory it went to — and, for VRAM, for what the
+PPU used that memory as when the run saw the bytes drawn: `maps/` for a file
+every landing of which lies in a tilemap, `tiles/` for one every landing of
+which lies in a name base or the sprite tiles, `vram/` for the rest (§2.17) —
+and included from the bank
 file where it was with [`INCBIN`](assembly-lexicon.md#54-incbin). The path is
 relative to the manifest; then the
 [class](65816-disassembler.md#hardware-registers) of the register the bytes
@@ -615,7 +624,7 @@ finds the same transfer every time; a `staged` or `stream` file's evidence is wr
 fresh (§2.15, §2.16), so its line is read back whole and keeps the file from
 one disassembly to the next until a run lifts a wider file over its bytes.
 
-### 2.13 Where a run landed
+### 2.13 Where the CPU arrived
 
 ```
 ran      <address> <name> e=<0|1> m=<8|16|?> x=<8|16|?> from <address>
@@ -825,6 +834,7 @@ Every line here is written fresh from the run and read back by nothing; a
 
 ```
 streamed <address> <register address> <register> <class> from <address> bytes <n> times <n>
+         at <lowest>-<highest> | none in <area> | none
 ```
 
 A run of bytes the CPU carried to a data register one store at a time: the
@@ -832,10 +842,15 @@ site of the first store, as the tree places it; the register — `VMDATAL` for
 the pair with `VMDATAH`, `CGDATA`, `OAMDATA`, an audio port for its pair — with
 its name and class; after `from`, where the first byte came from and after
 `bytes` how many consecutive ones followed; after `times`, how many sightings
-of exactly this stream the run made. A store continues a stream when its value
+of exactly this stream the run made; after `at`, where the bytes landed on the
+other side of the port, and after `in`, what the PPU used that memory as,
+exactly as a [`landed` line](#217-where-a-transfer-landed) says them — `none`
+and `none` for the audio ports, whose bytes land in no memory the run can
+name. A store continues a stream when its value
 is the next byte and it was made at the same site as the last store or on one
 straight run from it — no jump, branch, call or return between the two. A
-sequence of one byte is not a stream.
+sequence of one byte is not a stream. A stream seen again landing somewhere
+else is another line, with its own count.
 
 The bytes came from one of two places. A value loaded from work RAM and stored
 as it was is the buffer at the address after `from` being carried out, the next
@@ -851,14 +866,112 @@ count before its data, or an end mark after it, has read them all.
 The same cartridge's loops at `$8180` and `$84C0`:
 
 ```
-streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1
-streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1
+streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette
+streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown
 ```
 
 The first carried sixteen bytes of `$9200` and read an end mark after them, so
-its file, `cgram/00_9200.bin`, holds seventeen. The second carried the buffer
+its file, `cgram/00_9200.bin`, holds seventeen; the port put them in palette
+entries zero to seven. The second carried the buffer
 at `$7F:0800` a word at a time; the buffer's `origin` line names `$9600`, and
-`vram/00_9600.bin` is its file.
+`vram/00_9600.bin` is its file. Its words landed at `$0035`, and no frame was
+drawn between the loop's last store and the run's end, so what the memory was
+used as is unshown.
+
+### 2.17 Where a transfer landed
+
+```
+landed   <address> channel <n> memory <address> bytes <n> as dma | table | indirect
+         at <lowest>-<highest> in <area> times <n>
+```
+
+Where the bytes of one [`moved`](#211-what-a-run-moved) range went on the
+other side of the port: the range's site, channel, memory address, count and
+kind, exactly as its `moved` line writes them, which is how the two are read
+together; after `at`, the lowest and the highest address the port put a byte
+at — a VRAM word address, `$0000`–`$7FFF`, for a range to `VMDATAL` or
+`VMDATAH`; a palette word, `$00`–`$FF`, for one to `CGDATA`; an OAM byte,
+`$000`–`$21F`, for one to `OAMDATA` — after `in`, what the PPU used that memory
+as, and after `times`, how many sightings of exactly this landing the run
+made. A range whose bytes reach no data port — a table to the brightness
+register, a fill of a register, a read back into memory — has no line. A
+range the run saw land in two places has two lines, each with its own count,
+beside the one `moved` line. A fill from one byte lands, and has its line.
+
+The port steps for every byte it takes, so the extent is what the port did —
+a range to `VMDATAL` alone under an increment on the high byte lands every
+byte on one word, and the line says one word — and under a VRAM address
+translation ([SNES machine](snes-machine.md#the-video-registers-a-stub)) it is
+the hull of the rotated words, which lies within one aligned block of 256, 512
+or 1024 words.
+
+What the memory was used as is read at the first frame the PPU drew after the
+bytes landed: at the first start of a frame at which forced blank is off, the
+screen mode and the base registers as they then stand say what each word of
+the extent lies in — and a range the engine was still carrying at that
+frame's start has the bytes it lands afterwards read at the next such frame,
+its areas being every area read. The areas are `tilemap1`–`tilemap4`, a layer's screen base
+and its one, two or four screens of a thousand words, for the layers the mode
+has; `tiles1`–`tiles4`, a layer's name base and the eight, sixteen or
+thirty-two thousand words its thousand tiles occupy at the layer's colour
+depth in that mode; `sprites`, the four thousand words at the sprite base and
+the four thousand after the gap; and `mode7`, the whole of VRAM when the mode
+is 7, where the map lies in the even bytes and the tiles in the odd. The line
+writes every area the extent intersects, joined by `+`; `none` when it lies in
+no area; and `unshown` when no frame was drawn between the landing and the
+run's end — a run that never leaves forced blank says `unshown` of every
+VRAM landing. A palette landing is `palette` and an OAM landing `oam`,
+whatever the frame, since neither depends on a base. Whether a layer is enabled on the screen is
+not consulted: a layer the mode has keeps its bases whether or not it is shown
+this frame.
+
+A cartridge that uploads in forced blank, sets its bases, turns the screen on,
+and in later frames flips a base after uploading behind it, switches to Mode
+7, and blanks the screen again before one last upload, run for one second of
+its clock:
+
+```
+landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1
+landed   $00:8066 channel 0 memory $00:9100 bytes 64 as dma at $0000-$001F in tilemap1 times 1
+landed   $00:8098 channel 0 memory $00:9200 bytes 64 as dma at $0FF0-$100F in tilemap3+tiles1+tiles2+tiles3 times 1
+landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1
+landed   $00:80FC channel 0 memory $00:9400 bytes 64 as dma at $6000-$601F in sprites times 1
+landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1
+landed   $00:815B channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 1
+landed   $00:8192 channel 0 memory $00:9900 bytes 32 as dma at $2100-$2178 in tiles1+tiles2+tiles3+sprites times 1
+landed   $00:81C9 channel 0 memory $00:9C00 bytes 64 as dma at $5C00-$5C1F in none times 1
+landed   $00:8232 channel 0 memory $7E:0400 bytes 32 as dma at $0020-$002F in tilemap1 times 1
+landed   $00:8349 channel 0 memory $00:9700 bytes 64 as dma at $7800-$781F in tilemap2 times 1
+landed   $00:837B channel 0 memory $00:9D00 bytes 64 as dma at $0200-$021F in tilemap1+tilemap2 times 1
+landed   $00:83BE channel 0 memory $00:9800 bytes 64 as dma at $0000-$001F in mode7 times 1
+landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1
+landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2
+landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1
+```
+
+The first ten are the reset code's uploads, made in forced blank before any
+base was written and read at the first drawn frame against the bases the
+reset code then set: a tileset in the name base BG1 and BG2 share; a map in
+BG1's screen; sixty-four bytes that begin in BG3's screen and end where the
+three name bases start; thirty-two words nothing addresses; a sprite sheet;
+a palette at entry sixteen; a sprite table; thirty-two bytes written under
+the 8-bit translation, which scattered sixteen words across a block of a
+hundred and twenty-one; a fill; and thirty-two bytes the code copied into
+work RAM first and sent from there into BG1's screen. The vertical-blank
+handler uploads a map to `$7800` and another to `$0200`, and only then points
+BG2 at four screens from `$7400`, the last of which wraps round the end of
+VRAM: the first drawn frame reads the one as `tilemap2` and the other, which
+BG1's screen held all along, as `tilemap1+tilemap2`; it switches to Mode 7
+before its next upload; blanks the screen before its last, which no frame
+drew; and sends
+the sprite table on the three frames the screen is on — the port put it at
+`$000` on two of them, because the PPU reloads the OAM address at the start
+of every vertical blank, and at `$010` on the one the handler had moved the
+address first, so the one range has two lines.
+
+The line is written fresh and read back by nothing: the next run sees the
+landings again, and the one thing that follows from them — the directory a
+VRAM file lives under — is kept by the file's `asset` line.
 
 
 Two tools read a manifest, and each takes the lines that direct it.
@@ -902,8 +1015,8 @@ directory, it reads:
   disassembler does.
 
 Everything else is what the last run found and is written fresh — the `access`,
-`dma`, `routine`, `state`, `seen`, `origin`, `staged` and `streamed` lines
-among them, which no tool reads back:
+`dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed` and `landed`
+lines among them, which no tool reads back:
 they are what the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. The disassembler writes the files fresh
 too: an edit to a bank file is not read back by it, so a person's changes to the

@@ -578,7 +578,10 @@ std::optional<std::string_view> assetDirectory(RegisterClass cls, MovedKind kind
 // One piece of a moved range that reads consecutive image offsets, in image
 // order, with what the range was to the engine. For a staged source, `kind`
 // is `Staged` and `use` is what the range built from it went as, which is
-// what places the file; for a stream, both are `Stream`.
+// what places the file; for a stream, both are `Stream`. `landings` is where
+// the range — or the range built from the source, or the stream — landed on
+// the other side of the port, every landing the run saw; empty for a transfer
+// the code proves, a file kept from the manifest, and a range to no data port.
 struct Piece {
   std::size_t offset = 0;
   std::size_t length = 0;
@@ -587,7 +590,44 @@ struct Piece {
   MovedKind use = MovedKind::Dma;
   Address registerAddress = 0;
   Address site = 0;
+  std::vector<PortLanding> landings;
 };
+
+// The landings of one `moved` range, by the fields that identify it.
+std::vector<PortLanding> landingsOf(const CartridgeDisassembly& out, const MovedRange& range) {
+  std::vector<PortLanding> landings;
+  for (const LandedRange& landed : out.landed) {
+    if (landed.site == range.site && landed.channel == range.channel && landed.memory == range.memory &&
+        landed.bytes == range.bytes && landed.kind == range.kind) {
+      landings.push_back(landed.landing);
+    }
+  }
+  return landings;
+}
+
+// The directory a VRAM file takes from where its bytes landed: `maps` when
+// every landing the run saw drawn lies in a layer's screen, `tiles` when every
+// one lies in a name base or the sprite tiles, and `vram` when a landing was
+// never drawn (and so has no area), lies in no area, lies under Mode 7, mixes
+// the two, or when there is none.
+std::string_view vramDirectory(const std::vector<Piece>& group) {
+  bool any = false;
+  bool maps = true;
+  bool tiles = true;
+  for (const Piece& piece : group) {
+    for (const PortLanding& landing : piece.landings) {
+      if (landing.memory != PortMemory::Vram) continue;
+      any = true;
+      if (landing.areas == 0u) return "vram";  // shown in no area, or never shown, which has none
+      if ((landing.areas & ~kAreaTilemaps) != 0u) maps = false;
+      if ((landing.areas & ~kAreaTiles) != 0u) tiles = false;
+    }
+  }
+  if (!any) return "vram";
+  if (maps) return "maps";
+  if (tiles) return "tiles";
+  return "vram";
+}
 
 std::string movedText(const MovedRange& range) {
   return "moved " + address24(range.site) + " channel " + std::to_string(range.channel) + " memory " +
@@ -607,23 +647,29 @@ std::string classesText(const std::vector<RegisterClass>& classes, std::string_v
 
 // One way an extent of work RAM was carried out: the register it reached, as
 // a transfer or a table walk (`Dma`, `Table`, `Indirect`) or as the CPU's own
-// stores (`Stream`), and the instruction that sent it.
+// stores (`Stream`), the instruction that sent it, and where the bytes landed
+// on the other side of the port, every time the extent went this way.
 struct ExtentUse {
   RegisterClass cls = RegisterClass::Display;
   MovedKind kind = MovedKind::Dma;
   Address registerAddress = 0;
   Address site = 0;
+  std::vector<PortLanding> landings;
 };
 
 // Every distinct way an extent went, as the `moved` and `streamed` lines say —
 // only those a file can be named for.
 std::vector<ExtentUse> extentUses(const CartridgeDisassembly& out, const StagedRange& range) {
   std::vector<ExtentUse> uses;
-  const auto add = [&](const ExtentUse& use) {
-    const bool known = std::any_of(uses.begin(), uses.end(), [&](const ExtentUse& u) {
+  const auto add = [&](ExtentUse use) {
+    const auto known = std::find_if(uses.begin(), uses.end(), [&](const ExtentUse& u) {
       return u.cls == use.cls && u.kind == use.kind && u.registerAddress == use.registerAddress;
     });
-    if (!known) uses.push_back(use);
+    if (known == uses.end()) {
+      uses.push_back(std::move(use));
+    } else {
+      known->landings.insert(known->landings.end(), use.landings.begin(), use.landings.end());
+    }
   };
   for (const MovedRange& moved : out.moved) {
     if (!moved.toRegister || moved.step == MovedStep::Fixed || !moved.registerClass) continue;
@@ -632,7 +678,8 @@ std::vector<ExtentUse> extentUses(const CartridgeDisassembly& out, const StagedR
     add(ExtentUse{.cls = *moved.registerClass,
                   .kind = moved.kind,
                   .registerAddress = moved.registerAddress,
-                  .site = moved.site});
+                  .site = moved.site,
+                  .landings = landingsOf(out, moved)});
   }
   for (const StreamedRange& stream : out.streamed) {
     if (!stream.memory || *stream.memory != range.memory || stream.bytes != range.bytes) continue;
@@ -640,7 +687,8 @@ std::vector<ExtentUse> extentUses(const CartridgeDisassembly& out, const StagedR
     add(ExtentUse{.cls = *stream.registerClass,
                   .kind = MovedKind::Stream,
                   .registerAddress = stream.registerAddress,
-                  .site = stream.site});
+                  .site = stream.site,
+                  .landings = stream.landing ? std::vector<PortLanding>{*stream.landing} : std::vector<PortLanding>{}});
   }
   return uses;
 }
@@ -795,6 +843,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     if (!assetDirectory(*range.registerClass, range.kind)) continue;
     const bool up = range.step == MovedStep::Increment;
     const Address bank = range.memory & 0xFF0000u;
+    const std::vector<PortLanding> landings = landingsOf(out, range);
     std::vector<Piece> mine;
     std::optional<std::size_t> previous;
     std::uint32_t outside = 0;
@@ -816,7 +865,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                              .kind = range.kind,
                              .use = range.kind,
                              .registerAddress = range.registerAddress,
-                             .site = range.site});
+                             .site = range.site,
+                             .landings = landings});
       }
       previous = at;
     }
@@ -841,18 +891,23 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
   }
   // A piece the run's shadow named — a staged range's source, a stream's
-  // bytes — under the same two refusals.
+  // bytes — under the same two refusals. A refusal is said once: a stream
+  // seen landing in several places is several ranges of the same bytes, and
+  // one note names them.
+  const auto refuse = [&](const std::string& note) {
+    if (std::find(out.notes.begin(), out.notes.end(), note) == out.notes.end()) out.notes.push_back(note);
+  };
   auto admit = [&](Piece piece, const std::string& what) {
     const Address home = romAddress(map, piece.offset).value_or(0);
     const Address last = home + static_cast<Address>(piece.length) - 1u;
     if (overlapsCode(piece.offset, piece.length)) {
-      out.notes.push_back(what + ": " + address24(home) + "-" + address24(last) +
-                          " overlaps an instruction the trace decoded; not lifted");
+      refuse(what + ": " + address24(home) + "-" + address24(last) +
+             " overlaps an instruction the trace decoded; not lifted");
       return;
     }
     if (overlapsBlock(piece.offset, piece.length)) {
-      out.notes.push_back(what + ": " + address24(home) + "-" + address24(last) +
-                          " overlaps a block of the sound program; not lifted");
+      refuse(what + ": " + address24(home) + "-" + address24(last) +
+             " overlaps a block of the sound program; not lifted");
       return;
     }
     pieces.push_back(piece);
@@ -917,7 +972,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                              .kind = MovedKind::Proven,
                              .use = MovedKind::Dma,
                              .registerAddress = dma.destination.value_or(0),
-                             .site = dma.site});
+                             .site = dma.site,
+                             .landings = {}});
       }
       previous = at;
     }
@@ -947,7 +1003,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                       .kind = MovedKind::Staged,
                       .use = use.kind == MovedKind::Stream ? MovedKind::Dma : use.kind,
                       .registerAddress = use.registerAddress,
-                      .site = use.site},
+                      .site = use.site,
+                      .landings = use.landings},
                 stagedText(range, source));
         }
       }
@@ -966,7 +1023,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                 .kind = MovedKind::Stream,
                 .use = MovedKind::Stream,
                 .registerAddress = stream.registerAddress,
-                .site = stream.site},
+                .site = stream.site,
+                .landings = stream.landing ? std::vector<PortLanding>{*stream.landing} : std::vector<PortLanding>{}},
           streamText(stream));
   }
 
@@ -995,7 +1053,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                          : hdmaOnly                    ? MovedKind::Table
                                                        : MovedKind::Dma,
                   .registerAddress = 0,
-                  .site = 0},
+                  .site = 0,
+                  .landings = {}},
             "asset " + kept.file);
     }
   }
@@ -1082,7 +1141,13 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
     if (home) {
       const Piece& lead = named != nullptr ? *named : first;
-      const std::string_view directory = mixed ? std::string_view("staged") : *assetDirectory(lead.cls, lead.use);
+      std::string_view directory = mixed ? std::string_view("staged") : *assetDirectory(lead.cls, lead.use);
+      // A VRAM file goes where the run saw its bytes drawn: a map, tiles, or
+      // neither the run can say.
+      if (directory == "vram") {
+        directory = vramDirectory(std::vector<Piece>(pieces.begin() + static_cast<std::ptrdiff_t>(i),
+                                                     pieces.begin() + static_cast<std::ptrdiff_t>(j)));
+      }
       AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
                               hex(*home & 0xFFFFu, 4) + ".bin",
                       .classes = classes,
@@ -1259,6 +1324,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     out.seen = std::move(observation.seen);
     out.staged = std::move(observation.staged);
     out.streamed = std::move(observation.streamed);
+    out.landed = std::move(observation.landed);
     for (const MovedRange& range : observation.moved) {
       const auto known = std::find_if(out.moved.begin(), out.moved.end(),
                                       [&](const MovedRange& m) { return sameRange(m, range); });
@@ -1689,6 +1755,18 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            " times " + std::to_string(range.times) + "\n";
   }
 
+  // Where the ranges the run moved landed on the other side of the port, and
+  // what the PPU used the memory as at the first frame drawn after.
+  if (!disassembly.landed.empty()) out += "\n";
+  for (const LandedRange& landed : disassembly.landed) {
+    out += "landed   " + address24(landed.site) + " channel " + std::to_string(landed.channel) + " memory " +
+           address24(landed.memory) + " bytes " + std::to_string(landed.bytes) + " as " +
+           std::string(movedKindName(landed.kind)) + " at " +
+           portAddressText(landed.landing.memory, landed.landing.lowest) + "-" +
+           portAddressText(landed.landing.memory, landed.landing.highest) + " in " + areaText(landed.landing) +
+           " times " + std::to_string(landed.times) + "\n";
+  }
+
   // Where every range carried out of work RAM came from: one line per source
   // and image hull, one per register whose value entered, one for the save,
   // and one saying `computed` for a source built from constants alone.
@@ -1772,7 +1850,11 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
                                  : std::string("none")) +
            " from " +
            address24(stream.memory ? *stream.memory : romAddress(map, stream.romOffset).value_or(0)) +
-           " bytes " + std::to_string(stream.bytes) + " times " + std::to_string(stream.times) + "\n";
+           " bytes " + std::to_string(stream.bytes) + " times " + std::to_string(stream.times) + " at " +
+           (stream.landing ? portAddressText(stream.landing->memory, stream.landing->lowest) + "-" +
+                                 portAddressText(stream.landing->memory, stream.landing->highest)
+                           : std::string("none")) +
+           " in " + (stream.landing ? areaText(*stream.landing) : std::string("none")) + "\n";
   }
 
   // The routines. A list is one field, its names joined by commas; an empty
@@ -2059,7 +2141,7 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
     }
     static const std::set<std::string> kKnown = {"title",  "stop",   "warning", "note",   "access",
                                                  "dma",    "routine", "state",  "seen",   "origin",
-                                                 "staged", "streamed"};
+                                                 "staged", "streamed", "landed"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   return input;

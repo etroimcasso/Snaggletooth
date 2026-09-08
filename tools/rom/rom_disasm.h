@@ -119,9 +119,12 @@ struct SoundProgram {
 // under a directory named for the memory they went to — `vram/`, `cgram/`,
 // `oam/`, `apu/`, `hdma/` for a table and for a block an indirect entry pointed
 // at, and `staged/` for a source whose bytes were built into data for two
-// classes — and named by the address of its first byte. The bank file refers
-// to it with `INCBIN` where the bytes were. Ranges that share a byte are one
-// file, the union; ranges that touch are not.
+// classes — and, for VRAM, for what the PPU used that memory as where the run
+// saw every landing of the file's bytes drawn: `maps/` when every landing lies
+// in a layer's screen, `tiles/` when every one lies in a name base or the
+// sprite tiles, `vram/` otherwise — and named by the address of its first
+// byte. The bank file refers to it with `INCBIN` where the bytes were. Ranges
+// that share a byte are one file, the union; ranges that touch are not.
 struct AssetFile {
   std::string file;  // relative to the manifest: `vram/00_9000.bin`
   std::vector<RegisterClass> classes;  // of the registers the bytes went to, ascending, one for every file but a `staged/` one
@@ -179,6 +182,11 @@ struct CartridgeDisassembly {
   // Nothing is traced from them; they say where the bytes the hardware received
   // came from.
   std::vector<MovedRange> moved;
+  // Where the ranges this run moved landed on the other side of the port, and
+  // what the PPU used that memory as — see `rom_observe.h`. Written fresh on
+  // every run and read back by nothing; the directory a VRAM file takes from
+  // them is kept by its `asset` line. Empty without a run.
+  std::vector<LandedRange> landed;
   // The files lifted out of the bank files, in address order: every `moved`
   // range that begins in the image and goes to a memory a file can be named for,
   // every source the shadow named, and every transfer the code proves whole

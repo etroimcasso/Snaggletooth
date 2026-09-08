@@ -1098,7 +1098,7 @@ TEST(RomAssets, AStreamIsLiftedAsTheRunItsInvocationRead) {
   EXPECT_EQ(palette->bytes[16], 0xFFu);
   EXPECT_NE(renderManifest(d).find("asset    cgram/00_9200.bin Cgram as stream from $00:9200 bytes 17\n"),
             std::string::npos);
-  EXPECT_NE(renderManifest(d).find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1\n"),
+  EXPECT_NE(renderManifest(d).find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette\n"),
             std::string::npos);
   EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d)
                 .find("; ---- $00:9200-$00:9210: 17 bytes a routine carried Cgram data from, in cgram/00_9200.bin\n"
@@ -1196,6 +1196,130 @@ TEST(RomAssets, TheStagedTreeStillAssemblesToItsImage) {
   EXPECT_EQ(placement.unplaced, 0u);
   EXPECT_EQ(placement.placedTwice, 0u);
   EXPECT_EQ(placement.image, stagingImage());
+}
+
+// ---- where the files landed --------------------------------------------------
+//
+// The landing cartridge uploads to every video memory and sets the bases
+// afterwards; the cases pin the `landed` line as written, the directory a
+// VRAM file takes from its landings, a staged file placed by the landing of
+// the range built from it, the widened `streamed` line, that a name and a
+// tree without a run keep the path, and that the tree still assembles.
+
+namespace {
+
+using examples::landingImage;
+
+CartridgeDisassembly landingLift(CartridgeRequest request = {}) {
+  static const std::vector<std::uint8_t> rom = landingImage();
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 8u * kFrame;
+  return disassembleCartridge(request);
+}
+
+}  // namespace
+
+TEST(RomLandedFiles, TheLandedLineIsWrittenBesideItsMovedLineAndIsAKnownKind) {
+  const CartridgeDisassembly d = landingLift();
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1\n"),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1\n"),
+            std::string::npos);
+  // The copy into work RAM through the port lands in no memory, and has no line.
+  EXPECT_EQ(manifest.find("landed   $00:8200"), std::string::npos);
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(manifest, error);
+  ASSERT_TRUE(input.has_value()) << error;
+}
+
+TEST(RomLandedFiles, AVramFileTakesTheDirectoryItsLandingsName) {
+  const CartridgeDisassembly d = landingLift();
+  std::vector<std::string> files;
+  for (const AssetFile& asset : d.assets) files.push_back(asset.file);
+  EXPECT_EQ(files, (std::vector<std::string>{
+                       "tiles/00_9000.bin",   // the name base BG1 and BG2 share
+                       "maps/00_9100.bin",    // BG1's screen
+                       "vram/00_9200.bin",    // across a screen and the name bases
+                       "vram/00_9300.bin",    // no base reaches it
+                       "tiles/00_9400.bin",   // the sprite tiles
+                       "cgram/00_9500.bin",   // the palette
+                       "maps/00_9700.bin",    // BG2's screen, after the flip
+                       "vram/00_9800.bin",    // under Mode 7
+                       "tiles/00_9900.bin",   // the rotated words, in the name bases
+                       "vram/00_9A00.bin",    // no frame drew it
+                       "maps/00_9B00.bin",    // staged through work RAM into BG1's screen
+                       "maps/00_9D00.bin",    // BG2's screen through its wrap round the end of VRAM
+                       "oam/00_A000.bin",     // the sprite table
+                   }))
+      << renderManifest(d);
+}
+
+TEST(RomLandedFiles, AStagedFileIsPlacedByWhereTheRangeBuiltFromItLanded) {
+  const CartridgeDisassembly d = landingLift();
+  const AssetFile* staged = assetNamed(d, "maps/00_9B00.bin");
+  ASSERT_NE(staged, nullptr);
+  EXPECT_EQ(staged->kind, MovedKind::Staged);
+  EXPECT_EQ(staged->bytes.size(), 32u);
+  EXPECT_NE(renderManifest(d).find("asset    maps/00_9B00.bin Vram as staged from $00:9B00 bytes 32\n"),
+            std::string::npos);
+}
+
+TEST(RomLandedFiles, TheBankFileIncludesAFileByThePathItsLandingsGaveIt) {
+  const CartridgeDisassembly d = landingLift();
+  const std::string bank = renderRegion(regionNamed(d, "bank_00.asm"), d);
+  EXPECT_NE(bank.find("        INCBIN \"tiles/00_9000.bin\"\n"), std::string::npos);
+  EXPECT_NE(bank.find("        INCBIN \"maps/00_9100.bin\"\n"), std::string::npos);
+  EXPECT_NE(bank.find("        INCBIN \"vram/00_9300.bin\"\n"), std::string::npos);
+}
+
+TEST(RomLandedFiles, ANameAndATreeWithoutARunKeepThePath) {
+  const CartridgeDisassembly ran = landingLift();
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(ran), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  CartridgeRequest again;
+  static const std::vector<std::uint8_t> rom = landingImage();
+  again.rom = rom;
+  again.captureSound = false;
+  again.observeRun = false;
+  again.moved = input->moved;
+  again.assets = input->assets;
+  again.assets[0].file = "tiles/font.bin";  // a person's name for the tileset
+  const CartridgeDisassembly kept = disassembleCartridge(again);
+  ASSERT_EQ(kept.assets.size(), ran.assets.size()) << renderManifest(kept);
+  EXPECT_EQ(kept.assets[0].file, "tiles/font.bin");
+  for (std::size_t i = 1; i < ran.assets.size(); ++i) EXPECT_EQ(kept.assets[i].file, ran.assets[i].file);
+  EXPECT_TRUE(kept.landed.empty()) << "nothing is read back";
+  EXPECT_FALSE(anyNote(kept, "names no range this run lifted"));
+}
+
+TEST(RomLandedFiles, TheStreamedLineCarriesTheLanding) {
+  const CartridgeDisassembly d = stagedLift();
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette\n"),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $"),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find(" in unshown\n"), std::string::npos);
+}
+
+TEST(RomLandedFiles, TheLandingTreeStillAssemblesToItsImage) {
+  const CartridgeDisassembly d = landingLift();
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.unplaced, 0u);
+  EXPECT_EQ(placement.placedTwice, 0u);
+  EXPECT_EQ(placement.image, landingImage());
 }
 
 TEST(RomAssets, TheInstructionsTextDoesNotChange) {

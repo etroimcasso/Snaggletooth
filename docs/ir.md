@@ -403,7 +403,9 @@ address it came from until something computes with it, so a store of it to a
 data register is the buffer being carried out, told to a `CarrySink` the host
 sets byte by byte; `streams()` is every sequence of such stores, from a buffer
 or from the image, an image stream carrying the run its carrier read as its
-`source`. What the disassembler does with all of it is
+`source`, and every stream the lowest and highest address the port put a byte
+at, which the sink answers for each store from what the machine reported and
+is told of each stream as it closes. What the disassembler does with all of it is
 [snes-disassembler.md §Where the bytes came from](snes-disassembler.md#where-the-bytes-came-from);
 the rules are held by `tests/ir/provenance_test.cpp`, one case each.
 
@@ -591,7 +593,7 @@ The check itself — the observer that collects a step, the bus that answers the
 interpreter with what the machine read and holds every access to it, and the
 register and cycle checks after — is `ir/ir_lockstep.h`, and the differential
 is one of two things that drive it. The other is the cartridge disassembler's
-[run on the machine](snes-disassembler.md#where-a-run-landed-and-what-it-saw),
+[run on the machine](snes-disassembler.md#where-the-cpu-arrived-and-what-it-saw),
 which needs no program: it lifts every instruction the CPU executes from the
 bytes the CPU fetched, wherever they lay, and holds that node to the same
 check, so a node the run computes a fact from is a node the machine agreed

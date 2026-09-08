@@ -487,12 +487,30 @@ void Provenance::exchange() {
   std::swap(loaded(Place::A, 0), loaded(Place::A, 1));
 }
 
+namespace {
+
+// Where the port put a stream's byte, folded into the stream's extent.
+void landed(Stream& stream, std::optional<std::uint16_t> at) {
+  if (!at) return;
+  if (!stream.landed) {
+    stream.landed = true;
+    stream.lowest = *at;
+    stream.highest = *at;
+    return;
+  }
+  stream.lowest = std::min(stream.lowest, *at);
+  stream.highest = std::max(stream.highest, *at);
+}
+
+}  // namespace
+
 // A store to a data register: the sequence its register has open continues
 // when the value is the next byte — of the buffer, for a byte loaded from work
 // RAM; of the image, for a value with exactly one image byte as its origin —
 // and the store was made at the same site as the last or on one straight run
 // from it; otherwise the sequence closes, and a value of either kind opens a
-// new one.
+// new one. Every byte of a sequence carries where the port put it, as the
+// host reports it.
 void Provenance::streamed(std::uint32_t registerAddress, Origin origin, std::uint32_t loadedFrom) {
   const bool fromBuffer = loadedFrom != kNotLoaded;
   const OriginSet& set = origins_.of(origin);
@@ -502,6 +520,8 @@ void Provenance::streamed(std::uint32_t registerAddress, Origin origin, std::uin
   const bool straight = !broken_;
   broken_ = false;
   const std::uint32_t running = frames_.back().id;
+  const std::optional<std::uint16_t> at =
+      carries != nullptr ? carries->landedAt(registerAddress) : std::nullopt;
   if (found != open_.end()) {
     OpenStream& open = found->second;
     const bool sameKind = open.stream.memory.has_value() == fromBuffer;
@@ -511,6 +531,7 @@ void Provenance::streamed(std::uint32_t registerAddress, Origin origin, std::uin
     if (sameKind && nextByte && (site == open.lastSite || straight)) {
       ++open.stream.bytes;
       open.lastSite = site;
+      landed(open.stream, at);
       if (open.carrier != running) {
         release(open.carrier);
         open.carrier = running;
@@ -528,7 +549,11 @@ void Provenance::streamed(std::uint32_t registerAddress, Origin origin, std::uin
                 .bytes = 1,
                 .times = 1,
                 .source = {},
-                .memory = fromBuffer ? std::optional<Address>{workRamAddress(loadedFrom)} : std::nullopt};
+                .memory = fromBuffer ? std::optional<Address>{workRamAddress(loadedFrom)} : std::nullopt,
+                .landed = false,
+                .lowest = 0,
+                .highest = 0};
+  landed(stream, at);
   open_.emplace(registerAddress, OpenStream{.stream = stream, .lastSite = site, .carrier = running});
   hold(running);
   if (fromBuffer && carries != nullptr) carries->carriedByte(registerAddress, workRamAddress(loadedFrom), false);
@@ -560,6 +585,7 @@ void Provenance::closeStream(std::uint32_t registerAddress) {
         same->source = stream.source;
       }
     }
+    if (carries != nullptr) carries->streamClosed(stream);
   }
   const bool fromBuffer = stream.memory.has_value();
   open_.erase(found);

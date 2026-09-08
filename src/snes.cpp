@@ -406,6 +406,7 @@ void Snes::advanceLine() noexcept {
   if (state_.vpos == kVblankStartLine) {
     state_.vblankNmi = true;  // the NMI flag is set at the start of vblank, whether or not NMIs are enabled
     state_.hdmaActive = 0u;   // and every HDMA channel deactivates for the rest of the frame
+    if ((state_.inidisp & 0x80u) == 0u) reloadOamAddress();  // the PPU, done drawing, takes the OAM address back to the reload value
     if ((state_.nmitimen & 1u) != 0u) {
       // The auto-joypad read runs each frame it is enabled: it strobes the pads
       // now, clocks their bits out over the window, and lands them as it ends.
@@ -540,6 +541,12 @@ std::uint8_t Snes::readPpuReg(std::uint16_t offset) {
       }
       return latch(v);
     }
+    case 0x2138: {  // RDOAM: the byte at the OAM address, which then steps
+      const std::uint16_t at = state_.oamAddress & 0x3FFu;
+      const std::size_t index = at >= 0x200u ? 0x200u | (at & 0x1Fu) : at;
+      state_.oamAddress = static_cast<std::uint16_t>((at + 1u) & 0x3FFu);
+      return latch(state_.oam[index]);
+    }
     case 0x213B: {  // RDCGRAM: two reads make a word; the high byte's top bit is open bus
       const std::uint16_t byte = static_cast<std::uint16_t>(state_.cgadd) << 1;
       std::uint8_t v;
@@ -561,7 +568,41 @@ std::uint8_t Snes::readPpuReg(std::uint16_t offset) {
 
 void Snes::writePpuReg(std::uint16_t offset, std::uint8_t value) {
   switch (offset) {
-    case 0x2100: state_.inidisp = value; return;  // forced blank and brightness
+    case 0x2100: {  // forced blank and brightness
+      const bool released = (state_.inidisp & 0x80u) != 0u && (value & 0x80u) == 0u;
+      state_.inidisp = value;
+      // Forced blank released on vblank's first line: the PPU reloads the OAM
+      // address then, as it would have at the line's start with the screen on.
+      if (released && state_.vpos == kVblankStartLine) reloadOamAddress();
+      return;
+    }
+    case 0x2101: state_.objsel = value; return;
+    case 0x2102:  // OAMADDL: the low eight bits of the reload value, and the address takes the whole value
+      state_.oamadd = static_cast<std::uint16_t>((state_.oamadd & 0xFF00u) | value);
+      reloadOamAddress();
+      return;
+    case 0x2103:  // OAMADDH: the ninth bit and the priority-rotation bit
+      state_.oamadd = static_cast<std::uint16_t>((state_.oamadd & 0x00FFu) | (value << 8));
+      reloadOamAddress();
+      return;
+    case 0x2104: {  // OAMDATA: a word through the latch below $200, a byte above it, mirrored past $21F
+      const std::uint16_t at = state_.oamAddress & 0x3FFu;
+      if (at >= 0x200u) {
+        const std::size_t index = 0x200u | (at & 0x1Fu);
+        state_.oam[index] = value;
+        portLanding_ = static_cast<std::uint16_t>(index);
+      } else if ((at & 1u) == 0u) {
+        state_.oamLatch = value;
+        portLanding_ = at;
+      } else {
+        state_.oam[at - 1u] = state_.oamLatch;
+        state_.oam[at] = value;
+        portLanding_ = at;
+      }
+      state_.oamAddress = static_cast<std::uint16_t>((at + 1u) & 0x3FFu);
+      return;
+    }
+    case 0x2105: state_.bgmode = value; return;
     case 0x2107: state_.bg1sc = value; return;
     case 0x2108: state_.bg2sc = value; return;
     case 0x2109: state_.bg3sc = value; return;
@@ -578,14 +619,16 @@ void Snes::writePpuReg(std::uint16_t offset, std::uint8_t value) {
       state_.vramLatch = readVramWord();
       return;
     case 0x2118: {  // VMDATAL: the low byte of the addressed word
-      const std::size_t byte = static_cast<std::size_t>(vramWordAddress()) << 1;
-      state_.vram[byte & 0xFFFFu] = value;
+      const std::uint16_t word = static_cast<std::uint16_t>(vramWordAddress() & 0x7FFFu);
+      state_.vram[static_cast<std::size_t>(word) << 1] = value;
+      portLanding_ = word;
       stepVramAddress(/*highByte=*/false);  // a write never prefetches
       return;
     }
     case 0x2119: {  // VMDATAH: the high byte of the addressed word
-      const std::size_t byte = static_cast<std::size_t>(vramWordAddress()) << 1;
-      state_.vram[(byte + 1u) & 0xFFFFu] = value;
+      const std::uint16_t word = static_cast<std::uint16_t>(vramWordAddress() & 0x7FFFu);
+      state_.vram[(static_cast<std::size_t>(word) << 1) + 1u] = value;
+      portLanding_ = word;
       stepVramAddress(/*highByte=*/true);
       return;
     }
@@ -594,6 +637,7 @@ void Snes::writePpuReg(std::uint16_t offset, std::uint8_t value) {
       state_.cgLatchHigh = false;
       return;
     case 0x2122:  // CGDATA: the low byte is held, the high byte commits the word
+      portLanding_ = state_.cgadd;
       if (!state_.cgLatchHigh) {
         state_.cgLatch = value;
         state_.cgLatchHigh = true;

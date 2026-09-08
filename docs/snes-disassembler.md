@@ -30,9 +30,12 @@ of the image it was read from.
 > stack — becomes an entry too, and the direct register and the data bank the
 > run saw at every site are recorded beside what the paths prove; every range
 > of bytes the transfer engines moved is recorded with where it came from,
-> where it went and which instruction sent it, and every such range that begins
+> where it went and which instruction sent it — and, for the video memories,
+> which words, palette entries or sprite bytes it landed on and what the PPU
+> used them as when the run saw them drawn — and every such range that begins
 > in the image is lifted out of its bank into a file of its own under a
-> directory named for the memory it went to, the bank file including it where
+> directory named for the memory it went to and, for VRAM, for whether the
+> picture used it as a map or as tiles, the bank file including it where
 > it was; and the lifted program is read for what every path proves, so a jump
 > through a table whose index the bytes bound is traced past without running.
 > The manifest says what the code reaches: every register access, every
@@ -54,7 +57,7 @@ of the image it was read from.
 - [The sound program](#the-sound-program)
 - [Stops, and getting past them](#stops-and-getting-past-them)
 - [Running the cartridge](#running-the-cartridge)
-- [Where a run landed, and what it saw](#where-a-run-landed-and-what-it-saw)
+- [Where the CPU arrived, and what it saw](#where-the-cpu-arrived-and-what-it-saw)
 - [What a run moved](#what-a-run-moved)
 - [The assets](#the-assets)
 - [Where the bytes came from](#where-the-bytes-came-from)
@@ -437,7 +440,7 @@ disassembly to the next and merges a new run's with them, so an unattended run
 and a played one over the same directory accumulate — and an `entry` a person
 adds still names what no run has taken.
 
-## Where a run landed, and what it saw
+## Where the CPU arrived, and what it saw
 
 The four forms are not the only way a program leaves the bytes' flow. A
 routine dispatches by pushing an address and returning to it; a program builds
@@ -454,7 +457,7 @@ each instruction the run compares where the CPU went with what the instruction
 names: the address after it, its constant target, the pointer the four forms
 read, the vector a `BRK` or `COP` takes, and for a return, an address the run's
 own calls and interrupts said to expect one at. Anything else is a
-[`ran` line](project-manifest.md#213-where-a-run-landed), and the trace starts
+[`ran` line](project-manifest.md#213-where-the-cpu-arrived), and the trace starts
 from it as it starts from a `reached` line. A landing in work RAM is a `note`,
 since the tree has nothing to trace there.
 
@@ -576,6 +579,68 @@ was, and a run skipped with `--no-run` keeps them all. So a tree carries where
 the hardware's bytes came from whether or not the disassembly that wrote it ran
 the cartridge.
 
+**Where a range landed.** The `moved` line says what the engine did on the
+A bus; what happened on the other side of the port is the
+[`landed` line](project-manifest.md#217-where-a-transfer-landed) beside it.
+Every write through a video data port says where the port put the byte —
+the machine reports it with the access ([SNES machine](snes-machine.md#the-bus-observer)) — and
+the run keeps, for each range, the lowest and the highest VRAM word, palette
+word or OAM byte its bytes reached. Then, at the first frame the PPU draws
+after the bytes landed, it reads the screen mode and the base registers as
+they stand at that frame's start to say what the memory was: a
+layer's screen (`tilemap1`–`tilemap4`), a layer's name base at the colour
+depth the mode gives it (`tiles1`–`tiles4`), the sprite tiles (`sprites`),
+the whole of VRAM under Mode 7 (`mode7`), several of those joined by `+`,
+`none` for a stretch no base reaches, or `unshown` when no frame was drawn
+before the run ended. A range the engine was still carrying at a frame's
+start has its later bytes read at the next drawn frame, and its areas are
+every area read. A palette landing is `palette` and an OAM landing `oam`,
+whatever the frame. The first drawn frame is the moment the picture first
+used the words, so an upload made in forced blank with the bases written
+afterwards, or into the half of a double buffer the screen is not showing,
+is read as what it became, not as what the registers said when the engine
+ran. A range whose bytes reach no data port — a table to the brightness
+register, a copy into work RAM through its port, a read back — has no line;
+a range that landed in two places has two, each with its own count.
+
+The `landing` cartridge from [`tools/examples/`](../tools/examples/README.md)
+uploads to every video memory in forced blank and sets its bases only
+afterwards; the vertical-blank handler then flips a base behind an upload,
+switches to Mode 7 and blanks the screen before one last upload:
+
+```
+$ snes_disasm landing.smc -o landing --no-sound --run-seconds 1
+1 files, 365 instructions, 3 entries, 0 stops
+32768 of 32768 bytes placed -> landing
+```
+
+```
+landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1
+landed   $00:8066 channel 0 memory $00:9100 bytes 64 as dma at $0000-$001F in tilemap1 times 1
+landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1
+landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1
+landed   $00:8349 channel 0 memory $00:9700 bytes 64 as dma at $7800-$781F in tilemap2 times 1
+landed   $00:837B channel 0 memory $00:9D00 bytes 64 as dma at $0200-$021F in tilemap1+tilemap2 times 1
+landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1
+landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2
+landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1
+```
+
+The tileset from `$9000` was uploaded before any base was written and is
+read as the name base BG1 and BG2 share; the map from `$9700` was uploaded
+to `$7800` while BG2's screen was elsewhere, and the flip that followed is
+what the first drawn frame saw — a screen of four from `$7400`, whose last
+wraps round the end of VRAM to hold the map from `$9D00` at `$0200` beside
+BG1's; the upload from `$9A00` was made after the
+screen was blanked and no frame drew it. The sprite table sent from the
+handler landed at byte zero on two frames — the PPU reloads the OAM address
+at the start of every vertical blank — and at `$010` on the one the handler
+had moved the address first. The whole set is the
+[manifest page's example](project-manifest.md#217-where-a-transfer-landed).
+The line is written fresh and read back by nothing; what follows from it —
+the directory a VRAM file lives under — is the next section's, and is kept
+by the file's `asset` line.
+
 ## The assets
 
 Every range the run saw an engine carry begins somewhere, and where it begins in
@@ -593,7 +658,39 @@ pointed at, to any register. The file lives under `vram/`, `cgram/`, `oam/` or
 `apu/` for a transfer, `hdma/` for a table or a block — and `staged/` for a
 source the run's shadow named whose bytes were built into data for two
 classes, the next section — and is named `<bank>_<offset>.bin` after the
-address of its first byte. A range read downward is lifted in image order,
+address of its first byte. A VRAM file goes further, by
+[where its bytes landed](#what-a-run-moved): when every landing the run saw
+drawn of every range the file's bytes went through — its own ranges, or the
+ranges built from it, or the stream that carried it — lies in a layer's
+screen, the file lives under `maps/`; when every one lies in a name base or
+the sprite tiles, under `tiles/`; and when a landing was never drawn, lies in
+no area, lies under Mode 7, mixes a screen with tiles, or when there is no
+landing at all — a transfer the code proves, a tree disassembled without a
+run — it stays under `vram/`, which is the honest answer. The
+`landing` cartridge's thirteen files:
+
+```
+asset    tiles/00_9000.bin Vram as dma from $00:9000 bytes 64
+asset    maps/00_9100.bin Vram as dma from $00:9100 bytes 64
+asset    vram/00_9200.bin Vram as dma from $00:9200 bytes 64
+asset    vram/00_9300.bin Vram as dma from $00:9300 bytes 32
+asset    tiles/00_9400.bin Vram as dma from $00:9400 bytes 64
+asset    cgram/00_9500.bin Cgram as dma from $00:9500 bytes 32
+asset    maps/00_9700.bin Vram as dma from $00:9700 bytes 64
+asset    vram/00_9800.bin Vram as dma from $00:9800 bytes 64
+asset    tiles/00_9900.bin Vram as dma from $00:9900 bytes 32
+asset    vram/00_9A00.bin Vram as dma from $00:9A00 bytes 64
+asset    maps/00_9B00.bin Vram as staged from $00:9B00 bytes 32
+asset    maps/00_9D00.bin Vram as dma from $00:9D00 bytes 64
+asset    oam/00_A000.bin Oam as dma from $00:A000 bytes 544
+```
+
+The range from `$9200` began in BG3's screen and ended in the name bases,
+`$9300` landed where no base reaches, `$9800` was uploaded under Mode 7 and
+`$9A00` was never drawn: all four stay under `vram/`. The thirty-two bytes at
+`$9B00` were copied into work RAM and sent from there into BG1's screen, so
+their source is placed as a map; the map from `$9D00` lies in two screens at
+once, and two screens are still maps. A range read downward is lifted in image order,
 which is how its bytes lie. Ranges that share a byte are one file, the union of
 them — a tileset sent whole and then sent piece by piece is one tileset; ranges
 that only touch are two files, since the run cannot say whether a chunked
@@ -748,7 +845,8 @@ easier to split than to complete.
 RAM that went to a register a file can be named for — carried by an engine, as
 a `moved` range, or by the CPU a store at a time, as a `streamed` run — is
 lifted under the same rules as a range from the image, as an `asset` of kind
-`staged`; the `staged` line says which extent was built from it, which class
+`staged`, and placed by where the range built from it landed, as a range from
+the image is; the `staged` line says which extent was built from it, which class
 it went to, and by which routine. A computed range is not lifted, and nothing
 is said. The same bytes sent directly and sent after staging are one file. A
 source whose bytes were built into data for two classes — a block that
@@ -809,8 +907,8 @@ staged   staged/00_9500.bin at $7F:0700 bytes 8 to Vram by sub_0083C0 exact
 staged   staged/00_9500.bin at $7F:0700 bytes 8 to Cgram by sub_0083C0 exact
 staged   vram/00_9600.bin at $7F:0800 bytes 16 to Vram by sub_008480 exact
 
-streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1
-streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1
+streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette
+streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown
 ```
 
 The decoder at `$8100` unpacked eleven bytes — five runs, each a count and a
@@ -829,7 +927,10 @@ image is, under `hdma/`. The eight bytes copied to `$7F:0700` went to VRAM and
 then to CGRAM, so their source is one file under `staged/` named for both. The
 sixteen copied to `$7F:0800` were carried out by the loop at `$84C0` a word at
 a time: the `streamed` line names the buffer, and the buffer's source is its
-file.
+file. A stream lands as a transfer does, and its line says where: the palette
+loop's sixteen bytes at entries zero to seven; the VRAM loop's words at
+`$0035`, unshown because no frame was drawn between the loop and the run's
+end.
 
 In the bank file, a staged file's `INCBIN` says what it is:
 
@@ -1102,7 +1203,7 @@ image the tree describes and counts what is unplaced or placed twice.
 `reached` carries [what the run reached](#running-the-cartridge): one
 `ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site`
 that took it, whether it was a `call`, and the `name` the tree gives it. `ran`
-carries [where the run landed](#where-a-run-landed-and-what-it-saw): one
+carries [where the CPU arrived](#where-the-cpu-arrived-and-what-it-saw): one
 `Landing` per place — `target`, `mode`, `site` and `name`, as a reached target's
 — and `seen` one `SeenState` per site the run executed in the image, its
 `address` and the values of `d` and `dbr` seen there; `sameLanding` says
@@ -1112,20 +1213,33 @@ carries [what the run moved](#what-a-run-moved): one `MovedRange` per range —
 `registerClass` where the address has one, `memory`, `step` (a `MovedStep`),
 `bytes`, `kind` (a `MovedKind`) and `times`; `movedStepName` and `movedKindName`
 are their names as text, `sameRange` says whether two are one range, and
-`rangeBefore` is the order they are written in. `rom/rom_observe.h` is the run
+`rangeBefore` is the order they are written in. `landed` carries
+[where those ranges landed](#what-a-run-moved): one `LandedRange` per
+distinct landing — the `site`, `channel`, `memory`, `bytes` and `kind` of its
+`moved` line, the `landing` and `times`. A `PortLanding` is the `memory` the
+port reaches (a `PortMemory`: `Vram`, `Cgram`, `Oam`), the `lowest` and
+`highest` address the port put a byte at, whether the landing was `shown` —
+read at the first frame drawn after it — and the `areas` it lies in, one bit
+each of `kAreaTilemap1`–`kAreaTilemap4`, `kAreaTiles1`–`kAreaTiles4`,
+`kAreaSprites`, `kAreaMode7`, `kAreaPalette` and `kAreaOam`; `areaText` is
+the areas as the manifest writes them, `none` and `unshown` included,
+`portAddressText` an address in the memory's width, and `landedBefore` the
+order the lines are written in. `rom/rom_observe.h` is the run
 itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
 `input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone
 — into the controller ports, and returns a `RunObservation` holding the
-`reached` sightings in site order, the `moved` ranges, the `ran` landings, the
-`seen` values, the `staged` extents — one `StagedRange` per extent of work RAM
+`reached` sightings in site order, the `moved` ranges and their `landed`
+landings, the `ran` landings,
+the `seen` values, the `staged` extents — one `StagedRange` per extent of work RAM
 carried to a register, by an engine or by the CPU a store at a time: `memory`,
 `bytes`, the `origin` of every byte together (an `ir::OriginSet`) and the
 `writers`, each a `StagedWriter` with the `writer` site or engine, whether the
 bytes were `unwritten`, how many `bytes` it wrote, their `origin` and their
 `sources`; `sameExtent` says whether two are one — the `streamed` runs, one
 `StreamedRange` per stream: `site`, `registerAddress` with `registerName` and
-`registerClass`, `bytes` and `times`, and either the `memory` of the buffer
-carried or the `romOffset` carried with the `source` run it is lifted as,
+`registerClass`, `bytes` and `times`, either the `memory` of the buffer
+carried or the `romOffset` carried with the `source` run it is lifted as, and
+its `landing` where the register is a video data port,
 `sameStream` likewise — and what the run beside the
 interpreter checked — the `instructions` and `interrupts` it ran a node or a
 sequence for, the distinct `nodes` it lifted from the fetches, the
@@ -1208,7 +1322,13 @@ what the script plays, and no script plays everything — coverage is what a per
 exercises, run by run, and the manifest accumulates it. The same holds for what
 a run moved: a transfer the run never started has its `dma` line and no `moved`
 line, and a byte the CPU carries to a register itself, a store at a time, is
-not a transfer and is not recorded here. And for where a run landed: a return
+not a transfer and is not recorded here. And for where a range landed: what
+the memory was used as is read once, at the first frame drawn after the
+bytes landed, so a stretch of VRAM a game uses as tiles in one scene and as a
+map in another is named by the first; a run that ends before a frame is drawn
+says `unshown`; and a file whose landings mix the two, or lie under Mode 7,
+stays under `vram/` — the picture's use of every word over a whole run, and
+the editable forms that follow from it, are not here yet. And for where the CPU arrived: a return
 the run never took has no `ran` line, and code the program copied into work RAM
 and ran there is checked by the run and lifted from its fetches, but the tree
 has no file to place it in, so a landing there is a `note` and its bytes stay

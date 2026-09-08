@@ -348,6 +348,131 @@ TEST(SnesObserver, AnHdmaEventIsReportedInTheEnginesName) {
   EXPECT_EQ(m.state().inidisp, 0x0Fu);
 }
 
+// ---- where a port write landed ----------------------------------------------------------
+
+// The data write of the last step, which is the store the program made.
+BusAccess lastWrite(const Recorder& r) {
+  for (auto it = r.events.rbegin(); it != r.events.rend(); ++it) {
+    if (!it->internal && it->access.write) return it->access;
+  }
+  return BusAccess{};
+}
+
+TEST(SnesObserver, AWriteToTheVramPortSaysWhichWordItLandedOn) {
+  // 8-bit translation on: address $0001 reaches word $0008, and both halves of
+  // the word say so; the address write itself lands nowhere.
+  Snes m = programMachine({kLdaImm, 0x84u, kStaAbs, 0x15u, 0x21u,   // VMAIN = $84
+                           kLdaImm, 0x01u, kStaAbs, 0x16u, 0x21u,   // VMADDL = 1
+                           kLdaImm, 0x00u, kStaAbs, 0x17u, 0x21u,   // VMADDH = 0
+                           kLdaImm, 0xAAu, kStaAbs, 0x18u, 0x21u,   // VMDATAL
+                           kLdaImm, 0xBBu, kStaAbs, 0x19u, 0x21u,   // VMDATAH
+                           kStp});
+  Recorder r;
+  m.setObserver(&r);
+  m.step();
+  m.step();
+  m.step();
+  m.step();  // VMADDL
+  EXPECT_FALSE(lastWrite(r).landed.has_value());
+  m.step();
+  m.step();  // VMADDH
+  m.step();
+  r.events.clear();
+  m.step();  // VMDATAL
+  ASSERT_TRUE(lastWrite(r).landed.has_value());
+  EXPECT_EQ(int{*lastWrite(r).landed}, 0x0008);
+  m.step();
+  r.events.clear();
+  m.step();  // VMDATAH
+  ASSERT_TRUE(lastWrite(r).landed.has_value());
+  EXPECT_EQ(int{*lastWrite(r).landed}, 0x0008);
+}
+
+TEST(SnesObserver, AWriteToThePalettePortSaysWhichEntry) {
+  Snes m = programMachine({kLdaImm, 0x10u, kStaAbs, 0x21u, 0x21u,   // CGADD = $10
+                           kLdaImm, 0x34u, kStaAbs, 0x22u, 0x21u,   // low
+                           kLdaImm, 0x12u, kStaAbs, 0x22u, 0x21u,   // high: the word lands, the address steps
+                           kLdaImm, 0x56u, kStaAbs, 0x22u, 0x21u,   // the next entry's low
+                           kStp});
+  Recorder r;
+  m.setObserver(&r);
+  m.step();
+  m.step();  // CGADD
+  EXPECT_FALSE(lastWrite(r).landed.has_value());
+  int seen[3] = {-1, -1, -1};
+  for (int& entry : seen) {
+    m.step();
+    r.events.clear();
+    m.step();
+    entry = lastWrite(r).landed ? int{*lastWrite(r).landed} : -1;
+  }
+  EXPECT_EQ(seen[0], 0x10);
+  EXPECT_EQ(seen[1], 0x10);
+  EXPECT_EQ(seen[2], 0x11);
+}
+
+TEST(SnesObserver, AWriteToTheOamPortSaysWhichByte) {
+  Snes m = programMachine({kLdaImm, 0x02u, kStaAbs, 0x02u, 0x21u,   // OAMADDL = 2 -> address 4
+                           kLdaImm, 0x00u, kStaAbs, 0x03u, 0x21u,   // OAMADDH = 0
+                           kLdaImm, 0x34u, kStaAbs, 0x04u, 0x21u,   // byte 4, held
+                           kLdaImm, 0x12u, kStaAbs, 0x04u, 0x21u,   // byte 5, the word lands
+                           kStp});
+  Recorder r;
+  m.setObserver(&r);
+  for (int i = 0; i < 4; ++i) m.step();
+  EXPECT_FALSE(lastWrite(r).landed.has_value());
+  m.step();
+  r.events.clear();
+  m.step();
+  ASSERT_TRUE(lastWrite(r).landed.has_value());
+  EXPECT_EQ(int{*lastWrite(r).landed}, 4);
+  m.step();
+  r.events.clear();
+  m.step();
+  ASSERT_TRUE(lastWrite(r).landed.has_value());
+  EXPECT_EQ(int{*lastWrite(r).landed}, 5);
+}
+
+TEST(SnesObserver, AWriteAnywhereElseLandsNowhere) {
+  Snes m = programMachine({kLdaImm, 0x77u, kStaAbs, 0x20u, 0x00u,   // work RAM
+                           kLdaImm, 0x0Fu, kStaAbs, 0x00u, 0x21u,   // INIDISP
+                           kLdaImm, 0x01u, kStaAbs, 0x80u, 0x21u,   // the work-RAM port
+                           kStp});
+  Recorder r;
+  m.setObserver(&r);
+  for (int i = 0; i < 6; ++i) m.step();
+  for (const Event& e : r.events) EXPECT_FALSE(e.access.landed.has_value());
+}
+
+TEST(SnesObserver, AnEnginesWriteToAPortLandsToo) {
+  // Channel 0 carries four bytes from work RAM to VMDATAL/VMDATAH in pairs,
+  // from word $0100: the engine's B-bus writes say $0100, $0100, $0101, $0101.
+  Snes m = programMachine({kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
+  SnesState s = m.state();
+  s.dma[0].dmap = 0x01u;   // A->B, increment, pattern 1
+  s.dma[0].bbad = 0x18u;   // VMDATAL
+  s.dma[0].a1t = 0x0010u;
+  s.dma[0].a1b = 0x7Eu;
+  s.dma[0].das = 4;
+  s.vmain = 0x80u;
+  s.vmadd = 0x0100u;
+  m.restore(s);
+  Recorder r;
+  m.setObserver(&r);
+  m.run(20000u);
+  std::vector<int> words;
+  for (const BusAccess& a : r.accessesFrom(AccessSource::Dma)) {
+    if (a.write) words.push_back(a.landed ? int{*a.landed} : -1);
+  }
+  EXPECT_EQ(words, (std::vector<int>{0x100, 0x100, 0x101, 0x101}));
+  // The engine's reads on the A bus land nowhere.
+  for (const BusAccess& a : r.accessesFrom(AccessSource::Dma)) {
+    if (!a.write) {
+      EXPECT_FALSE(a.landed.has_value());
+    }
+  }
+}
+
 // ---- which channel, and whether the table --------------------------------------------
 
 TEST(SnesObserver, ACpuAccessNamesNoChannelAndNoTable) {

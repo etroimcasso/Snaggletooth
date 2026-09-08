@@ -23,10 +23,11 @@ every hardware access by class and by register, every transfer the code set up
 by destination, every range a run saw move by destination class and by kind,
 every file lifted by its directory with the bytes it holds, every staged
 extent by what the shadow found of its source — exact, approximate, computed,
-from a register, unwritten — and every routine with what it calls and reaches.
+from a register, unwritten — every landing by what the PPU used the memory as,
+and every routine with what it calls and reaches.
 
 Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
-`moved`, `asset`, `origin`, `staged`, `streamed`, `state` and `seen` lines, so
+`moved`, `landed`, `asset`, `origin`, `staged`, `streamed`, `state` and `seen` lines, so
 a corpus run says how far the trace, the run, the analysis, the shadow and the
 lift reached.
 
@@ -92,7 +93,10 @@ def facts(tree):
     moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
     # asset <path> <class> as <kind> from <address> bytes <n>
     assets = [(w[1].split("/")[0], int(w[8]), w[4]) for w in manifestLines(tree, "asset", 9)]
-    return classes, registers, valued, len(accesses), dmas, moved, assets
+    # landed <site> channel <n> memory <address> bytes <n> as <kind> at <lowest>-<highest>
+    #        in <area> times <n>
+    landed = [w[13] for w in manifestLines(tree, "landed", 16)]
+    return classes, registers, valued, len(accesses), dmas, moved, assets, landed
 
 
 def staged(tree):
@@ -188,6 +192,7 @@ def main():
     corpusAssetKinds = collections.Counter()
     corpusAssetKindBytes = collections.Counter()
     corpusSources = collections.Counter()
+    corpusAreas = collections.Counter()
     corpusReaches = collections.Counter()
     corpusThrough = collections.Counter()
     factTotals = collections.Counter()
@@ -243,13 +248,14 @@ def main():
             kinds = collections.Counter(line.split()[0] for line in manifest.read_text(errors="replace").splitlines()
                                         if line.strip() and not line.startswith(";"))
             summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['ran']} ran, "
-                        f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['asset']} assets, "
+                        f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['landed']} landed, "
+                        f"{kinds['asset']} assets, "
                         f"{kinds['origin']} origin, {kinds['staged']} staged, {kinds['streamed']} streamed, "
                         f"{kinds['state']} state lines, {kinds['seen']} seen lines")
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:
-            classes, registers, valued, accesses, dmas, movedLines, assets = facts(tree)
+            classes, registers, valued, accesses, dmas, movedLines, assets, landedLines = facts(tree)
             corpusClasses.update(classes)
             corpusRegisters.update(registers)
             factTotals["accesses"] += accesses
@@ -280,6 +286,8 @@ def main():
                 corpusAssetKinds[kind] += 1
                 corpusAssetKindBytes[kind] += size
                 factTotals["assetBytes"] += size
+            factTotals["landed"] += len(landedLines)
+            corpusAreas.update(landedLines)
             sourceKinds, spanned, used, stagedLines, streamedLines = staged(tree)
             corpusSources.update(sourceKinds)
             factTotals["sourceSpanned"] += spanned
@@ -342,6 +350,9 @@ def main():
         print("\nfiles lifted by kind, whole corpus:")
         for k, v in corpusAssetKinds.most_common():
             print(f"  {k:<12} {v} files, {corpusAssetKindBytes[k]} bytes")
+        print(f"\nlandings by what the memory was used as, whole corpus ({factTotals['landed']} landed lines):")
+        for k, v in corpusAreas.most_common():
+            print(f"  {k:<32} {v}")
         print(f"\nstaged sources, whole corpus ({factTotals['staged']} staged lines, "
               f"{factTotals['streamed']} streams; {factTotals['sourceSpanned']} bytes spanned, "
               f"{factTotals['sourceUsed']} used):")

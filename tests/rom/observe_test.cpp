@@ -35,6 +35,8 @@ namespace {
 
 using examples::copVectorImage;
 using examples::dispatchingImage;
+using examples::landingImage;
+using examples::liftingImage;
 using examples::loRomImage;
 using examples::mirroredImage;
 using examples::mixedImage;
@@ -50,7 +52,7 @@ using examples::unreadablePointerImage;
 constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
 // The manifest without the blocks a run writes fresh and a disassembly without
-// one does not write at all — `origin`, `staged`, `streamed` and `seen` — and
+// one does not write at all — `origin`, `staged`, `streamed`, `landed` and `seen` — and
 // without the blank line that stood before each, so what the manifest keeps
 // from one to the next is compared without them.
 std::string withoutRunLines(const std::string& manifest) {
@@ -62,7 +64,8 @@ std::string withoutRunLines(const std::string& manifest) {
         manifest.substr(position, end == std::string::npos ? std::string::npos : end - position + 1);
     position = end == std::string::npos ? manifest.size() : end + 1;
     const bool fresh = line.rfind("seen ", 0) == 0 || line.rfind("origin ", 0) == 0 ||
-                       line.rfind("staged ", 0) == 0 || line.rfind("streamed ", 0) == 0;
+                       line.rfind("staged ", 0) == 0 || line.rfind("streamed ", 0) == 0 ||
+                       line.rfind("landed ", 0) == 0;
     if (fresh) continue;
     if (line == "\n" && out.size() >= 1 && out.back() == '\n' && out.size() >= 2 &&
         out[out.size() - 2] == '\n') {
@@ -110,6 +113,22 @@ const MovedRange* rangeAt(const std::vector<MovedRange>& seen, Address site, std
     if (r.site == site && r.channel == channel && r.memory == memory) return &r;
   }
   return nullptr;
+}
+
+// The landings recorded under one trigger for one channel, in the order recorded.
+std::vector<const LandedRange*> landingsAt(const std::vector<LandedRange>& seen, Address site,
+                                           std::uint8_t channel) {
+  std::vector<const LandedRange*> out;
+  for (const LandedRange& l : seen) {
+    if (l.site == site && l.channel == channel) out.push_back(&l);
+  }
+  return out;
+}
+
+// The one landing recorded under a trigger for channel 0.
+const LandedRange* landingAt(const std::vector<LandedRange>& seen, Address site) {
+  const std::vector<const LandedRange*> all = landingsAt(seen, site, 0);
+  return all.size() == 1 ? all.front() : nullptr;
 }
 
 }  // namespace
@@ -1324,7 +1343,7 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
             std::string::npos);
   EXPECT_NE(manifest.find("staged   hdma/00_9400.bin at $7F:0600 bytes 3 to Display by sub_008380 exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1\n"),
+  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette\n"),
             std::string::npos);
   // A source sent two places: one file, a `staged` line per class it fed.
   EXPECT_NE(manifest.find("origin   $7F:0700 bytes 8 from $00:9500 bytes 8 using 8 by sub_0083C0 exact\n"),
@@ -1335,7 +1354,7 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
             std::string::npos);
   // A buffer the CPU carried out: the stream names the buffer, the buffer's
   // source is the file.
-  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1\n"),
+  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown\n"),
             std::string::npos);
   EXPECT_NE(manifest.find("origin   $7F:0800 bytes 16 from $00:9600 bytes 16 using 16 by sub_008480 exact\n"),
             std::string::npos);
@@ -1371,6 +1390,236 @@ TEST(RomLockstep, TheTreeStillAssemblesToItsImage) {
   });
   EXPECT_TRUE(report.error.empty()) << report.error;
   EXPECT_TRUE(report.identical()) << renderReport(report);
+}
+
+// ---- where a transfer landed -------------------------------------------------------
+
+// The landing cartridge's sites: the writes to `MDMAEN`.
+constexpr Address kLandTiles = 0x008034u;       // a tileset to word $3000
+constexpr Address kLandMap = 0x008066u;         // a map to $0000
+constexpr Address kLandAcross = 0x008098u;      // sixty-four bytes from $0FF0
+constexpr Address kLandNowhere = 0x0080CAu;     // thirty-two to $5000
+constexpr Address kLandSprites = 0x0080FCu;     // a sprite sheet to $6000
+constexpr Address kLandPalette = 0x008129u;     // a palette at entry sixteen
+constexpr Address kLandOam = 0x00815Bu;         // the sprite table from reset
+constexpr Address kLandRotated = 0x008192u;     // under the 8-bit translation
+constexpr Address kLandFill = 0x0081C9u;        // a fill to $5C00
+constexpr Address kLandFlipped = 0x008349u;     // the second frame's map to $7800
+constexpr Address kLandWrapped = 0x00837Bu;     // the second frame's map to $0200, under the screen's wrap
+constexpr Address kLandMode7 = 0x0083BEu;       // the third frame's upload under Mode 7
+constexpr Address kLandUnshown = 0x008401u;     // the fourth frame's upload in forced blank
+constexpr Address kLandOamAgain = 0x008430u;    // the sprite table from the handler
+
+// The landing cartridge run for eight frames: every frame the handler does
+// something on has passed, and the fourth's upload has no frame after it.
+const std::vector<LandedRange>& landings() {
+  static const std::vector<LandedRange> seen = [] {
+    std::vector<std::string> notes;
+    return observeRun(landingImage(), 8u * kFrame, InputScript{}, notes).landed;
+  }();
+  return seen;
+}
+
+TEST(RomLanded, ARangeToADataPortHasALandingWithItsExtent) {
+  const LandedRange* tiles = landingAt(landings(), kLandTiles);
+  ASSERT_NE(tiles, nullptr);
+  EXPECT_EQ(tiles->channel, 0u);
+  EXPECT_EQ(tiles->memory, 0x009000u);
+  EXPECT_EQ(tiles->bytes, 64u);
+  EXPECT_EQ(tiles->kind, MovedKind::Dma);
+  EXPECT_EQ(tiles->landing.memory, PortMemory::Vram);
+  EXPECT_EQ(tiles->landing.lowest, 0x3000u);
+  EXPECT_EQ(tiles->landing.highest, 0x301Fu) << "sixty-four bytes are thirty-two words";
+  EXPECT_EQ(tiles->times, 1u);
+}
+
+TEST(RomLanded, TheAreaIsReadAtTheFirstDrawnFrameAgainstTheBasesThenInForce) {
+  // Every base was written after the upload; at the first drawn frame BG1
+  // and BG2 share the name base at $1000.
+  const LandedRange* tiles = landingAt(landings(), kLandTiles);
+  ASSERT_NE(tiles, nullptr);
+  EXPECT_TRUE(tiles->landing.shown);
+  EXPECT_EQ(tiles->landing.areas, kAreaTiles1 | kAreaTiles2);
+  EXPECT_EQ(areaText(tiles->landing), "tiles1+tiles2");
+}
+
+TEST(RomLanded, AMapLandsInALayersScreen) {
+  const LandedRange* map = landingAt(landings(), kLandMap);
+  ASSERT_NE(map, nullptr);
+  EXPECT_EQ(map->landing.lowest, 0x0000u);
+  EXPECT_EQ(map->landing.highest, 0x001Fu);
+  EXPECT_EQ(map->landing.areas, kAreaTilemap1);
+}
+
+TEST(RomLanded, ARangeAcrossAreasNamesEveryOne) {
+  // $0FF0-$100F: the last words of BG3's screen and the first of the three
+  // name bases at $1000.
+  const LandedRange* across = landingAt(landings(), kLandAcross);
+  ASSERT_NE(across, nullptr);
+  EXPECT_EQ(across->landing.areas, kAreaTilemap3 | kAreaTiles1 | kAreaTiles2 | kAreaTiles3);
+  EXPECT_EQ(areaText(across->landing), "tilemap3+tiles1+tiles2+tiles3");
+}
+
+TEST(RomLanded, ARangeNoBaseReachesIsShownInNoArea) {
+  const LandedRange* nowhere = landingAt(landings(), kLandNowhere);
+  ASSERT_NE(nowhere, nullptr);
+  EXPECT_TRUE(nowhere->landing.shown);
+  EXPECT_EQ(nowhere->landing.areas, 0u);
+  EXPECT_EQ(areaText(nowhere->landing), "none");
+}
+
+TEST(RomLanded, ASpriteSheetLandsInTheSpriteTiles) {
+  const LandedRange* sheet = landingAt(landings(), kLandSprites);
+  ASSERT_NE(sheet, nullptr);
+  EXPECT_EQ(sheet->landing.lowest, 0x6000u);
+  EXPECT_EQ(sheet->landing.areas, kAreaSprites);
+}
+
+TEST(RomLanded, APaletteLandsAtItsEntryAndIsReadAtOnce) {
+  const LandedRange* palette = landingAt(landings(), kLandPalette);
+  ASSERT_NE(palette, nullptr);
+  EXPECT_EQ(palette->landing.memory, PortMemory::Cgram);
+  EXPECT_EQ(palette->landing.lowest, 0x10u);
+  EXPECT_EQ(palette->landing.highest, 0x1Fu) << "thirty-two bytes are sixteen entries";
+  EXPECT_EQ(palette->landing.areas, kAreaPalette);
+  EXPECT_EQ(areaText(palette->landing), "palette");
+  EXPECT_EQ(portAddressText(palette->landing.memory, palette->landing.lowest), "$10");
+}
+
+TEST(RomLanded, APaletteLandsWhetherOrNotAFrameIsDrawn) {
+  // The lifting cartridge never leaves forced blank: its VRAM landings are
+  // unshown, and its palette landings are still the palette.
+  std::vector<std::string> notes;
+  const RunObservation run = observeRun(liftingImage(), 3u * kFrame, InputScript{}, notes);
+  std::size_t palettes = 0;
+  for (const LandedRange& l : run.landed) {
+    if (l.landing.memory == PortMemory::Cgram) {
+      ++palettes;
+      EXPECT_TRUE(l.landing.shown);
+      EXPECT_EQ(l.landing.areas, kAreaPalette);
+    } else if (l.landing.memory == PortMemory::Vram) {
+      EXPECT_FALSE(l.landing.shown);
+    }
+  }
+  EXPECT_GT(palettes, 0u);
+}
+
+TEST(RomLanded, ASpriteTableLandsAtByteZero) {
+  const LandedRange* table = landingAt(landings(), kLandOam);
+  ASSERT_NE(table, nullptr);
+  EXPECT_EQ(table->landing.memory, PortMemory::Oam);
+  EXPECT_EQ(table->landing.lowest, 0x000u);
+  EXPECT_EQ(table->landing.highest, 0x21Fu);
+  EXPECT_EQ(table->landing.areas, kAreaOam);
+  EXPECT_EQ(portAddressText(table->landing.memory, table->landing.highest), "$21F");
+}
+
+TEST(RomLanded, TheSameRangeLandingInTwoPlacesIsTwoLandings) {
+  // The handler sends the sprite table on three frames without writing the
+  // OAM address: on two it lands at $000, reloaded at the start of vblank,
+  // and on the third the handler had moved the address to $010 first.
+  const std::vector<const LandedRange*> sends = landingsAt(landings(), kLandOamAgain, 0);
+  ASSERT_EQ(sends.size(), 2u);
+  EXPECT_EQ(sends[0]->landing.lowest, 0x000u);
+  EXPECT_EQ(sends[0]->landing.highest, 0x21Fu);
+  EXPECT_EQ(sends[0]->times, 2u);
+  EXPECT_EQ(sends[1]->landing.lowest, 0x010u);
+  EXPECT_EQ(sends[1]->landing.highest, 0x21Fu) << "the bytes past $21F land in its mirrors";
+  EXPECT_EQ(sends[1]->times, 1u);
+}
+
+TEST(RomLanded, ATranslatedRangeLandsOnTheRotatedWords) {
+  // Sixteen words from $2100 under the 8-bit rotation: $2100, $2108 … $2178.
+  const LandedRange* rotated = landingAt(landings(), kLandRotated);
+  ASSERT_NE(rotated, nullptr);
+  EXPECT_EQ(rotated->landing.lowest, 0x2100u);
+  EXPECT_EQ(rotated->landing.highest, 0x2178u);
+  EXPECT_EQ(rotated->landing.areas, kAreaTiles1 | kAreaTiles2 | kAreaTiles3 | kAreaSprites)
+      << "the sprite base's second half wraps round the end of VRAM to $2000";
+}
+
+TEST(RomLanded, AFillLands) {
+  const LandedRange* fill = landingAt(landings(), kLandFill);
+  ASSERT_NE(fill, nullptr);
+  EXPECT_EQ(fill->landing.lowest, 0x5C00u);
+  EXPECT_EQ(fill->landing.highest, 0x5C1Fu);
+  EXPECT_EQ(areaText(fill->landing), "none");
+}
+
+TEST(RomLanded, AMapUploadedBehindABaseIsReadAsTheMapItBecame) {
+  // Uploaded to $7800 while BG2's screen was at $0400, then BG2 pointed at a
+  // four-screen map from $7000; the first drawn frame after the upload has
+  // the flip.
+  const LandedRange* flipped = landingAt(landings(), kLandFlipped);
+  ASSERT_NE(flipped, nullptr);
+  EXPECT_EQ(flipped->landing.lowest, 0x7800u);
+  EXPECT_EQ(flipped->landing.areas, kAreaTilemap2);
+}
+
+TEST(RomLanded, AnAreaThatWrapsPastTheEndOfVramReachesItsStart) {
+  // Four screens from $7400 run to $83FF, and the address has fifteen bits:
+  // the words from $0000 to $03FF are the screen's last, and the map uploaded
+  // to $0200 lies in it — and in BG1's screen, which was there all along.
+  const LandedRange* wrapped = landingAt(landings(), kLandWrapped);
+  ASSERT_NE(wrapped, nullptr);
+  EXPECT_EQ(wrapped->landing.lowest, 0x0200u);
+  EXPECT_EQ(wrapped->landing.areas, kAreaTilemap1 | kAreaTilemap2);
+}
+
+TEST(RomLanded, AnUploadUnderMode7IsMode7) {
+  const LandedRange* mode7 = landingAt(landings(), kLandMode7);
+  ASSERT_NE(mode7, nullptr);
+  EXPECT_EQ(mode7->landing.areas, kAreaMode7);
+  EXPECT_EQ(areaText(mode7->landing), "mode7");
+}
+
+TEST(RomLanded, AnUploadNoFrameDrewIsUnshown) {
+  const LandedRange* unshown = landingAt(landings(), kLandUnshown);
+  ASSERT_NE(unshown, nullptr);
+  EXPECT_EQ(unshown->landing.lowest, 0x0100u);
+  EXPECT_FALSE(unshown->landing.shown);
+  EXPECT_EQ(unshown->landing.areas, 0u) << "a landing no frame drew lies in no area";
+  EXPECT_EQ(areaText(unshown->landing), "unshown");
+}
+
+TEST(RomLanded, ARangeToARegisterThatIsNoDataPortHasNoLanding) {
+  // The moving cartridge's channel 4 walks a table to the brightness
+  // register; its channel 5 sends bytes through `CGADD` and `CGDATA` in
+  // pairs, and those land.
+  std::vector<std::string> notes;
+  const RunObservation run = observeRun(movingImage(), 3u * kFrame, InputScript{}, notes);
+  EXPECT_TRUE(landingsAt(run.landed, kTables, 4).empty());
+  const std::vector<const LandedRange*> palette = landingsAt(run.landed, kTables, 5);
+  ASSERT_FALSE(palette.empty());
+  for (const LandedRange* l : palette) EXPECT_EQ(l->landing.memory, PortMemory::Cgram);
+}
+
+TEST(RomLanded, LandingsAreWrittenInTheirRangesOrder) {
+  const std::vector<LandedRange>& seen = landings();
+  for (std::size_t i = 1; i < seen.size(); ++i) EXPECT_FALSE(landedBefore(seen[i], seen[i - 1]));
+}
+
+TEST(RomLanded, AStreamCarriesItsLandingAndAStreamToTheAudioPortsNone) {
+  // The staging cartridge's loops: one carries a palette to `CGDATA` from
+  // address zero, and the run never turns the screen on.
+  std::vector<std::string> notes;
+  const RunObservation run = observeRun(stagingImage(), 2u * kFrame, InputScript{}, notes);
+  const StreamedRange* palette = nullptr;
+  const StreamedRange* tiles = nullptr;
+  for (const StreamedRange& stream : run.streamed) {
+    if (stream.registerAddress == 0x002122u) palette = &stream;
+    if (stream.registerAddress == 0x002118u) tiles = &stream;
+  }
+  ASSERT_NE(palette, nullptr);
+  ASSERT_TRUE(palette->landing.has_value());
+  EXPECT_EQ(palette->landing->memory, PortMemory::Cgram);
+  EXPECT_EQ(palette->landing->lowest, 0x00u);
+  EXPECT_EQ(palette->landing->highest, 0x07u) << "sixteen bytes are eight entries";
+  EXPECT_EQ(areaText(*palette->landing), "palette");
+  ASSERT_NE(tiles, nullptr);
+  ASSERT_TRUE(tiles->landing.has_value());
+  EXPECT_EQ(tiles->landing->memory, PortMemory::Vram);
+  EXPECT_FALSE(tiles->landing->shown);
 }
 
 }  // namespace snaggletooth::disasm

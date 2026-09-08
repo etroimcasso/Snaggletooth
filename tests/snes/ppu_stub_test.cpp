@@ -167,5 +167,191 @@ TEST(SnesPpuStub, PowerOnStartsInForcedBlank) {
   EXPECT_NE(m.state().inidisp & 0x80u, 0u);  // the screen is off at power-on
 }
 
+TEST(SnesPpuStub, ObjectSelectAndScreenModeStore) {
+  Snes m = run({
+      0xA9, 0x63, 0x8D, 0x01, 0x21,  // OBSEL = $63
+      0xA9, 0x09, 0x8D, 0x05, 0x21,  // BGMODE = $09
+      0xA9, 0x35, 0x8D, 0x0C, 0x21,  // BG34NBA = $35
+      0xDB,
+  });
+  EXPECT_EQ(m.state().objsel, 0x63u);
+  EXPECT_EQ(m.state().bgmode, 0x09u);
+  EXPECT_EQ(m.state().bg34nba, 0x35u);
+}
+
+// ---- OAM ------------------------------------------------------------------
+
+TEST(SnesPpuStub, WritingTheOamAddressSetsTheReloadValueAndTheAddress) {
+  // The reload value is the nine bits written (and the priority bit above
+  // them); the address is the reload value doubled, so bit 0 is clear.
+  Snes m = run({
+      0xA9, 0x05, 0x8D, 0x02, 0x21,  // OAMADDL = $05
+      0xA9, 0x81, 0x8D, 0x03, 0x21,  // OAMADDH = $81: the high bit and priority rotation
+      0xDB,
+  });
+  EXPECT_EQ(m.state().oamadd, 0x8105u);
+  EXPECT_EQ(m.state().oamAddress, 0x020Au);  // ($105 & $1FF) << 1
+}
+
+TEST(SnesPpuStub, OamDataWritesAWordThroughTheLatchAndStepsTheAddress) {
+  Snes m = run({
+      0xA9, 0x02, 0x8D, 0x02, 0x21,  // OAMADDL = 2 -> address 4
+      0xA9, 0x00, 0x8D, 0x03, 0x21,  // OAMADDH = 0
+      0xA9, 0x34, 0x8D, 0x04, 0x21,  // OAMDATA = $34: held, not written
+      0xA9, 0x12, 0x8D, 0x04, 0x21,  // OAMDATA = $12: the word lands
+      0xDB,
+  });
+  EXPECT_EQ(m.oam()[4], 0x34u);
+  EXPECT_EQ(m.oam()[5], 0x12u);
+  EXPECT_EQ(m.state().oamAddress, 6u);
+}
+
+TEST(SnesPpuStub, TheLowByteIsHeldUntilTheHighByteCommitsIt) {
+  // One low byte written, then the address moved: the byte never lands.
+  Snes m = run({
+      0xA9, 0x00, 0x8D, 0x02, 0x21,  // OAMADDL = 0
+      0xA9, 0x00, 0x8D, 0x03, 0x21,  // OAMADDH = 0
+      0xA9, 0x99, 0x8D, 0x04, 0x21,  // OAMDATA = $99: held
+      0xA9, 0x10, 0x8D, 0x02, 0x21,  // OAMADDL = $10: the address moves to $20
+      0xA9, 0x34, 0x8D, 0x04, 0x21,  // OAMDATA = $34: held
+      0xA9, 0x12, 0x8D, 0x04, 0x21,  // OAMDATA = $12: word $20 lands from the fresh pair
+      0xDB,
+  });
+  EXPECT_EQ(m.oam()[0], 0x00u);
+  EXPECT_EQ(m.oam()[0x20], 0x34u);
+  EXPECT_EQ(m.oam()[0x21], 0x12u);
+}
+
+TEST(SnesPpuStub, OamDataAboveTheTableWritesTheByteAndTheTopMirrors) {
+  // Above $1FF every write is one byte, and $220-$3FF mirror $200-$21F.
+  Snes m = run({
+      0xA9, 0x00, 0x8D, 0x02, 0x21,  // OAMADDL = 0
+      0xA9, 0x01, 0x8D, 0x03, 0x21,  // OAMADDH = 1 -> address $200
+      0xA9, 0xAA, 0x8D, 0x04, 0x21,  // OAMDATA = $AA -> $200
+      0xA9, 0xBB, 0x8D, 0x04, 0x21,  // OAMDATA = $BB -> $201
+      0xA9, 0x10, 0x8D, 0x02, 0x21,  // OAMADDL = $10 -> address $220, the mirror of $200
+      0xA9, 0xCC, 0x8D, 0x04, 0x21,  // OAMDATA = $CC -> $200 again
+      0xDB,
+  });
+  EXPECT_EQ(m.oam()[0x200], 0xCCu);
+  EXPECT_EQ(m.oam()[0x201], 0xBBu);
+  EXPECT_EQ(m.state().oamAddress, 0x221u);
+}
+
+TEST(SnesPpuStub, OamReadReturnsTheByteAndSteps) {
+  Snes m = run({
+      0xA9, 0x00, 0x8D, 0x02, 0x21,  // OAMADDL = 0
+      0xA9, 0x00, 0x8D, 0x03, 0x21,  // OAMADDH = 0
+      0xA9, 0xCD, 0x8D, 0x04, 0x21,  // low  = $CD
+      0xA9, 0xAB, 0x8D, 0x04, 0x21,  // high = $AB
+      0xA9, 0x00, 0x8D, 0x02, 0x21,  // OAMADDL = 0 again
+      0xAD, 0x38, 0x21, 0x85, 0x60,  // LDA $2138; STA $60
+      0xAD, 0x38, 0x21, 0x85, 0x61,  // LDA $2138; STA $61
+      0xDB,
+  });
+  EXPECT_EQ(m.state().wram[0x60], 0xCDu);
+  EXPECT_EQ(m.state().wram[0x61], 0xABu);
+  EXPECT_EQ(m.state().oamAddress, 2u);
+}
+
+// A machine that has written two OAM bytes from address $20 (so the address
+// stands at $22), with the screen as `inidisp` says, idling in a loop.
+Snes oamMachine(std::uint8_t inidisp) {
+  std::vector<std::uint8_t> rom = {
+      0xA9, inidisp, 0x8D, 0x00, 0x21,  // INIDISP
+      0xA9, 0x10, 0x8D, 0x02, 0x21,     // OAMADDL = $10 -> address $20
+      0xA9, 0x00, 0x8D, 0x03, 0x21,     // OAMADDH = 0
+      0xA9, 0x11, 0x8D, 0x04, 0x21,     // OAMDATA
+      0xA9, 0x22, 0x8D, 0x04, 0x21,     // OAMDATA -> address $22
+      0x80, 0xFE,                       // BRA *
+  };
+  rom.resize(0x8000u, 0x00u);
+  rom[0x7FFCu] = 0x00u;
+  rom[0x7FFDu] = 0x80u;
+  Snes m(SnesConfig{.rom = rom});
+  for (int i = 0; i < 10; ++i) m.step();  // the five loads and stores
+  return m;
+}
+
+constexpr std::uint16_t kVblankStart = 225u;
+constexpr std::uint32_t kLine = 1364u;
+
+TEST(SnesPpuStub, TheOamAddressReloadsAtTheStartOfVblankWhenTheScreenIsOn) {
+  Snes m = oamMachine(0x0Fu);
+  EXPECT_EQ(m.state().oamAddress, 0x22u);
+  while (m.state().vpos < kVblankStart) m.run(kLine);
+  EXPECT_EQ(m.state().oamAddress, 0x20u) << "the reload value, doubled, at the start of vblank";
+}
+
+TEST(SnesPpuStub, TheOamAddressDoesNotReloadInForcedBlank) {
+  Snes m = oamMachine(0x80u);
+  while (m.state().vpos < kVblankStart) m.run(kLine);
+  EXPECT_EQ(m.state().oamAddress, 0x22u);
+}
+
+// The machine of `oamMachine`, moved to line `vpos` in forced blank and about
+// to run `LDA #$0F; STA INIDISP`.
+Snes releasingMachine(std::uint16_t vpos) {
+  std::vector<std::uint8_t> rom = {
+      0xA9, 0x80, 0x8D, 0x00, 0x21,  // INIDISP = $80: forced blank
+      0xA9, 0x10, 0x8D, 0x02, 0x21,  // OAMADDL = $10 -> address $20
+      0xA9, 0x00, 0x8D, 0x03, 0x21,  // OAMADDH = 0
+      0xA9, 0x11, 0x8D, 0x04, 0x21,  // OAMDATA
+      0xA9, 0x22, 0x8D, 0x04, 0x21,  // OAMDATA -> address $22
+      0xA9, 0x0F, 0x8D, 0x00, 0x21,  // INIDISP = $0F: forced blank released
+      0xDB,
+  };
+  rom.resize(0x8000u, 0x00u);
+  rom[0x7FFCu] = 0x00u;
+  rom[0x7FFDu] = 0x80u;
+  Snes m(SnesConfig{.rom = rom});
+  for (int i = 0; i < 10; ++i) m.step();  // the five loads and stores
+  SnesState s = m.state();
+  s.vpos = vpos;
+  s.hpos = 0;
+  m.restore(s);
+  m.step();  // LDA
+  m.step();  // STA INIDISP
+  return m;
+}
+
+TEST(SnesPpuStub, ReleasingForcedBlankDuringTheFirstVblankLineReloadsTheOamAddress) {
+  Snes m = releasingMachine(kVblankStart);
+  EXPECT_EQ(m.state().oamAddress, 0x20u);
+}
+
+TEST(SnesPpuStub, ReleasingForcedBlankOnAnyOtherLineLeavesTheOamAddressAlone) {
+  Snes later = releasingMachine(kVblankStart + 1u);
+  EXPECT_EQ(later.state().oamAddress, 0x22u);
+  Snes earlier = releasingMachine(100u);
+  EXPECT_EQ(earlier.state().oamAddress, 0x22u);
+}
+
+TEST(SnesPpuStub, WritingTheBrightnessWithTheScreenAlreadyOnDoesNotReload) {
+  // The same write on line 225, but forced blank was already off: nothing
+  // was released, so the address stands.
+  std::vector<std::uint8_t> rom = {
+      0xA9, 0x0F, 0x8D, 0x00, 0x21,  // INIDISP = $0F: the screen on
+      0xA9, 0x10, 0x8D, 0x02, 0x21,  // OAMADDL = $10 -> address $20
+      0xA9, 0x00, 0x8D, 0x03, 0x21,  // OAMADDH = 0
+      0xA9, 0x11, 0x8D, 0x04, 0x21,  // OAMDATA
+      0xA9, 0x22, 0x8D, 0x04, 0x21,  // OAMDATA -> address $22
+      0xA9, 0x07, 0x8D, 0x00, 0x21,  // INIDISP = $07: the brightness alone
+      0xDB,
+  };
+  rom.resize(0x8000u, 0x00u);
+  rom[0x7FFCu] = 0x00u;
+  rom[0x7FFDu] = 0x80u;
+  Snes m(SnesConfig{.rom = rom});
+  for (int i = 0; i < 10; ++i) m.step();
+  SnesState s = m.state();
+  s.vpos = kVblankStart;
+  s.hpos = 0;
+  m.restore(s);
+  m.step();
+  m.step();
+  EXPECT_EQ(m.state().oamAddress, 0x22u);
+}
+
 }  // namespace
 }  // namespace snaggletooth

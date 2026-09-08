@@ -24,8 +24,9 @@ Writes one source file per bank, the sound program the cartridge uploads at boot
 `apu/driver.asm`, the bytes the run saw the cartridge send from the image to the
 hardware — and the ones the code proves a channel was set up to send — as files
 of their own under `vram/`, `cgram/`, `oam/`, `apu/` and
-`hdma/`, and `project.manifest`, which names the files, where the trace began,
-and where it stopped. The trace starts at the vectors and follows control
+`hdma/` — a VRAM file under `maps/` or `tiles/` where the run saw the picture
+use every landing of it as one or the other — and `project.manifest`, which
+names the files, where the trace began, and where it stopped. The trace starts at the vectors and follows control
 flow across banks; the sound program is captured by booting the cartridge on the
 machine and matched back to the image bytes it was read from. A manifest already in
 the directory supplies entries a person added and the file split, which is how the
@@ -53,11 +54,13 @@ and holding it to the machine through the representation's lockstep, so that
 every place the CPU arrived without an instruction naming it is a `ran` line
 the trace starts from too, and the direct register and the data bank the run
 saw at every site are `seen` lines beside what the paths prove — see
-[Where a run landed, and what it saw](../../docs/snes-disassembler.md#where-a-run-landed-and-what-it-saw)
+[Where the CPU arrived, and what it saw](../../docs/snes-disassembler.md#where-the-cpu-arrived-and-what-it-saw)
 — and recording every range of bytes the two transfer engines moved,
 with the instruction that started it, the channel, the register it reached, the
 memory address it began at, its length and how many times the run saw it, as
-`moved` lines the manifest keeps — see
+`moved` lines the manifest keeps, with where each landed on the other side of
+the port and what the PPU used that memory as at the first frame drawn after,
+as `landed` lines — see
 [What a run moved](../../docs/snes-disassembler.md#what-a-run-moved) — and
 lifting every such range that begins in the image out of its bank into a file
 of its own, the bank file including it with `INCBIN` and the manifest recording
