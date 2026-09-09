@@ -24,7 +24,8 @@ rebuilt image with the original's extension and compares it, and
 `snes_differential` replays the recorded run beside the interpreter — and
 reports one line per image and a verdict from the commands' exit statuses, with
 the corpus-wide aggregates the manifests carry on request. It creates nothing
-itself and decides nothing the commands do not:
+itself and decides nothing the commands do not, and it runs the two commands
+that emulate under `--quiet`, since their progress is for a terminal:
 
 ```
 tools/corpus.py <images> <output> --build build [--no-run] [--seconds N] [--input-dir <scripts>] [--no-differential] [--facts] [--routines]

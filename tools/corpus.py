@@ -189,9 +189,10 @@ def main():
         started = time.time()
         results = []
 
-        disasm = [args.build / "snes_disasm", rom, "-o", tree, "--run-seconds", args.seconds]
+        # The commands' progress is for a terminal; here their output is kept for a failure's report.
+        disasm = [args.build / "snes_disasm", rom, "-o", tree, "--run-seconds", args.seconds, "--quiet"]
         if args.no_run:
-            disasm = [args.build / "snes_disasm", rom, "-o", tree, "--no-run"]
+            disasm = [args.build / "snes_disasm", rom, "-o", tree, "--no-run", "--quiet"]
         elif args.input_dir is not None:
             disasm += ["--input-dir", args.input_dir]
         results.append(subprocess.run([str(c) for c in disasm], capture_output=True, text=True))
@@ -207,7 +208,7 @@ def main():
         replayLine = ""
         if not args.no_differential:
             replay = [args.build / "snes_differential", tree, rom, "-o", tree / "differential",
-                      "--seconds", args.seconds]
+                      "--seconds", args.seconds, "--quiet"]
             if args.input_dir is not None:
                 replay += ["--input-dir", args.input_dir]
             results.append(subprocess.run([str(c) for c in replay], capture_output=True, text=True))

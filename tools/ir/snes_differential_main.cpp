@@ -3,6 +3,7 @@
 //
 //   snes_differential <directory> <image> -o <report> [--seconds N]
 //                                                     [--input <script> | --input-dir <directory>]
+//                                                     [--quiet]
 //
 // Reads the directory's `program.snagir` — the program `snes_disasm` wrote, in
 // the grammar `docs/snagir.md` gives — and runs the machine on the image for
@@ -29,6 +30,11 @@
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
+//
+// The replay's advance is written to standard error as it goes, the seconds of
+// the master clock spent against `--seconds`, refreshed in place on a terminal
+// and one line per ten seconds otherwise. --quiet turns it off; the report and
+// the line on standard output are the same either way.
 
 #include <cstddef>
 #include <cstdint>
@@ -46,15 +52,33 @@
 #include "ir/ir_differential.h"
 #include "ir/ir_text.h"
 #include "rom/input_script.h"
+#include "rom/progress.h"
 #include "snaggletooth/snes/cartridge.h"
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
 [[noreturn]] void usage(const char* prog) {
   std::cerr << "usage: " << prog
-            << " <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]\n"
-               "  replays the tree's recorded run on the machine beside the interpreter\n";
+            << " <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]"
+               " [--quiet]\n"
+               "  replays the tree's recorded run on the machine beside the interpreter;\n"
+               "  --quiet keeps the progress off standard error\n";
   std::exit(2);
+}
+
+// Whether standard error is a terminal, where a progress line is refreshed in place.
+bool errorIsTerminal() {
+#ifdef _WIN32
+  return _isatty(_fileno(stderr)) != 0;
+#else
+  return isatty(2) != 0;
+#endif
 }
 
 std::string readText(const std::string& path, bool& ok) {
@@ -78,9 +102,12 @@ int main(int argc, char** argv) {
   std::string inputPath;
   std::string inputDir;
   double seconds = 60.0;
+  bool quiet = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "-o" || arg == "--seconds" || arg == "--input" || arg == "--input-dir") {
+    if (arg == "--quiet") {
+      quiet = true;
+    } else if (arg == "-o" || arg == "--seconds" || arg == "--input" || arg == "--input-dir") {
       if (i + 1 >= argc) {
         std::cerr << arg << " needs a value\n";
         usage(argv[0]);
@@ -184,8 +211,11 @@ int main(int argc, char** argv) {
   replay.masterCycles = static_cast<std::uint64_t>(seconds * 21'477'272.0);
   replay.input = input;
   replay.divergenceLimit = 200;
+  snaggletooth::disasm::ProgressPrinter printer(std::cerr, errorIsTerminal());
+  if (!quiet) replay.progress = std::ref(printer);
   const snaggletooth::ir::DifferentialReport report =
       snaggletooth::ir::differential(program, replay);
+  printer.finish();
 
   std::error_code ec;
   std::filesystem::create_directories(outPath, ec);

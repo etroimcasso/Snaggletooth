@@ -472,6 +472,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/rom/facts_test.cpp
     tests/rom/input_script_test.cpp
     tests/rom/observe_test.cpp
+    tests/rom/progress_test.cpp
     tests/rom/rom_disasm_test.cpp
     tests/rom/routines_test.cpp
     tests/rom/verify_test.cpp

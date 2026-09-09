@@ -86,9 +86,14 @@ struct UploadCapture {
 // The upload is read from the audio memory two boots leave behind, one over
 // cleared memory and one over memory filled with $FF: a byte the upload wrote
 // reads the same after both, and a byte it never touched reads differently.
+// `progress`, when given, is told `booting the sound program` as each of the
+// two boots begins and every tenth of a second of the master clock after, with
+// the cycles spent against `masterCycles`, and once more as each boot ends —
+// short of the budget when the program started early (`rom/progress.h`).
 [[nodiscard]] std::optional<UploadCapture> captureUpload(std::span<const std::uint8_t> rom,
                                                          std::uint64_t masterCycles,
-                                                         std::string& reason);
+                                                         std::string& reason,
+                                                         const ProgressSink& progress = {});
 
 // Where the trace stopped and why: an address whose successors the bytes do not
 // name, or that reads two ways. A person answers a stop with an entry.
@@ -247,6 +252,13 @@ struct CartridgeRequest {
   // see `rom/input_script.h`. Empty, the ports stay empty and the run is the boot
   // alone. `snes_disasm --input <script>` supplies one.
   InputScript input;
+  // Told what the disassembly is doing as it goes, when set: `running the
+  // cartridge` with the cycles spent against `runMasterCycles` every tenth of
+  // a second of the master clock, then `tracing`, then `proving what every
+  // path reaches`, then `booting the sound program` against `bootMasterCycles`
+  // for each of the two boots (`rom/progress.h`). Nothing is printed by the
+  // library; `snes_disasm` prints these to standard error unless `--quiet`.
+  ProgressSink progress;
 };
 
 // Disassembles the cartridge: the header, the regions traced from every entry with

@@ -19,7 +19,7 @@ disassembly of a whole cartridge starts.
 ## `snes_disasm`
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
 Writes `program.snagir`, the whole program in the intermediate representation
@@ -48,6 +48,15 @@ snes_disasm game.sfc -o game
 sound program: entry $0500, 3 blocks, 3 matched to the image
 524288 of 524288 bytes placed -> game
 ```
+
+While it works, standard error says what it is doing — the run and each boot
+with the seconds of the master clock spent against their bound, refreshed in
+place on a terminal and one line per ten seconds in a log, and the trace, the
+analysis and the writing each as a line; `--quiet` turns it off, and the
+results on standard output are the same either way. The library reports
+through `CartridgeRequest::progress`, a `ProgressSink` from `rom/progress.h`,
+and prints nothing itself; `ProgressPrinter` there is what the command line
+prints with.
 
 It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
 and steps it, recording the destination of every indirect jump or call the run

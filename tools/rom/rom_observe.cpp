@@ -1095,8 +1095,13 @@ bool sameSighting(const ReachedTarget& a, const ReachedTarget& b) {
 }
 
 RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t masterCycles,
-                          const InputScript& input, std::vector<std::string>& notes) {
+                          const InputScript& input, std::vector<std::string>& notes,
+                          const ProgressSink& progress) {
   RunObservation observation;
+  constexpr std::string_view kStage = "running the cartridge";
+  const auto report = [&](std::uint64_t at) {
+    if (progress) progress(Progress{.stage = kStage, .spent = at, .budget = masterCycles});
+  };
   std::vector<ReachedTarget>& out = observation.reached;
   const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
   if (!header) {
@@ -1122,7 +1127,13 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   presentPads(machine, input, frame);
 
   std::uint64_t spent = 0;
+  std::uint64_t reported = 0;  // the tick the last report was made at
+  report(0);
   while (spent < masterCycles) {
+    if (spent / kProgressTick != reported) {
+      reported = spent / kProgressTick;
+      report(spent);
+    }
     // `state()` is the live machine: everything read from it before the step is
     // copied out here, since the step rewrites it.
     const SnesState& before = machine.state();
@@ -1258,6 +1269,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
               return a.landing->areas < b.landing->areas;
             });
   observation.originSets = shadow.origins().interned();
+  report(spent);
   observation.originCap = shadow.origins().cap();
   return observation;
 }

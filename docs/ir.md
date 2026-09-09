@@ -618,7 +618,10 @@ check, so a node the run computes a fact from is a node the machine agreed
 with. Both name a disagreement the same way, as a `Divergence`. After a divergence the interpreter is realigned the same way, so the run
 goes on from the machine's truth rather than compounding one disagreement into
 every step after it; `Replay::divergenceLimit` ends the run once that many have
-been recorded.
+been recorded. `Replay::progress`, a `ProgressSink` from `rom/progress.h`, is
+told `replaying the run` with the master cycles spent against `masterCycles`
+every tenth of a second when set, and once more as the run ends — short of the
+budget when it ended early; the library prints nothing.
 
 ### The report
 
@@ -642,7 +645,7 @@ reached reads zero, and is known to rest on the vector proof alone.
 `snes_differential` does all of it from a tree:
 
 ```
-snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]
+snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
 It reads the directory's `program.snagir` as `snes_lift` does — the image
@@ -654,8 +657,10 @@ the run that produced the tree — or finds the run named for the image under
 `--input-dir` as `snes_disasm --input-dir` does, and writes the report under `-o`:
 `summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt` and
 `unlifted.txt`. One line on standard output sums it up, and the exit status is
-0 only when the run diverged nowhere. On the `mixed` cartridge, which stops on
-its own after three interrupts:
+0 only when the run diverged nowhere. While it replays, standard error carries
+`replaying the run: 23.5 of 60.0 s`, refreshed in place on a terminal and one
+line per ten seconds in a log; `--quiet` turns it off. On the `mixed`
+cartridge, which stops on its own after three interrupts:
 
 ```
 snes_differential mixed mixed.smc -o mixed/differential --seconds 0.1
@@ -844,7 +849,7 @@ would mean the layers leak into each other.
 | `Origins`, `Origin`, `OriginSet`, `OriginInterval` | The interned table of origins: an image byte, a hardware register, the save, the union of two; a set's intervals, marks and approximate flag. |
 | `Provenance`, `Writer`, `Stream` | The shadow of a run: work RAM's origin, writer and invocation byte by byte, `originOf`, `writerOf`, `sourcesOf`; `called`, `returned`; the streams the CPU carried. |
 | `differential(program, replay)` | Replay a run on the machine beside the interpreter, held to every access, register and cycle. |
-| `Replay` | The cartridge, the master-cycle budget, the recorded run, and the divergence limit. |
+| `Replay` | The cartridge, the master-cycle budget, the recorded run, the divergence limit, and the progress sink. |
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped; each disagreement with its step, node, effect and the two values; the form and construct histograms. |
 | `registersOf(state)` | A core state as the interpreter's registers. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |

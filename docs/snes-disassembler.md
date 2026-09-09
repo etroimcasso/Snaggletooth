@@ -76,7 +76,7 @@ of the image it was read from.
 ## Command line
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 snes_render <directory>
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
@@ -130,6 +130,30 @@ When the directory already holds a `project.manifest`, its `entry`, `reached`,
 `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
 it was written for: a manifest written for another image is refused rather than
 applied. See [Stops, and getting past them](#stops-and-getting-past-them).
+
+What the tool is doing is written to standard error as it goes, so the minute
+the run takes is not a minute of silence: the run and each of the two boots
+with the seconds of the master clock spent against their bound, and the trace,
+the analysis and the writing each as one line. On a terminal a counting line
+is refreshed in place; in a log it is one line when the stage begins, one each
+time the seconds cross a multiple of ten, and one when the stage ends:
+
+```
+running the cartridge: 0.0 of 60.0 s
+running the cartridge: 10.0 of 60.0 s
+…
+running the cartridge: 60.0 of 60.0 s
+tracing
+proving what every path reaches
+booting the sound program: 0.0 of 15.0 s
+booting the sound program: 0.0 of 15.0 s
+writing cartridge
+```
+
+A boot ends where the sound program starts, so its count ends short of the
+bound, and there are two of them ([The sound program](#the-sound-program)).
+`--quiet` turns all of it off; the results on standard output are the same
+either way, and `corpus.py` passes it.
 
 ## The tree
 
@@ -1280,7 +1304,13 @@ asks for the run — off unless asked, since it costs about as long as it emulat
 `CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`,
 `CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs
 found, read back from the manifest, which the disassembly merges with this
-run's.
+run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`),
+told what the disassembly is doing as it goes when set — `running the
+cartridge` with the master cycles spent against `runMasterCycles` every tenth
+of a second, then `tracing`, `proving what every path reaches`, and `booting
+the sound program` against `bootMasterCycles` for each boot; the library
+prints nothing, and `ProgressPrinter` in the same header is what the command
+line prints with.
 
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:

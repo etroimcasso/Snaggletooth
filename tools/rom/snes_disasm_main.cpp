@@ -3,15 +3,16 @@
 //   snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N]
 //                                      [--no-run] [--run-seconds N]
 //                                      [--input <script> | --input-dir <directory>]
+//                                      [--quiet]
 //
-// The tree is `program.snagir`, the whole program in the intermediate
-// representation; `project.manifest`, which says where every file's bytes land
-// in the image, where the trace began, and where it stopped; the files lifted
-// out of the banks; one source file per bank, rendered from the program file
-// read back; and the sound program the cartridge uploads at boot as a file of
-// its own. The trace starts at the handlers the cartridge header names and
-// follows control flow across banks; bytes execution cannot reach are written
-// as data.
+// It writes `program.snagir`, the whole program in the intermediate
+// representation, first; then `project.manifest`, which says where every file's
+// bytes land in the image, where the trace began, and where it stopped; the
+// files lifted out of the banks; and the sound program the cartridge uploads
+// at boot as a file of its own. It writes no bank file: `snes_render` writes
+// those from the program file. The trace starts at the handlers the cartridge
+// header names and follows control flow across banks; bytes execution cannot
+// reach are written as data.
 //
 // When the directory already holds a manifest, its `entry` and `file` lines are
 // read first: an entry a person added is traced with the vectors, and the file
@@ -32,9 +33,17 @@
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
+//
+// What the tool is doing is written to standard error as it goes — the run
+// and each boot with the seconds of the master clock spent against the bound,
+// refreshed in place on a terminal and one line per ten seconds otherwise, and
+// the trace, the analysis and the writing each as one line — so a minute of
+// emulation is not a minute of silence. --quiet turns it off; the results on
+// standard output are the same either way.
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -45,8 +54,15 @@
 #include <string>
 #include <vector>
 
+#include "rom/progress.h"
 #include "rom/rom_disasm.h"
 #include "snaggletooth/snes/cartridge.h"
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -55,11 +71,21 @@ constexpr std::uint64_t kMasterPerSecond = 21'477'272ull;
 [[noreturn]] void usage(const char* prog) {
   std::cerr << "usage: " << prog
             << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]"
-               " [--input <script> | --input-dir <directory>]\n"
+               " [--input <script> | --input-dir <directory>] [--quiet]\n"
                "  the directory's project.manifest, when present, supplies entries and the file split\n"
                "  --input replays a recorded run into the controller ports while the cartridge runs;\n"
-               "  --input-dir replays the run named for the image under that directory, if there is one\n";
+               "  --input-dir replays the run named for the image under that directory, if there is one\n"
+               "  --quiet keeps the progress off standard error\n";
   std::exit(2);
+}
+
+// Whether standard error is a terminal, where a progress line is refreshed in place.
+bool errorIsTerminal() {
+#ifdef _WIN32
+  return _isatty(_fileno(stderr)) != 0;
+#else
+  return isatty(2) != 0;
+#endif
 }
 
 bool readFile(const std::filesystem::path& path, std::string& out) {
@@ -80,6 +106,7 @@ int main(int argc, char** argv) {
   std::uint64_t runSeconds = 60;
   std::string inputPath;
   std::string inputDir;
+  bool quiet = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -107,6 +134,8 @@ int main(int argc, char** argv) {
       inputDir = next("--input-dir");
     } else if (arg == "--no-sound") {
       sound = false;
+    } else if (arg == "--quiet") {
+      quiet = true;
     } else if (arg == "--boot-seconds") {
       try {
         bootSeconds = std::stoull(next("--boot-seconds"));
@@ -178,6 +207,8 @@ int main(int argc, char** argv) {
   request.runMasterCycles = runSeconds * kMasterPerSecond;
   request.input = script;
   request.bootMasterCycles = bootSeconds * kMasterPerSecond;
+  snaggletooth::disasm::ProgressPrinter printer(std::cerr, errorIsTerminal());
+  if (!quiet) request.progress = std::ref(printer);
 
   const std::filesystem::path directory(outDir);
   const std::filesystem::path manifestPath = directory / "project.manifest";
@@ -208,6 +239,7 @@ int main(int argc, char** argv) {
 
   const snaggletooth::disasm::CartridgeDisassembly disassembly =
       snaggletooth::disasm::disassembleCartridge(request);
+  if (!quiet) printer.stage("writing " + directory.string());
   std::string error;
   if (!snaggletooth::disasm::writeProject(disassembly, directory, error)) {
     std::cerr << error << "\n";

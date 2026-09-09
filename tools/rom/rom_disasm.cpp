@@ -218,7 +218,12 @@ std::vector<UploadBlock> placeInImage(std::span<const std::uint8_t> rom, std::ui
 // audio CPU leaves the stub. True when it did, with the memory and the program
 // counter at that moment in `state`.
 bool bootUntilProgramStarts(std::span<const std::uint8_t> rom, std::uint8_t fill,
-                            std::uint64_t masterCycles, SnesState& state) {
+                            std::uint64_t masterCycles, SnesState& state,
+                            const ProgressSink& progress) {
+  constexpr std::string_view kStage = "booting the sound program";
+  const auto report = [&](std::uint64_t at) {
+    if (progress) progress(Progress{.stage = kStage, .spent = at, .budget = masterCycles});
+  };
   Snes machine{SnesConfig{.rom = rom}};
   {
     SnesState seeded = machine.state();
@@ -230,7 +235,13 @@ bool bootUntilProgramStarts(std::span<const std::uint8_t> rom, std::uint8_t fill
   }
   auto left = [&]() { return machine.state().apu.cpu.pc < kStubBase; };
   std::uint64_t spent = 0;
+  std::uint64_t reported = 0;  // the tick the last report was made at
+  report(0);
   while (spent < masterCycles) {
+    if (spent / kProgressTick != reported) {
+      reported = spent / kProgressTick;
+      report(spent);
+    }
     const SnesState before = machine.state();
     spent += machine.run(kWatchStep);
     if (!left()) continue;
@@ -240,8 +251,10 @@ bool bootUntilProgramStarts(std::span<const std::uint8_t> rom, std::uint8_t fill
     machine.restore(before);
     for (std::uint64_t i = 0; i < kWatchStep * 4u && !left(); ++i) machine.run(1);
     state = machine.state();
+    report(spent);
     return true;
   }
+  report(spent);
   return false;
 }
 
@@ -914,11 +927,12 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
 }  // namespace
 
 std::optional<UploadCapture> captureUpload(std::span<const std::uint8_t> rom,
-                                           std::uint64_t masterCycles, std::string& reason) {
+                                           std::uint64_t masterCycles, std::string& reason,
+                                           const ProgressSink& progress) {
   SnesState cleared;
   SnesState filled;
-  if (!bootUntilProgramStarts(rom, 0x00u, masterCycles, cleared) ||
-      !bootUntilProgramStarts(rom, 0xFFu, masterCycles, filled)) {
+  if (!bootUntilProgramStarts(rom, 0x00u, masterCycles, cleared, progress) ||
+      !bootUntilProgramStarts(rom, 0xFFu, masterCycles, filled, progress)) {
     reason = "the audio CPU did not leave the upload stub within " + std::to_string(masterCycles) +
              " master cycles";
     return std::nullopt;
@@ -1064,7 +1078,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   out.moved = request.moved;
   if (request.observeRun) {
     RunObservation observation =
-        observeRun(request.rom, request.runMasterCycles, request.input, out.notes);
+        observeRun(request.rom, request.runMasterCycles, request.input, out.notes, request.progress);
     for (const ReachedTarget& seen : observation.reached) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
         return sameSighting(r, seen);
@@ -1271,6 +1285,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     return any;
   };
 
+  if (request.progress) request.progress(Progress{.stage = "tracing", .spent = 0, .budget = 0});
   traceOwed();
   gatherRegions();
   std::vector<DerivedTarget> readBack = request.derived;
@@ -1281,6 +1296,9 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   if (addDerived(readBack)) {
     traceOwed();
     gatherRegions();
+  }
+  if (request.progress) {
+    request.progress(Progress{.stage = "proving what every path reaches", .spent = 0, .budget = 0});
   }
   std::optional<ProvenProgram> proven;
   for (;;) {
@@ -1316,7 +1334,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   if (request.captureSound) {
     std::string reason;
     std::optional<UploadCapture> capture =
-        captureUpload(request.rom, request.bootMasterCycles, reason);
+        captureUpload(request.rom, request.bootMasterCycles, reason, request.progress);
     if (!capture) {
       out.notes.push_back("no sound program: " + reason);
     } else {

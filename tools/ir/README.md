@@ -78,7 +78,7 @@ nodes 34
 ## `snes_differential`
 
 ```
-snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]
+snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
 Reads the directory's `program.snagir` the same way, refuses an image of
@@ -88,7 +88,11 @@ another size than the file's own `image` line, runs the machine for
 under `--input-dir` — and holds the interpreter to every access, every
 register and every cycle the machine made. The report — `summary.txt`, `divergences.txt`,
 `forms.txt`, `constructs.txt`, `unlifted.txt` — lands under `-o`; one line sums
-it up, and the exit status is 0 only when the run diverged nowhere.
+it up, and the exit status is 0 only when the run diverged nowhere. While it
+replays, standard error says how far it has come, `replaying the run: 23.5 of
+60.0 s`, refreshed in place on a terminal and one line per ten seconds in a
+log; `--quiet` turns it off. The library reports through `Replay::progress`
+(`rom/progress.h`) and prints nothing itself.
 
 ```
 snes_differential mixed mixed.smc -o mixed/differential --seconds 0.1

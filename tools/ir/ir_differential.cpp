@@ -212,8 +212,20 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   std::string lastMnemonic;
   std::uint64_t step = 0;
   std::uint64_t spent = 0;
+  constexpr std::string_view kStage = "replaying the run";
+  const auto tell = [&](std::uint64_t at) {
+    if (replay.progress) {
+      replay.progress(disasm::Progress{.stage = kStage, .spent = at, .budget = replay.masterCycles});
+    }
+  };
+  std::uint64_t reported = 0;  // the tick the last report was made at
+  tell(0);
   while (spent < replay.masterCycles && !report.stopped &&
          report.divergences.size() < replay.divergenceLimit) {
+    if (spent / disasm::kProgressTick != reported) {
+      reported = spent / disasm::kProgressTick;
+      tell(spent);
+    }
     const Cpu65816State before = machine.state().cpu;
     const std::uint16_t lineBefore = machine.state().vpos;
     observer.clear();
@@ -292,6 +304,7 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   machine.setObserver(nullptr);
   report.masterCycles = spent;
   report.unliftedSites.assign(unlifted.begin(), unlifted.end());
+  tell(spent);
   return report;
 }
 
