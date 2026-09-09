@@ -198,12 +198,12 @@ int main(int argc, char** argv) {
       std::cerr << "cannot open " << inputPath << "\n";
       return 2;
     }
-    const auto parsed = snaggletooth::disasm::parseInputScript(text, error);
-    if (!parsed) {
+    const auto parsedScript = snaggletooth::disasm::parseInputScript(text, error);
+    if (!parsedScript) {
       std::cerr << inputPath << ": " << error << "\n";
       return 2;
     }
-    input = *parsed;
+    input = *parsedScript;
   }
 
   snaggletooth::ir::Replay replay;
