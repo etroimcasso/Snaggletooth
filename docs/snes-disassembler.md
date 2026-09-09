@@ -1,12 +1,16 @@
 # Cartridge disassembler
 
-`snes_disasm` disassembles a whole cartridge into a source tree: one file per
-bank, the sound program the cartridge uploads at boot as a file of its own, the
-bytes the cartridge sends to the hardware as files of their own kind, and a
-manifest that says where every file's bytes land in the image, where the trace
-began, and where it stopped. `snes_verify` does the reverse: it assembles every
-file the manifest names, places the bytes where the manifest says, and reports
-the difference from the image. The tree is written in the
+`snes_disasm` disassembles a whole cartridge into its program file —
+`program.snagir`, the whole program in the [intermediate representation](snagir.md)
+— and a manifest that says where every file's bytes land in the image, where the
+trace began, and where it stopped, with the bytes the cartridge sends to the
+hardware as files of their own kind and the sound program the cartridge uploads
+at boot as a file of its own. `snes_render` writes the source tree from the
+program file: one file per bank, rendered from the program in the file and the
+facts in the manifest, by a tool that holds neither the image nor the trace.
+`snes_verify` does the reverse: it assembles every file the manifest names,
+places the bytes where the manifest says, and reports the difference from the
+image. The tree is written in the
 [65816](65816-assembly.md) and [SPC700](spc700-assembly.md) dialects over the
 [common layer](assembly-lexicon.md), and the manifest's grammar is
 [project-manifest.md](project-manifest.md).
@@ -72,16 +76,20 @@ of the image it was read from.
 ## Command line
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script>]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>] [--quiet]
+snes_render <directory>
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-Reads a cartridge image, writes the tree under the directory, creating it, and
-reports what it found:
+`snes_disasm` reads a cartridge image, writes `program.snagir`, the manifest, the
+lifted files and the sound program's file under the directory, creating it, and
+reports what it found; `snes_render` then writes the bank files from the program
+file and the manifest:
 
 ```
 $ snes_disasm cartridge.sfc -o cartridge
 2 files, 29 instructions, 2 entries, 0 stops
+program.snagir: 29 nodes
 65536 of 65536 bytes placed -> cartridge
 ```
 
@@ -112,17 +120,51 @@ bounds the run at N seconds of the master clock, sixty by default. `--input <scr
 replays an [input script](input-script.md) into the controller ports while the
 cartridge runs, so the run plays the game rather than watching it; a script that
 cannot be read is refused with its line named, and `--input` under `--no-run` is
-refused as well, having nothing to replay into.
+refused as well, having nothing to replay into. `--input-dir <directory>` names a
+directory of recorded runs instead: the one named for the image — its file name
+without the extension, spaces as underscores, `.txt` — is replayed when it is
+there, and the ports stay empty when it is not. The two forms are not given
+together.
 
 When the directory already holds a `project.manifest`, its `entry`, `reached`,
 `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
 it was written for: a manifest written for another image is refused rather than
 applied. See [Stops, and getting past them](#stops-and-getting-past-them).
 
+What the tool is doing is written to standard error as it goes, so the minute
+the run takes is not a minute of silence: the run and each of the two boots
+with the seconds of the master clock spent against their bound, and the trace,
+the analysis and the writing each as one line. On a terminal a counting line
+is refreshed in place; in a log it is one line when the stage begins, one each
+time the seconds cross a multiple of ten, and one when the stage ends:
+
+```
+running the cartridge: 0.0 of 60.0 s
+running the cartridge: 10.0 of 60.0 s
+…
+running the cartridge: 60.0 of 60.0 s
+tracing
+proving what every path reaches
+booting the sound program: 0.0 of 15.0 s
+booting the sound program: 0.0 of 15.0 s
+writing cartridge
+```
+
+A boot ends where the sound program starts, so its count ends short of the
+bound, and there are two of them ([The sound program](#the-sound-program)).
+`--quiet` turns all of it off; the results on standard output are the same
+either way, and `corpus.py` passes it.
+
 ## The tree
+
+The disassembler writes `program.snagir`, `project.manifest`, the lifted files
+and `apu/driver.asm`; the bank files are `snes_render`'s, written from the
+program file, which `snes_lift` prints back and `snes_differential` replays
+the run beside ([ir.md §Reading a program](ir.md#reading-a-program)). Together:
 
 ```
 cartridge/
+  program.snagir
   project.manifest
   bank_00.asm
   bank_01.asm
@@ -379,6 +421,7 @@ A cartridge that dispatches through a table:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 12 instructions, 1 entries, 2 stops
+program.snagir: 12 nodes
 ```
 
 ```
@@ -422,11 +465,13 @@ bytes:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 5 instructions, 2 entries, 0 stops
+program.snagir: 5 nodes
 $ cat play.txt
 frame 5 1 start
 frame 9 1 a
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1 --input play.txt
 1 files, 11 instructions, 2 entries, 0 stops
+program.snagir: 11 nodes
 ```
 
 ```
@@ -469,6 +514,7 @@ sixteen bits:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 41 instructions, 3 entries, 1 stops
+program.snagir: 41 nodes
 note: run: the CPU arrived at $7E:2000 from $00:802B, which the tree does not hold; not recorded
 ```
 
@@ -537,6 +583,7 @@ A cartridge that fills a channel from a pointer, run for one second:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 143 instructions, 3 entries, 0 stops
+program.snagir: 143 nodes
 ```
 
 ```
@@ -611,6 +658,7 @@ switches to Mode 7 and blanks the screen before one last upload:
 ```
 $ snes_disasm landing.smc -o landing --no-sound --run-seconds 1
 1 files, 365 instructions, 3 entries, 0 stops
+program.snagir: 365 nodes
 32768 of 32768 bytes placed -> landing
 ```
 
@@ -721,6 +769,7 @@ which sends bytes every way the rules have a case for, run for one second:
 ```
 $ snes_disasm lifting.smc -o lifting --no-sound --run-seconds 1
 2 files, 271 instructions, 1 entries, 0 stops
+program.snagir: 271 nodes
 note: moved $00:8165 channel 0 memory $00:8000 bytes 16: $00:8000-$00:800F overlaps an instruction the trace decoded; not lifted
 note: moved $00:8205 channel 0 memory $01:FFF0 bytes 32: 16 of its bytes are not the image and are not lifted
 note: the bytes at $00:9800 were sent to VMDATAL and CGDATA; not lifted
@@ -877,6 +926,7 @@ each, run for one second:
 ```
 $ snes_disasm staging.smc -o staging --no-sound --run-seconds 1
 1 files, 268 instructions, 1 entries, 0 stops
+program.snagir: 268 nodes
 32768 of 32768 bytes placed -> staging
 ```
 
@@ -1183,7 +1233,10 @@ const snaggletooth::disasm::CartridgeDisassembly tree =
     snaggletooth::disasm::disassembleCartridge(request);
 
 std::string error;
-snaggletooth::disasm::writeProject(tree, "cartridge", error);
+snaggletooth::disasm::writeProject(tree, "cartridge", error);  // program.snagir, the manifest, the lifted files
+
+std::size_t rendered = 0;
+snaggletooth::disasm::renderTree("cartridge", rendered, error);  // the bank files, from the two files on disk
 ```
 
 `disassembleCartridge` returns the header, the entries traced from, one
@@ -1251,7 +1304,13 @@ asks for the run — off unless asked, since it costs about as long as it emulat
 `CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`,
 `CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs
 found, read back from the manifest, which the disassembly merges with this
-run's.
+run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`),
+told what the disassembly is doing as it goes when set — `running the
+cartridge` with the master cycles spent against `runMasterCycles` every tenth
+of a second, then `tracing`, `proving what every path reaches`, and `booting
+the sound program` against `bootMasterCycles` for each boot; the library
+prints nothing, and `ProgressPrinter` in the same header is what the command
+line prints with.
 
 `accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
 `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
@@ -1259,9 +1318,10 @@ run's.
 instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the
 `value` where the bytes prove it, and the `run` of straight-line code it sits in —
 and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up.
-`proven` is a `ProvenProgram` from `proveProgram(disassembly, rom)`: the regions
-lifted into one program and the [dataflow](ir.md#what-every-path-proves) run
-over it, held together; without one, a value is the instruction before's alone
+`proven` is a `ProvenProgram` from `proveProgram(disassembly, rom)`: the
+[dataflow](ir.md#what-every-path-proves) run over the disassembly's `program` —
+every region lifted once, in address order, an address two paths read two ways
+as two nodes — which the dataflow refers to; without one, a value is the instruction before's alone
 and a direct-page operand produces nothing. `derivedTargets(disassembly, proven)`
 gives one `DerivedTarget` per destination the analysis derived — `target`,
 `mode`, `site`, `pointer`, `call`, `name` — which `disassembleCartridge` traces
@@ -1274,15 +1334,31 @@ holds and their `bytes`, the routines it `calls`, and its role as `reaches` and
 `through` — from `routines(disassembly)`, which reads the finished listings, the
 accesses and the transfers.
 
-The files are text from `renderRegion`, `renderSoundProgram` and
-`renderManifest`; `parseManifest` reads a manifest's entries, reached and
-derived targets, landings, moved ranges, assets, file split, map, sound program
-and image identity back, and `manifestMismatch` says whether that manifest can direct a
-run over a given image. `writeProject` writes all of it under a directory, the
-lifted files as bytes under theirs. `renderRegion` lifts the region's listing into the
-[intermediate representation](ir.md) and writes each instruction from it
-(`ir/ir_render.h`), with the labels, the register names from `accesses` and the
-`routines` attached; the data runs and the sound-program cut are the listing's.
+The disassembler's files are text from `renderProgramFile`, `renderManifest` and
+`renderSoundProgram`; `writeProject` writes them under a directory — the
+program file first, then the manifest, the lifted files as bytes under theirs,
+and the sound file — and no bank file. `parseManifest` reads a manifest's
+entries, reached and derived targets, landings, moved ranges, assets, file
+split, map, sound program and image identity back, and the accesses, routines,
+seen registers and transfers the renderer reads, and `manifestMismatch` says
+whether that manifest can direct a run over a given image.
+
+The bank files are `rom/rom_render.h`'s, a library that links nothing able to
+trace, run or lift: `readRenderInput(directory, program, error)` builds a
+`RenderInput` from `program.snagir` and `project.manifest` — each region's
+listing from the file's nodes, labels and data runs; the register an operand
+reaches from the `access` lines; the direct registers a run saw from `seen`;
+the routines from `routine`; the lifted files from `asset`, with the register
+their bytes went to found in the `moved` and `dma` lines; the sound program's
+blocks from `block` — and `renderRegion(region, input, program)` writes each
+instruction from its node in that program, the first at the line's address,
+through `ir/ir_render.h`, with the labels, the register names and the routine
+comments attached; the data runs and the sound-program cut are the listing's.
+`renderTree(directory, rendered, error)` does it for every region, and
+`snes_render` is that call. `renderInputOf(disassembly)` and
+`renderRegion(region, disassembly)` in `rom_disasm.h` render the same from the
+disassembly in memory, which is how a tree rendered from disk is held equal to
+the disassembly that wrote it.
 
 Verification is `rom/rom_verify.h`:
 

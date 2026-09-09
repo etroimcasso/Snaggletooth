@@ -30,8 +30,10 @@
 
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
+#include "ir/ir.h"
 #include "rom/rom_facts.h"
 #include "rom/rom_observe.h"
+#include "rom/rom_render.h"
 #include "snaggletooth/snes/cartridge.h"
 
 namespace snaggletooth::disasm {
@@ -84,9 +86,14 @@ struct UploadCapture {
 // The upload is read from the audio memory two boots leave behind, one over
 // cleared memory and one over memory filled with $FF: a byte the upload wrote
 // reads the same after both, and a byte it never touched reads differently.
+// `progress`, when given, is told `booting the sound program` as each of the
+// two boots begins and every tenth of a second of the master clock after, with
+// the cycles spent against `masterCycles`, and once more as each boot ends —
+// short of the budget when the program started early (`rom/progress.h`).
 [[nodiscard]] std::optional<UploadCapture> captureUpload(std::span<const std::uint8_t> rom,
                                                          std::uint64_t masterCycles,
-                                                         std::string& reason);
+                                                         std::string& reason,
+                                                         const ProgressSink& progress = {});
 
 // Where the trace stopped and why: an address whose successors the bytes do not
 // name, or that reads two ways. A person answers a stop with an entry.
@@ -154,6 +161,12 @@ struct CartridgeDisassembly {
   std::size_t imageBytes = 0;
   std::vector<TraceEntry> entries;  // every entry the trace started from, the vectors first
   std::vector<RegionListing> regions;
+  // Every region's code lifted once into the intermediate representation
+  // (`ir/ir.h`): the nodes in address order, an address two paths read two ways
+  // as two nodes with the listing's reading first, and the two interrupt
+  // sequences. The facts are proven over it, `program.snagir` is written from
+  // it, and the bank files are rendered from that file read back.
+  ir::Program program;
   std::optional<SoundProgram> sound;
   std::vector<TraceStop> stops;
   std::vector<std::string> notes;  // what the run could not do, in words
@@ -239,6 +252,13 @@ struct CartridgeRequest {
   // see `rom/input_script.h`. Empty, the ports stay empty and the run is the boot
   // alone. `snes_disasm --input <script>` supplies one.
   InputScript input;
+  // Told what the disassembly is doing as it goes, when set: `running the
+  // cartridge` with the cycles spent against `runMasterCycles` every tenth of
+  // a second of the master clock, then `tracing`, then `proving what every
+  // path reaches`, then `booting the sound program` against `bootMasterCycles`
+  // for each of the two boots (`rom/progress.h`). Nothing is printed by the
+  // library; `snes_disasm` prints these to standard error unless `--quiet`.
+  ProgressSink progress;
 };
 
 // Disassembles the cartridge: the header, the regions traced from every entry with
@@ -278,6 +298,17 @@ struct ManifestSound {
   std::vector<ManifestBlock> blocks;
 };
 
+// A transfer the code set up, as the `dma` line records the part the renderer
+// reads: the site, and the destination register, the source and the byte count
+// where the bytes said them.
+struct ManifestDma {
+  Address site = 0;
+  std::optional<Address> destination;
+  std::optional<Address> source;
+  MovedStep step = MovedStep::Increment;  // as the line says it; increment where it says `none`
+  std::optional<std::size_t> bytes;
+};
+
 // What a manifest gives the tools that read it. The next disassembly takes the
 // entries, the reached and derived targets, the landings, the moved ranges, the
 // assets' paths and the file split; a verification takes the map, the file
@@ -296,12 +327,21 @@ struct ManifestInput {
   std::optional<ManifestSound> sound;
   std::optional<std::size_t> imageBytes;
   std::optional<std::uint16_t> checksum;
+  // What the renderer reads: the accesses, the routines with their calls
+  // resolved to addresses, the direct registers a run saw, and the transfers
+  // the code set up, each as its line says it (`rom/rom_render.h`).
+  std::vector<RenderAccess> accesses;
+  std::vector<RenderRoutine> routines;
+  std::vector<RenderSeen> seen;
+  std::vector<ManifestDma> dmas;
 };
 
 // Reads the entries, reached and derived targets, landings, moved ranges,
-// assets, regions, map, sound program and image identity out of a manifest.
-// Nothing, with `error` naming the line, when a line does not parse, or when a
-// block names a file no `sound` line does.
+// assets, regions, map, sound program and image identity out of a manifest,
+// and the accesses, routines, seen registers and transfers the renderer reads.
+// Nothing, with `error` naming the line, when a line does not parse, when a
+// block names a file no `sound` line does, or when a routine calls a label no
+// routine line names.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
 
 // Why `input` cannot direct a run over `rom`, or an empty string when it can: a
@@ -310,28 +350,35 @@ struct ManifestInput {
 [[nodiscard]] std::string manifestMismatch(const ManifestInput& input,
                                            std::span<const std::uint8_t> rom);
 
-// A region's source file. The instructions are written from the representation
-// the listing lifts to (`ir/ir_render.h`), in pieces with an `ORG` where a piece
-// starts, a comment where a sound-program block's bytes are left out, and an
-// `INCBIN` where a lifted file's bytes were; the data runs and the labels are
-// the listing's. The file opens with an `EQU` line
-// for every hardware register its absolute operands address and every label
-// another file defines that it refers to, an absolute operand that addresses a
-// register is written as the register's name, a direct-page operand that every
-// path proves lands on a register carries the register's name in its comment —
-// or, where the paths prove nothing and the run saw one direct register there,
-// the register that value lands it on, marked `(run)` — a target with a label
-// anywhere in the tree is written as the label, and each routine that begins
-// in the file carries a comment with its role, what it calls and what calls it.
+// The renderer's input as a disassembly holds it in memory: every region with
+// its listing, and the facts. What `readRenderInput` (`rom/rom_render.h`)
+// builds from a tree on disk, this builds from the disassembly, so a bank file
+// rendered from the tree and one rendered from the disassembly can be held
+// equal.
+[[nodiscard]] RenderInput renderInputOf(const CartridgeDisassembly& disassembly);
+
+// A region's source file rendered from the disassembly in memory:
+// `renderRegion` of `rom/rom_render.h` over `renderInputOf(disassembly)` and
+// the disassembly's program. The tree on disk is not written this way — the
+// disassembler writes the program file and the manifest, and `snes_render`
+// renders from them — so this is the check that the two paths agree.
 [[nodiscard]] std::string renderRegion(const RegionListing& region,
                                        const CartridgeDisassembly& disassembly);
 
 // The sound program's source file: its blocks, each under its own `ORG`.
 [[nodiscard]] std::string renderSoundProgram(const SoundProgram& sound);
 
-// Writes the manifest, every source file and every lifted file under
-// `directory`, creating it and their directories. False, with `error` set, when
-// a file cannot be written.
+// The program file as text, in the grammar `docs/snagir.md` gives: the
+// disassembly's program, with the image's size and map and each region's file,
+// range, warnings, labels and data runs beside it.
+[[nodiscard]] std::string renderProgramFile(const CartridgeDisassembly& disassembly);
+
+// Writes what the disassembly found under `directory`, creating it and its
+// directories: `program.snagir` first, then `project.manifest`, every lifted
+// file, and the sound program's file, which is rendered from the boot capture.
+// No bank file is written here; `snes_render` writes those from the program
+// file and the manifest. False, with `error` set, when a file cannot be
+// written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
                   std::string& error);
 

@@ -240,6 +240,38 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   # cartridge carries both chips' programs: the main CPU's in its banks, the
   # audio CPU's uploaded at boot. It links the representation because the bank
   # files are rendered from it.
+  # The back end of the cartridge toolkit — the manifest read back, and the bank
+  # files rendered from the program file and the manifest. Its own target,
+  # below the disassembler, because a tree's source must come from the program
+  # file and from nowhere else: this library links the representation, the
+  # 65816 backend, the listing types and the cartridge map, and nothing that can
+  # trace a cartridge, run one or lift one. `snes_render` links this and only
+  # this, so a bank file it writes can only have been rendered from the file.
+  add_library(snaggletooth_rom_render STATIC
+    tools/rom/rom_manifest.cpp
+    tools/rom/rom_render.cpp
+  )
+  target_link_libraries(snaggletooth_rom_render PUBLIC
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_ir)
+  target_include_directories(snaggletooth_rom_render PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_rom_render PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_rom_render PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_rom_render PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_rom_render PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  add_executable(snes_render tools/rom/snes_render_main.cpp)
+  target_link_libraries(snes_render PRIVATE snaggletooth_rom_render)
+  if(MSVC)
+    target_compile_options(snes_render PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_render PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   add_library(snaggletooth_rom STATIC
     tools/rom/cartridge_entries.cpp
     tools/rom/input_script.cpp
@@ -250,7 +282,7 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   )
   target_link_libraries(snaggletooth_rom PUBLIC
     snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
-    snaggletooth_ir snaggletooth_ir_lockstep snaggletooth_ir_provenance)
+    snaggletooth_ir snaggletooth_ir_lockstep snaggletooth_ir_provenance snaggletooth_rom_render)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -320,8 +352,10 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snes_differential PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # `snes_lift` links the representation alone: it reads a program file back
+  # and prints it, and cannot trace a cartridge.
   add_executable(snes_lift tools/ir/snes_lift_main.cpp)
-  target_link_libraries(snes_lift PRIVATE snaggletooth_rom)
+  target_link_libraries(snes_lift PRIVATE snaggletooth_ir)
   if(MSVC)
     target_compile_options(snes_lift PRIVATE /W4 /WX)
   else()
@@ -438,6 +472,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/rom/facts_test.cpp
     tests/rom/input_script_test.cpp
     tests/rom/observe_test.cpp
+    tests/rom/progress_test.cpp
     tests/rom/rom_disasm_test.cpp
     tests/rom/routines_test.cpp
     tests/rom/verify_test.cpp
@@ -445,6 +480,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/ir/ir_vector_test.cpp
     tests/ir/differential_test.cpp
     tests/ir/render_test.cpp
+    tests/ir/text_test.cpp
     tests/ir/dataflow_test.cpp
     tests/ir/provenance_test.cpp
     tests/snes/machine_test.cpp

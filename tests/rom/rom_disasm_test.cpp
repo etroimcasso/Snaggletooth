@@ -16,6 +16,7 @@
 
 #include "examples/example_cartridges.h"
 #include "gtest/gtest.h"
+#include "ir/ir_text.h"
 #include "rom/rom_disasm.h"
 
 namespace snaggletooth::disasm {
@@ -681,7 +682,7 @@ TEST(RomDisasm, AManifestLineThatDoesNotParseNamesItsLine) {
 
 // ---- the tree on disk -------------------------------------------------------
 
-TEST(RomDisasm, TheProjectIsWrittenAsOneFilePerRegionPlusTheManifest) {
+TEST(RomDisasm, TheProjectIsWrittenAsTheProgramFileTheManifestAndTheSoundFile) {
   const std::vector<std::uint8_t> rom = uploadingImage();
   CartridgeRequest request;
   request.rom = rom;
@@ -693,17 +694,230 @@ TEST(RomDisasm, TheProjectIsWrittenAsOneFilePerRegionPlusTheManifest) {
   std::filesystem::remove_all(dir, ec);
   std::string error;
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "project.manifest"));
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "bank_00.asm"));
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "apu" / "driver.asm"));
-  // Read and close the file before the directory goes: an open file cannot be
-  // removed on every platform.
-  std::string bank0;
-  {
-    std::ifstream in(dir / "bank_00.asm", std::ios::binary);
-    bank0.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  // The disassembler writes no bank file: those are the renderer's, from the
+  // program file.
+  EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
+  std::filesystem::remove_all(dir, ec);
+}
+
+// ---- the program file --------------------------------------------------------
+//
+// The tree's source is `program.snagir`: the disassembler writes it beside the
+// manifest and stops; the renderer reads the two files and writes the bank
+// files, and what it writes is what the disassembly in memory would render.
+
+namespace {
+
+std::string readFile(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::string text;
+  text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  return text;
+}
+
+std::filesystem::path freshDirectory(const char* name) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / name;
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  return dir;
+}
+
+constexpr std::uint64_t kRenderFrame = 357'954u;  // one NTSC frame of the master clock, roughly
+
+// A tree written to disk and rendered from its files, compared region by region
+// with the disassembly rendered in memory.
+void expectRenderedFromDiskEqualsMemory(const CartridgeDisassembly& d, const char* name) {
+  const std::filesystem::path dir = freshDirectory(name);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  for (const RegionListing& region : d.regions) {
+    ASSERT_FALSE(std::filesystem::exists(dir / region.region.file)) << region.region.file;
   }
-  EXPECT_EQ(bank0, renderRegion(regionNamed(d, "bank_00.asm"), d));
+  std::size_t rendered = 0;
+  ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
+  EXPECT_EQ(rendered, d.regions.size());
+  for (const RegionListing& region : d.regions) {
+    EXPECT_EQ(readFile(dir / region.region.file), renderRegion(region, d)) << region.region.file;
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+}  // namespace
+
+TEST(RomProgramFile, TheTreeCarriesTheProgramFileAndItReadsBackAsTheProgram) {
+  const std::vector<std::uint8_t> rom = threeBankImage();
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const std::filesystem::path dir = freshDirectory("snaggletooth-program-file-test");
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  ASSERT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
+  const std::string text = readFile(dir / "program.snagir");
+  EXPECT_EQ(text, renderProgramFile(d));
+  const std::optional<ir::Parsed> parsed = ir::parseProgram(text, error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  EXPECT_TRUE(ir::equivalent(parsed->program, d.program));
+  EXPECT_EQ(parsed->program.nodes.size(), d.program.nodes.size());
+  EXPECT_EQ(ir::renderProgram(parsed->program, parsed->file), text);
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(RomProgramFile, TheBankFilesAreRenderedFromTheTwoFilesAndEqualTheDisassemblysOwn) {
+  expectRenderedFromDiskEqualsMemory(disassembleWithoutSound(threeBankImage()), "snaggletooth-render-three-bank");
+  CartridgeRequest request;
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  request.rom = rom;
+  expectRenderedFromDiskEqualsMemory(disassembleCartridge(request), "snaggletooth-render-uploading");
+}
+
+TEST(RomProgramFile, EveryExampleTreeRendersTheSameFromDiskAsFromMemory) {
+  // Every example cartridge with a short run, so the trees carry accesses,
+  // routines, seen registers, lifted files of every kind and sound blocks —
+  // everything the renderer reads back from the manifest.
+  for (const examples::Example& example : examples::examples()) {
+    const std::vector<std::uint8_t> rom = example.build();
+    CartridgeRequest request;
+    request.rom = rom;
+    request.captureSound = example.name == "uploading" || example.name == "straddling_upload";
+    request.observeRun = true;
+    request.runMasterCycles = 3u * kRenderFrame;
+    const CartridgeDisassembly d = disassembleCartridge(request);
+    expectRenderedFromDiskEqualsMemory(d, ("snaggletooth-render-" + std::string(example.name)).c_str());
+  }
+}
+
+TEST(RomProgramFile, TheProgramIsLiftedOnceInAddressOrderWithBothReadings) {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {0x18u, 0xFBu,          // $8000 CLC ; XCE
+                     0xC2u, 0x20u,          // $8002 REP #$20
+                     0x20u, 0x20u, 0x80u,   // $8004 JSR $8020 with m=16
+                     0xE2u, 0x20u,          // $8007 SEP #$20
+                     0x20u, 0x20u, 0x80u,   // $8009 JSR $8020 with m=8
+                     0xDBu});               // $800C STP
+  put(rom, 0x0020u, {0xA9u, 0x01u, 0x00u,   // $8020 LDA #$0001 under m=16; LDA #$01 / BRK under m=8
+                     0x60u});               // $8023 RTS
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  std::size_t at8020 = 0;
+  Address previous = 0;
+  for (const ir::Node& node : d.program.nodes) {
+    EXPECT_GE(node.instruction.address, previous);
+    previous = node.instruction.address;
+    if (node.instruction.address == 0x008020u) ++at8020;
+  }
+  EXPECT_EQ(at8020, 2u);
+  // The first reading at the address is the listing's: the sixteen-bit load.
+  const ir::Node* first = d.program.find(0x008020u, false, false, true);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first->instruction.length, 3u);
+  EXPECT_EQ(&*std::find_if(d.program.nodes.begin(), d.program.nodes.end(),
+                           [](const ir::Node& n) { return n.instruction.address == 0x008020u; }),
+            first);
+
+  // The order the regions come in is not the program's: a file split given
+  // highest bank first lifts to the same program, in address order.
+  const std::vector<std::uint8_t> three = threeBankImage();
+  CartridgeRequest forward;
+  forward.rom = three;
+  forward.captureSound = false;
+  CartridgeRequest backward = forward;
+  backward.regions = bankRegions(CartridgeMap::LoRom, three.size());
+  std::reverse(backward.regions.begin(), backward.regions.end());
+  const CartridgeDisassembly straight = disassembleCartridge(forward);
+  const CartridgeDisassembly reversed = disassembleCartridge(backward);
+  ASSERT_EQ(reversed.regions.size(), 3u);
+  EXPECT_EQ(reversed.regions.front().region.file, "bank_02.asm");
+  EXPECT_GT(straight.program.nodes.size(), 10u);
+  EXPECT_TRUE(ir::equivalent(reversed.program, straight.program));
+  EXPECT_TRUE(std::is_sorted(reversed.program.nodes.begin(), reversed.program.nodes.end(),
+                             [](const ir::Node& a, const ir::Node& b) {
+                               return a.instruction.address < b.instruction.address;
+                             }));
+  // And the renderer, reading the file back, renders the reversed tree's files
+  // the same as its own in-memory rendering.
+  expectRenderedFromDiskEqualsMemory(reversed, "snaggletooth-render-reversed");
+}
+
+TEST(RomProgramFile, TheProgramFileCarriesEveryLabelAndEveryDataRunOfEveryRegion) {
+  const std::vector<std::uint8_t> rom = threeBankImage();
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  std::string error;
+  const std::optional<ir::Parsed> parsed = ir::parseProgram(renderProgramFile(d), error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  ASSERT_EQ(parsed->file.regions.size(), d.regions.size());
+  std::size_t labels = 0;
+  std::size_t runs = 0;
+  for (std::size_t i = 0; i < d.regions.size(); ++i) {
+    const RegionListing& region = d.regions[i];
+    const ir::ProgramRegion& written = parsed->file.regions[i];
+    EXPECT_EQ(written.file, region.region.file);
+    std::vector<ir::ProgramLabel> expected;
+    for (const auto& [address, name] : region.listing.labels) expected.push_back({address, name});
+    EXPECT_EQ(written.labels, expected) << region.region.file;
+    std::vector<ir::DataRun> data;
+    for (const Line& line : region.listing.lines) {
+      if (!line.isCode && !line.data.empty()) data.push_back({line.address, line.data});
+    }
+    EXPECT_EQ(written.data, data) << region.region.file;
+    labels += expected.size();
+    runs += data.size();
+  }
+  EXPECT_GT(labels, 3u);
+  EXPECT_GT(runs, 0u);
+}
+
+TEST(RomProgramFile, TheProgramFileIsWrittenBeforeAnyOtherFile) {
+  const std::vector<std::uint8_t> rom = threeBankImage();
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const std::filesystem::path dir = freshDirectory("snaggletooth-program-file-first-test");
+  // The manifest's path is taken by a directory, so its write fails: what is on
+  // disk then is what was written before it.
+  std::filesystem::create_directories(dir / "project.manifest");
+  std::string error;
+  EXPECT_FALSE(writeProject(d, dir, error));
+  EXPECT_NE(error.find("project.manifest"), std::string::npos) << error;
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(RomProgramFile, TheRendererRefusesATreeWithoutItsFilesOrWithOneThatDoesNotRead) {
+  const std::vector<std::uint8_t> rom = threeBankImage();
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const std::filesystem::path dir = freshDirectory("snaggletooth-render-refusal-test");
+  std::size_t rendered = 0;
+  std::string error;
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  EXPECT_FALSE(renderTree(dir, rendered, error));
+  EXPECT_NE(error.find("program.snagir"), std::string::npos) << error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  // A program file altered so it does not read: refused by its line, and no
+  // bank file written.
+  std::string text = readFile(dir / "program.snagir");
+  const std::size_t flow = text.find(" flow continue ");
+  ASSERT_NE(flow, std::string::npos);
+  text.replace(flow, 15, " flow sideways ");
+  {
+    std::ofstream out(dir / "program.snagir", std::ios::binary);
+    out << text;
+  }
+  EXPECT_FALSE(renderTree(dir, rendered, error));
+  EXPECT_NE(error.find("program.snagir: line "), std::string::npos) << error;
+  EXPECT_NE(error.find("`sideways` is not a flow"), std::string::npos) << error;
+  EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
+  // Without the manifest, the program alone is not enough to render.
+  {
+    std::ofstream out(dir / "program.snagir", std::ios::binary);
+    out << renderProgramFile(d);
+  }
+  std::filesystem::remove(dir / "project.manifest", ec);
+  EXPECT_FALSE(renderTree(dir, rendered, error));
+  EXPECT_NE(error.find("project.manifest"), std::string::npos) << error;
   std::filesystem::remove_all(dir, ec);
 }
 

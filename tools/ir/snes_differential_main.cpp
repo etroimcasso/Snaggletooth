@@ -1,15 +1,20 @@
 // snes_differential — replays a cartridge's recorded run beside the interpreter
 // and reports where the lifted program and the machine disagree.
 //
-//   snes_differential <directory> <image> -o <report> [--seconds N] [--input <script>]
+//   snes_differential <directory> <image> -o <report> [--seconds N]
+//                                                     [--input <script> | --input-dir <directory>]
+//                                                     [--quiet]
 //
-// Reads the directory's `project.manifest`, traces the image as the manifest
-// directs — its entries, its file split, the targets earlier runs saw — lifts
-// every 65816 region into the intermediate representation, and runs the machine
-// for `--seconds` of the master clock (sixty by default) with the interpreter
-// beside it, held to every access, every register and every cycle. `--input`
+// Reads the directory's `program.snagir` — the program `snes_disasm` wrote, in
+// the grammar `docs/snagir.md` gives — and runs the machine on the image for
+// `--seconds` of the master clock (sixty by default) with the interpreter
+// beside it, held to every access, every register and every cycle. The image
+// must be the one the file is a program of: its size is checked against the
+// file's own `image` line before anything runs. `--input`
 // replays a recorded run into the controller ports, exactly as `snes_disasm
-// --input` does, so the same run is checked that produced the tree.
+// --input` does, so the same run is checked that produced the tree;
+// `--input-dir` finds the run named for the image under that directory, as
+// `snes_disasm --input-dir` does, and leaves the ports empty when there is none.
 //
 // The report is written under `-o`: `summary.txt` (what was checked and how
 // much), `divergences.txt` (each disagreement with its step, node, effect and
@@ -20,12 +25,17 @@
 // places them). One line on standard output sums it up.
 //
 // The exit status is 0 when the run diverged nowhere, 1 when it did, 2 on a bad
-// argument or an unreadable input.
+// argument, an unreadable input, or a program file the reader refuses, which is
+// named with its line.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
+//
+// The replay's advance is written to standard error as it goes, the seconds of
+// the master clock spent against `--seconds`, refreshed in place on a terminal
+// and one line per ten seconds otherwise. --quiet turns it off; the report and
+// the line on standard output are the same either way.
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -38,20 +48,37 @@
 #include <string>
 #include <vector>
 
-#include "ir/cpu65816_lift.h"
 #include "ir/ir.h"
 #include "ir/ir_differential.h"
+#include "ir/ir_text.h"
 #include "rom/input_script.h"
-#include "rom/rom_disasm.h"
+#include "rom/progress.h"
 #include "snaggletooth/snes/cartridge.h"
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
 [[noreturn]] void usage(const char* prog) {
   std::cerr << "usage: " << prog
-            << " <directory> <image> -o <report> [--seconds N] [--input <script>]\n"
-               "  replays the tree's recorded run on the machine beside the interpreter\n";
+            << " <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]"
+               " [--quiet]\n"
+               "  replays the tree's recorded run on the machine beside the interpreter;\n"
+               "  --quiet keeps the progress off standard error\n";
   std::exit(2);
+}
+
+// Whether standard error is a terminal, where a progress line is refreshed in place.
+bool errorIsTerminal() {
+#ifdef _WIN32
+  return _isatty(_fileno(stderr)) != 0;
+#else
+  return isatty(2) != 0;
+#endif
 }
 
 std::string readText(const std::string& path, bool& ok) {
@@ -66,30 +93,6 @@ std::string hex(std::uint32_t v, int width) {
   return b;
 }
 
-// The tree's 65816 regions lifted into one program, the nodes in address order.
-snaggletooth::ir::Program liftTree(const snaggletooth::disasm::CartridgeDisassembly& d,
-                                   std::size_t& codeLines) {
-  snaggletooth::ir::Program program;
-  for (const snaggletooth::disasm::RegionListing& region : d.regions) {
-    std::vector<std::uint8_t> image;
-    for (const snaggletooth::disasm::Line& line : region.listing.lines) {
-      const std::vector<std::uint8_t>& bytes = line.isCode ? line.instruction.bytes : line.data;
-      image.insert(image.end(), bytes.begin(), bytes.end());
-      if (line.isCode) ++codeLines;
-    }
-    snaggletooth::ir::Program one =
-        snaggletooth::ir::lift65816(region.listing, image, region.region.first);
-    program.nodes.insert(program.nodes.end(), one.nodes.begin(), one.nodes.end());
-    program.nmi = one.nmi;
-    program.irq = one.irq;
-  }
-  std::stable_sort(program.nodes.begin(), program.nodes.end(),
-                   [](const snaggletooth::ir::Node& a, const snaggletooth::ir::Node& b) {
-                     return a.instruction.address < b.instruction.address;
-                   });
-  return program;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -97,10 +100,14 @@ int main(int argc, char** argv) {
   std::string imagePath;
   std::string outPath;
   std::string inputPath;
+  std::string inputDir;
   double seconds = 60.0;
+  bool quiet = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "-o" || arg == "--seconds" || arg == "--input") {
+    if (arg == "--quiet") {
+      quiet = true;
+    } else if (arg == "-o" || arg == "--seconds" || arg == "--input" || arg == "--input-dir") {
       if (i + 1 >= argc) {
         std::cerr << arg << " needs a value\n";
         usage(argv[0]);
@@ -110,6 +117,8 @@ int main(int argc, char** argv) {
         outPath = value;
       } else if (arg == "--input") {
         inputPath = value;
+      } else if (arg == "--input-dir") {
+        inputDir = value;
       } else {
         seconds = std::strtod(value.c_str(), nullptr);
         if (seconds <= 0.0) {
@@ -126,6 +135,19 @@ int main(int argc, char** argv) {
     }
   }
   if (directory.empty() || imagePath.empty() || outPath.empty()) usage(argv[0]);
+  if (!inputPath.empty() && !inputDir.empty()) {
+    std::cerr << "--input and --input-dir both name a recorded run; give one\n";
+    return 2;
+  }
+  if (!inputDir.empty()) {
+    const std::filesystem::path script = snaggletooth::disasm::scriptPathFor(inputDir, imagePath);
+    if (std::filesystem::is_regular_file(script)) {
+      inputPath = script.string();
+      std::cout << "replaying " << script.string() << "\n";
+    } else {
+      std::cout << "no recorded run at " << script.string() << "; the ports stay empty\n";
+    }
+  }
 
   std::vector<std::uint8_t> rom;
   {
@@ -145,24 +167,29 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  // The tree's program, read from the file `snes_disasm` wrote; the image must
+  // be the one the file says it is a program of.
   bool ok = false;
-  const std::string manifestText =
-      readText((std::filesystem::path(directory) / "project.manifest").string(), ok);
+  const std::filesystem::path programPath = std::filesystem::path(directory) / "program.snagir";
+  const std::string programText = readText(programPath.string(), ok);
   if (!ok) {
-    std::cerr << "cannot open " << directory << "/project.manifest\n";
+    std::cerr << "cannot open " << programPath.string() << "\n";
     return 2;
   }
   std::string error;
-  const auto manifest = snaggletooth::disasm::parseManifest(manifestText, error);
-  if (!manifest) {
-    std::cerr << "project.manifest: " << error << "\n";
+  const std::optional<snaggletooth::ir::Parsed> parsed =
+      snaggletooth::ir::parseProgram(programText, error);
+  if (!parsed) {
+    std::cerr << programPath.string() << ": " << error << "\n";
     return 2;
   }
-  const std::string mismatch = snaggletooth::disasm::manifestMismatch(*manifest, rom);
-  if (!mismatch.empty()) {
-    std::cerr << mismatch << "\n";
+  if (parsed->file.imageBytes != rom.size()) {
+    std::cerr << programPath.string() << " is a program of an image of " << parsed->file.imageBytes
+              << " bytes; " << imagePath << " holds " << rom.size() << "\n";
     return 2;
   }
+  const snaggletooth::ir::Program& program = parsed->program;
+  const snaggletooth::ir::ProgramCounts counts = snaggletooth::ir::countProgram(*parsed);
 
   snaggletooth::disasm::InputScript input;
   if (!inputPath.empty()) {
@@ -171,37 +198,24 @@ int main(int argc, char** argv) {
       std::cerr << "cannot open " << inputPath << "\n";
       return 2;
     }
-    const auto parsed = snaggletooth::disasm::parseInputScript(text, error);
-    if (!parsed) {
+    const auto parsedScript = snaggletooth::disasm::parseInputScript(text, error);
+    if (!parsedScript) {
       std::cerr << inputPath << ": " << error << "\n";
       return 2;
     }
-    input = *parsed;
+    input = *parsedScript;
   }
-
-  // The tree as the manifest directs it, traced without the machine run and
-  // without the sound capture: the entries and the reached targets are already
-  // in the manifest, and the sound program is the audio CPU's.
-  snaggletooth::disasm::CartridgeRequest request;
-  request.rom = rom;
-  request.entries = manifest->entries;
-  request.regions = manifest->regions;
-  request.reached = manifest->reached;
-  request.ran = manifest->ran;
-  request.captureSound = false;
-  request.observeRun = false;
-  const snaggletooth::disasm::CartridgeDisassembly d =
-      snaggletooth::disasm::disassembleCartridge(request);
-  std::size_t codeLines = 0;
-  const snaggletooth::ir::Program program = liftTree(d, codeLines);
 
   snaggletooth::ir::Replay replay;
   replay.rom = rom;
   replay.masterCycles = static_cast<std::uint64_t>(seconds * 21'477'272.0);
   replay.input = input;
   replay.divergenceLimit = 200;
+  snaggletooth::disasm::ProgressPrinter printer(std::cerr, errorIsTerminal());
+  if (!quiet) replay.progress = std::ref(printer);
   const snaggletooth::ir::DifferentialReport report =
       snaggletooth::ir::differential(program, replay);
+  printer.finish();
 
   std::error_code ec;
   std::filesystem::create_directories(outPath, ec);
@@ -212,7 +226,7 @@ int main(int argc, char** argv) {
       std::cerr << "cannot write under " << outPath << "\n";
       return 2;
     }
-    f << "code lines " << codeLines << "\nnodes " << program.nodes.size()
+    f << "code lines " << counts.codeLines << "\nnodes " << counts.nodes
       << "\nmaster cycles run " << report.masterCycles
       << "\ninstructions checked " << report.instructions
       << "\nhardware interrupts checked " << report.interrupts

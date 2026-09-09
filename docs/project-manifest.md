@@ -689,8 +689,9 @@ At a site in the image the run executed an instruction: every value the direct
 register and the data bank held before it ran, each value once, ascending,
 joined by `|`. One line per site, in address order, and every value the run
 saw is written, however many. The line is written fresh on every run and read
-back by nothing — the next run sees it again — and a disassembly without a run
-writes none.
+back by no disassembly — the next run sees it again — and a disassembly without
+a run writes none; `snes_render` reads it for the `(run)` comment on a plain
+direct-page operand.
 
 `seen` and [`state`](#29-what-every-path-proves) say different things about
 the same registers: `state` is what every path into a label proves, `seen` is
@@ -827,8 +828,8 @@ with a `staged` line per class. The sixteen at `$7F:0800` were copied from
 `$9600` and carried out by the CPU itself, a word at a time (§2.16): an extent
 like any other, lifted as its source.
 
-Every line here is written fresh from the run and read back by nothing; a
-`staged` or `stream` file outlives the run through its `asset` line (§2.12).
+Every line here is written fresh from the run and read back by no disassembly;
+a `staged` or `stream` file outlives the run through its `asset` line (§2.12).
 
 ### 2.16 What the CPU streamed
 
@@ -1016,12 +1017,19 @@ directory, it reads:
 
 Everything else is what the last run found and is written fresh — the `access`,
 `dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed` and `landed`
-lines among them, which no tool reads back:
-they are what the trace and the run saw, and the next sees it again. A `stop` line records;
-only an `entry` line directs. The disassembler writes the files fresh
-too: an edit to a bank file is not read back by it, so a person's changes to the
-trace belong in the manifest, and their changes to the code in the sources,
-which `snes_verify` assembles as they are.
+lines among them — and the next disassembly reads none of it back: they are what
+the trace and the run saw, and the next sees it again. A `stop` line records;
+only an `entry` line directs. `snes_render` reads the `access`, `routine`,
+`seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the
+bank files from `program.snagir`, for the register names, the routine
+comments and the `INCBIN` lines ([snes-disassembler.md §Library](snes-disassembler.md#library)).
+`snes_lift` and `snes_differential` read `program.snagir` beside the manifest
+and nothing of the manifest itself ([snagir.md](snagir.md)).
+The disassembler writes the manifest, the program file and the lifted files
+fresh, and the renderer writes the bank files fresh: an edit to a bank file or
+to the program file is not read back by the next disassembly, so a person's
+changes to the trace belong in the manifest, and their changes to the code in
+the sources, which `snes_verify` assembles as they are.
 
 A line that does not parse stops either tool with the line number and what was
 expected, before anything is written. An `entry` whose name is a mnemonic —

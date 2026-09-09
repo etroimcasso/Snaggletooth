@@ -133,4 +133,13 @@ std::optional<InputScript> parseInputScript(std::string_view text, std::string& 
   return script;
 }
 
+std::filesystem::path scriptPathFor(const std::filesystem::path& directory,
+                                    const std::filesystem::path& image) {
+  std::string name = image.stem().string();
+  for (char& c : name) {
+    if (c == ' ') c = '_';
+  }
+  return directory / (name + ".txt");
+}
+
 }  // namespace snaggletooth::disasm

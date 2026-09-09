@@ -40,19 +40,18 @@ namespace snaggletooth::disasm {
 
 struct CartridgeDisassembly;  // rom_disasm.h
 
-// The program every region lifts to, and what every path proves over it. The
-// dataflow refers to the program, so the two travel together.
+// What every path proves over the disassembly's program. The dataflow refers
+// to that program and is kept no longer than the disassembly it was proven over.
 struct ProvenProgram {
-  std::unique_ptr<ir::Program> program;
   std::unique_ptr<ir::Dataflow> flow;
   ir::ImageReader image;
   ir::StackReach stack;
 };
 
-// Lifts every 65816 region of the disassembly into one program and runs the
-// dataflow over it from every entry — the reset vector with the direct register
-// and the data bank zero, every other entry with nothing proven — along the
-// program's own flow and every destination a run reached or the bytes derived.
+// Runs the dataflow over the disassembly's program from every entry — the reset
+// vector with the direct register and the data bank zero, every other entry
+// with nothing proven — along the program's own flow and every destination a
+// run reached or the bytes derived.
 [[nodiscard]] ProvenProgram proveProgram(const CartridgeDisassembly& disassembly,
                                          std::span<const std::uint8_t> rom);
 

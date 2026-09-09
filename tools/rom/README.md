@@ -1,14 +1,16 @@
 # Cartridge tools
 
-Four things live here: `snes_disasm`, which disassembles a whole cartridge into a
-source tree; `snes_verify`, which assembles that tree back and compares it with
-the image; `rom_render`, which boots a cartridge on the whole SNES machine and
-writes what the audio unit plays; and `cartridge_entries.h`, where a disassembly of
-a whole cartridge starts.
+Five things live here: `snes_disasm`, which disassembles a whole cartridge into
+its program file and manifest; `snes_render`, which writes the source tree from
+that program file; `snes_verify`, which assembles the tree back and compares it
+with the image; `rom_render`, which boots a cartridge on the whole SNES machine
+and writes what the audio unit plays; and `cartridge_entries.h`, where a
+disassembly of a whole cartridge starts.
 
 ## Contents
 
 - [`snes_disasm`](#snes_disasm)
+- [`snes_render`](#snes_render)
 - [`snes_verify`](#snes_verify)
 - [`rom_render`](#rom_render)
 - [`cartridge_entries.h`](#cartridge_entriesh)
@@ -17,16 +19,18 @@ a whole cartridge starts.
 ## `snes_disasm`
 
 ```
-snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script>]
+snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
-Writes one source file per bank, the sound program the cartridge uploads at boot as
-`apu/driver.asm`, the bytes the run saw the cartridge send from the image to the
-hardware — and the ones the code proves a channel was set up to send — as files
-of their own under `vram/`, `cgram/`, `oam/`, `apu/` and
-`hdma/` — a VRAM file under `maps/` or `tiles/` where the run saw the picture
-use every landing of it as one or the other — and `project.manifest`, which
-names the files, where the trace began, and where it stopped. The trace starts at the vectors and follows control
+Writes `program.snagir`, the whole program in the intermediate representation
+([docs/snagir.md](../../docs/snagir.md)), first; then `project.manifest`, which
+names the files, where the trace began, and where it stopped; the bytes the run
+saw the cartridge send from the image to the hardware — and the ones the code
+proves a channel was set up to send — as files of their own under `vram/`,
+`cgram/`, `oam/`, `apu/` and `hdma/` — a VRAM file under `maps/` or `tiles/`
+where the run saw the picture use every landing of it as one or the other — and
+the sound program the cartridge uploads at boot as `apu/driver.asm`. It writes
+no bank file: `snes_render` writes those from the program file. The trace starts at the vectors and follows control
 flow across banks; the sound program is captured by booting the cartridge on the
 machine and matched back to the image bytes it was read from. A manifest already in
 the directory supplies entries a person added and the file split, which is how the
@@ -44,6 +48,15 @@ snes_disasm game.sfc -o game
 sound program: entry $0500, 3 blocks, 3 matched to the image
 524288 of 524288 bytes placed -> game
 ```
+
+While it works, standard error says what it is doing — the run and each boot
+with the seconds of the master clock spent against their bound, refreshed in
+place on a terminal and one line per ten seconds in a log, and the trace, the
+analysis and the writing each as a line; `--quiet` turns it off, and the
+results on standard output are the same either way. The library reports
+through `CartridgeRequest::progress`, a `ProgressSink` from `rom/progress.h`,
+and prints nothing itself; `ProgressPrinter` there is what the command line
+prints with.
 
 It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
 and steps it, recording the destination of every indirect jump or call the run
@@ -76,8 +89,12 @@ every run of bytes the CPU carried from the image to a data register as a
 skips the run; `--run-seconds N` bounds it; `--input <script>` plays it,
 replaying an [input script](../../docs/input-script.md) — which buttons are held
 on which port from which frame — into the controller ports, so the run reaches
-what a player would. `rom/input_script.h` reads the script (`parseInputScript`)
-and says what a port holds at a frame (`InputScript::padAt`).
+what a player would; `--input-dir <directory>` plays the script named for the
+image under that directory when there is one. `rom/input_script.h` reads the
+script (`parseInputScript`), says what a port holds at a frame
+(`InputScript::padAt`), and names the file a directory keeps for an image
+(`scriptPathFor`: the image's name without its extension, spaces as
+underscores, `.txt`).
 
 The facts it attaches to addresses — the hardware each instruction reaches, the
 DMA transfers those add up to (one per start, with the channel's registers as
@@ -85,8 +102,9 @@ they stood: the destination, the source and its step, the count, and the write
 that started it), the routines the instructions belong to, each
 with what it calls and what it drives, and what every path proves about the
 direct register, the data bank and the stack pointer at each label — come from
-`rom/rom_facts.h`: `proveProgram(disassembly, rom)` lifts every region and runs
-the [dataflow](../ir/README.md) over it, then `hardwareAccesses(disassembly,
+`rom/rom_facts.h`: `proveProgram(disassembly, rom)` runs the
+[dataflow](../ir/README.md) over the disassembly's program — every region
+lifted once, `CartridgeDisassembly::program` — then `hardwareAccesses(disassembly,
 &proven)`, `dmaTransfers(accesses)`, `routines(disassembly)` and
 `stateFacts(disassembly, proven)`, written into the manifest as `access`, `dma`,
 `routine` and `state` lines. A transfer the code proves whole that the run
@@ -98,11 +116,38 @@ disassembler traces from each and writes it as a `derived` line, so a bounded
 table is traced past without running the cartridge.
 
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
-run, `captureUpload` for the boot alone, `placeBytes` for the count, and the
-renderers and `writeProject` for the files, the lifted ones (`AssetFile`)
-included. Full page:
+run, `captureUpload` for the boot alone, `placeBytes` for the count,
+`renderProgramFile` and `renderManifest` for the two files, and `writeProject`
+for everything it writes, the lifted files (`AssetFile`) included. Full page:
 [docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
 grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
+
+## `snes_render`
+
+```
+snes_render <directory>
+```
+
+Reads the directory's `program.snagir` and `project.manifest` and writes one
+source file per region the program file names: the instructions from their
+nodes, the data runs and the labels from the file's records, and the register
+names, the routine comments and the `INCBIN` lines from the manifest's `access`,
+`seen`, `routine`, `asset`, `moved`, `dma`, `sound` and `block` lines. It reads
+no image and runs nothing. Standard output names how many files were written;
+the exit status is 0 when every file was, 1 when the tree does not read.
+
+```
+snes_render game
+32 files rendered from game/program.snagir
+```
+
+The library behind it is `rom/rom_render.h`: `readRenderInput` for the two
+files, `renderRegion` for one file from that input and the program, and
+`renderTree` for the whole directory. It links the representation, the 65816
+backend, the listing types and the cartridge map, and nothing that can trace,
+run or lift a cartridge — so a bank file it writes can only have come from the
+program file — and `rom/rom_manifest.cpp` beside it reads the manifest for it
+and for the disassembler.
 
 ## `snes_verify`
 

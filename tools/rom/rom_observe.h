@@ -71,6 +71,7 @@
 #include "disasm/disasm.h"
 #include "ir/ir_provenance.h"
 #include "rom/input_script.h"
+#include "rom/progress.h"
 
 namespace snaggletooth::disasm {
 
@@ -364,8 +365,13 @@ struct RunObservation {
 // `input` is replayed into the controller ports as the run goes: at the start
 // of every frame, counted from power-on, each port is given what the script
 // holds for it there. An empty script leaves both ports empty.
+//
+// `progress`, when given, is told `running the cartridge` as the run begins
+// and every tenth of a second of the master clock after, with the cycles
+// spent against `masterCycles`, and once more as it ends (`rom/progress.h`).
 [[nodiscard]] RunObservation observeRun(std::span<const std::uint8_t> rom,
                                         std::uint64_t masterCycles, const InputScript& input,
-                                        std::vector<std::string>& notes);
+                                        std::vector<std::string>& notes,
+                                        const ProgressSink& progress = {});
 
 }  // namespace snaggletooth::disasm

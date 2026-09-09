@@ -110,6 +110,7 @@ struct Instruction {
   std::uint32_t operand = 0;
   std::uint8_t operand2 = 0;
   std::optional<Address> target;
+  friend bool operator==(const Instruction&, const Instruction&) = default;
 };
 
 // How wide an effect works. `ByM` and `ByX` are eight bits when the live flag says
@@ -151,6 +152,7 @@ enum class Place : std::uint8_t {
 struct Operand {
   Place place = Place::None;
   std::uint32_t value = 0;  // when `place` is `Imm`
+  friend bool operator==(const Operand&, const Operand&) = default;
 };
 
 // How the second and third bytes of a multi-byte access find their addresses.
@@ -189,6 +191,7 @@ struct Cond {
   Place place = Place::None;
   std::uint32_t value = 0;
   bool andEmulation = false;  // and the emulation flag is set as well
+  friend bool operator==(const Cond&, const Cond&) = default;
 };
 
 // The operations. Each is written `dst ← f(a, b)` where it has a destination;
@@ -248,6 +251,7 @@ struct Effect {
   Access access = Access::Data;
   bool pinned = false;
   Cond when;
+  friend bool operator==(const Effect&, const Effect&) = default;
 };
 
 // What an instruction costs: the measured base under each setting of the widths
@@ -255,6 +259,7 @@ struct Effect {
 // fire when it runs.
 struct Cost {
   std::array<std::uint8_t, 4> base{};
+  friend bool operator==(const Cost&, const Cost&) = default;
 };
 
 [[nodiscard]] constexpr std::size_t costIndex(bool accumulator8, bool index8) noexcept {
@@ -274,6 +279,7 @@ struct Node {
   Cost cost;
   std::string_view registerName;
   bool patched = false;
+  friend bool operator==(const Node&, const Node&) = default;  // the views by content
 };
 
 // A lifted program: its nodes in address order, with one node per address and
@@ -284,6 +290,7 @@ struct Program {
   std::vector<Node> nodes;
   std::vector<Effect> nmi;
   std::vector<Effect> irq;
+  friend bool operator==(const Program&, const Program&) = default;
 
   // The node at an address for the live flags, or nothing. A node whose width is
   // a live-flag selection matches either setting of that width.

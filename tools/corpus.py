@@ -3,17 +3,19 @@
 image and a verdict.
 
     corpus.py <images> <output> --build <build-dir> [--no-run] [--seconds N]
-              [--input-dir <scripts>] [--no-lift] [--no-differential] [--facts] [--routines]
+              [--input-dir <scripts>] [--no-differential] [--facts] [--routines]
 
-For every `.smc` or `.sfc` under <images>, in name order, the tree is written
-under <output>/<name>/ by `snes_disasm` (reading back the manifest already
-there, so a directory an earlier run filled keeps its `reached` lines), lifted
-by `snes_lift` into <output>/<name>.snagir unless `--no-lift`, assembled back by
-`snes_verify` into <output>/<name>-rebuilt<.smc|.sfc> with the rebuilt image's
-SHA-256 compared with the original's, and — unless `--no-differential` —
-replayed beside the interpreter by `snes_differential`, whose report lands under
-<output>/<name>/differential/. A script named <name>.txt under `--input-dir` is
-the recorded run for that image, given to both the disassembler and the replay.
+For every `.smc` or `.sfc` under <images>, in name order, four commands run and
+nothing else happens: `snes_disasm` writes what the disassembly found under
+<output>/<name>/ — `program.snagir`, the manifest, the lifted files and the
+sound program's file — reading back the manifest already there so a directory
+an earlier run filled keeps its `reached` lines; `snes_render` writes the bank
+files from the program file and the manifest; `snes_verify` assembles the tree
+back into <output>/<name>-rebuilt<.smc|.sfc> and compares it with the image,
+its exit status the verdict; and — unless `--no-differential` —
+`snes_differential` replays the recorded run beside the interpreter, its report
+under <output>/<name>/differential/. `--input-dir` is handed to the two commands
+that run the cartridge; each finds the script named for the image itself.
 `--no-run` skips the machine run in the disassembler (the trace alone takes
 seconds; the run takes about as long as it emulates), `--seconds` sets both the
 run's and the replay's length (sixty by default).
@@ -28,16 +30,15 @@ and every routine with what it calls and reaches.
 
 Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
 `moved`, `landed`, `asset`, `origin`, `staged`, `streamed`, `state` and `seen` lines, so
-a corpus run says how far the trace, the run, the analysis, the shadow and the
-lift reached.
+a corpus run says how far the trace, the run, the analysis and the shadow
+reached.
 
-An image is OK only when every command exits 0 and the rebuilt image matches;
-the script exits 0 only when every image is OK. A failure's whole output is
-printed, never truncated. Nothing is written anywhere but under <output>.
+An image is OK only when every command exits 0; the script exits 0 only when
+every image is OK. A failure's whole output is printed, never truncated. The
+script creates nothing itself and writes nothing anywhere but under <output>.
 """
 import argparse
 import collections
-import hashlib
 import pathlib
 import subprocess
 import sys
@@ -54,22 +55,6 @@ def manifestLines(tree, kind, length):
         if len(words) == length and words[0] == kind:
             out.append(words)
     return out
-
-
-def rebuiltMatches(rom, rebuilt, tree):
-    """Whether the rebuilt image is the file's image: the file's last `image`
-    bytes as the manifest counts them, so a copier header ahead of the image is
-    left out here exactly as the tools left it out."""
-    if not rebuilt.exists():
-        return False
-    sizes = manifestLines(tree, "image", 2)
-    if not sizes:
-        return False
-    data = rom.read_bytes()
-    size = int(sizes[0][1])
-    if size > len(data):
-        return False
-    return hashlib.sha256(data[len(data) - size:]).digest() == hashlib.sha256(rebuilt.read_bytes()).digest()
 
 
 def facts(tree):
@@ -170,8 +155,7 @@ def main():
     parser.add_argument("--build", type=pathlib.Path, required=True, help="the build directory holding the commands")
     parser.add_argument("--no-run", action="store_true", help="trace without running the cartridge")
     parser.add_argument("--seconds", default="60", help="the run's and the replay's length in seconds of the master clock")
-    parser.add_argument("--input-dir", type=pathlib.Path, help="recorded runs, one <name>.txt per image")
-    parser.add_argument("--no-lift", action="store_true", help="skip writing the tree's program as <name>.snagir")
+    parser.add_argument("--input-dir", type=pathlib.Path, help="recorded runs, one <name>.txt per image, found by the commands")
     parser.add_argument("--no-differential", action="store_true", help="skip the replay beside the interpreter")
     parser.add_argument("--facts", action="store_true", help="aggregate the hardware accesses, the transfers set up and the ranges moved")
     parser.add_argument("--routines", action="store_true", help="aggregate the routines")
@@ -202,43 +186,37 @@ def main():
     for rom in roms:
         name = rom.stem.replace(" ", "_")
         tree = args.output / name
-        tree.mkdir(parents=True, exist_ok=True)
-        script = args.input_dir / (name + ".txt") if args.input_dir else None
-        if script is not None and not script.exists():
-            script = None
         started = time.time()
         results = []
 
-        disasm = [args.build / "snes_disasm", rom, "-o", tree, "--run-seconds", args.seconds]
+        # The commands' progress is for a terminal; here their output is kept for a failure's report.
+        disasm = [args.build / "snes_disasm", rom, "-o", tree, "--run-seconds", args.seconds, "--quiet"]
         if args.no_run:
-            disasm = [args.build / "snes_disasm", rom, "-o", tree, "--no-run"]
-        elif script is not None:
-            disasm += ["--input", script]
+            disasm = [args.build / "snes_disasm", rom, "-o", tree, "--no-run", "--quiet"]
+        elif args.input_dir is not None:
+            disasm += ["--input-dir", args.input_dir]
         results.append(subprocess.run([str(c) for c in disasm], capture_output=True, text=True))
 
-        if not args.no_lift:
-            lifted = args.output / f"{name}.snagir"
-            results.append(subprocess.run([str(c) for c in [args.build / "snes_lift", tree, rom, "-o", lifted]],
-                                          capture_output=True, text=True))
+        results.append(subprocess.run([str(c) for c in [args.build / "snes_render", tree]],
+                                      capture_output=True, text=True))
 
         # The rebuilt image keeps the original's extension: it is the same kind of file.
         rebuilt = args.output / f"{name}-rebuilt{rom.suffix}"
         results.append(subprocess.run([str(c) for c in [args.build / "snes_verify", tree, rom, "-o", rebuilt]],
                                       capture_output=True, text=True))
-        same = rebuiltMatches(rom, rebuilt, tree)
 
         replayLine = ""
         if not args.no_differential:
             replay = [args.build / "snes_differential", tree, rom, "-o", tree / "differential",
-                      "--seconds", args.seconds]
-            if script is not None:
-                replay += ["--input", script]
+                      "--seconds", args.seconds, "--quiet"]
+            if args.input_dir is not None:
+                replay += ["--input-dir", args.input_dir]
             results.append(subprocess.run([str(c) for c in replay], capture_output=True, text=True))
             # The replay's last line sums it up; a dropped copier header is reported ahead of it.
             replayLine = results[-1].stdout.strip().splitlines()[-1] if results[-1].stdout.strip() else ""
 
         elapsed = time.time() - started
-        ok = same and all(r.returncode == 0 for r in results)
+        ok = all(r.returncode == 0 for r in results)
         if not ok:
             failures += 1
 
@@ -321,7 +299,6 @@ def main():
             for r in results:
                 print(r.stdout)
                 print(r.stderr)
-            print(f"      sha256 identical: {same}")
 
     print()
     print(f"{len(roms) - failures} of {len(roms)} images OK")

@@ -37,18 +37,24 @@
 #include "ir/ir.h"
 #include "ir/ir_lockstep.h"
 #include "rom/input_script.h"
+#include "rom/progress.h"
 
 namespace snaggletooth::ir {
 
 // What to replay: the cartridge, how much of the master clock to run, and the
 // recorded run to present at the controller ports frame by frame, exactly as
 // the cartridge disassembler presents it. The run ends early when the CPU
-// stops, or once `divergenceLimit` divergences have been recorded.
+// stops, or once `divergenceLimit` divergences have been recorded. `progress`,
+// when set, is told `replaying the run` as it begins and every tenth of a
+// second of the master clock after, with the cycles spent against
+// `masterCycles`, and once more as it ends — short of the budget when the run
+// ended early (`rom/progress.h`).
 struct Replay {
   std::span<const std::uint8_t> rom;
   std::uint64_t masterCycles = 0;
   disasm::InputScript input;
   std::size_t divergenceLimit = 16;
+  disasm::ProgressSink progress;
 };
 
 // What a replay found.

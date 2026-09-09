@@ -11,6 +11,7 @@
 // line; a port it never names has no pad, and reads as no controller.
 
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -44,5 +45,11 @@ struct InputScript {
 // it, when a line does not parse: a frame out of order, a port named twice on
 // one frame, a button named twice, a word that is not a button.
 [[nodiscard]] std::optional<InputScript> parseInputScript(std::string_view text, std::string& error);
+
+// Where a directory of recorded runs keeps the one for `image`: the image's file
+// name without its extension, each space an underscore, with `.txt` — so
+// `Some Game (U).sfc` has `Some_Game_(U).txt`. The file need not exist.
+[[nodiscard]] std::filesystem::path scriptPathFor(const std::filesystem::path& directory,
+                                                  const std::filesystem::path& image);
 
 }  // namespace snaggletooth::disasm
