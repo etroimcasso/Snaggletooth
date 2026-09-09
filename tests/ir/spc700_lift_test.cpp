@@ -575,6 +575,647 @@ TEST(Spc700Lift, ASequenceRunsAsAProgramWould) {
   EXPECT_EQ(int{out.ir.pc}, 0x050A);
 }
 
+// ---- the word instructions ------------------------------------------------------------
+TEST(Spc700Lift, TheWordStoreReadsOnlyItsLowByteBeforeWriting) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0x34;
+  sc.state.y = 0x12;
+  sc.bytes = {0xDA, 0x40};  // MOVW $40,YA
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0040}));
+  ASSERT_EQ(out.irLog.size(), 3u);
+  EXPECT_TRUE(out.irLog[1].write);
+  EXPECT_EQ(int{out.irLog[1].address}, 0x0040);
+  EXPECT_EQ(int{out.irLog[2].address}, 0x0041);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0x34);
+  EXPECT_EQ(out.coreMem.at(0x0041), 0x12);
+}
+
+TEST(Spc700Lift, TheWordLoadStaysInsideThePageAndTakesZeroFromTheWholeWord) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.psw = kFlagP;
+  sc.memory[0x01FF] = 0x00;
+  sc.memory[0x0100] = 0x01;  // the high byte wraps to the page's start
+  sc.bytes = {0xBA, 0xFF};   // MOVW YA,$FF
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x01FF, 0x0100}));
+  EXPECT_EQ(int{out.ir.a}, 0x00);
+  EXPECT_EQ(int{out.ir.y}, 0x01);
+  EXPECT_EQ(out.ir.psw & kFlagZ, 0);  // A is zero; the word is not
+}
+
+TEST(Spc700Lift, TheWordIncrementWritesEachByteBackBeforeReadingTheNext) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.memory[0x0040] = 0xFF;
+  sc.memory[0x0041] = 0x00;
+  sc.bytes = {0x3A, 0x40};  // INCW $40
+  Outcome out = runSame(sc);
+  ASSERT_EQ(out.irLog.size(), 4u);
+  EXPECT_EQ(int{out.irLog[0].address}, 0x0040);
+  EXPECT_FALSE(out.irLog[0].write);
+  EXPECT_EQ(int{out.irLog[1].address}, 0x0040);
+  EXPECT_TRUE(out.irLog[1].write);
+  EXPECT_EQ(int{out.irLog[2].address}, 0x0041);
+  EXPECT_FALSE(out.irLog[2].write);
+  EXPECT_EQ(int{out.irLog[3].address}, 0x0041);
+  EXPECT_TRUE(out.irLog[3].write);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0x00);
+  EXPECT_EQ(out.coreMem.at(0x0041), 0x01);
+  EXPECT_EQ(out.ir.psw & kFlagZ, 0);
+  // The high byte moves only when the low one wrapped.
+  sc.memory[0x0040] = 0x01;
+  sc.memory[0x0041] = 0x7F;
+  out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x0041), 0x7F);
+  // The flags are the whole word's.
+  sc.memory[0x0040] = 0xFF;
+  sc.memory[0x0041] = 0xFF;
+  out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagZ, 0);
+  sc.bytes = {0x1A, 0x40};  // DECW $40, from zero
+  sc.memory[0x0040] = 0x00;
+  sc.memory[0x0041] = 0x00;
+  out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0xFF);
+  EXPECT_EQ(out.coreMem.at(0x0041), 0xFF);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);
+}
+
+TEST(Spc700Lift, TheWordAddIgnoresTheCarryInAndTakesHAndVFromTheHighByte) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0xFF;
+  sc.state.y = 0x0F;  // YA = $0FFF
+  sc.state.psw = kFlagC;  // a carry in does not take
+  sc.memory[0x0040] = 0x01;
+  sc.memory[0x0041] = 0x00;
+  sc.bytes = {0x7A, 0x40};  // ADDW YA,$40
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.y}, 0x10);
+  EXPECT_EQ(int{out.ir.a}, 0x00);
+  EXPECT_NE(out.ir.psw & kFlagH, 0);  // $0F plus the low byte's carry crosses the nibble
+  EXPECT_EQ(out.ir.psw & kFlagC, 0);
+  sc.state.y = 0x7F;  // $7FFF + 1
+  sc.state.psw = 0;
+  out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagV, 0);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);
+  sc.state.y = 0xFF;  // $FFFF + 1
+  out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagC, 0);
+  EXPECT_NE(out.ir.psw & kFlagZ, 0);
+  EXPECT_EQ(count(out.node, Op::Adc), 1u);
+}
+
+TEST(Spc700Lift, TheWordSubtractBorrowsNothingIn) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0x05;
+  sc.state.y = 0x00;
+  sc.state.psw = 0;  // a borrow in does not take
+  sc.memory[0x0040] = 0x03;
+  sc.bytes = {0x9A, 0x40};  // SUBW YA,$40
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0x02);
+  EXPECT_NE(out.ir.psw & kFlagC, 0);
+  sc.memory[0x0040] = 0x06;
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0xFF);
+  EXPECT_EQ(int{out.ir.y}, 0xFF);
+  EXPECT_EQ(out.ir.psw & kFlagC, 0);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);
+}
+
+TEST(Spc700Lift, TheWordCompareMovesNZCAndLeavesVAndH) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0x00;
+  sc.state.y = 0x01;  // $0100
+  sc.state.psw = kFlagV | kFlagH;
+  sc.memory[0x0040] = 0x00;
+  sc.memory[0x0041] = 0x02;  // $0200
+  sc.bytes = {0x5A, 0x40};   // CMPW YA,$40
+  const Outcome out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);
+  EXPECT_EQ(out.ir.psw & kFlagC, 0);
+  EXPECT_NE(out.ir.psw & kFlagV, 0);
+  EXPECT_NE(out.ir.psw & kFlagH, 0);
+  ASSERT_EQ(out.irLog.size(), 2u);
+  EXPECT_FALSE(out.irLog[0].write);
+  EXPECT_FALSE(out.irLog[1].write);
+}
+
+// ---- the bits --------------------------------------------------------------------------
+// An absolute bit operand: thirteen bits of address, the bit index above them.
+std::vector<std::uint8_t> absoluteBit(std::uint8_t opcode, std::uint16_t address, unsigned bit) {
+  const auto word = static_cast<std::uint16_t>(address | (bit << 13));
+  return {opcode, static_cast<std::uint8_t>(word & 0xFFu), static_cast<std::uint8_t>(word >> 8)};
+}
+
+TEST(Spc700Lift, TheTestAndSetPairReadsTwiceAndTakesItsFlagsFromTheDifference) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0x0F;
+  sc.memory[0x2000] = 0xF0;
+  sc.bytes = {0x0E, 0x00, 0x20};  // TSET1 !$2000
+  Outcome out = runSame(sc);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x2000, 0x2000}));
+  EXPECT_EQ(out.coreMem.at(0x2000), 0xFF);
+  EXPECT_EQ(out.ir.psw & (kFlagN | kFlagZ), 0);  // A − m = $1F
+  sc.state.a = 0x10;
+  sc.memory[0x2000] = 0x10;
+  out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagZ, 0);  // A − m = 0
+  EXPECT_EQ(out.coreMem.at(0x2000), 0x10);
+  sc.state.a = 0x80;
+  sc.memory[0x2000] = 0x81;
+  sc.bytes = {0x4E, 0x00, 0x20};  // TCLR1 !$2000
+  out = runSame(sc);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x2000, 0x2000}));
+  EXPECT_EQ(out.coreMem.at(0x2000), 0x01);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);  // A − m = $FF
+}
+
+TEST(Spc700Lift, OneBitOfAByteIsSetClearedOrFlippedInPlaceAndMovesNoFlag) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.psw = kFlagN | kFlagZ | kFlagC;
+  sc.memory[0x0040] = 0x00;
+  sc.bytes = {0xA2, 0x40};  // SET1 $40.5
+  Outcome out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0x20);
+  ASSERT_EQ(out.irLog.size(), 2u);
+  EXPECT_FALSE(out.irLog[0].write);
+  EXPECT_TRUE(out.irLog[1].write);
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});
+  sc.memory[0x0040] = 0xFF;
+  sc.bytes = {0xB2, 0x40};  // CLR1 $40.5
+  out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0xDF);
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});
+  sc.memory[0x1000] = 0x00;
+  sc.bytes = absoluteBit(0xEA, 0x1000, 7);  // NOT1 !$1000.7
+  out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x1000), 0x80);
+  ASSERT_EQ(out.irLog.size(), 2u);
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});
+}
+
+TEST(Spc700Lift, TheCarryCombinesWithOneBitOfAnAbsoluteByte) {
+  struct Case {
+    std::uint8_t opcode;
+    unsigned bit;
+    std::uint8_t carryIn;
+    bool carryOut;
+  };
+  // The byte at $1000 has bit 2 set and bit 3 clear.
+  const Case cases[] = {
+      {0x4A, 2, 1, true},   // AND1 C,m.2: 1 and 1
+      {0x4A, 3, 1, false},  // AND1 C,m.3: 1 and 0
+      {0x6A, 3, 1, true},   // AND1 C,/m.3: 1 and not 0
+      {0x0A, 3, 0, false},  // OR1 C,m.3: 0 or 0
+      {0x2A, 3, 0, true},   // OR1 C,/m.3: 0 or not 0
+      {0x8A, 2, 1, false},  // EOR1 C,m.2: 1 xor 1
+      {0x8A, 3, 1, true},   // EOR1 C,m.3: 1 xor 0
+      {0xAA, 2, 0, true},   // MOV1 C,m.2
+      {0xAA, 3, 1, false},  // MOV1 C,m.3
+  };
+  for (const Case& c : cases) {
+    Scenario sc;
+    sc.state = at0500();
+    sc.state.psw = static_cast<std::uint8_t>(kFlagN | kFlagZ | c.carryIn);
+    sc.memory[0x1000] = 0x04;
+    sc.bytes = absoluteBit(c.opcode, 0x1000, c.bit);
+    const Outcome out = runSame(sc);
+    EXPECT_EQ((out.ir.psw & kFlagC) != 0, c.carryOut) << "opcode " << int{c.opcode} << " bit " << c.bit;
+    EXPECT_EQ(int{out.ir.psw & (kFlagN | kFlagZ)}, int{kFlagN | kFlagZ});
+    EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x1000}));
+    EXPECT_EQ(out.coreMem.at(0x1000), 0x04);
+  }
+}
+
+TEST(Spc700Lift, TheCarryStoredIntoOneBitReadsTheByteOnce) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.psw = kFlagC;
+  sc.memory[0x1000] = 0x00;
+  sc.bytes = absoluteBit(0xCA, 0x1000, 2);  // MOV1 !$1000.2,C
+  Outcome out = runSame(sc);
+  ASSERT_EQ(out.irLog.size(), 2u);
+  EXPECT_FALSE(out.irLog[0].write);
+  EXPECT_TRUE(out.irLog[1].write);
+  EXPECT_EQ(out.coreMem.at(0x1000), 0x04);
+  sc.state.psw = 0;
+  sc.memory[0x1000] = 0xFF;
+  out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x1000), 0xFB);
+}
+
+// ---- multiply, divide and the decimal adjusts ---------------------------------------
+TEST(Spc700Lift, MultiplyTakesItsFlagsFromTheHighByte) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.y = 0x10;
+  sc.state.a = 0x10;
+  sc.bytes = {0xCF};  // MUL YA
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.y}, 0x01);
+  EXPECT_EQ(int{out.ir.a}, 0x00);
+  EXPECT_EQ(out.ir.psw & (kFlagN | kFlagZ), 0);  // A is zero; Y is not
+  sc.state.y = 0x01;
+  sc.state.a = 0x01;
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0x01);
+  EXPECT_NE(out.ir.psw & kFlagZ, 0);  // Y is zero
+  sc.state.y = 0xFF;
+  sc.state.a = 0xFF;
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.y}, 0xFE);
+  EXPECT_EQ(int{out.ir.a}, 0x01);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);
+  EXPECT_EQ(count(out.node, Op::Mul), 1u);
+}
+
+TEST(Spc700Lift, DivideLeavesTheQuotientInAAndTheRemainderInY) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.y = 0x00;
+  sc.state.a = 0x64;  // 100
+  sc.state.x = 0x07;
+  sc.bytes = {0x9E};  // DIV YA,X
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 14);
+  EXPECT_EQ(int{out.ir.y}, 2);
+  EXPECT_EQ(out.ir.psw & kFlagV, 0);
+  EXPECT_EQ(count(out.node, Op::Div), 1u);
+  // A quotient past a byte: the overflow flag, and whatever the chip leaves.
+  sc.state.y = 0x10;
+  sc.state.a = 0x00;
+  sc.state.x = 0x01;
+  out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagV, 0);
+  // The half carry compares the low nibbles of X and Y as they stood, equal included.
+  sc.state.y = 0x05;
+  sc.state.x = 0x15;
+  out = runSame(sc);
+  EXPECT_NE(out.ir.psw & kFlagH, 0);
+  sc.state.x = 0x17;
+  out = runSame(sc);
+  EXPECT_EQ(out.ir.psw & kFlagH, 0);
+}
+
+TEST(Spc700Lift, TheDecimalAdjustsFollowTheCarryAndTheHalfCarry) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0x9A;  // past ninety-nine
+  sc.state.psw = 0;
+  sc.bytes = {0xDF};  // DAA A
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0x00);
+  EXPECT_NE(out.ir.psw & kFlagC, 0);
+  EXPECT_NE(out.ir.psw & kFlagZ, 0);
+  sc.state.a = 0x15;
+  sc.state.psw = kFlagH;  // the half carry adds six
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0x1B);
+  EXPECT_EQ(out.ir.psw & kFlagC, 0);
+  EXPECT_EQ(count(out.node, Op::Daa), 1u);
+  sc.bytes = {0xBE};  // DAS A
+  sc.state.a = 0x15;
+  sc.state.psw = kFlagC | kFlagH;  // nothing to adjust
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0x15);
+  sc.state.psw = kFlagC;  // no half carry: six comes off
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0x0F);
+  sc.state.psw = kFlagH;  // no carry: sixty comes off
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.a}, 0xB5);
+  EXPECT_NE(out.ir.psw & kFlagN, 0);
+  EXPECT_EQ(count(out.node, Op::Das), 1u);
+}
+
+// ---- control flow -----------------------------------------------------------------------
+TEST(Spc700Lift, EveryRelativeBranchCostsTwoMoreCyclesWhenTaken) {
+  struct Case {
+    std::uint8_t opcode;
+    std::uint8_t flag;
+    bool whenSet;
+  };
+  const Case cases[] = {{0xF0, kFlagZ, true}, {0xD0, kFlagZ, false}, {0xB0, kFlagC, true},
+                        {0x90, kFlagC, false}, {0x70, kFlagV, true}, {0x50, kFlagV, false},
+                        {0x30, kFlagN, true}, {0x10, kFlagN, false}};
+  for (const Case& c : cases) {
+    Scenario sc;
+    sc.state = at0500();
+    sc.bytes = {c.opcode, 0xFE};  // back onto the opcode itself
+    sc.state.psw = c.whenSet ? c.flag : std::uint8_t{0};
+    const Outcome taken = runSame(sc);
+    EXPECT_EQ(int{taken.ir.pc}, 0x0500) << "opcode " << int{c.opcode};
+    sc.state.psw = c.whenSet ? std::uint8_t{0} : c.flag;
+    const Outcome fallen = runSame(sc);
+    EXPECT_EQ(int{fallen.ir.pc}, 0x0502) << "opcode " << int{c.opcode};
+    EXPECT_EQ(taken.irCycles, fallen.irCycles + 2u) << "opcode " << int{c.opcode};
+    EXPECT_EQ(count(taken.node, Op::Cycles), 1u);
+  }
+  Scenario sc;
+  sc.state = at0500();
+  sc.bytes = {0x2F, 0x10};  // BRA $0512: always taken, so its cost has one value
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x0512);
+  EXPECT_EQ(count(out.node, Op::Cycles), 0u);
+}
+
+TEST(Spc700Lift, TheBitBranchesReadTheByteOnceAndPayOnlyWhenTaken) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.memory[0x0040] = 0x08;
+  sc.bytes = {0x63, 0x40, 0x10};  // BBS $40.3,$0513
+  const Outcome set = runSame(sc);
+  EXPECT_EQ(int{set.ir.pc}, 0x0513);
+  EXPECT_EQ(reads(set.irLog), (std::vector<std::uint16_t>{0x0040}));
+  sc.bytes = {0x73, 0x40, 0x10};  // BBC $40.3,$0513
+  const Outcome clear = runSame(sc);
+  EXPECT_EQ(int{clear.ir.pc}, 0x0503);
+  EXPECT_EQ(set.irCycles, clear.irCycles + 2u);
+  sc.memory[0x0040] = 0x00;
+  const Outcome clearTaken = runSame(sc);
+  EXPECT_EQ(int{clearTaken.ir.pc}, 0x0513);
+  EXPECT_EQ(clearTaken.irCycles, set.irCycles);
+}
+
+TEST(Spc700Lift, CompareAndBranchInBothFormsMovesNoFlag) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.a = 0x42;
+  sc.state.psw = kFlagZ | kFlagC;
+  sc.memory[0x0040] = 0x42;
+  sc.bytes = {0x2E, 0x40, 0x10};  // CBNE $40,$0513
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x0503);  // equal: not taken
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});
+  const std::uint32_t fallen = out.irCycles;
+  sc.memory[0x0040] = 0x43;
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x0513);
+  EXPECT_EQ(out.irCycles, fallen + 2u);
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});
+  sc.state.x = 0x10;
+  sc.state.psw = kFlagP;
+  sc.memory[0x0150] = 0x42;
+  sc.bytes = {0xDE, 0x40, 0x10};  // CBNE $40+X,$0513: $0150 under P
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x0503);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0150}));
+  EXPECT_EQ(int{out.ir.psw}, int{kFlagP});
+}
+
+TEST(Spc700Lift, DecrementAndBranchWritesTheByteBackWhetherOrNotItBranches) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.psw = kFlagZ | kFlagN;
+  sc.memory[0x0040] = 0x01;
+  sc.bytes = {0x6E, 0x40, 0x10};  // DBNZ $40,$0513
+  Outcome out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0x00);
+  EXPECT_EQ(int{out.ir.pc}, 0x0503);
+  ASSERT_EQ(out.irLog.size(), 2u);
+  EXPECT_TRUE(out.irLog[1].write);
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});  // the zero settles in no flag
+  const std::uint32_t fallen = out.irCycles;
+  sc.memory[0x0040] = 0x02;
+  out = runSame(sc);
+  EXPECT_EQ(out.coreMem.at(0x0040), 0x01);
+  EXPECT_EQ(int{out.ir.pc}, 0x0513);
+  EXPECT_EQ(out.irCycles, fallen + 2u);
+}
+
+TEST(Spc700Lift, DecrementYAndBranchReadsTheDisplacementTwice) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.y = 0x01;
+  sc.state.psw = kFlagZ | kFlagN;
+  sc.bytes = {0xFE, 0x10};  // DBNZ Y,$0512
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.y}, 0x00);
+  EXPECT_EQ(int{out.ir.pc}, 0x0502);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0501}));  // the displacement, again, as data
+  EXPECT_EQ(int{out.ir.psw}, int{sc.state.psw});
+  sc.state.y = 0x00;  // wraps, and branches
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.y}, 0xFF);
+  EXPECT_EQ(int{out.ir.pc}, 0x0512);
+}
+
+TEST(Spc700Lift, TheIndexedJumpReadsItsPointerAcrossAPageBoundary) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.x = 0x01;
+  sc.memory[0x10FF] = 0x34;
+  sc.memory[0x1100] = 0x12;
+  sc.bytes = {0x1F, 0xFE, 0x10};  // JMP [!$10FE+X]
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x1234);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x10FF, 0x1100}));
+}
+
+TEST(Spc700Lift, ACallPushesTheReturnAddressHighByteFirst) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.bytes = {0x3F, 0x34, 0x12};  // CALL !$1234
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x1234);
+  EXPECT_EQ(int{out.ir.sp}, 0xED);
+  ASSERT_EQ(out.irLog.size(), 2u);
+  EXPECT_TRUE(out.irLog[0].write);
+  EXPECT_EQ(int{out.irLog[0].address}, 0x01EF);
+  EXPECT_EQ(int{out.irLog[0].value}, 0x05);
+  EXPECT_EQ(int{out.irLog[1].address}, 0x01EE);
+  EXPECT_EQ(int{out.irLog[1].value}, 0x03);
+}
+
+TEST(Spc700Lift, ThePageCallLandsInTheTopPage) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.bytes = {0x4F, 0x12};  // PCALL $12
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0xFF12);
+  EXPECT_EQ(out.coreMem.at(0x01EF), 0x05);
+  EXPECT_EQ(out.coreMem.at(0x01EE), 0x02);
+}
+
+TEST(Spc700Lift, TheVectorCallReadsItsEntryFromTheTableBelowTheTopOfMemory) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.memory[0xFFDE] = 0x34;
+  sc.memory[0xFFDF] = 0x12;
+  sc.memory[0xFFC0] = 0x78;
+  sc.memory[0xFFC1] = 0x56;
+  sc.bytes = {0x01};  // TCALL 0
+  Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x1234);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0501, 0xFFDE, 0xFFDF}));
+  EXPECT_EQ(out.coreMem.at(0x01EF), 0x05);
+  EXPECT_EQ(out.coreMem.at(0x01EE), 0x01);
+  sc.bytes = {0xF1};  // TCALL 15
+  out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x5678);
+}
+
+TEST(Spc700Lift, BreakPushesTheCounterThenTheStatusAndTakesTheVector) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.psw = kFlagI | kFlagC;
+  sc.memory[0xFFDE] = 0x34;
+  sc.memory[0xFFDF] = 0x12;
+  sc.bytes = {0x0F};  // BRK
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x1234);
+  EXPECT_EQ(int{out.ir.sp}, 0xEC);
+  EXPECT_EQ(out.coreMem.at(0x01EF), 0x05);
+  EXPECT_EQ(out.coreMem.at(0x01EE), 0x01);
+  EXPECT_EQ(out.coreMem.at(0x01ED), kFlagI | kFlagC);  // the status as it stood
+  EXPECT_NE(out.ir.psw & kFlagB, 0);
+  EXPECT_EQ(out.ir.psw & kFlagI, 0);
+  EXPECT_NE(out.ir.psw & kFlagC, 0);
+}
+
+TEST(Spc700Lift, ReturnPullsTheCounterLowByteFirst) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.sp = 0xED;
+  sc.memory[0x01EE] = 0x34;
+  sc.memory[0x01EF] = 0x12;
+  sc.bytes = {0x6F};  // RET
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x1234);
+  EXPECT_EQ(int{out.ir.sp}, 0xEF);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0501, 0x01EE, 0x01EF}));
+}
+
+TEST(Spc700Lift, ReturnFromInterruptPullsTheStatusBeforeTheCounter) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.state.sp = 0xEC;
+  sc.state.psw = 0;
+  sc.memory[0x01ED] = 0xFF;  // every bit, the break and the page included
+  sc.memory[0x01EE] = 0x34;
+  sc.memory[0x01EF] = 0x12;
+  sc.bytes = {0x7F};  // RET1
+  const Outcome out = runSame(sc);
+  EXPECT_EQ(int{out.ir.pc}, 0x1234);
+  EXPECT_EQ(int{out.ir.psw}, 0xFF);
+  EXPECT_EQ(int{out.ir.sp}, 0xEF);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0501, 0x01ED, 0x01EE, 0x01EF}));
+  EXPECT_EQ(count(out.node, Op::Pull), 2u);
+}
+
+TEST(Spc700Lift, PushesAndPopsStayInPageOneAndWrapTheStackPointer) {
+  struct Case {
+    std::uint8_t push;
+    std::uint8_t pop;
+    std::uint8_t pushed;
+  };
+  const Case cases[] = {{0x2D, 0xAE, 0xA1}, {0x4D, 0xCE, 0xB2}, {0x6D, 0xEE, 0xC3}, {0x0D, 0x8E, 0xD4}};
+  for (const Case& c : cases) {
+    Scenario sc;
+    sc.state = at0500();
+    sc.state.sp = 0x00;
+    sc.state.a = 0xA1;
+    sc.state.x = 0xB2;
+    sc.state.y = 0xC3;
+    sc.state.psw = 0xD4;
+    sc.bytes = {c.push};
+    const Outcome pushed = runSame(sc);
+    EXPECT_EQ(int{pushed.ir.sp}, 0xFF) << "push " << int{c.push};
+    ASSERT_EQ(pushed.irLog.size(), 2u);  // the byte after the opcode, then the push
+    EXPECT_TRUE(pushed.irLog[1].write);
+    EXPECT_EQ(int{pushed.irLog[1].address}, 0x0100);
+    EXPECT_EQ(int{pushed.irLog[1].value}, int{c.pushed});
+    // The pop reads where the push wrote, and a register's pop moves no flag.
+    Scenario back;
+    back.state = at0500();
+    back.state.sp = 0xFF;
+    back.state.psw = kFlagN;
+    back.memory[0x0100] = c.pop == 0x8E ? std::uint8_t{0x5A} : std::uint8_t{0x00};
+    back.bytes = {c.pop};
+    const Outcome popped = runSame(back);
+    EXPECT_EQ(int{popped.ir.sp}, 0x00) << "pop " << int{c.pop};
+    EXPECT_EQ(reads(popped.irLog), (std::vector<std::uint16_t>{0x0501, 0x0100}));
+    EXPECT_EQ(int{popped.ir.psw}, c.pop == 0x8E ? 0x5A : int{kFlagN}) << "pop " << int{c.pop};
+  }
+}
+
+TEST(Spc700Lift, TheFlagInstructionsMoveTheirOwnBitAlone) {
+  struct Case {
+    std::uint8_t opcode;
+    std::uint8_t before;
+    std::uint8_t after;
+  };
+  const Case cases[] = {
+      {0x60, 0xFF, 0xFF & ~kFlagC},             // CLRC
+      {0x80, 0x00, kFlagC},                     // SETC
+      {0xED, kFlagC | kFlagZ, kFlagZ},          // NOTC
+      {0xED, 0x00, kFlagC},                     // NOTC
+      {0x20, 0xFF, 0xFF & ~kFlagP},             // CLRP
+      {0x40, 0x00, kFlagP},                     // SETP
+      {0xE0, 0xFF, 0xFF & ~(kFlagV | kFlagH)},  // CLRV clears the half carry too
+      {0xA0, 0x00, kFlagI},                     // EI
+      {0xC0, 0xFF, 0xFF & ~kFlagI},             // DI
+      {0x00, 0xA5, 0xA5},                       // NOP
+  };
+  for (const Case& c : cases) {
+    Scenario sc;
+    sc.state = at0500();
+    sc.state.psw = c.before;
+    sc.bytes = {c.opcode, 0xEE};
+    const Outcome out = runSame(sc);
+    EXPECT_EQ(int{out.ir.psw}, int{c.after}) << "opcode " << int{c.opcode};
+    EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0501}));
+  }
+}
+
+TEST(Spc700Lift, SleepAndStopHaltTheInterpreterAsTheyHaltTheCore) {
+  Scenario sc;
+  sc.state = at0500();
+  sc.bytes = {0xEF, 0xEE};  // SLEEP
+  Outcome out = runSame(sc);
+  EXPECT_EQ(out.ir.run, Run::Waiting);
+  EXPECT_EQ(reads(out.irLog), (std::vector<std::uint16_t>{0x0501, 0x0501, 0x0501}));
+  EXPECT_EQ(count(out.node, Op::Halt), 1u);
+  sc.bytes = {0xFF, 0xEE};  // STOP
+  out = runSame(sc);
+  EXPECT_EQ(out.ir.run, Run::Stopped);
+  EXPECT_EQ(int{out.ir.pc}, 0x0501);
+}
+
+// ---- every opcode -----------------------------------------------------------------------
+// One state, one operand pair, all 256 opcodes: each decodes, lifts, and runs to
+// the same registers, accesses, memory and cycles as the core.
+TEST(Spc700Lift, EveryOpcodeLiftsAndRunsBesideTheCore) {
+  for (unsigned opcode = 0; opcode < 256; ++opcode) {
+    SCOPED_TRACE("opcode " + std::to_string(opcode));
+    Scenario sc;
+    sc.state = at0500();
+    sc.state.a = 0x5A;
+    sc.state.x = 0x03;
+    sc.state.y = 0x21;
+    sc.state.psw = kFlagC;
+    sc.bytes = {static_cast<std::uint8_t>(opcode), 0x40, 0x06};
+    sc.memory[0x0040] = 0x7E;
+    sc.memory[0x0041] = 0x01;
+    sc.memory[0x0640] = 0x33;
+    const Outcome out = runSame(sc);
+    EXPECT_FALSE(out.node.instruction.mnemonic.empty());
+    ASSERT_FALSE(out.node.effects.empty());
+    EXPECT_EQ(out.node.effects.front().op, Op::Set);
+    EXPECT_EQ(out.node.effects.front().dst.place, Place::PC);
+  }
+}
+
 // ---- the interpreter's sources ----------------------------------------------------
 std::string sourceText(const std::string& relative) {
   std::ifstream in(std::string(SNAGGLETOOTH_SOURCE_DIR) + "/" + relative);
