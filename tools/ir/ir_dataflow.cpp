@@ -445,6 +445,7 @@ struct Abstract {
             at = (wrapLow && *wrapLow) ? ((at & 0xFF00u) | ((at + 1u) & 0xFFu))
                                        : ((at + 1u) & 0xFFFFu);
             break;
+          case Step::Page: at = (at & 0xFFFF00u) | ((at + 1u) & 0xFFu); break;
         }
       }
       out.push_back(value);
@@ -674,6 +675,15 @@ struct Abstract {
         break;
       case Op::Halt:
       case Op::Cycles:
+        break;
+      case Op::Shl:
+      case Op::PageAddress:
+      case Op::Daa:
+      case Op::Das:
+      case Op::Mul:
+      case Op::Div:
+        // The sound CPU's operations; the analysis runs the main CPU's program.
+        forget(e.dst.place);
         break;
     }
   }

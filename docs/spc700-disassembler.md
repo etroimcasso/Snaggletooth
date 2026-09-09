@@ -168,6 +168,8 @@ std::string text = snaggletooth::disasm::render(listing);
 | `render(listing)` | Renders a `Listing` as source text. |
 | `cycleTable()` | The measured cost of all 256 opcodes. |
 | `registerName(address)` | A hardware register's name, or empty for ordinary memory. |
+| `spc700Mnemonic(opcode)`, `spc700Form(opcode)` | An opcode's row as the two words that name it: the mnemonic, and the operand form — the row's text with each operand slot replaced by its kind, `#imm`, `dp`, `abs`, `rel`, `abs.bit`, `upage`, `dp.n` — so `MOV A,[$%1+X]` is `MOV` and `A,[dp+X]`, `TCALL 0` is `TCALL` and `0`, `RET` is `RET` and nothing. |
+| `spc700OpcodeOf(mnemonic, form)` | The one opcode a mnemonic and a form name together, or nothing. |
 
 `Listing`, `Instruction` and `Flow` are the framework's types, described on its page.
 Addresses in them are 24-bit values; the SPC700 backend never sets a bank, reports

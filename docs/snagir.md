@@ -181,19 +181,22 @@ sequence's:
 ```
 
 `<op>` is the operation's name — `Set`, `SetNZ`, `Load`, `Store`, `Adc`,
-`WriteP`, every name in [ir.md §Operations](ir.md#operations). `<dst> <-`
-follows where the operation has a destination; `<a>` and `<b>` are the
-operands it has, the first followed by a comma when there are two. A place is
-written by name — `A`, `X`, `Y`, `S`, `D`, `PC`, `PBR`, `DBR`, `P`, `E`, `T0`
-to `T3` — and a flag as `P.` and its letter: `P.N`, `P.V`, `P.M`, `P.X`,
-`P.D`, `P.I`, `P.Z`, `P.C`. The register `X` and the flag `P.X`, the register
-`D` and the flag `P.D`, are two words. A constant is a value, `$20`.
+`WriteP`, `PageAddress`, `Div`, every name in
+[ir.md §Operations](ir.md#operations). `<dst> <-` follows where the operation
+has a destination; `<a>` and `<b>` are the operands it has, the first followed
+by a comma when there are two. A place is written by name — `A`, `X`, `Y`,
+`S`, `D`, `PC`, `PBR`, `DBR`, `P`, `E`, `T0` to `T3`, and the sound CPU's pair
+`YA` — and a flag as `P.` and its letter: `P.N`, `P.V`, `P.M`, `P.X`, `P.D`,
+`P.I`, `P.Z`, `P.C`, and the sound CPU's `P.P`, `P.B`, `P.H`. The register `X`
+and the flag `P.X`, the register `D` and the flag `P.D`, the register `P` and
+the flag `P.P`, are two words each. A constant is a value, `$20`.
 
 The bracket carries the width — `8`, `16`, `24`, `byM` or `byX` — and, for a
 `Load`, `Store` or `StoreRmw`, the step the access's later bytes take (`flat`,
-`bank0`, `bank`, `direct`, `pointer`) and, where the access is not plain data,
-its kind (`rmw`, `rmw-unmodified`, `vector`); for a `Push` or `Pull`, `pinned`
-or `unpinned`. No other operation carries a step, a kind or a pin.
+`bank0`, `bank`, `direct`, `pointer`, `page`) and, where the access is not
+plain data, its kind (`rmw`, `rmw-unmodified`, `vector`); for a `Push` or
+`Pull`, `pinned` or `unpinned`. No other operation carries a step, a kind or a
+pin.
 
 A condition, where the effect has one, follows the bracket: `if e`, `if !e`,
 `if set <flag>`, `if clear <flag>`, `if is <place> <value>`,

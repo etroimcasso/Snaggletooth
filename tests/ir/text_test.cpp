@@ -168,7 +168,7 @@ TEST(Text, TheImageLineCarriesTheSizeAndTheMap) {
 
 TEST(Text, EveryOperationRoundTrips) {
   std::vector<Effect> effects;
-  for (std::size_t i = 0; i <= static_cast<std::size_t>(Op::Cycles); ++i) {
+  for (std::size_t i = 0; i <= static_cast<std::size_t>(Op::Div); ++i) {
     const Op op = static_cast<Op>(i);
     Effect e = effect(op, at(Place::T0), at(Place::A), imm(0x1234u), Width::Word);
     if (op == Op::Load || op == Op::Store || op == Op::StoreRmw) e.step = Step::Bank;
@@ -178,12 +178,18 @@ TEST(Text, EveryOperationRoundTrips) {
   Node node = nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset());
   node.effects = effects;
   roundTrip(programOf({node}), bankZero(), "every operation");
-  EXPECT_EQ(effects.size(), 37u);
+  EXPECT_EQ(effects.size(), 43u);
+  EXPECT_EQ(renderEffect(effect(Op::Shl, at(Place::T3), at(Place::FlagC), imm(3u), Width::Byte)),
+            "Shl T3 <- P.C, $3 [8];");
+  EXPECT_EQ(renderEffect(effect(Op::PageAddress, at(Place::T0), imm(0x40u), at(Place::X), Width::Word)),
+            "PageAddress T0 <- $40, X [16];");
+  EXPECT_EQ(renderEffect(effect(Op::Div, at(Place::YA), at(Place::YA), at(Place::X), Width::Word)),
+            "Div YA <- YA, X [16];");
 }
 
 TEST(Text, EveryPlaceRoundTripsAndAFlagIsWrittenQualified) {
   std::vector<Effect> effects;
-  for (std::size_t i = static_cast<std::size_t>(Place::A); i <= static_cast<std::size_t>(Place::FlagC); ++i) {
+  for (std::size_t i = static_cast<std::size_t>(Place::A); i <= static_cast<std::size_t>(Place::FlagH); ++i) {
     effects.push_back(effect(Op::Set, at(static_cast<Place>(i)), at(static_cast<Place>(i)), {}, Width::Byte));
   }
   Node node = nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset());
@@ -195,12 +201,20 @@ TEST(Text, EveryPlaceRoundTripsAndAFlagIsWrittenQualified) {
   EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::D), imm(0u), {}, Width::Word)), "Set D <- $0 [16];");
   EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagD), imm(0u), {}, Width::Byte)), "Set P.D <- $0 [8];");
   EXPECT_EQ(placeName(Place::FlagX), "X");  // the vocabulary's own name is not qualified
+  // The sound CPU's places: the pair, and the flags the register `P` and the
+  // flags `P`, `B` and `H` are told apart from.
+  EXPECT_EQ(renderEffect(effect(Op::SetNZ, at(Place::YA), at(Place::T1), {}, Width::Word)), "SetNZ YA <- T1 [16];");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagP), imm(1u), {}, Width::Byte)), "Set P.P <- $1 [8];");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagB), imm(1u), {}, Width::Byte)), "Set P.B <- $1 [8];");
+  EXPECT_EQ(renderEffect(effect(Op::Set, at(Place::FlagH), imm(0u), {}, Width::Byte)), "Set P.H <- $0 [8];");
+  EXPECT_EQ(placeName(Place::FlagP), "P");
+  EXPECT_EQ(placeName(Place::YA), "YA");
 }
 
 TEST(Text, EveryWidthStepAccessAndPinRoundTrips) {
   std::vector<Effect> effects;
   for (std::size_t w = 0; w <= static_cast<std::size_t>(Width::ByX); ++w) {
-    for (std::size_t s = 0; s <= static_cast<std::size_t>(Step::DirectPointer); ++s) {
+    for (std::size_t s = 0; s <= static_cast<std::size_t>(Step::Page); ++s) {
       for (std::size_t a = 0; a <= static_cast<std::size_t>(Access::Vector); ++a) {
         Effect e = effect(Op::Load, at(Place::T1), at(Place::T0), {}, static_cast<Width>(w));
         e.step = static_cast<Step>(s);
@@ -224,6 +238,9 @@ TEST(Text, EveryWidthStepAccessAndPinRoundTrips) {
   EXPECT_EQ(renderEffect(pinned), "Push PC [16 pinned];");
   EXPECT_EQ(renderEffect(unpinned), "Pull A <- [byM unpinned];");
   EXPECT_EQ(renderEffect(effects[3]), "StoreRmw T0, A [8 flat rmw];");
+  Effect page = effect(Op::Load, at(Place::T1), at(Place::T0), {}, Width::Word);
+  page.step = Step::Page;
+  EXPECT_EQ(renderEffect(page), "Load T1 <- T0 [16 page];");
 }
 
 TEST(Text, EveryConditionRoundTrips) {

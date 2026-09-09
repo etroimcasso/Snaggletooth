@@ -16,19 +16,22 @@ constexpr std::string_view kOps[] = {
     "Load", "Store", "StoreRmw", "Push", "Pull", "SettleStack",
     "Adc", "Sbc", "Cmp", "Bit", "BitImm", "Asl", "Lsr", "Rol", "Ror", "Inc", "Dec",
     "Tsb", "Trb", "WriteP", "Xba", "Xce", "Halt", "Cycles",
+    "Shl", "PageAddress", "Daa", "Das", "Mul", "Div",
 };
 
 constexpr std::string_view kPlaces[] = {
     "",   "imm", "A", "X",  "Y",  "S",  "D",  "PC", "PBR", "DBR", "P", "E",
-    "T0", "T1",  "T2", "T3", "N", "V", "M", "X", "D", "I", "Z", "C",
+    "T0", "T1",  "T2", "T3", "YA", "N", "V", "M", "X", "D", "I", "Z", "C", "P", "B", "H",
 };
 
 // A flag as the file writes it: qualified by the register it is a bit of, so the
 // register `X` and the flag `X` are two words.
-constexpr std::string_view kFlagTexts[] = {"P.N", "P.V", "P.M", "P.X", "P.D", "P.I", "P.Z", "P.C"};
+constexpr std::string_view kFlagTexts[] = {"P.N", "P.V", "P.M", "P.X", "P.D", "P.I",
+                                           "P.Z", "P.C", "P.P", "P.B", "P.H"};
+constexpr std::size_t kFlagCount = sizeof kFlagTexts / sizeof kFlagTexts[0];
 
 constexpr std::string_view kWidths[] = {"8", "16", "24", "byM", "byX"};
-constexpr std::string_view kSteps[] = {"flat", "bank0", "bank", "direct", "pointer"};
+constexpr std::string_view kSteps[] = {"flat", "bank0", "bank", "direct", "pointer", "page"};
 constexpr std::string_view kAccesses[] = {"data", "rmw", "rmw-unmodified", "vector"};
 constexpr std::string_view kWhens[] = {
     "", "if e", "if !e", "if set", "if clear", "if is", "if is not", "if D.lo", "if crossed",
@@ -42,7 +45,7 @@ constexpr std::string_view kAddressings[] = {
     "rel16",  "src,dst", "#abs",   "rel16",
 };
 
-constexpr std::size_t kRegisterPlaceCount = static_cast<std::size_t>(Place::T3) + 1;
+constexpr std::size_t kRegisterPlaceCount = static_cast<std::size_t>(Place::YA) + 1;
 
 std::string hex(std::uint32_t value) {
   char b[16];
@@ -185,7 +188,7 @@ std::optional<Place> place(std::string_view text) {
   for (std::size_t i = static_cast<std::size_t>(Place::A); i < kRegisterPlaceCount; ++i) {
     if (kPlaces[i] == text) return static_cast<Place>(i);
   }
-  for (std::size_t i = 0; i < 8; ++i) {
+  for (std::size_t i = 0; i < kFlagCount; ++i) {
     if (kFlagTexts[i] == text) {
       return static_cast<Place>(static_cast<std::size_t>(Place::FlagN) + i);
     }

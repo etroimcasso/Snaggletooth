@@ -1,9 +1,12 @@
 # The intermediate representation
 
-`ir.h` is a 65816 program as its meaning: one node per instruction, carrying what
+`ir.h` is a program as its meaning: one node per instruction, carrying what
 source says about the instruction and the typed effects the chip performs for it,
-with no bytes in it. `cpu65816_lift.h` builds a program from a listing the 65816
-disassembler traced — the one place in the toolkit where bytes become meaning —
+with no bytes in it — the main CPU's program in the 65816's terms and the sound
+program in the SPC700's, one vocabulary over each chip's own places.
+`cpu65816_lift.h` builds the first from a listing the 65816 disassembler traced
+and `spc700_lift.h` the second from the SPC700 disassembler's — the two places
+in the toolkit where bytes become meaning —
 `ir_interpret.h` runs a program's effects and nothing else, `ir_provenance.h`
 is the shadow that follows where every value came from, `ir_render.h` writes
 SNES assembly from its instruction layer, `ir_lockstep.h` holds the interpreter
@@ -31,10 +34,12 @@ Everything lives in `snaggletooth::ir`.
 | Symbol | Purpose |
 |---|---|
 | `Node` | One instruction at one address under one mode: the instruction layer, the effect layer, the measured cost. |
-| `Program` | The nodes in address order with the two hardware interrupt sequences; `find` answers the node for the live flags. |
+| `Program` | The main CPU's nodes in address order with the two hardware interrupt sequences, and the sound program's nodes in their own; `find` answers the node for the live flags, `findSpc700` the sound node at an audio address. |
 | `lift65816(listing, image, base)` | A whole 65816 listing as a program. |
-| `liftInstruction(instruction, mode)` | One decoded instruction as a node. |
-| `Interpreter` | Runs a node or an interrupt sequence over a `Bus` the host implements, and returns the cycles; tells its `Shadow`, if one is set, every move a value makes. |
+| `liftInstruction(instruction, mode)` | One decoded 65816 instruction as a node. |
+| `liftSpc700(listing)`, `liftSpc700Instruction(instruction)` | A whole SPC700 listing as the sound program's nodes; one decoded SPC700 instruction as a node. |
+| `Interpreter` | Runs a 65816 node or an interrupt sequence over a `Bus` the host implements, and returns the cycles; tells its `Shadow`, if one is set, every move a value makes. |
+| `Spc700Interpreter` | Runs a sound-CPU node over the same `Bus` with the sound CPU's registers and rules, and returns the cycles. |
 | `Provenance`, `Origins`, `OriginSet`, `CarrySink` | The shadow that carries, beside every value, the image bytes it was computed from — interned interval sets, a mark for a register or the save — and keeps work RAM's origin, last writer and each invocation's reads as runs, the maximal stretches it read; `originOf`, `writerOf`, `sourcesOf` read it back, `streams()` is every sequence of stores the CPU made to a data register — from the image, with the run its carrier read as the file, or from a buffer in work RAM, told to the `CarrySink` byte by byte — each with where the port put its bytes, which the sink answers store by store and is told of as the stream closes. |
 | `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the machine collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; every disagreement is a `Divergence`. |
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
@@ -116,10 +121,12 @@ interpreter.execute(*node, bus);
 ```
 
 The library target is `snaggletooth_ir`; `tools/` is on its public include path.
-It links `snaggletooth_cpu65816` for the lift, which reads a listing and the
+It links `snaggletooth_cpu65816` for the 65816 lift, which reads a listing and the
 measured cycle tables, and for the renderer, which reads the opcode table and
-follows the widths through the same function the assembler does. The
-interpreter's own translation unit includes neither. `snes_lift` links this
+follows the widths through the same function the assembler does; and
+`snaggletooth_spc700` for the SPC700 lift, which reads a listing, the measured
+cycle table and the mnemonic and form of each opcode. The two interpreters'
+own translation units include none of them. `snes_lift` links this
 target alone, so it reads a program file and cannot trace a cartridge. The lockstep is its own
 target, `snaggletooth_ir_lockstep`, which links the representation and the
 machine, and two things link it: the differential, its own target
@@ -142,5 +149,7 @@ it for the run.
 - [`../examples/`](../examples/README.md) — the cartridges the examples above
   are run on.
 - [`../cpu65816/`](../cpu65816/README.md) — the disassembler whose listing the
-  lift reads.
+  65816 lift reads.
+- [`../spc700/`](../spc700/README.md) — the disassembler whose listing the
+  SPC700 lift reads, and whose table names each opcode by mnemonic and form.
 - [`../disasm/`](../disasm/README.md) — the framework that shapes the listing.

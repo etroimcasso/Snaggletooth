@@ -156,6 +156,7 @@ struct Run65816 {
       case Step::DirectPointer:
         if (r.e && r.d == 0) return (address & 0xFF00u) | ((address + 1u) & 0xFFu);
         return (address + 1u) & 0xFFFFu;
+      case Step::Page: return (address & 0xFFFF00u) | ((address + 1u) & 0xFFu);
     }
     return (address + 1u) & 0xFFFFFFu;
   }
@@ -481,6 +482,17 @@ struct Run65816 {
       }
       case Op::Halt: r.run = raw(e.a) == 0 ? Run::Waiting : Run::Stopped; break;
       case Op::Cycles: cycles += raw(e.a); break;
+
+      case Op::Shl:
+        put(e.dst.place, raw(e.a) << raw(e.b), w);
+        shadowCombine(e.dst.place, w, e.a.place, e.b.place);
+        break;
+      case Op::PageAddress:
+      case Op::Daa:
+      case Op::Das:
+      case Op::Mul:
+      case Op::Div:
+        throw std::logic_error("an operation of the sound CPU in a node of the main CPU");
     }
   }
 };
