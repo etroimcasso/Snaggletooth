@@ -11,9 +11,10 @@ to one step of the machine, `ir_differential.h` runs a program beside the
 machine through a recorded run and reports every disagreement, `ir_dataflow.h`
 runs the effects over every path at once and says what each instruction can
 rely on — the direct register, the data bank, the stack pointer, a stored
-value, the slots of a jump table — and `ir_text.h` writes it out for reading. Two commands sit over the library, and the cartridge
-disassembler in [`../rom/`](../rom/README.md) writes its bank files through the
-renderer.
+value, the slots of a jump table — and `ir_text.h` writes the program file and
+reads it back. Two commands sit over the library, both readers of that file;
+the cartridge disassembler in [`../rom/`](../rom/README.md) writes it, and
+`snes_render` writes the bank files from it through the renderer.
 
 ## Contents
 
@@ -41,6 +42,7 @@ Everything lives in `snaggletooth::ir`.
 | `evaluate(node, before, image)` | One node over a `State`: the state after and every access it can make. |
 | `renderProgram(program, file)`, `parseProgram(text, error)` | The program file (`docs/snagir.md`) written from a program and what it does not carry, and read back to both. |
 | `renderNode(node)`, `renderEffect(effect)`, `equivalent(a, b)` | A node and an effect as the file has them; two programs compared as the file carries them. |
+| `selectFile(parsed, file)`, `countProgram(parsed)` | A parsed file cut to one source file's regions and their nodes; what a parsed file carries, counted as `snes_lift` prints it. |
 | `renderInstruction(instruction, names)`, `renderLine(node, names, bytesWidth)` | An instruction as source, with a label, a register name and an annotation in place of addresses where given; a line with its comment. |
 | `encode(instruction)`, `renderCost(node)` | The bytes an instruction assembles to; the cost as a listing prints it. |
 | `SourceMode` | The mode a region of source carries in file order, and the directives each instruction needs before it. |
@@ -48,17 +50,20 @@ Everything lives in `snaggletooth::ir`.
 ## `snes_lift`
 
 ```
-snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
+snes_lift <directory> [-o <file.snagir>] [--file <name>]
 ```
 
-Lifts a cartridge tree — the directory's `project.manifest` and the image it
-was written for — and writes the summary, then the program file
-([docs/snagir.md](../../docs/snagir.md)): every region with its labels, its
-data runs and its nodes in address order, and the interrupt sequences.
-`--file` limits both to one region's file; `-o` writes the file there.
+Reads the directory's `program.snagir`
+([docs/snagir.md](../../docs/snagir.md)) and writes the summary — the regions,
+the code lines, the nodes, and how many select a width by the live flag, name
+a hardware register or were lifted from patched bytes, and the effects — then
+the program file written again from what it read: every region with its
+labels, its data runs and its nodes in address order, and the interrupt
+sequences. `--file` limits both to the regions written to one source file;
+`-o` writes the file there. It reads no image and runs nothing.
 
 ```
-snes_lift mixed mixed.smc
+snes_lift mixed
 regions 1
 code lines 34
 nodes 34
@@ -76,10 +81,12 @@ nodes 34
 snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]
 ```
 
-Lifts the tree the same way, runs the machine for `--seconds` of the master
-clock (sixty by default) with the recorded run `--input` replayed into the
-controller ports, and holds the interpreter to every access, every register and
-every cycle the machine made. The report — `summary.txt`, `divergences.txt`,
+Reads the directory's `program.snagir` the same way, refuses an image of
+another size than the file's own `image` line, runs the machine for
+`--seconds` of the master clock (sixty by default) with the recorded run
+`--input` replayed into the controller ports — or the run named for the image
+under `--input-dir` — and holds the interpreter to every access, every
+register and every cycle the machine made. The report — `summary.txt`, `divergences.txt`,
 `forms.txt`, `constructs.txt`, `unlifted.txt` — lands under `-o`; one line sums
 it up, and the exit status is 0 only when the run diverged nowhere.
 
@@ -108,7 +115,8 @@ The library target is `snaggletooth_ir`; `tools/` is on its public include path.
 It links `snaggletooth_cpu65816` for the lift, which reads a listing and the
 measured cycle tables, and for the renderer, which reads the opcode table and
 follows the widths through the same function the assembler does. The
-interpreter's own translation unit includes neither. The lockstep is its own
+interpreter's own translation unit includes neither. `snes_lift` links this
+target alone, so it reads a program file and cannot trace a cartridge. The lockstep is its own
 target, `snaggletooth_ir_lockstep`, which links the representation and the
 machine, and two things link it: the differential, its own target
 `snaggletooth_ir_differential`, which links `snaggletooth_rom` as well for the

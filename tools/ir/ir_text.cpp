@@ -934,6 +934,44 @@ std::optional<Parsed> parseProgram(std::string_view text, std::string& error) {
   return reader.read(text);
 }
 
+std::optional<Parsed> selectFile(const Parsed& parsed, std::string_view file) {
+  Parsed out;
+  out.file.imageBytes = parsed.file.imageBytes;
+  out.file.map = parsed.file.map;
+  out.program.nmi = parsed.program.nmi;
+  out.program.irq = parsed.program.irq;
+  for (const ProgramRegion& region : parsed.file.regions) {
+    if (region.file != file) continue;
+    out.file.regions.push_back(region);
+    for (const Node& node : parsed.program.nodes) {
+      const Address at = node.instruction.address;
+      if (at >= region.first && at <= region.last) out.program.nodes.push_back(node);
+    }
+  }
+  if (out.file.regions.empty()) return std::nullopt;
+  std::stable_sort(out.program.nodes.begin(), out.program.nodes.end(),
+                   [](const Node& a, const Node& b) {
+                     return a.instruction.address < b.instruction.address;
+                   });
+  return out;
+}
+
+ProgramCounts countProgram(const Parsed& parsed) {
+  ProgramCounts counts;
+  counts.regions = parsed.file.regions.size();
+  counts.nodes = parsed.program.nodes.size();
+  std::optional<Address> previous;
+  for (const Node& node : parsed.program.nodes) {
+    if (previous != node.instruction.address) ++counts.codeLines;
+    previous = node.instruction.address;
+    if (!node.mode.accumulatorKnown || !node.mode.indexKnown) ++counts.liveWidth;
+    if (!node.registerName.empty()) ++counts.named;
+    if (node.patched) ++counts.patched;
+    counts.effects += node.effects.size();
+  }
+  return counts;
+}
+
 bool equivalent(const Mode& a, const Mode& b) noexcept {
   return a.emulation == b.emulation && a.accumulatorKnown == b.accumulatorKnown &&
          a.indexKnown == b.indexKnown && (!a.accumulatorKnown || a.accumulator8 == b.accumulator8) &&

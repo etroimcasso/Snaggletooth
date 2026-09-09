@@ -6,14 +6,16 @@ image it is a program of, every region of source with its labels and the runs
 of bytes execution never reached, every node with its instruction and its
 effects, and the two hardware interrupt sequences. `snes_disasm` writes one as
 `program.snagir` at the root of every tree, `snes_render` writes the tree's
-source files from it, `tools/ir/ir_text.h` writes and reads one, and anything
-that reads tokens can read it.
+source files from it, `snes_lift` prints it back and `snes_differential`
+replays the cartridge's run beside it, `tools/ir/ir_text.h` writes and reads
+one, and anything that reads tokens can read it.
 
 > **Status.** `renderProgram` writes the file and `parseProgram` reads it;
 > reading what was written gives the program back equivalent on every field
 > the file carries, and writing what was read gives the same bytes. The
-> disassembler writes it before anything else in the tree, and the renderer
-> reads it and the manifest and nothing else.
+> disassembler writes it before anything else in the tree; the renderer reads
+> it and the manifest and nothing else, and the two readers over the
+> representation read it and no manifest at all.
 
 ---
 
@@ -342,7 +344,14 @@ order the regions came in — or returns nothing with `error` naming the line;
 the mnemonics and register names in the nodes it returns are the instruction
 table's and the register table's own. `renderNode` writes one node as it
 stands inside a region's group, and `renderEffect` one effect with its
-semicolon; both are what `renderProgram` calls.
+semicolon; both are what `renderProgram` calls. `selectFile(parsed, file)`
+cuts a `Parsed` to the regions written to one source file — those regions,
+the nodes whose addresses they hold, and the image line and the interrupt
+sequences as they were — or returns nothing when no region is written to it;
+`countProgram(parsed)` is a `ProgramCounts`: the regions, the code lines (one
+per address a node stands at), the nodes, the nodes that select a width by
+the live flag, the nodes naming a hardware register, the nodes lifted from
+patched bytes, and the effects — the summary `snes_lift` prints.
 
 Every type in `ir/ir.h` compares with `==`, and `equivalent` compares two
 programs as the file carries them: every field, except the bit behind a width

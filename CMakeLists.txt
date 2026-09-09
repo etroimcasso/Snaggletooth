@@ -352,8 +352,10 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snes_differential PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # `snes_lift` links the representation alone: it reads a program file back
+  # and prints it, and cannot trace a cartridge.
   add_executable(snes_lift tools/ir/snes_lift_main.cpp)
-  target_link_libraries(snes_lift PRIVATE snaggletooth_rom)
+  target_link_libraries(snes_lift PRIVATE snaggletooth_ir)
   if(MSVC)
     target_compile_options(snes_lift PRIVATE /W4 /WX)
   else()

@@ -1023,11 +1023,13 @@ only an `entry` line directs. `snes_render` reads the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the
 bank files from `program.snagir`, for the register names, the routine
 comments and the `INCBIN` lines ([snes-disassembler.md §Library](snes-disassembler.md#library)).
+`snes_lift` and `snes_differential` read `program.snagir` beside the manifest
+and nothing of the manifest itself ([snagir.md](snagir.md)).
 The disassembler writes the manifest, the program file and the lifted files
-fresh, and the renderer writes the bank files fresh: an edit to a bank file is
-not read back by either, so a person's changes to the trace belong in the
-manifest, and their changes to the code in the sources, which `snes_verify`
-assembles as they are.
+fresh, and the renderer writes the bank files fresh: an edit to a bank file or
+to the program file is not read back by the next disassembly, so a person's
+changes to the trace belong in the manifest, and their changes to the code in
+the sources, which `snes_verify` assembles as they are.
 
 A line that does not parse stops either tool with the line number and what was
 expected, before anything is written. An `entry` whose name is a mnemonic —

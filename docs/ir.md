@@ -8,10 +8,11 @@ runs it, `tools/ir/ir_render.h` writes SNES assembly from it,
 `tools/ir/ir_differential.h` runs it beside the machine and reports every place
 the two disagree, and `tools/ir/ir_dataflow.h` runs it over every path at once
 and says what each instruction can rely on. Two commands put those in a
-person's hands: `snes_lift` writes a cartridge's program out for reading, and
-`snes_differential` replays a cartridge's recorded run and reports; the
-[cartridge disassembler](snes-disassembler.md#the-tree) writes its bank files
-through the renderer and reads the dataflow for its manifest.
+person's hands: `snes_lift` reads a tree's program file back and prints it,
+and `snes_differential` reads the same file and replays the cartridge's
+recorded run beside it; the
+[cartridge disassembler](snes-disassembler.md#the-tree) writes that file, and
+`snes_render` writes the bank files from it through the renderer.
 
 Three properties shape everything below.
 
@@ -422,25 +423,32 @@ node's effects and each interrupt sequence, a semicolon ends every record and
 every effect, and whitespace separates words and means nothing else.
 `renderNode` and `renderEffect` write one node and one effect as the file has
 them, and `equivalent` compares two programs as the file carries them.
+`selectFile` cuts a parsed file to the regions written to one source file,
+with the nodes they hold, and `countProgram` counts what a parsed file
+carries — the regions, the code lines (one per address a node stands at),
+the nodes, the nodes that select a width by the live flag, the nodes naming a
+hardware register, the nodes lifted from patched bytes, and the effects.
 
 `snes_disasm` writes the file as `program.snagir` at the root of every tree,
-and `snes_render` writes the tree's source files from it. `snes_lift` writes a
-tree's program from the tree and its image, for a person to read:
+and `snes_render` writes the tree's source files from it. `snes_lift` reads it
+back and prints it, for a person to read:
 
 ```
-snes_lift <directory> <image> [-o <file.snagir>] [--file <name>]
+snes_lift <directory> [-o <file.snagir>] [--file <name>]
 ```
 
-It reads the directory's `project.manifest`, traces the image as the manifest
-directs, lifts every 65816 region, and writes the summary and then the program
-file. `--file` limits both to one region's file and `-o` writes the file there,
-standard output keeping the summary. A whole cartridge's file is large — ten
-times the image, since every instruction is written with each of its effects.
-On the `mixed` cartridge from [`tools/examples/`](../tools/examples/README.md),
-after `snes_disasm mixed.smc -o mixed --no-run --no-sound`:
+It reads the directory's `program.snagir` and writes the summary
+`countProgram` gives, then the program file written again from what it read.
+`--file` limits both to the regions written to one source file and `-o`
+writes the file there, standard output keeping the summary. It reads no image
+and runs nothing; a file the reader refuses is named with its line, and the
+exit status is 2. A whole cartridge's file is large — ten times the image,
+since every instruction is written with each of its effects. On the `mixed`
+cartridge from [`tools/examples/`](../tools/examples/README.md), after
+`snes_disasm mixed.smc -o mixed --no-run --no-sound`:
 
 ```
-snes_lift mixed mixed.smc
+snes_lift mixed
 regions 1
 code lines 34
 nodes 34
@@ -637,7 +645,9 @@ reached reads zero, and is known to rest on the vector proof alone.
 snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>]
 ```
 
-It traces and lifts the tree as `snes_lift` does, runs the machine for
+It reads the directory's `program.snagir` as `snes_lift` does — the image
+must be the one the file is a program of, and one of another size is refused
+before anything runs — runs the machine for
 `--seconds` of the master clock (sixty by default), replays `--input` into the
 controller ports exactly as `snes_disasm --input` does — so the run checked is
 the run that produced the tree — or finds the run named for the image under
@@ -840,6 +850,7 @@ would mean the layers leak into each other.
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
 | `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed` | The program file written from a program and what it does not carry, and read back to both; the grammar is [snagir.md](snagir.md). |
 | `renderEffect(effect)`, `renderNode(node)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the file carries them. |
+| `selectFile(parsed, file)`, `countProgram(parsed)`, `ProgramCounts` | A parsed file cut to one source file's regions and their nodes; what a parsed file carries, counted. |
 | `opcodeOf(instruction)`, `encode(instruction)` | The opcode the mnemonic and mode name; the bytes the instruction assembles to. |
 | `renderInstruction(instruction, names)`, `SourceNames` | The instruction as source, with a label, a register name and an annotation in place of addresses where given. |
 | `renderCost(node)`, `renderLine(node, names, bytesWidth)` | The cost as a listing prints it; one line of source with its comment. |
@@ -858,7 +869,8 @@ The differential is `snaggletooth_ir_differential`,
 header `ir/ir_differential.h`, which links the representation and the
 cartridge tools for the recorded run it replays; the cartridge tools link the
 representation for the bank files they render, and the shadow for the run. The
-commands are `snes_lift` and `snes_differential`.
+commands are `snes_lift`, which links `snaggletooth_ir` alone and so reads a
+program file and cannot trace a cartridge, and `snes_differential`.
 
 ## Stability
 

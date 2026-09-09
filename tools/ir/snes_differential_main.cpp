@@ -4,11 +4,12 @@
 //   snes_differential <directory> <image> -o <report> [--seconds N]
 //                                                     [--input <script> | --input-dir <directory>]
 //
-// Reads the directory's `project.manifest`, traces the image as the manifest
-// directs — its entries, its file split, the targets earlier runs saw — lifts
-// every 65816 region into the intermediate representation, and runs the machine
-// for `--seconds` of the master clock (sixty by default) with the interpreter
-// beside it, held to every access, every register and every cycle. `--input`
+// Reads the directory's `program.snagir` — the program `snes_disasm` wrote, in
+// the grammar `docs/snagir.md` gives — and runs the machine on the image for
+// `--seconds` of the master clock (sixty by default) with the interpreter
+// beside it, held to every access, every register and every cycle. The image
+// must be the one the file is a program of: its size is checked against the
+// file's own `image` line before anything runs. `--input`
 // replays a recorded run into the controller ports, exactly as `snes_disasm
 // --input` does, so the same run is checked that produced the tree;
 // `--input-dir` finds the run named for the image under that directory, as
@@ -23,12 +24,12 @@
 // places them). One line on standard output sums it up.
 //
 // The exit status is 0 when the run diverged nowhere, 1 when it did, 2 on a bad
-// argument or an unreadable input.
+// argument, an unreadable input, or a program file the reader refuses, which is
+// named with its line.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -41,11 +42,10 @@
 #include <string>
 #include <vector>
 
-#include "ir/cpu65816_lift.h"
 #include "ir/ir.h"
 #include "ir/ir_differential.h"
+#include "ir/ir_text.h"
 #include "rom/input_script.h"
-#include "rom/rom_disasm.h"
 #include "snaggletooth/snes/cartridge.h"
 
 namespace {
@@ -67,30 +67,6 @@ std::string hex(std::uint32_t v, int width) {
   char b[16];
   std::snprintf(b, sizeof b, "$%0*X", width, v);
   return b;
-}
-
-// The tree's 65816 regions lifted into one program, the nodes in address order.
-snaggletooth::ir::Program liftTree(const snaggletooth::disasm::CartridgeDisassembly& d,
-                                   std::size_t& codeLines) {
-  snaggletooth::ir::Program program;
-  for (const snaggletooth::disasm::RegionListing& region : d.regions) {
-    std::vector<std::uint8_t> image;
-    for (const snaggletooth::disasm::Line& line : region.listing.lines) {
-      const std::vector<std::uint8_t>& bytes = line.isCode ? line.instruction.bytes : line.data;
-      image.insert(image.end(), bytes.begin(), bytes.end());
-      if (line.isCode) ++codeLines;
-    }
-    snaggletooth::ir::Program one =
-        snaggletooth::ir::lift65816(region.listing, image, region.region.first);
-    program.nodes.insert(program.nodes.end(), one.nodes.begin(), one.nodes.end());
-    program.nmi = one.nmi;
-    program.irq = one.irq;
-  }
-  std::stable_sort(program.nodes.begin(), program.nodes.end(),
-                   [](const snaggletooth::ir::Node& a, const snaggletooth::ir::Node& b) {
-                     return a.instruction.address < b.instruction.address;
-                   });
-  return program;
 }
 
 }  // namespace
@@ -164,24 +140,29 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  // The tree's program, read from the file `snes_disasm` wrote; the image must
+  // be the one the file says it is a program of.
   bool ok = false;
-  const std::string manifestText =
-      readText((std::filesystem::path(directory) / "project.manifest").string(), ok);
+  const std::filesystem::path programPath = std::filesystem::path(directory) / "program.snagir";
+  const std::string programText = readText(programPath.string(), ok);
   if (!ok) {
-    std::cerr << "cannot open " << directory << "/project.manifest\n";
+    std::cerr << "cannot open " << programPath.string() << "\n";
     return 2;
   }
   std::string error;
-  const auto manifest = snaggletooth::disasm::parseManifest(manifestText, error);
-  if (!manifest) {
-    std::cerr << "project.manifest: " << error << "\n";
+  const std::optional<snaggletooth::ir::Parsed> parsed =
+      snaggletooth::ir::parseProgram(programText, error);
+  if (!parsed) {
+    std::cerr << programPath.string() << ": " << error << "\n";
     return 2;
   }
-  const std::string mismatch = snaggletooth::disasm::manifestMismatch(*manifest, rom);
-  if (!mismatch.empty()) {
-    std::cerr << mismatch << "\n";
+  if (parsed->file.imageBytes != rom.size()) {
+    std::cerr << programPath.string() << " is a program of an image of " << parsed->file.imageBytes
+              << " bytes; " << imagePath << " holds " << rom.size() << "\n";
     return 2;
   }
+  const snaggletooth::ir::Program& program = parsed->program;
+  const snaggletooth::ir::ProgramCounts counts = snaggletooth::ir::countProgram(*parsed);
 
   snaggletooth::disasm::InputScript input;
   if (!inputPath.empty()) {
@@ -197,22 +178,6 @@ int main(int argc, char** argv) {
     }
     input = *parsed;
   }
-
-  // The tree as the manifest directs it, traced without the machine run and
-  // without the sound capture: the entries and the reached targets are already
-  // in the manifest, and the sound program is the audio CPU's.
-  snaggletooth::disasm::CartridgeRequest request;
-  request.rom = rom;
-  request.entries = manifest->entries;
-  request.regions = manifest->regions;
-  request.reached = manifest->reached;
-  request.ran = manifest->ran;
-  request.captureSound = false;
-  request.observeRun = false;
-  const snaggletooth::disasm::CartridgeDisassembly d =
-      snaggletooth::disasm::disassembleCartridge(request);
-  std::size_t codeLines = 0;
-  const snaggletooth::ir::Program program = liftTree(d, codeLines);
 
   snaggletooth::ir::Replay replay;
   replay.rom = rom;
@@ -231,7 +196,7 @@ int main(int argc, char** argv) {
       std::cerr << "cannot write under " << outPath << "\n";
       return 2;
     }
-    f << "code lines " << codeLines << "\nnodes " << program.nodes.size()
+    f << "code lines " << counts.codeLines << "\nnodes " << counts.nodes
       << "\nmaster cycles run " << report.masterCycles
       << "\ninstructions checked " << report.instructions
       << "\nhardware interrupts checked " << report.interrupts

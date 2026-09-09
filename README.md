@@ -155,13 +155,13 @@ The public headers are under [`include/snaggletooth/`](include/snaggletooth); th
 ### Running the tools
 
 A cartridge into its program file and manifest, the source tree rendered from the program file,
-the tree proved against the image, and the program printed out:
+the tree proved against the image, and the program file printed back with a summary:
 
 ```
 snes_disasm game.sfc -o game
 snes_render game
 snes_verify game game.sfc
-snes_lift game game.sfc -o game.snagir
+snes_lift game
 ```
 
 `spc_render` and `rom_render` write what the audio unit plays, from a dump or from a cartridge,

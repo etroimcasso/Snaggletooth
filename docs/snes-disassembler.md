@@ -89,6 +89,7 @@ file and the manifest:
 ```
 $ snes_disasm cartridge.sfc -o cartridge
 2 files, 29 instructions, 2 entries, 0 stops
+program.snagir: 29 nodes
 65536 of 65536 bytes placed -> cartridge
 ```
 
@@ -134,7 +135,8 @@ applied. See [Stops, and getting past them](#stops-and-getting-past-them).
 
 The disassembler writes `program.snagir`, `project.manifest`, the lifted files
 and `apu/driver.asm`; the bank files are `snes_render`'s, written from the
-program file. Together:
+program file, which `snes_lift` prints back and `snes_differential` replays
+the run beside ([ir.md §Reading a program](ir.md#reading-a-program)). Together:
 
 ```
 cartridge/
@@ -395,6 +397,7 @@ A cartridge that dispatches through a table:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 12 instructions, 1 entries, 2 stops
+program.snagir: 12 nodes
 ```
 
 ```
@@ -438,11 +441,13 @@ bytes:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 5 instructions, 2 entries, 0 stops
+program.snagir: 5 nodes
 $ cat play.txt
 frame 5 1 start
 frame 9 1 a
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1 --input play.txt
 1 files, 11 instructions, 2 entries, 0 stops
+program.snagir: 11 nodes
 ```
 
 ```
@@ -554,6 +559,7 @@ A cartridge that fills a channel from a pointer, run for one second:
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 143 instructions, 3 entries, 0 stops
+program.snagir: 143 nodes
 ```
 
 ```

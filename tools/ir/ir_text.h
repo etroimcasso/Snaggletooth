@@ -108,6 +108,30 @@ struct Parsed {
 // the order the grammar gives.
 [[nodiscard]] std::optional<Parsed> parseProgram(std::string_view text, std::string& error);
 
+// A parsed file cut to the regions written to one source file: those regions
+// with their warnings, labels and data runs, the nodes whose addresses they
+// hold, and the image line and the interrupt sequences as they were — what
+// `snes_lift --file` prints. Nothing when no region is written to `file`.
+[[nodiscard]] std::optional<Parsed> selectFile(const Parsed& parsed, std::string_view file);
+
+// What a reader counts over a parsed file, as `snes_lift` and
+// `snes_differential` report it: the regions; the code lines, one per address
+// a node stands at; the nodes, two where an address is read two ways; the nodes
+// whose width is a selection by the live flag; the nodes naming a hardware
+// register; the nodes lifted from patched bytes; and the effects.
+struct ProgramCounts {
+  std::size_t regions = 0;
+  std::size_t codeLines = 0;
+  std::size_t nodes = 0;
+  std::size_t liveWidth = 0;
+  std::size_t named = 0;
+  std::size_t patched = 0;
+  std::size_t effects = 0;
+  friend bool operator==(const ProgramCounts&, const ProgramCounts&) = default;
+};
+
+[[nodiscard]] ProgramCounts countProgram(const Parsed& parsed);
+
 // Whether two programs are the same program as the file carries one: every
 // field equal, except a width the mode does not know — the file writes `?`
 // for it, the node selects by the live flag, and no reader of the mode looks

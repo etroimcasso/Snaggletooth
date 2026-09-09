@@ -644,6 +644,102 @@ TEST(Text, WhitespaceAndCommentsCarryNoMeaning) {
   EXPECT_EQ(renderProgram(parsed->program, parsed->file), text);
 }
 
+// ---- what a reader takes from a file -------------------------------------------------
+
+// Two source files, the first holding two regions: what `selectFile` keeps of
+// each, and what it keeps of the file whatever it selects.
+Parsed twoFiles() {
+  ProgramFile file;
+  file.imageBytes = 65536;
+  file.map = "HiROM";
+  file.regions.push_back({.file = "bank_00.asm",
+                          .first = 0x008000u,
+                          .last = 0x0080FFu,
+                          .warnings = {"a warning of the first region"},
+                          .labels = {{0x008000u, "reset"}},
+                          .data = {{0x008003u, {0xFFu}}}});
+  file.regions.push_back({.file = "bank_01.asm",
+                          .first = 0x018000u,
+                          .last = 0x01FFFFu,
+                          .warnings = {},
+                          .labels = {{0x018000u, "sub_018000"}},
+                          .data = {}});
+  file.regions.push_back({.file = "bank_00.asm",
+                          .first = 0x00C000u,
+                          .last = 0x00FFFFu,
+                          .warnings = {},
+                          .labels = {},
+                          .data = {{0x00C001u, {0x00u}}}});
+  const Cpu65816Mode native = Cpu65816Mode::native(true, true);
+  Parsed parsed;
+  parsed.program = programOf({
+      nodeOf({0x4Cu, 0x03u, 0x80u}, 0x008000u, native),
+      nodeOf({0x60u}, 0x018000u, native),
+      nodeOf({0xEAu}, 0x00C000u, native),
+  });
+  parsed.file = file;
+  return parsed;
+}
+
+TEST(Text, OneSourceFileIsSelectedWithItsRegionsAndTheirNodes) {
+  const Parsed all = twoFiles();
+  const std::optional<Parsed> first = selectFile(all, "bank_00.asm");
+  ASSERT_TRUE(first.has_value());
+  ASSERT_EQ(first->file.regions.size(), 2u);
+  EXPECT_EQ(first->file.regions[0], all.file.regions[0]);
+  EXPECT_EQ(first->file.regions[1], all.file.regions[2]);
+  ASSERT_EQ(first->program.nodes.size(), 2u);
+  EXPECT_EQ(first->program.nodes[0], all.program.nodes[0]);
+  EXPECT_EQ(first->program.nodes[1], all.program.nodes[2]);
+  EXPECT_EQ(first->file.imageBytes, 65536u);
+  EXPECT_EQ(first->file.map, "HiROM");
+  EXPECT_EQ(first->program.nmi, all.program.nmi);
+  EXPECT_EQ(first->program.irq, all.program.irq);
+  roundTrip(first->program, first->file, "the first file selected");
+
+  const std::optional<Parsed> second = selectFile(all, "bank_01.asm");
+  ASSERT_TRUE(second.has_value());
+  ASSERT_EQ(second->file.regions.size(), 1u);
+  EXPECT_EQ(second->file.regions[0], all.file.regions[1]);
+  ASSERT_EQ(second->program.nodes.size(), 1u);
+  EXPECT_EQ(second->program.nodes[0], all.program.nodes[1]);
+
+  EXPECT_FALSE(selectFile(all, "bank_02.asm").has_value());
+  EXPECT_FALSE(selectFile(all, "").has_value());
+}
+
+TEST(Text, TheCountsAreOnePerAddressAndOnePerNode) {
+  const Cpu65816Mode native = Cpu65816Mode::native(true, true);
+  const Node first = nodeOf({0xA9u, 0x01u}, 0x008000u, native);
+  const Node second = nodeOf({0xA9u, 0x01u, 0x00u}, 0x008000u, Cpu65816Mode::native(false, true));
+  const Node named = nodeOf({0x8Fu, 0x00u, 0x21u, 0x00u}, 0x008003u, native);  // STA $00:2100
+  const Node patched = nodeOf({0xEAu}, 0x008007u, native, true);
+  Cpu65816Mode half = native;
+  half.indexKnown = false;
+  const Node live = nodeOf({0xEAu}, 0x008008u, half);  // one width known, one selected live
+  Parsed parsed;
+  parsed.program = programOf({first, second, named, patched, live});
+  parsed.file = bankZero();
+  parsed.file.regions.push_back({.file = "bank_01.asm",
+                                 .first = 0x018000u,
+                                 .last = 0x01FFFFu,
+                                 .warnings = {},
+                                 .labels = {},
+                                 .data = {}});
+  std::size_t effects = 0;
+  for (const Node& node : parsed.program.nodes) effects += node.effects.size();
+  const ProgramCounts expected = {.regions = 2,
+                                  .codeLines = 4,
+                                  .nodes = 5,
+                                  .liveWidth = 1,
+                                  .named = 1,
+                                  .patched = 1,
+                                  .effects = effects};
+  EXPECT_EQ(countProgram(parsed), expected);
+  EXPECT_GT(effects, 5u);
+  EXPECT_EQ(countProgram(Parsed{}), ProgramCounts{});
+}
+
 // ---- the round trip over the example cartridges ----------------------------------------
 
 TEST(Text, WritingWhatWasReadGivesTheSameBytes) {
