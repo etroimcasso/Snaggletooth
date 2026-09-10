@@ -666,11 +666,11 @@ class Reader {
       const Token* name = word("the register name");
       if (name == nullptr) return false;
       std::string_view tableName;
-      std::uint32_t at = instruction.operand;
+      std::uint32_t checked = instruction.operand;
       if (sound()) {
         const std::optional<std::uint16_t> reached = spc700OperandAddress(instruction, *shape);
         if (reached) {
-          at = *reached;
+          checked = *reached;
           tableName = disasm::registerName(*reached);
         }
       } else {
@@ -679,7 +679,7 @@ class Reader {
         if (longForm) tableName = disasm::cpu65816RegisterName(instruction.operand);
       }
       if (tableName.empty() || tableName != name->text) {
-        return failAt(name->line, quoted(name->text) + " is not the register at " + hex(at));
+        return failAt(name->line, quoted(name->text) + " is not the register at " + hex(checked));
       }
       node.registerName = tableName;
     }
