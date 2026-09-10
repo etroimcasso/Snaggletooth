@@ -65,8 +65,9 @@ It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
 and steps it, recording the destination of every indirect jump or call the run
 took, and the trace starts from each — see the
 [Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)
-section — lifting every instruction the CPU executes from the bytes it fetched
-and holding it to the machine through the representation's lockstep, so that
+section — lifting every instruction the CPU executes from the bytes it fetched,
+and every instruction the sound CPU executes from the bytes at its program
+counter, and holding each to the machine through the representation's lockstep, so that
 every place the CPU arrived without an instruction naming it is a `ran` line
 the trace starts from too, and the direct register and the data bank the run
 saw at every site are `seen` lines beside what the paths prove — see

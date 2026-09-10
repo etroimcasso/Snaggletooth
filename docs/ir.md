@@ -759,7 +759,10 @@ address the tree places the instruction — the one home of the image bytes the
 CPU fetched, under the cartridge's map — so a program that runs through a
 mirror of its bank, `$80:8010` for bytes the tree writes at `$00:8010`, is
 checked against those nodes, and every site the report names is the address a
-reader finds in the tree. An address outside the image is its own.
+reader finds in the tree. An address outside the image is its own. Its
+`spc700` nodes are the sound program's, and `Program::findSpc700` answers the
+node at the sound CPU's program counter at every boundary the audio machine
+crosses; a program with no sound nodes replays the main CPU alone.
 
 ### What is checked
 
@@ -778,6 +781,22 @@ to compute every value from the effects. A run with no divergence says the
 effects carry the instruction's whole meaning, for every instruction the run
 took.
 
+The sound CPU is held the same way, through the audio machine's
+[observer](apu-machine.md#the-observer). It reports every access the sound CPU
+makes and every instruction boundary it crosses; at each boundary the node at
+the program counter is looked up among the sound program's nodes, the
+instruction's own fetches are set apart from the accesses since the boundary
+before — the first read at each of its addresses in order, which is how the
+core fetches them — and the sound interpreter runs the node through a bus that
+answers each read with what the machine read and checks every access's
+address, direction and written value in order. After it the registers, the
+status word and the run state are checked, and the cycles against the
+boundary's count. The audio bus has no cycle kinds, so an access's declared
+purpose is not checked there. The node's bytes are held to the bytes the
+machine fetched too: a node of other bytes than the machine ran is another
+program than the file's, and is counted rather than checked against the
+wrong node.
+
 ### What is an input
 
 Three things reach the interpreter from the machine rather than from a node. A
@@ -793,20 +812,32 @@ never held against the interpreter: they are the engines', not the program's.
 An instruction at an address the program has no node for — code the trace never
 reached, code copied into RAM — is counted as unlifted, the address recorded as
 the tree places it, and the interpreter realigned to the machine's registers,
-since there is nothing to run.
+since there is nothing to run. The sound CPU has its own such count: the
+upload stub it runs before the program arrives is in no tree, so its
+instructions are unlifted on every cartridge, at addresses in the boot-ROM
+window. A halted sound CPU's idle cycles are not checked; nothing but a reset
+ends its halt.
 
 The check itself — the observer that collects a step, the bus that answers the
 interpreter with what the machine read and holds every access to it, and the
-register and cycle checks after — is `ir/ir_lockstep.h`, and the differential
-is one of two things that drive it. The other is the cartridge disassembler's
+register and cycle checks after — is `ir/ir_lockstep.h`, for both CPUs, and
+the differential is one of two things that drive it. The other is the
+cartridge disassembler's
 [run on the machine](snes-disassembler.md#where-the-cpu-arrived-and-what-it-saw),
 which needs no program: it lifts every instruction the CPU executes from the
-bytes the CPU fetched, wherever they lay, and holds that node to the same
-check, so a node the run computes a fact from is a node the machine agreed
-with. Both name a disagreement the same way, as a `Divergence`. After a divergence the interpreter is realigned the same way, so the run
+bytes the CPU fetched, wherever they lay, and every instruction the sound CPU
+executes from the bytes at its program counter, and holds each node to the
+same check, so a node the run computes a fact from is a node the machine
+agreed with. Both name a disagreement the same way, as a `Divergence`, whose
+`processor` says which CPU it is on. After a divergence the interpreter is realigned the same way, so the run
 goes on from the machine's truth rather than compounding one disagreement into
 every step after it; `Replay::divergenceLimit` ends the run once that many have
-been recorded. `Replay::progress`, a `ProgressSink` from `rom/progress.h`, is
+been recorded, on either CPU together. The run also ends once the main CPU has
+stopped, unless the program holds sound nodes and the sound CPU is still
+running — a sound program started just before the main CPU stops is still on
+its way through the stub, and is checked to its end; a program with no sound
+nodes leaves the sound CPU looping in the stub with nothing to check.
+`Replay::progress`, a `ProgressSink` from `rom/progress.h`, is
 told `replaying the run` with the master cycles spent against `masterCycles`
 every tenth of a second when set, and once more as the run ends — short of the
 budget when it ended early; the library prints nothing.
@@ -830,6 +861,14 @@ read-modify-write under emulation, a block move re-entered, a page-crossing
 cycle charged, a wait released. Every construct is present, so one the run never
 reached reads zero, and is known to rest on the vector proof alone.
 
+The sound CPU's side is the `spc700` fields: the nodes run and checked and the
+cycles checked, the instructions at an audio address with no node and those
+addresses, the instructions whose node's bytes are not what the machine
+fetched and those addresses, and `spc700Forms`, how many times each sound
+instruction form ran (`MOV A,dp`, the mnemonic and the form word). Its
+divergences are among `divergences` with the processor set and the site in the
+audio unit's space.
+
 `snes_differential` does all of it from a tree:
 
 ```
@@ -838,21 +877,28 @@ snes_differential <directory> <image> -o <report> [--seconds N] [--input <script
 
 It reads the directory's `program.snagir` as `snes_lift` does — the image
 must be the one the file is a program of, and one of another size is refused
-before anything runs — runs the machine for
+before anything runs — and its `apu.snagir` where the tree has one, runs the
+machine for
 `--seconds` of the master clock (sixty by default), replays `--input` into the
 controller ports exactly as `snes_disasm --input` does — so the run checked is
 the run that produced the tree — or finds the run named for the image under
 `--input-dir` as `snes_disasm --input-dir` does, and writes the report under `-o`:
-`summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt` and
-`unlifted.txt`. One line on standard output sums it up, and the exit status is
+`summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt`,
+`unlifted.txt` and `patched.txt`. The sound CPU's lines follow the main
+CPU's in `summary.txt`; a sound divergence names its site `apu $XXXX`, a
+sound form is listed as `apu MOV A,dp`, an unlifted audio address as `apu
+$XXXX`, and `patched.txt` holds the audio addresses where the bytes the sound
+CPU fetched are not the sound file's node's. One line on standard output sums
+it up, and the exit status is
 0 only when the run diverged nowhere. While it replays, standard error carries
 `replaying the run: 23.5 of 60.0 s`, refreshed in place on a terminal and one
 line per ten seconds in a log; `--quiet` turns it off. On the `mixed`
-cartridge, which stops on its own after three interrupts:
+cartridge, which stops on its own after three interrupts and uploads no sound
+program, so the sound CPU runs the upload stub alone:
 
 ```
 snes_differential mixed mixed.smc -o mixed/differential --seconds 0.1
-OK : 35228 instructions, 3 interrupts, 132147 CPU cycles, 0 held, 0 unlifted at 0 addresses, 29 forms, 34 of 57 constructs unexercised, stopped, 0 divergences
+OK : 35228 instructions, 3 interrupts, 132147 CPU cycles, 0 held, 0 unlifted at 0 addresses, 29 forms, 34 of 57 constructs unexercised, stopped, 0 divergences; sound: 0 instructions, 0 cycles, 16240 unlifted at 8 addresses, 0 with other bytes at 0 addresses, 0 forms, 0 divergences
 ```
 
 ```
@@ -869,6 +915,27 @@ waits released 0
 instructions with no node 0 at 0 addresses
 stopped yes
 divergences 0
+sound code lines 0
+sound nodes 0
+sound instructions checked 0
+sound CPU cycles checked 0
+sound instructions with no node 16240 at 8 addresses
+sound instructions with other bytes than the file's 0 at 0 addresses
+```
+
+The main CPU stops after its three interrupts, and the replay ends with it:
+the tree holds no sound program, and the sound CPU is looping in the stub,
+polling its port through eight addresses. The `uploading` cartridge sends a
+twenty-instruction program and starts it just before its own `STP`; the
+replay runs on until the sound program halts, and its summary ends:
+
+```
+sound code lines 20
+sound nodes 20
+sound instructions checked 20
+sound CPU cycles checked 48
+sound instructions with no node 573 at 29 addresses
+sound instructions with other bytes than the file's 0 at 0 addresses
 ```
 
 `constructs.txt` lists every construct with its count; the ones this cartridge
@@ -1040,8 +1107,9 @@ would mean the layers leak into each other.
 | `Provenance`, `Writer`, `Stream` | The shadow of a run: work RAM's origin, writer and invocation byte by byte, `originOf`, `writerOf`, `sourcesOf`; `called`, `returned`; the streams the CPU carried. |
 | `differential(program, replay)` | Replay a run on the machine beside the interpreter, held to every access, register and cycle. |
 | `Replay` | The cartridge, the master-cycle budget, the recorded run, the divergence limit, and the progress sink. |
-| `DifferentialReport`, `Divergence` | What was checked, counted and skipped; each disagreement with its step, node, effect and the two values; the form and construct histograms. |
-| `registersOf(state)` | A core state as the interpreter's registers. |
+| `DifferentialReport`, `Divergence` | What was checked, counted and skipped, on both CPUs; each disagreement with its step, processor, node, effect and the two values; the form and construct histograms, and the sound CPU's form histogram. |
+| `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the main CPU collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; a core state as the interpreter's registers. |
+| `Spc700Access`, `Spc700StepAccesses`, `splitSpc700Step(step, pc, length)`, `checkSpc700Node(…)` | One sound-CPU access as the audio machine reports it; a step's accesses with the instruction's own fetches set apart from its data; the sound interpreter run over the data and checked against the registers after and the cycles. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
 | `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed`, `Processor` | One chip's program file written from a program and what it does not carry — the chip among them — and read back to both; the grammar is [snagir.md](snagir.md). |
 | `renderEffect(effect)`, `renderNode(node, processor)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the files carry them, both node lists. |
@@ -1063,10 +1131,12 @@ so the headers are `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/spc700_lift.h`,
 It links the 65816 disassembler for that lift and the renderer, and the SPC700
 disassembler for the sound program's lift. The shadow is `snaggletooth_ir_provenance`, header
 `ir/ir_provenance.h`, which links the representation and the cartridge map.
+The lockstep is `snaggletooth_ir_lockstep`, header `ir/ir_lockstep.h`, which
+links the representation and the machine for the two observers it reads.
 The differential is `snaggletooth_ir_differential`,
-header `ir/ir_differential.h`, which links the representation and the
+header `ir/ir_differential.h`, which links the lockstep and the
 cartridge tools for the recorded run it replays; the cartridge tools link the
-representation for the bank files they render, and the shadow for the run. The
+representation for the bank files they render, the lockstep for the run, and the shadow for the run. The
 commands are `snes_lift`, which links `snaggletooth_ir` alone and so reads a
 program file and cannot trace a cartridge, and `snes_differential`.
 
@@ -1094,13 +1164,17 @@ a table whose index the bytes bound; it follows the registers by the byte and
 does not follow the carry or the decimal flag, so an `ADC` result is never
 known. The sound CPU's lift covers every SPC700 opcode, and its interpreter is
 held to that core at unit grain by the SPC700 vector suite and by a case per
-construct against the core over a flat bus; the cartridge disassembler lifts
-the sound program it captures into `apu.snagir`, and the sound file is
-rendered from that file through the renderer, byte for byte what the listing
-prints. The sound program is not yet replayed beside the machine, and the
-dataflow, the shadow and the facts are the main CPU's. The replay reports an
-instruction at an address the tree has no node for, but does not trace from
-it; those addresses are the person's to answer with entries.
+construct against the core over a flat bus, and at cartridge grain by the
+replay beside the audio machine, which checks every sound instruction a run
+takes, and by the cartridge disassembler's own run, which lifts every
+instruction the sound CPU executes and holds it to the machine; the cartridge
+disassembler lifts the sound program it captures into `apu.snagir`, and the
+sound file is rendered from that file through the renderer, byte for byte
+what the listing prints. The dataflow, the shadow and the facts are the main
+CPU's; nothing is yet computed from a sound node beyond the check. The replay
+reports an instruction at an address the tree has no node for, but does not
+trace from it; those addresses are the person's to answer with entries, and
+on the sound CPU they include the upload stub on every cartridge.
 
 ## See also
 
@@ -1118,7 +1192,8 @@ it; those addresses are the person's to answer with entries.
   file written back from them.
 - [65816 assembly language](65816-assembly.md) — the dialect the renderer
   writes, and the directives `SourceMode` places.
-- [The SNES machine](snes-machine.md#the-bus-observer) — the observer the replay
-  reads the machine's accesses through.
+- [The SNES machine](snes-machine.md#the-bus-observer) and
+  [the APU machine](apu-machine.md#the-observer) — the two observers the
+  replay reads the machine's accesses through.
 - [The example cartridges](../tools/examples/README.md) — the cartridges this
   page's output comes from, and the ones the replay is tested on.

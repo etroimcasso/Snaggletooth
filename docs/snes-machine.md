@@ -523,9 +523,31 @@ The observer is the host's object, not part of the state: a snapshot does not ca
 leaves it in place, and it must outlive every step it is set for. `observer()` reads back what is
 set; the machine starts with none.
 
-The [intermediate representation](ir.md#running-beside-the-machine) is its first consumer: a run
-replayed instruction by instruction with an interpreter beside the core, held to every access the
-observer reports.
+The audio machine has an observer of its own, the [`ApuObserver`](apu-machine.md#the-observer), told
+every access the sound CPU makes and every instruction boundary it crosses. `setApuObserver` sets it
+on the audio machine inside the console, under the same terms — the host's object, not part of the
+state, none by default — and `apuObserver()` reads it back. Because the audio machine runs inside the
+CPU's cycles, its report arrives from within `step()` and `run()`, between the bus observer's
+accesses. `peekApu` answers what a fetch by the sound CPU at an address returns, without making one —
+the boot-ROM image while the window is mapped, the RAM byte otherwise — so a host can decode the
+instruction the sound CPU is about to run.
+
+```cpp
+struct AudioLog final : ApuObserver {
+  std::uint64_t instructions = 0;
+  void access(std::uint16_t, std::uint8_t, bool) override {}
+  void instruction(const Spc700State&, const Spc700State&, std::uint32_t) override { ++instructions; }
+};
+
+AudioLog audio;
+machine.setApuObserver(&audio);
+machine.run(21'477'272);      // one second: every instruction the sound CPU ran is counted
+machine.setApuObserver(nullptr);
+```
+
+The [intermediate representation](ir.md#running-beside-the-machine) is the first consumer of both:
+a run replayed instruction by instruction with an interpreter beside each core, held to every access
+the two observers report.
 
 ## Snapshot and restore
 
@@ -568,4 +590,5 @@ machine.restore(saved);   // back to the saved cycle, exactly
 
 - [The cartridge](snes-cartridge.md) — the header, the three maps, and where every address lands.
 - [The 65816 CPU core](65816-cpu.md) — the instruction set the machine runs.
-- [The APU machine](apu-machine.md) — the audio machine on the other side of the ports.
+- [The APU machine](apu-machine.md) — the audio machine on the other side of the ports, and its
+  own observer, which `setApuObserver` reaches.

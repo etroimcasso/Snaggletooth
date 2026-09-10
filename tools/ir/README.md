@@ -43,8 +43,9 @@ Everything lives in `snaggletooth::ir`.
 | `Interpreter` | Runs a 65816 node or an interrupt sequence over a `Bus` the host implements, and returns the cycles; tells its `Shadow`, if one is set, every move a value makes. |
 | `Spc700Interpreter` | Runs a sound-CPU node over the same `Bus` with the sound CPU's registers and rules, and returns the cycles. |
 | `Provenance`, `Origins`, `OriginSet`, `CarrySink` | The shadow that carries, beside every value, the image bytes it was computed from — interned interval sets, a mark for a register or the save — and keeps work RAM's origin, last writer and each invocation's reads as runs, the maximal stretches it read; `originOf`, `writerOf`, `sourcesOf` read it back, `streams()` is every sequence of stores the CPU made to a data register — from the image, with the run its carrier read as the file, or from a buffer in work RAM, told to the `CarrySink` byte by byte — each with where the port put its bytes, which the sink answers store by store and is told of as the stream closes. |
-| `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the machine collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; every disagreement is a `Divergence`. |
-| `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
+| `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the main CPU collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; every disagreement is a `Divergence`, which says which CPU it is on. |
+| `Spc700Access`, `splitSpc700Step(step, pc, length)`, `checkSpc700Node(…)` | One sound-CPU access as the audio machine's observer reports it; a step's accesses with the instruction's own fetches set apart; the sound interpreter run over the data and checked against the registers after and the cycles. |
+| `differential(program, replay)` | Replays a run on the machine beside both interpreters; a `DifferentialReport` of what was checked on each CPU and every `Divergence`. |
 | `Dataflow(program, entries, sightings, image, canonical)` | Runs the effects over every path from the entries; `before(address)` is what is proven there, `derived()` every table slot a bounded index selects. |
 | `evaluate(node, before, image)` | One node over a `State`: the state after and every access it can make. |
 | `renderProgram(program, file)`, `parseProgram(text, error)`, `Processor` | One chip's program file (`docs/snagir.md`) written from a program and what it does not carry — the chip among them — and read back to both. |
@@ -91,13 +92,15 @@ nodes 34
 snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
-Reads the directory's `program.snagir` the same way, refuses an image of
+Reads the directory's `program.snagir` the same way, and its `apu.snagir`
+where the tree has one, refuses an image of
 another size than the file's own `image` line, runs the machine for
 `--seconds` of the master clock (sixty by default) with the recorded run
 `--input` replayed into the controller ports — or the run named for the image
-under `--input-dir` — and holds the interpreter to every access, every
-register and every cycle the machine made. The report — `summary.txt`, `divergences.txt`,
-`forms.txt`, `constructs.txt`, `unlifted.txt` — lands under `-o`; one line sums
+under `--input-dir` — and holds each interpreter to every access, every
+register and every cycle its CPU made. The report — `summary.txt`, `divergences.txt`,
+`forms.txt`, `constructs.txt`, `unlifted.txt`, `patched.txt` — lands under `-o`, the sound CPU's
+lines after the main CPU's and marked `apu`; one line sums
 it up, and the exit status is 0 only when the run diverged nowhere. While it
 replays, standard error says how far it has come, `replaying the run: 23.5 of
 60.0 s`, refreshed in place on a terminal and one line per ten seconds in a
@@ -106,7 +109,7 @@ log; `--quiet` turns it off. The library reports through `Replay::progress`
 
 ```
 snes_differential mixed mixed.smc -o mixed/differential --seconds 0.1
-OK : 35228 instructions, 3 interrupts, 132147 CPU cycles, 0 held, 0 unlifted at 0 addresses, 29 forms, 34 of 57 constructs unexercised, stopped, 0 divergences
+OK : 35228 instructions, 3 interrupts, 132147 CPU cycles, 0 held, 0 unlifted at 0 addresses, 29 forms, 34 of 57 constructs unexercised, stopped, 0 divergences; sound: 0 instructions, 0 cycles, 16240 unlifted at 8 addresses, 0 with other bytes at 0 addresses, 0 forms, 0 divergences
 ```
 
 ## Using the library
@@ -136,10 +139,10 @@ the same table. The two interpreters' own translation units include none of
 them. `snes_lift` links this
 target alone, so it reads a program file and cannot trace a cartridge. The lockstep is its own
 target, `snaggletooth_ir_lockstep`, which links the representation and the
-machine, and two things link it: the differential, its own target
+machine for the two observers it reads, and two things link it: the differential, its own target
 `snaggletooth_ir_differential`, which links `snaggletooth_rom` as well for the
 recorded run it replays; and `snaggletooth_rom` itself, whose run on the
-machine lifts every executed instruction from its fetches and holds it to the
+machine lifts every executed instruction, on either CPU, and holds it to the
 same check — and which links the representation for the bank files it renders.
 The shadow is its own target too, `snaggletooth_ir_provenance`, which links the
 representation and the cartridge map and nothing else; `snaggletooth_rom` links

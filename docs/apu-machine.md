@@ -31,6 +31,7 @@ boot-ROM window*).
 - [Boot and reset](#boot-and-reset)
 - [Snapshot and restore](#snapshot-and-restore)
 - [Host RAM access](#host-ram-access)
+- [The observer](#the-observer)
 - [Gotchas](#gotchas)
 - [Where to look](#where-to-look)
 
@@ -272,6 +273,72 @@ apu.setPc(0x0200);                          // point the CPU at a loaded image
 These bypass the overlay — RAM is RAM from the host side, so `readRam($00F2)` returns the byte beneath
 DSPADDR, not the register the CPU would see there.
 
+`peek` is the other reading: what a fetch by the CPU at an address returns, without making one. It
+answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — the
+sixteen register bytes included, from the RAM beneath them, since no program is fetched from the
+overlay — and changes nothing, so a host can decode the instruction the CPU is about to run:
+
+```cpp
+apu.mapIplRom(boot);
+std::uint8_t opcode = apu.peek(0xFFC0);  // boot[0] while the window is mapped; the RAM byte once it is not
+```
+
+## The observer
+
+`state()` says what the machine holds after a step. An observer says what the sound CPU *did*: every
+access it made through the machine's bus, in order, as the value settled, and every instruction
+boundary the machine crossed, with the CPU's state on either side and the cycles between. A host
+that needs the order of an instruction's accesses, the value a register answered, or the exact cost
+of each instruction sets one; a host that needs none of that never pays for it — with no observer
+set, an access costs one check and a cycle one more, and the machine runs exactly as it does without
+the feature.
+
+```cpp
+#include "snaggletooth/apu/apu.h"
+using namespace snaggletooth;
+
+struct Log final : ApuObserver {
+  std::vector<std::uint16_t> reads;
+  std::uint32_t instructions = 0;
+  std::uint64_t cpuCycles = 0;
+  void access(std::uint16_t address, std::uint8_t, bool write) override {
+    if (!write) reads.push_back(address);
+  }
+  void instruction(const Spc700State&, const Spc700State&, std::uint32_t cycles) override {
+    ++instructions;      // one instruction, from the state before to the state after
+    cpuCycles += cycles;  // costing this many cycles
+  }
+};
+
+Log log;
+apu.setObserver(&log);
+apu.step();                 // the instruction's fetches and data accesses, then its boundary
+apu.setObserver(nullptr);
+```
+
+`access` is told every access the CPU makes: the instruction's own fetches like any other read, a
+read's value as the bus answered it — a register's value for an address in the overlay, the boot-ROM
+image for a read in the mapped window — and a write's as the CPU drove it. The DSP's own reads of RAM,
+the sample and echo fetches, are not the CPU's and are not reported.
+
+`instruction` is told each boundary the machine crosses: the state at the boundary before, the state
+at this one, and the cycles between, which is the whole cost of the instruction that ran however many
+`run()` calls it spanned — a budget that stops mid-instruction reports nothing until the instruction
+ends. A halted core sits on a boundary, so each of its idle cycles is reported as one, with no access
+between and the same halted state on both sides. The accesses of an instruction always come before
+its boundary.
+
+The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()`
+leaves it in place, and it must outlive every cycle it is set for. `observer()` reads back what is
+set; the machine starts with none. Set it at an instruction boundary — the state the machine holds
+when it is set is the `before` of the first boundary reported. Through the [SNES machine](snes-machine.md#the-bus-observer)
+the same observer is set with `setApuObserver`, and its report arrives from inside the console's
+own steps, since the audio machine runs inside the CPU's cycles.
+
+The [intermediate representation](ir.md#running-beside-the-machine) is its first consumer: the sound
+program replayed instruction by instruction with an interpreter beside the core, held to every
+access, every register and every cycle the observer reports.
+
 ## Gotchas
 
 - **The CPU's access is the last thing in its cycle.** Everything the machine clocks — the counter,
@@ -293,11 +360,17 @@ DSPADDR, not the register the CPU would see there.
   "ignored while `P` is set" rule, but the register's behavioral bits (clock scaling, the timer gate)
   are not modeled — no sound driver touches them, and the power-on `$0A` satisfies the state the
   timers document.
+- **An observer sees fetches too.** To keep only the data an instruction touched, drop the first
+  read at each of its addresses from its program counter on, in order — the core fetches them in that
+  order — and keep every other access: the byte after a one-byte instruction that the core reads
+  and throws away is data, not a fetch.
 
 ## Where to look
 
-- `include/snaggletooth/apu/apu.h` — the `ApuState`/`TimerState` value structs and the `Apu` class.
-- `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, and `reset()`.
-- `tests/apu/` — the overlay, port, timer and cycle-timing suites, each derived from the register
-  and low-level-timing documentation.
+- `include/snaggletooth/apu/apu.h` — the `ApuState`/`TimerState` value structs, the `Apu` class and
+  the `ApuObserver` interface.
+- `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, `reset()`,
+  `peek()` and the observer's boundary report.
+- `tests/apu/` — the overlay, port, timer, cycle-timing and observer suites, each derived from the
+  register and low-level-timing documentation.
 - [docs/spc700-cpu.md](spc700-cpu.md) — the CPU core the machine wraps.

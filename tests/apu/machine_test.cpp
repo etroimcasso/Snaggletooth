@@ -1,14 +1,20 @@
 // The APU machine: the $F0-$FF register overlay, DSPADDR/DSPDATA, the TEST
-// register, the seeded boot state, and whole-machine snapshot/restore.
+// register, the seeded boot state, whole-machine snapshot/restore, and the
+// observer that reports what the sound CPU did.
 //
 // Every assertion is derived from the SNESdev SPC700 register documentation (the
 // reverse-derived contract). The overlay is the SPC700's view, so the tests
 // drive the real interpreter through it: a short program is loaded into RAM and
-// stepped, and the resulting machine state is inspected.
+// stepped, and the resulting machine state is inspected. The observer's cases
+// hold its report to the accesses the core makes and the boundaries the machine
+// crosses, and hold the machine to running exactly the same with none set.
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -17,8 +23,12 @@
 namespace {
 
 using snaggletooth::Apu;
+using snaggletooth::ApuObserver;
 using snaggletooth::ApuState;
+using snaggletooth::kIplWindowBytes;
 using snaggletooth::RunState;
+using snaggletooth::Spc700State;
+using snaggletooth::StereoFrame;
 
 // Loads `code` at $0200, points the CPU there, and runs `instructions` of it.
 Apu run(std::initializer_list<std::uint8_t> code, int instructions) {
@@ -274,6 +284,256 @@ TEST(ApuHost, LoadRamCopiesABlock) {
   EXPECT_EQ(apu.readRam(0x0400), 0xE8);
   EXPECT_EQ(apu.readRam(0x0401), 0x12);
   EXPECT_EQ(apu.readRam(0x0402), 0x00);
+}
+
+// ── The observer ────────────────────────────────────────────────────────────
+
+// Everything the machine reports, in order: an access with its address, value
+// and direction, or a boundary with the state on either side and the cycles.
+struct Report {
+  bool boundary = false;
+  std::uint16_t address = 0;
+  std::uint8_t value = 0;
+  bool write = false;
+  Spc700State before{};
+  Spc700State after{};
+  std::uint32_t cycles = 0;
+};
+
+struct Recorder final : ApuObserver {
+  std::vector<Report> reports;
+  void access(std::uint16_t address, std::uint8_t value, bool write) override {
+    Report r;
+    r.address = address;
+    r.value = value;
+    r.write = write;
+    reports.push_back(r);
+  }
+  void instruction(const Spc700State& before, const Spc700State& after,
+                   std::uint32_t cycles) override {
+    Report r;
+    r.boundary = true;
+    r.before = before;
+    r.after = after;
+    r.cycles = cycles;
+    reports.push_back(r);
+  }
+  [[nodiscard]] std::vector<Report> accesses() const {
+    std::vector<Report> out;
+    for (const Report& r : reports) {
+      if (!r.boundary) out.push_back(r);
+    }
+    return out;
+  }
+  [[nodiscard]] std::vector<Report> boundaries() const {
+    std::vector<Report> out;
+    for (const Report& r : reports) {
+      if (r.boundary) out.push_back(r);
+    }
+    return out;
+  }
+};
+
+// A machine with `code` at $0200 and the CPU pointed there, nothing run yet.
+Apu loaded(std::initializer_list<std::uint8_t> code) {
+  Apu apu;
+  std::uint16_t addr = 0x0200;
+  for (std::uint8_t byte : code) apu.writeRam(addr++, byte);
+  apu.setPc(0x0200);
+  return apu;
+}
+
+TEST(ApuObserver, NoneIsSetAtPowerOn) {
+  Apu apu;
+  EXPECT_EQ(apu.observer(), nullptr);
+}
+
+TEST(ApuObserver, EveryAccessIsReportedAsItSettles) {
+  // MOV $F2,#$55 fetches its three bytes, reads its destination — the DSPADDR
+  // register, still $00 — and writes it; MOV A,$F2 then reads the register,
+  // whose settled value is what the report carries, not the RAM beneath.
+  Apu apu = loaded({0x8F, 0x55, 0xF2,   // MOV $F2,#$55
+                    0xE4, 0xF2});       // MOV A,$F2
+  Recorder rec;
+  apu.setObserver(&rec);
+  apu.step();
+  const std::vector<Report> first = rec.accesses();
+  ASSERT_GE(first.size(), 4u);
+  EXPECT_EQ(first[0].address, 0x0200u);
+  EXPECT_EQ(first[0].value, 0x8Fu);
+  EXPECT_FALSE(first[0].write);
+  EXPECT_EQ(first[1].address, 0x0201u);
+  EXPECT_EQ(first[1].value, 0x55u);
+  EXPECT_EQ(first[2].address, 0x0202u);
+  EXPECT_EQ(first[2].value, 0xF2u);
+  const Report& store = first.back();
+  EXPECT_EQ(store.address, 0x00F2u);
+  EXPECT_EQ(store.value, 0x55u);
+  EXPECT_TRUE(store.write);
+  const std::size_t readsOfRegister = static_cast<std::size_t>(
+      std::count_if(first.begin(), first.end(),
+                    [](const Report& r) { return r.address == 0x00F2u && !r.write; }));
+  EXPECT_EQ(readsOfRegister, 1u) << "the read a store makes of its destination before writing";
+
+  rec.reports.clear();
+  apu.writeRam(0x00F2, 0x99);  // the RAM beneath disagrees with the register
+  apu.step();
+  const std::vector<Report> second = rec.accesses();
+  ASSERT_EQ(second.size(), 3u);
+  EXPECT_EQ(second[0].address, 0x0203u);
+  EXPECT_EQ(second[0].value, 0xE4u);
+  EXPECT_EQ(second[1].address, 0x0204u);
+  EXPECT_EQ(second[1].value, 0xF2u);
+  EXPECT_EQ(second[2].address, 0x00F2u);
+  EXPECT_EQ(second[2].value, 0x55u) << "the register's value, as the CPU read it";
+  EXPECT_FALSE(second[2].write);
+}
+
+TEST(ApuObserver, EveryBoundaryIsReportedWithTheStateOnEitherSideAndTheCycles) {
+  Apu apu = loaded({0x8F, 0x55, 0xF2,   // MOV $F2,#$55
+                    0xE4, 0xF2});       // MOV A,$F2
+  Recorder rec;
+  apu.setObserver(&rec);
+  const std::uint32_t first = apu.step();
+  const std::uint32_t second = apu.step();
+  const std::vector<Report> boundaries = rec.boundaries();
+  ASSERT_EQ(boundaries.size(), 2u);
+  EXPECT_EQ(boundaries[0].before.pc, 0x0200u);
+  EXPECT_EQ(boundaries[0].after.pc, 0x0203u);
+  EXPECT_EQ(boundaries[0].cycles, first);
+  EXPECT_EQ(boundaries[1].before.pc, 0x0203u);
+  EXPECT_EQ(boundaries[1].after.pc, 0x0205u);
+  EXPECT_EQ(boundaries[1].after.a, 0x55u);
+  EXPECT_EQ(boundaries[1].cycles, second);
+  // The accesses of an instruction come before its boundary.
+  EXPECT_FALSE(rec.reports.front().boundary);
+  EXPECT_TRUE(rec.reports.back().boundary);
+}
+
+TEST(ApuObserver, AnInstructionSplitAcrossRunsIsOneBoundaryWithItsWholeCost) {
+  Apu apu = loaded({0x8F, 0x55, 0xF2});  // MOV $F2,#$55: five cycles
+  Recorder rec;
+  apu.setObserver(&rec);
+  apu.run(2);
+  EXPECT_TRUE(rec.boundaries().empty()) << "mid-instruction is no boundary";
+  apu.run(3);
+  const std::vector<Report> boundaries = rec.boundaries();
+  ASSERT_EQ(boundaries.size(), 1u);
+  EXPECT_EQ(boundaries[0].before.pc, 0x0200u);
+  EXPECT_EQ(boundaries[0].after.pc, 0x0203u);
+  EXPECT_EQ(boundaries[0].cycles, 5u);
+}
+
+TEST(ApuObserver, AHaltedCoreReportsIdleBoundariesWithNoAccessBetween) {
+  Apu apu = loaded({0xFF});  // STOP
+  Recorder rec;
+  apu.setObserver(&rec);
+  apu.step();
+  ASSERT_EQ(rec.boundaries().size(), 1u);
+  EXPECT_EQ(rec.boundaries()[0].after.run, RunState::Stopped);
+  rec.reports.clear();
+  EXPECT_EQ(apu.step(), 2u);
+  ASSERT_EQ(rec.reports.size(), 2u);
+  for (const Report& r : rec.reports) {
+    EXPECT_TRUE(r.boundary);
+    EXPECT_EQ(r.cycles, 1u);
+    EXPECT_EQ(r.before.run, RunState::Stopped);
+    EXPECT_EQ(r.after.run, RunState::Stopped);
+    EXPECT_EQ(r.before.pc, r.after.pc);
+  }
+}
+
+TEST(ApuObserver, RunsIdenticallyWithAndWithoutOne) {
+  // Timers enabled, the amplifier unmuted, a voice keyed on, then a loop: the
+  // clocked events and the output are the same with an observer reporting
+  // every cycle and with none.
+  const std::initializer_list<std::uint8_t> program = {
+      0x8F, 0x07, 0xF1,   // MOV $F1,#$07   timers on
+      0x8F, 0x10, 0xFA,   // MOV $FA,#$10   T0 target
+      0x8F, 0x6C, 0xF2,   // MOV $F2,#$6C   FLG
+      0x8F, 0x00, 0xF3,   // MOV $F3,#$00   unmute
+      0x8F, 0x4C, 0xF2,   // MOV $F2,#$4C   KON
+      0x8F, 0x01, 0xF3,   // MOV $F3,#$01   voice 0
+      0xE4, 0xFD,         // MOV A,$FD      T0OUT
+      0x2F, 0xFC,         // BRA back to the read
+  };
+  Apu watched = loaded(program);
+  Apu alone = loaded(program);
+  Recorder rec;
+  watched.setObserver(&rec);
+  watched.run(20'000);
+  alone.run(20'000);
+  EXPECT_FALSE(rec.reports.empty());
+  const ApuState& a = watched.state();
+  const ApuState& b = alone.state();
+  EXPECT_EQ(a.cpu.pc, b.cpu.pc);
+  EXPECT_EQ(a.cpu.a, b.cpu.a);
+  EXPECT_EQ(a.cpu.psw, b.cpu.psw);
+  EXPECT_EQ(a.cpu.tcu, b.cpu.tcu);
+  EXPECT_EQ(a.divider, b.divider);
+  EXPECT_EQ(a.control, b.control);
+  EXPECT_EQ(a.dspAddr, b.dspAddr);
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(a.timers[i].stage2, b.timers[i].stage2);
+    EXPECT_EQ(a.timers[i].stage3, b.timers[i].stage3);
+  }
+  EXPECT_TRUE(std::equal(a.ram.begin(), a.ram.end(), b.ram.begin()));
+  for (std::size_t i = 0; i < 128; ++i) EXPECT_EQ(a.dsp[i], b.dsp[i]) << i;
+  const std::vector<StereoFrame> framesA = watched.takeFrames();
+  const std::vector<StereoFrame> framesB = alone.takeFrames();
+  EXPECT_EQ(framesA.size(), 20'000u / 32u);
+  EXPECT_EQ(framesA, framesB);
+}
+
+TEST(ApuObserver, PeekAnswersWhatAFetchWouldReturnAndChangesNothing) {
+  Apu apu = loaded({0x8F, 0x30, 0xF1});  // MOV $F1,#$30: CONTROL bit 7 off
+  EXPECT_EQ(apu.peek(0x0200), 0x8Fu);
+  std::array<std::uint8_t, kIplWindowBytes> image{};
+  for (std::size_t i = 0; i < image.size(); ++i) image[i] = static_cast<std::uint8_t>(0xC0u + i);
+  apu.mapIplRom(image);
+  EXPECT_EQ(apu.state().control & 0x80u, 0x80u) << "power-on CONTROL maps the window";
+  EXPECT_EQ(apu.peek(0xFFC0), 0xC0u) << "the image, as a fetch would read it";
+  EXPECT_EQ(apu.peek(0xFFFF), 0xFFu);
+  EXPECT_EQ(apu.readRam(0xFFC0), 0x00u) << "the RAM beneath, as the host reads it";
+  apu.step();  // the bit clears
+  EXPECT_EQ(apu.peek(0xFFC0), 0x00u) << "the RAM beneath, once the window is unmapped";
+  // The overlay is answered from the RAM beneath: a program is not fetched
+  // from the registers, and a peek there moves no register — T0OUT keeps its
+  // power-on $F where a CPU read would have cleared it.
+  apu.writePort(0, 0x77);
+  EXPECT_EQ(apu.peek(0x00F4), 0x00u);
+  EXPECT_EQ(apu.state().inputPorts[0], 0x77u);
+  EXPECT_EQ(apu.peek(0x00FD), 0x00u);
+  EXPECT_EQ(apu.state().timers[0].stage3, 0x0Fu);
+}
+
+TEST(ApuObserver, IsNotPartOfTheStateSoRestoreLeavesItInPlace) {
+  Apu apu = loaded({0xE8, 0x40,         // MOV A,#$40
+                    0xE8, 0x41});       // MOV A,#$41
+  Recorder rec;
+  apu.setObserver(&rec);
+  apu.step();
+  const ApuState snap = apu.state();
+  apu.step();
+  apu.restore(snap);
+  EXPECT_EQ(apu.observer(), &rec);
+  rec.reports.clear();
+  apu.step();
+  ASSERT_EQ(rec.boundaries().size(), 1u);
+  EXPECT_EQ(rec.boundaries()[0].before.pc, snap.cpu.pc) << "the restored state is the before";
+  EXPECT_EQ(rec.boundaries()[0].cycles, 2u);
+}
+
+TEST(ApuObserver, ClearingItStopsTheReport) {
+  Apu apu = loaded({0xE8, 0x40, 0xE8, 0x41});
+  Recorder rec;
+  apu.setObserver(&rec);
+  apu.step();
+  apu.setObserver(nullptr);
+  const std::size_t reported = rec.reports.size();
+  apu.step();
+  EXPECT_EQ(rec.reports.size(), reported);
+  EXPECT_EQ(apu.observer(), nullptr);
 }
 
 }  // namespace

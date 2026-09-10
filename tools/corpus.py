@@ -4,6 +4,7 @@ image and a verdict.
 
     corpus.py <images> <output> --build <build-dir> [--no-run] [--seconds N]
               [--input-dir <scripts>] [--no-differential] [--facts] [--routines]
+              [--jobs N]
 
 For every `.smc` or `.sfc` under <images>, in name order, four commands run and
 nothing else happens: `snes_disasm` writes what the disassembly found under
@@ -18,7 +19,9 @@ under <output>/<name>/differential/. `--input-dir` is handed to the two commands
 that run the cartridge; each finds the script named for the image itself.
 `--no-run` skips the machine run in the disassembler (the trace alone takes
 seconds; the run takes about as long as it emulates), `--seconds` sets both the
-run's and the replay's length (sixty by default).
+run's and the replay's length (sixty by default). `--jobs` runs that many
+images at once, each image's four commands still one after another; the lines
+and the aggregates come out in name order whatever finished first.
 
 `--facts` and `--routines` add the corpus-wide aggregates the manifests carry:
 every hardware access by class and by register, every transfer the code set up
@@ -39,6 +42,7 @@ script creates nothing itself and writes nothing anywhere but under <output>.
 """
 import argparse
 import collections
+import concurrent.futures
 import pathlib
 import subprocess
 import sys
@@ -148,6 +152,43 @@ def routines(tree):
     return out
 
 
+def runImage(args, rom):
+    """The four commands over one image, one after another: the results in
+    order, the seconds they took, and the replay's summary line."""
+    name = rom.stem.replace(" ", "_")
+    tree = args.output / name
+    started = time.time()
+    results = []
+
+    # The commands' progress is for a terminal; here their output is kept for a failure's report.
+    disasm = [args.build / "snes_disasm", rom, "-o", tree, "--run-seconds", args.seconds, "--quiet"]
+    if args.no_run:
+        disasm = [args.build / "snes_disasm", rom, "-o", tree, "--no-run", "--quiet"]
+    elif args.input_dir is not None:
+        disasm += ["--input-dir", args.input_dir]
+    results.append(subprocess.run([str(c) for c in disasm], capture_output=True, text=True))
+
+    results.append(subprocess.run([str(c) for c in [args.build / "snes_render", tree]],
+                                  capture_output=True, text=True))
+
+    # The rebuilt image keeps the original's extension: it is the same kind of file.
+    rebuilt = args.output / f"{name}-rebuilt{rom.suffix}"
+    results.append(subprocess.run([str(c) for c in [args.build / "snes_verify", tree, rom, "-o", rebuilt]],
+                                  capture_output=True, text=True))
+
+    replayLine = ""
+    if not args.no_differential:
+        replay = [args.build / "snes_differential", tree, rom, "-o", tree / "differential",
+                  "--seconds", args.seconds, "--quiet"]
+        if args.input_dir is not None:
+            replay += ["--input-dir", args.input_dir]
+        results.append(subprocess.run([str(c) for c in replay], capture_output=True, text=True))
+        # The replay's last line sums it up; a dropped copier header is reported ahead of it.
+        replayLine = results[-1].stdout.strip().splitlines()[-1] if results[-1].stdout.strip() else ""
+
+    return results, time.time() - started, replayLine
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("images", type=pathlib.Path)
@@ -159,11 +200,15 @@ def main():
     parser.add_argument("--no-differential", action="store_true", help="skip the replay beside the interpreter")
     parser.add_argument("--facts", action="store_true", help="aggregate the hardware accesses, the transfers set up and the ranges moved")
     parser.add_argument("--routines", action="store_true", help="aggregate the routines")
+    parser.add_argument("--jobs", type=int, default=1, help="how many images to run at once")
     args = parser.parse_args()
 
     roms = sorted(p for p in args.images.iterdir() if p.suffix.lower() in (".smc", ".sfc"))
     if not roms:
         print(f"no .smc or .sfc under {args.images}")
+        sys.exit(2)
+    if args.jobs < 1:
+        print("--jobs needs a positive number")
         sys.exit(2)
     failures = 0
     corpusClasses = collections.Counter()
@@ -183,39 +228,14 @@ def main():
     routineTotals = collections.Counter()
     largest = []
 
-    for rom in roms:
+    # The images run `--jobs` at a time; each one's line and aggregates follow
+    # in name order, so the report reads the same however they finished.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
+    runs = [pool.submit(runImage, args, rom) for rom in roms]
+    for rom, run in zip(roms, runs):
         name = rom.stem.replace(" ", "_")
         tree = args.output / name
-        started = time.time()
-        results = []
-
-        # The commands' progress is for a terminal; here their output is kept for a failure's report.
-        disasm = [args.build / "snes_disasm", rom, "-o", tree, "--run-seconds", args.seconds, "--quiet"]
-        if args.no_run:
-            disasm = [args.build / "snes_disasm", rom, "-o", tree, "--no-run", "--quiet"]
-        elif args.input_dir is not None:
-            disasm += ["--input-dir", args.input_dir]
-        results.append(subprocess.run([str(c) for c in disasm], capture_output=True, text=True))
-
-        results.append(subprocess.run([str(c) for c in [args.build / "snes_render", tree]],
-                                      capture_output=True, text=True))
-
-        # The rebuilt image keeps the original's extension: it is the same kind of file.
-        rebuilt = args.output / f"{name}-rebuilt{rom.suffix}"
-        results.append(subprocess.run([str(c) for c in [args.build / "snes_verify", tree, rom, "-o", rebuilt]],
-                                      capture_output=True, text=True))
-
-        replayLine = ""
-        if not args.no_differential:
-            replay = [args.build / "snes_differential", tree, rom, "-o", tree / "differential",
-                      "--seconds", args.seconds, "--quiet"]
-            if args.input_dir is not None:
-                replay += ["--input-dir", args.input_dir]
-            results.append(subprocess.run([str(c) for c in replay], capture_output=True, text=True))
-            # The replay's last line sums it up; a dropped copier header is reported ahead of it.
-            replayLine = results[-1].stdout.strip().splitlines()[-1] if results[-1].stdout.strip() else ""
-
-        elapsed = time.time() - started
+        results, elapsed, replayLine = run.result()
         ok = all(r.returncode == 0 for r in results)
         if not ok:
             failures += 1
@@ -299,6 +319,7 @@ def main():
             for r in results:
                 print(r.stdout)
                 print(r.stderr)
+    pool.shutdown()
 
     print()
     print(f"{len(roms) - failures} of {len(roms)} images OK")

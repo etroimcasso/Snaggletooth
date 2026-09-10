@@ -77,7 +77,7 @@ the component in full.
 | Component | Status |
 |---|---|
 | [SPC700 CPU core](docs/spc700-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests vectors |
-| [APU machine](docs/apu-machine.md) | **complete** — 64KB RAM, the register overlay, three timers on their documented slots, the communication ports, exact cycle budgets |
+| [APU machine](docs/apu-machine.md) | **complete** — 64KB RAM, the register overlay, three timers on their documented slots, the communication ports, exact cycle budgets, and an observer told every access the sound CPU makes and every instruction boundary it crosses |
 | [S-DSP](docs/dsp.md) | feature-complete — BRR decode, pitch and Gaussian interpolation, envelopes, keying, the eight-voice stereo mix, noise, pitch modulation, master volume, the echo delay line, and the intra-sample register schedule; three sub-tests of the DSP test ROM still report a wrong checksum ([below](#validation)) |
 | [SPC dump loader and WAV renderer](docs/spc-rendering.md) | in progress — loads a dump into the machine and renders 32 kHz WAV; output not yet validated against reference renders |
 

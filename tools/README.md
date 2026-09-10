@@ -17,7 +17,8 @@ shelling out to the tool.
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
-cartridges through four commands, one image at a time — `snes_disasm` writes
+cartridges through four commands, one image at a time or `--jobs` of them at
+once — `snes_disasm` writes
 the program file, the manifest and the lifted files, `snes_render` writes the
 bank files from the program file, `snes_verify` assembles the tree back into a
 rebuilt image with the original's extension and compares it, and
@@ -28,10 +29,12 @@ itself and decides nothing the commands do not, and it runs the two commands
 that emulate under `--quiet`, since their progress is for a terminal:
 
 ```
-tools/corpus.py <images> <output> --build build [--no-run] [--seconds N] [--input-dir <scripts>] [--no-differential] [--facts] [--routines]
+tools/corpus.py <images> <output> --build build [--no-run] [--seconds N] [--input-dir <scripts>] [--no-differential] [--facts] [--routines] [--jobs N]
 ```
 
 It exits 0 only when every command did, and writes nothing outside `<output>`.
+Its lines and aggregates come out in name order however many images run at
+once.
 `parse_dsp_tables.py` stands apart from the toolkit: it transcribes the S-DSP's
 documented constant tables — the Gaussian interpolation table, and the envelope
 and noise rate tables — from two public references, cross-checking them entry by

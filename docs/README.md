@@ -42,7 +42,7 @@ what is unstarted.
 | Read a tree's program files — the main CPU's or the sound program's — whole or one source file's regions at a time | [ir.md §Reading a program](ir.md#reading-a-program), [snagir.md](snagir.md) |
 | Write SNES assembly back from the lifted form, with registers, labels and routines named | [ir.md §Rendering source](ir.md#rendering-source), [snes-disassembler.md §The tree](snes-disassembler.md#the-tree) |
 | Prove the lifted form runs as the machine does, over a whole recorded run | [ir.md §Running beside the machine](ir.md#running-beside-the-machine) |
-| Watch every access a running machine makes | [snes-machine.md §The bus observer](snes-machine.md#the-bus-observer) |
+| Watch every access a running machine makes | [snes-machine.md §The bus observer](snes-machine.md#the-bus-observer), [apu-machine.md §The observer](apu-machine.md#the-observer) |
 | Run a directory of cartridges through every tool | [tools/README.md](../tools/README.md) |
 | Get the example cartridges the pages' output comes from | [tools/examples/README.md](../tools/examples/README.md) |
 
@@ -58,7 +58,7 @@ what is unstarted.
 
 | Page | Covers |
 |---|---|
-| [apu-machine.md](apu-machine.md) | The audio machine — memory map, timers, communication ports, the boot-ROM window, and stepping |
+| [apu-machine.md](apu-machine.md) | The audio machine — memory map, timers, communication ports, the boot-ROM window, stepping, and the observer told every access the sound CPU makes and every instruction boundary |
 | [spc700-cpu.md](spc700-cpu.md) | The audio CPU core — its surface, usage, and how to run the vector suite |
 | [dsp.md](dsp.md) | The S-DSP — voices, the output mixer, the echo unit, and its stereo output |
 | [s-dsp-behavior.md](s-dsp-behavior.md) | Where the published S-DSP documentation is incomplete, ambiguous or wrong, what the hardware does instead, and the measurement that settles each case |

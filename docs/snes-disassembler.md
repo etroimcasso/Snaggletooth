@@ -162,8 +162,8 @@ either way, and `corpus.py` passes it.
 
 The disassembler writes `program.snagir`, `apu.snagir`, `project.snagifest`
 and the lifted files; the bank files and `apu/driver.asm` are `snes_render`'s,
-written from the two program files, which `snes_lift` prints back and the
-first of which `snes_differential` replays the run beside
+written from the two program files, which `snes_lift` prints back and
+`snes_differential` replays the run beside, each on its own CPU
 ([ir.md §Reading a program](ir.md#reading-a-program)). Together:
 
 ```
@@ -574,6 +574,20 @@ seen     $00:803F D=$4320 DBR=$00
 The manifest keeps every `ran` line as it keeps `reached`, and writes the
 `seen` lines fresh on every run: they are what the run saw, and the next run
 sees it again.
+
+The sound CPU is held the same way. The audio machine reports every access the
+sound CPU makes and every instruction boundary it crosses; at each boundary
+the run decodes the instruction about to run from the bytes at the sound
+CPU's program counter — the upload stub's, served from the boot-ROM window,
+and the uploaded program's alike — lifts it through the same lift `apu.snagir`
+comes from, and at the boundary after holds that node to what the machine did
+between them, through the [interpreter](ir.md#running-beside-the-machine) as
+the differential holds it. A lift the audio machine disagrees with is a `note`
+naming the audio site, said once; so is a step whose bytes do not decode as
+one instruction, or that did not fetch the instruction decoded there, which is
+not checked. Nothing is yet computed from a sound node: no `ran`, no `seen`,
+no fact — the check is the whole of it, and a run that ends with no note has
+held every sound instruction it executed to the chip.
 
 ## What a run moved
 
@@ -1453,7 +1467,8 @@ or starts from a handler the paths do not reach, stays in its bank.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or
-`state` lines. A value carries as far as every path proves it and no further, so
+`state` lines; the run holds every instruction the sound CPU executes to the
+audio machine, and computes nothing from them yet. A value carries as far as every path proves it and no further, so
 a channel configured from a table, or across a call that does not give the
 register back, leaves the fields it did not settle `none` rather than guessing at
 them. A routine's role counts what the bytes reach and what a run reached; a call

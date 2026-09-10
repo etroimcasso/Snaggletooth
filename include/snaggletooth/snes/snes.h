@@ -359,6 +359,20 @@ class Snes {
   void setObserver(BusObserver* observer) noexcept { observer_ = observer; }
   [[nodiscard]] BusObserver* observer() const noexcept { return observer_; }
 
+  // The audio machine's observer (ApuObserver, `apu/apu.h`), told every access
+  // the sound CPU makes and every instruction boundary it crosses, under the
+  // same terms as the bus observer: the host's object, not part of the state,
+  // none by default. The audio machine runs inside the CPU's cycles, so its
+  // report arrives from within step() and run().
+  void setApuObserver(ApuObserver* observer) noexcept { apu_.setObserver(observer); }
+  [[nodiscard]] ApuObserver* apuObserver() const noexcept { return apu_.observer(); }
+
+  // What a fetch by the sound CPU at `address` returns, without making one:
+  // Apu::peek on the live audio machine.
+  [[nodiscard]] std::uint8_t peekApu(std::uint16_t address) const noexcept {
+    return apu_.peek(address);
+  }
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an

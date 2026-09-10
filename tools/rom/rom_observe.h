@@ -55,6 +55,14 @@
 // bytes is recorded as the stream it is, with the run of image bytes its
 // carrier read as the file it is lifted as.
 //
+// The sound CPU is held to the same check. The audio machine reports every
+// access the sound CPU makes and every instruction boundary it crosses; at
+// each boundary the run decodes the instruction about to run from the bytes at
+// the program counter, lifts it, and at the boundary after holds that node to
+// what the machine did between them — the upload stub's instructions and the
+// driver's alike, whatever the bytes came from. Nothing is computed from a
+// sound node yet; the check is the whole of it.
+//
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
 // reaches what a player does, and the trace follows.
@@ -329,8 +337,11 @@ struct StreamedRange {
 // the run beside the interpreter checked. `divergences` counts the steps on
 // which the node lifted from the fetches disagreed with the machine — each site
 // once in the notes, the interpreter realigned after — and is zero on every
-// cartridge the lift is right for. `originSets` is how many distinct origins
-// the run interned, and `originCap` the cap above which one is widened.
+// cartridge the lift is right for. The `spc700` counts are the sound CPU's
+// under the same check: the instructions it executed and checked, the distinct
+// nodes lifted — an address and its bytes — and the steps that disagreed.
+// `originSets` is how many distinct origins the run interned, and `originCap`
+// the cap above which one is widened.
 struct RunObservation {
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
@@ -343,6 +354,9 @@ struct RunObservation {
   std::uint64_t interrupts = 0;    // hardware sequences run and checked
   std::size_t nodes = 0;           // distinct nodes lifted from fetches: an address, a mode, the bytes
   std::uint64_t divergences = 0;
+  std::uint64_t spc700Instructions = 0;  // sound-CPU instructions run through a node and checked
+  std::size_t spc700Nodes = 0;           // distinct sound-CPU nodes lifted: an address and its bytes
+  std::uint64_t spc700Divergences = 0;
   std::size_t originSets = 0;
   std::size_t originCap = 0;
 };
@@ -360,7 +374,10 @@ struct RunObservation {
 // wherever its memory address lies: the engine addressed it, and nothing here
 // needs to read it. A landing outside the image is named once in `notes` and
 // not recorded: the tree has nothing to trace there. A step on which the lifted
-// node disagreed with the machine is named once per site in `notes`.
+// node disagreed with the machine is named once per site in `notes`, on
+// either CPU; so is a sound-CPU step whose bytes do not decode as one
+// instruction, or that did not fetch the instruction its program counter
+// named, which is not checked.
 //
 // `input` is replayed into the controller ports as the run goes: at the start
 // of every frame, counted from power-on, each port is given what the script
