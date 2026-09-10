@@ -1,16 +1,19 @@
 #pragma once
 
-// The bank files, rendered from the program file and the manifest.
+// The bank files and the sound program's file, rendered from the program files
+// and the manifest.
 //
 // This is the back end of the cartridge toolkit. Its input is what the
-// disassembler left on disk — `program.snagir`, the whole program in the
-// intermediate representation, and `project.manifest`, the facts the run and
-// the analysis found — and its output is one 65816 source file per region. It
-// never holds the image, the listing the trace produced or the program the
-// disassembler lifted: `readRenderInput` builds everything it needs from the two
-// files, and `renderRegion` writes a file from that alone. The library links the
-// representation, the 65816 backend and the cartridge map, and nothing that can
-// trace, run or lift, so a bank file can only have come from the file.
+// disassembler left on disk — `program.snagir`, the main CPU's whole program in
+// the intermediate representation, `apu.snagir`, the sound program's, and
+// `project.manifest`, the facts the run and the analysis found — and its output
+// is one 65816 source file per region and one SPC700 source file for the sound
+// program. It never holds the image, the listings the trace produced or the
+// program the disassembler lifted: `readRenderInput` builds everything it needs
+// from the files, and `renderRegion` and `renderSoundFile` write a file from
+// that alone. The library links the representation, the two chip backends and
+// the cartridge map, and nothing that can trace, run or lift, so a source file
+// can only have come from the files.
 
 #include <cstddef>
 #include <cstdint>
@@ -23,6 +26,7 @@
 #include "cpu65816/cpu65816_disasm.h"
 #include "disasm/disasm.h"
 #include "ir/ir.h"
+#include "ir/ir_text.h"
 #include "rom/rom_observe.h"
 #include "snaggletooth/snes/cartridge.h"
 
@@ -90,19 +94,28 @@ struct RenderAsset {
   std::size_t bytes = 0;
 };
 
-// A block of the sound program the image holds, as the `block` line says it.
+// A block of the sound program, as the `block` line says it: the audio address
+// the cartridge sent the bytes to, how many, and the image offset they were
+// read from — absent for a block the image does not hold as it is.
 struct RenderBlock {
-  std::size_t romOffset = 0;
+  std::uint16_t apuAddress = 0;
   std::size_t bytes = 0;
+  std::optional<std::size_t> romOffset;
 };
 
+// The sound program as the sound file is rendered from it: its file and the
+// entry from the `sound` line, its blocks in address order from the `block`
+// lines, and the regions of `apu.snagir` written to that file, in address
+// order, with their warnings, labels and data runs.
 struct RenderSound {
   std::string file;
+  std::uint16_t entry = 0;
   std::vector<RenderBlock> blocks;
+  std::vector<ir::ProgramRegion> regions;
 };
 
-// Everything a bank file is rendered from besides the program: the image's map
-// and size, every region, and the facts.
+// Everything a source file is rendered from besides the program: the image's
+// map and size, every region, the facts, and the sound program.
 struct RenderInput {
   CartridgeMap map = CartridgeMap::LoRom;
   std::size_t imageBytes = 0;
@@ -136,17 +149,31 @@ struct RenderInput {
 [[nodiscard]] std::string renderRegion(const RenderRegion& region, const RenderInput& input,
                                        const ir::Program& program);
 
-// The renderer's input read from a tree on disk: `program.snagir` for the
-// program, the regions, the labels and the data runs, and `project.manifest`
+// The sound program's source file, from `input.sound` and the program's
+// `spc700` nodes. It opens with what the cartridge sent — the entry the program
+// was traced from and one line per block with the image offset it was read
+// from, or that it was not read from the image as it is — then each region in
+// address order under its own `ORG`, with a `; ---- $XXXX-$XXXX: not uploaded`
+// comment where a gap lies between two regions: the region's warnings, its
+// labels, its data runs as `DB` rows, and each instruction from its node
+// through `ir/ir_render.h`, a target with a label anywhere in the file written
+// as the label. `input.sound` must be set.
+[[nodiscard]] std::string renderSoundFile(const RenderInput& input, const ir::Program& program);
+
+// The renderer's input read from a tree on disk: `program.snagir` for the main
+// CPU's program, the regions, the labels and the data runs; `project.manifest`
 // for the map, the image size, the facts, the lifted files and the sound
-// program's blocks. Nothing, with `error` naming the file and the line, when
-// either file is missing or does not read.
+// program's entry and blocks; and, where the manifest names a sound program,
+// `apu.snagir` for its nodes and regions. Nothing, with `error` naming the
+// file and the line, when a file is missing or does not read, or when
+// `apu.snagir` has no region written to the file the manifest names.
 [[nodiscard]] std::optional<RenderInput> readRenderInput(const std::filesystem::path& directory,
                                                          ir::Program& program, std::string& error);
 
-// Renders every region's file from the tree's program file and manifest and
-// writes it under `directory`. False, with `error` set, when the input does not
-// read or a file cannot be written. `rendered` counts the files written.
+// Renders every region's file, and the sound program's where the manifest
+// names one, from the tree's program files and manifest and writes them under
+// `directory`. False, with `error` set, when the input does not read or a file
+// cannot be written. `rendered` counts the files written.
 bool renderTree(const std::filesystem::path& directory, std::size_t& rendered, std::string& error);
 
 }  // namespace snaggletooth::disasm

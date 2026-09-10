@@ -1,21 +1,25 @@
 # The program file
 
-A `.snagir` file is a whole 65816 program in the
+A `.snagir` file is one chip's whole program in the
 [intermediate representation](ir.md), written as text that stands alone: which
 image it is a program of, every region of source with its labels and the runs
 of bytes execution never reached, every node with its instruction and its
-effects, and the two hardware interrupt sequences. `snes_disasm` writes one as
-`program.snagir` at the root of every tree, `snes_render` writes the tree's
-source files from it, `snes_lift` prints it back and `snes_differential`
-replays the cartridge's run beside it, `tools/ir/ir_text.h` writes and reads
-one, and anything that reads tokens can read it.
+effects, and, for the main CPU, the two hardware interrupt sequences. A tree
+carries two: `program.snagir`, the main CPU's program, and `apu.snagir`, the
+sound program the cartridge uploads to the audio unit, whose version record
+says `apu` and whose addresses are the audio unit's sixteen bits. `snes_disasm`
+writes both at the root of every tree, `snes_render` writes the tree's source
+files from them — the bank files from the first, the sound program's file from
+the second — `snes_lift` prints either back, `snes_differential` replays the
+cartridge's run beside the first, `tools/ir/ir_text.h` writes and reads one,
+and anything that reads tokens can read it.
 
 > **Status.** `renderProgram` writes the file and `parseProgram` reads it;
 > reading what was written gives the program back equivalent on every field
 > the file carries, and writing what was read gives the same bytes. The
-> disassembler writes it before anything else in the tree; the renderer reads
-> it and the manifest and nothing else, and the two readers over the
-> representation read it and no manifest at all.
+> disassembler writes the two files before anything else in the tree; the
+> renderer reads them and the manifest and nothing else, and the two readers
+> over the representation read a program file and no manifest at all.
 
 ---
 
@@ -49,13 +53,15 @@ end of its line. The writer indents the groups two spaces per level for a
 reader's sake; a reader gives the indentation no meaning.
 
 Every number is hexadecimal and begins with `$`, except three that are
-decimal: an instruction's `length`, the four costs after `base`, and the byte
-count on the `image` record. An address is written `$BB:XXXX`, the bank then
-the offset within it. A value is written with as many digits as it needs and
-no leading zeros — `$0`, `$2C`, `$1234`, `$7E0200`.
+decimal: an instruction's `length`, the costs after `base`, and the byte count
+on the `image` record. An address is written `$BB:XXXX` in the main CPU's file,
+the bank then the offset within it, and `$XXXX` in the sound program's, whose
+space is the audio unit's sixteen bits. A value is written with as many digits
+as it needs and no leading zeros — `$0`, `$2C`, `$1234`, `$7E0200`.
 
 The records come in one order: the version, the image, then each region with
-what it holds in address order, then `nmi` and `irq`.
+what it holds in address order, then — in the main CPU's file — `nmi` and
+`irq`. The sound program's file ends with its last region.
 
 ## 2. Records
 
@@ -63,10 +69,15 @@ what it holds in address order, then `nmi` and `irq`.
 
 ```
 snagir 1;
+snagir 1 apu;
 ```
 
-The first record of every file. A reader that knows version 1 reads the rest;
-one given another number stops there (§4).
+The first record of every file. The main CPU's file writes the version alone;
+the sound program's writes `apu` after it, and everything that follows is in
+the sound CPU's terms — its addresses, its nodes (§2.6), and no interrupt
+sequence (§2.8). A reader that knows version 1 reads the rest; one given
+another number, or a word after the version it does not know, stops there
+(§4).
 
 ### 2.2 The image
 
@@ -89,12 +100,16 @@ region <file> <first>-<last> {
 ```
 
 `region` opens a region of source: the file it is written to and the address
-range it covers, inclusive, within one bank, and then its group. Every record
-inside the group belongs to it. Within a region the labels, data runs and
-nodes come in address order; at one address a label comes first, then a data
-run, then a node — and where two nodes share an address (§2.6) both follow the
-label. A region's records account for every byte of its range: each byte is in
-a node's instruction or in a data run.
+range it covers, inclusive, within one bank — or, in the sound program's file,
+within the audio unit's space — and then its group. Every record inside the
+group belongs to it. Within a region the labels, data runs and nodes come in
+address order; at one address a label comes first, then a data run, then a
+node — and where two nodes share an address (§2.6) both follow the label. A
+region's records account for every byte of its range: each byte is in a node's
+instruction or in a data run. The sound program's regions are the runs of
+addresses the cartridge's upload wrote, two blocks that landed end to end
+being one run, all written to the sound program's file; the gaps between them
+are what the upload never wrote.
 
 A `warning` comes first in its region's group and carries what the trace could
 not settle there, as the manifest's [`warning`](project-manifest.md#25-stops-warnings-and-notes)
@@ -171,6 +186,43 @@ An address two paths read two ways is two nodes, each with its own mode, the
 first reading first — the one the listing carries, which is the one a bank
 file is written from.
 
+**A sound-CPU node** has the same header with one field fewer and one cost:
+
+```
+<address> <mnemonic> [<form>] operand <value> [operand2 <value>] length <n> flow <flow> [target <address>] base <n> [<register>] [patched] {
+  <effect>
+  …
+}
+```
+
+- `<mnemonic> [<form>]` — the instruction as the [SPC700 disassembler](spc700-disassembler.md#library)
+  names it: the mnemonic, then its operand form, which is the table's text
+  after the mnemonic with each operand slot replaced by the word for its kind —
+  `#imm`, `dp`, `abs`, `rel`, `abs.bit`, `upage`, and `dp.n` for one bit of a
+  direct-page byte. So `MOV A,[$12+X]` is `MOV` with `A,[dp+X]`, `BBS $12.3,$0316`
+  is `BBS` with `dp.3,rel`, `OR $34,$12` is `OR` with `dp,dp`, `MOV $34,#$12` is
+  `MOV` with `dp,#imm`, `OR1 C,/!$1234.7` is `OR1` with `C,/abs.bit`,
+  `PCALL $12` is `PCALL` with `upage`, `TCALL 0` is `TCALL` with `0`, `PUSH PSW`
+  is `PUSH` with `PSW`, and `RET` and `NOP` have no form. The pair names one
+  opcode.
+- `operand <value>` — the first operand byte's value as the dialect writes it
+  — an immediate, a direct-page offset, an absolute address, the offset a
+  `PCALL` names — or, for a relative form (`rel`), the target address.
+  `operand2 <value>` follows for the forms with two operand bytes, and is the
+  bit index of an `abs.bit` form, the destination offset of a `dp,dp` form,
+  or the destination offset of a `dp,#imm` form, whose immediate is `operand`.
+- `length`, `flow` and `target` — as any node's. A `dp,rel` form carries its
+  direct-page offset in `operand` and its destination in `target`.
+- No mode: the sound CPU's instructions always read the same way.
+- `base <n>` — the one measured cost, in decimal. A conditional branch's
+  taken cost is the `Cycles` effect under its condition, as on the main CPU.
+- `<register>` — the audio unit's register the operand's address names, when it
+  names one of the sixteen at `$00F0`–`$00FF`, by the name the
+  [SPC700 disassembler](spc700-disassembler.md#hardware-registers) gives it:
+  the address of a `dp`, `abs`, `abs.bit` or `dp,rel` form, the destination of
+  a `dp,dp` or `dp,#imm` form. Absent otherwise.
+- `patched` — as any node's.
+
 ### 2.7 Effects
 
 Each effect is one record inside its node's group, or inside an interrupt
@@ -228,10 +280,12 @@ irq {
 }
 ```
 
-After the last region, once each: the effects of a non-maskable interrupt and
-of a maskable one, taken between two instructions, exactly as
-[ir.md §The rules](ir.md#the-rules) gives them. They are the chip's rather than
-the program's, and every file carries them.
+After the last region of the main CPU's file, once each: the effects of a
+non-maskable interrupt and of a maskable one, taken between two instructions,
+exactly as [ir.md §The rules](ir.md#the-rules) gives them. They are the chip's
+rather than the program's, and every main-CPU file carries them. The sound CPU
+takes no hardware interrupt, so the sound program's file carries neither and
+ends with its last region's `}`.
 
 ## 3. An example
 
@@ -288,13 +342,49 @@ interrupt sequences:
 }
 ```
 
+The `uploading` cartridge, whose reset code sends a program to the audio unit,
+disassembled with `snes_disasm uploading.smc -o uploading --no-run`, has this
+as `uploading/apu.snagir`:
+
+```
+snagir 1 apu;
+image 32768 LoROM;
+
+region apu/driver.asm $0200-$022B {
+  label $0200 entry;
+  $0200 MOV A,#imm operand $5A length 2 flow continue base 2 {
+    Set PC <- $202 [16];
+    SetNZ A <- $5A [8];
+  }
+  $0202 MOV abs,A operand $250 length 3 flow continue base 5 {
+    Set PC <- $205 [16];
+    Set T0 <- $250 [16];
+    Load T3 <- T0 [8 flat];
+    Store T0, A [8 flat];
+  }
+  $0205 MOV A,#imm operand $0 length 2 flow continue base 2 {
+    Set PC <- $207 [16];
+    SetNZ A <- $0 [8];
+  }
+  $0207 NOP operand $0 length 1 flow continue base 2 {
+    Set PC <- $208 [16];
+    Load T3 <- $208 [8 flat];
+  }
+```
+
+The two blocks the boot sent landed end to end, so the file has one region;
+the entry's label heads it, the store reads its destination before writing it
+as the chip does, and `NOP` reads the byte after itself and throws it away.
+The file goes on through the sixteen `NOP`s and the `STOP`, then the table the
+trace never reached as one `data` record, and ends with the region's `}`.
+
 ## 4. Refusals
 
 A file is read whole before anything is made of it, and a record that cannot
 be read refuses the whole file, naming the line the offending word is on:
 
-- a file that does not open with `snagir 1;`, or a version this reader does
-  not know;
+- a file that does not open with `snagir 1;`, a version this reader does not
+  know, or a word after the version that is not `apu`;
 - a record whose first word this page does not name, or a word where a
   delimiter belongs and a delimiter where a word belongs;
 - a record with a field missing, a field it does not have, a number that is
@@ -308,7 +398,13 @@ be read refuses the whole file, naming the line the offending word is on:
 - a label, a data run or a node outside a region's group, a warning after a
   region's first label, data run or node, or a record after the `irq` sequence;
 - an `nmi` or `irq` missing, or a region, an `image` or an `nmi` inside a
-  region.
+  region;
+- in the sound program's file: an address written `$BB:XXXX`, a mnemonic that
+  is not the sound CPU's, a mnemonic and a form that name no opcode together, a
+  mode on a node, four costs, an `operand2` on a form with one operand byte or
+  none on a form with two, or an `nmi`, an `irq` or any record after the last
+  region — and, in the main CPU's file, an address written `$XXXX` or a
+  mnemonic that is the sound CPU's alone.
 
 ```
 line 12: `Sett` is not an operation
@@ -337,31 +433,39 @@ renderProgram(parsed->program, parsed->file) == text;    // true
 ```
 
 `renderProgram` takes the `Program` — its nodes in address order, its `nmi`
-and `irq` — and a `ProgramFile`, which carries what the program does not: the
-image record, and each `ProgramRegion` with its file, its range, its warnings,
-its labels and its data runs, the labels and runs in address order. It writes
-the file as this page describes it and throws `std::invalid_argument` for a
-node no region's range holds. `parseProgram` reads text into a `Parsed` — the
-`Program` and the `ProgramFile` back, the nodes in address order whatever
-order the regions came in — or returns nothing with `error` naming the line;
-the mnemonics and register names in the nodes it returns are the instruction
-table's and the register table's own. `renderNode` writes one node as it
-stands inside a region's group, and `renderEffect` one effect with its
-semicolon; both are what `renderProgram` calls. `selectFile(parsed, file)`
-cuts a `Parsed` to the regions written to one source file — those regions,
-the nodes whose addresses they hold, and the image line and the interrupt
-sequences as they were — or returns nothing when no region is written to it;
-`countProgram(parsed)` is a `ProgramCounts`: the regions, the code lines (one
-per address a node stands at), the nodes, the nodes that select a width by
-the live flag, the nodes naming a hardware register, the nodes lifted from
-patched bytes, and the effects — the summary `snes_lift` prints.
+and `irq`, and its `spc700` nodes — and a `ProgramFile`, which carries what
+the program does not: the `processor` the file is written for, the image
+record, and each `ProgramRegion` with its file, its range, its warnings, its
+labels and its data runs, the labels and runs in address order. With the
+processor at its default, the main CPU, it writes the program's `nodes` under
+the regions and the interrupt sequences after; with `Processor::Spc700` it
+writes `snagir 1 apu;`, the `spc700` nodes under the regions at sixteen bits,
+and no sequence. It writes the file as this page describes it and throws
+`std::invalid_argument` for a node no region's range holds, or a sound-CPU
+node whose mnemonic and form name no opcode. `parseProgram` reads text into a
+`Parsed` — the `Program` and the `ProgramFile` back, the nodes in address
+order whatever order the regions came in, the sound program's in `spc700`
+with `nodes` empty — or returns nothing with `error` naming the line; the
+mnemonics, forms and register names in the nodes it returns are the
+instruction tables' and the register tables' own. `renderNode` writes one
+node as it stands inside a region's group, a sound-CPU node's under
+`Processor::Spc700`, and `renderEffect` one effect with its semicolon; both
+are what `renderProgram` calls. `selectFile(parsed, file)` cuts a `Parsed` to
+the regions written to one source file — those regions, the nodes whose
+addresses they hold, and the image line and the interrupt sequences as they
+were — or returns nothing when no region is written to it;
+`countProgram(parsed)` is a `ProgramCounts` over the file's own chip's nodes:
+the regions, the code lines (one per address a node stands at), the nodes, the
+nodes that select a width by the live flag (none in a sound program), the
+nodes naming a hardware register, the nodes lifted from patched bytes, and
+the effects — the summary `snes_lift` prints.
 
 Every type in `ir/ir.h` compares with `==`, and `equivalent` compares two
-programs as the file carries them: every field, except the bit behind a width
-the mode does not know. The file writes `?` for that width, the node selects
-by the live flag, and no reader of the mode looks at the bit, so a program
-read back is equivalent to the one written and the file carries nothing that
-has no meaning. The library target is `snaggletooth_ir`.
+programs as the files carry them: every field of both node lists, except the
+bit behind a width the mode does not know. The file writes `?` for that
+width, the node selects by the live flag, and no reader of the mode looks at
+the bit, so a program read back is equivalent to the one written and the file
+carries nothing that has no meaning. The library target is `snaggletooth_ir`.
 
 ## 6. Stability
 
@@ -380,7 +484,10 @@ reader given a number it does not know stops.
 
 - [The intermediate representation](ir.md) — what a node and an effect mean,
   every rule the effects follow, and the vocabulary the names here are.
-- [Cartridge disassembler](snes-disassembler.md) — the tree whose program the
-  file is, and `snes_render`, which writes the tree from it.
+- [Cartridge disassembler](snes-disassembler.md) — the tree whose programs the
+  two files are, and `snes_render`, which writes the tree from them.
+- [SPC700 disassembler](spc700-disassembler.md) — the mnemonic and form that
+  name a sound-CPU node's opcode, and the registers its operand can name.
 - [Project manifest](project-manifest.md) — the other file at the root of a
-  tree: the facts the trace and the run attach to the program.
+  tree: the facts the trace and the run attach to the programs, the sound
+  program's entry and blocks among them.

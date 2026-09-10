@@ -14,10 +14,12 @@ to one step of the machine, `ir_differential.h` runs a program beside the
 machine through a recorded run and reports every disagreement, `ir_dataflow.h`
 runs the effects over every path at once and says what each instruction can
 rely on — the direct register, the data bank, the stack pointer, a stored
-value, the slots of a jump table — and `ir_text.h` writes the program file and
-reads it back. Two commands sit over the library, both readers of that file;
-the cartridge disassembler in [`../rom/`](../rom/README.md) writes it, and
-`snes_render` writes the bank files from it through the renderer.
+value, the slots of a jump table — and `ir_text.h` writes a program file and
+reads it back, the main CPU's `program.snagir` or the sound program's
+`apu.snagir`. Two commands sit over the library, both readers of those files;
+the cartridge disassembler in [`../rom/`](../rom/README.md) writes them, and
+`snes_render` writes the bank files and the sound file from them through the
+renderer.
 
 ## Contents
 
@@ -45,27 +47,30 @@ Everything lives in `snaggletooth::ir`.
 | `differential(program, replay)` | Replays a run on the machine beside the interpreter; a `DifferentialReport` of what was checked and every `Divergence`. |
 | `Dataflow(program, entries, sightings, image, canonical)` | Runs the effects over every path from the entries; `before(address)` is what is proven there, `derived()` every table slot a bounded index selects. |
 | `evaluate(node, before, image)` | One node over a `State`: the state after and every access it can make. |
-| `renderProgram(program, file)`, `parseProgram(text, error)` | The program file (`docs/snagir.md`) written from a program and what it does not carry, and read back to both. |
-| `renderNode(node)`, `renderEffect(effect)`, `equivalent(a, b)` | A node and an effect as the file has them; two programs compared as the file carries them. |
-| `selectFile(parsed, file)`, `countProgram(parsed)` | A parsed file cut to one source file's regions and their nodes; what a parsed file carries, counted as `snes_lift` prints it. |
+| `renderProgram(program, file)`, `parseProgram(text, error)`, `Processor` | One chip's program file (`docs/snagir.md`) written from a program and what it does not carry — the chip among them — and read back to both. |
+| `renderNode(node, processor)`, `renderEffect(effect)`, `equivalent(a, b)` | A node and an effect as the file has them; two programs compared as the files carry them, both node lists. |
+| `selectFile(parsed, file)`, `countProgram(parsed)` | A parsed file cut to one source file's regions and their nodes; what a parsed file carries, counted over its own chip's nodes as `snes_lift` prints it. |
 | `renderInstruction(instruction, names)`, `renderLine(node, names, bytesWidth)` | An instruction as source, with a label, a register name and an annotation in place of addresses where given; a line with its comment. |
 | `encode(instruction)`, `renderCost(node)` | The bytes an instruction assembles to; the cost as a listing prints it. |
+| `renderSpc700Instruction(instruction, targetLabel)`, `renderSpc700Line(node, targetLabel, bytesWidth)` | A sound-CPU instruction as source, with a label in place of its target where given; one line of the sound program's source with its comment. |
+| `encodeSpc700(instruction)`, `opcodeOfSpc700(instruction)`, `renderSpc700Cost(node)` | The bytes a sound-CPU instruction assembles to; the opcode its mnemonic and form name; its cost as the listing prints it. |
 | `SourceMode` | The mode a region of source carries in file order, and the directives each instruction needs before it. |
 
 ## `snes_lift`
 
 ```
-snes_lift <directory> [-o <file.snagir>] [--file <name>]
+snes_lift <directory> [--apu] [-o <file.snagir>] [--file <name>]
 ```
 
-Reads the directory's `program.snagir`
-([docs/snagir.md](../../docs/snagir.md)) and writes the summary — the regions,
-the code lines, the nodes, and how many select a width by the live flag, name
-a hardware register or were lifted from patched bytes, and the effects — then
-the program file written again from what it read: every region with its
-labels, its data runs and its nodes in address order, and the interrupt
-sequences. `--file` limits both to the regions written to one source file;
-`-o` writes the file there. It reads no image and runs nothing.
+Reads the directory's `program.snagir` — or, with `--apu`, its `apu.snagir`,
+the sound program's ([docs/snagir.md](../../docs/snagir.md)) — and writes the
+summary — the regions, the code lines, the nodes, and how many select a width
+by the live flag, name a hardware register or were lifted from patched bytes,
+and the effects — then the program file written again from what it read:
+every region with its labels, its data runs and its nodes in address order,
+and, for the main CPU's file, the interrupt sequences. `--file` limits both
+to the regions written to one source file; `-o` writes the file there. It
+reads no image and runs nothing.
 
 ```
 snes_lift mixed
@@ -125,8 +130,10 @@ It links `snaggletooth_cpu65816` for the 65816 lift, which reads a listing and t
 measured cycle tables, and for the renderer, which reads the opcode table and
 follows the widths through the same function the assembler does; and
 `snaggletooth_spc700` for the SPC700 lift, which reads a listing, the measured
-cycle table and the mnemonic and form of each opcode. The two interpreters'
-own translation units include none of them. `snes_lift` links this
+cycle table and the mnemonic and form of each opcode, and for the sound
+program's renderer and file, which resolve a node's mnemonic and form against
+the same table. The two interpreters' own translation units include none of
+them. `snes_lift` links this
 target alone, so it reads a program file and cannot trace a cartridge. The lockstep is its own
 target, `snaggletooth_ir_lockstep`, which links the representation and the
 machine, and two things link it: the differential, its own target
@@ -145,7 +152,8 @@ it for the run.
   rendering source, running beside the machine, and how the lift is held to
   the core.
 - [`../rom/`](../rom/README.md) — the cartridge disassembler, whose bank files
-  the renderer writes and whose run on the machine drives the lockstep.
+  and sound file the renderer writes and whose run on the machine drives the
+  lockstep.
 - [`../examples/`](../examples/README.md) — the cartridges the examples above
   are run on.
 - [`../cpu65816/`](../cpu65816/README.md) — the disassembler whose listing the

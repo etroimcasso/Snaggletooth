@@ -13,6 +13,7 @@
 #include "ir/cpu65816_lift.h"
 #include "ir/ir_render.h"
 #include "ir/ir_text.h"
+#include "ir/spc700_lift.h"
 #include "rom/cartridge_entries.h"
 #include "rom/rom_text.h"
 #include "snaggletooth/snes/snes.h"
@@ -89,44 +90,6 @@ std::vector<Range> joined(std::vector<Range> ranges) {
       out.push_back(range);
     }
   }
-  return out;
-}
-
-Address lineEnd(const Line& line) {
-  return line.isCode ? line.address + line.instruction.length
-                     : line.address + static_cast<Address>(line.data.size());
-}
-
-// The listing as text, one piece per run of consecutive lines, each piece under
-// its own `ORG`. `between` names what lies in the gap before a piece. Every
-// piece is a region to an assembler, so the first instruction of a piece carries
-// the directives a region's start needs, whatever the line above the cut left.
-template <typename Between>
-std::string renderPieces(const Listing& listing, const Backend& backend, Between between) {
-  std::string out;
-  Listing piece;
-  piece.labels = listing.labels;
-  piece.warnings = listing.warnings;
-  piece.addressBits = listing.addressBits;
-  std::optional<Address> previousEnd;
-  auto flush = [&]() {
-    if (piece.lines.empty()) return;
-    out += render(piece);
-    piece.lines.clear();
-    piece.warnings.clear();
-  };
-  for (const Line& line : listing.lines) {
-    if (previousEnd && line.address != *previousEnd) {
-      flush();
-      out += "\n" + between(*previousEnd, line.address - 1u) + "\n";
-    }
-    piece.lines.push_back(line);
-    if (piece.lines.size() == 1 && line.isCode) {
-      piece.lines.back().directives = backend.directives(std::nullopt, line.context);
-    }
-    previousEnd = lineEnd(line);
-  }
-  flush();
   return out;
 }
 
@@ -1356,6 +1319,9 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       // Two blocks that landed end to end are one run of the program: an
       // instruction across their edge is kept whole.
       sound.listing = keepRanges(trace(spc700Backend(), traceRequest), joined(blocks));
+      // The sound program lifted once, as every region's code was: one node
+      // per code line, in the audio unit's address order.
+      out.program.spc700 = ir::liftSpc700(sound.listing);
       out.sound = std::move(sound);
     }
   }
@@ -1699,24 +1665,6 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   return out;
 }
 
-std::string renderSoundProgram(const SoundProgram& sound) {
-  std::string out;
-  out += "; The sound program the cartridge uploads at boot, traced from " +
-         address16(sound.capture.entry) + ".\n";
-  for (const UploadBlock& block : sound.capture.blocks) {
-    out += "; " + address16(block.apuAddress) + ": " + std::to_string(block.bytes.size()) + " bytes";
-    out += block.romOffset ? ", read from image offset $" +
-                                 hex(static_cast<std::uint32_t>(*block.romOffset), 6)
-                           : std::string(", not read from the image as they are");
-    out += "\n";
-  }
-  out += "\n";
-  out += renderPieces(sound.listing, spc700Backend(), [&](Address first, Address last) {
-    return "; ---- " + address16(first) + "-" + address16(last) + ": not uploaded";
-  });
-  return out;
-}
-
 namespace {
 
 // What the program file carries beside the program: the image line, and each
@@ -1734,6 +1682,40 @@ ir::ProgramFile programFileOf(const CartridgeDisassembly& disassembly) {
     for (const auto& [address, name] : region.listing.labels) out.labels.push_back({address, name});
     for (const Line& line : region.listing.lines) {
       if (!line.isCode && !line.data.empty()) out.data.push_back({line.address, line.data});
+    }
+    file.regions.push_back(std::move(out));
+  }
+  return file;
+}
+
+// What the sound program's file carries beside its nodes: the image line, and
+// one region per run of uploaded addresses — two blocks that landed end to end
+// are one run — with the listing's warnings on the first, and the labels and
+// the data runs that lie within each.
+ir::ProgramFile soundFileOf(const CartridgeDisassembly& disassembly) {
+  if (!disassembly.sound) throw std::logic_error("no sound program was captured");
+  const SoundProgram& sound = *disassembly.sound;
+  ir::ProgramFile file;
+  file.processor = ir::Processor::Spc700;
+  file.imageBytes = disassembly.imageBytes;
+  file.map = mapName(disassembly.header.map);
+  std::vector<Range> ranges;
+  for (const UploadBlock& block : sound.capture.blocks) {
+    ranges.push_back(Range{.first = block.apuAddress,
+                           .last = block.apuAddress + static_cast<Address>(block.bytes.size()) - 1u});
+  }
+  for (const Range& range : joined(ranges)) {
+    ir::ProgramRegion out;
+    out.file = sound.file;
+    out.first = range.first;
+    out.last = range.last;
+    if (file.regions.empty()) out.warnings = sound.listing.warnings;
+    for (const auto& [address, name] : sound.listing.labels) {
+      if (address >= range.first && address <= range.last) out.labels.push_back({address, name});
+    }
+    for (const Line& line : sound.listing.lines) {
+      if (line.isCode || line.data.empty()) continue;
+      if (line.address >= range.first && line.address <= range.last) out.data.push_back({line.address, line.data});
     }
     file.regions.push_back(std::move(out));
   }
@@ -1795,9 +1777,12 @@ RenderInput renderInputOf(const CartridgeDisassembly& disassembly) {
   if (disassembly.sound) {
     RenderSound sound;
     sound.file = disassembly.sound->file;
+    sound.entry = disassembly.sound->capture.entry;
     for (const UploadBlock& block : disassembly.sound->capture.blocks) {
-      if (block.romOffset) sound.blocks.push_back(RenderBlock{.romOffset = *block.romOffset, .bytes = block.bytes.size()});
+      sound.blocks.push_back(
+          RenderBlock{.apuAddress = block.apuAddress, .bytes = block.bytes.size(), .romOffset = block.romOffset});
     }
+    sound.regions = soundFileOf(disassembly).regions;
     input.sound = std::move(sound);
   }
   return input;
@@ -1811,8 +1796,17 @@ std::string renderRegion(const RegionListing& region, const CartridgeDisassembly
   throw std::logic_error("the disassembly has no region " + region.region.file);
 }
 
+std::string renderSoundFile(const CartridgeDisassembly& disassembly) {
+  if (!disassembly.sound) throw std::logic_error("no sound program was captured");
+  return renderSoundFile(renderInputOf(disassembly), disassembly.program);
+}
+
 std::string renderProgramFile(const CartridgeDisassembly& disassembly) {
   return ir::renderProgram(disassembly.program, programFileOf(disassembly));
+}
+
+std::string renderSoundProgramFile(const CartridgeDisassembly& disassembly) {
+  return ir::renderProgram(disassembly.program, soundFileOf(disassembly));
 }
 
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
@@ -1823,18 +1817,16 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
     error = "cannot create " + directory.string() + ": " + ec.message();
     return false;
   }
-  // The program file is the first thing under the directory; everything after
-  // it is what the disassembly found beside the program.
+  // The program files are the first things under the directory; everything
+  // after them is what the disassembly found beside the programs.
   if (!writeFile(directory / "program.snagir", renderProgramFile(disassembly), error)) return false;
+  if (disassembly.sound && !writeFile(directory / "apu.snagir", renderSoundProgramFile(disassembly), error)) {
+    return false;
+  }
   if (!writeFile(directory / "project.manifest", renderManifest(disassembly), error)) return false;
   for (const AssetFile& asset : disassembly.assets) {
     const std::string_view bytes(reinterpret_cast<const char*>(asset.bytes.data()), asset.bytes.size());
     if (!writeFile(directory / asset.file, bytes, error)) return false;
-  }
-  if (disassembly.sound) {
-    if (!writeFile(directory / disassembly.sound->file, renderSoundProgram(*disassembly.sound), error)) {
-      return false;
-    }
   }
   return true;
 }

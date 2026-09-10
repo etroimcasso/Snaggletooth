@@ -34,7 +34,7 @@ Tree treeOf(const CartridgeDisassembly& d) {
   for (const RegionListing& region : d.regions) {
     tree.files[region.region.file] = renderRegion(region, d);
   }
-  if (d.sound) tree.files[d.sound->file] = renderSoundProgram(*d.sound);
+  if (d.sound) tree.files[d.sound->file] = renderSoundFile(d);
   for (const AssetFile& asset : d.assets) {
     tree.files[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
   }

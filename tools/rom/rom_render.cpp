@@ -72,8 +72,9 @@ std::vector<Range> placedBlockRanges(const RenderInput& input, const RenderRegio
   if (!start) return ranges;
   const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
   for (const RenderBlock& block : input.sound->blocks) {
-    const std::size_t from = std::max(block.romOffset, *start);
-    const std::size_t to = std::min(block.romOffset + block.bytes, *start + length);
+    if (!block.romOffset) continue;  // a block the image does not hold stays in its bank
+    const std::size_t from = std::max(*block.romOffset, *start);
+    const std::size_t to = std::min(*block.romOffset + block.bytes, *start + length);
     if (from >= to) continue;
     ranges.push_back(Range{.first = region.first + static_cast<Address>(from - *start),
                            .last = region.first + static_cast<Address>(to - *start) - 1u});
@@ -221,21 +222,21 @@ std::string runDirectRegister(const RenderInput& input, Address site, std::uint3
 }
 
 // A run of bytes execution never reached, as `DB` rows of eight with the bytes
-// as text beside them — the framework's own form, so a bank file and a listing
-// read alike.
-std::string renderDataRun(const Line& line) {
+// as text beside them — the framework's own form, so a source file and a
+// listing read alike. The address prints at `addressBits`: 24 in a bank file,
+// 16 in the sound program's.
+std::string renderDataRun(Address address, const std::vector<std::uint8_t>& data, unsigned addressBits) {
   constexpr std::size_t kCommentColumn = 40;
   constexpr std::size_t kPerRow = 8;
-  std::string out = "\n; ---- " + std::to_string(line.data.size()) +
-                    " bytes execution did not reach\n";
-  for (std::size_t i = 0; i < line.data.size(); i += kPerRow) {
-    const std::size_t end = std::min(i + kPerRow, line.data.size());
+  std::string out = "\n; ---- " + std::to_string(data.size()) + " bytes execution did not reach\n";
+  for (std::size_t i = 0; i < data.size(); i += kPerRow) {
+    const std::size_t end = std::min(i + kPerRow, data.size());
     std::string row = "        DB ";
     std::string ascii;
     for (std::size_t j = i; j < end; ++j) {
       if (j != i) row += ",";
-      row += "$" + hex(line.data[j], 2);
-      const std::uint8_t byte = line.data[j];
+      row += "$" + hex(data[j], 2);
+      const std::uint8_t byte = data[j];
       ascii += (byte >= 0x20 && byte < 0x7F) ? static_cast<char>(byte) : '.';
     }
     if (row.size() < kCommentColumn) {
@@ -243,7 +244,7 @@ std::string renderDataRun(const Line& line) {
     } else {
       row += "  ";
     }
-    row += "; " + address24(line.address + static_cast<Address>(i)) + "  |" + ascii + "|";
+    row += "; " + formatAddress(address + static_cast<Address>(i), addressBits) + "  |" + ascii + "|";
     out += row + "\n";
   }
   return out;
@@ -420,7 +421,7 @@ std::string renderRegion(const RenderRegion& region, const RenderInput& input,
     }
 
     if (!line.isCode) {
-      if (!line.data.empty()) out += renderDataRun(line);
+      if (!line.data.empty()) out += renderDataRun(line.address, line.data, 24);
       mode.reset();
       continue;
     }
@@ -480,6 +481,79 @@ std::string renderRegion(const RenderRegion& region, const RenderInput& input,
     out += ir::renderLine(node, names, bytesWidth);
   }
   writeCutsBefore(region.last + 1u);
+  return out;
+}
+
+std::string renderSoundFile(const RenderInput& input, const ir::Program& program) {
+  if (!input.sound) throw std::logic_error("no sound program to render");
+  const RenderSound& sound = *input.sound;
+  std::string out = "; The sound program the cartridge uploads at boot, traced from " +
+                    formatAddress(sound.entry, 16) + ".\n";
+  for (const RenderBlock& block : sound.blocks) {
+    out += "; " + formatAddress(block.apuAddress, 16) + ": " + std::to_string(block.bytes) + " bytes";
+    out += block.romOffset ? ", read from image offset $" + hex(static_cast<std::uint32_t>(*block.romOffset), 6)
+                           : std::string(", not read from the image as they are");
+    out += "\n";
+  }
+  out += "\n";
+
+  // A target is written as its label wherever the file defines one.
+  std::map<Address, std::string> labels;
+  for (const ir::ProgramRegion& region : sound.regions) {
+    for (const ir::ProgramLabel& label : region.labels) labels[label.address] = label.name;
+  }
+
+  std::optional<Address> previousEnd;
+  for (const ir::ProgramRegion& region : sound.regions) {
+    // The region's nodes: the first at each address.
+    std::vector<const ir::Node*> nodes;
+    auto it = std::lower_bound(program.spc700.begin(), program.spc700.end(), region.first,
+                               [](const ir::Node& node, Address wanted) { return node.instruction.address < wanted; });
+    for (; it != program.spc700.end() && it->instruction.address <= region.last; ++it) {
+      if (!nodes.empty() && nodes.back()->instruction.address == it->instruction.address) continue;
+      nodes.push_back(&*it);
+    }
+
+    // A gap between two regions is what the upload never wrote.
+    if (previousEnd && *previousEnd != region.first) {
+      out += "\n; ---- " + formatAddress(*previousEnd, 16) + "-" + formatAddress(region.first - 1u, 16) +
+             ": not uploaded\n";
+    }
+    for (const std::string& warning : region.warnings) out += "; warning: " + warning + "\n";
+    if (!region.warnings.empty()) out += "\n";
+    out += "        ORG " + formatAddress(region.first, 16) + "\n";
+
+    // The raw-bytes field is as wide as the longest instruction in the region,
+    // and never narrower than three bytes.
+    std::size_t longest = 3;
+    for (const ir::Node* node : nodes) longest = std::max<std::size_t>(longest, node->instruction.length);
+    const std::size_t bytesWidth = longest * 3;
+
+    // The nodes and the data runs merged by address.
+    std::size_t n = 0;
+    std::size_t d = 0;
+    while (n < nodes.size() || d < region.data.size()) {
+      const Address na = n < nodes.size() ? nodes[n]->instruction.address : 0xFFFFFFFFu;
+      const Address da = d < region.data.size() ? region.data[d].address : 0xFFFFFFFFu;
+      if (da <= na) {
+        const ir::DataRun& run = region.data[d++];
+        if (!run.bytes.empty()) out += renderDataRun(run.address, run.bytes, 16);
+        continue;
+      }
+      const ir::Node& node = *nodes[n++];
+      if (const auto label = labels.find(node.instruction.address); label != labels.end()) {
+        out += "\n" + label->second + ":\n";
+      }
+      std::string_view targetLabel;
+      if (node.instruction.target) {
+        if (const auto found = labels.find(*node.instruction.target); found != labels.end()) {
+          targetLabel = found->second;
+        }
+      }
+      out += ir::renderSpc700Line(node, targetLabel, bytesWidth);
+    }
+    previousEnd = region.last + 1u;
+  }
   return out;
 }
 
@@ -671,15 +745,43 @@ std::optional<RenderInput> readRenderInput(const std::filesystem::path& director
                                        .first = asset.first,
                                        .bytes = asset.bytes});
   }
+  program = parsed->program;
   if (manifest->sound) {
     RenderSound sound;
     sound.file = manifest->sound->file;
+    sound.entry = manifest->sound->entry;
     for (const ManifestBlock& block : manifest->sound->blocks) {
-      if (block.romOffset) sound.blocks.push_back(RenderBlock{.romOffset = *block.romOffset, .bytes = block.length});
+      sound.blocks.push_back(
+          RenderBlock{.apuAddress = block.apuAddress, .bytes = block.length, .romOffset = block.romOffset});
     }
+    // The sound program's own file: its nodes and the regions written to the
+    // file the manifest names.
+    const std::optional<std::string> soundText = readText(directory / "apu.snagir");
+    if (!soundText) {
+      error = "cannot open " + (directory / "apu.snagir").string();
+      return std::nullopt;
+    }
+    const std::optional<ir::Parsed> soundParsed = ir::parseProgram(*soundText, why);
+    if (!soundParsed) {
+      error = "apu.snagir: " + why;
+      return std::nullopt;
+    }
+    if (soundParsed->file.processor != ir::Processor::Spc700) {
+      error = "apu.snagir: not the sound program's file";
+      return std::nullopt;
+    }
+    for (const ir::ProgramRegion& region : soundParsed->file.regions) {
+      if (region.file == sound.file) sound.regions.push_back(region);
+    }
+    if (sound.regions.empty()) {
+      error = "apu.snagir: no region is written to " + sound.file + ", which the manifest names";
+      return std::nullopt;
+    }
+    std::sort(sound.regions.begin(), sound.regions.end(),
+              [](const ir::ProgramRegion& a, const ir::ProgramRegion& b) { return a.first < b.first; });
+    program.spc700 = soundParsed->program.spc700;
     input.sound = std::move(sound);
   }
-  program = parsed->program;
   return input;
 }
 
@@ -688,22 +790,23 @@ bool renderTree(const std::filesystem::path& directory, std::size_t& rendered, s
   ir::Program program;
   const std::optional<RenderInput> input = readRenderInput(directory, program, error);
   if (!input) return false;
-  for (const RenderRegion& region : input->regions) {
-    const std::filesystem::path path = directory / region.file;
+  auto write = [&](const std::string& file, const std::string& text) {
+    const std::filesystem::path path = directory / file;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     std::ofstream out(path, std::ios::binary);
-    if (!out) {
-      error = "cannot write " + path.string();
-      return false;
-    }
-    out << renderRegion(region, *input, program);
+    if (out) out << text;
     if (!out) {
       error = "cannot write " + path.string();
       return false;
     }
     ++rendered;
+    return true;
+  };
+  for (const RenderRegion& region : input->regions) {
+    if (!write(region.file, renderRegion(region, *input, program))) return false;
   }
+  if (input->sound && !write(input->sound->file, renderSoundFile(*input, program))) return false;
   return true;
 }
 

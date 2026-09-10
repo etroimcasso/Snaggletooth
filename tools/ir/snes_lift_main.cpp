@@ -1,12 +1,13 @@
 // snes_lift — prints a tree's program, whole or one source file's regions.
 //
-//   snes_lift <directory> [-o <file.snagir>] [--file <name>]
+//   snes_lift <directory> [--apu] [-o <file.snagir>] [--file <name>]
 //
 // Reads the directory's `program.snagir`, the program file `snes_disasm`
-// wrote in the grammar `docs/snagir.md` gives, and writes what it counted —
-// the regions, the code lines (one per address a node stands at), the nodes
-// (an address two paths read two ways is two), how many nodes select a width
-// by the live flag, how many carry a hardware register's name, how many were
+// wrote in the grammar `docs/snagir.md` gives — or, with `--apu`, its
+// `apu.snagir`, the sound program's — and writes what it counted — the
+// regions, the code lines (one per address a node stands at), the nodes (an
+// address two paths read two ways is two), how many nodes select a width by
+// the live flag, how many carry a hardware register's name, how many were
 // lifted from patched bytes, and the effects — then the program file, written
 // again from what was read. `-o` writes the file there instead, and standard
 // output keeps the summary; `--file` limits both to the regions written to one
@@ -28,8 +29,9 @@
 namespace {
 
 [[noreturn]] void usage(const char* prog) {
-  std::cerr << "usage: " << prog << " <directory> [-o <file.snagir>] [--file <name>]\n"
-               "  prints the directory's program.snagir with a summary, whole or one source file's regions\n";
+  std::cerr << "usage: " << prog << " <directory> [--apu] [-o <file.snagir>] [--file <name>]\n"
+               "  prints the directory's program.snagir — or, with --apu, its apu.snagir — with a\n"
+               "  summary, whole or one source file's regions\n";
   std::exit(2);
 }
 
@@ -39,6 +41,7 @@ int main(int argc, char** argv) {
   std::string directory;
   std::string outPath;
   std::string onlyFile;
+  bool apu = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "-o" || arg == "--file") {
@@ -47,6 +50,8 @@ int main(int argc, char** argv) {
         usage(argv[0]);
       }
       (arg == "-o" ? outPath : onlyFile) = argv[++i];
+    } else if (arg == "--apu") {
+      apu = true;
     } else if (directory.empty()) {
       directory = arg;
     } else {
@@ -55,7 +60,8 @@ int main(int argc, char** argv) {
   }
   if (directory.empty()) usage(argv[0]);
 
-  const std::filesystem::path programPath = std::filesystem::path(directory) / "program.snagir";
+  const std::filesystem::path programPath =
+      std::filesystem::path(directory) / (apu ? "apu.snagir" : "program.snagir");
   std::string text;
   {
     std::ifstream in(programPath, std::ios::binary);

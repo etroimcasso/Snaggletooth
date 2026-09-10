@@ -1021,15 +1021,17 @@ lines among them — and the next disassembly reads none of it back: they are wh
 the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. `snes_render` reads the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the
-bank files from `program.snagir`, for the register names, the routine
-comments and the `INCBIN` lines ([snes-disassembler.md §Library](snes-disassembler.md#library)).
-`snes_lift` and `snes_differential` read `program.snagir` beside the manifest
-and nothing of the manifest itself ([snagir.md](snagir.md)).
-The disassembler writes the manifest, the program file and the lifted files
-fresh, and the renderer writes the bank files fresh: an edit to a bank file or
-to the program file is not read back by the next disassembly, so a person's
-changes to the trace belong in the manifest, and their changes to the code in
-the sources, which `snes_verify` assembles as they are.
+bank files from `program.snagir` and the sound file from `apu.snagir`, for
+the register names, the routine comments, the `INCBIN` lines and the sound
+file's header ([snes-disassembler.md §Library](snes-disassembler.md#library)).
+`snes_lift` and `snes_differential` read the program files beside the
+manifest and nothing of the manifest itself ([snagir.md](snagir.md)).
+The disassembler writes the manifest, the program files and the lifted files
+fresh, and the renderer writes the bank files and the sound file fresh: an
+edit to a source file or to a program file is not read back by the next
+disassembly, so a person's changes to the trace belong in the manifest, and
+their changes to the code in the sources, which `snes_verify` assembles as
+they are.
 
 A line that does not parse stops either tool with the line number and what was
 expected, before anything is written. An `entry` whose name is a mnemonic —

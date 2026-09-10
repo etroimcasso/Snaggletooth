@@ -47,8 +47,14 @@
 
 namespace snaggletooth::ir {
 
-// A 24-bit address: the bank in bits 16-23, the offset within it below.
+// A 24-bit address: the bank in bits 16-23, the offset within it below. The
+// sound CPU's addresses are the low sixteen bits, with the bank zero.
 using Address = std::uint32_t;
+
+// The chip a program is written for: the main CPU, whose nodes carry a mode and
+// address a 24-bit space, or the sound CPU, whose nodes carry no mode and
+// address the audio unit's 16-bit space.
+enum class Processor : std::uint8_t { Cpu65816, Spc700 };
 
 // The mode a node reads under: the emulation flag, and each register width with
 // whether it is known. Emulation mode forces both widths to eight and known.

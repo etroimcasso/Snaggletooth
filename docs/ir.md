@@ -8,15 +8,16 @@ uploads to the audio unit is the SPC700's. `tools/ir/cpu65816_lift.h` builds
 the first from a listing the [65816 disassembler](65816-disassembler.md)
 traced and `tools/ir/spc700_lift.h` the second from a listing the
 [SPC700 disassembler](spc700-disassembler.md) traced, `tools/ir/ir_interpret.h`
-runs either, `tools/ir/ir_render.h` writes SNES assembly from the main CPU's,
-`tools/ir/ir_differential.h` runs it beside the machine and reports every place
-the two disagree, and `tools/ir/ir_dataflow.h` runs it over every path at once
-and says what each instruction can rely on. Two commands put those in a
-person's hands: `snes_lift` reads a tree's program file back and prints it,
-and `snes_differential` reads the same file and replays the cartridge's
-recorded run beside it; the
-[cartridge disassembler](snes-disassembler.md#the-tree) writes that file, and
-`snes_render` writes the bank files from it through the renderer.
+runs either, `tools/ir/ir_render.h` writes SNES assembly from either,
+`tools/ir/ir_differential.h` runs the main CPU's beside the machine and
+reports every place the two disagree, and `tools/ir/ir_dataflow.h` runs it
+over every path at once and says what each instruction can rely on. Two
+commands put those in a person's hands: `snes_lift` reads a tree's program
+file back and prints it, and `snes_differential` reads the same file and
+replays the cartridge's recorded run beside it; the
+[cartridge disassembler](snes-disassembler.md#the-tree) writes the two
+program files — the main CPU's and the sound program's — and `snes_render`
+writes the bank files and the sound file from them through the renderer.
 
 Three properties shape everything below.
 
@@ -558,37 +559,42 @@ the rules are held by `tests/ir/provenance_test.cpp`, one case each.
 
 `tools/ir/ir_text.h` names every value of the vocabulary — `opName`, `placeName`,
 `widthName`, `stepName`, `accessName`, `whenName`, `flowName`, `addressingName`,
-`modeName` — and writes and reads the program file: `renderProgram` writes a
-whole program with what the program does not carry — the image, each region's
-file and range, its labels, its data runs and its warnings — as a `.snagir`
-file, and `parseProgram` reads one back into the same program. The file's
-grammar, record by record, is [snagir.md](snagir.md): braces open a region, a
-node's effects and each interrupt sequence, a semicolon ends every record and
-every effect, and whitespace separates words and means nothing else.
+`modeName` — and writes and reads the program file: `renderProgram` writes one
+chip's whole program with what the program does not carry — the chip, the
+image, each region's file and range, its labels, its data runs and its
+warnings — as a `.snagir` file, and `parseProgram` reads one back into the
+same program. The file's grammar, record by record, is [snagir.md](snagir.md):
+braces open a region, a node's effects and each interrupt sequence, a
+semicolon ends every record and every effect, and whitespace separates words
+and means nothing else. The main CPU's file carries `Program::nodes` and the
+interrupt sequences; the sound program's, whose version record says `apu`,
+carries `Program::spc700` at sixteen-bit addresses and no sequence.
 `renderNode` and `renderEffect` write one node and one effect as the file has
-them, and `equivalent` compares two programs as the file carries them.
+them, and `equivalent` compares two programs as the files carry them.
 `selectFile` cuts a parsed file to the regions written to one source file,
 with the nodes they hold, and `countProgram` counts what a parsed file
 carries — the regions, the code lines (one per address a node stands at),
 the nodes, the nodes that select a width by the live flag, the nodes naming a
 hardware register, the nodes lifted from patched bytes, and the effects.
 
-`snes_disasm` writes the file as `program.snagir` at the root of every tree,
-and `snes_render` writes the tree's source files from it. `snes_lift` reads it
-back and prints it, for a person to read:
+`snes_disasm` writes the main CPU's file as `program.snagir` and the sound
+program's as `apu.snagir` at the root of every tree, and `snes_render` writes
+the tree's source files from them. `snes_lift` reads either back and prints
+it, for a person to read:
 
 ```
-snes_lift <directory> [-o <file.snagir>] [--file <name>]
+snes_lift <directory> [--apu] [-o <file.snagir>] [--file <name>]
 ```
 
-It reads the directory's `program.snagir` and writes the summary
-`countProgram` gives, then the program file written again from what it read.
-`--file` limits both to the regions written to one source file and `-o`
-writes the file there, standard output keeping the summary. It reads no image
-and runs nothing; a file the reader refuses is named with its line, and the
-exit status is 2. A whole cartridge's file is large — ten times the image,
-since every instruction is written with each of its effects. On the `mixed`
-cartridge from [`tools/examples/`](../tools/examples/README.md), after
+It reads the directory's `program.snagir` — or, with `--apu`, its
+`apu.snagir` — and writes the summary `countProgram` gives, then the program
+file written again from what it read. `--file` limits both to the regions
+written to one source file and `-o` writes the file there, standard output
+keeping the summary. It reads no image and runs nothing; a file the reader
+refuses is named with its line, and the exit status is 2. A whole cartridge's
+file is large — ten times the image, since every instruction is written with
+each of its effects. On the `mixed` cartridge from
+[`tools/examples/`](../tools/examples/README.md), after
 `snes_disasm mixed.smc -o mixed --no-run --no-sound`:
 
 ```
@@ -641,6 +647,22 @@ or pull; a condition follows the bracket, and the semicolon ends the effect. The
 four costs are the measured base under each setting of the widths, in
 `costIndex` order: both eight, index sixteen, accumulator sixteen, both sixteen.
 
+The sound program's file reads the same way with the sound CPU's header: on
+the `uploading` cartridge, after `snes_disasm uploading.smc -o uploading --no-run`,
+`snes_lift uploading --apu` prints a summary of one region, twenty code lines
+and no node selecting a width, then the file — `snagir 1 apu;`, the region
+`apu/driver.asm $0200-$022B`, and each node with its form in place of an
+addressing mode, no mode and one cost:
+
+```
+  $0202 MOV abs,A operand $250 length 3 flow continue base 5 {
+    Set PC <- $205 [16];
+    Set T0 <- $250 [16];
+    Load T3 <- T0 [8 flat];
+    Store T0, A [8 flat];
+  }
+```
+
 ## Rendering source
 
 `tools/ir/ir_render.h` writes SNES assembly from the instruction layer alone.
@@ -675,6 +697,28 @@ carries, goes in the comment.
 comment with the address, the bytes from `encode` padded to the width the
 caller chose, the cost, and the annotation, the long operand's register name,
 and `PATCHED at run time` for a node lifted from patched bytes.
+
+The sound program's source comes from the same layer through the SPC700
+table: a sound-CPU node's mnemonic and form name its row, `opcodeOfSpc700`
+answers the opcode, `encodeSpc700` the bytes — a relative form's displacement
+from the instruction after it, a bit form's address and bit index packed into
+one word — and `renderSpc700Instruction` the text, the row's own with the
+operands as the [SPC700 disassembler](spc700-disassembler.md) prints them,
+or with a label in place of the target of a branch, an absolute call or an
+absolute jump where the caller gives one (a `PCALL` keeps its byte).
+`renderSpc700Cost` is the one measured base with `/taken` where a `Cycles`
+effect fires under a condition, and `renderSpc700Line` the line with its
+comment: the sixteen-bit address, the bytes, the cost, and the note — the
+audio register the operand names, the page-`$FF` address a `PCALL` reaches,
+`PATCHED at run time`.
+
+```cpp
+renderSpc700Instruction(node.instruction);            // "BBS $88.7,$02DF"
+renderSpc700Instruction(node.instruction, "loc_02DF"); // "BBS $88.7,loc_02DF"
+encodeSpc700(node.instruction);                        // {0xE3, 0x88, 0x1A}
+renderSpc700Cost(node);                                // "5/7"
+renderSpc700Line(node, "loc_02DF", 9);                 // "        BBS $88.7,loc_02DF   …  ; $02C2  E3 88 1A  5/7\n"
+```
 
 The directives an assembler needs — `EMULATION`, `NATIVE`, `A8`, `A16`, `X8`,
 `X16` — are written by `SourceMode`, which carries the mode a region of source
@@ -999,12 +1043,14 @@ would mean the layers leak into each other.
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped; each disagreement with its step, node, effect and the two values; the form and construct histograms. |
 | `registersOf(state)` | A core state as the interpreter's registers. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
-| `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed` | The program file written from a program and what it does not carry, and read back to both; the grammar is [snagir.md](snagir.md). |
-| `renderEffect(effect)`, `renderNode(node)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the file carries them. |
-| `selectFile(parsed, file)`, `countProgram(parsed)`, `ProgramCounts` | A parsed file cut to one source file's regions and their nodes; what a parsed file carries, counted. |
+| `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed`, `Processor` | One chip's program file written from a program and what it does not carry — the chip among them — and read back to both; the grammar is [snagir.md](snagir.md). |
+| `renderEffect(effect)`, `renderNode(node, processor)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the files carry them, both node lists. |
+| `selectFile(parsed, file)`, `countProgram(parsed)`, `ProgramCounts` | A parsed file cut to one source file's regions and their nodes; what a parsed file carries, counted over its own chip's nodes. |
 | `opcodeOf(instruction)`, `encode(instruction)` | The opcode the mnemonic and mode name; the bytes the instruction assembles to. |
 | `renderInstruction(instruction, names)`, `SourceNames` | The instruction as source, with a label, a register name and an annotation in place of addresses where given. |
 | `renderCost(node)`, `renderLine(node, names, bytesWidth)` | The cost as a listing prints it; one line of source with its comment. |
+| `opcodeOfSpc700(instruction)`, `encodeSpc700(instruction)` | The opcode a sound-CPU node's mnemonic and form name; the bytes it assembles to. |
+| `renderSpc700Instruction(instruction, targetLabel)`, `renderSpc700Cost(node)`, `renderSpc700Line(node, targetLabel, bytesWidth)` | A sound-CPU instruction as source, with a label in place of its target where given; its cost as the listing prints it; one line of the sound program's source with its comment. |
 | `SourceMode::reset()`, `directives(node)` | The mode a region of source carries in file order, and the directives each instruction needs. |
 | `Values`, `Symbol`, `RegisterState`, `Compare`, `State` | What every path proves: a register's possible values, a named entry value, the registers, the last compare, the bytes pushed. |
 | `resetState()`, `nothingProven()` | Where the reset vector begins; where everything else does. |
@@ -1048,12 +1094,13 @@ a table whose index the bytes bound; it follows the registers by the byte and
 does not follow the carry or the decimal flag, so an `ADC` result is never
 known. The sound CPU's lift covers every SPC700 opcode, and its interpreter is
 held to that core at unit grain by the SPC700 vector suite and by a case per
-construct against the core over a flat bus; the cartridge disassembler does
-not yet lift the sound program it captures, so a tree's program file carries
-the main CPU's program alone and the sound file is written from the capture's
-listing. The replay reports an instruction at an address the tree has no node
-for, but does not trace from it; those addresses are the person's to answer
-with entries.
+construct against the core over a flat bus; the cartridge disassembler lifts
+the sound program it captures into `apu.snagir`, and the sound file is
+rendered from that file through the renderer, byte for byte what the listing
+prints. The sound program is not yet replayed beside the machine, and the
+dataflow, the shadow and the facts are the main CPU's. The replay reports an
+instruction at an address the tree has no node for, but does not trace from
+it; those addresses are the person's to answer with entries.
 
 ## See also
 
@@ -1067,8 +1114,8 @@ with entries.
 - [Disassembly framework](disassembly-framework.md) — the listing's shape, the
   context beside every address, and how a conflict is reported.
 - [Cartridge disassembler](snes-disassembler.md) — a whole cartridge traced into
-  the listings a program is lifted from, and its bank files written back from
-  the program.
+  the listings the two programs are lifted from, and its bank files and sound
+  file written back from them.
 - [65816 assembly language](65816-assembly.md) — the dialect the renderer
   writes, and the directives `SourceMode` places.
 - [The SNES machine](snes-machine.md#the-bus-observer) — the observer the replay

@@ -14,6 +14,11 @@
 // target of a branch, jump or call; a hardware register's name for an absolute
 // operand — and the names are the caller's: what a label is, and which register
 // an address reaches, are facts attached to the program, not part of it.
+//
+// The sound program's lines are written the same way from a sound-CPU node: its
+// mnemonic and form name the SPC700 table's row, whose text is filled with the
+// operands as the SPC700 disassembler prints them, and the bytes come back from
+// the same row.
 
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +29,7 @@
 
 #include "cpu65816_disasm.h"
 #include "ir/ir.h"
+#include "spc700_disasm.h"
 
 namespace snaggletooth::ir {
 
@@ -78,5 +84,36 @@ class SourceMode {
  private:
   std::optional<disasm::Cpu65816Mode> left_;
 };
+
+// ---- the sound program ----------------------------------------------------------
+
+// The opcode a sound-CPU node's mnemonic and form name together, from the
+// SPC700 table; `std::logic_error` where they name none.
+[[nodiscard]] std::uint8_t opcodeOfSpc700(const Instruction& instruction);
+
+// The bytes a sound-CPU instruction assembles to: the opcode, then the operand
+// bytes its form has, in the order the chip reads them — a relative form's
+// displacement from the instruction after it, a bit form's address and bit
+// index packed into one word.
+[[nodiscard]] std::vector<std::uint8_t> encodeSpc700(const Instruction& instruction);
+
+// A sound-CPU instruction as source: the table's text with the operands as the
+// SPC700 disassembler prints them. With `targetLabel`, a branch, an absolute
+// call or an absolute jump is written with the label in place of its target
+// address, as the listing writes one; a `PCALL` keeps its byte.
+[[nodiscard]] std::string renderSpc700Instruction(const Instruction& instruction,
+                                                  std::string_view targetLabel = {});
+
+// A sound-CPU node's cost as the listing prints it: the measured base, with
+// `/taken` where a `Cycles` effect fires under a condition.
+[[nodiscard]] std::string renderSpc700Cost(const Node& node);
+
+// One line of the sound program's source: the instruction under the indent,
+// then the comment with the 16-bit address, the bytes padded to `bytesWidth`,
+// the cost, and the note — the register the operand names, the page-`$FF`
+// address a `PCALL` reaches, and `PATCHED at run time` where the node was lifted
+// from patched bytes.
+[[nodiscard]] std::string renderSpc700Line(const Node& node, std::string_view targetLabel,
+                                           std::size_t bytesWidth);
 
 }  // namespace snaggletooth::ir

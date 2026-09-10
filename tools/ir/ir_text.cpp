@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "cpu65816_disasm.h"
+#include "spc700_disasm.h"
 
 namespace snaggletooth::ir {
 namespace {
@@ -53,10 +54,65 @@ std::string hex(std::uint32_t value) {
   return b;
 }
 
-std::string addressText(Address address) {
+// An address as the file writes one: `$BB:XXXX` in the main CPU's file, `$XXXX`
+// in the sound program's.
+std::string addressText(Address address, Processor processor) {
   char b[16];
-  std::snprintf(b, sizeof b, "$%02X:%04X", (address >> 16) & 0xFFu, address & 0xFFFFu);
+  if (processor == Processor::Spc700) {
+    std::snprintf(b, sizeof b, "$%04X", address & 0xFFFFu);
+  } else {
+    std::snprintf(b, sizeof b, "$%02X:%04X", (address >> 16) & 0xFFu, address & 0xFFFFu);
+  }
   return b;
+}
+
+// The chip's own nodes in a program.
+const std::vector<Node>& nodesOf(const Program& program, Processor processor) {
+  return processor == Processor::Spc700 ? program.spc700 : program.nodes;
+}
+
+std::vector<Node>& nodesOf(Program& program, Processor processor) {
+  return processor == Processor::Spc700 ? program.spc700 : program.nodes;
+}
+
+// The byte shape of a sound-CPU instruction's operands, from the table row its
+// mnemonic and form name; nothing where they name no row.
+std::optional<disasm::Spc700Operands> spc700Shape(const Instruction& instruction) {
+  const std::optional<std::uint8_t> opcode =
+      disasm::spc700OpcodeOf(instruction.mnemonic, instruction.form);
+  if (!opcode) return std::nullopt;
+  return disasm::spc700Opcodes()[*opcode].operands;
+}
+
+// Whether a sound-CPU form carries a second operand byte in `operand2`: a bit
+// index, or the destination offset of a two-operand direct-page form.
+bool spc700HasOperand2(disasm::Spc700Operands shape) {
+  return shape == disasm::Spc700Operands::AbsBit || shape == disasm::Spc700Operands::DpDp ||
+         shape == disasm::Spc700Operands::ImmDp;
+}
+
+// The memory address a sound-CPU instruction's operand names, which is the
+// address a register name on the node is checked against — the forms that reach
+// memory alone, and the destination for a two-operand form — or nothing.
+std::optional<std::uint16_t> spc700OperandAddress(const Instruction& instruction,
+                                                  disasm::Spc700Operands shape) {
+  using S = disasm::Spc700Operands;
+  switch (shape) {
+    case S::Dp:
+    case S::DpRel:
+    case S::Abs:
+    case S::AbsBit:
+      return static_cast<std::uint16_t>(instruction.operand & 0xFFFFu);
+    case S::DpDp:
+    case S::ImmDp:
+      return instruction.operand2;
+    case S::None:
+    case S::Imm:
+    case S::Rel:
+    case S::Upage:
+      break;
+  }
+  return std::nullopt;
 }
 
 std::string_view placeText(Place place) {
@@ -152,8 +208,13 @@ std::optional<std::uint32_t> value(std::string_view text) {
   return hexValue(text.substr(1));
 }
 
-// An address as the file writes one: `$BB:XXXX`.
-std::optional<Address> address(std::string_view text) {
+// An address as the file writes one: `$BB:XXXX` in the main CPU's file, `$XXXX`
+// in the sound program's.
+std::optional<Address> address(std::string_view text, Processor processor) {
+  if (processor == Processor::Spc700) {
+    if (text.size() != 5 || text[0] != '$') return std::nullopt;
+    return hexValue(text.substr(1, 4));
+  }
   if (text.size() != 8 || text[0] != '$' || text[3] != ':') return std::nullopt;
   const std::optional<std::uint32_t> bank = hexValue(text.substr(1, 2));
   const std::optional<std::uint32_t> offset = hexValue(text.substr(4, 4));
@@ -208,22 +269,44 @@ class Reader {
     while (peekIs("region")) {
       if (!readRegion()) return std::nullopt;
     }
-    if (!readSequence("nmi", parsed_.program.nmi) || !readSequence("irq", parsed_.program.irq)) {
-      return std::nullopt;
+    if (sound()) {
+      // The sound CPU takes no hardware interrupt: its file ends with its last
+      // region.
+      if (pos_ < tokens_.size()) {
+        const Token& t = tokens_[pos_];
+        if (!t.quoted && (t.text == "nmi" || t.text == "irq")) {
+          failAt(t.line, "the sound program has no `" + t.text + "` sequence");
+        } else {
+          fail(quoted(t.text) + " after the last region");
+        }
+        return std::nullopt;
+      }
+    } else {
+      if (!readSequence("nmi", parsed_.program.nmi) || !readSequence("irq", parsed_.program.irq)) {
+        return std::nullopt;
+      }
+      if (pos_ < tokens_.size()) {
+        fail(quoted(tokens_[pos_].text) + " after the irq sequence");
+        return std::nullopt;
+      }
     }
-    if (pos_ < tokens_.size()) {
-      fail(quoted(tokens_[pos_].text) + " after the irq sequence");
-      return std::nullopt;
-    }
-    std::stable_sort(parsed_.program.nodes.begin(), parsed_.program.nodes.end(),
-                     [](const Node& a, const Node& b) {
-                       return a.instruction.address < b.instruction.address;
-                     });
+    std::vector<Node>& nodes = nodesOf(parsed_.program, processor_);
+    std::stable_sort(nodes.begin(), nodes.end(), [](const Node& a, const Node& b) {
+      return a.instruction.address < b.instruction.address;
+    });
     return std::move(parsed_);
   }
 
  private:
   enum class Kind { Label, Data, Node };
+
+  bool sound() const { return processor_ == Processor::Spc700; }
+
+  std::optional<Address> address(std::string_view text) const {
+    return ir::address(text, processor_);
+  }
+
+  std::string addressText(Address at) const { return ir::addressText(at, processor_); }
 
   // ---- tokens ------------------------------------------------------------------
 
@@ -332,12 +415,23 @@ class Reader {
 
   // ---- the head ------------------------------------------------------------------
 
+  // `snagir 1;` for the main CPU's program, `snagir 1 apu;` for the sound
+  // program's.
   bool readVersion() {
     if (!peekIs("snagir")) return fail("the file does not open with `snagir 1;`");
     ++pos_;
     const Token* version = word("the version");
     if (version == nullptr) return false;
     if (version->text != "1") return failAt(version->line, "version " + version->text + " is not one this reader knows");
+    // A word after the version names the processor — unless it opens the next
+    // record, in which case the `;` is what is missing.
+    if (!peekIs(";") && !peekIs("image") && !peekIs("region")) {
+      const Token* chip = word("the processor");
+      if (chip == nullptr) return false;
+      if (chip->text != "apu") return failAt(chip->line, quoted(chip->text) + " is not a processor this reader knows");
+      processor_ = Processor::Spc700;
+      parsed_.file.processor = processor_;
+    }
     return expect(";");
   }
 
@@ -470,11 +564,20 @@ class Reader {
     if (mnemonic == nullptr) return false;
     std::string addressing;
     if (!peekIs("operand")) {
-      const Token* form = word("the node's addressing mode");
+      const Token* form = word(sound() ? "the node's form" : "the node's addressing mode");
       if (form == nullptr) return false;
       addressing = form->text;
     }
-    if (!resolve(*mnemonic, addressing, instruction)) return false;
+    std::optional<disasm::Spc700Operands> shape;
+    if (sound()) {
+      if (!resolveSpc700(*mnemonic, addressing, instruction)) return false;
+      shape = spc700Shape(instruction);
+    } else if (!resolve(*mnemonic, addressing, instruction)) {
+      return false;
+    }
+    // Which forms carry a second operand byte: a block move's destination bank
+    // on the main CPU; a bit index or a destination offset on the sound CPU.
+    const bool second = sound() ? spc700HasOperand2(*shape) : instruction.addressing == Addressing::BlockMove;
 
     if (!expect("operand")) return false;
     const Token* operand = word("the operand");
@@ -484,16 +587,19 @@ class Reader {
     instruction.operand = *operandValue;
     if (peekIs("operand2")) {
       const Token* key = next();
-      if (instruction.addressing != Addressing::BlockMove) {
-        return failAt(key->line, "`operand2` belongs to a block move alone");
+      if (!second) {
+        return failAt(key->line, sound() ? "`operand2` belongs to a form with two operand bytes alone"
+                                         : "`operand2` belongs to a block move alone");
       }
-      const Token* bank = word("the block move's destination bank");
-      if (bank == nullptr) return false;
-      const std::optional<std::uint32_t> operand2 = value(bank->text);
-      if (!operand2 || *operand2 > 0xFFu) return failAt(bank->line, quoted(bank->text) + " is not a bank");
+      const Token* byte = word(sound() ? "the second operand byte" : "the block move's destination bank");
+      if (byte == nullptr) return false;
+      const std::optional<std::uint32_t> operand2 = value(byte->text);
+      if (!operand2 || *operand2 > 0xFFu) {
+        return failAt(byte->line, quoted(byte->text) + (sound() ? " is not a byte" : " is not a bank"));
+      }
       instruction.operand2 = static_cast<std::uint8_t>(*operand2);
-    } else if (instruction.addressing == Addressing::BlockMove) {
-      return fail("a block move lacks its `operand2`");
+    } else if (second) {
+      return fail(sound() ? "a form with two operand bytes lacks its `operand2`" : "a block move lacks its `operand2`");
     }
 
     if (!expect("length")) return false;
@@ -518,36 +624,62 @@ class Reader {
       instruction.target = *targetValue;
     }
 
-    const Token* e = word("the mode");
-    if (e == nullptr) return false;
-    if (e->text == "e=1") {
-      node.mode = Mode{};
-    } else if (e->text == "e=0") {
-      const Token* m = word("the accumulator width");
-      const Token* x = m == nullptr ? nullptr : word("the index width");
-      if (m == nullptr || x == nullptr) return false;
-      if (!width(m->text, 'm', node.mode.accumulatorKnown, node.mode.accumulator8) ||
-          !width(x->text, 'x', node.mode.indexKnown, node.mode.index8)) {
-        return failAt(m->line, "a native mode is `e=0 m=<8|16|?> x=<8|16|?>`");
+    if (sound()) {
+      // A sound-CPU node carries no mode: the chip's instructions always read
+      // the same way.
+      if (pos_ < tokens_.size() && !tokens_[pos_].quoted && tokens_[pos_].text.starts_with("e=")) {
+        return failAt(tokens_[pos_].line, "a sound-CPU node carries no mode");
       }
-      node.mode.emulation = false;
     } else {
-      return failAt(e->line, quoted(e->text) + " is not a mode");
+      const Token* e = word("the mode");
+      if (e == nullptr) return false;
+      if (e->text == "e=1") {
+        node.mode = Mode{};
+      } else if (e->text == "e=0") {
+        const Token* m = word("the accumulator width");
+        const Token* x = m == nullptr ? nullptr : word("the index width");
+        if (m == nullptr || x == nullptr) return false;
+        if (!width(m->text, 'm', node.mode.accumulatorKnown, node.mode.accumulator8) ||
+            !width(x->text, 'x', node.mode.indexKnown, node.mode.index8)) {
+          return failAt(m->line, "a native mode is `e=0 m=<8|16|?> x=<8|16|?>`");
+        }
+        node.mode.emulation = false;
+      } else {
+        return failAt(e->line, quoted(e->text) + " is not a mode");
+      }
     }
 
     if (!expect("base")) return false;
-    const Token* base = word("the costs");
+    const Token* base = word(sound() ? "the cost" : "the costs");
     if (base == nullptr) return false;
-    if (!costs(base->text, node.cost)) return failAt(base->line, quoted(base->text) + " is not four costs");
+    if (sound()) {
+      // One measured cost, held in all four slots so a reader of any slot
+      // reads it.
+      const std::optional<std::uint32_t> c = decimal(base->text, 255);
+      if (!c) return failAt(base->line, quoted(base->text) + " is not a cost");
+      node.cost.base.fill(static_cast<std::uint8_t>(*c));
+    } else if (!costs(base->text, node.cost)) {
+      return failAt(base->line, quoted(base->text) + " is not four costs");
+    }
 
     if (!peekIs("{") && !peekIs("patched")) {
       const Token* name = word("the register name");
       if (name == nullptr) return false;
-      const std::string_view tableName = disasm::cpu65816RegisterName(instruction.operand);
-      const bool longForm = instruction.addressing == Addressing::AbsoluteLong ||
-                            instruction.addressing == Addressing::AbsoluteLongX;
-      if (!longForm || tableName.empty() || tableName != name->text) {
-        return failAt(name->line, quoted(name->text) + " is not the register at " + hex(instruction.operand));
+      std::string_view tableName;
+      std::uint32_t at = instruction.operand;
+      if (sound()) {
+        const std::optional<std::uint16_t> reached = spc700OperandAddress(instruction, *shape);
+        if (reached) {
+          at = *reached;
+          tableName = disasm::registerName(*reached);
+        }
+      } else {
+        const bool longForm = instruction.addressing == Addressing::AbsoluteLong ||
+                              instruction.addressing == Addressing::AbsoluteLongX;
+        if (longForm) tableName = disasm::cpu65816RegisterName(instruction.operand);
+      }
+      if (tableName.empty() || tableName != name->text) {
+        return failAt(name->line, quoted(name->text) + " is not the register at " + hex(at));
       }
       node.registerName = tableName;
     }
@@ -563,8 +695,25 @@ class Reader {
     ++pos_;
     if (!readEffects(node.effects)) return false;
     if (!inOrder(first.line, instruction.address, Kind::Node)) return false;
-    parsed_.program.nodes.push_back(std::move(node));
+    nodesOf(parsed_.program, processor_).push_back(std::move(node));
     return true;
+  }
+
+  // A sound-CPU node's mnemonic and form as the one opcode they name together;
+  // both views the SPC700 table's own, so they outlive the text.
+  bool resolveSpc700(const Token& mnemonic, std::string_view form, Instruction& instruction) {
+    const std::optional<std::uint8_t> opcode = disasm::spc700OpcodeOf(mnemonic.text, form);
+    if (opcode) {
+      instruction.mnemonic = disasm::spc700Mnemonic(*opcode);
+      instruction.form = disasm::spc700Form(*opcode);
+      return true;
+    }
+    for (unsigned candidate = 0; candidate < 256; ++candidate) {
+      if (mnemonic.text == disasm::spc700Mnemonic(static_cast<std::uint8_t>(candidate))) {
+        return failAt(mnemonic.line, quoted(mnemonic.text) + " with " + quoted(form) + " names no opcode");
+      }
+    }
+    return failAt(mnemonic.line, quoted(mnemonic.text) + " is not a mnemonic of the sound CPU");
   }
 
   // The mnemonic and the addressing mode as the one opcode they name together;
@@ -799,6 +948,7 @@ class Reader {
   std::vector<Token> tokens_;
   std::size_t pos_ = 0;
   std::size_t lastLine_ = 1;
+  Processor processor_ = Processor::Cpu65816;
   Parsed parsed_;
   std::optional<std::pair<Address, Kind>> last_;
 };
@@ -861,17 +1011,34 @@ std::string renderEffect(const Effect& e) {
   return line + ";";
 }
 
-std::string renderNode(const Node& node) {
+std::string renderNode(const Node& node, Processor processor) {
   const Instruction& i = node.instruction;
-  std::string out = "  " + addressText(i.address) + " " + std::string(i.mnemonic);
-  if (i.addressing != Addressing::Implied) out += " " + std::string(addressingName(i.addressing));
+  const bool sound = processor == Processor::Spc700;
+  std::string out = "  " + addressText(i.address, processor) + " " + std::string(i.mnemonic);
+  bool second = false;
+  if (sound) {
+    const std::optional<disasm::Spc700Operands> shape = spc700Shape(i);
+    if (!shape) {
+      throw std::invalid_argument(std::string(i.mnemonic) + " with " + std::string(i.form) +
+                                  " names no opcode of the sound CPU");
+    }
+    if (!i.form.empty()) out += " " + std::string(i.form);
+    second = spc700HasOperand2(*shape);
+  } else {
+    if (i.addressing != Addressing::Implied) out += " " + std::string(addressingName(i.addressing));
+    second = i.addressing == Addressing::BlockMove;
+  }
   out += " operand " + hex(i.operand);
-  if (i.addressing == Addressing::BlockMove) out += " operand2 " + hex(i.operand2);
+  if (second) out += " operand2 " + hex(i.operand2);
   out += " length " + std::to_string(i.length) + " flow " + std::string(flowName(i.flow));
-  if (i.target) out += " target " + addressText(*i.target);
-  out += " " + modeName(node.mode) + " base " + std::to_string(node.cost.base[0]) + "/" +
-         std::to_string(node.cost.base[1]) + "/" + std::to_string(node.cost.base[2]) + "/" +
-         std::to_string(node.cost.base[3]);
+  if (i.target) out += " target " + addressText(*i.target, processor);
+  if (sound) {
+    out += " base " + std::to_string(node.cost.base[0]);
+  } else {
+    out += " " + modeName(node.mode) + " base " + std::to_string(node.cost.base[0]) + "/" +
+           std::to_string(node.cost.base[1]) + "/" + std::to_string(node.cost.base[2]) + "/" +
+           std::to_string(node.cost.base[3]);
+  }
   if (!node.registerName.empty()) {
     out += " ";
     out += node.registerName;
@@ -884,14 +1051,19 @@ std::string renderNode(const Node& node) {
 }
 
 std::string renderProgram(const Program& program, const ProgramFile& file) {
-  std::string out = "snagir 1;\nimage " + std::to_string(file.imageBytes) + " " + file.map + ";\n";
+  const Processor processor = file.processor;
+  const bool sound = processor == Processor::Spc700;
+  std::string out = sound ? "snagir 1 apu;\n" : "snagir 1;\n";
+  out += "image " + std::to_string(file.imageBytes) + " " + file.map + ";\n";
+  const std::vector<Node>& all = nodesOf(program, processor);
   std::size_t written = 0;
   char b[4];
   for (const ProgramRegion& region : file.regions) {
-    out += "\nregion " + region.file + " " + addressText(region.first) + "-" + addressText(region.last) + " {\n";
+    out += "\nregion " + region.file + " " + addressText(region.first, processor) + "-" +
+           addressText(region.last, processor) + " {\n";
     for (const std::string& warning : region.warnings) out += "  warning " + quotedText(warning) + ";\n";
     std::vector<const Node*> nodes;
-    for (const Node& node : program.nodes) {
+    for (const Node& node : all) {
       const Address at = node.instruction.address;
       if (at >= region.first && at <= region.last) nodes.push_back(&node);
     }
@@ -906,24 +1078,25 @@ std::string renderProgram(const Program& program, const ProgramFile& file) {
       const Address da = d < region.data.size() ? region.data[d].address : 0xFFFFFFFFu;
       const Address na = n < nodes.size() ? nodes[n]->instruction.address : 0xFFFFFFFFu;
       if (la <= da && la <= na) {
-        out += "  label " + addressText(la) + " " + region.labels[l++].name + ";\n";
+        out += "  label " + addressText(la, processor) + " " + region.labels[l++].name + ";\n";
       } else if (da <= na) {
         const DataRun& run = region.data[d++];
-        out += "  data " + addressText(run.address) + " ";
+        out += "  data " + addressText(run.address, processor) + " ";
         for (const std::uint8_t byte : run.bytes) {
           std::snprintf(b, sizeof b, "%02X", byte);
           out += b;
         }
         out += ";\n";
       } else {
-        out += renderNode(*nodes[n++]);
+        out += renderNode(*nodes[n++], processor);
       }
     }
     out += "}\n";
   }
-  if (written != program.nodes.size()) {
+  if (written != all.size()) {
     throw std::invalid_argument("a node lies in no region of the program file");
   }
+  if (sound) return out;  // the sound CPU takes no hardware interrupt
   out += "\nnmi {\n";
   for (const Effect& e : program.nmi) out += "  " + renderEffect(e) + "\n";
   out += "}\nirq {\n";
@@ -938,33 +1111,36 @@ std::optional<Parsed> parseProgram(std::string_view text, std::string& error) {
 }
 
 std::optional<Parsed> selectFile(const Parsed& parsed, std::string_view file) {
+  const Processor processor = parsed.file.processor;
   Parsed out;
+  out.file.processor = processor;
   out.file.imageBytes = parsed.file.imageBytes;
   out.file.map = parsed.file.map;
   out.program.nmi = parsed.program.nmi;
   out.program.irq = parsed.program.irq;
+  std::vector<Node>& kept = nodesOf(out.program, processor);
   for (const ProgramRegion& region : parsed.file.regions) {
     if (region.file != file) continue;
     out.file.regions.push_back(region);
-    for (const Node& node : parsed.program.nodes) {
+    for (const Node& node : nodesOf(parsed.program, processor)) {
       const Address at = node.instruction.address;
-      if (at >= region.first && at <= region.last) out.program.nodes.push_back(node);
+      if (at >= region.first && at <= region.last) kept.push_back(node);
     }
   }
   if (out.file.regions.empty()) return std::nullopt;
-  std::stable_sort(out.program.nodes.begin(), out.program.nodes.end(),
-                   [](const Node& a, const Node& b) {
-                     return a.instruction.address < b.instruction.address;
-                   });
+  std::stable_sort(kept.begin(), kept.end(), [](const Node& a, const Node& b) {
+    return a.instruction.address < b.instruction.address;
+  });
   return out;
 }
 
 ProgramCounts countProgram(const Parsed& parsed) {
   ProgramCounts counts;
+  const std::vector<Node>& nodes = nodesOf(parsed.program, parsed.file.processor);
   counts.regions = parsed.file.regions.size();
-  counts.nodes = parsed.program.nodes.size();
+  counts.nodes = nodes.size();
   std::optional<Address> previous;
-  for (const Node& node : parsed.program.nodes) {
+  for (const Node& node : nodes) {
     if (previous != node.instruction.address) ++counts.codeLines;
     previous = node.instruction.address;
     if (!node.mode.accumulatorKnown || !node.mode.indexKnown) ++counts.liveWidth;
@@ -987,9 +1163,15 @@ bool equivalent(const Node& a, const Node& b) {
 }
 
 bool equivalent(const Program& a, const Program& b) {
-  if (a.nodes.size() != b.nodes.size() || a.nmi != b.nmi || a.irq != b.irq) return false;
+  if (a.nodes.size() != b.nodes.size() || a.spc700.size() != b.spc700.size() || a.nmi != b.nmi ||
+      a.irq != b.irq) {
+    return false;
+  }
   for (std::size_t i = 0; i < a.nodes.size(); ++i) {
     if (!equivalent(a.nodes[i], b.nodes[i])) return false;
+  }
+  for (std::size_t i = 0; i < a.spc700.size(); ++i) {
+    if (!equivalent(a.spc700[i], b.spc700[i])) return false;
   }
   return true;
 }

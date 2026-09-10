@@ -254,7 +254,8 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     tools/rom/rom_render.cpp
   )
   target_link_libraries(snaggletooth_rom_render PUBLIC
-    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_ir)
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
+    snaggletooth_ir)
   target_include_directories(snaggletooth_rom_render PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )

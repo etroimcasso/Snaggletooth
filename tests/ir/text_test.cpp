@@ -6,7 +6,10 @@
 // data run, a label, a warning, two regions, the image line, the version — each
 // rendered, parsed and held equal on every field. Then what a reader refuses,
 // each naming its line; that writing what was read gives the same bytes; and
-// that every example cartridge's program survives the round trip whole.
+// that every example cartridge's program survives the round trip whole. Then
+// the sound program's file: its header word, its 16-bit addresses, the sound
+// node's header with its form, its second operand byte, its one cost and its
+// register name, no mode and no sequence — and what a reader refuses of it.
 
 #include <algorithm>
 #include <cstdint>
@@ -23,7 +26,9 @@
 #include "ir/cpu65816_lift.h"
 #include "ir/ir.h"
 #include "ir/ir_text.h"
+#include "ir/spc700_lift.h"
 #include "rom/rom_disasm.h"
+#include "spc700_disasm.h"
 
 namespace snaggletooth::ir {
 namespace {
@@ -794,6 +799,190 @@ TEST(Text, EveryExampleCartridgeSurvivesTheRoundTrip) {
     }
   }
   EXPECT_GT(nodes, 500u);
+}
+
+// ---- the sound program's file ----------------------------------------------------------
+
+// One SPC700 instruction placed at `address`, decoded and lifted.
+Node soundNodeOf(std::vector<std::uint8_t> bytes, Address address, bool patched = false) {
+  const std::optional<disasm::Instruction> decoded = disasm::decodeAt(
+      bytes, static_cast<std::uint16_t>(address), static_cast<std::uint16_t>(address));
+  EXPECT_TRUE(decoded.has_value());
+  return liftSpc700Instruction(*decoded, patched);
+}
+
+// The sound program's file with one region of the audio unit's space, no labels
+// and no data.
+ProgramFile soundFile() {
+  ProgramFile file;
+  file.processor = Processor::Spc700;
+  file.imageBytes = 32768;
+  file.map = "LoROM";
+  file.regions.push_back({.file = "apu/driver.asm",
+                          .first = 0x0500u,
+                          .last = 0x05FFu,
+                          .warnings = {},
+                          .labels = {},
+                          .data = {}});
+  return file;
+}
+
+Program soundProgramOf(std::vector<Node> nodes) {
+  Program program;
+  program.spc700 = std::move(nodes);
+  return program;
+}
+
+const std::string kSoundHead = "snagir 1 apu;\nimage 32768 LoROM;\n\nregion apu/driver.asm $0500-$05FF {\n";
+
+TEST(Text, ASoundProgramFileRoundTripsUnderItsOwnHeaderWithItsOwnAddresses) {
+  ProgramFile file = soundFile();
+  file.regions[0].warnings = {"$0520 overlaps an instruction already decoded"};
+  file.regions[0].labels = {{0x0500u, "entry"}};
+  file.regions[0].data = {{0x050Au, {0x00u, 0xFFu}}};
+  const std::vector<Node> nodes = {
+      soundNodeOf({0x8Fu, 0x30u, 0xF1u}, 0x0500u),  // MOV $F1,#$30: a second operand byte and a register
+      soundNodeOf({0x0Au, 0x34u, 0xF2u}, 0x0503u),  // OR1 C,!$1234.7: a bit index
+      soundNodeOf({0x01u}, 0x0506u),                // TCALL 0: a literal form
+      soundNodeOf({0xD0u, 0xF7u}, 0x0507u),         // BNE $0500: a target and a taken cost
+      soundNodeOf({0x6Fu}, 0x0509u),                // RET: no form
+  };
+  const Program program = soundProgramOf(nodes);
+  roundTrip(program, file, "the sound program");
+  const std::string text = renderProgram(program, file);
+  EXPECT_TRUE(text.starts_with(kSoundHead + "  warning \"$0520 overlaps an instruction already decoded\";\n"
+                                            "  label $0500 entry;\n"
+                                            "  $0500 MOV dp,#imm operand $30 operand2 $F1 length 3 flow continue base 5 CONTROL {\n"))
+      << text;
+  EXPECT_NE(text.find("  $0503 OR1 C,abs.bit operand $1234 operand2 $7 length 3 flow continue base 5 {\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("  $0506 TCALL 0 operand $0 length 1 flow call base 8 {\n"), std::string::npos) << text;
+  EXPECT_NE(text.find("  $0507 BNE rel operand $500 length 2 flow branch target $0500 base 2 {\n"
+                      "    Set PC <- $509 [16];\n    Set PC <- $500 [16] if clear P.Z;\n    Cycles $2 [8] if clear P.Z;\n  }\n"),
+            std::string::npos)
+      << text;
+  EXPECT_NE(text.find("  $0509 RET operand $0 length 1 flow return base 5 {\n"), std::string::npos) << text;
+  // The file ends with its last region: the sound CPU takes no interrupt.
+  EXPECT_TRUE(text.ends_with("  data $050A 00FF;\n}\n")) << text;
+  EXPECT_EQ(text.find("e=1"), std::string::npos);
+  EXPECT_EQ(text.find("nmi"), std::string::npos);
+  // A patched sound node is marked as any node is.
+  const std::string patched = renderProgram(soundProgramOf({soundNodeOf({0x00u}, 0x0500u, true)}), soundFile());
+  EXPECT_NE(patched.find("  $0500 NOP operand $0 length 1 flow continue base 2 patched {\n"), std::string::npos) << patched;
+  roundTrip(soundProgramOf({soundNodeOf({0x00u}, 0x0500u, true)}), soundFile(), "a patched sound node");
+}
+
+TEST(Text, EverySoundOpcodeRoundTrips) {
+  for (unsigned opcode = 0; opcode < 256; ++opcode) {
+    roundTrip(soundProgramOf({soundNodeOf({static_cast<std::uint8_t>(opcode), 0xF2u, 0x12u}, 0x0500u)}),
+              soundFile(), ("opcode " + std::to_string(opcode)).c_str());
+  }
+}
+
+TEST(Text, ASoundNodeNamingNoOpcodeIsRefusedByTheWriter) {
+  Node node = soundNodeOf({0x00u}, 0x0500u);
+  node.instruction.form = "A,foo";
+  EXPECT_THROW(static_cast<void>(renderProgram(soundProgramOf({node}), soundFile())), std::invalid_argument);
+  node.instruction.form = "";
+  node.instruction.mnemonic = "LDA";
+  EXPECT_THROW(static_cast<void>(renderProgram(soundProgramOf({node}), soundFile())), std::invalid_argument);
+}
+
+TEST(Text, WhatAReaderRefusesOfASoundProgramFile) {
+  EXPECT_EQ(refusal("snagir 1 cpu;\nimage 1 LoROM;\n"), "line 1: `cpu` is not a processor this reader knows");
+  EXPECT_EQ(refusal("snagir 1 apu;\nimage 1 LoROM;\nnmi {}\nirq {}\n"), "line 3: the sound program has no `nmi` sequence");
+  EXPECT_EQ(refusal("snagir 1 apu;\nimage 1 LoROM;\nlabel $0500 entry;\n"), "line 3: `label` after the last region");
+  EXPECT_EQ(refusal("snagir 1 apu;\nimage 1 LoROM;\nregion apu/driver.asm $00:0500-$00:05FF {\n}\n"),
+            "line 3: `$00:0500-$00:05FF` is not a range");
+  EXPECT_EQ(refusal(kSoundHead + "  label $00:0500 entry;\n}\n"), "line 5: `$00:0500` is not an address");
+  EXPECT_EQ(refusal(kSoundHead + "  label $500 entry;\n}\n"), "line 5: `$500` is not an address");
+  EXPECT_EQ(refusal(kSoundHead + "  label $00500 entry;\n}\n"), "line 5: `$00500` is not an address");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 NOP operand $0 length 1 flow continue e=1 base 2 {}\n}\n"),
+            "line 5: a sound-CPU node carries no mode");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 NOP operand $0 length 1 flow continue base 2/2/2/2 {}\n}\n"),
+            "line 5: `2/2/2/2` is not a cost");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 LDA dp operand $0 length 2 flow continue base 2 {}\n}\n"),
+            "line 5: `LDA` is not a mnemonic of the sound CPU");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 MOV A,foo operand $0 length 2 flow continue base 2 {}\n}\n"),
+            "line 5: `MOV` with `A,foo` names no opcode");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 MOV A,#imm operand $0 operand2 $1 length 2 flow continue base 2 {}\n}\n"),
+            "line 5: `operand2` belongs to a form with two operand bytes alone");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 MOV dp,#imm operand $30 length 3 flow continue base 5 {}\n}\n"),
+            "line 5: a form with two operand bytes lacks its `operand2`");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 MOV dp,#imm operand $30 operand2 $100 length 3 flow continue base 5 {}\n}\n"),
+            "line 5: `$100` is not a byte");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 MOV dp,#imm operand $30 operand2 $F1 length 3 flow continue base 5 DSPADDR {}\n}\n"),
+            "line 5: `DSPADDR` is not the register at $F1");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 MOV A,#imm operand $F1 length 2 flow continue base 2 CONTROL {}\n}\n"),
+            "line 5: `CONTROL` is not the register at $F1");
+  EXPECT_EQ(refusal(kSoundHead + "  $0500 NOP operand $0 length 1 flow continue base 2 {\n    Xce [8];\n  }\n}\n"), "");
+  // The sound CPU's addresses and mnemonics are not the main CPU's file's.
+  const std::string head = "snagir 1;\nimage 32768 LoROM;\n\nregion bank_00.asm $00:8000-$00:FFFF {\n";
+  EXPECT_EQ(refusal(head + "  label $8000 reset;\n}\n"), "line 5: `$8000` is not an address");
+  EXPECT_EQ(refusal(head + "  $00:8000 MOV A,#imm operand $0 length 2 flow continue e=1 base 2/2/2/2 {}\n}\n"),
+            "line 5: `MOV` is not a mnemonic");
+}
+
+TEST(Text, TheSoundCountsAndTheSelectionAreOverTheSoundProgram) {
+  Parsed parsed;
+  parsed.file = soundFile();
+  parsed.file.regions[0].labels = {{0x0500u, "entry"}};
+  parsed.file.regions.push_back({.file = "apu/driver.asm",
+                                 .first = 0x1E00u,
+                                 .last = 0x1E23u,
+                                 .warnings = {},
+                                 .labels = {},
+                                 .data = {{0x1E01u, {0x00u}}}});
+  parsed.file.regions.push_back({.file = "apu/other.asm",
+                                 .first = 0x2000u,
+                                 .last = 0x20FFu,
+                                 .warnings = {},
+                                 .labels = {},
+                                 .data = {}});
+  parsed.program = soundProgramOf({
+      soundNodeOf({0xC4u, 0xF1u}, 0x0500u),  // MOV $F1,A: named
+      soundNodeOf({0x6Fu}, 0x0502u),
+      soundNodeOf({0x6Fu}, 0x1E00u),
+      soundNodeOf({0x6Fu}, 0x2000u, true),
+  });
+  std::size_t effects = 0;
+  for (const Node& node : parsed.program.spc700) effects += node.effects.size();
+  const ProgramCounts expected = {.regions = 3,
+                                  .codeLines = 4,
+                                  .nodes = 4,
+                                  .liveWidth = 0,
+                                  .named = 1,
+                                  .patched = 1,
+                                  .effects = effects};
+  EXPECT_EQ(countProgram(parsed), expected);
+  roundTrip(parsed.program, parsed.file, "three sound regions");
+
+  const std::optional<Parsed> driver = selectFile(parsed, "apu/driver.asm");
+  ASSERT_TRUE(driver.has_value());
+  EXPECT_EQ(driver->file.processor, Processor::Spc700);
+  ASSERT_EQ(driver->file.regions.size(), 2u);
+  EXPECT_EQ(driver->file.regions[0], parsed.file.regions[0]);
+  EXPECT_EQ(driver->file.regions[1], parsed.file.regions[1]);
+  ASSERT_EQ(driver->program.spc700.size(), 3u);
+  EXPECT_EQ(driver->program.spc700[2], parsed.program.spc700[2]);
+  EXPECT_TRUE(driver->program.nodes.empty());
+  roundTrip(driver->program, driver->file, "the sound file selected");
+  const std::optional<Parsed> other = selectFile(parsed, "apu/other.asm");
+  ASSERT_TRUE(other.has_value());
+  ASSERT_EQ(other->program.spc700.size(), 1u);
+  EXPECT_TRUE(other->program.spc700[0].patched);
+  EXPECT_FALSE(selectFile(parsed, "bank_00.asm").has_value());
+}
+
+TEST(Text, TwoProgramsDifferingInTheirSoundNodesAreNotEquivalent) {
+  Program a = soundProgramOf({soundNodeOf({0x6Fu}, 0x0500u)});
+  Program b = a;
+  EXPECT_TRUE(equivalent(a, b));
+  b.spc700[0].instruction.operand = 1;
+  EXPECT_FALSE(equivalent(a, b));
+  b = a;
+  b.spc700.push_back(a.spc700[0]);
+  EXPECT_FALSE(equivalent(a, b));
+  EXPECT_FALSE(equivalent(b, a));
 }
 
 }  // namespace
