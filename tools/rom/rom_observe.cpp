@@ -12,6 +12,7 @@
 #include "ir/cpu65816_lift.h"
 #include "ir/ir_lockstep.h"
 #include "ir/ir_text.h"
+#include "ir/spc700_lift.h"
 #include "snaggletooth/cpu/cpu65816.h"
 #include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/snes.h"
@@ -994,6 +995,137 @@ struct Lockstep {
   }
 };
 
+// The sound interpreter run beside the audio machine over the whole run. At
+// every boundary the machine reports, the instruction about to run is decoded
+// from the bytes at the program counter as the machine holds them then — the
+// image mapped over the boot-ROM window included — lifted, and held until the
+// boundary after says what the machine did: the accesses between, with the
+// instruction's own fetches set apart, the registers after and the cycles.
+// The fetched bytes are held to the decoded ones too, so an instruction whose
+// bytes changed between the boundary and its fetch is noted rather than
+// checked against the wrong node.
+struct AudioLockstep final : ApuObserver {
+  const Snes& machine;
+  std::vector<std::string>& notes;
+  ir::Spc700Interpreter interpreter;
+  std::vector<ir::Spc700Access> accesses;  // since the last boundary, in order
+
+  // The nodes lifted so far, one per address and bytes — so bytes the program
+  // rewrote at an address are a second node there.
+  using NodeKey = std::pair<std::uint16_t, std::vector<std::uint8_t>>;
+  std::map<NodeKey, ir::Node> nodes;
+
+  // The instruction about to run, decoded at the last boundary; nothing when
+  // the core is halted or the bytes there do not decode.
+  struct Pending {
+    std::uint16_t pc = 0;
+    std::vector<std::uint8_t> bytes;
+    const ir::Node* node = nullptr;
+  };
+  std::optional<Pending> pending;
+
+  std::set<std::uint16_t> notedSites;  // a site already named in the notes
+  std::vector<ir::Divergence> divergences;
+  std::uint64_t instructions = 0;
+  std::uint64_t diverged = 0;
+  std::uint64_t steps = 0;
+
+  AudioLockstep(const Snes& m, std::vector<std::string>& n) : machine(m), notes(n) {
+    interpreter.registers = ir::registersOf(m.state().apu.cpu);
+    prepare(m.state().apu.cpu);
+  }
+
+  void access(std::uint16_t address, std::uint8_t value, bool write) override {
+    accesses.push_back(ir::Spc700Access{.address = address, .value = value, .write = write});
+  }
+
+  void instruction(const Spc700State& before, const Spc700State& after,
+                   std::uint32_t cycles) override {
+    const std::uint64_t ordinal = steps++;
+    if (before.run == RunState::Running) {
+      step(ordinal, before, after, cycles);
+    } else if (after.run == RunState::Running) {
+      // Nothing ends a halt but a reset; the interpreter follows the machine.
+      interpreter.registers = ir::registersOf(after);
+    }
+    accesses.clear();
+    prepare(after);
+  }
+
+  // Decodes and lifts the instruction at `state`'s program counter from the
+  // bytes the machine holds there now, ahead of the step that runs it.
+  void prepare(const Spc700State& state) {
+    pending.reset();
+    if (state.run != RunState::Running) return;
+    std::array<std::uint8_t, 3> window{};
+    for (std::size_t i = 0; i < window.size(); ++i) {
+      window[i] = machine.peekApu(static_cast<std::uint16_t>(state.pc + i));
+    }
+    const std::optional<Instruction> decoded = decodeAt(window, state.pc, state.pc);
+    if (!decoded) return;
+    Pending next;
+    next.pc = state.pc;
+    next.bytes = decoded->bytes;
+    const NodeKey key{state.pc, next.bytes};
+    auto found = nodes.find(key);
+    if (found == nodes.end()) found = nodes.emplace(key, ir::liftSpc700Instruction(*decoded)).first;
+    next.node = &found->second;
+    pending = std::move(next);
+  }
+
+  // One instruction the machine ran, from the boundary before it to the one after.
+  void step(std::uint64_t ordinal, const Spc700State& before, const Spc700State& after,
+            std::uint32_t cycles) {
+    const std::uint16_t site = before.pc;
+    // A reload moved the CPU since the last boundary: the bytes now at the
+    // program counter are the best reading there is.
+    if (!pending || pending->pc != site) prepare(before);
+    if (!pending) {
+      note(site, "run: the bytes at " + formatAddress(site, 16) +
+                     " on the sound CPU do not decode as one instruction; the step is not checked");
+      interpreter.registers = ir::registersOf(after);
+      return;
+    }
+    const std::optional<ir::Spc700StepAccesses> split =
+        ir::splitSpc700Step(accesses, site, pending->bytes.size());
+    bool fetchedAsDecoded = split.has_value();
+    if (split) {
+      for (std::size_t i = 0; i < split->fetches.size(); ++i) {
+        if (split->fetches[i].value != pending->bytes[i]) fetchedAsDecoded = false;
+      }
+    }
+    if (!fetchedAsDecoded) {
+      note(site, "run: the sound CPU's step at " + formatAddress(site, 16) +
+                     " did not fetch the instruction decoded there; the step is not checked");
+      interpreter.registers = ir::registersOf(after);
+      return;
+    }
+
+    ir::Divergence prototype;
+    prototype.instruction = ordinal;
+    prototype.site = site;
+    const std::size_t divergencesBefore = divergences.size();
+    ir::checkSpc700Node(interpreter, *pending->node, split->data, cycles, after, prototype,
+                        divergences);
+    ++instructions;
+    if (divergences.size() != divergencesBefore) {
+      ++diverged;
+      const ir::Divergence& d = divergences.back();
+      char values[64];
+      std::snprintf(values, sizeof values, "machine $%X, the lift $%X", d.expected, d.actual);
+      note(site, "run: the lift of `" + std::string(pending->node->instruction.mnemonic) + " " +
+                     std::string(pending->node->instruction.form) + "` at " +
+                     formatAddress(site, 16) + " on the sound CPU disagreed with the machine (" +
+                     d.what + ": " + values + "); the interpreter was realigned");
+    }
+  }
+
+  // A note about a site, said once.
+  void note(std::uint16_t site, std::string text) {
+    if (notedSites.insert(site).second) notes.push_back(std::move(text));
+  }
+};
+
 }  // namespace
 
 bool sameLanding(const Landing& a, const Landing& b) {
@@ -1116,6 +1248,8 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   shadow.carries = &recorder;
   machine.setObserver(&recorder);
   Lockstep lockstep{map, rom.size(), machine.state().cpu, shadow};
+  AudioLockstep audio{machine, notes};
+  machine.setApuObserver(&audio);
   std::set<std::tuple<Address, Address, std::uint32_t>> seen;
   std::set<Address> unreadableSites;
   std::set<Address> unconfirmedSites;
@@ -1210,6 +1344,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   recorder.finish();
   shadow.carries = nullptr;
   machine.setObserver(nullptr);
+  machine.setApuObserver(nullptr);
   observation.moved = std::move(recorder.out);
   std::sort(observation.moved.begin(), observation.moved.end(), rangeBefore);
   observation.landed = std::move(recorder.landed);
@@ -1230,6 +1365,9 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   observation.interrupts = lockstep.interrupts;
   observation.nodes = lockstep.nodes.size();
   observation.divergences = lockstep.diverged;
+  observation.spc700Instructions = audio.instructions;
+  observation.spc700Nodes = audio.nodes.size();
+  observation.spc700Divergences = audio.diverged;
 
   // What was staged: every extent, in address order then by count, its
   // writers most bytes first.

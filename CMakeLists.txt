@@ -204,22 +204,24 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(cpu65816_asm PRIVATE -Wall -Wextra -Werror)
   endif()
 
-  # The intermediate representation — a 65816 program as its meaning, with no
-  # bytes in it: the model, the lift from a listing (the one consumer of bytes),
-  # the interpreter that runs the effects and nothing else, the text form for
-  # reading, and the renderer that writes SNES assembly from the instruction
-  # layer. The lift links the 65816 backend because it reads a listing and the
-  # measured cycle tables; the renderer links it for the opcode table and the
-  # mode tracker it shares with the assembler; the interpreter's own translation
-  # unit includes neither.
+  # The intermediate representation — a program as its meaning, with no bytes in
+  # it: the model, the two lifts from a listing (the only consumers of bytes: the
+  # 65816's and the SPC700's), the two interpreters that run the effects and
+  # nothing else, the text form for reading, and the renderer that writes SNES
+  # assembly from the instruction layer. The lifts link the two backends because
+  # each reads a listing and its measured cycle table; the renderer links the
+  # 65816's for the opcode table and the mode tracker it shares with the
+  # assembler; the interpreters' own translation units include neither.
   add_library(snaggletooth_ir STATIC
     tools/ir/cpu65816_lift.cpp
+    tools/ir/spc700_lift.cpp
     tools/ir/ir_interpret.cpp
+    tools/ir/ir_interpret_spc700.cpp
     tools/ir/ir_render.cpp
     tools/ir/ir_text.cpp
     tools/ir/ir_dataflow.cpp
   )
-  target_link_libraries(snaggletooth_ir PUBLIC snaggletooth_cpu65816)
+  target_link_libraries(snaggletooth_ir PUBLIC snaggletooth_cpu65816 snaggletooth_spc700)
   target_include_directories(snaggletooth_ir PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -252,7 +254,8 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     tools/rom/rom_render.cpp
   )
   target_link_libraries(snaggletooth_rom_render PUBLIC
-    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_ir)
+    snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
+    snaggletooth_ir)
   target_include_directories(snaggletooth_rom_render PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -478,6 +481,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/rom/verify_test.cpp
     tests/ir/lift_test.cpp
     tests/ir/ir_vector_test.cpp
+    tests/ir/spc700_lift_test.cpp
+    tests/ir/spc700_vector_test.cpp
     tests/ir/differential_test.cpp
     tests/ir/render_test.cpp
     tests/ir/text_test.cpp

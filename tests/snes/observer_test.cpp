@@ -3,7 +3,9 @@
 // cases hold the report to what the core and the engines actually drive — the
 // CPU's kinds cycle by cycle, a transfer's bytes in the engine's name, the
 // work-RAM port's own accesses — and hold the machine to running exactly the same
-// with no observer set, which is how it starts.
+// with no observer set, which is how it starts. The audio machine's observer is
+// reached through the console the same way, and one case holds that it reports
+// the sound CPU running the upload stub from inside the console's own steps.
 
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,7 @@
 
 #include "gtest/gtest.h"
 #include "snaggletooth/snes/snes.h"
+#include "snes_ipl_stub.h"
 
 namespace snaggletooth {
 namespace {
@@ -82,6 +85,43 @@ constexpr std::uint8_t kWai = 0xCBu;
 TEST(SnesObserver, NoneIsSetAtPowerOn) {
   Snes m = programMachine({kNop, kStp});
   EXPECT_EQ(m.observer(), nullptr);
+  EXPECT_EQ(m.apuObserver(), nullptr);
+}
+
+// The audio machine's report, as the console passes it through: every access
+// the sound CPU makes and every boundary, arriving from inside the console's
+// steps because the audio machine runs inside the CPU's cycles.
+struct AudioRecorder final : ApuObserver {
+  std::vector<std::uint16_t> reads;
+  std::vector<Spc700State> befores;
+  std::uint64_t cycles = 0;
+  void access(std::uint16_t address, std::uint8_t, bool write) override {
+    if (!write) reads.push_back(address);
+  }
+  void instruction(const Spc700State& before, const Spc700State&, std::uint32_t c) override {
+    befores.push_back(before);
+    cycles += c;
+  }
+};
+
+TEST(SnesObserver, TheAudioObserverIsReachedThroughTheConsole) {
+  Snes m = programMachine({kNop, kStp});
+  AudioRecorder rec;
+  m.setApuObserver(&rec);
+  EXPECT_EQ(m.apuObserver(), &rec);
+  EXPECT_EQ(m.peekApu(kIplStubBase), iplStubImage()[0]) << "the stub, through the mapped window";
+  EXPECT_EQ(m.peekApu(0x0200), 0x00u);
+  const std::uint64_t before = m.state().apu.divider;
+  m.run(2'000);
+  const std::uint64_t ran = m.state().apu.divider - before;
+  ASSERT_FALSE(rec.befores.empty());
+  EXPECT_EQ(rec.befores.front().pc, kIplStubBase) << "the first boundary's before is the seeded state";
+  EXPECT_FALSE(rec.reads.empty());
+  EXPECT_GE(rec.reads.front(), kIplStubBase) << "the stub is fetched from the window";
+  EXPECT_LE(rec.cycles, ran);
+  EXPECT_GE(rec.cycles + 8u, ran) << "every cycle but an instruction in flight is a boundary's";
+  m.setApuObserver(nullptr);
+  EXPECT_EQ(m.apuObserver(), nullptr);
 }
 
 TEST(SnesObserver, ACpuReadIsReportedWithItsAddressValueKindAndSource) {

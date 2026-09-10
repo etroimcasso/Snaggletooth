@@ -11,6 +11,7 @@
 #include <iterator>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -406,12 +407,91 @@ TEST(RomDisasm, TheBankLeavesTheUploadedBytesToTheSoundProgram) {
   EXPECT_NE(bank0.find("        ORG $00:8114\n"), std::string::npos);
   EXPECT_EQ(bank0.find("$E8,$5A,$C5"), std::string::npos);  // the program's bytes are not here
   EXPECT_EQ(bank0.find("$9C,$3D,$71"), std::string::npos);  // nor the table's
-  const std::string sound = renderSoundProgram(*d.sound);
+  const std::string sound = renderSoundFile(d);
   EXPECT_NE(sound.find("        ORG $0200\n"), std::string::npos);
   EXPECT_NE(sound.find("; $0200: 24 bytes, read from image offset $0000A0\n"), std::string::npos);
   EXPECT_NE(sound.find("; $0218: 20 bytes, read from image offset $000100\n"), std::string::npos);
   EXPECT_NE(sound.find("MOV !$0250,A"), std::string::npos);
   EXPECT_NE(sound.find("DB $9C,$3D"), std::string::npos);
+}
+
+TEST(RomDisasm, TheSoundProgramIsLiftedIntoTheProgram) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_TRUE(d.sound.has_value());
+  // One node per code line of the sound listing, in the audio unit's order.
+  std::size_t codeLines = 0;
+  for (const Line& line : d.sound->listing.lines) codeLines += line.isCode ? 1u : 0u;
+  ASSERT_EQ(d.program.spc700.size(), codeLines);
+  EXPECT_EQ(codeLines, 20u);
+  EXPECT_EQ(d.program.spc700.front().instruction.address, 0x0200u);
+  EXPECT_EQ(d.program.spc700.front().instruction.mnemonic, "MOV");
+  EXPECT_EQ(d.program.spc700.front().instruction.form, "A,#imm");
+  EXPECT_EQ(d.program.spc700[1].instruction.form, "abs,A");
+  EXPECT_EQ(d.program.spc700[1].instruction.operand, 0x0250u);
+  EXPECT_EQ(d.program.spc700.back().instruction.mnemonic, "STOP");
+  EXPECT_NE(d.program.findSpc700(0x0217u), nullptr);
+  EXPECT_EQ(d.program.findSpc700(0x0218u), nullptr);  // the table is data
+  // The main CPU's program is untouched by the sound program's presence.
+  EXPECT_FALSE(d.program.nodes.empty());
+  EXPECT_TRUE(disassembleWithoutSound(rom).program.spc700.empty());
+}
+
+TEST(RomDisasm, TheSoundProgramsFileReadsBackAsTheSoundProgram) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_TRUE(d.sound.has_value());
+  const std::string text = renderSoundProgramFile(d);
+  EXPECT_TRUE(text.starts_with("snagir 1 apu;\nimage 32768 LoROM;\n\nregion apu/driver.asm $0200-$022B {\n"
+                               "  label $0200 entry;\n  $0200 MOV A,#imm operand $5A length 2 flow continue base 2 {\n"))
+      << text;
+  EXPECT_NE(text.find("  data $0218 9C3D71E258A706B4C91F638E2BF54AD01786EB39;\n}\n"), std::string::npos) << text;
+  EXPECT_EQ(text.find("nmi"), std::string::npos);  // the sound CPU takes no interrupt
+  std::string error;
+  const std::optional<ir::Parsed> parsed = ir::parseProgram(text, error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  EXPECT_EQ(parsed->file.processor, ir::Processor::Spc700);
+  ASSERT_EQ(parsed->file.regions.size(), 1u);
+  EXPECT_EQ(parsed->file.regions[0].file, "apu/driver.asm");
+  EXPECT_EQ(parsed->file.regions[0].first, 0x0200u);
+  EXPECT_EQ(parsed->file.regions[0].last, 0x022Bu);
+  ir::Program expected;
+  expected.spc700 = d.program.spc700;
+  EXPECT_TRUE(ir::equivalent(parsed->program, expected));
+  EXPECT_TRUE(parsed->program.nodes.empty());
+  EXPECT_EQ(ir::renderProgram(parsed->program, parsed->file), text);
+  // What the sound trace could not settle heads the file's first region, and
+  // the sound file rendered from it.
+  CartridgeDisassembly warned = d;
+  warned.sound->listing.warnings = {"$0210 overlaps an instruction already decoded"};
+  EXPECT_NE(renderSoundProgramFile(warned).find("region apu/driver.asm $0200-$022B {\n"
+                                                "  warning \"$0210 overlaps an instruction already decoded\";\n"
+                                                "  label $0200 entry;\n"),
+            std::string::npos);
+  EXPECT_TRUE(renderSoundFile(warned).find("; warning: $0210 overlaps an instruction already decoded\n\n"
+                                           "        ORG $0200\n") != std::string::npos);
+  // Without a sound program there is no file to write.
+  EXPECT_THROW(static_cast<void>(renderSoundProgramFile(disassembleWithoutSound(rom))), std::logic_error);
+  EXPECT_THROW(static_cast<void>(renderSoundFile(disassembleWithoutSound(rom))), std::logic_error);
+}
+
+TEST(RomDisasm, TheSoundFileIsTheListingsOwnRenderUnderTheUploadHeader) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_TRUE(d.sound.has_value());
+  // The two blocks land end to end, so the file is one piece: the header that
+  // says what was sent, then the listing exactly as the framework renders it.
+  EXPECT_EQ(renderSoundFile(d),
+            "; The sound program the cartridge uploads at boot, traced from $0200.\n"
+            "; $0200: 24 bytes, read from image offset $0000A0\n"
+            "; $0218: 20 bytes, read from image offset $000100\n\n" +
+                render(d.sound->listing));
 }
 
 TEST(RomDisasm, EveryImageByteIsPlacedOnce) {
@@ -682,7 +762,7 @@ TEST(RomDisasm, AManifestLineThatDoesNotParseNamesItsLine) {
 
 // ---- the tree on disk -------------------------------------------------------
 
-TEST(RomDisasm, TheProjectIsWrittenAsTheProgramFileTheManifestAndTheSoundFile) {
+TEST(RomDisasm, TheProjectIsWrittenAsTheTwoProgramFilesAndTheManifest) {
   const std::vector<std::uint8_t> rom = uploadingImage();
   CartridgeRequest request;
   request.rom = rom;
@@ -695,11 +775,18 @@ TEST(RomDisasm, TheProjectIsWrittenAsTheProgramFileTheManifestAndTheSoundFile) {
   std::string error;
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "project.manifest"));
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "apu" / "driver.asm"));
-  // The disassembler writes no bank file: those are the renderer's, from the
-  // program file.
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "apu.snagir"));
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "project.snagifest"));
+  // The disassembler writes no bank file and no sound file: those are the
+  // renderer's, from the program files.
   EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "apu" / "driver.asm"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "apu"));
+  std::filesystem::remove_all(dir, ec);
+  // Without a sound program there is no `apu.snagir`.
+  ASSERT_TRUE(writeProject(disassembleWithoutSound(rom), dir, error)) << error;
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "apu.snagir"));
   std::filesystem::remove_all(dir, ec);
 }
 
@@ -727,8 +814,9 @@ std::filesystem::path freshDirectory(const char* name) {
 
 constexpr std::uint64_t kRenderFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
-// A tree written to disk and rendered from its files, compared region by region
-// with the disassembly rendered in memory.
+// A tree written to disk and rendered from its files, compared file by file
+// with the disassembly rendered in memory — the bank files and, where a sound
+// program was captured, its file too.
 void expectRenderedFromDiskEqualsMemory(const CartridgeDisassembly& d, const char* name) {
   const std::filesystem::path dir = freshDirectory(name);
   std::string error;
@@ -736,11 +824,17 @@ void expectRenderedFromDiskEqualsMemory(const CartridgeDisassembly& d, const cha
   for (const RegionListing& region : d.regions) {
     ASSERT_FALSE(std::filesystem::exists(dir / region.region.file)) << region.region.file;
   }
+  if (d.sound) {
+    ASSERT_FALSE(std::filesystem::exists(dir / d.sound->file));
+  }
   std::size_t rendered = 0;
   ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
-  EXPECT_EQ(rendered, d.regions.size());
+  EXPECT_EQ(rendered, d.regions.size() + (d.sound ? 1u : 0u));
   for (const RegionListing& region : d.regions) {
     EXPECT_EQ(readFile(dir / region.region.file), renderRegion(region, d)) << region.region.file;
+  }
+  if (d.sound) {
+    EXPECT_EQ(readFile(dir / d.sound->file), renderSoundFile(d)) << d.sound->file;
   }
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
@@ -772,6 +866,42 @@ TEST(RomProgramFile, TheBankFilesAreRenderedFromTheTwoFilesAndEqualTheDisassembl
   const std::vector<std::uint8_t> rom = uploadingImage();
   request.rom = rom;
   expectRenderedFromDiskEqualsMemory(disassembleCartridge(request), "snaggletooth-render-uploading");
+}
+
+TEST(RomProgramFile, ATreeWhoseSoundFileIsMissingOrNamesNoRegionIsRefused) {
+  CartridgeRequest request;
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  request.rom = rom;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_TRUE(d.sound.has_value());
+  const std::filesystem::path dir = freshDirectory("snaggletooth-render-no-apu");
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  std::size_t rendered = 0;
+  // The manifest names a sound program; the file that carries it is gone.
+  std::error_code ec;
+  std::filesystem::remove(dir / "apu.snagir", ec);
+  EXPECT_FALSE(renderTree(dir, rendered, error));
+  EXPECT_NE(error.find("apu.snagir"), std::string::npos) << error;
+  // The file is back, written to another name than the manifest's.
+  std::string text = renderSoundProgramFile(d);
+  const std::size_t at = text.find("region apu/driver.asm");
+  ASSERT_NE(at, std::string::npos);
+  text.replace(at, std::string("region apu/driver.asm").size(), "region apu/other.asm");
+  {
+    std::ofstream out(dir / "apu.snagir", std::ios::binary);
+    out << text;
+  }
+  EXPECT_FALSE(renderTree(dir, rendered, error));
+  EXPECT_NE(error.find("no region is written to apu/driver.asm"), std::string::npos) << error;
+  // The main CPU's file in its place is not the sound program's.
+  {
+    std::ofstream out(dir / "apu.snagir", std::ios::binary);
+    out << renderProgramFile(d);
+  }
+  EXPECT_FALSE(renderTree(dir, rendered, error));
+  EXPECT_NE(error.find("not the sound program's file"), std::string::npos) << error;
+  std::filesystem::remove_all(dir, ec);
 }
 
 TEST(RomProgramFile, EveryExampleTreeRendersTheSameFromDiskAsFromMemory) {
@@ -875,10 +1005,10 @@ TEST(RomProgramFile, TheProgramFileIsWrittenBeforeAnyOtherFile) {
   const std::filesystem::path dir = freshDirectory("snaggletooth-program-file-first-test");
   // The manifest's path is taken by a directory, so its write fails: what is on
   // disk then is what was written before it.
-  std::filesystem::create_directories(dir / "project.manifest");
+  std::filesystem::create_directories(dir / "project.snagifest");
   std::string error;
   EXPECT_FALSE(writeProject(d, dir, error));
-  EXPECT_NE(error.find("project.manifest"), std::string::npos) << error;
+  EXPECT_NE(error.find("project.snagifest"), std::string::npos) << error;
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
   EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
   std::error_code ec;
@@ -915,9 +1045,9 @@ TEST(RomProgramFile, TheRendererRefusesATreeWithoutItsFilesOrWithOneThatDoesNotR
     std::ofstream out(dir / "program.snagir", std::ios::binary);
     out << renderProgramFile(d);
   }
-  std::filesystem::remove(dir / "project.manifest", ec);
+  std::filesystem::remove(dir / "project.snagifest", ec);
   EXPECT_FALSE(renderTree(dir, rendered, error));
-  EXPECT_NE(error.find("project.manifest"), std::string::npos) << error;
+  EXPECT_NE(error.find("project.snagifest"), std::string::npos) << error;
   std::filesystem::remove_all(dir, ec);
 }
 
@@ -1134,7 +1264,7 @@ TEST(RomAssets, TheBankFileIncludesEachFileWhereItsBytesWere) {
             std::string::npos);
   EXPECT_NE(bank0.find("; ---- $00:9710-$00:9711: a block an HDMA entry pointed at, sent to CGADD, in hdma/00_9710.bin\n"),
             std::string::npos);
-  EXPECT_EQ(bank0.find("; $00:9000  |"), std::string::npos) << "the lifted bytes are no longer DB rows";
+  EXPECT_EQ(bank0.find("; $00:9000  |"), std::string::npos) << "the lifted bytes are not DB rows";
   EXPECT_EQ(bank0.find("; $00:9040  |"), std::string::npos);
   EXPECT_NE(bank0.find("; $00:9050  |"), std::string::npos) << "the byte after the file is";
   // An INCBIN continues the range: one ORG per bank still.

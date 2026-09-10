@@ -1,5 +1,6 @@
 #include "ir/ir_differential.h"
 
+#include "ir/ir_render.h"
 #include "ir/ir_text.h"
 #include "snaggletooth/snes/cartridge.h"
 
@@ -184,6 +185,76 @@ void cover(DifferentialReport& report, const Node& node, const Registers& before
   }
 }
 
+// The sound program replayed beside the audio machine: at every boundary the
+// machine reports, the node at the program counter is held to the accesses
+// since the boundary before, the registers after and the cycles between.
+struct AudioReplay final : ApuObserver {
+  const Program& program;
+  DifferentialReport& report;
+  Spc700Interpreter interpreter;
+  std::vector<Spc700Access> accesses;  // since the last boundary, in order
+  std::set<Address> unlifted;
+  std::set<Address> patched;
+  std::uint64_t step = 0;
+
+  AudioReplay(const Program& p, DifferentialReport& r, const Spc700State& start)
+      : program(p), report(r) {
+    interpreter.registers = registersOf(start);
+  }
+
+  void access(std::uint16_t address, std::uint8_t value, bool write) override {
+    accesses.push_back(Spc700Access{.address = address, .value = value, .write = write});
+  }
+
+  void instruction(const Spc700State& before, const Spc700State& after,
+                   std::uint32_t cycles) override {
+    if (before.run != RunState::Running) {
+      // A halted cycle: nothing ran, and nothing ends a halt but a reset.
+      if (after.run == RunState::Running) interpreter.registers = registersOf(after);
+      accesses.clear();
+      return;
+    }
+    const std::uint64_t ordinal = step++;
+    const Address site = before.pc;
+    const Node* node = program.findSpc700(site);
+    if (node == nullptr) {
+      ++report.spc700Unlifted;
+      unlifted.insert(site);
+      interpreter.registers = registersOf(after);
+      accesses.clear();
+      return;
+    }
+    // The node's bytes against the bytes the machine fetched: a difference is
+    // a program the file does not hold, and the node is not the instruction
+    // that ran.
+    const std::vector<std::uint8_t> bytes = encodeSpc700(node->instruction);
+    const std::optional<Spc700StepAccesses> split = splitSpc700Step(accesses, before.pc, bytes.size());
+    bool fetchedAsWritten = split.has_value();
+    if (split) {
+      for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (split->fetches[i].value != bytes[i]) fetchedAsWritten = false;
+      }
+    }
+    if (!fetchedAsWritten) {
+      ++report.spc700Patched;
+      patched.insert(site);
+      interpreter.registers = registersOf(after);
+      accesses.clear();
+      return;
+    }
+    Divergence prototype;
+    prototype.instruction = ordinal;
+    prototype.site = site;
+    checkSpc700Node(interpreter, *node, split->data, cycles, after, prototype, report.divergences);
+    ++report.spc700Instructions;
+    report.spc700Cycles += cycles;
+    std::string form(node->instruction.mnemonic);
+    if (!node->instruction.form.empty()) form += " " + std::string(node->instruction.form);
+    ++report.spc700Forms[form];
+    accesses.clear();
+  }
+};
+
 }  // namespace
 
 DifferentialReport differential(const Program& program, const Replay& replay) {
@@ -193,6 +264,8 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   Snes machine{SnesConfig{.rom = replay.rom}};
   StepObserver observer;
   machine.setObserver(&observer);
+  AudioReplay audio{program, report, machine.state().apu.cpu};
+  machine.setApuObserver(&audio);
   Interpreter interpreter;
   interpreter.registers = registersOf(machine.state().cpu);
   const CartridgeMap map = detectCartridgeMap(replay.rom);
@@ -220,7 +293,15 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   };
   std::uint64_t reported = 0;  // the tick the last report was made at
   tell(0);
-  while (spent < replay.masterCycles && !report.stopped &&
+  // The run ends early once the main CPU has stopped, unless the tree holds a
+  // sound program and the sound CPU is still running: a sound program started
+  // just before the main CPU stops is still on its way through the stub to its
+  // nodes, and is checked to its end. A tree with no sound program leaves the
+  // sound CPU looping in the upload stub, with nothing to check.
+  const auto soundChecking = [&]() {
+    return !program.spc700.empty() && machine.state().apu.cpu.run == RunState::Running;
+  };
+  while (spent < replay.masterCycles && !(report.stopped && !soundChecking()) &&
          report.divergences.size() < replay.divergenceLimit) {
     if (spent / disasm::kProgressTick != reported) {
       reported = spent / disasm::kProgressTick;
@@ -302,8 +383,11 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   }
 
   machine.setObserver(nullptr);
+  machine.setApuObserver(nullptr);
   report.masterCycles = spent;
   report.unliftedSites.assign(unlifted.begin(), unlifted.end());
+  report.spc700UnliftedSites.assign(audio.unlifted.begin(), audio.unlifted.end());
+  report.spc700PatchedSites.assign(audio.patched.begin(), audio.patched.end());
   tell(spent);
   return report;
 }

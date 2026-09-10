@@ -3,7 +3,10 @@
 // A whole cartridge disassembled into a source tree that assembles back to the
 // image: one file per region of the bus, the sound program the cartridge uploads
 // at boot as a file of its own, and a manifest that says where every file's
-// bytes land in the image, where the trace began, and where it stopped.
+// bytes land in the image, where the trace began, and where it stopped. The
+// disassembler writes the two programs in the intermediate representation —
+// `program.snagir` for the main CPU, `apu.snagir` for the sound program — and
+// the manifest; every source file is rendered from those by `snes_render`.
 //
 // The trace starts at the handlers the header names and follows control flow
 // across banks: a call or a jump into another region enters that region's trace
@@ -165,7 +168,10 @@ struct CartridgeDisassembly {
   // (`ir/ir.h`): the nodes in address order, an address two paths read two ways
   // as two nodes with the listing's reading first, and the two interrupt
   // sequences. The facts are proven over it, `program.snagir` is written from
-  // it, and the bank files are rendered from that file read back.
+  // it, and the bank files are rendered from that file read back. Its `spc700`
+  // nodes are the sound program's listing lifted the same way, one node per
+  // code line; `apu.snagir` is written from them and the sound file rendered
+  // from that file read back.
   ir::Program program;
   std::optional<SoundProgram> sound;
   std::vector<TraceStop> stops;
@@ -365,20 +371,30 @@ struct ManifestInput {
 [[nodiscard]] std::string renderRegion(const RegionListing& region,
                                        const CartridgeDisassembly& disassembly);
 
-// The sound program's source file: its blocks, each under its own `ORG`.
-[[nodiscard]] std::string renderSoundProgram(const SoundProgram& sound);
+// The sound program's source file rendered from the disassembly in memory:
+// `renderSoundFile` of `rom/rom_render.h` over `renderInputOf(disassembly)`
+// and the disassembly's program — the check that a sound file rendered from
+// the tree agrees with the disassembly that wrote it. `std::logic_error` when
+// no sound program was captured.
+[[nodiscard]] std::string renderSoundFile(const CartridgeDisassembly& disassembly);
 
 // The program file as text, in the grammar `docs/snagir.md` gives: the
 // disassembly's program, with the image's size and map and each region's file,
 // range, warnings, labels and data runs beside it.
 [[nodiscard]] std::string renderProgramFile(const CartridgeDisassembly& disassembly);
 
+// The sound program's file as text, in the same grammar under `snagir 1 apu;`:
+// the disassembly's `spc700` nodes, with one region per run of uploaded
+// addresses — its range in the audio unit's space, the listing's warnings on
+// the first, and the labels and data runs within it. `std::logic_error` when
+// no sound program was captured.
+[[nodiscard]] std::string renderSoundProgramFile(const CartridgeDisassembly& disassembly);
+
 // Writes what the disassembly found under `directory`, creating it and its
-// directories: `program.snagir` first, then `project.manifest`, every lifted
-// file, and the sound program's file, which is rendered from the boot capture.
-// No bank file is written here; `snes_render` writes those from the program
-// file and the manifest. False, with `error` set, when a file cannot be
-// written.
+// directories: `program.snagir` first, then `apu.snagir` where a sound program
+// was captured, `project.snagifest`, and every lifted file. No bank file and no
+// sound file is written here; `snes_render` writes those from the program files
+// and the manifest. False, with `error` set, when a file cannot be written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
                   std::string& error);
 

@@ -26,6 +26,15 @@
 // instruction: the one home of the image bytes the CPU fetched, so a program
 // that runs through a mirror of its bank is checked against the nodes placed in
 // the bank the image is written for. An address outside the image is its own.
+//
+// The sound program is replayed beside the same run. The audio machine reports
+// every access the sound CPU makes and every instruction boundary it crosses;
+// at each boundary the node at the program counter is looked up among the
+// program's `spc700` nodes and held to what the machine did — the accesses
+// with the instruction's own fetches set apart, the registers after, the
+// cycles. An address with no node is counted, as on the main CPU; so is a node
+// whose bytes are not the bytes the machine fetched there, which is a
+// different program from the file's and is not checked against it.
 
 #include <cstddef>
 #include <cstdint>
@@ -43,8 +52,10 @@ namespace snaggletooth::ir {
 
 // What to replay: the cartridge, how much of the master clock to run, and the
 // recorded run to present at the controller ports frame by frame, exactly as
-// the cartridge disassembler presents it. The run ends early when the CPU
-// stops, or once `divergenceLimit` divergences have been recorded. `progress`,
+// the cartridge disassembler presents it. The run ends early when the main CPU
+// has stopped — unless the program holds sound nodes and the sound CPU is
+// still running, in which case it runs on until the sound CPU halts — or once
+// `divergenceLimit` divergences have been recorded. `progress`,
 // when set, is told `replaying the run` as it begins and every tenth of a
 // second of the master clock after, with the cycles spent against
 // `masterCycles`, and once more as it ends — short of the budget when the run
@@ -68,7 +79,7 @@ struct DifferentialReport {
   std::uint64_t masterCycles = 0;   // master cycles run
   std::uint64_t unlifted = 0;       // instructions at an address with no node
   std::vector<Address> unliftedSites;  // those addresses as the tree places them, each once, in address order
-  bool stopped = false;             // the CPU stopped, which ended the run
+  bool stopped = false;             // the main CPU stopped; the run ended there, or once the sound program it was checking halted
   std::vector<Divergence> divergences;
   // How many times each instruction form ran, keyed by mnemonic, addressing
   // mode and the mode the node reads under — `LDA abs,X e=0 m=8 x=16`.
@@ -76,11 +87,26 @@ struct DifferentialReport {
   // How many times each named construct was exercised. Every name is present,
   // so a construct the run never reached reads zero.
   std::map<std::string, std::uint64_t> constructs;
+
+  // The sound CPU's side: the nodes run and checked, the cycles checked, the
+  // instructions at an audio address with no node and those addresses, the
+  // instructions whose node's bytes are not what the machine fetched and
+  // those addresses, and how many times each instruction form ran — `MOV
+  // A,dp`, the mnemonic and the form word. The divergences are among
+  // `divergences`, with the processor set.
+  std::uint64_t spc700Instructions = 0;
+  std::uint64_t spc700Cycles = 0;
+  std::uint64_t spc700Unlifted = 0;
+  std::vector<Address> spc700UnliftedSites;  // each once, in address order
+  std::uint64_t spc700Patched = 0;
+  std::vector<Address> spc700PatchedSites;   // each once, in address order
+  std::map<std::string, std::uint64_t> spc700Forms;
 };
 
 // Replays the run on the machine beside the interpreter. `program` is the
 // cartridge's nodes in address order, `Program::find` answering the node for
-// the live flags at every step.
+// the live flags at every step, and its `spc700` nodes the sound program's,
+// `Program::findSpc700` answering the node at every audio address.
 [[nodiscard]] DifferentialReport differential(const Program& program, const Replay& replay);
 
 }  // namespace snaggletooth::ir

@@ -1,13 +1,15 @@
 # Cartridge disassembler
 
-`snes_disasm` disassembles a whole cartridge into its program file —
-`program.snagir`, the whole program in the [intermediate representation](snagir.md)
-— and a manifest that says where every file's bytes land in the image, where the
-trace began, and where it stopped, with the bytes the cartridge sends to the
-hardware as files of their own kind and the sound program the cartridge uploads
-at boot as a file of its own. `snes_render` writes the source tree from the
-program file: one file per bank, rendered from the program in the file and the
-facts in the manifest, by a tool that holds neither the image nor the trace.
+`snes_disasm` disassembles a whole cartridge into its program files —
+`program.snagir`, the main CPU's whole program in the
+[intermediate representation](snagir.md), and `apu.snagir`, the sound program
+the cartridge uploads at boot — and a manifest that says where every file's
+bytes land in the image, where the trace began, and where it stopped, with the
+bytes the cartridge sends to the hardware as files of their own kind.
+`snes_render` writes the source tree from the program files: one file per
+bank and the sound program's file, rendered from the programs in the files
+and the facts in the manifest, by a tool that holds neither the image nor the
+trace.
 `snes_verify` does the reverse: it assembles every file the manifest names,
 places the bytes where the manifest says, and reports the difference from the
 image. The tree is written in the
@@ -81,10 +83,11 @@ snes_render <directory>
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-`snes_disasm` reads a cartridge image, writes `program.snagir`, the manifest, the
-lifted files and the sound program's file under the directory, creating it, and
-reports what it found; `snes_render` then writes the bank files from the program
-file and the manifest:
+`snes_disasm` reads a cartridge image, writes `program.snagir`, `apu.snagir`
+where a sound program was captured, the manifest and the lifted files under the
+directory, creating it, and reports what it found; `snes_render` then writes
+the bank files and the sound program's file from the program files and the
+manifest:
 
 ```
 $ snes_disasm cartridge.sfc -o cartridge
@@ -126,7 +129,7 @@ without the extension, spaces as underscores, `.txt` — is replayed when it is
 there, and the ports stay empty when it is not. The two forms are not given
 together.
 
-When the directory already holds a `project.manifest`, its `entry`, `reached`,
+When the directory already holds a `project.snagifest`, its `entry`, `reached`,
 `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
 it was written for: a manifest written for another image is refused rather than
 applied. See [Stops, and getting past them](#stops-and-getting-past-them).
@@ -157,15 +160,17 @@ either way, and `corpus.py` passes it.
 
 ## The tree
 
-The disassembler writes `program.snagir`, `project.manifest`, the lifted files
-and `apu/driver.asm`; the bank files are `snes_render`'s, written from the
-program file, which `snes_lift` prints back and `snes_differential` replays
-the run beside ([ir.md §Reading a program](ir.md#reading-a-program)). Together:
+The disassembler writes `program.snagir`, `apu.snagir`, `project.snagifest`
+and the lifted files; the bank files and `apu/driver.asm` are `snes_render`'s,
+written from the two program files, which `snes_lift` prints back and
+`snes_differential` replays the run beside, each on its own CPU
+([ir.md §Reading a program](ir.md#reading-a-program)). Together:
 
 ```
 cartridge/
   program.snagir
-  project.manifest
+  apu.snagir
+  project.snagifest
   bank_00.asm
   bank_01.asm
   …
@@ -264,7 +269,8 @@ manifest's [`routine` line](#what-the-code-reaches) read out beside the code it
 describes.
 
 **The sound program as its own file.** The bytes the cartridge sends to the audio
-unit are written once, as SPC700 source in `apu/driver.asm`, and the bank that
+unit are written once, as SPC700 source in `apu/driver.asm`, rendered from
+`apu.snagir` as the bank files are from `program.snagir`, and the bank that
 carried them leaves that range to it:
 
 ```
@@ -298,7 +304,7 @@ through it; the comment says what the run saw the bytes were for, and the file
 they are in. [The assets](#the-assets) says which ranges are lifted and which are
 not.
 
-**The manifest.** `project.manifest` names the image, every file and the range it
+**The manifest.** `project.snagifest` names the image, every file and the range it
 covers, the sound program and each of its blocks with the image offset it was read
 from, every entry the trace started from with its mode, every stop, and every
 warning the listings raised. Its grammar is [project-manifest.md](project-manifest.md).
@@ -345,8 +351,14 @@ or transformed it on the way, is reported `unplaced`, and the bank keeps its
 bytes. Only a placed block is left out of its bank.
 
 The listing is traced from the entry over the uploaded blocks with the
-[SPC700 disassembler](spc700-disassembler.md), and the file opens with what was
-sent:
+[SPC700 disassembler](spc700-disassembler.md) and lifted into `apu.snagir`,
+the sound program's own [program file](snagir.md): one region per run of
+uploaded addresses, two blocks that landed end to end being one run, every
+instruction as a node with its effects, the labels and the runs of bytes the
+trace never reached. `snes_render` writes `apu/driver.asm` from that file and
+the manifest's `sound` and `block` lines — each region under its own `ORG`, a
+`; ---- $XXXX-$XXXX: not uploaded` comment where a gap lies between two, and
+the file opening with what was sent:
 
 ```
 ; The sound program the cartridge uploads at boot, traced from $0500.
@@ -562,6 +574,20 @@ seen     $00:803F D=$4320 DBR=$00
 The manifest keeps every `ran` line as it keeps `reached`, and writes the
 `seen` lines fresh on every run: they are what the run saw, and the next run
 sees it again.
+
+The sound CPU is held the same way. The audio machine reports every access the
+sound CPU makes and every instruction boundary it crosses; at each boundary
+the run decodes the instruction about to run from the bytes at the sound
+CPU's program counter — the upload stub's, served from the boot-ROM window,
+and the uploaded program's alike — lifts it through the same lift `apu.snagir`
+comes from, and at the boundary after holds that node to what the machine did
+between them, through the [interpreter](ir.md#running-beside-the-machine) as
+the differential holds it. A lift the audio machine disagrees with is a `note`
+naming the audio site, said once; so is a step whose bytes do not decode as
+one instruction, or that did not fetch the instruction decoded there, which is
+not checked. Nothing is yet computed from a sound node: no `ran`, no `seen`,
+no fact — the check is the whole of it, and a run that ends with no note has
+held every sound instruction it executed to the chip.
 
 ## What a run moved
 
@@ -1025,7 +1051,7 @@ to them is what `snes_verify` answers.
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-Reads the directory's `project.manifest`, assembles every bank file with the
+Reads the directory's `project.snagifest`, assembles every bank file with the
 65816 dialect and the sound file with the SPC700 dialect, places each range a
 file emits at the image offset its address reads from under the manifest's map
 and each placed block at the offset the manifest recorded, and compares the
@@ -1233,7 +1259,7 @@ const snaggletooth::disasm::CartridgeDisassembly tree =
     snaggletooth::disasm::disassembleCartridge(request);
 
 std::string error;
-snaggletooth::disasm::writeProject(tree, "cartridge", error);  // program.snagir, the manifest, the lifted files
+snaggletooth::disasm::writeProject(tree, "cartridge", error);  // program.snagir, apu.snagir, the manifest, the lifted files
 
 std::size_t rendered = 0;
 snaggletooth::disasm::renderTree("cartridge", rendered, error);  // the bank files, from the two files on disk
@@ -1334,31 +1360,41 @@ holds and their `bytes`, the routines it `calls`, and its role as `reaches` and
 `through` — from `routines(disassembly)`, which reads the finished listings, the
 accesses and the transfers.
 
-The disassembler's files are text from `renderProgramFile`, `renderManifest` and
-`renderSoundProgram`; `writeProject` writes them under a directory — the
-program file first, then the manifest, the lifted files as bytes under theirs,
-and the sound file — and no bank file. `parseManifest` reads a manifest's
-entries, reached and derived targets, landings, moved ranges, assets, file
-split, map, sound program and image identity back, and the accesses, routines,
-seen registers and transfers the renderer reads, and `manifestMismatch` says
+The disassembler's files are text from `renderProgramFile`,
+`renderSoundProgramFile` and `renderManifest`; `writeProject` writes them
+under a directory — the program file first, then the sound program's file
+where one was captured, the manifest, and the lifted files as bytes under
+theirs — and no bank file and no sound file. The sound program's nodes are
+`CartridgeDisassembly::program.spc700`, lifted from the captured listing
+through `ir/spc700_lift.h`. `parseManifest` reads a manifest's entries,
+reached and derived targets, landings, moved ranges, assets, file split, map,
+sound program and image identity back, and the accesses, routines, seen
+registers and transfers the renderer reads, and `manifestMismatch` says
 whether that manifest can direct a run over a given image.
 
-The bank files are `rom/rom_render.h`'s, a library that links nothing able to
-trace, run or lift: `readRenderInput(directory, program, error)` builds a
-`RenderInput` from `program.snagir` and `project.manifest` — each region's
+The bank files and the sound file are `rom/rom_render.h`'s, a library that
+links nothing able to trace, run or lift: `readRenderInput(directory, program,
+error)` builds a `RenderInput` from `program.snagir`, `project.snagifest` and,
+where the manifest names a sound program, `apu.snagir` — each region's
 listing from the file's nodes, labels and data runs; the register an operand
 reaches from the `access` lines; the direct registers a run saw from `seen`;
 the routines from `routine`; the lifted files from `asset`, with the register
 their bytes went to found in the `moved` and `dma` lines; the sound program's
-blocks from `block` — and `renderRegion(region, input, program)` writes each
+entry and blocks from `sound` and `block`, and its nodes and regions from its
+own file — and `renderRegion(region, input, program)` writes each
 instruction from its node in that program, the first at the line's address,
 through `ir/ir_render.h`, with the labels, the register names and the routine
 comments attached; the data runs and the sound-program cut are the listing's.
-`renderTree(directory, rendered, error)` does it for every region, and
-`snes_render` is that call. `renderInputOf(disassembly)` and
-`renderRegion(region, disassembly)` in `rom_disasm.h` render the same from the
-disassembly in memory, which is how a tree rendered from disk is held equal to
-the disassembly that wrote it.
+`renderSoundFile(input, program)` writes the sound program's file the same
+way from the `spc700` nodes: the header from the `sound` and `block` lines,
+each region under its own `ORG` with the gap comment between two, the labels,
+the data runs, and every instruction through `renderSpc700Line`, a target with
+a label anywhere in the file written as the label.
+`renderTree(directory, rendered, error)` does it for every region and for the
+sound file, and `snes_render` is that call. `renderInputOf(disassembly)`,
+`renderRegion(region, disassembly)` and `renderSoundFile(disassembly)` in
+`rom_disasm.h` render the same from the disassembly in memory, which is how a
+tree rendered from disk is held equal to the disassembly that wrote it.
 
 Verification is `rom/rom_verify.h`:
 
@@ -1431,7 +1467,8 @@ or starts from a handler the paths do not reach, stays in its bank.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or
-`state` lines. A value carries as far as every path proves it and no further, so
+`state` lines; the run holds every instruction the sound CPU executes to the
+audio machine, and computes nothing from them yet. A value carries as far as every path proves it and no further, so
 a channel configured from a table, or across a call that does not give the
 register back, leaves the fields it did not settle `none` rather than guessing at
 them. A routine's role counts what the bytes reach and what a run reached; a call
@@ -1443,11 +1480,11 @@ for the run or a person to answer.
 
 Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
 from 512 KB to 6 MB — assembles back to its image byte for byte under
-`snes_verify`. The bank files are written from the intermediate representation,
-which holds no bytes: the bytes in every comment are re-encoded from the
-instruction layer, and the tree still assembles to the image. The trace's own
-limits stand: a jump through a table stops it, and an entry in the manifest is
-how a person carries it past.
+`snes_verify`. The bank files and the sound file are written from the
+intermediate representation, which holds no bytes: the bytes in every comment
+are re-encoded from the instruction layer, and the tree still assembles to
+the image. The trace's own limits stand: a jump through a table stops it, and
+an entry in the manifest is how a person carries it past.
 
 ## See also
 

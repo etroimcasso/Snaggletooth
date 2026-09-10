@@ -390,9 +390,72 @@ std::string fill(const char* text, const std::string& first, const std::string& 
   return out;
 }
 
+// A row's text split into the mnemonic and the form: the text up to its first
+// space, and the rest with every operand slot replaced by the word for its kind.
+std::string_view mnemonicOf(const OpcodeInfo& info) {
+  const std::string_view text(info.text);
+  const std::size_t space = text.find(' ');
+  return space == std::string_view::npos ? text : text.substr(0, space);
+}
+
+std::string formOf(const OpcodeInfo& info) {
+  const std::string_view text(info.text);
+  const std::size_t space = text.find(' ');
+  if (space == std::string_view::npos) return std::string();
+  std::string form(text.substr(space + 1));
+  auto replace = [&](std::string_view slot, std::string_view word) {
+    const std::size_t at = form.find(slot);
+    if (at != std::string::npos) form.replace(at, slot.size(), word);
+  };
+  switch (info.operands) {
+    case Operands::None: break;
+    case Operands::Imm: replace("#$%1", "#imm"); break;
+    case Operands::Dp: replace("$%1", "dp"); break;
+    case Operands::Abs: replace("!$%1", "abs"); break;
+    case Operands::AbsBit: replace("!$%1.%2", "abs.bit"); break;
+    case Operands::Rel: replace("$%1", "rel"); break;
+    case Operands::Upage: replace("$%1", "upage"); break;
+    case Operands::DpRel:
+      replace("$%1", "dp");
+      replace("$%2", "rel");
+      break;
+    case Operands::DpDp:
+      replace("$%2", "dp");
+      replace("$%1", "dp");
+      break;
+    case Operands::ImmDp:
+      replace("$%2", "dp");
+      replace("#$%1", "#imm");
+      break;
+  }
+  return form;
+}
+
+const std::array<std::string, 256>& forms() {
+  static const std::array<std::string, 256> table = [] {
+    std::array<std::string, 256> out;
+    for (unsigned opcode = 0; opcode < 256; ++opcode) out[opcode] = formOf(kOpcodes[opcode]);
+    return out;
+  }();
+  return table;
+}
+
 }  // namespace
 
 const std::array<Spc700Opcode, 256>& spc700Opcodes() { return kOpcodes; }
+
+std::string_view spc700Mnemonic(std::uint8_t opcode) { return mnemonicOf(kOpcodes[opcode]); }
+
+std::string_view spc700Form(std::uint8_t opcode) { return forms()[opcode]; }
+
+std::optional<std::uint8_t> spc700OpcodeOf(std::string_view mnemonic, std::string_view form) {
+  for (unsigned opcode = 0; opcode < 256; ++opcode) {
+    if (mnemonicOf(kOpcodes[opcode]) == mnemonic && forms()[opcode] == form) {
+      return static_cast<std::uint8_t>(opcode);
+    }
+  }
+  return std::nullopt;
+}
 
 const std::array<CycleCost, 256>& cycleTable() {
   static const std::array<CycleCost, 256> table = [] {

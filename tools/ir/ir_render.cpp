@@ -276,6 +276,173 @@ std::string renderLine(const Node& node, const SourceNames& names, std::size_t b
   return row + "\n";
 }
 
+// ---- the sound program ----------------------------------------------------------
+
+namespace {
+
+using disasm::Spc700Operands;
+
+// A table row's text with `%1` and `%2` replaced by the operands rendered for
+// it, as the SPC700 disassembler fills it.
+std::string fillSlots(std::string_view text, const std::string& first, const std::string& second) {
+  std::string out;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '%' && i + 1 < text.size() && (text[i + 1] == '1' || text[i + 1] == '2')) {
+      out += text[i + 1] == '1' ? first : second;
+      ++i;
+      continue;
+    }
+    out += text[i];
+  }
+  return out;
+}
+
+// The operand slots as the SPC700 disassembler prints them: a byte or a word, a
+// relative form's target, a bit form's address and bit index.
+void spc700Slots(const Instruction& instruction, Spc700Operands shape, std::string& first,
+                 std::string& second) {
+  switch (shape) {
+    case Spc700Operands::None: break;
+    case Spc700Operands::Imm:
+    case Spc700Operands::Dp:
+    case Spc700Operands::Upage:
+      first = hex(instruction.operand & 0xFFu, 2);
+      break;
+    case Spc700Operands::Abs:
+      first = hex(instruction.operand & 0xFFFFu, 4);
+      break;
+    case Spc700Operands::AbsBit:
+      first = hex(instruction.operand & 0x1FFFu, 4);
+      second = std::to_string(instruction.operand2);
+      break;
+    case Spc700Operands::Rel:
+      first = hex(instruction.target.value_or(instruction.operand) & 0xFFFFu, 4);
+      break;
+    case Spc700Operands::DpRel:
+      first = hex(instruction.operand & 0xFFu, 2);
+      second = hex(instruction.target.value_or(0) & 0xFFFFu, 4);
+      break;
+    case Spc700Operands::DpDp:
+    case Spc700Operands::ImmDp:
+      first = hex(instruction.operand & 0xFFu, 2);
+      second = hex(instruction.operand2, 2);
+      break;
+  }
+}
+
+// The displacement a relative form's byte carries: from the instruction after
+// it to the target, within the audio unit's space.
+std::uint8_t spc700Displacement(const Instruction& instruction) {
+  const std::uint32_t after = (instruction.address + instruction.length) & 0xFFFFu;
+  return static_cast<std::uint8_t>((instruction.target.value_or(instruction.operand) - after) & 0xFFu);
+}
+
+}  // namespace
+
+std::uint8_t opcodeOfSpc700(const Instruction& instruction) {
+  const std::optional<std::uint8_t> opcode =
+      disasm::spc700OpcodeOf(instruction.mnemonic, instruction.form);
+  if (!opcode) {
+    throw std::logic_error("no opcode of the sound CPU is " + std::string(instruction.mnemonic) +
+                           " with " + std::string(instruction.form));
+  }
+  return *opcode;
+}
+
+std::vector<std::uint8_t> encodeSpc700(const Instruction& instruction) {
+  const std::uint8_t opcode = opcodeOfSpc700(instruction);
+  std::vector<std::uint8_t> bytes{opcode};
+  auto byte = [](std::uint32_t value) { return static_cast<std::uint8_t>(value & 0xFFu); };
+  switch (disasm::spc700Opcodes()[opcode].operands) {
+    case Spc700Operands::None: break;
+    case Spc700Operands::Imm:
+    case Spc700Operands::Dp:
+    case Spc700Operands::Upage:
+      bytes.push_back(byte(instruction.operand));
+      break;
+    case Spc700Operands::Abs:
+      bytes.push_back(byte(instruction.operand));
+      bytes.push_back(byte(instruction.operand >> 8));
+      break;
+    case Spc700Operands::AbsBit: {
+      const std::uint32_t word = (instruction.operand & 0x1FFFu) | (static_cast<std::uint32_t>(instruction.operand2) << 13);
+      bytes.push_back(byte(word));
+      bytes.push_back(byte(word >> 8));
+      break;
+    }
+    case Spc700Operands::Rel:
+      bytes.push_back(spc700Displacement(instruction));
+      break;
+    case Spc700Operands::DpRel:
+      bytes.push_back(byte(instruction.operand));
+      bytes.push_back(spc700Displacement(instruction));
+      break;
+    case Spc700Operands::DpDp:
+    case Spc700Operands::ImmDp:
+      bytes.push_back(byte(instruction.operand));
+      bytes.push_back(instruction.operand2);
+      break;
+  }
+  return bytes;
+}
+
+std::string renderSpc700Instruction(const Instruction& instruction, std::string_view targetLabel) {
+  const disasm::Spc700Opcode& row = disasm::spc700Opcodes()[opcodeOfSpc700(instruction)];
+  std::string first;
+  std::string second;
+  spc700Slots(instruction, row.operands, first, second);
+  const std::string_view text(row.text);
+  // The forms whose target the dialect writes as a symbol: an absolute call or
+  // jump, and the branches, where the target is the slot printed as `$%1` or
+  // `$%2`. The symbol replaces the `$` and the digits together.
+  const bool symbolic = (row.operands == Spc700Operands::Abs && instruction.target) ||
+                        row.operands == Spc700Operands::Rel || row.operands == Spc700Operands::DpRel;
+  if (symbolic && !targetLabel.empty()) {
+    const std::string_view slot = row.operands == Spc700Operands::DpRel ? "$%2" : "$%1";
+    const std::size_t at = text.find(slot);
+    return fillSlots(text.substr(0, at), first, second) + std::string(targetLabel) +
+           fillSlots(text.substr(at + slot.size()), first, second);
+  }
+  return fillSlots(text, first, second);
+}
+
+std::string renderSpc700Cost(const Node& node) {
+  // One measured cost; a taken branch adds the cycles of the `Cycles` effect
+  // that fires under its condition.
+  std::uint32_t taken = 0;
+  for (const Effect& e : node.effects) {
+    if (e.op == Op::Cycles && e.when.when != When::Always) taken += e.a.value;
+  }
+  std::string text = std::to_string(node.cost.base[0]);
+  if (taken != 0) text += "/" + std::to_string(node.cost.base[0] + taken);
+  return text;
+}
+
+std::string renderSpc700Line(const Node& node, std::string_view targetLabel, std::size_t bytesWidth) {
+  constexpr std::size_t kCommentColumn = 40;
+  std::string row = "        " + renderSpc700Instruction(node.instruction, targetLabel);
+  padTo(row, kCommentColumn);
+
+  std::string bytes;
+  for (const std::uint8_t b : encodeSpc700(node.instruction)) bytes += hex(b, 2) + " ";
+  if (bytes.size() < bytesWidth) bytes.append(bytesWidth - bytes.size(), ' ');
+
+  row += "; " + disasm::formatAddress(node.instruction.address & 0xFFFFu, 16) + "  " + bytes + " " +
+         renderSpc700Cost(node);
+  // The note: the register the operand names, or the address a `PCALL` reaches,
+  // whose operand is an offset into page $FF.
+  std::string note(node.registerName);
+  if (note.empty() && node.instruction.form == "upage" && node.instruction.target) {
+    note = "$" + hex(*node.instruction.target & 0xFFFFu, 4);
+  }
+  if (node.patched) {
+    if (!note.empty()) note += "; ";
+    note += "PATCHED at run time";
+  }
+  if (!note.empty()) row += "  " + note;
+  return row + "\n";
+}
+
 std::vector<std::string> SourceMode::directives(const Node& node) {
   // The node's mode, as the backend carries one: what it reads under, with the
   // carry memory the line above left, which is what `XCE` exchanges.

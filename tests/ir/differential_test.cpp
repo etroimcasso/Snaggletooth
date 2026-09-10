@@ -5,7 +5,10 @@
 // code run through a mirror bank is looked up and reported where the tree places
 // it, and that a deliberate break in one effect — a wrong value, a wrong address,
 // a dropped flag write, a dropped cycle, a missing or an extra access — is named
-// with the node, the effect and the two values.
+// with the node, the effect and the two values. The sound program is replayed
+// beside the same run: the cases pin what a clean replay of an uploaded program
+// reports, that a break in one of its effects is named with the audio site,
+// and what an audio address with no node, or with a node of other bytes, does.
 
 #include <algorithm>
 #include <cstdint>
@@ -29,21 +32,25 @@ using examples::mirroredImage;
 using examples::mixedImage;
 using examples::ramCodeImage;
 using examples::transferImage;
+using examples::uploadingImage;
 using examples::waitingImage;
 
 constexpr std::uint64_t kFrame = 262u * 1364u;  // one NTSC frame of the master clock
 
 // A cartridge's program: every region traced from its vectors — and, when
 // asked, from what a run of `runCycles` reached and landed on — and lifted, the
-// nodes of all of them in address order.
-Program programOf(const std::vector<std::uint8_t>& rom, std::uint64_t runCycles = 0) {
+// nodes of all of them in address order; with `sound`, the program the
+// cartridge uploads to the audio unit, lifted as the sound program's nodes.
+Program programOf(const std::vector<std::uint8_t>& rom, std::uint64_t runCycles = 0,
+                  bool sound = false) {
   disasm::CartridgeRequest request;
   request.rom = rom;
-  request.captureSound = false;
+  request.captureSound = sound;
   request.observeRun = runCycles != 0;
   request.runMasterCycles = runCycles;
   const disasm::CartridgeDisassembly d = disasm::disassembleCartridge(request);
   Program all;
+  all.spc700 = d.program.spc700;
   for (const disasm::RegionListing& region : d.regions) {
     std::vector<std::uint8_t> image;
     for (const disasm::Line& line : region.listing.lines) {
@@ -66,6 +73,14 @@ Node* nodeAt(Program& program, Address address) {
     if (node.instruction.address == address) return &node;
   }
   ADD_FAILURE() << "no node at " << address;
+  return nullptr;
+}
+
+Node* soundNodeAt(Program& program, Address address) {
+  for (Node& node : program.spc700) {
+    if (node.instruction.address == address) return &node;
+  }
+  ADD_FAILURE() << "no sound node at " << address;
   return nullptr;
 }
 
@@ -202,6 +217,136 @@ TEST(Differential, ADivergenceInAMirrorBankNamesTheSiteTheTreePlaces) {
   EXPECT_EQ(d.what, "write value");
   EXPECT_EQ(d.expected, 0x13u);
   EXPECT_EQ(d.actual, 0x11u);
+}
+
+// ---- the sound program ----------------------------------------------------------------
+//
+// The uploading cartridge sends twenty instructions — two immediate loads, a
+// store, sixteen NOPs and a STOP — and starts them. The stub that receives
+// them runs first, from the boot-ROM window, and the tree has no node for it.
+
+TEST(Differential, TheSoundProgramIsCheckedBesideTheMainCpu) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  const Program program = programOf(rom, 0, true);
+  ASSERT_EQ(program.spc700.size(), 20u);
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_TRUE(report.divergences.empty()) << describe(report.divergences.front());
+  EXPECT_EQ(report.spc700Instructions, 20u) << "each uploaded instruction runs once";
+  EXPECT_GT(report.spc700Cycles, 40u);
+  EXPECT_EQ(report.spc700Patched, 0u);
+  EXPECT_TRUE(report.spc700PatchedSites.empty());
+  EXPECT_GT(report.spc700Unlifted, 20u) << "the stub's instructions, which the tree does not hold";
+  ASSERT_FALSE(report.spc700UnliftedSites.empty());
+  for (const Address site : report.spc700UnliftedSites) {
+    EXPECT_GE(site, 0xFFC0u) << "every unlifted audio address is in the boot-ROM window";
+  }
+  EXPECT_EQ(report.spc700Forms.size(), 4u);
+  EXPECT_EQ(report.spc700Forms.at("MOV A,#imm"), 2u);
+  EXPECT_EQ(report.spc700Forms.at("MOV abs,A"), 1u);
+  EXPECT_EQ(report.spc700Forms.at("NOP"), 16u);
+  EXPECT_EQ(report.spc700Forms.at("STOP"), 1u);
+}
+
+TEST(Differential, AWrongSoundEffectIsNamedWithTheAudioSite) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  Program program = programOf(rom, 0, true);
+  Node* store = soundNodeAt(program, 0x0202u);  // MOV !$0250,A
+  ASSERT_NE(store, nullptr);
+  Effect* write = firstEffect(*store, Op::Store);
+  ASSERT_NE(write, nullptr);
+  write->b.place = Place::X;  // the value stored is X, not A
+  const std::size_t index = static_cast<std::size_t>(write - store->effects.data());
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_FALSE(report.divergences.empty());
+  const Divergence& d = report.divergences.front();
+  EXPECT_EQ(d.processor, Processor::Spc700);
+  EXPECT_EQ(d.site, 0x0202u);
+  EXPECT_EQ(d.name, "MOV");
+  ASSERT_TRUE(d.effect.has_value());
+  EXPECT_EQ(*d.effect, index);
+  EXPECT_EQ(d.what, "write value");
+  EXPECT_EQ(d.expected, 0x5Au) << "what the sound CPU stored";
+  EXPECT_NE(d.actual, 0x5Au);
+  // The interpreter was realigned: the instructions after are checked clean.
+  EXPECT_EQ(report.spc700Instructions, 20u);
+  EXPECT_EQ(report.divergences.size(), 1u);
+}
+
+TEST(Differential, AWrongSoundRegisterWriteIsARegisterDivergenceWithNoEffectNamed) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  Program program = programOf(rom, 0, true);
+  Node* load = soundNodeAt(program, 0x0200u);  // MOV A,#$5A
+  ASSERT_NE(load, nullptr);
+  Effect* set = nullptr;
+  for (Effect& e : load->effects) {
+    if (e.op == Op::SetNZ && e.dst.place == Place::A) set = &e;
+  }
+  ASSERT_NE(set, nullptr) << "the write of the immediate into A, with N and Z";
+  set->dst.place = Place::Y;  // the immediate lands in Y, not A
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_FALSE(report.divergences.empty());
+  const Divergence& d = report.divergences.front();
+  EXPECT_EQ(d.processor, Processor::Spc700);
+  EXPECT_EQ(d.site, 0x0200u);
+  EXPECT_EQ(d.name, "MOV");
+  EXPECT_FALSE(d.effect.has_value());
+  EXPECT_EQ(d.what, "register a");
+  EXPECT_EQ(d.expected, 0x5Au);
+  EXPECT_NE(d.actual, 0x5Au);
+  // Y diverged on the same step; the store after ran realigned and clean.
+  bool y = false;
+  for (const Divergence& other : report.divergences) y = y || (other.site == 0x0200u && other.what == "register y");
+  EXPECT_TRUE(y);
+  EXPECT_EQ(report.spc700Instructions, 20u);
+}
+
+TEST(Differential, ADroppedSoundCycleIsACycleDivergence) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  Program program = programOf(rom, 0, true);
+  Node* store = soundNodeAt(program, 0x0202u);  // MOV !$0250,A: five cycles
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(store->cost.base[0], 5u);
+  store->cost.base[0] = 4;
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_FALSE(report.divergences.empty());
+  const Divergence& d = report.divergences.front();
+  EXPECT_EQ(d.processor, Processor::Spc700);
+  EXPECT_EQ(d.site, 0x0202u);
+  EXPECT_FALSE(d.effect.has_value());
+  EXPECT_EQ(d.what, "cycles");
+  EXPECT_EQ(d.expected, 5u);
+  EXPECT_EQ(d.actual, 4u);
+  EXPECT_EQ(report.divergences.size(), 1u);
+}
+
+TEST(Differential, AnAudioAddressWithNoNodeIsCountedAndTheInterpreterRealigned) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  Program program = programOf(rom, 0, true);
+  const auto nop = std::find_if(program.spc700.begin(), program.spc700.end(),
+                                [](const Node& n) { return n.instruction.address == 0x0207u; });
+  ASSERT_NE(nop, program.spc700.end());
+  program.spc700.erase(nop);
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_TRUE(report.divergences.empty()) << describe(report.divergences.front());
+  EXPECT_EQ(report.spc700Instructions, 19u);
+  EXPECT_EQ(std::count(report.spc700UnliftedSites.begin(), report.spc700UnliftedSites.end(), 0x0207u), 1)
+      << "the address once, however many times it ran";
+  EXPECT_EQ(report.spc700Forms.at("NOP"), 15u);
+}
+
+TEST(Differential, ASoundNodeOfOtherBytesThanTheMachineFetchedIsCountedNotChecked) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  Program program = programOf(rom, 0, true);
+  Node* store = soundNodeAt(program, 0x0202u);  // MOV !$0250,A
+  ASSERT_NE(store, nullptr);
+  store->instruction.operand = 0x0251u;  // the file says another address than the bytes
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_TRUE(report.divergences.empty()) << describe(report.divergences.front());
+  EXPECT_EQ(report.spc700Patched, 1u);
+  ASSERT_EQ(report.spc700PatchedSites.size(), 1u);
+  EXPECT_EQ(report.spc700PatchedSites.front(), 0x0202u);
+  EXPECT_EQ(report.spc700Instructions, 19u) << "the rest of the program is checked";
+  EXPECT_EQ(report.spc700Forms.count("MOV abs,A"), 0u);
 }
 
 TEST(Differential, TheRunEndsAtTheBudgetWhenTheProgramDoesNotStop) {

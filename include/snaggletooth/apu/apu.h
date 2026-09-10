@@ -29,6 +29,11 @@
 // step() runs one instruction; run() runs an exact number of cycles and may
 // stop mid-instruction, which is a legal resting place — instruction progress
 // is part of the state value.
+//
+// A host that wants to know what the sound CPU did, not only what the machine
+// holds afterwards, sets an observer (ApuObserver): it is told every access the
+// CPU makes as its value settles, and every instruction boundary the machine
+// crosses with the state on either side and the cycles between.
 
 #include <array>
 #include <cstddef>
@@ -77,6 +82,32 @@ struct ApuState {
   std::array<TimerState, 3> timers{};
 };
 
+// What the audio machine tells about the sound CPU: every access it makes and
+// every instruction boundary it crosses. A host derives the CPU's whole
+// observable behaviour from it — which addresses were read and written in what
+// order with what values, and how many cycles each instruction took. The DSP's
+// own reads of RAM, the sample and echo fetches, are not the CPU's and are not
+// reported.
+class ApuObserver {
+ public:
+  virtual ~ApuObserver() = default;
+
+  // An access the CPU made through the machine's bus, after its value settled:
+  // a read carries what the bus answered — a register's value for an address in
+  // the overlay, the boot-ROM image for a read in the mapped window — and a
+  // write what the CPU drove. The instruction's own fetches are reported like
+  // any other read.
+  virtual void access(std::uint16_t address, std::uint8_t value, bool write) = 0;
+
+  // An instruction boundary the machine crossed: the CPU's state at the
+  // boundary before, its state at this one, and the cycles between — the whole
+  // cost of the instruction that ran, however many run() calls it spanned. A
+  // halted core crosses a boundary every cycle, reported with no access between
+  // and the same halted state on both sides.
+  virtual void instruction(const Spc700State& before, const Spc700State& after,
+                           std::uint32_t cycles) = 0;
+};
+
 class Apu {
  public:
   // The seeded post-IPL power-on machine: zeroed RAM, SP at $01EF, TEST $0A,
@@ -117,9 +148,30 @@ class Apu {
   }
   void loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) noexcept;
 
+  // What a fetch by the sound CPU at `address` returns, without making one: the
+  // boot-ROM image while an image is mapped and CONTROL bit 7 is set, the RAM
+  // byte otherwise. The sixteen register bytes are answered from the RAM
+  // beneath them, as readRam answers them; no program is fetched from the
+  // overlay. Nothing changes, so a host can decode the instruction the CPU is
+  // about to run.
+  [[nodiscard]] std::uint8_t peek(std::uint16_t address) const noexcept;
+
   // Points the CPU at a loaded image (the machine has no IPL ROM to set an entry
   // for). A convenience over restoring a whole state with a changed PC.
   void setPc(std::uint16_t pc);
+
+  // The observer told every access the CPU makes and every instruction boundary
+  // the machine crosses, or none, which is how the machine starts. It is the
+  // host's object and outlives every cycle it is set for; it is not part of the
+  // state, so a snapshot does not carry it and restore() leaves it in place.
+  // With none set an access costs one check and a cycle one more. Set it at an
+  // instruction boundary: the state the machine holds when it is set is the
+  // `before` of the first boundary reported.
+  void setObserver(ApuObserver* observer) noexcept {
+    observer_ = observer;
+    markBoundary();
+  }
+  [[nodiscard]] ApuObserver* observer() const noexcept { return observer_; }
 
   // Maps a 64-byte boot-ROM image over the $FFC0-$FFFF window. While CONTROL bit 7
   // is set, an SPC700 read in that range returns the image; every write still lands
@@ -149,18 +201,32 @@ class Apu {
 
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
-  // is RAM. Both the CPU and its dummy reads pass through here.
+  // is RAM. Both the CPU and its dummy reads pass through here, and every call
+  // is reported to the observer once its value is settled.
   struct Bus {
     Apu& apu;
-    std::uint8_t read(std::uint16_t address) { return apu.busRead(address); }
+    std::uint8_t read(std::uint16_t address) {
+      const std::uint8_t value = apu.busRead(address);
+      if (apu.observer_) apu.observer_->access(address, value, false);
+      return value;
+    }
     void write(std::uint16_t address, std::uint8_t value) {
       apu.busWrite(address, value);
+      if (apu.observer_) apu.observer_->access(address, value, true);
     }
   };
 
   // Reloads the live CPU from state_ and re-locks the DSP sample slot to the master
   // counter after a construct, restore, or reset.
   void syncCpuAndSlot();
+
+  // Takes the live CPU's state as the `before` of the next boundary reported
+  // and starts its cycle count over: after every reload of the CPU, and when
+  // an observer is set.
+  void markBoundary() noexcept {
+    boundaryState_ = cpu_.state();
+    sinceBoundary_ = 0;
+  }
 
   std::uint8_t busRead(std::uint16_t address);
   void busWrite(std::uint16_t address, std::uint8_t value);
@@ -191,6 +257,9 @@ class Apu {
   ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced before every return
   std::vector<StereoFrame> frames_;  // DSP output awaiting the host's drain; not part of the snapshot
   std::optional<std::array<std::uint8_t, kIplWindowBytes>> iplImage_;  // the $FFC0 window image; config, absent by default, kept across restore()/reset()
+  ApuObserver* observer_ = nullptr;  // told every access and every boundary; none by default
+  Spc700State boundaryState_{};      // the CPU at the last boundary reported, the `before` of the next
+  std::uint32_t sinceBoundary_ = 0;  // cycles run since it
 };
 
 }  // namespace snaggletooth

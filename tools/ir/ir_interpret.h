@@ -1,19 +1,24 @@
 #pragma once
 
-// The interpreter — runs a node's effects, and nothing else.
+// The interpreters — each runs a node's effects, and nothing else.
 //
-// It holds the CPU's registers and reads its memory through a bus its host
-// answers. It never sees an instruction's bytes, its listing or its decoder: what
-// it knows about an instruction is the effect layer, and what it produces is the
-// registers after, every load and store in order, and the cycles the node cost.
-// That is the whole point of it. An interpreter that could reach the bytes could
-// copy them through and prove nothing; this one has to compute every value, so a
-// run beside the core compares what the intermediate representation says against
-// what the chip does.
+// An interpreter holds its CPU's registers and reads memory through a bus its
+// host answers. It never sees an instruction's bytes, its listing or its
+// decoder: what it knows about an instruction is the effect layer, and what it
+// produces is the registers after, every load and store in order, and the
+// cycles the node cost. That is the whole point of it. An interpreter that could
+// reach the bytes could copy them through and prove nothing; this one has to
+// compute every value, so a run beside the core compares what the intermediate
+// representation says against what the chip does.
 //
-// A host drives it one node at a time: it looks the node up for the live program
-// counter and flags, supplies a hardware interrupt between two nodes when one is
-// due, and answers every read.
+// There is one per chip. `Interpreter` runs the main CPU's nodes over its
+// 24-bit space; `Spc700Interpreter` runs the sound program's over the audio
+// unit's 16-bit space. Each honours the vocabulary with its own chip's rules
+// and refuses a word that has no meaning on it.
+//
+// A host drives an interpreter one node at a time: it looks the node up for
+// the live program counter and flags, supplies a hardware interrupt between two
+// nodes when one is due, and answers every read.
 
 #include <cstddef>
 #include <cstdint>
@@ -120,6 +125,42 @@ class Interpreter {
   // Releases a wait without an interrupt sequence: what a maskable request does
   // while the interrupt-disable flag is set.
   void release() noexcept { if (registers.run == Run::Waiting) registers.run = Run::Running; }
+};
+
+// The sound CPU's state as the effects name it: eight-bit registers, the stack
+// pointer's low byte in page one, the status word, and the program counter in
+// the audio unit's 16-bit space. `Waiting` is a sleep and `Stopped` a stop;
+// the sound CPU takes no interrupt, so only a reset ends either.
+struct Spc700Registers {
+  std::uint16_t pc = 0;
+  std::uint8_t a = 0;
+  std::uint8_t x = 0;
+  std::uint8_t y = 0;
+  std::uint8_t sp = 0;
+  std::uint8_t psw = 0;
+  Run run = Run::Running;
+
+  friend bool operator==(const Spc700Registers&, const Spc700Registers&) = default;
+};
+
+// The interpreter for a sound-CPU node, over the same `Bus`: every address it
+// reads or writes is in the audio unit's space, and the bus is asked for it as
+// a 16-bit address. It runs the effect vocabulary with the sound CPU's rules —
+// an add sets the half carry, a page address takes its page from the P flag,
+// the stack is page one — and refuses an effect the sound CPU has no meaning
+// for. It never sees an instruction's bytes.
+class Spc700Interpreter {
+ public:
+  Spc700Registers registers;
+
+  // The index, in the node being run, of the effect whose accesses the bus is
+  // answering.
+  std::size_t effectIndex = 0;
+
+  // Runs one node: every effect whose condition holds, in order. Returns the
+  // cycles the node cost: its measured base plus every `Cycles` effect that
+  // fired.
+  std::uint32_t execute(const Node& node, Bus& bus);
 };
 
 }  // namespace snaggletooth::ir

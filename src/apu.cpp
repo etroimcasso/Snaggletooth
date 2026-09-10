@@ -47,6 +47,7 @@ void Apu::restore(ApuState state) {
 
 void Apu::syncCpuAndSlot() {
   cpu_.restore(state_.cpu);
+  markBoundary();
   // The DSP's sample slot rides the master counter: after a cycle that leaves the
   // counter at D, the DSP has run slot (D-1) and its cursor sits at D mod 32. A
   // restored or seeded state re-establishes that lockstep so the machine drives
@@ -72,6 +73,13 @@ void Apu::loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) no
 void Apu::setPc(std::uint16_t pc) {
   state_.cpu.pc = pc;
   cpu_.restore(state_.cpu);
+  markBoundary();
+}
+
+std::uint8_t Apu::peek(std::uint16_t address) const noexcept {
+  if (iplImage_ && address >= kIplWindowBase && (state_.control & kControlIplRom) != 0u)
+    return (*iplImage_)[address - kIplWindowBase];
+  return state_.ram[address];
 }
 
 void Apu::mapIplRom(std::span<const std::uint8_t, kIplWindowBytes> image) {
@@ -100,6 +108,17 @@ void Apu::machineCycle() {
   // the cycle still passes for everything above.
   Bus bus{*this};
   cpu_.stepCycle(bus);
+
+  // The observer is told each boundary the cycle lands on, with the state at
+  // the one before and every cycle between. A halted core sits on a boundary,
+  // so each of its idle cycles is one.
+  if (observer_) {
+    ++sinceBoundary_;
+    if (cpu_.atInstructionBoundary()) {
+      observer_->instruction(boundaryState_, cpu_.state(), sinceBoundary_);
+      markBoundary();
+    }
+  }
 }
 
 void Apu::tickTimer(std::size_t index) {

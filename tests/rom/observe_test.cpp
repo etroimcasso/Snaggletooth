@@ -12,7 +12,9 @@
 // holds it to the machine. A third cartridge rewrites a routine in work RAM and
 // returns to addresses the bytes do not name, and the cases pin what is
 // checked, which landings are recorded and which are not, the values seen at a
-// site, and that no example cartridge diverges.
+// site, and that no example cartridge diverges — on the sound CPU too, whose
+// every instruction, the upload stub's and the uploaded program's, is lifted
+// from the bytes at its program counter and held to the audio machine.
 
 #include <algorithm>
 #include <cstdint>
@@ -48,6 +50,7 @@ using examples::runningBankImage;
 using examples::stalledJumpImage;
 using examples::threeBankImage;
 using examples::unreadablePointerImage;
+using examples::uploadingImage;
 
 constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
@@ -1101,10 +1104,58 @@ TEST(RomLockstep, NoExampleCartridgeDivergesFromTheMachine) {
     std::vector<std::string> notes;
     const RunObservation o = observe(example.build(), 4u * kFrame, &notes);
     EXPECT_EQ(o.divergences, 0u) << example.name;
+    EXPECT_EQ(o.spc700Divergences, 0u) << example.name;
+    EXPECT_GT(o.spc700Instructions, 0u) << example.name << ": the upload stub runs on every cartridge";
     for (const std::string& note : notes) {
       EXPECT_EQ(note.find("disagreed"), std::string::npos) << example.name << ": " << note;
+      EXPECT_EQ(note.find("not checked"), std::string::npos) << example.name << ": " << note;
     }
   }
+}
+
+// ---- the sound CPU ---------------------------------------------------------------
+//
+// The uploading cartridge sends a twenty-instruction program and starts it; the
+// stub that receives it runs first. Every instruction of both is decoded from
+// the bytes at the program counter, lifted, and held to the audio machine.
+
+TEST(RomLockstep, EverySoundInstructionIsLiftedFromItsBytesAndCheckedAgainstTheMachine) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  std::vector<std::string> notes;
+  const RunObservation o = observe(rom, 5u * kFrame, &notes);
+  EXPECT_EQ(o.spc700Divergences, 0u);
+  EXPECT_TRUE(notes.empty()) << notes.front();
+  // The stub's instructions and the twenty uploaded ones are distinct nodes;
+  // the stub loops, so it runs many more times than it has nodes.
+  EXPECT_GE(o.spc700Nodes, 20u);
+  EXPECT_GT(o.spc700Instructions, o.spc700Nodes);
+
+  // The same run replayed on the tree's sound program checks the uploaded
+  // nodes and counts the stub's instructions, which the tree has no node for:
+  // together they are every instruction the observed run checked.
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = false;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.program.spc700.size(), 20u);
+  ir::Replay replay;
+  replay.rom = rom;
+  replay.masterCycles = 5u * kFrame;
+  const ir::DifferentialReport report = ir::differential(d.program, replay);
+  EXPECT_TRUE(report.divergences.empty());
+  EXPECT_EQ(report.spc700Instructions, 20u);
+  EXPECT_EQ(report.spc700Patched, 0u);
+  EXPECT_EQ(o.spc700Instructions, report.spc700Instructions + report.spc700Unlifted);
+}
+
+TEST(RomLockstep, TwoRunsCheckTheSameSoundInstructions) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  const RunObservation first = observe(rom, 3u * kFrame);
+  const RunObservation second = observe(rom, 3u * kFrame);
+  EXPECT_EQ(first.spc700Instructions, second.spc700Instructions);
+  EXPECT_EQ(first.spc700Nodes, second.spc700Nodes);
+  EXPECT_EQ(first.spc700Divergences, 0u);
 }
 
 // ---- where every byte came from ------------------------------------------------

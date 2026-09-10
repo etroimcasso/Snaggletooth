@@ -2,7 +2,7 @@
 //
 //   snes_verify <directory> <image> [-o <rebuilt>]
 //
-// Reads the directory's `project.manifest`, assembles every file it names —
+// Reads the directory's `project.snagifest`, assembles every file it names —
 // the bank files under the 65816 dialect, the sound program under the SPC700
 // dialect — places each range and each placed block at the image offset the
 // manifest gives, and compares the whole with the image byte for byte. The

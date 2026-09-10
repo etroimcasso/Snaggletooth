@@ -73,6 +73,20 @@ struct Spc700Opcode {
 // The instruction table, indexed by opcode.
 [[nodiscard]] const std::array<Spc700Opcode, 256>& spc700Opcodes();
 
+// An opcode's row as a mnemonic and an operand form, the two words that name
+// it in the program file. The mnemonic is the row's text up to its first space;
+// the form is the rest of the text with each operand slot replaced by its kind —
+// `#imm`, `dp`, `abs`, `rel`, `abs.bit`, `upage`, and `dp.n` for a bit of a
+// direct-page byte — so `MOV A,[$%1+X]` is `MOV` and `A,[dp+X]`, `BBS $%1.3,$%2`
+// is `BBS` and `dp.3,rel`, `TCALL 0` is `TCALL` and `0`, and `RET` is `RET` and
+// nothing. The pair names one opcode: `spc700OpcodeOf` is the inverse, and
+// answers nothing for a pair no row has. Both views are into storage that lives
+// as long as the program.
+[[nodiscard]] std::string_view spc700Mnemonic(std::uint8_t opcode);
+[[nodiscard]] std::string_view spc700Form(std::uint8_t opcode);
+[[nodiscard]] std::optional<std::uint8_t> spc700OpcodeOf(std::string_view mnemonic,
+                                                          std::string_view form);
+
 // The SPC700 has a 16-bit address space and its instructions always read the same
 // way, so the backend never sets a bank and passes the context through untouched.
 class Spc700Backend final : public Backend {

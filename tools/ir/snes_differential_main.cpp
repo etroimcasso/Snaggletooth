@@ -6,23 +6,28 @@
 //                                                     [--quiet]
 //
 // Reads the directory's `program.snagir` — the program `snes_disasm` wrote, in
-// the grammar `docs/snagir.md` gives — and runs the machine on the image for
-// `--seconds` of the master clock (sixty by default) with the interpreter
-// beside it, held to every access, every register and every cycle. The image
-// must be the one the file is a program of: its size is checked against the
-// file's own `image` line before anything runs. `--input`
-// replays a recorded run into the controller ports, exactly as `snes_disasm
-// --input` does, so the same run is checked that produced the tree;
-// `--input-dir` finds the run named for the image under that directory, as
-// `snes_disasm --input-dir` does, and leaves the ports empty when there is none.
+// the grammar `docs/snagir.md` gives — and its `apu.snagir` where the tree has
+// one, and runs the machine on the image for `--seconds` of the master clock
+// (sixty by default) with the interpreters beside it, held to every access,
+// every register and every cycle on both CPUs. The image must be the one the
+// file is a program of: its size is checked against the file's own `image`
+// line before anything runs. `--input` replays a recorded run into the
+// controller ports, exactly as `snes_disasm --input` does, so the same run is
+// checked that produced the tree; `--input-dir` finds the run named for the
+// image under that directory, as `snes_disasm --input-dir` does, and leaves the
+// ports empty when there is none.
 //
 // The report is written under `-o`: `summary.txt` (what was checked and how
-// much), `divergences.txt` (each disagreement with its step, node, effect and
-// the two values), `forms.txt` (how many times each instruction form ran under
-// each mode), `constructs.txt` (how many times each named construct was
-// exercised, zero where the run never reached one), and `unlifted.txt` (the
-// addresses the run executed that the tree has no instruction for, as the tree
-// places them). One line on standard output sums it up.
+// much, the sound CPU's lines after the main CPU's), `divergences.txt` (each
+// disagreement with its step, node, effect and the two values; a sound CPU's
+// names its site `apu $XXXX`), `forms.txt` (how many times each instruction
+// form ran under each mode, and each sound-CPU form as `apu MOV A,dp`),
+// `constructs.txt` (how many times each named construct was exercised, zero
+// where the run never reached one), `unlifted.txt` (the addresses the run
+// executed that the tree has no instruction for, as the tree places them, the
+// sound CPU's as `apu $XXXX`), and `patched.txt` (the audio addresses where
+// the bytes the sound CPU fetched are not the sound file's node's). One line
+// on standard output sums it up.
 //
 // The exit status is 0 when the run diverged nowhere, 1 when it did, 2 on a bad
 // argument, an unreadable input, or a program file the reader refuses, which is
@@ -188,8 +193,28 @@ int main(int argc, char** argv) {
               << " bytes; " << imagePath << " holds " << rom.size() << "\n";
     return 2;
   }
-  const snaggletooth::ir::Program& program = parsed->program;
+  snaggletooth::ir::Program program = parsed->program;
   const snaggletooth::ir::ProgramCounts counts = snaggletooth::ir::countProgram(*parsed);
+
+  // The sound program, where the tree has one: its nodes join the program's,
+  // in the audio unit's own space.
+  snaggletooth::ir::ProgramCounts soundCounts;
+  const std::filesystem::path soundPath = std::filesystem::path(directory) / "apu.snagir";
+  if (std::filesystem::is_regular_file(soundPath)) {
+    const std::string soundText = readText(soundPath.string(), ok);
+    if (!ok) {
+      std::cerr << "cannot open " << soundPath.string() << "\n";
+      return 2;
+    }
+    const std::optional<snaggletooth::ir::Parsed> parsedSound =
+        snaggletooth::ir::parseProgram(soundText, error);
+    if (!parsedSound) {
+      std::cerr << soundPath.string() << ": " << error << "\n";
+      return 2;
+    }
+    program.spc700 = parsedSound->program.spc700;
+    soundCounts = snaggletooth::ir::countProgram(*parsedSound);
+  }
 
   snaggletooth::disasm::InputScript input;
   if (!inputPath.empty()) {
@@ -237,11 +262,27 @@ int main(int argc, char** argv) {
       << "\ninstructions with no node " << report.unlifted << " at "
       << report.unliftedSites.size() << " addresses"
       << "\nstopped " << (report.stopped ? "yes" : "no")
-      << "\ndivergences " << report.divergences.size() << "\n";
+      << "\ndivergences " << report.divergences.size()
+      << "\nsound code lines " << soundCounts.codeLines << "\nsound nodes " << soundCounts.nodes
+      << "\nsound instructions checked " << report.spc700Instructions
+      << "\nsound CPU cycles checked " << report.spc700Cycles
+      << "\nsound instructions with no node " << report.spc700Unlifted << " at "
+      << report.spc700UnliftedSites.size() << " addresses"
+      << "\nsound instructions with other bytes than the file's " << report.spc700Patched << " at "
+      << report.spc700PatchedSites.size() << " addresses\n";
   }
+  std::size_t soundDivergences = 0;
   {
     std::ofstream f(out / "divergences.txt");
     for (const snaggletooth::ir::Divergence& dv : report.divergences) {
+      if (dv.processor == snaggletooth::ir::Processor::Spc700) {
+        ++soundDivergences;
+        f << "step " << dv.instruction << "  apu " << hex(dv.site, 4) << "  " << dv.name
+          << (dv.effect ? "  effect " + std::to_string(*dv.effect) : std::string()) << "  "
+          << dv.what << ": machine " << hex(dv.expected, 1) << " interpreter "
+          << hex(dv.actual, 1) << "\n";
+        continue;
+      }
       f << "step " << dv.instruction << "  " << hex(dv.site, 6) << "  " << dv.name
         << (dv.mode.emulation ? "  e=1" : "  e=0")
         << (dv.effect ? "  effect " + std::to_string(*dv.effect) : std::string()) << "  "
@@ -252,6 +293,7 @@ int main(int argc, char** argv) {
   {
     std::ofstream f(out / "forms.txt");
     for (const auto& [form, count] : report.forms) f << count << "\t" << form << "\n";
+    for (const auto& [form, count] : report.spc700Forms) f << count << "\tapu " << form << "\n";
   }
   {
     std::ofstream f(out / "constructs.txt");
@@ -262,6 +304,11 @@ int main(int argc, char** argv) {
   {
     std::ofstream f(out / "unlifted.txt");
     for (const snaggletooth::ir::Address a : report.unliftedSites) f << hex(a, 6) << "\n";
+    for (const snaggletooth::ir::Address a : report.spc700UnliftedSites) f << "apu " << hex(a, 4) << "\n";
+  }
+  {
+    std::ofstream f(out / "patched.txt");
+    for (const snaggletooth::ir::Address a : report.spc700PatchedSites) f << "apu " << hex(a, 4) << "\n";
   }
 
   std::size_t unexercised = 0;
@@ -273,6 +320,11 @@ int main(int argc, char** argv) {
             << report.forms.size() << " forms, " << unexercised << " of "
             << report.constructs.size() << " constructs unexercised, "
             << (report.stopped ? "stopped" : "ran out the budget") << ", "
-            << report.divergences.size() << " divergences\n";
+            << report.divergences.size() << " divergences; sound: "
+            << report.spc700Instructions << " instructions, " << report.spc700Cycles
+            << " cycles, " << report.spc700Unlifted << " unlifted at "
+            << report.spc700UnliftedSites.size() << " addresses, " << report.spc700Patched
+            << " with other bytes at " << report.spc700PatchedSites.size() << " addresses, "
+            << report.spc700Forms.size() << " forms, " << soundDivergences << " divergences\n";
   return report.divergences.empty() ? 0 : 1;
 }

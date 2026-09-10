@@ -7,12 +7,16 @@
 // directives land where the listing put them.
 // The rest pin what the bank file adds — the names in place of addresses, the
 // prologue that defines them, the routine headers — and that every example tree
-// still assembles back to its image.
+// still assembles back to its image. The last cases hold the sound program's
+// renderer to the SPC700 listing the same way, over every opcode, and pin the
+// sound file's shape: the header that says what was sent, a region per run of
+// uploaded addresses, and the gap comment between two.
 
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -23,8 +27,11 @@
 #include "ir/cpu65816_lift.h"
 #include "ir/ir.h"
 #include "ir/ir_render.h"
+#include "ir/spc700_lift.h"
 #include "rom/rom_disasm.h"
+#include "rom/rom_render.h"
 #include "rom/rom_verify.h"
+#include "spc700_disasm.h"
 
 namespace snaggletooth::ir {
 namespace {
@@ -114,7 +121,7 @@ disasm::VerifyReport verifyInMemory(const CartridgeDisassembly& d, std::span<con
   for (const RegionListing& region : d.regions) {
     files[region.region.file] = disasm::renderRegion(region, d);
   }
-  if (d.sound) files[d.sound->file] = disasm::renderSoundProgram(*d.sound);
+  if (d.sound) files[d.sound->file] = disasm::renderSoundFile(d);
   // The files the code's word lifts without a run, which the bank files include.
   for (const disasm::AssetFile& asset : d.assets) {
     files[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
@@ -375,6 +382,141 @@ TEST(Render, EveryExampleTreeAssemblesBackToItsImage) {
     EXPECT_TRUE(report.identical()) << example.name << "\n" << disasm::renderReport(report);
     EXPECT_EQ(report.image, rom) << example.name;
   }
+}
+
+// ---- the sound program --------------------------------------------------------------
+
+// One SPC700 instruction placed at `address`: the listing's own decoding, and
+// the node lifted from it.
+struct SoundLine {
+  disasm::Instruction instruction;
+  Node node;
+};
+
+SoundLine soundLineOf(std::vector<std::uint8_t> bytes, Address address, bool patched = false) {
+  const std::optional<disasm::Instruction> decoded = disasm::decodeAt(
+      bytes, static_cast<std::uint16_t>(address), static_cast<std::uint16_t>(address));
+  EXPECT_TRUE(decoded.has_value());
+  return SoundLine{.instruction = *decoded, .node = liftSpc700Instruction(*decoded, patched)};
+}
+
+TEST(SoundRender, EveryOpcodeRendersTheListingsOwnTextBytesAndCost) {
+  for (unsigned opcode = 0; opcode < 256; ++opcode) {
+    const SoundLine line = soundLineOf({static_cast<std::uint8_t>(opcode), 0x12u, 0xF4u}, 0x0300u);
+    const disasm::Instruction& listing = line.instruction;
+    EXPECT_EQ(opcodeOfSpc700(line.node.instruction), opcode);
+    EXPECT_EQ(encodeSpc700(line.node.instruction), listing.bytes) << listing.text;
+    EXPECT_EQ(renderSpc700Instruction(line.node.instruction), listing.text) << opcode;
+    EXPECT_EQ(renderSpc700Cost(line.node), listingCost(listing.cycles)) << listing.text;
+  }
+}
+
+TEST(SoundRender, ATargetWithALabelIsWrittenAsTheLabelWhereTheListingWritesOne) {
+  std::size_t symbolic = 0;
+  for (unsigned opcode = 0; opcode < 256; ++opcode) {
+    const SoundLine line = soundLineOf({static_cast<std::uint8_t>(opcode), 0x12u, 0xF4u}, 0x0300u);
+    const std::string rendered = renderSpc700Instruction(line.node.instruction, "loc_0316");
+    if (line.instruction.symbolic) {
+      EXPECT_EQ(rendered, line.instruction.symbolic->before + "loc_0316" + line.instruction.symbolic->after)
+          << line.instruction.text;
+      ++symbolic;
+    } else {
+      EXPECT_EQ(rendered, line.instruction.text) << line.instruction.text;
+    }
+  }
+  // The eight relative branches, the sixteen bit branches, CBNE and DBNZ in
+  // both forms, BRA, CALL and JMP !abs.
+  EXPECT_EQ(symbolic, 8u + 16u + 4u + 1u + 2u);
+  EXPECT_EQ(renderSpc700Instruction(soundLineOf({0x4Fu, 0x12u}, 0x0300u).node.instruction, "loc_FF12"), "PCALL $12");
+}
+
+TEST(SoundRender, ASoundLineCarriesTheAddressTheBytesTheCostAndTheNote) {
+  EXPECT_EQ(renderSpc700Line(soundLineOf({0xC4u, 0xF1u}, 0x0300u).node, {}, 9),
+            "        MOV $F1,A                       ; $0300  C4 F1     4  CONTROL\n");
+  EXPECT_EQ(renderSpc700Line(soundLineOf({0x4Fu, 0x12u}, 0x0302u).node, {}, 9),
+            "        PCALL $12                       ; $0302  4F 12     6  $FF12\n");
+  EXPECT_EQ(renderSpc700Line(soundLineOf({0xE3u, 0x88u, 0x1Au}, 0x02C2u).node, "loc_02DF", 9),
+            "        BBS $88.7,loc_02DF              ; $02C2  E3 88 1A  5/7\n");
+  EXPECT_EQ(renderSpc700Line(soundLineOf({0xE3u, 0x88u, 0x1Au}, 0x02C2u).node, {}, 9),
+            "        BBS $88.7,$02DF                 ; $02C2  E3 88 1A  5/7\n");
+  EXPECT_EQ(renderSpc700Line(soundLineOf({0x00u}, 0x0500u, true).node, {}, 9),
+            "        NOP                             ; $0500  00        2  PATCHED at run time\n");
+  EXPECT_EQ(renderSpc700Line(soundLineOf({0x8Fu, 0x30u, 0xF1u}, 0x0500u, true).node, {}, 9),
+            "        MOV $F1,#$30                    ; $0500  8F 30 F1  5  CONTROL; PATCHED at run time\n");
+}
+
+TEST(SoundRender, TheSoundFileIsTheHeaderThenARegionPerRunWithTheGapBetween) {
+  disasm::RenderInput input;
+  disasm::RenderSound sound;
+  sound.file = "apu/driver.asm";
+  sound.entry = 0x0200u;
+  sound.blocks = {{.apuAddress = 0x0200u, .bytes = 4, .romOffset = 0xA0u},
+                  {.apuAddress = 0x0300u, .bytes = 5, .romOffset = std::nullopt}};
+  sound.regions.push_back({.file = "apu/driver.asm",
+                           .first = 0x0200u,
+                           .last = 0x0203u,
+                           .warnings = {"$0203 overlaps an instruction already decoded"},
+                           .labels = {{0x0200u, "entry"}},
+                           .data = {}});
+  sound.regions.push_back({.file = "apu/driver.asm",
+                           .first = 0x0300u,
+                           .last = 0x0304u,
+                           .warnings = {},
+                           .labels = {{0x0300u, "loc_0300"}},
+                           .data = {{0x0303u, {0x41u, 0x00u}}}});
+  input.sound = sound;
+  Program program;
+  program.spc700 = {
+      soundLineOf({0x5Fu, 0x00u, 0x03u}, 0x0200u).node,  // JMP !$0300
+      soundLineOf({0x00u}, 0x0203u).node,
+      soundLineOf({0xE8u, 0x01u}, 0x0300u).node,
+      soundLineOf({0x6Fu}, 0x0302u).node,
+  };
+  EXPECT_EQ(disasm::renderSoundFile(input, program),
+            "; The sound program the cartridge uploads at boot, traced from $0200.\n"
+            "; $0200: 4 bytes, read from image offset $0000A0\n"
+            "; $0300: 5 bytes, not read from the image as they are\n"
+            "\n"
+            "; warning: $0203 overlaps an instruction already decoded\n"
+            "\n"
+            "        ORG $0200\n"
+            "\n"
+            "entry:\n"
+            "        JMP !loc_0300                   ; $0200  5F 00 03  3\n"
+            "        NOP                             ; $0203  00        2\n"
+            "\n"
+            "; ---- $0204-$02FF: not uploaded\n"
+            "        ORG $0300\n"
+            "\n"
+            "loc_0300:\n"
+            "        MOV A,#$01                      ; $0300  E8 01     2\n"
+            "        RET                             ; $0302  6F        5\n"
+            "\n"
+            "; ---- 2 bytes execution did not reach\n"
+            "        DB $41,$00                      ; $0303  |A.|\n");
+  // Without a sound program there is nothing to render.
+  input.sound.reset();
+  EXPECT_THROW(static_cast<void>(disasm::renderSoundFile(input, program)), std::logic_error);
+}
+
+TEST(SoundRender, EverySoundExampleLineRendersTheListingsOwnLine) {
+  std::size_t lines = 0;
+  for (const examples::Example& example : examples::examples()) {
+    if (example.name != "uploading" && example.name != "straddling_upload") continue;
+    const std::vector<std::uint8_t> rom = example.build();
+    const CartridgeDisassembly d = disassemble(rom, true);
+    ASSERT_TRUE(d.sound.has_value()) << example.name;
+    for (const Line& line : d.sound->listing.lines) {
+      if (!line.isCode) continue;
+      const Node* node = d.program.findSpc700(line.address);
+      ASSERT_NE(node, nullptr) << example.name;
+      EXPECT_EQ(encodeSpc700(node->instruction), line.instruction.bytes) << example.name;
+      EXPECT_EQ(renderSpc700Instruction(node->instruction), line.instruction.text) << example.name;
+      EXPECT_EQ(renderSpc700Cost(*node), listingCost(line.instruction.cycles)) << example.name;
+      ++lines;
+    }
+  }
+  EXPECT_GT(lines, 30u);
 }
 
 }  // namespace

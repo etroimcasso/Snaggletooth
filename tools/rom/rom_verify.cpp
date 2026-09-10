@@ -204,16 +204,16 @@ VerifyReport verifyTree(const std::filesystem::path& directory, std::span<const 
     if (!in) return std::nullopt;
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   };
-  const std::optional<std::string> text = read("project.manifest");
+  const std::optional<std::string> text = read("project.snagifest");
   VerifyReport report;
   if (!text) {
-    report.error = "cannot read " + (directory / "project.manifest").string();
+    report.error = "cannot read " + (directory / "project.snagifest").string();
     return report;
   }
   std::string error;
   const std::optional<ManifestInput> manifest = parseManifest(*text, error);
   if (!manifest) {
-    report.error = (directory / "project.manifest").string() + ": " + error;
+    report.error = (directory / "project.snagifest").string() + ": " + error;
     return report;
   }
   return verifyProject(*manifest, rom, read);

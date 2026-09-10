@@ -22,17 +22,20 @@ disassembly of a whole cartridge starts.
 snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
-Writes `program.snagir`, the whole program in the intermediate representation
-([docs/snagir.md](../../docs/snagir.md)), first; then `project.manifest`, which
-names the files, where the trace began, and where it stopped; the bytes the run
-saw the cartridge send from the image to the hardware — and the ones the code
+Writes `program.snagir`, the main CPU's whole program in the intermediate
+representation ([docs/snagir.md](../../docs/snagir.md)), first; then
+`apu.snagir`, the sound program the cartridge uploads at boot in the same
+representation, where one was captured; `project.snagifest`, which names the
+files, where the trace began, and where it stopped; and the bytes the run saw
+the cartridge send from the image to the hardware — and the ones the code
 proves a channel was set up to send — as files of their own under `vram/`,
 `cgram/`, `oam/`, `apu/` and `hdma/` — a VRAM file under `maps/` or `tiles/`
-where the run saw the picture use every landing of it as one or the other — and
-the sound program the cartridge uploads at boot as `apu/driver.asm`. It writes
-no bank file: `snes_render` writes those from the program file. The trace starts at the vectors and follows control
-flow across banks; the sound program is captured by booting the cartridge on the
-machine and matched back to the image bytes it was read from. A manifest already in
+where the run saw the picture use every landing of it as one or the other. It
+writes no bank file and no sound file: `snes_render` writes those from the
+program files. The trace starts at the vectors and follows control flow across
+banks; the sound program is captured by booting the cartridge on the machine,
+matched back to the image bytes it was read from, and lifted from its listing
+as the banks are. A manifest already in
 the directory supplies entries a person added and the file split, which is how the
 trace is carried past a jump table. A bank file's instructions are written from
 the [intermediate representation](../ir/README.md) the listing lifts to, with
@@ -62,8 +65,9 @@ It also runs the cartridge: `rom/rom_observe.h`'s `observeRun` boots the machine
 and steps it, recording the destination of every indirect jump or call the run
 took, and the trace starts from each — see the
 [Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)
-section — lifting every instruction the CPU executes from the bytes it fetched
-and holding it to the machine through the representation's lockstep, so that
+section — lifting every instruction the CPU executes from the bytes it fetched,
+and every instruction the sound CPU executes from the bytes at its program
+counter, and holding each to the machine through the representation's lockstep, so that
 every place the CPU arrived without an instruction naming it is a `ran` line
 the trace starts from too, and the direct register and the data bank the run
 saw at every site are `seen` lines beside what the paths prove — see
@@ -117,8 +121,9 @@ table is traced past without running the cartridge.
 
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count,
-`renderProgramFile` and `renderManifest` for the two files, and `writeProject`
-for everything it writes, the lifted files (`AssetFile`) included. Full page:
+`renderProgramFile`, `renderSoundProgramFile` and `renderManifest` for the
+three files, and `writeProject` for everything it writes, the lifted files
+(`AssetFile`) included. Full page:
 [docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
 grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 
@@ -128,26 +133,31 @@ grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 snes_render <directory>
 ```
 
-Reads the directory's `program.snagir` and `project.manifest` and writes one
+Reads the directory's `program.snagir` and `project.snagifest` and writes one
 source file per region the program file names: the instructions from their
 nodes, the data runs and the labels from the file's records, and the register
 names, the routine comments and the `INCBIN` lines from the manifest's `access`,
-`seen`, `routine`, `asset`, `moved`, `dma`, `sound` and `block` lines. It reads
-no image and runs nothing. Standard output names how many files were written;
-the exit status is 0 when every file was, 1 when the tree does not read.
+`seen`, `routine`, `asset`, `moved`, `dma`, `sound` and `block` lines. Where
+the manifest names a sound program it reads `apu.snagir` as well and writes
+the sound program's file from it — `apu/driver.asm`, the header from the
+`sound` and `block` lines, a region per run of uploaded addresses under its
+own `ORG`. It reads no image and runs nothing. Standard output names how many
+files were written; the exit status is 0 when every file was, 1 when the tree
+does not read.
 
 ```
 snes_render game
-32 files rendered from game/program.snagir
+33 files rendered from game
 ```
 
-The library behind it is `rom/rom_render.h`: `readRenderInput` for the two
-files, `renderRegion` for one file from that input and the program, and
-`renderTree` for the whole directory. It links the representation, the 65816
-backend, the listing types and the cartridge map, and nothing that can trace,
-run or lift a cartridge — so a bank file it writes can only have come from the
-program file — and `rom/rom_manifest.cpp` beside it reads the manifest for it
-and for the disassembler.
+The library behind it is `rom/rom_render.h`: `readRenderInput` for the files,
+`renderRegion` for one bank file from that input and the program,
+`renderSoundFile` for the sound program's, and `renderTree` for the whole
+directory. It links the representation, the two chip backends, the listing
+types and the cartridge map, and nothing that can trace, run or lift a
+cartridge — so a source file it writes can only have come from a program file
+— and `rom/rom_manifest.cpp` beside it reads the manifest for it and for the
+disassembler.
 
 ## `snes_verify`
 
@@ -155,7 +165,7 @@ and for the disassembler.
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-Reads the directory's `project.manifest`, assembles every file it names — the
+Reads the directory's `project.snagifest`, assembles every file it names — the
 bank files with the 65816 dialect, the sound program with the SPC700 dialect —
 places each range and each placed block where the manifest says, and compares the
 whole with the image. One line per file, one per run that differs with its first
