@@ -46,7 +46,7 @@ import time
 
 
 def manifestLines(tree, kind, length):
-    manifest = tree / "project.manifest"
+    manifest = tree / "project.snagifest"
     if not manifest.exists():
         return []
     out = []
@@ -92,7 +92,7 @@ def staged(tree):
     kinds = collections.Counter()
     spanned = 0
     used = 0
-    manifest = tree / "project.manifest"
+    manifest = tree / "project.snagifest"
     if not manifest.exists():
         return kinds, spanned, used, 0, 0
     stagedLines = 0
@@ -221,7 +221,7 @@ def main():
             failures += 1
 
         summary = f"{'OK ' if ok else 'BAD'} {rom.name}: {elapsed:.0f} s"
-        manifest = tree / "project.manifest"
+        manifest = tree / "project.snagifest"
         if manifest.exists():
             kinds = collections.Counter(line.split()[0] for line in manifest.read_text(errors="replace").splitlines()
                                         if line.strip() and not line.startswith(";"))

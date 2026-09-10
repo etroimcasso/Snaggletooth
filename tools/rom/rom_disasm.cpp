@@ -1823,7 +1823,7 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
   if (disassembly.sound && !writeFile(directory / "apu.snagir", renderSoundProgramFile(disassembly), error)) {
     return false;
   }
-  if (!writeFile(directory / "project.manifest", renderManifest(disassembly), error)) return false;
+  if (!writeFile(directory / "project.snagifest", renderManifest(disassembly), error)) return false;
   for (const AssetFile& asset : disassembly.assets) {
     const std::string_view bytes(reinterpret_cast<const char*>(asset.bytes.data()), asset.bytes.size());
     if (!writeFile(directory / asset.file, bytes, error)) return false;

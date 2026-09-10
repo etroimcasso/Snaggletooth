@@ -129,7 +129,7 @@ without the extension, spaces as underscores, `.txt` — is replayed when it is
 there, and the ports stay empty when it is not. The two forms are not given
 together.
 
-When the directory already holds a `project.manifest`, its `entry`, `reached`,
+When the directory already holds a `project.snagifest`, its `entry`, `reached`,
 `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
 it was written for: a manifest written for another image is refused rather than
 applied. See [Stops, and getting past them](#stops-and-getting-past-them).
@@ -160,7 +160,7 @@ either way, and `corpus.py` passes it.
 
 ## The tree
 
-The disassembler writes `program.snagir`, `apu.snagir`, `project.manifest`
+The disassembler writes `program.snagir`, `apu.snagir`, `project.snagifest`
 and the lifted files; the bank files and `apu/driver.asm` are `snes_render`'s,
 written from the two program files, which `snes_lift` prints back and the
 first of which `snes_differential` replays the run beside
@@ -170,7 +170,7 @@ first of which `snes_differential` replays the run beside
 cartridge/
   program.snagir
   apu.snagir
-  project.manifest
+  project.snagifest
   bank_00.asm
   bank_01.asm
   …
@@ -304,7 +304,7 @@ through it; the comment says what the run saw the bytes were for, and the file
 they are in. [The assets](#the-assets) says which ranges are lifted and which are
 not.
 
-**The manifest.** `project.manifest` names the image, every file and the range it
+**The manifest.** `project.snagifest` names the image, every file and the range it
 covers, the sound program and each of its blocks with the image offset it was read
 from, every entry the trace started from with its mode, every stop, and every
 warning the listings raised. Its grammar is [project-manifest.md](project-manifest.md).
@@ -1037,7 +1037,7 @@ to them is what `snes_verify` answers.
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-Reads the directory's `project.manifest`, assembles every bank file with the
+Reads the directory's `project.snagifest`, assembles every bank file with the
 65816 dialect and the sound file with the SPC700 dialect, places each range a
 file emits at the image offset its address reads from under the manifest's map
 and each placed block at the offset the manifest recorded, and compares the
@@ -1360,7 +1360,7 @@ whether that manifest can direct a run over a given image.
 
 The bank files and the sound file are `rom/rom_render.h`'s, a library that
 links nothing able to trace, run or lift: `readRenderInput(directory, program,
-error)` builds a `RenderInput` from `program.snagir`, `project.manifest` and,
+error)` builds a `RenderInput` from `program.snagir`, `project.snagifest` and,
 where the manifest names a sound program, `apu.snagir` — each region's
 listing from the file's nodes, labels and data runs; the register an operand
 reaches from the `access` lines; the direct registers a run saw from `seen`;

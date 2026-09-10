@@ -6,7 +6,7 @@
 //                                      [--quiet]
 //
 // It writes `program.snagir`, the whole program in the intermediate
-// representation, first; then `project.manifest`, which says where every file's
+// representation, first; then `project.snagifest`, which says where every file's
 // bytes land in the image, where the trace began, and where it stopped; the
 // files lifted out of the banks; and the sound program the cartridge uploads
 // at boot as a file of its own. It writes no bank file: `snes_render` writes
@@ -72,7 +72,7 @@ constexpr std::uint64_t kMasterPerSecond = 21'477'272ull;
   std::cerr << "usage: " << prog
             << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]"
                " [--input <script> | --input-dir <directory>] [--quiet]\n"
-               "  the directory's project.manifest, when present, supplies entries and the file split\n"
+               "  the directory's project.snagifest, when present, supplies entries and the file split\n"
                "  --input replays a recorded run into the controller ports while the cartridge runs;\n"
                "  --input-dir replays the run named for the image under that directory, if there is one\n"
                "  --quiet keeps the progress off standard error\n";
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
   if (!quiet) request.progress = std::ref(printer);
 
   const std::filesystem::path directory(outDir);
-  const std::filesystem::path manifestPath = directory / "project.manifest";
+  const std::filesystem::path manifestPath = directory / "project.snagifest";
   std::string manifestText;
   if (readFile(manifestPath, manifestText)) {
     std::string error;

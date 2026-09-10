@@ -25,7 +25,7 @@ snes_disasm <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [-
 Writes `program.snagir`, the main CPU's whole program in the intermediate
 representation ([docs/snagir.md](../../docs/snagir.md)), first; then
 `apu.snagir`, the sound program the cartridge uploads at boot in the same
-representation, where one was captured; `project.manifest`, which names the
+representation, where one was captured; `project.snagifest`, which names the
 files, where the trace began, and where it stopped; and the bytes the run saw
 the cartridge send from the image to the hardware — and the ones the code
 proves a channel was set up to send — as files of their own under `vram/`,
@@ -132,7 +132,7 @@ grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 snes_render <directory>
 ```
 
-Reads the directory's `program.snagir` and `project.manifest` and writes one
+Reads the directory's `program.snagir` and `project.snagifest` and writes one
 source file per region the program file names: the instructions from their
 nodes, the data runs and the labels from the file's records, and the register
 names, the routine comments and the `INCBIN` lines from the manifest's `access`,
@@ -164,7 +164,7 @@ disassembler.
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-Reads the directory's `project.manifest`, assembles every file it names — the
+Reads the directory's `project.snagifest`, assembles every file it names — the
 bank files with the 65816 dialect, the sound program with the SPC700 dialect —
 places each range and each placed block where the manifest says, and compares the
 whole with the image. One line per file, one per run that differs with its first

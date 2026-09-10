@@ -1,9 +1,9 @@
 # Project manifest
 
-`project.manifest` is the file at the root of a source tree the
-[cartridge disassembler](snes-disassembler.md) writes. It says which image the
-tree is of, which files make it up and which bytes of the image each produces,
-where the trace began and where it stopped. Seven of its line kinds are read
+`project.snagifest` is the manifest at the root of a source tree the
+[cartridge disassembler](snes-disassembler.md) writes: the one file that says
+which image the tree is of, which files make it up and which bytes of the image
+each produces, where the trace began and where it stopped. Seven of its line kinds are read
 back on the next run — which is how a person directs the trace, how a run's
 findings outlive it, and how a name a person gives a file survives.
 

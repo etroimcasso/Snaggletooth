@@ -709,18 +709,18 @@ std::optional<RenderInput> readRenderInput(const std::filesystem::path& director
     error = "program.snagir: " + why;
     return std::nullopt;
   }
-  const std::optional<std::string> manifestText = readText(directory / "project.manifest");
+  const std::optional<std::string> manifestText = readText(directory / "project.snagifest");
   if (!manifestText) {
-    error = "cannot open " + (directory / "project.manifest").string();
+    error = "cannot open " + (directory / "project.snagifest").string();
     return std::nullopt;
   }
   const std::optional<ManifestInput> manifest = parseManifest(*manifestText, why);
   if (!manifest) {
-    error = "project.manifest: " + why;
+    error = "project.snagifest: " + why;
     return std::nullopt;
   }
   if (!manifest->map || !manifest->imageBytes) {
-    error = "project.manifest: the map and the image size are needed to render";
+    error = "project.snagifest: the map and the image size are needed to render";
     return std::nullopt;
   }
 

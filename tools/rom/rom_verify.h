@@ -74,7 +74,7 @@ using SourceReader = std::function<std::optional<std::string>(const std::string&
                                          std::span<const std::uint8_t> rom,
                                          const SourceReader& read);
 
-// Reads `project.manifest` under `directory` and verifies the tree it describes,
+// Reads `project.snagifest` under `directory` and verifies the tree it describes,
 // with every file read from the same directory.
 [[nodiscard]] VerifyReport verifyTree(const std::filesystem::path& directory,
                                       std::span<const std::uint8_t> rom);

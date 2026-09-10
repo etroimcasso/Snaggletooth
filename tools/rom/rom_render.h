@@ -6,7 +6,7 @@
 // This is the back end of the cartridge toolkit. Its input is what the
 // disassembler left on disk — `program.snagir`, the main CPU's whole program in
 // the intermediate representation, `apu.snagir`, the sound program's, and
-// `project.manifest`, the facts the run and the analysis found — and its output
+// `project.snagifest`, the facts the run and the analysis found — and its output
 // is one 65816 source file per region and one SPC700 source file for the sound
 // program. It never holds the image, the listings the trace produced or the
 // program the disassembler lifted: `readRenderInput` builds everything it needs
@@ -161,7 +161,7 @@ struct RenderInput {
 [[nodiscard]] std::string renderSoundFile(const RenderInput& input, const ir::Program& program);
 
 // The renderer's input read from a tree on disk: `program.snagir` for the main
-// CPU's program, the regions, the labels and the data runs; `project.manifest`
+// CPU's program, the regions, the labels and the data runs; `project.snagifest`
 // for the map, the image size, the facts, the lifted files and the sound
 // program's entry and blocks; and, where the manifest names a sound program,
 // `apu.snagir` for its nodes and regions. Nothing, with `error` naming the

@@ -392,7 +392,7 @@ struct ManifestInput {
 
 // Writes what the disassembly found under `directory`, creating it and its
 // directories: `program.snagir` first, then `apu.snagir` where a sound program
-// was captured, `project.manifest`, and every lifted file. No bank file and no
+// was captured, `project.snagifest`, and every lifted file. No bank file and no
 // sound file is written here; `snes_render` writes those from the program files
 // and the manifest. False, with `error` set, when a file cannot be written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,

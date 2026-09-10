@@ -776,7 +776,7 @@ TEST(RomDisasm, TheProjectIsWrittenAsTheTwoProgramFilesAndTheManifest) {
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "apu.snagir"));
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "project.manifest"));
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "project.snagifest"));
   // The disassembler writes no bank file and no sound file: those are the
   // renderer's, from the program files.
   EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
@@ -1005,10 +1005,10 @@ TEST(RomProgramFile, TheProgramFileIsWrittenBeforeAnyOtherFile) {
   const std::filesystem::path dir = freshDirectory("snaggletooth-program-file-first-test");
   // The manifest's path is taken by a directory, so its write fails: what is on
   // disk then is what was written before it.
-  std::filesystem::create_directories(dir / "project.manifest");
+  std::filesystem::create_directories(dir / "project.snagifest");
   std::string error;
   EXPECT_FALSE(writeProject(d, dir, error));
-  EXPECT_NE(error.find("project.manifest"), std::string::npos) << error;
+  EXPECT_NE(error.find("project.snagifest"), std::string::npos) << error;
   EXPECT_TRUE(std::filesystem::is_regular_file(dir / "program.snagir"));
   EXPECT_FALSE(std::filesystem::exists(dir / "bank_00.asm"));
   std::error_code ec;
@@ -1045,9 +1045,9 @@ TEST(RomProgramFile, TheRendererRefusesATreeWithoutItsFilesOrWithOneThatDoesNotR
     std::ofstream out(dir / "program.snagir", std::ios::binary);
     out << renderProgramFile(d);
   }
-  std::filesystem::remove(dir / "project.manifest", ec);
+  std::filesystem::remove(dir / "project.snagifest", ec);
   EXPECT_FALSE(renderTree(dir, rendered, error));
-  EXPECT_NE(error.find("project.manifest"), std::string::npos) << error;
+  EXPECT_NE(error.find("project.snagifest"), std::string::npos) << error;
   std::filesystem::remove_all(dir, ec);
 }
 

@@ -2,7 +2,7 @@
 //
 //   snes_render <directory>
 //
-// Reads the directory's `program.snagir` and `project.manifest` and writes one
+// Reads the directory's `program.snagir` and `project.snagifest` and writes one
 // 65816 source file per region the program file names, rendered from the
 // program in the file: the instructions from their nodes, the data runs and the
 // labels from the file's records, and the names, the routine comments and the
@@ -28,7 +28,7 @@ namespace {
 [[noreturn]] void usage(const char* prog) {
   std::cerr << "usage: " << prog << " <directory>\n"
                "  writes the bank files and the sound file from the directory's program.snagir,\n"
-               "  apu.snagir and project.manifest\n";
+               "  apu.snagir and project.snagifest\n";
   std::exit(2);
 }
 
