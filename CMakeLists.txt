@@ -124,6 +124,43 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_assembler PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # lodepng, vendored under third_party/lodepng, is the PNG encoder and decoder the
+  # tile codec reads and writes through. It is built as its own static library with
+  # a SYSTEM include so its warnings are not the toolkit's, and it is linked
+  # privately into the codec library so no lodepng symbol reaches a toolkit header.
+  add_library(snaggletooth_lodepng STATIC third_party/lodepng/lodepng.cpp)
+  target_include_directories(snaggletooth_lodepng SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/lodepng>
+  )
+  target_compile_features(snaggletooth_lodepng PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_lodepng PROPERTIES CXX_EXTENSIONS OFF)
+
+  # The asset codecs — the tile sheet, the palette, the tilemap, the OAM and HDMA
+  # tables, and the reader that turns an included asset back into the SNES bytes it
+  # was made from. Its own library over the standard library and lodepng, so a tool
+  # that writes a tree and a tool that assembles one share one set of codecs.
+  add_library(snaggletooth_formats STATIC
+    tools/formats/png.cpp
+    tools/formats/tiles.cpp
+    tools/formats/text.cpp
+    tools/formats/palette.cpp
+    tools/formats/tilemap.cpp
+    tools/formats/oam.cpp
+    tools/formats/hdma.cpp
+    tools/formats/reader.cpp
+  )
+  target_link_libraries(snaggletooth_formats PRIVATE snaggletooth_lodepng)
+  target_include_directories(snaggletooth_formats PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_formats PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_formats PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_formats PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_formats PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
   # tooling above because that reads a file format and this reads the instruction
   # set; the test tree already draws the same line between tests/spc and
@@ -515,6 +552,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc/loader_test.cpp
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp
+    tests/formats/png_test.cpp
+    tests/formats/tiles_test.cpp
+    tests/formats/palette_test.cpp
+    tests/formats/tilemap_test.cpp
+    tests/formats/oam_test.cpp
+    tests/formats/hdma_test.cpp
+    tests/formats/reader_test.cpp
   )
   # snaggletooth_spc links snaggletooth::snaggletooth publicly, and the
   # differential links the representation and the cartridge tools publicly, which
@@ -523,6 +567,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
     snaggletooth_ir_differential
+    snaggletooth_formats
+    snaggletooth_lodepng
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE

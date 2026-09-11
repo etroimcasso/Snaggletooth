@@ -38,6 +38,7 @@ what is unstarted.
 | See what hardware a cartridge's code drives, which routine drives what, and what each transfer the code sets up carries — its source, step and count — with a transfer the run never took lifted from the code's word | [snes-disassembler.md §What the code reaches](snes-disassembler.md#what-the-code-reaches), [snes-disassembler.md §The assets](snes-disassembler.md#the-assets) |
 | See what the direct register, the data bank and the stack pointer are at a label, and what a store writes | [snes-disassembler.md §What every path proves](snes-disassembler.md#what-every-path-proves), [project-manifest.md §2.9](project-manifest.md#29-what-every-path-proves) |
 | Assemble source back into bytes | [assemblers.md](assemblers.md) |
+| Edit a tile sheet, palette, tilemap, OAM or HDMA table as a file, and include it back | [asset-formats.md](asset-formats.md) |
 | Lift a cartridge's code into a form with no bytes in it, and run that form | [ir.md](ir.md) |
 | Read a tree's program files — the main CPU's or the sound program's — whole or one source file's regions at a time | [ir.md §Reading a program](ir.md#reading-a-program), [snagir.md](snagir.md) |
 | Write SNES assembly back from the lifted form, with registers, labels and routines named | [ir.md §Rendering source](ir.md#rendering-source), [snes-disassembler.md §The tree](snes-disassembler.md#the-tree) |
@@ -78,6 +79,7 @@ what is unstarted.
 | [ir.md](ir.md) | The intermediate representation — a 65816 program and an SPC700 program as their meaning: the instruction layer and the effect layer, the vocabulary, every wrap and flag rule the effects follow on each chip, the measured cost, the lift from a listing, the two interpreters, the program files written and read back, SNES assembly rendered back from the instruction layer for both chips, the shadow that follows where every value came from, the run replayed beside the machine with every access, register and cycle checked and the lockstep the cartridge disassembler's own run shares, the dataflow that says what every path proves, and how all of it is held to the core |
 | [assemblers.md](assemblers.md) | The two assemblers — the command lines, what is written, the diagnostics, how the 65816's widths are followed, the library and how an included file is read, and writing a dialect |
 | [assembly-lexicon.md](assembly-lexicon.md) | The assembly language's common layer — source format, numbers, symbols, directives, round-trip, diagnostics and stability |
+| [asset-formats.md](asset-formats.md) | The asset file formats — tiles as an indexed PNG, and palettes, tilemaps, OAM and HDMA tables as text, each exact both ways, and the reader that includes them back into an assembly |
 | [spc700-assembly.md](spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |
 | [65816-assembly.md](65816-assembly.md) | The 65816 dialect — its addressing modes, the width and mode directives, regions, and the long, jump, block-move and stack forms |
 
