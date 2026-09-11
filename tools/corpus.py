@@ -27,15 +27,17 @@ and the aggregates come out in name order whatever finished first.
 `--facts` and `--routines` add the corpus-wide aggregates the manifests carry:
 every hardware access by class and by register, every transfer the code set up
 by destination, every range a run saw move by destination class and by kind,
-every file lifted by its directory with the bytes it holds, every staged
-extent by what the shadow found of its source — exact, approximate, computed,
-from a register, unwritten — every landing by what the PPU used the memory as,
-and every routine with what it calls and reaches.
+every file lifted by its directory and by the form its path names with the
+bytes it holds, every staged extent by what the shadow found of its source —
+exact, approximate, computed, from a register, unwritten — every landing by
+what the PPU used the memory as and by its depth, every walk by its unit and
+form, every preview by its form, and every routine with what it calls and
+reaches.
 
 Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
-`moved`, `landed`, `asset`, `origin`, `staged`, `streamed`, `state` and `seen` lines, so
-a corpus run says how far the trace, the run, the analysis and the shadow
-reached.
+`moved`, `landed`, `walked`, `asset`, `preview`, `origin`, `staged`,
+`streamed`, `state` and `seen` lines, so a corpus run says how far the trace,
+the run, the analysis and the shadow reached.
 
 An image is OK only when every command exits 0; the script exits 0 only when
 every image is OK. A failure's whole output is printed, never truncated. The
@@ -82,11 +84,15 @@ def facts(tree):
     #       <step> bytes <n> as <kind> times <n>
     moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
     # asset <path> <class> as <kind> from <address> bytes <n>
-    assets = [(w[1].split("/")[0], int(w[8]), w[4]) for w in manifestLines(tree, "asset", 9)]
+    assets = [(w[1].split("/")[0], int(w[8]), w[4], w[1].rsplit(".", 1)[-1]) for w in manifestLines(tree, "asset", 9)]
     # landed <site> channel <n> memory <address> bytes <n> as <kind> at <lowest>-<highest>
-    #        in <area> times <n>
-    landed = [w[13] for w in manifestLines(tree, "landed", 16)]
-    return classes, registers, valued, len(accesses), dmas, moved, assets, landed
+    #        in <area> times <n> depth <2|4|8|none>
+    landed = [(w[13], w[17]) for w in manifestLines(tree, "landed", 18)]
+    # walked <site> channel <n> memory <address> bytes <n> as <kind> unit <n> direct|indirect times <n>
+    walked = [f"unit {w[11]} {w[12]}" for w in manifestLines(tree, "walked", 15)]
+    # preview <path> of <path> [at <address> bytes <n>] as <form>
+    previews = [w[-1] for w in manifestLines(tree, "preview", 6) + manifestLines(tree, "preview", 10)]
+    return classes, registers, valued, len(accesses), dmas, moved, assets, landed, walked, previews
 
 
 def staged(tree):
@@ -223,6 +229,11 @@ def main():
     corpusAssetKindBytes = collections.Counter()
     corpusSources = collections.Counter()
     corpusAreas = collections.Counter()
+    corpusDepths = collections.Counter()
+    corpusForms = collections.Counter()
+    corpusFormBytes = collections.Counter()
+    corpusWalks = collections.Counter()
+    corpusPreviews = collections.Counter()
     corpusReaches = collections.Counter()
     corpusThrough = collections.Counter()
     factTotals = collections.Counter()
@@ -248,13 +259,13 @@ def main():
                                         if line.strip() and not line.startswith(";"))
             summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['ran']} ran, "
                         f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['landed']} landed, "
-                        f"{kinds['asset']} assets, "
+                        f"{kinds['walked']} walked, {kinds['asset']} assets, {kinds['preview']} previews, "
                         f"{kinds['origin']} origin, {kinds['staged']} staged, {kinds['streamed']} streamed, "
                         f"{kinds['state']} state lines, {kinds['seen']} seen lines")
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:
-            classes, registers, valued, accesses, dmas, movedLines, assets, landedLines = facts(tree)
+            classes, registers, valued, accesses, dmas, movedLines, assets, landedLines, walkedLines, previewLines = facts(tree)
             corpusClasses.update(classes)
             corpusRegisters.update(registers)
             factTotals["accesses"] += accesses
@@ -279,14 +290,21 @@ def main():
                     imageRanges += 1
             factTotals["movedFromImage"] += imageRanges
             factTotals["assets"] += len(assets)
-            for directory, size, kind in assets:
+            for directory, size, kind, form in assets:
                 corpusAssets[directory] += 1
                 corpusAssetBytes[directory] += size
                 corpusAssetKinds[kind] += 1
                 corpusAssetKindBytes[kind] += size
+                corpusForms[form] += 1
+                corpusFormBytes[form] += size
                 factTotals["assetBytes"] += size
             factTotals["landed"] += len(landedLines)
-            corpusAreas.update(landedLines)
+            corpusAreas.update(area for area, _ in landedLines)
+            corpusDepths.update(depth for _, depth in landedLines)
+            factTotals["walked"] += len(walkedLines)
+            corpusWalks.update(walkedLines)
+            factTotals["previews"] += len(previewLines)
+            corpusPreviews.update(previewLines)
             sourceKinds, spanned, used, stagedLines, streamedLines = staged(tree)
             corpusSources.update(sourceKinds)
             factTotals["sourceSpanned"] += spanned
@@ -295,9 +313,11 @@ def main():
             factTotals["streamed"] += streamedLines
             top = ", ".join(f"{k} {v}" for k, v in classes.most_common(5))
             sources = ", ".join(f"{k} {v}" for k, v in sourceKinds.most_common())
+            forms = ", ".join(f"{k} {v}" for k, v in collections.Counter(f for _, _, _, f in assets).most_common())
             summary += (f"; {accesses} accesses ({valued} with a value), {len(dmas)} transfers, "
                         f"{len(movedLines)} moved ({imageRanges} from the image), "
-                        f"{len(assets)} assets ({sum(s for _, s, _ in assets)} bytes); {top}"
+                        f"{len(assets)} assets ({sum(s for _, s, _, _ in assets)} bytes; {forms or 'none'}), "
+                        f"{len(previewLines)} previews; {top}"
                         f"; sources: {sources or 'none'}, {spanned} bytes spanned, {used} used")
         if args.routines:
             found = routines(tree)
@@ -349,9 +369,21 @@ def main():
         print("\nfiles lifted by kind, whole corpus:")
         for k, v in corpusAssetKinds.most_common():
             print(f"  {k:<12} {v} files, {corpusAssetKindBytes[k]} bytes")
+        print("\nfiles lifted by form, whole corpus:")
+        for k, v in corpusForms.most_common():
+            print(f"  {k:<12} {v} files, {corpusFormBytes[k]} bytes")
         print(f"\nlandings by what the memory was used as, whole corpus ({factTotals['landed']} landed lines):")
         for k, v in corpusAreas.most_common():
             print(f"  {k:<32} {v}")
+        print("\nlandings by depth, whole corpus:")
+        for k, v in corpusDepths.most_common():
+            print(f"  {k:<12} {v}")
+        print(f"\nwalks by unit and form, whole corpus ({factTotals['walked']} walked lines):")
+        for k, v in corpusWalks.most_common():
+            print(f"  {k:<16} {v}")
+        print(f"\npreviews by form, whole corpus ({factTotals['previews']} preview lines):")
+        for k, v in corpusPreviews.most_common():
+            print(f"  {k:<12} {v}")
         print(f"\nstaged sources, whole corpus ({factTotals['staged']} staged lines, "
               f"{factTotals['streamed']} streams; {factTotals['sourceSpanned']} bytes spanned, "
               f"{factTotals['sourceUsed']} used):")

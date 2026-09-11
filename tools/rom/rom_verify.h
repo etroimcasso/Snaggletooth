@@ -1,7 +1,8 @@
 #pragma once
 
 // Verification of a source tree against the cartridge image it describes: the
-// manifest read, every file assembled under its chip's dialect, each range a
+// manifest read, every file assembled under its chip's dialect — an included
+// asset in an editable form decoded to its bytes on the way in — each range a
 // bank file emits placed at the image offset its address reads from, each block
 // of the sound program placed at the offset the manifest recorded, and the whole
 // compared with the image byte for byte.

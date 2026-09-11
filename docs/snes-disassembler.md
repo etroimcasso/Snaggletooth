@@ -177,10 +177,12 @@ cartridge/
   …
   bank_0F.asm
   apu/driver.asm
-  vram/00_9000.bin
-  cgram/00_9200.bin
-  oam/00_9300.bin
-  hdma/00_9700.bin
+  tiles/00_9000.png
+  cgram/00_9200.pal
+  oam/00_9300.oam
+  hdma/00_9700.hdma
+  staged/00_A500.bin
+  staged/00_A500-1.png
 ```
 
 **One file per bank.** Each `bank_XX.asm` covers the ROM window of one bank
@@ -289,9 +291,10 @@ block itself is in the sound program's file. A bank file therefore carries an
 and never over emitted bytes, is what makes the file one program.
 
 **The assets as files of their own.** A range the cartridge, run on the machine,
-was seen to send from the image to the hardware is written once, as the bytes
-are, in a file under a directory named for the memory it went to, and the bank
-file includes it where it was — from `bank_00.asm` of the `lifting` cartridge:
+was seen to send from the image to the hardware is written once, in a file
+under a directory named for the memory it went to — as an editable form where
+the run's facts name one, as the bytes otherwise — and the bank file includes
+it where it was, from `bank_00.asm` of the `lifting` cartridge:
 
 ```
 ; ---- $00:9000-$00:904F: 80 bytes a transfer carried to VMDATAL, in vram/00_9000.bin
@@ -300,10 +303,17 @@ file includes it where it was — from `bank_00.asm` of the `lifting` cartridge:
 ; ---- 432 bytes execution did not reach
 ```
 
+```
+; ---- $00:9200-$00:920F: 16 bytes a transfer carried to CGDATA, in cgram/00_9200.pal
+        INCBIN "cgram/00_9200.pal", 0, 16
+```
+
 The `INCBIN` emits the file's bytes at that address, so the bank's range runs on
 through it; the comment says what the run saw the bytes were for, and the file
-they are in. [The assets](#the-assets) says which ranges are lifted and which are
-not.
+they are in. An encoded file is included with its offset and length, since its
+form decodes to whole units and the length is what clips it to the file
+([asset-formats.md](asset-formats.md#including-an-asset)). [The assets](#the-assets)
+says which ranges are lifted, which are not, and which form each file takes.
 
 **The manifest.** `project.snagifest` names the image, every file and the range it
 covers, the sound program and each of its blocks with the image offset it was read
@@ -745,19 +755,19 @@ run — it stays under `vram/`, which is the honest answer. The
 `landing` cartridge's thirteen files:
 
 ```
-asset    tiles/00_9000.bin Vram as dma from $00:9000 bytes 64
-asset    maps/00_9100.bin Vram as dma from $00:9100 bytes 64
+asset    tiles/00_9000.png Vram as dma from $00:9000 bytes 64
+asset    maps/00_9100.map Vram as dma from $00:9100 bytes 64
 asset    vram/00_9200.bin Vram as dma from $00:9200 bytes 64
 asset    vram/00_9300.bin Vram as dma from $00:9300 bytes 32
-asset    tiles/00_9400.bin Vram as dma from $00:9400 bytes 64
-asset    cgram/00_9500.bin Cgram as dma from $00:9500 bytes 32
-asset    maps/00_9700.bin Vram as dma from $00:9700 bytes 64
+asset    tiles/00_9400.png Vram as dma from $00:9400 bytes 64
+asset    cgram/00_9500.pal Cgram as dma from $00:9500 bytes 32
+asset    maps/00_9700.map Vram as dma from $00:9700 bytes 64
 asset    vram/00_9800.bin Vram as dma from $00:9800 bytes 64
 asset    tiles/00_9900.bin Vram as dma from $00:9900 bytes 32
 asset    vram/00_9A00.bin Vram as dma from $00:9A00 bytes 64
 asset    maps/00_9B00.bin Vram as staged from $00:9B00 bytes 32
-asset    maps/00_9D00.bin Vram as dma from $00:9D00 bytes 64
-asset    oam/00_A000.bin Oam as dma from $00:A000 bytes 544
+asset    maps/00_9D00.map Vram as dma from $00:9D00 bytes 64
+asset    oam/00_A000.oam Oam as dma from $00:A000 bytes 544
 ```
 
 The range from `$9200` began in BG3's screen and ended in the name bases,
@@ -770,6 +780,20 @@ which is how its bytes lie. Ranges that share a byte are one file, the union of
 them — a tileset sent whole and then sent piece by piece is one tileset; ranges
 that only touch are two files, since the run cannot say whether a chunked
 upload is one asset or two.
+
+**The form.** The path's extension names what the file is written as
+([asset-formats.md](asset-formats.md#which-form-a-lifted-file-takes)): a tile
+sheet under `tiles/` is a `.png` at the depth its landings were read at — the
+`landed` line's `depth`, the layer's colour depth in the mode for a name base,
+four for the sprite tiles — carrying the palette RAM as it stood at the frame
+that read them; a `maps/` file is a `.map`, a `cgram/` file a `.pal`, an `oam/`
+file an `.oam`; a table under `hdma/` is a `.hdma` under the unit and the mode
+the engine walked it, the `walked` line's. The two sheets above at `$9000` and
+`$9400` are four bits a pixel; the rotated words at `$9900` reach name bases of
+two depths, so that file is bytes, and a `note` says so; the staged source at
+`$9B00` is what a routine read, not what it built, and is bytes with a preview
+of the map it became beside it. Every form is decoded back and compared before
+it is written, and a file shorter than one unit of its form stays bytes.
 
 **What is not, without a word.** A fill from one byte, which is not a range of
 anything; a read from a register back into memory, whose memory is the
@@ -806,10 +830,10 @@ note: the bytes at $00:9C00 were sent to VMDATAL and VMDATAH; not lifted
 
 ```
 asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 80
-asset    cgram/00_9200.bin Cgram as dma from $00:9200 bytes 16
-asset    oam/00_9300.bin Oam as dma from $00:9300 bytes 544
+asset    cgram/00_9200.pal Cgram as dma from $00:9200 bytes 16
+asset    oam/00_9300.oam Oam as dma from $00:9300 bytes 544
 asset    apu/00_9600.bin Apu as dma from $00:9600 bytes 8
-asset    hdma/00_9700.bin Cgram as table from $00:9700 bytes 7
+asset    hdma/00_9700.hdma Cgram as table from $00:9700 bytes 7
 asset    hdma/00_9710.bin Cgram as indirect from $00:9710 bytes 2
 asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2
 asset    vram/00_9900.bin Vram as staged from $00:9900 bytes 16
@@ -818,7 +842,8 @@ asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
 ```
 
 Three transfers from `$9000` — sixty-four bytes, sixteen inside them, thirty-two
-across their end — are the one file of eighty; the two blocks the HDMA table
+across their end — are the one file of eighty, bytes because the run never
+drew them; the two blocks the HDMA table
 points at lie end to end and are two files; the transfer from `$01:FFF0` read
 its last sixteen bytes from `$01:0000`, which is not the image, and its file
 holds the sixteen that were. The three notes are the three refusals: the same
@@ -854,8 +879,8 @@ reset code sets five channels up behind a button the run never presses:
 asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 32
 asset    vram/00_9040.bin Vram as dma from $00:9040 bytes 16
 asset    vram/00_9100.bin Vram as dma from $00:9100 bytes 48
-asset    cgram/00_9200.bin Cgram as dma from $00:9200 bytes 16
-asset    oam/00_9300.bin Oam as proven from $00:9300 bytes 544
+asset    cgram/00_9200.pal Cgram as dma from $00:9200 bytes 16
+asset    oam/00_9300.oam Oam as proven from $00:9300 bytes 544
 ```
 
 The run took five transfers and confirmed each; the sprite table at `$9300`
@@ -1102,9 +1127,13 @@ against the fill.
 
 A lifted file needs no line of its own: a bank file's `INCBIN` emits the file's
 bytes into the bank's own range, read from the tree's directory as the sources
-are, so a tree with assets verifies exactly as one without. A lifted file that
-cannot be read is that bank file's assembly error, reported with its line, and
-the bank's bytes are then among those no file produced.
+are, so a tree with assets verifies exactly as one without. A file in an
+editable form is read back to its bytes on include
+([asset-formats.md](asset-formats.md#including-an-asset)), so an edited pixel
+or table entry differs at the byte it changes. A lifted file that cannot be
+read — or a sheet that is not an indexed PNG, a table whose first line names
+no unit — is that bank file's assembly error, reported with its line and the
+reason, and the bank's bytes are then among those no file produced.
 
 ## What the code reaches
 
@@ -1269,13 +1298,23 @@ snaggletooth::disasm::renderTree("cartridge", rendered, error);  // the bank fil
 `disassembleCartridge` returns the header, the entries traced from, one
 `RegionListing` per region — its `SourceRegion` and its `Listing`, whole — the
 `SoundProgram` when one was captured, the `assets` lifted out of the banks, the
-`TraceStop`s, and `notes` for what the run could not do. Each `AssetFile` is its
-path, the `classes` of the registers its bytes went to — one, or two for a
-`staged/` file — and the `registerAddress` of the one that named it, its
-`kind` (a `MovedKind`), the address of its `first` byte, its `romOffset` and its
-`bytes`; `CartridgeRequest::assets` is the `ManifestAsset`s read back from the
+`previews` written beside them, the `TraceStop`s, and `notes` for what the run
+could not do. Each `AssetFile` is its
+path — whose extension names its form — the `classes` of the registers its
+bytes went to — one, or two for a `staged/` file — and the `registerAddress`
+of the one that named it, its `kind` (a `MovedKind`), the address of its
+`first` byte, its `romOffset`, its `bytes` as the image holds them, and what
+the form needs and the file is written as: a sheet's `depth` and `palette`
+(RGBA quadruples), a table's `unit` and `indirect`, and `written`, the bytes
+that go to disk — the form's encoding, or the bytes themselves. Each
+`PreviewFile` is its path, the lifted file it is `of`, its `form` as the
+`preview` line names it, the extent of work RAM (`memory`, `bytes`) for a
+source's preview, and its `written` bytes. `CartridgeRequest::assets` is the
+`ManifestAsset`s read back from the
 manifest — a path with the first address, length and classes it names — which
-give a file lifted again its path. `bankRegions(map, imageBytes)` is the default split.
+give a file lifted again its path, and `CartridgeRequest::readFile` is a
+`FileReader` over the tree's files, which a disassembly without a run takes a
+sheet's depth and palette and a table's unit from. `bankRegions(map, imageBytes)` is the default split.
 `captureUpload(rom, masterCycles, reason)` is the boot alone: the entry and the
 blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the
 image the tree describes and counts what is unplaced or placed twice.
@@ -1301,10 +1340,19 @@ port reaches (a `PortMemory`: `Vram`, `Cgram`, `Oam`), the `lowest` and
 `highest` address the port put a byte at, whether the landing was `shown` —
 read at the first frame drawn after it — and the `areas` it lies in, one bit
 each of `kAreaTilemap1`–`kAreaTilemap4`, `kAreaTiles1`–`kAreaTiles4`,
-`kAreaSprites`, `kAreaMode7`, `kAreaPalette` and `kAreaOam`; `areaText` is
+`kAreaSprites`, `kAreaMode7`, `kAreaPalette` and `kAreaOam`, the `depths` its
+tile areas were read at, one bit each of `kDepth2`, `kDepth4` and `kDepth8`,
+and the `palette` — an index among the palettes the run kept — as it stood
+at the first drawn frame that read a VRAM landing; `areaText` is
 the areas as the manifest writes them, `none` and `unshown` included,
-`portAddressText` an address in the memory's width, and `landedBefore` the
-order the lines are written in. `rom/rom_observe.h` is the run
+`landingDepth` the one depth the tile areas share and `depthText` it as the
+manifest writes it, `portAddressText` an address in the memory's width, and
+`landedBefore` the order the lines are written in. `walked` carries one
+`WalkedRange` per distinct walk of a table or an indirect block — the fields
+of its `moved` line, the `unit`, whether it is `indirect`, and `times` —
+`hdmaUnitOf` is the unit a `DMAP` transfer pattern gives, and `walkedBefore`
+the order the lines are written in; `palettes` is the palette RAM at each
+drawn frame a landing was read at, each distinct copy once. `rom/rom_observe.h` is the run
 itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
 `input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone
 — into the controller ports, and returns a `RunObservation` holding the
@@ -1312,10 +1360,13 @@ itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
 landings, the `ran` landings,
 the `seen` values, the `staged` extents — one `StagedRange` per extent of work RAM
 carried to a register, by an engine or by the CPU a store at a time: `memory`,
-`bytes`, the `origin` of every byte together (an `ir::OriginSet`) and the
+`bytes`, the `origin` of every byte together (an `ir::OriginSet`), the
 `writers`, each a `StagedWriter` with the `writer` site or engine, whether the
 bytes were `unwritten`, how many `bytes` it wrote, their `origin` and their
-`sources`; `sameExtent` says whether two are one — the `streamed` runs, one
+`sources`, and the `contents` the extent was carried out with, each a
+`CarriedContent` with its `bytes`, their `origin`, the `cls` and `kind` of the
+carry, its `landing`, and a table's `unit` and `indirect`; `sameExtent` says
+whether two are one and `sameContent` whether two contents are — the `streamed` runs, one
 `StreamedRange` per stream: `site`, `registerAddress` with `registerName` and
 `registerClass`, `bytes` and `times`, either the `memory` of the buffer
 carried or the `romOffset` carried with the `source` run it is lifted as, and
@@ -1364,8 +1415,8 @@ accesses and the transfers.
 The disassembler's files are text from `renderProgramFile`,
 `renderSoundProgramFile` and `renderManifest`; `writeProject` writes them
 under a directory — the program file first, then the sound program's file
-where one was captured, the manifest, and the lifted files as bytes under
-theirs — and no bank file and no sound file. The sound program's nodes are
+where one was captured, the manifest, the lifted files in their forms under
+theirs, and the previews — and no bank file and no sound file. The sound program's nodes are
 `CartridgeDisassembly::program.spc700`, lifted from the captured listing
 through `ir/spc700_lift.h`. `parseManifest` reads a manifest's entries,
 reached and derived targets, landings, moved ranges, assets, file split, map,
@@ -1440,8 +1491,12 @@ the memory was used as is read once, at the first frame drawn after the
 bytes landed, so a stretch of VRAM a game uses as tiles in one scene and as a
 map in another is named by the first; a run that ends before a frame is drawn
 says `unshown`; and a file whose landings mix the two, or lie under Mode 7,
-stays under `vram/` — the picture's use of every word over a whole run, and
-the editable forms that follow from it, are not here yet. And for where the CPU arrived: a return
+stays under `vram/`, as bytes — the picture's use of every word over a whole
+run is not here. A file under `tiles/`, `maps/`, `cgram/` or `oam/`, and a
+table under `hdma/`, is written in its editable form where the run's facts
+name one, and a source a routine built its data from keeps its bytes with a
+preview of what they became; a source is never re-encoded, since the routine
+that packed it is the game's. And for where the CPU arrived: a return
 the run never took has no `ran` line, and code the program copied into work RAM
 and ran there is checked by the run and lifted from its fetches, but the tree
 has no file to place it in, so a landing there is a `note` and its bytes stay

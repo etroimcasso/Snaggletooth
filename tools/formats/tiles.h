@@ -31,4 +31,10 @@ namespace snaggletooth::formats {
 // of eight, naming the dimension.
 [[nodiscard]] Bytes decodeTiles(std::span<const std::uint8_t> png);
 
+// Encodes Mode 7 tiles — one byte a pixel, sixty-four bytes a tile, no planes —
+// as an 8-bit indexed PNG sixteen tiles wide carrying `palette`, a trailing
+// partial tile zero-padded. A preview only: nothing decodes it back.
+[[nodiscard]] Bytes encodeMode7Tiles(std::span<const std::uint8_t> pixels,
+                                     const std::vector<std::uint8_t>& palette);
+
 }  // namespace snaggletooth::formats

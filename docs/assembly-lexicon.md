@@ -247,6 +247,11 @@ An assembly reads files only through the reader its caller gives it — see
 [assemblers.md](assemblers.md#library). The command-line assemblers read
 beside the source; `snes_verify` reads from the tree it verifies; an assembly
 given no reader reports the directive as an error rather than open anything.
+A reader may hand back other bytes than the file holds: the toolkit's reads a
+tile sheet, a palette, a tilemap, an OAM table or an HDMA table back to the
+bytes it was made from ([asset-formats.md](asset-formats.md)), and the offset
+and the length then address those decoded bytes — a sheet padded to whole
+tiles is included with the length of the bytes it stands for.
 
 ---
 

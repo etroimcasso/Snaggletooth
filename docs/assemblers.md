@@ -143,7 +143,12 @@ a tree's root is asked for exactly those: `bank_00.asm` including
 `vram/tiles.bin` asks for `vram/tiles.bin`; `code/bank_00.asm` including
 `../vram/tiles.bin` asks for the same. Without a reader an `INCBIN` is an error
 saying the assembly reads no files; the assembler never opens the filesystem
-itself, so a front end that holds a tree in memory assembles it whole.
+itself, so a front end that holds a tree in memory assembles it whole. The
+command-line assemblers and `snes_verify` wrap their readers in the encoding
+reader of [asset-formats.md](asset-formats.md#including-an-asset), so an
+included `.png`, `.pal`, `.map`, `.oam` or `.hdma` reaches the assembler as
+the bytes it was made from, and one that does not decode is reported with its
+reason beside the assembler's own error.
 
 ```cpp
 const snaggletooth::assembler::Reader reader =

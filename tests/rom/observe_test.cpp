@@ -55,9 +55,10 @@ using examples::uploadingImage;
 constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
 // The manifest without the blocks a run writes fresh and a disassembly without
-// one does not write at all — `origin`, `staged`, `streamed`, `landed` and `seen` — and
-// without the blank line that stood before each, so what the manifest keeps
-// from one to the next is compared without them.
+// one does not write at all — `origin`, `staged`, `streamed`, `landed`,
+// `walked`, `preview` and `seen` — and without the blank line that stood
+// before each, so what the manifest keeps from one to the next is compared
+// without them.
 std::string withoutRunLines(const std::string& manifest) {
   std::string out;
   std::size_t position = 0;
@@ -68,7 +69,8 @@ std::string withoutRunLines(const std::string& manifest) {
     position = end == std::string::npos ? manifest.size() : end + 1;
     const bool fresh = line.rfind("seen ", 0) == 0 || line.rfind("origin ", 0) == 0 ||
                        line.rfind("staged ", 0) == 0 || line.rfind("streamed ", 0) == 0 ||
-                       line.rfind("landed ", 0) == 0;
+                       line.rfind("landed ", 0) == 0 || line.rfind("walked ", 0) == 0 ||
+                       line.rfind("preview ", 0) == 0;
     if (fresh) continue;
     if (line == "\n" && out.size() >= 1 && out.back() == '\n' && out.size() >= 2 &&
         out[out.size() - 2] == '\n') {
@@ -446,7 +448,7 @@ TEST(RomObserve, TheTreeStillAssemblesToItsImage) {
 
   std::map<std::string, std::string> tree;
   for (const RegionListing& region : d.regions) tree[region.region.file] = renderRegion(region, d);
-  for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
+  for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.written.begin(), asset.written.end());
   std::string error;
   const std::optional<ManifestInput> manifest = parseManifest(renderManifest(d), error);
   ASSERT_TRUE(manifest.has_value()) << error;
@@ -785,6 +787,8 @@ TEST(RomMoved, TheManifestCarriesTheRangesAndReadsThemBack) {
 // What an earlier run saw move is kept without running: the manifest is the
 // run's memory, and the asset pass reads it from a tree that was not re-run.
 TEST(RomMoved, AnEarlierRunsRangesAreKeptWithoutRunning) {
+  // The tables are written in their form again from the files on disk: the
+  // tree the run wrote serves them.
   const std::vector<std::uint8_t> rom = movingImage();
   CartridgeRequest first;
   first.rom = rom;
@@ -802,6 +806,13 @@ TEST(RomMoved, AnEarlierRunsRangesAreKeptWithoutRunning) {
   again.captureSound = false;
   again.observeRun = false;
   again.moved = input->moved;
+  again.assets = input->assets;
+  again.readFile = [&](const std::string& file) -> std::optional<std::string> {
+    for (const AssetFile& asset : ran.assets) {
+      if (asset.file == file) return std::string(asset.written.begin(), asset.written.end());
+    }
+    return std::nullopt;
+  };
   const CartridgeDisassembly kept = disassembleCartridge(again);
   ASSERT_EQ(kept.moved.size(), ran.moved.size());
   EXPECT_EQ(withoutRunLines(renderManifest(kept)), withoutRunLines(renderManifest(ran)));
@@ -860,7 +871,7 @@ TEST(RomMoved, TheTreeStillAssemblesToItsImage) {
 
   std::map<std::string, std::string> tree;
   for (const RegionListing& region : d.regions) tree[region.region.file] = renderRegion(region, d);
-  for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
+  for (const AssetFile& asset : d.assets) tree[asset.file] = std::string(asset.written.begin(), asset.written.end());
   std::string error;
   const std::optional<ManifestInput> manifest = parseManifest(renderManifest(d), error);
   ASSERT_TRUE(manifest.has_value()) << error;
@@ -1394,7 +1405,7 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
             std::string::npos);
   EXPECT_NE(manifest.find("staged   hdma/00_9400.bin at $7F:0600 bytes 3 to Display by sub_008380 exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette\n"),
+  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette depth none\n"),
             std::string::npos);
   // A source sent two places: one file, a `staged` line per class it fed.
   EXPECT_NE(manifest.find("origin   $7F:0700 bytes 8 from $00:9500 bytes 8 using 8 by sub_0083C0 exact\n"),
@@ -1405,7 +1416,7 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
             std::string::npos);
   // A buffer the CPU carried out: the stream names the buffer, the buffer's
   // source is the file.
-  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown\n"),
+  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown depth none\n"),
             std::string::npos);
   EXPECT_NE(manifest.find("origin   $7F:0800 bytes 16 from $00:9600 bytes 16 using 16 by sub_008480 exact\n"),
             std::string::npos);
@@ -1671,6 +1682,293 @@ TEST(RomLanded, AStreamCarriesItsLandingAndAStreamToTheAudioPortsNone) {
   ASSERT_TRUE(tiles->landing.has_value());
   EXPECT_EQ(tiles->landing->memory, PortMemory::Vram);
   EXPECT_FALSE(tiles->landing->shown);
+}
+
+// ---- what a lifted file's form needs ----------------------------------------------
+//
+// The drawing cartridge sends one of everything an editable form has a grammar
+// for; the cases pin what the run keeps beside a landing for the file's form —
+// the depth of the tile areas, the palette RAM at the frame that read it, the
+// unit a table was walked under — and the contents an extent of work RAM was
+// carried out with.
+
+namespace {
+
+using examples::drawingImage;
+
+const LandedRange* drawingLanding(const RunObservation& run, Address site) {
+  return landingAt(run.landed, site);
+}
+
+}  // namespace
+
+TEST(RomLanded, ALandingCarriesTheDepthOfItsTileAreas) {
+  const RunObservation run = observe(drawingImage(), 4u * kFrame);
+  const LandedRange* fourBit = drawingLanding(run, 0x008046u);
+  const LandedRange* twoBit = drawingLanding(run, 0x008070u);
+  const LandedRange* sprites = drawingLanding(run, 0x00809Au);
+  const LandedRange* palette = drawingLanding(run, 0x0080CAu);
+  const LandedRange* map = drawingLanding(run, 0x008100u);
+  const LandedRange* mode7 = drawingLanding(run, 0x0083E5u);
+  ASSERT_NE(fourBit, nullptr);
+  ASSERT_NE(twoBit, nullptr);
+  ASSERT_NE(sprites, nullptr);
+  ASSERT_NE(palette, nullptr);
+  ASSERT_NE(map, nullptr);
+  ASSERT_NE(mode7, nullptr);
+  EXPECT_EQ(fourBit->landing.depths, kDepth4) << "BG1's name base under Mode 1";
+  EXPECT_EQ(landingDepth(fourBit->landing), 4u);
+  EXPECT_EQ(twoBit->landing.depths, kDepth2) << "BG3's name base under Mode 1";
+  EXPECT_EQ(depthText(twoBit->landing), "2");
+  EXPECT_EQ(sprites->landing.depths, kDepth4) << "the sprite tiles are always four";
+  EXPECT_EQ(palette->landing.depths, 0u);
+  EXPECT_EQ(depthText(palette->landing), "none");
+  EXPECT_EQ(map->landing.depths, 0u) << "a screen has no depth";
+  EXPECT_EQ(mode7->landing.depths, kDepth8);
+  EXPECT_EQ(depthText(mode7->landing), "8");
+}
+
+TEST(RomLanded, ALandingReadInTwoDepthsSaysNone) {
+  // The landing cartridge's rotated words reach BG1's and BG2's name bases,
+  // BG3's and the sprite tiles: four bits, four, two and four.
+  const RunObservation run = observe(landingImage(), 8u * kFrame);
+  const LandedRange* rotated = landingAt(run.landed, 0x008192u);
+  ASSERT_NE(rotated, nullptr);
+  EXPECT_EQ(rotated->landing.depths, kDepth2 | kDepth4);
+  EXPECT_FALSE(landingDepth(rotated->landing).has_value());
+  EXPECT_EQ(depthText(rotated->landing), "none");
+}
+
+TEST(RomLanded, AVramLandingNamesThePaletteAsItStoodAtItsFrame) {
+  const RunObservation run = observe(drawingImage(), 4u * kFrame);
+  const LandedRange* fourBit = drawingLanding(run, 0x008046u);
+  const LandedRange* palette = drawingLanding(run, 0x0080CAu);
+  const LandedRange* fromBuffer = drawingLanding(run, 0x008367u);
+  ASSERT_NE(fourBit, nullptr);
+  ASSERT_NE(palette, nullptr);
+  ASSERT_NE(fromBuffer, nullptr);
+  // The tileset was read at the first drawn frame, when the palette RAM held
+  // the sixteen words the reset code sent to entry zero and nothing else —
+  // the fifteen bits of each the PPU keeps; the top bit is the image's alone.
+  ASSERT_TRUE(fourBit->landing.palette.has_value());
+  ASSERT_LT(*fourBit->landing.palette, run.palettes.size());
+  const std::vector<std::uint8_t>& first = run.palettes[*fourBit->landing.palette];
+  ASSERT_EQ(first.size(), 512u);
+  for (std::size_t i = 0; i < 16; ++i) {
+    const std::uint16_t word = static_cast<std::uint16_t>(i * 0x0421u);
+    EXPECT_EQ(first[2u * i], word & 0xFFu) << i;
+    EXPECT_EQ(first[2u * i + 1u], word >> 8) << i;
+  }
+  EXPECT_EQ(first[32], 0u) << "entry sixteen was not written yet";
+  // A palette landing names none: no palette colours the palette.
+  EXPECT_FALSE(palette->landing.palette.has_value());
+  // The tiles sent from the buffer on the second frame were read at the third,
+  // after the handler had sent the second blob to entry sixteen.
+  ASSERT_TRUE(fromBuffer->landing.palette.has_value());
+  const std::vector<std::uint8_t>& later = run.palettes[*fromBuffer->landing.palette];
+  EXPECT_NE(*fromBuffer->landing.palette, *fourBit->landing.palette);
+  const std::uint8_t decoded[] = {0x1F, 0x1F, 0x1F, 0x1F, 0x7C, 0x7C, 0x7C, 0x7C, 0xE0, 0xE0, 0xE0, 0xE0,
+                                  0x03, 0x03, 0x03, 0x03, 0x7F, 0x7F, 0x7F, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF,
+                                  0x00, 0x00, 0x00, 0x00, 0x55, 0x55, 0x55, 0x55};
+  for (std::size_t i = 0; i < 32; ++i) {
+    const std::uint8_t kept = i % 2u == 1u ? static_cast<std::uint8_t>(decoded[i] & 0x7Fu) : decoded[i];
+    EXPECT_EQ(later[32u + i], kept) << i;
+  }
+  // Each distinct palette is kept once.
+  EXPECT_EQ(run.palettes.size(), 2u);
+}
+
+TEST(RomLanded, AnUnshownLandingNamesNoPalette) {
+  const RunObservation run = observe(landingImage(), 8u * kFrame);
+  const LandedRange* unshown = landingAt(run.landed, 0x008401u);
+  ASSERT_NE(unshown, nullptr);
+  EXPECT_FALSE(unshown->landing.shown);
+  EXPECT_FALSE(unshown->landing.palette.has_value());
+}
+
+TEST(RomLanded, AWalkKeepsTheUnitAndTheForm) {
+  const RunObservation run = observe(drawingImage(), 4u * kFrame);
+  // The walks seen every frame, whole; a run's end cuts the frame's walk
+  // short, and that walk is its own range with its own line, seen once.
+  std::vector<const WalkedRange*> whole;
+  for (const WalkedRange& walk : run.walked) {
+    if (walk.times > 1u) whole.push_back(&walk);
+  }
+  ASSERT_EQ(whole.size(), 3u) << run.walked.size();
+  // In their ranges' order: channel 1's direct table, channel 2's indirect
+  // table, then the block channel 2's entries point at.
+  EXPECT_EQ(whole[0]->site, 0x0081A8u);
+  EXPECT_EQ(whole[0]->channel, 1u);
+  EXPECT_EQ(whole[0]->memory, 0x00A400u);
+  EXPECT_EQ(whole[0]->bytes, 11u);
+  EXPECT_EQ(whole[0]->kind, MovedKind::Table);
+  EXPECT_EQ(whole[0]->unit, 2u) << "pattern 1: two registers, a byte each";
+  EXPECT_FALSE(whole[0]->indirect);
+  EXPECT_EQ(whole[1]->channel, 2u);
+  EXPECT_EQ(whole[1]->memory, 0x00A410u);
+  EXPECT_EQ(whole[1]->kind, MovedKind::Table);
+  EXPECT_EQ(whole[1]->unit, 1u);
+  EXPECT_TRUE(whole[1]->indirect);
+  EXPECT_EQ(whole[2]->memory, 0x00A420u);
+  EXPECT_EQ(whole[2]->kind, MovedKind::Indirect);
+  EXPECT_EQ(whole[2]->unit, 1u);
+  EXPECT_TRUE(whole[2]->indirect);
+  EXPECT_EQ(whole[0]->times, whole[1]->times);
+  // The walk joins its range as a landing does.
+  const MovedRange* table = rangeAt(run.moved, 0x0081A8u, 1, 0x00A400u);
+  ASSERT_NE(table, nullptr);
+  EXPECT_EQ(table->bytes, whole[0]->bytes);
+  EXPECT_EQ(table->times, whole[0]->times);
+  // Every walk is in its range's order, whole before cut.
+  for (std::size_t i = 1; i < run.walked.size(); ++i) EXPECT_TRUE(walkedBefore(run.walked[i - 1], run.walked[i]));
+}
+
+TEST(RomLanded, TheUnitFollowsTheChannelsTransferPattern) {
+  // fullsnes: patterns 0 → 1 byte, 1 and 2 → 2, 3 through 5 → 4, 6 → 2, 7 → 4.
+  EXPECT_EQ(hdmaUnitOf(0), 1u);
+  EXPECT_EQ(hdmaUnitOf(1), 2u);
+  EXPECT_EQ(hdmaUnitOf(2), 2u);
+  EXPECT_EQ(hdmaUnitOf(3), 4u);
+  EXPECT_EQ(hdmaUnitOf(4), 4u);
+  EXPECT_EQ(hdmaUnitOf(5), 4u);
+  EXPECT_EQ(hdmaUnitOf(6), 2u);
+  EXPECT_EQ(hdmaUnitOf(7), 4u);
+}
+
+TEST(RomLanded, AGeneralPurposeTransferHasNoWalk) {
+  const RunObservation run = observe(landingImage(), 4u * kFrame);
+  EXPECT_TRUE(run.walked.empty());
+}
+
+TEST(RomStaged, AnExtentKeepsEachContentItWasCarriedOutWith) {
+  const RunObservation run = observe(drawingImage(), 4u * kFrame);
+  const StagedRange* buffer = stagedAt(run.staged, 0x7E1000u, 32);
+  ASSERT_NE(buffer, nullptr);
+  ASSERT_EQ(buffer->contents.size(), 2u);
+  // First the tiles: four runs of eight, sent to VRAM, landing in BG1's name
+  // base at four bits; built from the first blob.
+  const CarriedContent& tiles = buffer->contents[0];
+  std::vector<std::uint8_t> expected;
+  for (const std::uint8_t value : {0x11u, 0x22u, 0x33u, 0x44u}) {
+    for (int i = 0; i < 8; ++i) expected.push_back(value);
+  }
+  EXPECT_EQ(tiles.bytes, expected);
+  EXPECT_EQ(tiles.cls, RegisterClass::Vram);
+  EXPECT_EQ(tiles.kind, MovedKind::Dma);
+  ASSERT_TRUE(tiles.landing.has_value());
+  EXPECT_TRUE(tiles.landing->shown);
+  EXPECT_EQ(tiles.landing->areas, kAreaTiles1 | kAreaTiles2);
+  EXPECT_EQ(landingDepth(*tiles.landing), 4u);
+  EXPECT_TRUE(tiles.landing->palette.has_value());
+  // Built from the first blob: its four value bytes, a comb.
+  ASSERT_EQ(tiles.origin.image.size(), 4u);
+  EXPECT_EQ(tiles.origin.image.front().first, 0x2501u);
+  EXPECT_EQ(tiles.origin.image.back().first, 0x2507u);
+  // Then the palette, built from the second blob into the same bytes.
+  const CarriedContent& palette = buffer->contents[1];
+  EXPECT_EQ(palette.bytes.size(), 32u);
+  EXPECT_EQ(palette.bytes[0], 0x1Fu);
+  EXPECT_EQ(palette.bytes[31], 0x55u);
+  EXPECT_EQ(palette.cls, RegisterClass::Cgram);
+  ASSERT_TRUE(palette.landing.has_value());
+  EXPECT_EQ(palette.landing->areas, kAreaPalette);
+  ASSERT_FALSE(palette.origin.image.empty());
+  EXPECT_EQ(palette.origin.image.front().first, 0x2521u);
+  EXPECT_FALSE(sameContent(tiles, palette));
+}
+
+TEST(RomStaged, ABufferTheCpuCarriesOutKeepsItsContent) {
+  const RunObservation run = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* buffer = stagedAt(run.staged, 0x7F0800u, 16);
+  ASSERT_NE(buffer, nullptr);
+  ASSERT_EQ(buffer->contents.size(), 1u);
+  const CarriedContent& content = buffer->contents.front();
+  EXPECT_EQ(content.kind, MovedKind::Stream);
+  EXPECT_EQ(content.cls, RegisterClass::Vram);
+  ASSERT_EQ(content.bytes.size(), 16u);
+  for (std::size_t i = 0; i < 16; ++i) EXPECT_EQ(content.bytes[i], 0xB0u + i);
+  ASSERT_TRUE(content.landing.has_value());
+  EXPECT_FALSE(content.landing->shown) << "the run never turns the screen on";
+}
+
+TEST(RomStaged, ATableWalkedEveryFrameFromOneBufferIsOneContent) {
+  const RunObservation run = observe(stagingImage(), 4u * kFrame);
+  const StagedRange* table = stagedAt(run.staged, 0x7F0600u, 3);
+  ASSERT_NE(table, nullptr);
+  ASSERT_EQ(table->contents.size(), 1u);
+  const CarriedContent& content = table->contents.front();
+  EXPECT_EQ(content.kind, MovedKind::Table);
+  EXPECT_EQ(content.bytes, (std::vector<std::uint8_t>{0x01u, 0x0Fu, 0x00u}));
+  EXPECT_EQ(content.unit, 1u);
+  EXPECT_FALSE(content.indirect);
+  EXPECT_FALSE(content.landing.has_value()) << "the brightness register is no data port";
+}
+
+TEST(RomStaged, TwoRunsSeeTheSameContentsAndWalks) {
+  const RunObservation first = observe(drawingImage(), 4u * kFrame);
+  const RunObservation second = observe(drawingImage(), 4u * kFrame);
+  ASSERT_EQ(first.staged.size(), second.staged.size());
+  for (std::size_t i = 0; i < first.staged.size(); ++i) {
+    ASSERT_EQ(first.staged[i].contents.size(), second.staged[i].contents.size());
+    for (std::size_t c = 0; c < first.staged[i].contents.size(); ++c) {
+      EXPECT_TRUE(sameContent(first.staged[i].contents[c], second.staged[i].contents[c]));
+    }
+  }
+  ASSERT_EQ(first.walked.size(), second.walked.size());
+  for (std::size_t i = 0; i < first.walked.size(); ++i) {
+    EXPECT_EQ(first.walked[i].unit, second.walked[i].unit);
+    EXPECT_EQ(first.walked[i].times, second.walked[i].times);
+  }
+  EXPECT_EQ(first.palettes, second.palettes);
+}
+
+namespace {
+
+// A cartridge that copies sixteen bytes into work RAM through the port and
+// sends them to the palette read downward, from the highest byte first.
+std::vector<std::uint8_t> downwardImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {
+      0xA9u, 0x00u, 0x8Du, 0x81u, 0x21u,       // $8000 WMADDL
+      0xA9u, 0x01u, 0x8Du, 0x82u, 0x21u,       // $8005 WMADDM: the port at $7E:0100
+      0xA9u, 0x00u, 0x8Du, 0x83u, 0x21u,       // $800A WMADDH
+      0xA9u, 0x00u, 0x8Du, 0x00u, 0x43u,       // $800F DMAP0 = $00
+      0xA9u, 0x80u, 0x8Du, 0x01u, 0x43u,       // $8014 BBAD0 = $80: WMDATA
+      0xA9u, 0x00u, 0x8Du, 0x02u, 0x43u,       // $8019 A1T0 low
+      0xA9u, 0x90u, 0x8Du, 0x03u, 0x43u,       // $801E A1T0 high: $9000
+      0xA9u, 0x00u, 0x8Du, 0x04u, 0x43u,       // $8023 A1B0 = $00
+      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,       // $8028 DAS0 low: 16
+      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,       // $802D DAS0 high
+      0xA9u, 0x01u, 0x8Du, 0x0Bu, 0x42u,       // $8032 MDMAEN = $01 (the write at $8034)
+      0xA9u, 0x00u, 0x8Du, 0x21u, 0x21u,       // $8037 CGADD = 0
+      0xA9u, 0x10u, 0x8Du, 0x00u, 0x43u,       // $803C DMAP0 = $10: A->B, decrement, pattern 0
+      0xA9u, 0x22u, 0x8Du, 0x01u, 0x43u,       // $8041 BBAD0 = $22: CGDATA
+      0xA9u, 0x0Fu, 0x8Du, 0x02u, 0x43u,       // $8046 A1T0 low
+      0xA9u, 0x01u, 0x8Du, 0x03u, 0x43u,       // $804B A1T0 high: $010F, the highest byte
+      0xA9u, 0x7Eu, 0x8Du, 0x04u, 0x43u,       // $8050 A1B0 = $7E: work RAM
+      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,       // $8055 DAS0 low: 16
+      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,       // $805A DAS0 high
+      0xA9u, 0x01u, 0x8Du, 0x0Bu, 0x42u,       // $805F MDMAEN = $01 (the write at $8061)
+      0x80u, 0xFEu,                            // $8064 BRA $8064
+  });
+  for (std::size_t i = 0; i < 16; ++i) rom[0x1000u + i] = static_cast<std::uint8_t>(0x40u + i);
+  return rom;
+}
+
+}  // namespace
+
+TEST(RomStaged, ADecrementingCarryKeepsItsContentInAddressOrder) {
+  const RunObservation run = observe(downwardImage(), 2u * kFrame);
+  const StagedRange* buffer = stagedAt(run.staged, 0x7E0100u, 16);
+  ASSERT_NE(buffer, nullptr);
+  ASSERT_EQ(buffer->contents.size(), 1u);
+  const CarriedContent& content = buffer->contents.front();
+  EXPECT_EQ(content.cls, RegisterClass::Cgram);
+  ASSERT_EQ(content.bytes.size(), 16u);
+  // Read from $010F down to $0100, kept as the bytes lie in memory.
+  for (std::size_t i = 0; i < 16; ++i) EXPECT_EQ(content.bytes[i], 0x40u + i) << i;
+  ASSERT_TRUE(content.landing.has_value());
+  EXPECT_EQ(content.landing->areas, kAreaPalette);
 }
 
 }  // namespace snaggletooth::disasm

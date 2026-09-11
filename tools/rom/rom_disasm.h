@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -135,14 +136,45 @@ struct SoundProgram {
 // sprite tiles, `vram/` otherwise — and named by the address of its first
 // byte. The bank file refers to it with `INCBIN` where the bytes were. Ranges
 // that share a byte are one file, the union; ranges that touch are not.
+//
+// The file is written in the form its path's extension names
+// (`docs/asset-formats.md`): a tile sheet as `.png` at the depth its landings
+// were read at, carrying the palette the run held at the frame that read
+// them or a ramp; a palette as `.pal`; a tilemap as `.map`; a sprite table as
+// `.oam`; an HDMA table as `.hdma` under the unit and the form the engine
+// walked it; and `.bin` for bytes as they are — a source a routine built its
+// data from, a file under `vram/`, `apu/` or `staged/`, an indirect block, a
+// file shorter than one unit of its form, or one whose form does not give
+// the bytes back. `bytes` are the image's; `written` is the file as it goes
+// to disk, the form's encoding of them or the bytes themselves.
 struct AssetFile {
-  std::string file;  // relative to the manifest: `vram/00_9000.bin`
+  std::string file;  // relative to the manifest: `tiles/00_9000.png`
   std::vector<RegisterClass> classes;  // of the registers the bytes went to, ascending, one for every file but a `staged/` one
   MovedKind kind = MovedKind::Dma;
   Address registerAddress = 0;  // the register itself, for the comment beside the `INCBIN`
   Address first = 0;            // the address the tree places its first byte at
   std::size_t romOffset = 0;
   std::vector<std::uint8_t> bytes;
+  unsigned depth = 0;                 // a tile sheet's bits a pixel, 2, 4 or 8; 0 for any other form
+  std::vector<std::uint8_t> palette;  // a tile sheet's palette as RGBA quadruples, the run's or a ramp
+  unsigned unit = 1;                  // an HDMA table's bytes a line
+  bool indirect = false;              // and whether its entries carry pointers
+  std::vector<std::uint8_t> written;
+};
+
+// A file written beside a lifted file to show what its bytes became, which
+// nothing reads back and no bank file includes: its path, the lifted file it
+// is of, the form it is in as the manifest's `preview` line names it —
+// `tiles`, `palette`, `map`, `oam`, `hdma`, `mode7-tiles`, `mode7-map` — the
+// extent of work RAM the shown content was built in, for a source a routine
+// built its data from, and the file's bytes.
+struct PreviewFile {
+  std::string file;
+  std::string of;
+  std::string form;
+  std::optional<Address> memory;
+  std::uint32_t bytes = 0;
+  std::vector<std::uint8_t> written;
 };
 
 // An asset as the manifest records it, read back for its path — a person's
@@ -206,6 +238,14 @@ struct CartridgeDisassembly {
   // every run and read back by nothing; the directory a VRAM file takes from
   // them is kept by its `asset` line. Empty without a run.
   std::vector<LandedRange> landed;
+  // How every HDMA table and indirect block the run moved was walked — the
+  // transfer unit and the form — see `rom_observe.h`; and the palette RAM as
+  // it stood at each drawn frame a landing was read at, which the landings
+  // name by index. Both written fresh on every run, `walked` as its line and
+  // the palettes through the tile sheets that carry them; empty without a
+  // run.
+  std::vector<WalkedRange> walked;
+  std::vector<std::vector<std::uint8_t>> palettes;
   // The files lifted out of the bank files, in address order: every `moved`
   // range that begins in the image and goes to a memory a file can be named for,
   // every source the shadow named, and every transfer the code proves whole
@@ -214,6 +254,10 @@ struct CartridgeDisassembly {
   // sent two places — is named in `notes` and stays in its bank; so is a
   // proven transfer the run moved another way.
   std::vector<AssetFile> assets;
+  // The previews written beside the lifted files, in the assets' order and,
+  // within a file, in the order the run first carried each content. Written
+  // fresh by a run and read back by nothing; empty without one.
+  std::vector<PreviewFile> previews;
   // The targets the bytes prove the indirect jumps take — a pointer in the image
   // selected by an index every path bounds — this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_facts.h`. A jump every
@@ -227,6 +271,10 @@ struct CartridgeDisassembly {
   std::vector<StagedRange> staged;
   std::vector<StreamedRange> streamed;
 };
+
+// The text of one of the tree's files, by the path the manifest names, or
+// nothing when it cannot be read.
+using FileReader = std::function<std::optional<std::string>(const std::string& file)>;
 
 // What to disassemble. `entries` are the entry points beyond the vectors, which
 // are always traced. `regions` is the file split, or empty for one file per bank.
@@ -243,6 +291,12 @@ struct CartridgeRequest {
   std::vector<MovedRange> moved;       // what earlier runs saw move, read back the same way
   std::vector<ManifestAsset> assets;   // the paths the manifest gives the lifted files
   std::vector<DerivedTarget> derived;  // what earlier runs derived, read back the same way
+  // Reads a lifted file the manifest names, as it lies in the tree, for a
+  // disassembly without a run: the depth and the palette of a tile sheet and
+  // the unit of a table are the run's facts, and without a run they are read
+  // from the file the path names before it is written again. Nothing, or a
+  // reader that finds nothing, writes every such file as bytes.
+  FileReader readFile;
   bool captureSound = true;
   std::uint64_t bootMasterCycles = 15u * 21'477'272u;
   // `observeRun` boots the machine and steps it for `runMasterCycles` — sixty
@@ -392,9 +446,10 @@ struct ManifestInput {
 
 // Writes what the disassembly found under `directory`, creating it and its
 // directories: `program.snagir` first, then `apu.snagir` where a sound program
-// was captured, `project.snagifest`, and every lifted file. No bank file and no
-// sound file is written here; `snes_render` writes those from the program files
-// and the manifest. False, with `error` set, when a file cannot be written.
+// was captured, `project.snagifest`, every lifted file in its form, and every
+// preview. No bank file and no sound file is written here; `snes_render`
+// writes those from the program files and the manifest. False, with `error`
+// set, when a file cannot be written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
                   std::string& error);
 

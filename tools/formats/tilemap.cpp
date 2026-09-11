@@ -118,4 +118,13 @@ Bytes decodeTilemap(const std::string& text) {
   return out;
 }
 
+Text encodeMode7Map(std::span<const std::uint8_t> map) {
+  Text out;
+  for (std::size_t i = 0; i < map.size(); ++i) {
+    out.text += (i % 32u == 0u ? "" : " ") + std::string("$") + text::hex(map[i], 2);
+    if (i % 32u == 31u || i + 1 == map.size()) out.text += '\n';
+  }
+  return out;
+}
+
 }  // namespace snaggletooth::formats

@@ -1,6 +1,7 @@
 #include "rom/rom_disasm.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +11,12 @@
 #include <utility>
 
 #include "cpu65816/cpu65816_asm.h"
+#include "formats/hdma.h"
+#include "formats/oam.h"
+#include "formats/palette.h"
+#include "formats/png.h"
+#include "formats/tilemap.h"
+#include "formats/tiles.h"
 #include "ir/cpu65816_lift.h"
 #include "ir/ir_render.h"
 #include "ir/ir_text.h"
@@ -299,6 +306,13 @@ std::optional<std::string_view> assetDirectory(RegisterClass cls, MovedKind kind
 // the range — or the range built from the source, or the stream — landed on
 // the other side of the port, every landing the run saw; empty for a transfer
 // the code proves, a file kept from the manifest, and a range to no data port.
+// How a table piece was walked, once per distinct unit and form.
+struct Walk {
+  unsigned unit = 1;
+  bool indirect = false;
+  bool operator==(const Walk&) const = default;
+};
+
 struct Piece {
   std::size_t offset = 0;
   std::size_t length = 0;
@@ -308,7 +322,22 @@ struct Piece {
   Address registerAddress = 0;
   Address site = 0;
   std::vector<PortLanding> landings;
+  std::vector<Walk> walks;   // a table's, from the run's `walked` lines; empty for anything else
+  bool wholeCarried = true;  // false for a stream whose file is wider than the bytes it carried
 };
+
+// The walks of one `moved` range, by the fields that identify it.
+std::vector<Walk> walksOf(const CartridgeDisassembly& out, const MovedRange& range) {
+  std::vector<Walk> walks;
+  for (const WalkedRange& walked : out.walked) {
+    if (walked.site == range.site && walked.channel == range.channel && walked.memory == range.memory &&
+        walked.bytes == range.bytes && walked.kind == range.kind) {
+      const Walk walk{.unit = walked.unit, .indirect = walked.indirect};
+      if (std::find(walks.begin(), walks.end(), walk) == walks.end()) walks.push_back(walk);
+    }
+  }
+  return walks;
+}
 
 // The landings of one `moved` range, by the fields that identify it.
 std::vector<PortLanding> landingsOf(const CartridgeDisassembly& out, const MovedRange& range) {
@@ -486,6 +515,464 @@ std::string streamText(const StreamedRange& stream) {
          " bytes " + std::to_string(stream.bytes);
 }
 
+// ---- the forms --------------------------------------------------------------------
+
+// The editable form a lifted file is written in, named by its path's extension.
+enum class Form : std::uint8_t { Bin, Tiles, Palette, Tilemap, Oam, Hdma };
+
+std::string_view formExtension(Form form) {
+  switch (form) {
+    case Form::Bin: return "bin";
+    case Form::Tiles: return "png";
+    case Form::Palette: return "pal";
+    case Form::Tilemap: return "map";
+    case Form::Oam: return "oam";
+    case Form::Hdma: return "hdma";
+  }
+  return "bin";
+}
+
+// The directory a path's first segment names.
+std::string_view directoryOf(const std::string& file) {
+  const std::size_t slash = file.find('/');
+  return slash == std::string::npos ? std::string_view() : std::string_view(file).substr(0, slash);
+}
+
+// A path's extension, lower-cased, without the dot; empty when it has none.
+std::string extensionOf(const std::string& file) {
+  const std::size_t dot = file.find_last_of('.');
+  const std::size_t slash = file.find_last_of('/');
+  if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return {};
+  std::string ext = file.substr(dot + 1);
+  for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return ext;
+}
+
+
+// The path without its extension.
+std::string stemOf(const std::string& file) {
+  const std::size_t dot = file.find_last_of('.');
+  const std::size_t slash = file.find_last_of('/');
+  return (dot == std::string::npos || (slash != std::string::npos && dot < slash)) ? file : file.substr(0, dot);
+}
+
+// The path with its extension replaced.
+std::string withExtension(const std::string& file, std::string_view extension) {
+  return stemOf(file) + "." + std::string(extension);
+}
+
+// Palette RAM words as RGBA quadruples, `count` entries from `first`: five
+// bits a channel spread to eight, the top bit of the word ignored as the PPU
+// ignores it.
+std::vector<std::uint8_t> rgbaOf(std::span<const std::uint8_t> cgram, std::size_t first, std::size_t count) {
+  std::vector<std::uint8_t> out;
+  for (std::size_t i = first; i < first + count; ++i) {
+    const std::uint16_t word = static_cast<std::uint16_t>(cgram[2u * i] | (cgram[2u * i + 1u] << 8));
+    const auto to8 = [](unsigned five) { return static_cast<std::uint8_t>((five << 3) | (five >> 2)); };
+    out.push_back(to8(word & 31u));
+    out.push_back(to8((word >> 5) & 31u));
+    out.push_back(to8((word >> 10) & 31u));
+    out.push_back(255u);
+  }
+  return out;
+}
+
+// A ramp from black to white over `count` entries, for a sheet no palette
+// of the run's colours.
+std::vector<std::uint8_t> ramp(std::size_t count) {
+  std::vector<std::uint8_t> out;
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::uint8_t level = count == 1 ? 255u : static_cast<std::uint8_t>(i * 255u / (count - 1u));
+    out.insert(out.end(), {level, level, level, 255u});
+  }
+  return out;
+}
+
+// The palette a tile sheet at `depth` carries from palette RAM `cgram`:
+// entries 128–143 for a sheet the sprites alone use, every entry for eight
+// bits a pixel, and the first `2^depth` — palette 0 of that depth — otherwise.
+std::vector<std::uint8_t> sheetPalette(std::span<const std::uint8_t> cgram, unsigned depth, bool spritesOnly) {
+  if (depth == 8u) return rgbaOf(cgram, 0, 256);
+  if (spritesOnly) return rgbaOf(cgram, 128, 16);
+  return rgbaOf(cgram, 0, std::size_t{1} << depth);
+}
+
+// What a group of pieces says about the form their file can take: the depths
+// every VRAM landing was read at together, whether the tile areas met are
+// the sprite tiles alone, the palette the first read landing names, whether
+// every shown VRAM landing lies under Mode 7, the distinct walks of the table
+// pieces, and whether every stream piece is exactly the bytes it carried.
+struct FormFacts {
+  std::uint8_t depths = 0;
+  bool anyVram = false;
+  bool spritesOnly = true;
+  bool mode7Only = true;
+  bool anyShownVram = false;
+  std::optional<std::size_t> palette;
+  std::vector<Walk> walks;
+  bool wholeCarried = true;
+};
+
+FormFacts factsOf(std::vector<Piece>::const_iterator first, std::vector<Piece>::const_iterator last) {
+  FormFacts facts;
+  for (auto piece = first; piece != last; ++piece) {
+    for (const PortLanding& landing : piece->landings) {
+      if (landing.memory != PortMemory::Vram) continue;
+      facts.anyVram = true;
+      facts.depths |= landing.depths;
+      if ((landing.areas & kAreaTiles) != kAreaSprites || (landing.areas & ~kAreaTiles) != 0u) facts.spritesOnly = false;
+      if (landing.shown) facts.anyShownVram = true;
+      if (!landing.shown || landing.areas != kAreaMode7) facts.mode7Only = false;
+      if (!facts.palette && landing.palette) facts.palette = landing.palette;
+    }
+    for (const Walk& walk : piece->walks) {
+      if (std::find(facts.walks.begin(), facts.walks.end(), walk) == facts.walks.end()) facts.walks.push_back(walk);
+    }
+    if (!piece->wholeCarried) facts.wholeCarried = false;
+  }
+  return facts;
+}
+
+// The smallest file a form has a picture of: one tile at the depth, one word,
+// one entry, one sprite, one HDMA entry with its data.
+std::size_t unitOf(Form form, unsigned depth, unsigned unit, bool indirect) {
+  switch (form) {
+    case Form::Tiles: return 8u * depth;
+    case Form::Palette: return 2;
+    case Form::Tilemap: return 2;
+    case Form::Oam: return 4;
+    case Form::Hdma: return 1u + (indirect ? 2u : unit);
+    case Form::Bin: return 1;
+  }
+  return 1;
+}
+
+// The form's encoding of `bytes`, or nothing with `reason` set when the form
+// does not give the bytes back exactly.
+std::optional<std::vector<std::uint8_t>> encodeForm(Form form, const AssetFile& asset, std::string& reason) {
+  const std::span<const std::uint8_t> bytes = asset.bytes;
+  const auto text = [](const formats::Text& t) { return std::vector<std::uint8_t>(t.text.begin(), t.text.end()); };
+  std::vector<std::uint8_t> encoded;
+  formats::Bytes decoded;
+  switch (form) {
+    case Form::Bin: return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+    case Form::Tiles: {
+      const formats::Bytes png = formats::encodeTiles(bytes, asset.depth, asset.palette);
+      if (!png.ok()) { reason = png.error; return std::nullopt; }
+      encoded = png.bytes;
+      decoded = formats::decodeTiles(encoded);
+      break;
+    }
+    case Form::Palette: {
+      const formats::Text t = formats::encodePalette(bytes);
+      if (!t.ok()) { reason = t.error; return std::nullopt; }
+      encoded = text(t);
+      decoded = formats::decodePalette(t.text);
+      break;
+    }
+    case Form::Tilemap: {
+      const formats::Text t = formats::encodeTilemap(bytes);
+      if (!t.ok()) { reason = t.error; return std::nullopt; }
+      encoded = text(t);
+      decoded = formats::decodeTilemap(t.text);
+      break;
+    }
+    case Form::Oam: {
+      const formats::Text t = formats::encodeOam(bytes);
+      if (!t.ok()) { reason = t.error; return std::nullopt; }
+      encoded = text(t);
+      decoded = formats::decodeOam(t.text);
+      break;
+    }
+    case Form::Hdma: {
+      const formats::Text t = formats::encodeHdma(bytes, asset.unit, asset.indirect);
+      if (!t.ok()) { reason = t.error; return std::nullopt; }
+      encoded = text(t);
+      decoded = formats::decodeHdma(t.text);
+      break;
+    }
+  }
+  if (!decoded.ok()) { reason = decoded.error; return std::nullopt; }
+  // A tile sheet decodes to whole tiles; the bank file's `INCBIN` carries the
+  // length, so the padding past the file is never assembled.
+  const bool exact = form == Form::Tiles ? decoded.bytes.size() >= bytes.size() &&
+                                               std::equal(bytes.begin(), bytes.end(), decoded.bytes.begin())
+                                         : decoded.bytes.size() == bytes.size() &&
+                                               std::equal(bytes.begin(), bytes.end(), decoded.bytes.begin());
+  if (!exact) { reason = "decoding the form does not give the bytes back"; return std::nullopt; }
+  return encoded;
+}
+
+// The form a file takes and the facts it needs, from the run where there was
+// one and from the file on disk where there was not; `expected` says a form
+// was looked for, so falling back to bytes is said in a note.
+struct FormChoice {
+  Form form = Form::Bin;
+  bool expected = false;
+  std::string reason;  // why the form does not hold, when `expected` and `form` is `Bin`
+};
+
+// The form a path's extension names: `.bin` for bytes, and nothing for an
+// extension that names no form.
+std::optional<Form> formOfExtension(const std::string& extension) {
+  if (extension == "bin") return Form::Bin;
+  if (extension == "png") return Form::Tiles;
+  if (extension == "pal") return Form::Palette;
+  if (extension == "map") return Form::Tilemap;
+  if (extension == "oam") return Form::Oam;
+  if (extension == "hdma") return Form::Hdma;
+  return std::nullopt;
+}
+
+// With a run, the form follows from the directory the landings named and the
+// facts the run kept. Without one, the manifest's path names the form — the
+// run that wrote it chose it — and the facts a tile sheet and a table need
+// are read from the file on disk.
+FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeDisassembly& out,
+                      const CartridgeRequest& request) {
+  FormChoice choice;
+  const std::string_view directory = directoryOf(asset.file);
+  const bool source = asset.kind == MovedKind::Staged || (request.observeRun && !facts.wholeCarried);
+  if (source) return choice;  // the bytes are what a routine read, not what it built
+  const std::string kept = extensionOf(asset.file);
+  if (!request.observeRun) {
+    choice.form = formOfExtension(kept).value_or(Form::Bin);
+    choice.expected = choice.form != Form::Bin;
+  } else if (directory == "maps") {
+    choice.form = Form::Tilemap;
+  } else if (directory == "cgram") {
+    choice.form = Form::Palette;
+  } else if (directory == "oam") {
+    choice.form = Form::Oam;
+  } else if (directory == "tiles") {
+    choice.form = Form::Tiles;
+    choice.expected = true;
+  } else if (directory == "hdma" && asset.kind == MovedKind::Table) {
+    choice.form = Form::Hdma;
+    choice.expected = true;
+  } else {
+    return choice;  // `vram/`, `apu/`, `staged/`, a block an entry points at: bytes as they are
+  }
+  if (choice.form == Form::Tiles) {
+    if (request.observeRun) {
+      const std::optional<unsigned> depth = landingDepth(PortLanding{.depths = facts.depths});
+      if (!depth) {
+        choice.form = Form::Bin;
+        choice.reason = facts.depths == 0u ? "no landing names its depth" : "its landings were read at two depths";
+        return choice;
+      }
+      asset.depth = *depth;
+      asset.palette = facts.palette ? sheetPalette(out.palettes[*facts.palette], *depth, facts.spritesOnly)
+                                    : ramp(std::size_t{1} << *depth);
+    } else {
+      // Without a run the sheet on disk says its depth and its palette.
+      const std::optional<std::string> file = request.readFile ? request.readFile(asset.file) : std::nullopt;
+      if (!file) {
+        choice.form = Form::Bin;
+        choice.reason = "the tree holds no such file to take the depth and the palette from";
+        return choice;
+      }
+      const formats::PngImage image = formats::decodePng(
+          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(file->data()), file->size()));
+      if (!image.ok() || (image.image.bitDepth != 2u && image.image.bitDepth != 4u && image.image.bitDepth != 8u)) {
+        choice.form = Form::Bin;
+        choice.reason = image.ok() ? "the file on disk is a " + std::to_string(image.image.bitDepth) + "-bit sheet, not 2, 4 or 8"
+                                   : "the file on disk does not read as a tile sheet: " + image.error;
+        return choice;
+      }
+      asset.depth = image.image.bitDepth;
+      asset.palette = image.image.palette;
+      if (asset.palette.size() < (std::size_t{4} << asset.depth)) {
+        std::vector<std::uint8_t> filled = ramp(std::size_t{1} << asset.depth);
+        std::copy(asset.palette.begin(), asset.palette.end(), filled.begin());
+        asset.palette = std::move(filled);
+      }
+    }
+  } else if (choice.form == Form::Hdma) {
+    if (request.observeRun) {
+      if (facts.walks.size() != 1u) {
+        choice.form = Form::Bin;
+        choice.reason = facts.walks.empty() ? "no walk names its unit" : "the engine walked it under two units";
+        return choice;
+      }
+      asset.unit = facts.walks.front().unit;
+      asset.indirect = facts.walks.front().indirect;
+    } else {
+      const std::optional<std::string> file = request.readFile ? request.readFile(asset.file) : std::nullopt;
+      if (!file) {
+        choice.form = Form::Bin;
+        choice.reason = "the tree holds no such file to take the unit from";
+        return choice;
+      }
+      // The first line: `unit <1|2|4> direct|indirect`.
+      const std::string firstLine = file->substr(0, file->find('\n'));
+      const std::vector<std::string> words = text::tokens(firstLine);
+      const bool wellFormed = words.size() == 3 && words[0] == "unit" &&
+                              (words[1] == "1" || words[1] == "2" || words[1] == "4") &&
+                              (words[2] == "direct" || words[2] == "indirect");
+      if (!wellFormed) {
+        choice.form = Form::Bin;
+        choice.reason = "the file on disk does not open with `unit <1|2|4> direct|indirect`";
+        return choice;
+      }
+      asset.unit = static_cast<unsigned>(words[1][0] - '0');
+      asset.indirect = words[2] == "indirect";
+    }
+  }
+  if (asset.bytes.size() < unitOf(choice.form, asset.depth, asset.unit, asset.indirect)) {
+    choice.form = Form::Bin;  // shorter than one unit of the form: no picture to show, nothing to say
+    choice.expected = false;
+  }
+  return choice;
+}
+
+// Writes the file in its form: chooses it, encodes with the check that the
+// form gives the bytes back, sets the path's extension, and says in a note
+// where a form was looked for and does not hold.
+void applyForm(CartridgeDisassembly& out, AssetFile& asset, const FormFacts& facts, const CartridgeRequest& request,
+               bool named) {
+  const std::string kept = asset.file;
+  FormChoice choice = chooseForm(asset, facts, out, request);
+  std::string reason;
+  std::optional<std::vector<std::uint8_t>> written = encodeForm(choice.form, asset, reason);
+  if (!written) {
+    choice.form = Form::Bin;
+    choice.reason = reason;
+    written = asset.bytes;
+  }
+  if (choice.form != Form::Tiles) {
+    asset.depth = 0;
+    asset.palette.clear();
+  }
+  if (choice.form != Form::Hdma) {
+    asset.unit = 1;
+    asset.indirect = false;
+  }
+  asset.written = std::move(*written);
+  asset.file = withExtension(kept, formExtension(choice.form));
+  if (choice.form == Form::Bin && choice.expected) {
+    out.notes.push_back(asset.file + ": " + choice.reason + "; written as bytes");
+  } else if (named && asset.file != kept) {
+    // The manifest's path named another form; the file keeps its name and
+    // takes the form's extension.
+    out.notes.push_back("asset " + kept + " is written as " + asset.file + ": the extension is the form's");
+  }
+}
+
+// The preview of one content an extent was carried out with, in the form its
+// class and landing name, or nothing where they name none.
+std::optional<PreviewFile> previewOf(const CartridgeDisassembly& out, const CarriedContent& content) {
+  PreviewFile preview;
+  const std::span<const std::uint8_t> bytes = content.bytes;
+  const auto text = [&](const formats::Text& t, const char* form) -> std::optional<PreviewFile> {
+    if (!t.ok()) return std::nullopt;
+    preview.form = form;
+    preview.written.assign(t.text.begin(), t.text.end());
+    return preview;
+  };
+  if (content.kind == MovedKind::Table) {
+    if (bytes.size() < unitOf(Form::Hdma, 0, content.unit, content.indirect)) return std::nullopt;
+    return text(formats::encodeHdma(bytes, content.unit, content.indirect), "hdma");
+  }
+  if (content.kind == MovedKind::Indirect) return std::nullopt;
+  switch (content.cls) {
+    case RegisterClass::Cgram:
+      if (bytes.size() < 2) return std::nullopt;
+      return text(formats::encodePalette(bytes), "palette");
+    case RegisterClass::Oam:
+      if (bytes.size() < 4) return std::nullopt;
+      return text(formats::encodeOam(bytes), "oam");
+    case RegisterClass::Vram: {
+      if (!content.landing || !content.landing->shown || content.landing->areas == 0u) return std::nullopt;
+      const PortLanding& landing = *content.landing;
+      if ((landing.areas & ~kAreaTilemaps) == 0u) {
+        if (bytes.size() < 2) return std::nullopt;
+        return text(formats::encodeTilemap(bytes), "map");
+      }
+      if ((landing.areas & ~kAreaTiles) != 0u) return std::nullopt;  // mixed with a screen, or Mode 7
+      const std::optional<unsigned> depth = landingDepth(landing);
+      if (!depth || bytes.size() < 8u * *depth) return std::nullopt;
+      const bool spritesOnly = (landing.areas & kAreaTiles) == kAreaSprites;
+      const std::vector<std::uint8_t> palette =
+          landing.palette ? sheetPalette(out.palettes[*landing.palette], *depth, spritesOnly) : ramp(std::size_t{1} << *depth);
+      const formats::Bytes png = formats::encodeTiles(bytes, *depth, palette);
+      if (!png.ok()) return std::nullopt;
+      preview.form = "tiles";
+      preview.written = png.bytes;
+      return preview;
+    }
+    default: return std::nullopt;
+  }
+}
+
+// The extension a preview's form is written with.
+std::string_view previewExtension(const std::string& form) {
+  if (form == "tiles" || form == "mode7-tiles") return "png";
+  if (form == "palette") return "pal";
+  if (form == "map" || form == "mode7-map") return "map";
+  if (form == "oam") return "oam";
+  return "hdma";
+}
+
+// Writes the previews: beside a source a routine built its data from, one per
+// distinct content the extents it fed were carried out with, numbered from 1
+// in the order the run first carried each; beside a Mode 7 file, its tiles
+// and its map.
+void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts) {
+  out.previews.clear();
+  for (std::size_t i = 0; i < out.assets.size(); ++i) {
+    const AssetFile& asset = out.assets[i];
+    const std::string stem = stemOf(asset.file);
+    if (asset.kind == MovedKind::Staged) {
+      unsigned number = 0;
+      for (const StagedRange& range : out.staged) {
+        for (const CarriedContent& content : range.contents) {
+          // A content is this file's when the bytes carried were built from it.
+          const bool fed = std::any_of(content.origin.image.begin(), content.origin.image.end(),
+                                       [&](const ir::OriginInterval& run) {
+                                         return run.first < asset.romOffset + asset.bytes.size() &&
+                                                asset.romOffset <= run.last;
+                                       });
+          if (!fed) continue;
+          std::optional<PreviewFile> preview = previewOf(out, content);
+          if (!preview) continue;
+          ++number;
+          preview->file = stem + "-" + std::to_string(number) + "." + std::string(previewExtension(preview->form));
+          preview->of = asset.file;
+          preview->memory = range.memory;
+          preview->bytes = range.bytes;
+          out.previews.push_back(std::move(*preview));
+        }
+      }
+      continue;
+    }
+    if (directoryOf(asset.file) == "vram" && facts[i].mode7Only && facts[i].anyShownVram && asset.bytes.size() >= 2) {
+      // The even bytes are the map and the odd the tiles, a byte a pixel.
+      std::vector<std::uint8_t> map;
+      std::vector<std::uint8_t> tiles;
+      for (std::size_t k = 0; k < asset.bytes.size(); ++k) (k % 2u == 0u ? map : tiles).push_back(asset.bytes[k]);
+      const std::vector<std::uint8_t> palette =
+          facts[i].palette ? rgbaOf(out.palettes[*facts[i].palette], 0, 256) : ramp(256);
+      const formats::Bytes png = formats::encodeMode7Tiles(tiles, palette);
+      if (png.ok()) {
+        out.previews.push_back(PreviewFile{.file = stem + "-tiles.png",
+                                           .of = asset.file,
+                                           .form = "mode7-tiles",
+                                           .memory = std::nullopt,
+                                           .bytes = 0,
+                                           .written = png.bytes});
+      }
+      const formats::Text text = formats::encodeMode7Map(map);
+      out.previews.push_back(PreviewFile{.file = stem + "-map.map",
+                                         .of = asset.file,
+                                         .form = "mode7-map",
+                                         .memory = std::nullopt,
+                                         .bytes = 0,
+                                         .written = std::vector<std::uint8_t>(text.text.begin(), text.text.end())});
+    }
+  }
+}
+
 // Lifts every `moved` range the rules admit into `out.assets`. The rules are the
 // page's (`docs/snes-disassembler.md` §The assets): a range is lifted when it goes
 // to a register, steps up or down, its bytes are in the image, and it is a
@@ -550,6 +1037,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     const bool up = range.step == MovedStep::Increment;
     const Address bank = range.memory & 0xFF0000u;
     const std::vector<PortLanding> landings = landingsOf(out, range);
+    const std::vector<Walk> walks = walksOf(out, range);
     std::vector<Piece> mine;
     std::optional<std::size_t> previous;
     std::uint32_t outside = 0;
@@ -572,7 +1060,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                              .use = range.kind,
                              .registerAddress = range.registerAddress,
                              .site = range.site,
-                             .landings = landings});
+                             .landings = landings,
+                             .walks = walks,
+                             .wholeCarried = true});
       }
       previous = at;
     }
@@ -679,7 +1169,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                              .use = MovedKind::Dma,
                              .registerAddress = dma.destination.value_or(0),
                              .site = dma.site,
-                             .landings = {}});
+                             .landings = {},
+                             .walks = {},
+                             .wholeCarried = true});
       }
       previous = at;
     }
@@ -710,7 +1202,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                       .use = use.kind == MovedKind::Stream ? MovedKind::Dma : use.kind,
                       .registerAddress = use.registerAddress,
                       .site = use.site,
-                      .landings = use.landings},
+                      .landings = use.landings,
+                      .walks = {},
+                      .wholeCarried = true},
                 stagedText(range, source));
         }
       }
@@ -730,7 +1224,10 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                 .use = MovedKind::Stream,
                 .registerAddress = stream.registerAddress,
                 .site = stream.site,
-                .landings = stream.landing ? std::vector<PortLanding>{*stream.landing} : std::vector<PortLanding>{}},
+                .landings = stream.landing ? std::vector<PortLanding>{*stream.landing} : std::vector<PortLanding>{},
+                .walks = {},
+                .wholeCarried = stream.source.first == stream.romOffset &&
+                                stream.source.last - stream.source.first + 1u == stream.bytes},
           streamText(stream));
   }
 
@@ -760,7 +1257,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                                                        : MovedKind::Dma,
                   .registerAddress = 0,
                   .site = 0,
-                  .landings = {}},
+                  .landings = {},
+                  .walks = {},
+                  .wholeCarried = true},
             "asset " + kept.file);
     }
   }
@@ -786,6 +1285,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // under `staged/`, named for every class; only the engines' own pieces, and
   // the code's, sent two places, or two ways, are refused.
   out.assets.clear();
+  std::vector<FormFacts> facts;  // beside `out.assets`, one per file
   for (std::size_t i = 0; i < pieces.size();) {
     std::size_t end = pieces[i].offset + pieces[i].length;
     std::size_t j = i + 1;
@@ -862,10 +1362,17 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                       .registerAddress = lead.registerAddress,
                       .first = *home,
                       .romOffset = first.offset,
-                      .bytes = {}};
+                      .bytes = {},
+                      .depth = 0,
+                      .palette = {},
+                      .unit = 1,
+                      .indirect = false,
+                      .written = {}};
       asset.bytes.assign(request.rom.begin() + static_cast<std::ptrdiff_t>(first.offset),
                          request.rom.begin() + static_cast<std::ptrdiff_t>(end));
       out.assets.push_back(std::move(asset));
+      facts.push_back(factsOf(pieces.begin() + static_cast<std::ptrdiff_t>(i),
+                              pieces.begin() + static_cast<std::ptrdiff_t>(j)));
     }
     i = j;
   }
@@ -873,6 +1380,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // A person's path for a file lifted again. A file the shadow named that
   // nothing lifted again was re-lifted from its line above, or was covered by
   // a wider file this pass lifted, whose name is its own.
+  std::vector<bool> namedByAPerson(out.assets.size(), false);
   for (const ManifestAsset& named : request.assets) {
     const auto found = std::find_if(out.assets.begin(), out.assets.end(), [&](const AssetFile& a) {
       return a.first == named.first && a.bytes.size() == named.bytes;
@@ -884,7 +1392,15 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       continue;
     }
     found->file = named.file;
+    namedByAPerson[static_cast<std::size_t>(found - out.assets.begin())] = true;
   }
+
+  // The form each file is written in, from the run's facts, and what is
+  // written beside a file the run could not turn into a source.
+  for (std::size_t i = 0; i < out.assets.size(); ++i) {
+    applyForm(out, out.assets[i], facts[i], request, namedByAPerson[i]);
+  }
+  writePreviews(out, facts);
 }
 
 }  // namespace
@@ -1058,6 +1574,8 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     out.staged = std::move(observation.staged);
     out.streamed = std::move(observation.streamed);
     out.landed = std::move(observation.landed);
+    out.walked = std::move(observation.walked);
+    out.palettes = std::move(observation.palettes);
     for (const MovedRange& range : observation.moved) {
       const auto known = std::find_if(out.moved.begin(), out.moved.end(),
                                       [&](const MovedRange& m) { return sameRange(m, range); });
@@ -1506,7 +2024,17 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            std::string(movedKindName(landed.kind)) + " at " +
            portAddressText(landed.landing.memory, landed.landing.lowest) + "-" +
            portAddressText(landed.landing.memory, landed.landing.highest) + " in " + areaText(landed.landing) +
-           " times " + std::to_string(landed.times) + "\n";
+           " times " + std::to_string(landed.times) + " depth " + depthText(landed.landing) + "\n";
+  }
+
+  // How each table was walked: the unit and the form, which its text form
+  // states.
+  if (!disassembly.walked.empty()) out += "\n";
+  for (const WalkedRange& walk : disassembly.walked) {
+    out += "walked   " + address24(walk.site) + " channel " + std::to_string(walk.channel) + " memory " +
+           address24(walk.memory) + " bytes " + std::to_string(walk.bytes) + " as " +
+           std::string(movedKindName(walk.kind)) + " unit " + std::to_string(walk.unit) +
+           (walk.indirect ? " indirect" : " direct") + " times " + std::to_string(walk.times) + "\n";
   }
 
   // Where every range carried out of work RAM came from: one line per source
@@ -1550,6 +2078,14 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
     out += "asset    " + asset.file + " " + classesText(asset.classes, "+") + " as " +
            std::string(movedKindName(asset.kind)) + " from " + address24(asset.first) + " bytes " +
            std::to_string(asset.bytes.size()) + "\n";
+  }
+
+  // What was written beside a file to show what its bytes became.
+  if (!disassembly.previews.empty()) out += "\n";
+  for (const PreviewFile& preview : disassembly.previews) {
+    out += "preview  " + preview.file + " of " + preview.of;
+    if (preview.memory) out += " at " + address24(*preview.memory) + " bytes " + std::to_string(preview.bytes);
+    out += " as " + preview.form + "\n";
   }
 
   // What the run built from each file: one line per file, staged extent whose
@@ -1596,7 +2132,8 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            (stream.landing ? portAddressText(stream.landing->memory, stream.landing->lowest) + "-" +
                                  portAddressText(stream.landing->memory, stream.landing->highest)
                            : std::string("none")) +
-           " in " + (stream.landing ? areaText(*stream.landing) : std::string("none")) + "\n";
+           " in " + (stream.landing ? areaText(*stream.landing) : std::string("none")) + " depth " +
+           (stream.landing ? depthText(*stream.landing) : std::string("none")) + "\n";
   }
 
   // The routines. A list is one field, its names joined by commas; an empty
@@ -1825,8 +2362,12 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
   }
   if (!writeFile(directory / "project.snagifest", renderManifest(disassembly), error)) return false;
   for (const AssetFile& asset : disassembly.assets) {
-    const std::string_view bytes(reinterpret_cast<const char*>(asset.bytes.data()), asset.bytes.size());
+    const std::string_view bytes(reinterpret_cast<const char*>(asset.written.data()), asset.written.size());
     if (!writeFile(directory / asset.file, bytes, error)) return false;
+  }
+  for (const PreviewFile& preview : disassembly.previews) {
+    const std::string_view bytes(reinterpret_cast<const char*>(preview.written.data()), preview.written.size());
+    if (!writeFile(directory / preview.file, bytes, error)) return false;
   }
   return true;
 }

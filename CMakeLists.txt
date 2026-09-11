@@ -116,6 +116,9 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   target_include_directories(snaggletooth_assembler PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
+  # The command-line assemblers include an asset back through the encoding
+  # reader, so an edited tile sheet or table assembles as its bytes.
+  target_link_libraries(snaggletooth_assembler PRIVATE snaggletooth_formats)
   target_compile_features(snaggletooth_assembler PUBLIC cxx_std_20)
   set_target_properties(snaggletooth_assembler PROPERTIES CXX_EXTENSIONS OFF)
   if(MSVC)
@@ -323,6 +326,9 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_rom PUBLIC
     snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
     snaggletooth_ir snaggletooth_ir_lockstep snaggletooth_ir_provenance snaggletooth_rom_render)
+  # The codecs: the disassembler writes a lifted file in its form, and the
+  # verifier reads one back through the encoding reader.
+  target_link_libraries(snaggletooth_rom PRIVATE snaggletooth_formats)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -562,13 +568,12 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   )
   # snaggletooth_spc links snaggletooth::snaggletooth publicly, and the
   # differential links the representation and the cartridge tools publicly, which
-  # link both chip backends publicly, so the test target reaches the library, the
-  # tools and the backends through them — no separate direct links.
+  # link both chip backends publicly and the codecs privately, so the test target
+  # reaches the library, the tools, the backends and the codecs through them — no
+  # separate direct links.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_spc
     snaggletooth_ir_differential
-    snaggletooth_formats
-    snaggletooth_lodepng
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
@@ -578,9 +583,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}"
     SNAGGLETOOTH_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   # The IPL-stub test seeds the stub into an audio machine through the internal
-  # seam in src/, so the test target reaches the private headers there.
+  # seam in src/, so the test target reaches the private headers there; the PNG
+  # face's test builds images through lodepng itself, so it reaches that header
+  # too, as the codec library does.
   target_include_directories(snaggletooth_tests PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+  target_include_directories(snaggletooth_tests SYSTEM PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/lodepng>)
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
     # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the

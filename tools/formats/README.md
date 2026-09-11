@@ -25,8 +25,10 @@ Everything lives in `snaggletooth::formats`.
 | `IndexedImage` | An indexed image: per-pixel indexes, a palette, and the bit depth. |
 | `decodePng`, `encodePng` | The indexed PNG face over lodepng; refuses a non-indexed image. |
 | `encodeTiles`, `decodeTiles` | Planar tile bytes ↔ an indexed PNG sheet at the tile's depth. |
+| `encodeMode7Tiles` | Mode 7 tiles, a byte a pixel, → an 8-bit PNG sheet; a preview, never decoded. |
 | `encodePalette`, `decodePalette` | CGRAM words ↔ `.pal` text. |
 | `encodeTilemap`, `decodeTilemap` | BG map words ↔ `.map` text. |
+| `encodeMode7Map` | A Mode 7 map, a byte an entry, → `$XX` text thirty-two a line; a preview, never decoded. |
 | `encodeOam`, `decodeOam` | OAM bytes ↔ `.oam` text. |
 | `encodeHdma`, `decodeHdma` | An HDMA table ↔ `.hdma` text. |
 | `encodingReader` | Wraps an `assembler::Reader` so an included asset is decoded by extension. |
@@ -44,7 +46,9 @@ if (!png.ok()) { /* png.error names what was wrong */ }
 The library target is `snaggletooth_formats`; `tools/` is on its public include
 path. PNG encoding and decoding is [lodepng](../../third_party/lodepng/README.md),
 built as `snaggletooth_lodepng` and linked privately so no lodepng symbol reaches
-a header here. The library has no command line of its own.
+a header here. The library has no command line of its own: the cartridge
+disassembler writes a lifted file through it, and `snes_verify` and the two
+command-line assemblers read an included asset back through `encodingReader`.
 
 ## See also
 
@@ -52,3 +56,5 @@ a header here. The library has no command line of its own.
   grammar, worked examples, and the encoding reader.
 - [`../assembler/`](../assembler/README.md) — the assembler whose `Reader` the
   encoding reader wraps.
+- [`../rom/`](../rom/README.md) — the disassembler that writes the forms and the
+  verifier that reads them back.

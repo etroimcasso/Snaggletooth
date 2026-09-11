@@ -27,6 +27,23 @@ std::vector<std::uint8_t> unpack(const std::vector<unsigned char>& packed,
   return out;
 }
 
+// The reverse: one index per pixel packed to `depth` bits, most-significant
+// first, every scanline starting on a byte boundary.
+std::vector<unsigned char> pack(const std::vector<std::uint8_t>& indices, unsigned width, unsigned height,
+                                unsigned depth) {
+  const unsigned stride = (width * depth + 7u) / 8u;
+  std::vector<unsigned char> out(static_cast<std::size_t>(stride) * height, 0);
+  for (unsigned y = 0; y < height; ++y) {
+    for (unsigned x = 0; x < width; ++x) {
+      const unsigned bit = x * depth;
+      const unsigned byte = y * stride + bit / 8u;
+      const unsigned shift = 8u - depth - (bit % 8u);
+      out[byte] = static_cast<unsigned char>(out[byte] | (indices[static_cast<std::size_t>(y) * width + x] << shift));
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 PngImage decodePng(std::span<const std::uint8_t> file) {
@@ -81,11 +98,15 @@ Bytes encodePng(const IndexedImage& image) {
     }
   }
 
-  // The raw buffer is one index per byte; lodepng repacks it to the target depth
-  // and writes the palette as PLTE. auto_convert is off so the depth is honoured.
+  // The raw buffer is handed over already packed at the file's depth, with the
+  // same palette on both sides, so lodepng copies it as it is: a raw mode that
+  // differs from the file's would be converted pixel by pixel through a lookup
+  // of each colour in the palette, and a palette with two entries of one colour
+  // — a run's palette RAM usually has many — would fold every pixel of the
+  // second onto the first. auto_convert is off so the depth is honoured.
   lodepng::State state;
   state.info_raw.colortype = LCT_PALETTE;
-  state.info_raw.bitdepth = 8;
+  state.info_raw.bitdepth = image.bitDepth;
   state.info_png.color.colortype = LCT_PALETTE;
   state.info_png.color.bitdepth = image.bitDepth;
   state.encoder.auto_convert = 0;
@@ -97,7 +118,7 @@ Bytes encodePng(const IndexedImage& image) {
                         image.palette[i + 2], image.palette[i + 3]);
   }
 
-  std::vector<unsigned char> raw(image.indices.begin(), image.indices.end());
+  const std::vector<unsigned char> raw = pack(image.indices, image.width, image.height, image.bitDepth);
   std::vector<unsigned char> png;
   const unsigned err = lodepng::encode(png, raw, image.width, image.height, state);
   if (err) {

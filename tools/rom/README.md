@@ -30,9 +30,14 @@ files, where the trace began, and where it stopped; and the bytes the run saw
 the cartridge send from the image to the hardware — and the ones the code
 proves a channel was set up to send — as files of their own under `vram/`,
 `cgram/`, `oam/`, `apu/` and `hdma/` — a VRAM file under `maps/` or `tiles/`
-where the run saw the picture use every landing of it as one or the other. It
-writes no bank file and no sound file: `snes_render` writes those from the
-program files. The trace starts at the vectors and follows control flow across
+where the run saw the picture use every landing of it as one or the other —
+each in its editable form where the run's facts name one
+([docs/asset-formats.md](../../docs/asset-formats.md)): a tile sheet as an
+indexed PNG at the depth the picture used it, with the palette the run held; a
+palette, a tilemap, a sprite table and an HDMA table as text; and bytes with a
+preview beside them for a source a routine built its data from and for a Mode
+7 block. It writes no bank file and no sound file: `snes_render` writes those
+from the program files. The trace starts at the vectors and follows control flow across
 banks; the sound program is captured by booting the cartridge on the machine,
 matched back to the image bytes it was read from, and lifted from its listing
 as the banks are. A manifest already in
@@ -76,8 +81,9 @@ saw at every site are `seen` lines beside what the paths prove — see
 with the instruction that started it, the channel, the register it reached, the
 memory address it began at, its length and how many times the run saw it, as
 `moved` lines the manifest keeps, with where each landed on the other side of
-the port and what the PPU used that memory as at the first frame drawn after,
-as `landed` lines — see
+the port, what the PPU used that memory as at the first frame drawn after and
+at what depth, as `landed` lines, and how each HDMA table was walked, as
+`walked` lines — see
 [What a run moved](../../docs/snes-disassembler.md#what-a-run-moved) — and
 lifting every such range that begins in the image out of its bank into a file
 of its own, the bank file including it with `INCBIN` and the manifest recording
@@ -88,9 +94,13 @@ out of work RAM came from — by an engine, or by the CPU a store at a time: the
 image bytes each routine built it from as `origin` lines, each source lifted
 as a `staged` file with a `staged` line saying what was built from it, and
 every run of bytes the CPU carried from the image to a data register as a
-`streamed` line and a `stream` file holding the run its carrier read — see
+`streamed` line and a `stream` file holding the run its carrier read, each
+source with a preview of what the buffer built from it became, as `preview`
+lines — see
 [Where the bytes came from](../../docs/snes-disassembler.md#where-the-bytes-came-from). `--no-run`
-skips the run; `--run-seconds N` bounds it; `--input <script>` plays it,
+skips the run, and a tree written without one takes a sheet's depth and
+palette and a table's unit from the files already on disk; `--run-seconds N`
+bounds it; `--input <script>` plays it,
 replaying an [input script](../../docs/input-script.md) — which buttons are held
 on which port from which frame — into the controller ports, so the run reaches
 what a player would; `--input-dir <directory>` plays the script named for the
@@ -124,7 +134,7 @@ The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whol
 run, `captureUpload` for the boot alone, `placeBytes` for the count,
 `renderProgramFile`, `renderSoundProgramFile` and `renderManifest` for the
 three files, and `writeProject` for everything it writes, the lifted files
-(`AssetFile`) included. Full page:
+(`AssetFile`, each in its form) and the previews (`PreviewFile`) included. Full page:
 [docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
 grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 
@@ -167,7 +177,9 @@ snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
 Reads the directory's `project.snagifest`, assembles every file it names — the
-bank files with the 65816 dialect, the sound program with the SPC700 dialect —
+bank files with the 65816 dialect, the sound program with the SPC700 dialect,
+an included tile sheet or table read back to its bytes through the encoding
+reader of [`../formats/`](../formats/README.md) —
 places each range and each placed block where the manifest says, and compares the
 whole with the image. One line per file, one per run that differs with its first
 differing byte, then the totals and the verdict; the exit status is 0 only when

@@ -71,6 +71,17 @@ TEST(Png, PaletteSurvivesEncode) {
   EXPECT_EQ(out.palette, pal);
 }
 
+TEST(Png, TwoEntriesOfOneColourKeepTheirOwnIndexes) {
+  // A palette the run held: unused entries all black. The pixel that names
+  // the second black must come back as index 1, not folded onto index 0.
+  std::vector<std::uint8_t> pal(16 * 4, 0);
+  for (unsigned i = 0; i < 16; ++i) pal[i * 4 + 3] = 255;
+  IndexedImage in{4, 1, 4, {0, 1, 1, 0}, pal};
+  const IndexedImage out = roundTrip(in);
+  EXPECT_EQ(out.indices, in.indices);
+  EXPECT_EQ(out.palette, pal);
+}
+
 TEST(Png, TruecolourIsRefused) {
   // Force a real RGB PNG: with auto_convert on, lodepng would optimise a low-colour
   // image down to a palette, which is exactly what this test must not produce.

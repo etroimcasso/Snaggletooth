@@ -107,6 +107,16 @@ struct Cut {
   std::size_t length = 0;
 };
 
+// Whether a lifted file's path names an editable form — `.png`, `.pal`,
+// `.map`, `.oam`, `.hdma` — whose bytes the assembler decodes on include.
+bool encodedForm(const std::string& file) {
+  const std::size_t dot = file.find_last_of('.');
+  const std::size_t slash = file.find_last_of('/');
+  if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return false;
+  const std::string ext = file.substr(dot + 1);
+  return ext == "png" || ext == "pal" || ext == "map" || ext == "oam" || ext == "hdma";
+}
+
 // Every cut of a region, in address order.
 std::vector<Cut> cutsOf(const RenderInput& input, const RenderRegion& region) {
   std::vector<Cut> cuts;
@@ -405,7 +415,10 @@ std::string renderRegion(const RenderRegion& region, const RenderInput& input,
               .generic_string();
       out += "\n; ---- " + span + ": " + what + ", in " + asset.file + "\n";
       out += "        INCBIN \"" + included + "\"";
-      if (cut.length != asset.bytes) {
+      // An encoded file decodes to whole units — a tile sheet to whole tiles —
+      // so its include always says the length; a `.bin` says it only where a
+      // file split cuts across the file.
+      if (cut.length != asset.bytes || encodedForm(asset.file)) {
         out += ", " + std::to_string(cut.fileOffset) + ", " + std::to_string(cut.length);
       }
       out += "\n";

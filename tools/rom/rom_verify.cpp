@@ -6,6 +6,7 @@
 #include <iterator>
 
 #include "cpu65816/cpu65816_asm.h"
+#include "formats/reader.h"
 #include "spc700/spc700_asm.h"
 
 namespace snaggletooth::disasm {
@@ -83,8 +84,17 @@ void verifyBankFile(Rebuild& rebuild, CartridgeMap map, const SourceRegion& regi
     report.files.push_back(std::move(file));
     return;
   }
-  const assembler::Assembly assembly = assembler::assembleCpu65816(*source, region.file, read);
+  // An included asset is decoded to its bytes by its extension; one that does
+  // not decode is the bank file's error, with the reason beside the
+  // assembler's own diagnostic.
+  std::vector<assembler::Diagnostic> undecoded;
+  const assembler::Reader reader =
+      formats::encodingReader(read, [&](const std::string& reason) {
+        undecoded.push_back(assembler::Diagnostic{.file = region.file, .line = 0, .message = reason});
+      });
+  const assembler::Assembly assembly = assembler::assembleCpu65816(*source, region.file, reader);
   file.errors = assembly.errors;
+  file.errors.insert(file.errors.end(), undecoded.begin(), undecoded.end());
   if (!assembly.ok()) {
     report.files.push_back(std::move(file));
     return;

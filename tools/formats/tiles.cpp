@@ -88,6 +88,28 @@ Bytes encodeTiles(std::span<const std::uint8_t> planar, unsigned depth,
   return encodePng(image);
 }
 
+Bytes encodeMode7Tiles(std::span<const std::uint8_t> pixels, const std::vector<std::uint8_t>& palette) {
+  constexpr unsigned bytesPerTile = kTileWidth * kTileHeight;
+  const unsigned tileCount = static_cast<unsigned>((pixels.size() + bytesPerTile - 1) / bytesPerTile);
+  const unsigned rows = (tileCount + kTilesPerRow - 1) / kTilesPerRow;
+  IndexedImage image;
+  image.bitDepth = 8;
+  image.width = kTilesPerRow * kTileWidth;
+  image.height = rows * kTileHeight;
+  image.indices.assign(static_cast<std::size_t>(image.width) * image.height, 0);
+  image.palette = palette;
+  for (std::size_t i = 0; i < pixels.size(); ++i) {
+    const unsigned t = static_cast<unsigned>(i / bytesPerTile);
+    const unsigned within = static_cast<unsigned>(i % bytesPerTile);
+    const unsigned tileX = t % kTilesPerRow;
+    const unsigned tileY = t / kTilesPerRow;
+    const std::size_t at = (static_cast<std::size_t>(tileY) * kTileHeight + within / kTileWidth) * image.width +
+                           tileX * kTileWidth + within % kTileWidth;
+    image.indices[at] = pixels[i];
+  }
+  return encodePng(image);
+}
+
 Bytes decodeTiles(std::span<const std::uint8_t> png) {
   Bytes out;
   PngImage decoded = decodePng(png);

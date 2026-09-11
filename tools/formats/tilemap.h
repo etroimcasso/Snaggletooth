@@ -22,4 +22,9 @@ namespace snaggletooth::formats {
 // palette over 7, an unknown flag letter) is an error naming it.
 [[nodiscard]] Bytes decodeTilemap(const std::string& text);
 
+// Encodes a Mode 7 map — one byte an entry, the tile number — as text, each
+// entry `$XX`, thirty-two a line, one screen row. A preview only: nothing
+// decodes it back.
+[[nodiscard]] Text encodeMode7Map(std::span<const std::uint8_t> map);
+
 }  // namespace snaggletooth::formats
