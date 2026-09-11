@@ -17,7 +17,10 @@ std::vector<std::uint8_t> ramp(unsigned count) {
   std::vector<std::uint8_t> out;
   for (unsigned i = 0; i < count; ++i) {
     const std::uint8_t v = count <= 1 ? 0 : static_cast<std::uint8_t>(i * 255u / (count - 1));
-    out.insert(out.end(), {v, v, v, 255});
+    out.push_back(v);
+    out.push_back(v);
+    out.push_back(v);
+    out.push_back(255);
   }
   return out;
 }

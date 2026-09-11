@@ -31,7 +31,12 @@ assembler::Reader fixed(std::map<std::string, std::string> files) {
 
 std::vector<std::uint8_t> palette4() {
   std::vector<std::uint8_t> p;
-  for (int i = 0; i < 4; ++i) p.insert(p.end(), {0, 0, 0, 255});
+  for (int i = 0; i < 4; ++i) {
+    p.push_back(0);
+    p.push_back(0);
+    p.push_back(0);
+    p.push_back(255);
+  }
   return p;
 }
 
