@@ -198,7 +198,13 @@ std::optional<PortMemory> portMemory(std::uint32_t address) {
 // Where the port put one more byte, folded into a landing's extent.
 void foldLanding(std::optional<PortLanding>& landing, PortMemory memory, std::uint16_t at) {
   if (!landing || landing->memory != memory) {
-    landing = PortLanding{.memory = memory, .lowest = at, .highest = at, .shown = false, .areas = 0};
+    landing = PortLanding{.memory = memory,
+                          .lowest = at,
+                          .highest = at,
+                          .shown = false,
+                          .areas = 0,
+                          .depths = 0,
+                          .palette = std::nullopt};
     return;
   }
   landing->lowest = std::min(landing->lowest, at);
@@ -385,9 +391,8 @@ struct Recorder final : BusObserver, ir::CarrySink {
   std::vector<WalkedRange> walked;
 
   // The palette RAM at each drawn frame a VRAM landing was read at, each
-  // distinct one once, and where each is.
+  // distinct one once.
   std::vector<std::vector<std::uint8_t>> palettes;
-  std::map<std::vector<std::uint8_t>, std::size_t> paletteIndex;
 
   // A content carried out of an extent whose landing waits for a drawn frame.
   struct PendingContent {
@@ -482,12 +487,13 @@ struct Recorder final : BusObserver, ir::CarrySink {
   }
 
   // The palette RAM as it stands, interned: the index of the copy equal to it.
+  // A run holds few distinct copies, so they are searched, not indexed.
   std::size_t paletteNow() {
     const std::span<const std::uint8_t> cgram = machine.state().cgram;
     std::vector<std::uint8_t> copy(cgram.begin(), cgram.end());
-    const auto found = paletteIndex.find(copy);
-    if (found != paletteIndex.end()) return found->second;
-    paletteIndex.emplace(copy, palettes.size());
+    for (std::size_t i = 0; i < palettes.size(); ++i) {
+      if (palettes[i] == copy) return i;
+    }
     palettes.push_back(std::move(copy));
     return palettes.size() - 1u;
   }

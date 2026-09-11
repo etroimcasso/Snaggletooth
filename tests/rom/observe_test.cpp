@@ -1901,7 +1901,8 @@ TEST(RomStaged, AnExtentKeepsEachContentItWasCarriedOutWith) {
   // at four bits; built from the blob at $A500.
   const CarriedContent& tiles = buffer->contents[8];
   std::vector<std::uint8_t> expected;
-  for (const std::uint8_t value : {0x11u, 0x22u, 0x33u, 0x44u}) {
+  const std::uint8_t runs[4] = {0x11u, 0x22u, 0x33u, 0x44u};
+  for (const std::uint8_t value : runs) {
     for (int i = 0; i < 8; ++i) expected.push_back(value);
   }
   EXPECT_EQ(tiles.bytes, expected);

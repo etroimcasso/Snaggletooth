@@ -755,7 +755,13 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
   }
   if (choice.form == Form::Tiles) {
     if (request.observeRun) {
-      const std::optional<unsigned> depth = landingDepth(PortLanding{.depths = facts.depths});
+      const std::optional<unsigned> depth = landingDepth(PortLanding{.memory = PortMemory::Vram,
+                                                                     .lowest = 0,
+                                                                     .highest = 0,
+                                                                     .shown = true,
+                                                                     .areas = 0,
+                                                                     .depths = facts.depths,
+                                                                     .palette = std::nullopt});
       if (!depth) {
         choice.form = Form::Bin;
         choice.reason = facts.depths == 0u ? "no landing names its depth" : "its landings were read at two depths";
