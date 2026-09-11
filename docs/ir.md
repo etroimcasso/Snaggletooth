@@ -882,7 +882,7 @@ machine for
 `--seconds` of the master clock (sixty by default), replays `--input` into the
 controller ports exactly as `snes_disasm --input` does — so the run checked is
 the run that produced the tree — or finds the run named for the image under
-`--input-dir` as `snes_disasm --input-dir` does, and writes the report under `-o`:
+`--input-dir`, or that directory's `default.snaginput`, as `snes_disasm --input-dir` does, and writes the report under `-o`:
 `summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt`,
 `unlifted.txt` and `patched.txt`. The sound CPU's lines follow the main
 CPU's in `summary.txt`; a sound divergence names its site `apu $XXXX`, a

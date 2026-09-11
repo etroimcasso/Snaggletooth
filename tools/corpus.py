@@ -16,7 +16,8 @@ back into <output>/<name>-rebuilt<.smc|.sfc> and compares it with the image,
 its exit status the verdict; and — unless `--no-differential` —
 `snes_differential` replays the recorded run beside the interpreter, its report
 under <output>/<name>/differential/. `--input-dir` is handed to the two commands
-that run the cartridge; each finds the script named for the image itself.
+that run the cartridge; each finds the script named for the image itself, or the
+directory's `default.snaginput` when the image has none, so every image is played.
 `--no-run` skips the machine run in the disassembler (the trace alone takes
 seconds; the run takes about as long as it emulates), `--seconds` sets both the
 run's and the replay's length (sixty by default). `--jobs` runs that many
@@ -196,7 +197,7 @@ def main():
     parser.add_argument("--build", type=pathlib.Path, required=True, help="the build directory holding the commands")
     parser.add_argument("--no-run", action="store_true", help="trace without running the cartridge")
     parser.add_argument("--seconds", default="60", help="the run's and the replay's length in seconds of the master clock")
-    parser.add_argument("--input-dir", type=pathlib.Path, help="recorded runs, one <name>.txt per image, found by the commands")
+    parser.add_argument("--input-dir", type=pathlib.Path, help="recorded runs, <name>.snaginput per image or default.snaginput for the rest, found by the commands")
     parser.add_argument("--no-differential", action="store_true", help="skip the replay beside the interpreter")
     parser.add_argument("--facts", action="store_true", help="aggregate the hardware accesses, the transfers set up and the ranges moved")
     parser.add_argument("--routines", action="store_true", help="aggregate the routines")

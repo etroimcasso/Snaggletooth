@@ -25,7 +25,8 @@ entered, a level begun — and the trace reaches the code those things run.
 
 ## 1. Form
 
-A script is UTF-8 text, one line per change:
+A script is UTF-8 text in a file whose extension is `.snaginput`, one line per
+change:
 
 ```
 frame <n> <port> <buttons>    ; comment
@@ -103,8 +104,8 @@ refuses the whole script, naming the line:
 - a word that is not a button, a button named twice, or `none` beside a button.
 
 ```
-$ snes_disasm cartridge.sfc -o cartridge --input play.txt
-play.txt: line 4: `fire` is not a button; the buttons are b y select start up down left right a x l r, or none
+$ snes_disasm cartridge.sfc -o cartridge --input play.snaginput
+play.snaginput: line 4: `fire` is not a button; the buttons are b y select start up down left right a x l r, or none
 ```
 
 ## 6. Library
@@ -119,6 +120,14 @@ if (!script) std::cerr << error << "\n";
 
 request.input = *script;  // a CartridgeRequest; observeRun replays it
 ```
+
+A directory of scripts, as `--input-dir` takes, holds one file per image named
+`scriptPathFor(directory, image)` — the image's file name without its extension,
+spaces as underscores, `.snaginput` — and may hold a `default.snaginput`. `scriptFor` picks
+the one to play: the image's own when it exists, else `default.snaginput`, else the
+image's own path so a caller finds nothing to replay. A `default.snaginput` that leaves
+a title and a menu behind is what lets every cartridge in a corpus be played
+before any has a run of its own.
 
 `parseInputScript` returns the `InputScript` — its `events` in frame order, each
 an `InputEvent` of `frame`, `port` and the `Joypad` held — or nothing, with

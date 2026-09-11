@@ -139,7 +139,16 @@ std::filesystem::path scriptPathFor(const std::filesystem::path& directory,
   for (char& c : name) {
     if (c == ' ') c = '_';
   }
-  return directory / (name + ".txt");
+  return directory / (name + ".snaginput");
+}
+
+std::filesystem::path scriptFor(const std::filesystem::path& directory,
+                                const std::filesystem::path& image) {
+  const std::filesystem::path own = scriptPathFor(directory, image);
+  if (std::filesystem::is_regular_file(own)) return own;
+  const std::filesystem::path fallback = directory / "default.snaginput";
+  if (std::filesystem::is_regular_file(fallback)) return fallback;
+  return own;
 }
 
 }  // namespace snaggletooth::disasm

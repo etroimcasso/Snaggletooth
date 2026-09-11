@@ -125,9 +125,10 @@ cartridge runs, so the run plays the game rather than watching it; a script that
 cannot be read is refused with its line named, and `--input` under `--no-run` is
 refused as well, having nothing to replay into. `--input-dir <directory>` names a
 directory of recorded runs instead: the one named for the image — its file name
-without the extension, spaces as underscores, `.txt` — is replayed when it is
-there, and the ports stay empty when it is not. The two forms are not given
-together.
+without the extension, spaces as underscores, `.snaginput` — is replayed when it is
+there; the directory's `default.snaginput` is replayed when it is not, so every image
+in a corpus is played; and the ports stay empty only when the directory holds
+neither. The two forms are not given together.
 
 When the directory already holds a `project.snagifest`, its `entry`, `reached`,
 `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
@@ -478,10 +479,10 @@ bytes:
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
 1 files, 5 instructions, 2 entries, 0 stops
 program.snagir: 5 nodes
-$ cat play.txt
+$ cat play.snaginput
 frame 5 1 start
 frame 9 1 a
-$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1 --input play.txt
+$ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1 --input play.snaginput
 1 files, 11 instructions, 2 entries, 0 stops
 program.snagir: 11 nodes
 ```

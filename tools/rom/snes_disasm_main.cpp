@@ -28,8 +28,9 @@
 // it; --run-seconds bounds it (sixty by default); --input replays a recorded run
 // into the controller ports while it goes, so the run reaches what a player
 // would; --input-dir names a directory of recorded runs, and the one named for
-// the image (`rom/input_script.h`, `scriptPathFor`) is replayed when it is
-// there and the ports stay empty when it is not.
+// the image (`rom/input_script.h`, `scriptFor`) is replayed when it is there,
+// the directory's `default.snaginput` when it is not, and the ports stay empty only
+// when the directory holds neither.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
@@ -159,12 +160,12 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (!inputDir.empty()) {
-    const std::filesystem::path script = snaggletooth::disasm::scriptPathFor(inputDir, imagePath);
+    const std::filesystem::path script = snaggletooth::disasm::scriptFor(inputDir, imagePath);
     if (std::filesystem::is_regular_file(script)) {
       inputPath = script.string();
       std::cout << "replaying " << script.string() << "\n";
     } else {
-      std::cout << "no recorded run at " << script.string() << "; the ports stay empty\n";
+      std::cout << "no recorded run at " << script.string() << " and no default.snaginput beside it; the ports stay empty\n";
     }
   }
 

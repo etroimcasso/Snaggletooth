@@ -94,11 +94,12 @@ skips the run; `--run-seconds N` bounds it; `--input <script>` plays it,
 replaying an [input script](../../docs/input-script.md) — which buttons are held
 on which port from which frame — into the controller ports, so the run reaches
 what a player would; `--input-dir <directory>` plays the script named for the
-image under that directory when there is one. `rom/input_script.h` reads the
-script (`parseInputScript`), says what a port holds at a frame
-(`InputScript::padAt`), and names the file a directory keeps for an image
-(`scriptPathFor`: the image's name without its extension, spaces as
-underscores, `.txt`).
+image under that directory when there is one, and the directory's `default.snaginput`
+when there is not. `rom/input_script.h` reads the script (`parseInputScript`),
+says what a port holds at a frame (`InputScript::padAt`), names the file a
+directory keeps for an image (`scriptPathFor`: the image's name without its
+extension, spaces as underscores, `.snaginput`), and picks the one to play
+(`scriptFor`: the image's own, else `default.snaginput`).
 
 The facts it attaches to addresses — the hardware each instruction reaches, the
 DMA transfers those add up to (one per start, with the channel's registers as
