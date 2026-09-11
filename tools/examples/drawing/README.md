@@ -18,12 +18,21 @@ HDMA table of unit 2 — one entry of two lines, one of three lines repeated,
 then the end — to the window registers, and channel 2 on an indirect table
 of unit 1 to the brightness register, whose two entries point at a block of
 one byte and a block of three; and the vertical-blank interrupt on. On the
-second frame the handler decompresses a run-length blob into thirty-two
-bytes at `$7E:1000` and sends them to word `$1200`, inside BG1's name base,
-then decompresses a second blob into the same thirty-two bytes and sends
-them to the palette at entry sixteen. On the third it switches to Mode 7 and
-sends a block of 128 bytes, a map in its even bytes and tiles in its odd, to
-word `$0000`.
+first and the second frames the handler fills thirty-two bytes at `$7E:1000`
+from run-length blobs and sends them out ten times through that one buffer,
+six on the first frame and four on the second, so each frame's sends fit its
+vertical blank: a blob of two parts, each part unpacked and sent to word
+`$1300` inside BG1's name base; twenty-four bytes unpacked from one blob and
+eight from another at a lower address, sent there together; sixteen from
+each of two blobs, sent there together; a second blob of two parts, its first
+part sent to word `$5100` inside BG3's name base and its second to `$1300`;
+then, on the second frame, twenty-four bytes the handler clears itself and
+eight unpacked from a blob, sent to `$1300` together; thirty-two bytes each
+of which adds two bytes of one blob to one of another, sent to `$1300`; a
+blob sent to word `$1200`; and a blob sent to the palette at entry sixteen.
+On the third it
+switches to Mode 7 and sends a block of 128 bytes, a map in its even bytes
+and tiles in its odd, to word `$0000`.
 
 What it shows: a `landed` line's `depth` — 4 for the name base BG1 and BG2
 share, 2 for BG3's, 4 for the sprite tiles, 8 under Mode 7, `none` for a
@@ -33,10 +42,18 @@ for a sheet read after the handler had written more of it; `walked` lines
 for both tables and the indirect block, with the unit the channel's transfer
 pattern set and the form; a tile sheet at each depth, a `.pal`, a `.map` with
 every flag, an `.oam` of a whole table, a `.hdma` under each form, and the
-indirect block left as bytes; two blobs that are the sources of what one
-buffer held, each with a preview of what it became — a tile sheet, a
-palette — and the Mode 7 block with a preview of its tiles and one of its
-map; and the bank file including every encoded file with its length.
+indirect block left as bytes; eleven blobs that are the sources of what one
+buffer held, and the previews beside them — a source whose two contents
+went to the tiles has one sheet of both, a source that supplied most of a
+content owns its preview while the source that supplied the rest has none,
+two sources that supplied a content equally give it to the lower address, a
+source whose contents went to tiles of two depths has one sheet at the
+deeper, a source that supplied eight bytes of a buffer the handler cleared
+has none since the handler made more of it, a source that supplied two of
+every summed byte's three image bytes owns that buffer, and the blob sent to
+the palette has a `.pal` — the Mode 7 block with
+a preview of its tiles and one of its map; and the bank file including every
+encoded file with its length.
 
 Read by `tests/rom/observe_test.cpp`, `tests/rom/rom_disasm_test.cpp` and
 `tests/rom/verify_test.cpp`; the source of the `walked` and `preview` lines

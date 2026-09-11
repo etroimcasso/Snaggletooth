@@ -182,7 +182,7 @@ cartridge/
   oam/00_9300.oam
   hdma/00_9700.hdma
   staged/00_A500.bin
-  staged/00_A500-1.png
+  staged/00_A500-tiles.png
 ```
 
 **One file per bank.** Each `bank_XX.asm` covers the ROM window of one bank
@@ -1308,8 +1308,8 @@ the form needs and the file is written as: a sheet's `depth` and `palette`
 (RGBA quadruples), a table's `unit` and `indirect`, and `written`, the bytes
 that go to disk — the form's encoding, or the bytes themselves. Each
 `PreviewFile` is its path, the lifted file it is `of`, its `form` as the
-`preview` line names it, the extent of work RAM (`memory`, `bytes`) for a
-source's preview, and its `written` bytes. `CartridgeRequest::assets` is the
+`preview` line names it, how many distinct `contents` a source's preview
+holds, and its `written` bytes. `CartridgeRequest::assets` is the
 `ManifestAsset`s read back from the
 manifest — a path with the first address, length and classes it names — which
 give a file lifted again its path, and `CartridgeRequest::readFile` is a

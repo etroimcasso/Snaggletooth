@@ -79,7 +79,7 @@ inline const std::vector<Example>& examples() {
       {"staging", "ranges built in work RAM every way the shadow has a rule for, then sent to the hardware", &stagingImage},
       {"declaring", "transfers set up and started several times in one stretch of code, and five the code proves that the run never takes", &declaringImage},
       {"landing", "uploads to every video memory in forced blank, the bases set afterwards, then a base flipped behind an upload, Mode 7, and an upload no frame draws", &landingImage},
-      {"drawing", "one of everything an editable form has a grammar for: tile sheets at three depths, a palette, a tilemap, a sprite table, two HDMA tables, a blob decompressed twice through one buffer, and a Mode 7 block", &drawingImage},
+      {"drawing", "one of everything an editable form has a grammar for: tile sheets at three depths, a palette, a tilemap, a sprite table, two HDMA tables, eleven blobs unpacked through one buffer, and a Mode 7 block", &drawingImage},
   };
   return all;
 }

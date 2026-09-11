@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "examples/example_cartridges.h"
@@ -1956,8 +1957,17 @@ TEST(RomLandedFiles, EachFileIsWrittenInItsFormAndGivesItsBytesBack) {
                        "hdma/00_A400.hdma",    // the direct table
                        "hdma/00_A410.hdma",    // the indirect table
                        "hdma/00_A420.bin",     // the block its entries point at: data, not a table
-                       "staged/00_A500.bin",   // a source a routine built its data from
-                       "staged/00_A520.bin",   // the other
+                       "staged/00_A500.bin",   // a source a routine built its data from: the blob sent to the tiles
+                       "staged/00_A520.bin",   // the blob sent to the palette
+                       "staged/00_A540.bin",   // the blob of two parts
+                       "staged/00_A560.bin",   // the blob of eight
+                       "staged/00_A580.bin",   // and of twenty-four, sent with it
+                       "staged/00_A5A0.bin",   // the two blobs of sixteen
+                       "staged/00_A5B0.bin",
+                       "staged/00_A5C0.bin",   // the blob of two parts sent at two depths
+                       "staged/00_A5E0.bin",   // the eight bytes after twenty-four the routine cleared
+                       "staged/00_A5E8.bin",   // two bytes of every summed byte
+                       "staged/00_A5F4.bin",   // and the third
                        "vram/00_A600.bin",     // the Mode 7 block
                    }))
       << renderManifest(d);
@@ -2011,8 +2021,8 @@ TEST(RomLandedFiles, ATileSheetCarriesItsDepthAndTheRunsPalette) {
   ASSERT_TRUE(image.ok()) << image.error;
   EXPECT_EQ(image.image.bitDepth, 4u);
   EXPECT_EQ(image.image.palette, fourBit->palette);
-  EXPECT_EQ(image.image.width, 128u);
-  EXPECT_EQ(image.image.height, 8u) << "three tiles and a half on one row";
+  EXPECT_EQ(image.image.width, 32u) << "as wide as its tiles: three and a half is four";
+  EXPECT_EQ(image.image.height, 8u) << "on one row";
   // A file the palette RAM colours the other way stays exact: every other
   // entry of the sprite palette is one colour, and every pixel keeps its index.
   const formats::Bytes back = formats::decodeTiles(sprites->written);
@@ -2055,9 +2065,11 @@ TEST(RomLandedFiles, TheWalkedAndPreviewLinesAreWrittenAndAreKnownKinds) {
             std::string::npos);
   EXPECT_NE(manifest.find("walked   $00:81A8 channel 2 memory $00:A420 bytes 4 as indirect unit 1 indirect times "),
             std::string::npos);
-  EXPECT_NE(manifest.find("preview  staged/00_A500-1.png of staged/00_A500.bin at $7E:1000 bytes 32 as tiles\n"),
+  EXPECT_NE(manifest.find("preview  staged/00_A500-tiles.png of staged/00_A500.bin as tiles contents 1\n"),
             std::string::npos) << manifest;
-  EXPECT_NE(manifest.find("preview  staged/00_A520-1.pal of staged/00_A520.bin at $7E:1000 bytes 32 as palette\n"),
+  EXPECT_NE(manifest.find("preview  staged/00_A520-palette.pal of staged/00_A520.bin as palette contents 1\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("preview  staged/00_A540-tiles.png of staged/00_A540.bin as tiles contents 2\n"),
             std::string::npos);
   EXPECT_NE(manifest.find("preview  vram/00_A600-tiles.png of vram/00_A600.bin as mode7-tiles\n"), std::string::npos);
   EXPECT_NE(manifest.find("preview  vram/00_A600-map.map of vram/00_A600.bin as mode7-map\n"), std::string::npos);
@@ -2070,53 +2082,191 @@ TEST(RomLandedFiles, TheWalkedAndPreviewLinesAreWrittenAndAreKnownKinds) {
                   .has_value())
       << error;
   EXPECT_TRUE(parseManifest("preview  vram/x-map.map of vram/x.bin as mode7-map\n", error).has_value()) << error;
+  EXPECT_TRUE(parseManifest("preview  staged/x-tiles.png of staged/x.bin as tiles contents 3\n", error).has_value())
+      << error;
   EXPECT_FALSE(parseManifest("walk     $00:81A8\n", error).has_value());
 }
 
-TEST(RomLandedFiles, APreviewIsWrittenPerContentBesideItsSource) {
+namespace {
+
+const PreviewFile* previewNamed(const CartridgeDisassembly& d, std::string_view file) {
+  for (const PreviewFile& preview : d.previews) {
+    if (preview.file == file) return &preview;
+  }
+  return nullptr;
+}
+
+std::vector<std::string> previewFiles(const CartridgeDisassembly& d) {
+  std::vector<std::string> files;
+  for (const PreviewFile& preview : d.previews) files.push_back(preview.file);
+  return files;
+}
+
+}  // namespace
+
+TEST(RomLandedFiles, APreviewIsWrittenPerSourceAndFormBesideItsSource) {
   const CartridgeDisassembly d = drawingLift();
-  ASSERT_EQ(d.previews.size(), 4u) << renderManifest(d);
+  EXPECT_EQ(previewFiles(d), (std::vector<std::string>{
+                                 "staged/00_A500-tiles.png",    // the blob sent to the tiles
+                                 "staged/00_A520-palette.pal",  // the blob sent to the palette
+                                 "staged/00_A540-tiles.png",    // the blob of two parts: one sheet of both
+                                 "staged/00_A580-tiles.png",    // the blob of twenty-four owns the content it shared
+                                 "staged/00_A5A0-tiles.png",    // of the two blobs of sixteen, the lower address
+                                 "staged/00_A5C0-tiles.png",    // the blob sent at two depths: one sheet at the deeper
+                                 "staged/00_A5E8-tiles.png",    // the blob two of every summed byte's three came from
+                                 "vram/00_A600-tiles.png",      // the Mode 7 block
+                                 "vram/00_A600-map.map",
+                             }))
+      << renderManifest(d);
   // The first blob's content went to tiles: an indexed PNG of the thirty-two
-  // bytes it was unpacked into, at BG1's depth, the palette the run held.
-  const PreviewFile& tiles = d.previews[0];
-  EXPECT_EQ(tiles.file, "staged/00_A500-1.png");
-  EXPECT_EQ(tiles.of, "staged/00_A500.bin");
-  EXPECT_EQ(tiles.form, "tiles");
-  EXPECT_EQ(tiles.memory, 0x7E1000u);
-  EXPECT_EQ(tiles.bytes, 32u);
-  const formats::Bytes unpacked = formats::decodeTiles(tiles.written);
+  // bytes it was unpacked into, at BG1's depth, the palette the run held, one
+  // tile wide.
+  const PreviewFile* tiles = previewNamed(d, "staged/00_A500-tiles.png");
+  ASSERT_NE(tiles, nullptr);
+  EXPECT_EQ(tiles->of, "staged/00_A500.bin");
+  EXPECT_EQ(tiles->form, "tiles");
+  EXPECT_EQ(tiles->contents, 1u);
+  const formats::PngImage one = formats::decodePng(tiles->written);
+  ASSERT_TRUE(one.ok()) << one.error;
+  EXPECT_EQ(one.image.bitDepth, 4u);
+  EXPECT_EQ(one.image.width, 8u) << "one 4bpp tile";
+  const formats::Bytes unpacked = formats::decodeTiles(tiles->written);
   ASSERT_TRUE(unpacked.ok()) << unpacked.error;
-  ASSERT_GE(unpacked.bytes.size(), 32u) << "a sheet decodes to whole rows of sixteen tiles";
+  ASSERT_EQ(unpacked.bytes.size(), 32u);
   for (std::size_t i = 0; i < 32; ++i) EXPECT_EQ(unpacked.bytes[i], 0x11u * (i / 8u + 1u)) << i;
   // The second blob's went to the palette.
-  const PreviewFile& palette = d.previews[1];
-  EXPECT_EQ(palette.file, "staged/00_A520-1.pal");
-  EXPECT_EQ(palette.of, "staged/00_A520.bin");
-  EXPECT_EQ(palette.form, "palette");
-  const formats::Bytes words = formats::decodePalette(textOf(palette.written));
+  const PreviewFile* palette = previewNamed(d, "staged/00_A520-palette.pal");
+  ASSERT_NE(palette, nullptr);
+  EXPECT_EQ(palette->of, "staged/00_A520.bin");
+  EXPECT_EQ(palette->form, "palette");
+  EXPECT_EQ(palette->contents, 1u);
+  const formats::Bytes words = formats::decodePalette(textOf(palette->written));
   ASSERT_TRUE(words.ok());
   ASSERT_EQ(words.bytes.size(), 32u);
   EXPECT_EQ(words.bytes[0], 0x1Fu);
   EXPECT_EQ(words.bytes[4], 0x7Cu);
   // The Mode 7 block: its odd bytes as an 8-bit sheet, its even bytes as
-  // tile numbers thirty-two a line.
-  const PreviewFile& mode7Tiles = d.previews[2];
-  EXPECT_EQ(mode7Tiles.file, "vram/00_A600-tiles.png");
-  EXPECT_EQ(mode7Tiles.form, "mode7-tiles");
-  EXPECT_FALSE(mode7Tiles.memory.has_value());
-  const formats::PngImage sheet = formats::decodePng(mode7Tiles.written);
+  // tile numbers thirty-two a line; neither counts contents.
+  const PreviewFile* mode7Tiles = previewNamed(d, "vram/00_A600-tiles.png");
+  ASSERT_NE(mode7Tiles, nullptr);
+  EXPECT_EQ(mode7Tiles->form, "mode7-tiles");
+  EXPECT_EQ(mode7Tiles->contents, 0u);
+  const formats::PngImage sheet = formats::decodePng(mode7Tiles->written);
   ASSERT_TRUE(sheet.ok()) << sheet.error;
   EXPECT_EQ(sheet.image.bitDepth, 8u);
   EXPECT_EQ(sheet.image.indices[0], static_cast<std::uint8_t>((1u * 71u + 3u) & 0xFFu)) << "the first odd byte";
   EXPECT_EQ(sheet.image.indices[1], static_cast<std::uint8_t>((3u * 71u + 3u) & 0xFFu));
-  const PreviewFile& mode7Map = d.previews[3];
-  EXPECT_EQ(mode7Map.file, "vram/00_A600-map.map");
-  EXPECT_EQ(mode7Map.form, "mode7-map");
-  EXPECT_EQ(textOf(mode7Map.written).substr(0, 12), "$00 $01 $02 ");
-  EXPECT_EQ(std::count(mode7Map.written.begin(), mode7Map.written.end(), '\n'), 2) << "sixty-four entries, two rows";
+  const PreviewFile* mode7Map = previewNamed(d, "vram/00_A600-map.map");
+  ASSERT_NE(mode7Map, nullptr);
+  EXPECT_EQ(mode7Map->form, "mode7-map");
+  EXPECT_EQ(mode7Map->contents, 0u);
+  EXPECT_EQ(textOf(mode7Map->written).substr(0, 12), "$00 $01 $02 ");
+  EXPECT_EQ(std::count(mode7Map->written.begin(), mode7Map->written.end(), '\n'), 2) << "sixty-four entries, two rows";
   // Nothing is placed twice: a preview is not a source.
   const Placement placement = placeBytes(d);
   EXPECT_EQ(placement.placedTwice, 0u);
+}
+
+TEST(RomLandedFiles, ASourcesContentsOfOneFormCombineInTheOrderCarried) {
+  const CartridgeDisassembly d = drawingLift();
+  // The blob of two parts was unpacked a part at a time into one buffer and
+  // each part sent to the tiles: two contents, one sheet, the first part's
+  // tile then the second's.
+  const PreviewFile* both = previewNamed(d, "staged/00_A540-tiles.png");
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->contents, 2u);
+  const formats::PngImage image = formats::decodePng(both->written);
+  ASSERT_TRUE(image.ok()) << image.error;
+  EXPECT_EQ(image.image.width, 16u) << "two tiles side by side";
+  EXPECT_EQ(image.image.height, 8u);
+  const formats::Bytes back = formats::decodeTiles(both->written);
+  ASSERT_TRUE(back.ok()) << back.error;
+  ASSERT_EQ(back.bytes.size(), 64u);
+  const std::uint8_t first[4] = {0x12u, 0x34u, 0x56u, 0x78u};
+  const std::uint8_t second[4] = {0x9Au, 0xBCu, 0xDEu, 0xF0u};
+  for (std::size_t i = 0; i < 32; ++i) {
+    EXPECT_EQ(back.bytes[i], first[i / 8u]) << i;
+    EXPECT_EQ(back.bytes[32u + i], second[i / 8u]) << i;
+  }
+}
+
+TEST(RomLandedFiles, AContentBelongsToTheSourceThatSuppliedMostOfIt) {
+  const CartridgeDisassembly d = drawingLift();
+  // Twenty-four bytes from one blob and eight from another were sent
+  // together: the content is the first blob's, whose bytes are three of its
+  // four, and the second blob — at the lower address, so first by address —
+  // has no preview.
+  const PreviewFile* most = previewNamed(d, "staged/00_A580-tiles.png");
+  ASSERT_NE(most, nullptr) << renderManifest(d);
+  EXPECT_EQ(most->contents, 1u);
+  EXPECT_EQ(previewNamed(d, "staged/00_A560-tiles.png"), nullptr);
+  const formats::Bytes back = formats::decodeTiles(most->written);
+  ASSERT_TRUE(back.ok()) << back.error;
+  ASSERT_EQ(back.bytes.size(), 32u);
+  EXPECT_EQ(back.bytes[0], 0x21u);
+  EXPECT_EQ(back.bytes[23], 0x65u);
+  EXPECT_EQ(back.bytes[24], 0x87u) << "the eight bytes the other blob supplied are in the picture";
+  // Sixteen from each of two blobs: equal shares go to the lower address.
+  const PreviewFile* lower = previewNamed(d, "staged/00_A5A0-tiles.png");
+  ASSERT_NE(lower, nullptr);
+  EXPECT_EQ(lower->contents, 1u);
+  EXPECT_EQ(previewNamed(d, "staged/00_A5B0-tiles.png"), nullptr);
+  const formats::Bytes tied = formats::decodeTiles(lower->written);
+  ASSERT_TRUE(tied.ok());
+  ASSERT_EQ(tied.bytes.size(), 32u);
+  EXPECT_EQ(tied.bytes[0], 0xA9u);
+  EXPECT_EQ(tied.bytes[16], 0xEDu);
+  // Twenty-four bytes the routine cleared itself and eight from a blob: the
+  // routine made more of the content than the blob did, so it is the
+  // routine's and the blob shows nothing.
+  EXPECT_EQ(previewNamed(d, "staged/00_A5E0-tiles.png"), nullptr) << renderManifest(d);
+  // Every byte of the summed buffer came from three image bytes, two in one
+  // blob and one in another, at the higher address: byte by byte the first
+  // blob holds the most of the origin, so the content is its.
+  const PreviewFile* summed = previewNamed(d, "staged/00_A5E8-tiles.png");
+  ASSERT_NE(summed, nullptr) << renderManifest(d);
+  EXPECT_EQ(summed->contents, 1u);
+  EXPECT_EQ(previewNamed(d, "staged/00_A5F4-tiles.png"), nullptr);
+  const formats::Bytes sums = formats::decodeTiles(summed->written);
+  ASSERT_TRUE(sums.ok());
+  ASSERT_EQ(sums.bytes.size(), 32u);
+  EXPECT_EQ(sums.bytes[0], 0x03u);
+  EXPECT_EQ(sums.bytes[7], 0x88u);
+  // Every source is still lifted: a source without a preview is a file all the same.
+  EXPECT_NE(assetNamed(d, "staged/00_A560.bin"), nullptr);
+  EXPECT_NE(assetNamed(d, "staged/00_A5B0.bin"), nullptr);
+  EXPECT_NE(assetNamed(d, "staged/00_A5E0.bin"), nullptr);
+}
+
+TEST(RomLandedFiles, ContentsOfTwoDepthsShareOneSheetAtTheDeeper) {
+  const CartridgeDisassembly d = drawingLift();
+  // The blob's first part went to BG3's name base at two bits — two tiles —
+  // and its second to BG1's at four — one tile: one sheet of three 4bpp
+  // tiles, the two-bit tiles' planes above their own zero, with the palette
+  // of the four-bit content.
+  const PreviewFile* sheet = previewNamed(d, "staged/00_A5C0-tiles.png");
+  ASSERT_NE(sheet, nullptr) << renderManifest(d);
+  EXPECT_EQ(sheet->contents, 2u);
+  const formats::PngImage image = formats::decodePng(sheet->written);
+  ASSERT_TRUE(image.ok()) << image.error;
+  EXPECT_EQ(image.image.bitDepth, 4u);
+  EXPECT_EQ(image.image.width, 24u) << "three tiles";
+  EXPECT_EQ(image.image.height, 8u);
+  const AssetFile* fourBit = assetNamed(d, "tiles/00_9000.png");
+  ASSERT_NE(fourBit, nullptr);
+  EXPECT_EQ(image.image.palette, fourBit->palette) << "palette 0 of four bits, as the run held it";
+  const formats::Bytes back = formats::decodeTiles(sheet->written);
+  ASSERT_TRUE(back.ok()) << back.error;
+  ASSERT_EQ(back.bytes.size(), 96u);
+  const std::uint8_t first[4] = {0x0Au, 0x0Bu, 0x0Cu, 0x0Du};
+  const std::uint8_t second[4] = {0x1Eu, 0x2Fu, 0x3Au, 0x4Bu};
+  for (std::size_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(back.bytes[i], first[i / 8u]) << i << ": the first two-bit tile's planes 0 and 1";
+    EXPECT_EQ(back.bytes[16u + i], 0u) << i << ": its planes 2 and 3";
+    EXPECT_EQ(back.bytes[32u + i], first[2u + i / 8u]) << i << ": the second two-bit tile";
+    EXPECT_EQ(back.bytes[48u + i], 0u) << i;
+  }
+  for (std::size_t i = 0; i < 32; ++i) EXPECT_EQ(back.bytes[64u + i], second[i / 8u]) << i << ": the four-bit tile whole";
 }
 
 TEST(RomLandedFiles, TheBankFileIncludesAnEncodedFileWithItsLength) {

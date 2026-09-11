@@ -1709,7 +1709,7 @@ TEST(RomLanded, ALandingCarriesTheDepthOfItsTileAreas) {
   const LandedRange* sprites = drawingLanding(run, 0x00809Au);
   const LandedRange* palette = drawingLanding(run, 0x0080CAu);
   const LandedRange* map = drawingLanding(run, 0x008100u);
-  const LandedRange* mode7 = drawingLanding(run, 0x0083E5u);
+  const LandedRange* mode7 = drawingLanding(run, 0x0083EEu);
   ASSERT_NE(fourBit, nullptr);
   ASSERT_NE(twoBit, nullptr);
   ASSERT_NE(sprites, nullptr);
@@ -1844,10 +1844,62 @@ TEST(RomStaged, AnExtentKeepsEachContentItWasCarriedOutWith) {
   const RunObservation run = observe(drawingImage(), 4u * kFrame);
   const StagedRange* buffer = stagedAt(run.staged, 0x7E1000u, 32);
   ASSERT_NE(buffer, nullptr);
-  ASSERT_EQ(buffer->contents.size(), 2u);
-  // First the tiles: four runs of eight, sent to VRAM, landing in BG1's name
-  // base at four bits; built from the first blob.
-  const CarriedContent& tiles = buffer->contents[0];
+  // Ten contents, in the order the run carried them: the two parts of the
+  // two-part blob, the twenty-four-and-eight, the sixteen-and-sixteen, the two
+  // parts of the blob sent at two depths, the twenty-four the routine cleared
+  // with eight from a blob, the sums of two blobs, then the blob sent to the
+  // tiles and the blob sent to the palette.
+  ASSERT_EQ(buffer->contents.size(), 10u);
+  for (std::size_t i = 0; i < 10; ++i) EXPECT_EQ(buffer->contents[i].order, i) << "carried in this order";
+  EXPECT_EQ(buffer->contents[0].bytes[0], 0x12u);
+  EXPECT_EQ(buffer->contents[1].bytes[0], 0x9Au);
+  EXPECT_EQ(buffer->contents[2].bytes[0], 0x21u);
+  EXPECT_EQ(buffer->contents[2].bytes[24], 0x87u);
+  EXPECT_EQ(buffer->contents[3].bytes[0], 0xA9u);
+  EXPECT_EQ(buffer->contents[3].bytes[16], 0xEDu);
+  EXPECT_EQ(buffer->contents[4].bytes[0], 0x0Au);
+  EXPECT_EQ(landingDepth(*buffer->contents[4].landing), 2u) << "BG3's name base";
+  EXPECT_EQ(buffer->contents[5].bytes[0], 0x1Eu);
+  EXPECT_EQ(landingDepth(*buffer->contents[5].landing), 4u) << "BG1's";
+  // The twenty-four-and-eight was built from two blobs: one value byte of the
+  // blob at $A560 and three of the blob at $A580, a comb of four — and byte
+  // by byte, three runs of eight from the one blob then a run of eight from
+  // the other.
+  ASSERT_EQ(buffer->contents[2].origin.image.size(), 4u);
+  EXPECT_EQ(buffer->contents[2].origin.image[0].first, 0x2561u);
+  EXPECT_EQ(buffer->contents[2].origin.image[1].first, 0x2581u);
+  EXPECT_EQ(buffer->contents[2].origin.image[3].first, 0x2585u);
+  ASSERT_EQ(buffer->contents[2].byteOrigins.size(), 4u);
+  EXPECT_EQ(buffer->contents[2].byteOrigins[0].bytes, 8u);
+  ASSERT_EQ(buffer->contents[2].byteOrigins[0].origin.image.size(), 1u);
+  EXPECT_EQ(buffer->contents[2].byteOrigins[0].origin.image[0].first, 0x2581u);
+  EXPECT_EQ(buffer->contents[2].byteOrigins[2].origin.image[0].first, 0x2585u);
+  EXPECT_EQ(buffer->contents[2].byteOrigins[3].bytes, 8u);
+  EXPECT_EQ(buffer->contents[2].byteOrigins[3].origin.image[0].first, 0x2561u);
+  // The twenty-four the routine cleared have no origin; the eight after them
+  // are the blob at $A5E0's.
+  const CarriedContent& cleared = buffer->contents[6];
+  EXPECT_EQ(cleared.bytes[0], 0u);
+  EXPECT_EQ(cleared.bytes[24], 0xC3u);
+  ASSERT_EQ(cleared.byteOrigins.size(), 2u);
+  EXPECT_EQ(cleared.byteOrigins[0].bytes, 24u);
+  EXPECT_TRUE(cleared.byteOrigins[0].origin.empty());
+  EXPECT_EQ(cleared.byteOrigins[1].bytes, 8u);
+  ASSERT_EQ(cleared.byteOrigins[1].origin.image.size(), 1u);
+  EXPECT_EQ(cleared.byteOrigins[1].origin.image[0].first, 0x25E1u);
+  // Every summed byte adds two bytes of the blob at $A5E8 to one of the blob
+  // at $A5F4: its own origin is three image bytes, and no two bytes share one.
+  const CarriedContent& summed = buffer->contents[7];
+  EXPECT_EQ(summed.bytes[0], 0x03u);
+  EXPECT_EQ(summed.bytes[7], 0x88u);
+  ASSERT_EQ(summed.byteOrigins.size(), 32u);
+  EXPECT_EQ(summed.byteOrigins[0].bytes, 1u);
+  EXPECT_EQ(summed.byteOrigins[0].origin.imageBytes(), 3u);
+  EXPECT_EQ(summed.byteOrigins[0].origin.image.front().first, 0x25E8u);
+  EXPECT_EQ(summed.byteOrigins[0].origin.image.back().first, 0x25F4u);
+  // The tiles: four runs of eight, sent to VRAM, landing in BG1's name base
+  // at four bits; built from the blob at $A500.
+  const CarriedContent& tiles = buffer->contents[8];
   std::vector<std::uint8_t> expected;
   for (const std::uint8_t value : {0x11u, 0x22u, 0x33u, 0x44u}) {
     for (int i = 0; i < 8; ++i) expected.push_back(value);
@@ -1864,8 +1916,8 @@ TEST(RomStaged, AnExtentKeepsEachContentItWasCarriedOutWith) {
   ASSERT_EQ(tiles.origin.image.size(), 4u);
   EXPECT_EQ(tiles.origin.image.front().first, 0x2501u);
   EXPECT_EQ(tiles.origin.image.back().first, 0x2507u);
-  // Then the palette, built from the second blob into the same bytes.
-  const CarriedContent& palette = buffer->contents[1];
+  // Then the palette, built from the blob at $A520 into the same bytes.
+  const CarriedContent& palette = buffer->contents[9];
   EXPECT_EQ(palette.bytes.size(), 32u);
   EXPECT_EQ(palette.bytes[0], 0x1Fu);
   EXPECT_EQ(palette.bytes[31], 0x55u);

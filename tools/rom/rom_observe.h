@@ -288,9 +288,19 @@ struct PortLanding {
 // class of the register they went to and what the carry was to the engine — a
 // transfer, a table, an indirect block, or the CPU's own stores (`Stream`) —
 // where they landed on the other side of the port, read as a range's landing
-// is, and, for a table, the unit and the form the engine walked it under. A
-// buffer a decoder fills twice from one source is two contents; a table the
-// engine walks every frame from one buffer is one.
+// is, for a table, the unit and the form the engine walked it under, the
+// origin of each of its bytes on its own — as runs of consecutive bytes with
+// one origin, in address order, which is what says how much of the content
+// each source supplied and how much the routine made itself — and the carry's
+// place in the run's order of carries, from zero, so contents from several
+// extents can be put in the order the run first carried each. A buffer a
+// decoder fills twice from one source is two contents; a table the engine
+// walks every frame from one buffer is one.
+struct ContentOrigin {
+  std::uint32_t bytes = 0;
+  ir::OriginSet origin;  // empty for bytes with no image origin: cleared, computed, read from a register
+};
+
 struct CarriedContent {
   std::vector<std::uint8_t> bytes;
   ir::OriginSet origin;
@@ -299,6 +309,8 @@ struct CarriedContent {
   std::optional<PortLanding> landing;
   unsigned unit = 1;
   bool indirect = false;
+  std::vector<ContentOrigin> byteOrigins;
+  std::uint32_t order = 0;
 };
 
 // Two contents are the same when the same bytes went to the same class the

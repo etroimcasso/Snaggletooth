@@ -358,6 +358,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
     std::vector<std::uint8_t> values;  // every byte the engine read, in transfer order
     unsigned unit = 1;                 // a table's or a block's transfer unit, from the channel's DMAP
     bool indirect = false;             // and whether its entries carry pointers
+    std::vector<ContentOrigin> byteOrigins;  // the origin of each byte read, as runs, in transfer order
   };
   std::array<std::optional<Open>, 8> dma;       // a general-purpose transfer per channel
   std::array<std::optional<Open>, 8> table;     // an HDMA table per channel
@@ -395,6 +396,9 @@ struct Recorder final : BusObserver, ir::CarrySink {
   };
   std::vector<PendingContent> pendingContents;
 
+  // How many contents have been carried out so far: the next one's `order`.
+  std::uint32_t carryCount = 0;
+
   // The last stream closed from a buffer for each register, with its landing
   // as the closing saw it: the carry that ends after it takes the landing.
   std::map<std::uint32_t, StreamedRange> closedFromBuffer;
@@ -421,7 +425,8 @@ struct Recorder final : BusObserver, ir::CarrySink {
     Address memory = 0;
     std::uint32_t bytes = 0;
     std::vector<StagedWriter> writers;
-    std::vector<std::uint8_t> values;  // every byte carried, in address order
+    std::vector<std::uint8_t> values;        // every byte carried, in address order
+    std::vector<ContentOrigin> byteOrigins;  // and the origin of each, as runs
   };
   std::map<std::uint32_t, Carry> carries;
 
@@ -487,6 +492,21 @@ struct Recorder final : BusObserver, ir::CarrySink {
     return palettes.size() - 1u;
   }
 
+  // The origin of one byte a carry takes, on its own, joined to the run before
+  // it when it is the same: a byte read from the image through an engine, or
+  // one with no origin — cleared, computed, read from a register — has none.
+  void noteOrigin(std::vector<ContentOrigin>& runs, Address address, bool read) {
+    ir::OriginSet set;
+    if (read) {
+      if (const std::optional<ir::Origin> origin = shadow.originOf(address)) set = shadow.origins().of(*origin);
+    }
+    if (!runs.empty() && runs.back().origin == set) {
+      ++runs.back().bytes;
+      return;
+    }
+    runs.push_back(ContentOrigin{.bytes = 1, .origin = std::move(set)});
+  }
+
   // The origin of every byte the writers wrote, together.
   static ir::OriginSet originOf(const std::vector<StagedWriter>& writers) {
     ir::OriginSet origin;
@@ -505,8 +525,11 @@ struct Recorder final : BusObserver, ir::CarrySink {
   }
 
   // A content whose landing is read, or has none, is resolved now; one whose
-  // VRAM landing waits for a drawn frame is resolved at that frame.
+  // VRAM landing waits for a drawn frame is resolved at that frame. Either way
+  // it takes its place in the run's order of carries here, so a content
+  // resolved late still sorts by when it was carried.
   void carryOut(std::pair<Address, std::uint32_t> extent, CarriedContent content, bool unread) {
+    content.order = carryCount++;
     PendingContent pending{.extent = extent, .content = std::move(content)};
     if (unread && pending.content.landing && pending.content.landing->memory == PortMemory::Vram) {
       pendingContents.push_back(std::move(pending));
@@ -548,7 +571,11 @@ struct Recorder final : BusObserver, ir::CarrySink {
       // What the extent held, in address order: a range read downward was
       // read from its highest byte first.
       std::vector<std::uint8_t> values = open->values;
-      if (open->range.step == MovedStep::Decrement) std::reverse(values.begin(), values.end());
+      std::vector<ContentOrigin> byteOrigins = open->byteOrigins;
+      if (open->range.step == MovedStep::Decrement) {
+        std::reverse(values.begin(), values.end());
+        std::reverse(byteOrigins.begin(), byteOrigins.end());
+      }
       if (open->range.registerClass) {
         carryOut({extentStart(open->range), open->range.bytes},
                 CarriedContent{.bytes = std::move(values),
@@ -557,7 +584,9 @@ struct Recorder final : BusObserver, ir::CarrySink {
                                .kind = open->range.kind,
                                .landing = open->landing,
                                .unit = open->unit,
-                               .indirect = open->indirect},
+                               .indirect = open->indirect,
+                               .byteOrigins = std::move(byteOrigins),
+                               .order = 0},
                 open->unread);
       }
     }
@@ -717,10 +746,11 @@ struct Recorder final : BusObserver, ir::CarrySink {
   // before the carry ends.
   void carriedByte(std::uint32_t registerAddress, Address memory, bool continues) override {
     Carry& carry = carries[registerAddress];
-    if (!continues) carry = Carry{.memory = memory, .bytes = 0, .writers = {}, .values = {}};
+    if (!continues) carry = Carry{.memory = memory, .bytes = 0, .writers = {}, .values = {}, .byteOrigins = {}};
     fold(carry.writers, memory);
     ++carry.bytes;
     carry.values.push_back(workRamByte(machine.state(), memory));
+    noteOrigin(carry.byteOrigins, memory, true);
   }
 
   // The carry ended after the shadow closed its stream, so the stream's
@@ -744,7 +774,9 @@ struct Recorder final : BusObserver, ir::CarrySink {
                                .kind = MovedKind::Stream,
                                .landing = landing,
                                .unit = 1,
-                               .indirect = false},
+                               .indirect = false,
+                               .byteOrigins = carry.byteOrigins,
+                               .order = 0},
                 landing && !landing->shown);
       }
     }
@@ -803,6 +835,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
       open->next = stepped(address, step);
       if (read) fold(open->writers, address);
       open->values.push_back(value);
+      noteOrigin(open->byteOrigins, address, read);
       return;
     }
     close(open);
@@ -828,8 +861,10 @@ struct Recorder final : BusObserver, ir::CarrySink {
                 .unread = false,
                 .values = {value},
                 .unit = hdmaUnitOf(ch.dmap & 7u),
-                .indirect = (ch.dmap & 0x40u) != 0u};
+                .indirect = (ch.dmap & 0x40u) != 0u,
+                .byteOrigins = {}};
     if (read) fold(open->writers, address);
+    noteOrigin(open->byteOrigins, address, read);
   }
 
   // The port's access, now that the access that caused it is here. On an

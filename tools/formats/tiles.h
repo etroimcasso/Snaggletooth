@@ -2,8 +2,9 @@
 
 // Tiles as an indexed PNG. An 8x8 tile occupies 16, 32 or 64 bytes for 2, 4 or 8
 // bits per pixel, the colour number of each pixel spread across the bit-planes
-// the way the PPU reads them. The sheet is sixteen tiles wide, in file order left
-// to right and down; the PNG's bit depth is the tile depth, so the file says its
+// the way the PPU reads them. The sheet is as wide as its tiles up to sixteen —
+// a one-tile file is 8x8, a longer one wraps at sixteen — in file order left to
+// right and down; the PNG's bit depth is the tile depth, so the file says its
 // own depth and a person's editor shows the right number of colours.
 //
 // A file that is not a whole number of tiles — most are not — has its last tile
@@ -20,8 +21,8 @@
 namespace snaggletooth::formats {
 
 // Encodes `planar` — SNES tile bytes at `depth` (2, 4 or 8) — as an indexed PNG
-// sixteen tiles wide carrying `palette` (RGBA quadruples). A trailing partial
-// tile is zero-padded to a whole tile.
+// as wide as its tiles up to sixteen, carrying `palette` (RGBA quadruples). A
+// trailing partial tile is zero-padded to a whole tile.
 [[nodiscard]] Bytes encodeTiles(std::span<const std::uint8_t> planar, unsigned depth,
                                 const std::vector<std::uint8_t>& palette);
 

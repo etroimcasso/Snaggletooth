@@ -34,8 +34,11 @@ thirty-two, two bytes a row, and in each byte bit 7 is the left-most pixel. Plan
 of the colour number.
 
 The PNG is indexed at the tile depth — a 2bpp file is a 2-bit PNG, 4bpp a 4-bit, 8bpp an 8-bit — so
-the file carries its own depth and a pixel value is a colour number, not a colour. The sheet is
-sixteen tiles wide, `ceil(tiles ÷ 16) × 8` pixels tall, tiles in file order left to right and down.
+the file carries its own depth and a pixel value is a colour number, not a colour. The sheet is as
+wide as its tiles up to sixteen — a one-tile file is 8 × 8, a five-tile file 40 × 8 — and a longer
+file wraps at sixteen, `ceil(tiles ÷ 16) × 8` pixels tall, tiles in file order left to right and
+down. Decoding accepts any width that is a whole number of tiles, so a sheet a person has widened
+or narrowed in an editor still reads.
 
 Most tile files are not a whole number of tiles. The last tile is padded with zero pixels, and the
 bank file that includes the sheet carries the byte length, so the padding past the file's end is
@@ -174,11 +177,21 @@ asset    hdma/00_A410.hdma Display as table from $00:A410 bytes 7
 asset    hdma/00_A420.bin Display as indirect from $00:A420 bytes 4
 asset    staged/00_A500.bin Vram+Cgram as staged from $00:A500 bytes 9
 asset    staged/00_A520.bin Vram+Cgram as staged from $00:A520 bytes 17
+asset    staged/00_A540.bin Vram+Cgram as staged from $00:A540 bytes 18
+asset    staged/00_A560.bin Vram+Cgram as staged from $00:A560 bytes 3
+asset    staged/00_A580.bin Vram+Cgram as staged from $00:A580 bytes 7
+asset    staged/00_A5A0.bin Vram+Cgram as staged from $00:A5A0 bytes 5
+asset    staged/00_A5B0.bin Vram+Cgram as staged from $00:A5B0 bytes 5
+asset    staged/00_A5C0.bin Vram+Cgram as staged from $00:A5C0 bytes 18
+asset    staged/00_A5E0.bin Vram+Cgram as staged from $00:A5E0 bytes 3
+asset    staged/00_A5E8.bin Vram+Cgram as staged from $00:A5E8 bytes 8
+asset    staged/00_A5F4.bin Vram+Cgram as staged from $00:A5F4 bytes 8
 asset    vram/00_A600.bin Vram as dma from $00:A600 bytes 128
 ```
 
 The three sheets are at four, two and four bits a pixel — BG1's name base, BG3's and the sprite
-tiles under Mode 1; the two blobs are sources, and the Mode 7 block is a map and tiles in one file.
+tiles under Mode 1; the eleven blobs are sources, and the Mode 7 block is a map and tiles in one
+file.
 A tree disassembled without a run writes each file in the form its manifest path names, reading a
 sheet's depth and palette and a table's unit from the file already on disk.
 
@@ -186,27 +199,53 @@ sheet's depth and palette and a table's unit from the file already on disk.
 
 A file the disassembler cannot turn into a source gets a picture beside it, which nothing includes
 and no tool reads back. A source a routine built its data from keeps its bytes, and beside it the
-run writes one preview per distinct content the buffer built from it was carried out with, in the
-form that content's landing names — `<name>-1.png`, `<name>-2.pal`, `.map`, `.oam`, `.hdma` —
-numbered from 1 in the order the run first carried each. A Mode 7 file under `vram/`, whose even
-bytes are a map and whose odd bytes are tiles, gets two: `<name>-tiles.png`, the odd bytes as an
-8-bit sheet sixteen tiles wide with one byte a pixel and no bit-planes, and `<name>-map.map`, the
-even bytes as tile numbers, each `$XX`, thirty-two a line:
+run writes one preview per form its contents took — `<name>-tiles.png`, `<name>-palette.pal`,
+`<name>-map.map`, `<name>-oam.oam`, `<name>-hdma.hdma` — each holding every distinct content the
+run built from the source and sent out in that form, in the order it first sent each: tiles as one
+sheet, each content padded to whole tiles and laid end to end, as wide as its tiles up to sixteen,
+at the deepest depth among the contents with the palette of the first content at that depth; a text
+form as one file, a blank line between contents. A content belongs to the source that supplied the
+most of its bytes — each byte counted for the source its own origin names — and to the lower address
+when two supplied the same; the other sources show nothing of it. A content the routine made more of
+itself than any source supplied — cleared, computed, assembled from constants — is the routine's own
+work, and no source shows it. A Mode 7 file under `vram/`, whose even bytes are a map and whose
+odd bytes are tiles, gets two: `<name>-tiles.png`, the odd bytes as an 8-bit sheet sixteen tiles
+wide with one byte a pixel and no bit-planes, and `<name>-map.map`, the even bytes as tile numbers,
+each `$XX`, thirty-two a line:
 
 ```
 $00 $01 $02 $03 $04 $05 $06 $07 $08 $09 $0A $0B $0C $0D $0E $0F $10 $11 $12 …
 ```
 
-The manifest's [`preview` line](project-manifest.md#219-previews) says what each is of and in what
-form. The `drawing` cartridge decompresses two blobs in turn into one buffer, sends the first to
-the tiles and the second to the palette, and sends a Mode 7 block:
+The manifest's [`preview` line](project-manifest.md#219-previews) says what each is of, in what
+form, and how many contents it holds. The `drawing` cartridge fills one buffer from eleven blobs
+and sends it out ten times — a blob of two parts, a part at a time, to the tiles; twenty-four
+bytes from one blob and eight from another to the tiles together; sixteen from each of two blobs
+to the tiles together; a second two-part blob, its first part to tiles of two bits a pixel and its
+second to tiles of four; twenty-four bytes it clears itself and eight from a blob, to the tiles
+together; a buffer each byte of which adds two bytes of one blob to one of another, to the tiles;
+one blob to the tiles; one to the palette — and sends a Mode 7 block:
 
 ```
-preview  staged/00_A500-1.png of staged/00_A500.bin at $7E:1000 bytes 32 as tiles
-preview  staged/00_A520-1.pal of staged/00_A520.bin at $7E:1000 bytes 32 as palette
+preview  staged/00_A500-tiles.png of staged/00_A500.bin as tiles contents 1
+preview  staged/00_A520-palette.pal of staged/00_A520.bin as palette contents 1
+preview  staged/00_A540-tiles.png of staged/00_A540.bin as tiles contents 2
+preview  staged/00_A580-tiles.png of staged/00_A580.bin as tiles contents 1
+preview  staged/00_A5A0-tiles.png of staged/00_A5A0.bin as tiles contents 1
+preview  staged/00_A5C0-tiles.png of staged/00_A5C0.bin as tiles contents 2
+preview  staged/00_A5E8-tiles.png of staged/00_A5E8.bin as tiles contents 1
 preview  vram/00_A600-tiles.png of vram/00_A600.bin as mode7-tiles
 preview  vram/00_A600-map.map of vram/00_A600.bin as mode7-map
 ```
+
+The first two-part blob's sheet is two tiles wide, its first part's tile then its second's. The
+blob of twenty-four owns the content it shared with the blob of eight, whose file has no preview;
+of the two blobs of sixteen, the lower address owns theirs. The second two-part blob's sheet is
+three 4-bit tiles — the two 2-bit tiles of its first part, their upper planes zero, then the 4-bit
+tile of its second — with the palette the 4-bit content carried. The blob that supplied eight bytes
+of a buffer the routine cleared has no preview: the routine made more of that content than the blob
+did. Of the two blobs summed into one buffer, the one that supplied two of every byte's three owns
+it, and the other has no preview.
 
 ## Including an asset
 

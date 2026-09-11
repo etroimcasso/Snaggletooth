@@ -859,16 +859,23 @@ void applyForm(CartridgeDisassembly& out, AssetFile& asset, const FormFacts& fac
   }
 }
 
-// The preview of one content an extent was carried out with, in the form its
-// class and landing name, or nothing where they name none.
-std::optional<PreviewFile> previewOf(const CartridgeDisassembly& out, const CarriedContent& content) {
-  PreviewFile preview;
+// One content an extent was carried out with, in the form its class and
+// landing name: the form's word, and for tiles the content's depth and the
+// palette its landing gives a sheet, for a text form the content encoded —
+// each content is its own text, and a source's preview joins them.
+struct ContentForm {
+  std::string form;
+  unsigned depth = 0;
+  std::vector<std::uint8_t> palette;
+  std::string text;
+};
+
+// The form of one content, or nothing where its class and landing name none.
+std::optional<ContentForm> formOfContent(const CartridgeDisassembly& out, const CarriedContent& content) {
   const std::span<const std::uint8_t> bytes = content.bytes;
-  const auto text = [&](const formats::Text& t, const char* form) -> std::optional<PreviewFile> {
+  const auto text = [&](const formats::Text& t, const char* form) -> std::optional<ContentForm> {
     if (!t.ok()) return std::nullopt;
-    preview.form = form;
-    preview.written.assign(t.text.begin(), t.text.end());
-    return preview;
+    return ContentForm{.form = form, .depth = 0, .palette = {}, .text = t.text};
   };
   if (content.kind == MovedKind::Table) {
     if (bytes.size() < unitOf(Form::Hdma, 0, content.unit, content.indirect)) return std::nullopt;
@@ -893,13 +900,11 @@ std::optional<PreviewFile> previewOf(const CartridgeDisassembly& out, const Carr
       const std::optional<unsigned> depth = landingDepth(landing);
       if (!depth || bytes.size() < 8u * *depth) return std::nullopt;
       const bool spritesOnly = (landing.areas & kAreaTiles) == kAreaSprites;
-      const std::vector<std::uint8_t> palette =
-          landing.palette ? sheetPalette(out.palettes[*landing.palette], *depth, spritesOnly) : ramp(std::size_t{1} << *depth);
-      const formats::Bytes png = formats::encodeTiles(bytes, *depth, palette);
-      if (!png.ok()) return std::nullopt;
-      preview.form = "tiles";
-      preview.written = png.bytes;
-      return preview;
+      return ContentForm{.form = "tiles",
+                         .depth = *depth,
+                         .palette = landing.palette ? sheetPalette(out.palettes[*landing.palette], *depth, spritesOnly)
+                                                    : ramp(std::size_t{1} << *depth),
+                         .text = {}};
     }
     default: return std::nullopt;
   }
@@ -914,35 +919,169 @@ std::string_view previewExtension(const std::string& form) {
   return "hdma";
 }
 
+// A staged file's place in the image, and which asset it is.
+struct StagedSpan {
+  std::size_t begin = 0;
+  std::size_t end = 0;  // one past the last byte
+  std::size_t asset = 0;
+};
+
+// The staged files in address order.
+std::vector<StagedSpan> stagedSpans(const CartridgeDisassembly& out) {
+  std::vector<StagedSpan> spans;
+  for (std::size_t i = 0; i < out.assets.size(); ++i) {
+    const AssetFile& asset = out.assets[i];
+    if (asset.kind != MovedKind::Staged || asset.bytes.empty()) continue;
+    spans.push_back(StagedSpan{.begin = asset.romOffset, .end = asset.romOffset + asset.bytes.size(), .asset = i});
+  }
+  std::stable_sort(spans.begin(), spans.end(),
+                   [](const StagedSpan& a, const StagedSpan& b) { return a.begin < b.begin; });
+  return spans;
+}
+
+// The staged file one byte of a content came from: the one holding the most
+// of the byte's origin — the image bytes the byte was computed from — and the
+// first in address order among equals; nothing when no staged file holds any
+// of it, which is a byte the routine made itself.
+std::optional<std::size_t> supplierOf(const ir::OriginSet& origin, const std::vector<StagedSpan>& spans) {
+  std::optional<std::size_t> best;
+  std::size_t most = 0;
+  for (std::size_t s = 0; s < spans.size(); ++s) {
+    std::size_t held = 0;
+    for (const ir::OriginInterval& run : origin.image) {
+      const std::size_t low = std::max(run.first, spans[s].begin);
+      const std::size_t high = std::min(run.last + 1u, spans[s].end);
+      if (high > low) held += high - low;
+    }
+    if (held > most) {
+      best = s;
+      most = held;
+    }
+  }
+  return best;
+}
+
+// The staged file a content belongs to: the one that supplied the most of the
+// content's bytes, each byte counted for the file its own origin names, and
+// the first in address order among equals — and only when that file supplied
+// more of the bytes than no file did. A content the routine made more of than
+// any source did is the routine's, and belongs to no file.
+std::optional<std::size_t> sourceOf(const CarriedContent& content, const std::vector<StagedSpan>& spans) {
+  std::map<std::size_t, std::uint32_t> supplied;  // by span, so ascending is address order
+  std::uint32_t own = 0;
+  for (const ContentOrigin& run : content.byteOrigins) {
+    if (const std::optional<std::size_t> supplier = supplierOf(run.origin, spans)) {
+      supplied[*supplier] += run.bytes;
+    } else {
+      own += run.bytes;
+    }
+  }
+  std::optional<std::size_t> best;
+  std::uint32_t most = 0;
+  for (const auto& [span, bytes] : supplied) {
+    if (bytes > most) {
+      best = span;
+      most = bytes;
+    }
+  }
+  if (!best || most <= own) return std::nullopt;
+  return spans[*best].asset;
+}
+
+// One content of a source, with the source's index and the content's form.
+struct SourceContent {
+  std::size_t source = 0;
+  const CarriedContent* content = nullptr;
+  ContentForm form;
+};
+
+// Several tile contents as one sheet: each padded to whole tiles at its own
+// depth, then laid end to end at the deepest depth among them — a colour
+// number at a lower depth is the same number at a higher, with the planes
+// above it zero — with the palette of the first content at that depth.
+formats::Bytes combinedSheet(const std::vector<const SourceContent*>& tiles) {
+  unsigned depth = 0;
+  for (const SourceContent* item : tiles) depth = std::max(depth, item->form.depth);
+  const std::size_t bytesPerTile = 8u * depth;
+  std::vector<std::uint8_t> planar;
+  const std::vector<std::uint8_t>* palette = nullptr;
+  for (const SourceContent* item : tiles) {
+    if (!palette && item->form.depth == depth) palette = &item->form.palette;
+    const std::size_t own = 8u * item->form.depth;
+    const std::vector<std::uint8_t>& bytes = item->content->bytes;
+    const std::size_t count = (bytes.size() + own - 1u) / own;
+    for (std::size_t t = 0; t < count; ++t) {
+      std::vector<std::uint8_t> tile(bytesPerTile, 0);
+      for (std::size_t b = 0; b < own && t * own + b < bytes.size(); ++b) tile[b] = bytes[t * own + b];
+      planar.insert(planar.end(), tile.begin(), tile.end());
+    }
+  }
+  return formats::encodeTiles(planar, depth, *palette);
+}
+
+// Several text contents as one file, a blank line between them.
+std::string combinedText(const std::vector<const SourceContent*>& items) {
+  std::string joined;
+  for (const SourceContent* item : items) {
+    if (!joined.empty()) {
+      if (joined.back() != '\n') joined += '\n';
+      joined += '\n';
+    }
+    joined += item->form.text;
+  }
+  return joined;
+}
+
 // Writes the previews: beside a source a routine built its data from, one per
-// distinct content the extents it fed were carried out with, numbered from 1
-// in the order the run first carried each; beside a Mode 7 file, its tiles
-// and its map.
+// form, every distinct content the run attributed to the source and of that
+// form combined in the order the run first carried each; beside a Mode 7
+// file, its tiles and its map.
 void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts) {
   out.previews.clear();
+  // Every content with a form, under its one source, in the order carried.
+  const std::vector<StagedSpan> spans = stagedSpans(out);
+  std::vector<SourceContent> contents;
+  for (const StagedRange& range : out.staged) {
+    for (const CarriedContent& content : range.contents) {
+      const std::optional<std::size_t> source = sourceOf(content, spans);
+      if (!source) continue;
+      std::optional<ContentForm> form = formOfContent(out, content);
+      if (!form) continue;
+      contents.push_back(SourceContent{.source = *source, .content = &content, .form = std::move(*form)});
+    }
+  }
+  std::stable_sort(contents.begin(), contents.end(), [](const SourceContent& a, const SourceContent& b) {
+    return a.content->order < b.content->order;
+  });
   for (std::size_t i = 0; i < out.assets.size(); ++i) {
     const AssetFile& asset = out.assets[i];
     const std::string stem = stemOf(asset.file);
     if (asset.kind == MovedKind::Staged) {
-      unsigned number = 0;
-      for (const StagedRange& range : out.staged) {
-        for (const CarriedContent& content : range.contents) {
-          // A content is this file's when the bytes carried were built from it.
-          const bool fed = std::any_of(content.origin.image.begin(), content.origin.image.end(),
-                                       [&](const ir::OriginInterval& run) {
-                                         return run.first < asset.romOffset + asset.bytes.size() &&
-                                                asset.romOffset <= run.last;
-                                       });
-          if (!fed) continue;
-          std::optional<PreviewFile> preview = previewOf(out, content);
-          if (!preview) continue;
-          ++number;
-          preview->file = stem + "-" + std::to_string(number) + "." + std::string(previewExtension(preview->form));
-          preview->of = asset.file;
-          preview->memory = range.memory;
-          preview->bytes = range.bytes;
-          out.previews.push_back(std::move(*preview));
+      // The forms in the order their first content was carried, each with
+      // every content of the source in that form.
+      std::vector<std::string> forms;
+      std::map<std::string, std::vector<const SourceContent*>> byForm;
+      for (const SourceContent& item : contents) {
+        if (item.source != i) continue;
+        if (byForm.find(item.form.form) == byForm.end()) forms.push_back(item.form.form);
+        byForm[item.form.form].push_back(&item);
+      }
+      for (const std::string& form : forms) {
+        const std::vector<const SourceContent*>& items = byForm[form];
+        PreviewFile preview{.file = stem + "-" + form + "." + std::string(previewExtension(form)),
+                            .of = asset.file,
+                            .form = form,
+                            .contents = static_cast<std::uint32_t>(items.size()),
+                            .written = {}};
+        if (form == "tiles") {
+          const formats::Bytes png = combinedSheet(items);
+          if (!png.ok()) continue;
+          preview.written = png.bytes;
+        } else {
+          const std::string text = combinedText(items);
+          preview.written.assign(text.begin(), text.end());
         }
+        out.previews.push_back(std::move(preview));
       }
       continue;
     }
@@ -958,16 +1097,14 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
         out.previews.push_back(PreviewFile{.file = stem + "-tiles.png",
                                            .of = asset.file,
                                            .form = "mode7-tiles",
-                                           .memory = std::nullopt,
-                                           .bytes = 0,
+                                           .contents = 0,
                                            .written = png.bytes});
       }
       const formats::Text text = formats::encodeMode7Map(map);
       out.previews.push_back(PreviewFile{.file = stem + "-map.map",
                                          .of = asset.file,
                                          .form = "mode7-map",
-                                         .memory = std::nullopt,
-                                         .bytes = 0,
+                                         .contents = 0,
                                          .written = std::vector<std::uint8_t>(text.text.begin(), text.text.end())});
     }
   }
@@ -2080,12 +2217,13 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            std::to_string(asset.bytes.size()) + "\n";
   }
 
-  // What was written beside a file to show what its bytes became.
+  // What was written beside a file to show what its bytes became, and how
+  // many contents a source's preview gathers.
   if (!disassembly.previews.empty()) out += "\n";
   for (const PreviewFile& preview : disassembly.previews) {
-    out += "preview  " + preview.file + " of " + preview.of;
-    if (preview.memory) out += " at " + address24(*preview.memory) + " bytes " + std::to_string(preview.bytes);
-    out += " as " + preview.form + "\n";
+    out += "preview  " + preview.file + " of " + preview.of + " as " + preview.form;
+    if (preview.contents != 0u) out += " contents " + std::to_string(preview.contents);
+    out += "\n";
   }
 
   // What the run built from each file: one line per file, staged extent whose

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 #include "formats/png.h"
@@ -32,9 +33,9 @@ std::vector<std::uint8_t> pattern(std::size_t n) {
   return out;
 }
 
-// The sheet is always sixteen tiles wide, so decode yields whole tiles up to the
-// row: the original bytes come back exactly and any padding past them is zero, and
-// a bank file clips the result to its length.
+// Decode yields whole tiles up to the sheet's last row: the original bytes come
+// back exactly and any padding past them is zero, and a bank file clips the
+// result to its length.
 void expectRoundTrip(const std::vector<std::uint8_t>& planar, unsigned depth) {
   const Bytes png = encodeTiles(planar, depth, ramp(1u << depth));
   ASSERT_TRUE(png.ok()) << png.error;
@@ -64,6 +65,27 @@ TEST(Tiles, ManyTilesCrossRows) { expectRoundTrip(pattern(16 * 40), 2); }
 
 TEST(Tiles, PartialLastTileKeepsBytesThenZeroPads) {
   expectRoundTrip(pattern(20), 2);  // 2bpp: one whole tile plus four bytes
+}
+
+// The sheet is as wide as its tiles up to sixteen: a file under a row is one
+// row of exactly its tiles, and one over wraps at sixteen.
+TEST(Tiles, ASheetIsAsWideAsItsTilesUpToSixteen) {
+  const auto widthOf = [](std::size_t bytes, unsigned depth) {
+    const Bytes png = encodeTiles(pattern(bytes), depth, ramp(1u << depth));
+    EXPECT_TRUE(png.ok()) << png.error;
+    const PngImage image = decodePng(png.bytes);
+    EXPECT_TRUE(image.ok()) << image.error;
+    return std::make_pair(image.image.width, image.image.height);
+  };
+  EXPECT_EQ(widthOf(16, 2), std::make_pair(8u, 8u)) << "one tile";
+  EXPECT_EQ(widthOf(20, 2), std::make_pair(16u, 8u)) << "one tile and a partial second";
+  EXPECT_EQ(widthOf(32 * 5, 4), std::make_pair(40u, 8u)) << "five tiles, one row";
+  EXPECT_EQ(widthOf(64 * 16, 8), std::make_pair(128u, 8u)) << "a full row";
+  EXPECT_EQ(widthOf(16 * 17, 2), std::make_pair(128u, 16u)) << "one over a row wraps at sixteen";
+}
+
+TEST(Tiles, ANarrowSheetRoundTrips) {
+  expectRoundTrip(pattern(32 * 3), 4);  // three 4bpp tiles: a sheet twenty-four pixels wide
 }
 
 TEST(Tiles, PlaneAndBitLayoutIsThePpu) {

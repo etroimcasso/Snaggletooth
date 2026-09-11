@@ -11,6 +11,12 @@ constexpr unsigned kTileWidth = 8;
 constexpr unsigned kTileHeight = 8;
 constexpr unsigned kTilesPerRow = 16;
 
+// A sheet is as wide as its tiles up to a row of sixteen: a file under a row
+// is one row of exactly its tiles, and one over wraps at sixteen.
+constexpr unsigned tilesAcross(unsigned tileCount) {
+  return std::min(std::max(tileCount, 1u), kTilesPerRow);
+}
+
 // The byte within a tile that holds bit-plane `plane` of pixel row `row`: planes
 // 0 and 1 interleave in the first sixteen bytes, 2 and 3 in the next sixteen,
 // and so on, two bytes a row.
@@ -62,11 +68,12 @@ Bytes encodeTiles(std::span<const std::uint8_t> planar, unsigned depth,
   const unsigned bytesPerTile = depth * kTileHeight;
   const unsigned tileCount =
       static_cast<unsigned>((planar.size() + bytesPerTile - 1) / bytesPerTile);
-  const unsigned rows = (tileCount + kTilesPerRow - 1) / kTilesPerRow;
+  const unsigned across = tilesAcross(tileCount);
+  const unsigned rows = (tileCount + across - 1) / across;
 
   IndexedImage image;
   image.bitDepth = depth;
-  image.width = kTilesPerRow * kTileWidth;
+  image.width = across * kTileWidth;
   image.height = rows * kTileHeight;
   image.indices.assign(static_cast<std::size_t>(image.width) * image.height, 0);
   image.palette = palette;
@@ -78,8 +85,8 @@ Bytes encodeTiles(std::span<const std::uint8_t> planar, unsigned depth,
     for (unsigned b = 0; b < bytesPerTile && start + b < planar.size(); ++b) {
       tile[b] = planar[start + b];
     }
-    const unsigned tileX = t % kTilesPerRow;
-    const unsigned tileY = t / kTilesPerRow;
+    const unsigned tileX = t % across;
+    const unsigned tileY = t / across;
     const std::size_t base =
         static_cast<std::size_t>(tileY) * kTileHeight * image.width + tileX * kTileWidth;
     tileToIndices(tile, depth, image.indices, base, image.width);

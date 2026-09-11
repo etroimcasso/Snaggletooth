@@ -90,8 +90,8 @@ def facts(tree):
     landed = [(w[13], w[17]) for w in manifestLines(tree, "landed", 18)]
     # walked <site> channel <n> memory <address> bytes <n> as <kind> unit <n> direct|indirect times <n>
     walked = [f"unit {w[11]} {w[12]}" for w in manifestLines(tree, "walked", 15)]
-    # preview <path> of <path> [at <address> bytes <n>] as <form>
-    previews = [w[-1] for w in manifestLines(tree, "preview", 6) + manifestLines(tree, "preview", 10)]
+    # preview <path> of <path> as <form> [contents <n>]
+    previews = [w[5] for w in manifestLines(tree, "preview", 6) + manifestLines(tree, "preview", 8)]
     return classes, registers, valued, len(accesses), dmas, moved, assets, landed, walked, previews
 
 

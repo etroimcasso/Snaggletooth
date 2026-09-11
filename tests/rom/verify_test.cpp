@@ -568,7 +568,7 @@ TEST(RomVerify, ASheetThatIsNotIndexedIsTheBankFilesErrorNamingIt) {
   const std::vector<std::uint8_t> rom = drawingImage();
   Tree tree = drawingTree();
   // A sheet re-saved as truecolour: the same picture, no indexes to read.
-  std::vector<unsigned char> pixels(128u * 8u * 3u, 40);
+  std::vector<unsigned char> pixels(32u * 8u * 3u, 40);
   lodepng::State state;
   state.info_raw.colortype = LCT_RGB;
   state.info_raw.bitdepth = 8;
@@ -576,7 +576,7 @@ TEST(RomVerify, ASheetThatIsNotIndexedIsTheBankFilesErrorNamingIt) {
   state.info_png.color.bitdepth = 8;
   state.encoder.auto_convert = 0;
   std::vector<unsigned char> png;
-  ASSERT_EQ(lodepng::encode(png, pixels, 128, 8, state), 0u);
+  ASSERT_EQ(lodepng::encode(png, pixels, 32, 8, state), 0u);
   tree.files.at("tiles/00_9000.png").assign(png.begin(), png.end());
   const VerifyReport report = verify(tree, rom);
   EXPECT_FALSE(report.identical());
@@ -600,14 +600,17 @@ TEST(RomVerify, TheTreeOnDiskVerifiesWithItsFormsAndPreviews) {
   request.observeRun = true;
   request.runMasterCycles = 4u * 357'954u;
   const CartridgeDisassembly d = disassembleCartridge(request);
-  ASSERT_EQ(d.previews.size(), 4u);
+  ASSERT_EQ(d.previews.size(), 9u);
   const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth_verify_forms_tree";
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
   std::string error;
   ASSERT_TRUE(writeProject(d, dir, error)) << error;
   EXPECT_TRUE(std::filesystem::exists(dir / "tiles" / "00_9000.png"));
-  EXPECT_TRUE(std::filesystem::exists(dir / "staged" / "00_A500-1.png"));
+  EXPECT_TRUE(std::filesystem::exists(dir / "staged" / "00_A500-tiles.png"));
+  EXPECT_TRUE(std::filesystem::exists(dir / "staged" / "00_A540-tiles.png"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "staged" / "00_A560-tiles.png")) << "a source that supplied the lesser share";
+  EXPECT_FALSE(std::filesystem::exists(dir / "staged" / "00_A5E0-tiles.png")) << "a content mostly the routine's own";
   EXPECT_TRUE(std::filesystem::exists(dir / "vram" / "00_A600-map.map"));
   for (const AssetFile& asset : d.assets) {
     EXPECT_EQ(std::filesystem::file_size(dir / asset.file), asset.written.size()) << asset.file;

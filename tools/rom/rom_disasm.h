@@ -165,15 +165,15 @@ struct AssetFile {
 // A file written beside a lifted file to show what its bytes became, which
 // nothing reads back and no bank file includes: its path, the lifted file it
 // is of, the form it is in as the manifest's `preview` line names it —
-// `tiles`, `palette`, `map`, `oam`, `hdma`, `mode7-tiles`, `mode7-map` — the
-// extent of work RAM the shown content was built in, for a source a routine
-// built its data from, and the file's bytes.
+// `tiles`, `palette`, `map`, `oam`, `hdma`, `mode7-tiles`, `mode7-map` — how
+// many distinct contents it combines, for a source a routine built its data
+// from (zero for a Mode 7 file's, whose bytes are their own picture), and the
+// file's bytes.
 struct PreviewFile {
   std::string file;
   std::string of;
   std::string form;
-  std::optional<Address> memory;
-  std::uint32_t bytes = 0;
+  std::uint32_t contents = 0;
   std::vector<std::uint8_t> written;
 };
 

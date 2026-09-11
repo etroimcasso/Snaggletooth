@@ -1060,45 +1060,65 @@ without a run takes a table's unit from the `.hdma` file on disk
 ### 2.19 Previews
 
 ```
-preview  <path> of <path> [at <address> bytes <n>]
-         as tiles | palette | map | oam | hdma | mode7-tiles | mode7-map
+preview  <path> of <path> as tiles | palette | map | oam | hdma | mode7-tiles | mode7-map
+         [contents <n>]
 ```
 
 A file written beside a lifted file to show what its bytes became, which
 nothing reads back and no bank file includes. The first path is the
 preview's, relative to the manifest; after `of`, the lifted file it is a
-preview of; after `at`, for a source a routine built its data from, the
-extent of work RAM the data was built in and its length — absent for a Mode 7
-file, whose bytes are their own picture; and after `as`, the form the
-preview is written in ([asset-formats.md §Previews](asset-formats.md#previews)).
+preview of; after `as`, the form the preview is written in
+([asset-formats.md §Previews](asset-formats.md#previews)); and after
+`contents`, for a source a routine built its data from, how many distinct
+contents the file holds — absent for a Mode 7 file, whose bytes are their own
+picture.
 
 A [`staged`](#215-where-a-staged-range-came-from) file is the bytes a routine
 read to build what it sent — compressed, packed, indexed — and stays the
-source; the run keeps the bytes the extent was carried out with, and writes
-one preview per distinct content the extent carried out with this file in its
-origin, numbered from 1 in the order the run first carried each, so a buffer
-a decoder fills twice from one blob shows both. A preview is written only
-where the run's facts name a form: a range that landed in tiles of one depth,
-in a tilemap, in the palette or in the sprite table, or a table walked under
-one unit; a content whose landing mixes a screen with tiles, lies in no area
-or was never shown has none. A Mode 7 file under `vram/` — one range holding a
-map in its even bytes and tiles in its odd — gets two, `<name>-tiles.png` and
-`<name>-map.map`.
+source; the run keeps the bytes every extent was carried out with and the
+origin of each byte on its own, gives each content to the one source that
+supplied the most of its bytes — the lower address when two supplied the
+same, and no source when the routine made more of the bytes itself than any
+source supplied — and writes one preview per form beside that source,
+`<name>-tiles.png`, `<name>-palette.pal`, `<name>-map.map`, `<name>-oam.oam`
+or `<name>-hdma.hdma`, holding every content of that form in the order the
+run first carried each, so a buffer a decoder fills twice from one blob shows
+both in one file. A content is shown only where the run's facts name a form:
+a range that landed in tiles of one depth, in a tilemap, in the palette or in
+the sprite table, or a table walked under one unit; a content whose landing
+mixes a screen with tiles, lies in no area or was never shown is left out. A
+Mode 7 file under `vram/` — one range holding a map in its even bytes and
+tiles in its odd — gets two, `<name>-tiles.png` and `<name>-map.map`.
 
-The `drawing` cartridge's two blobs, decompressed in turn into one buffer of
-thirty-two bytes — the first sent to the tiles, the second to the palette —
-and its Mode 7 block:
+The `drawing` cartridge fills one buffer of thirty-two bytes from eleven
+blobs and sends it out ten times — a blob of two parts, a part at a time, to
+the tiles; twenty-four bytes from one blob and eight from another to the
+tiles together; sixteen from each of two blobs to the tiles together; a
+second two-part blob, one part to tiles of two bits a pixel and the other to
+tiles of four; twenty-four bytes it clears itself and eight from a blob, to
+the tiles together; a buffer each byte of which adds two bytes of one blob to
+one of another, to the tiles; a blob to the tiles; a blob to the palette —
+and sends a Mode 7 block:
 
 ```
-preview  staged/00_A500-1.png of staged/00_A500.bin at $7E:1000 bytes 32 as tiles
-preview  staged/00_A520-1.pal of staged/00_A520.bin at $7E:1000 bytes 32 as palette
+preview  staged/00_A500-tiles.png of staged/00_A500.bin as tiles contents 1
+preview  staged/00_A520-palette.pal of staged/00_A520.bin as palette contents 1
+preview  staged/00_A540-tiles.png of staged/00_A540.bin as tiles contents 2
+preview  staged/00_A580-tiles.png of staged/00_A580.bin as tiles contents 1
+preview  staged/00_A5A0-tiles.png of staged/00_A5A0.bin as tiles contents 1
+preview  staged/00_A5C0-tiles.png of staged/00_A5C0.bin as tiles contents 2
+preview  staged/00_A5E8-tiles.png of staged/00_A5E8.bin as tiles contents 1
 preview  vram/00_A600-tiles.png of vram/00_A600.bin as mode7-tiles
 preview  vram/00_A600-map.map of vram/00_A600.bin as mode7-map
 ```
 
-Each blob's preview shows what the buffer held when the bytes built from that
-blob were carried out — the content is attributed to the source it was built
-from, not to every source the buffer ever held.
+Each two-part blob's one sheet holds both parts, the second's at the deeper of
+its two depths; the blob of twenty-four owns the content it shared with the
+blob of eight, whose file has no preview; of the two blobs of sixteen, the
+lower address owns theirs; the blob that supplied eight bytes of a buffer the
+routine cleared has no preview, since the routine made more of that content
+than the blob did; and of the two blobs summed into one buffer, the one that
+supplied two of every byte's three owns it.
 
 The line is written fresh and read back by nothing; a run that had no
 machine leaves the previews on disk as they were, since the disassembler
