@@ -136,7 +136,9 @@ struct RenderInput {
 // `program` — the first node at each code line's address — through
 // `ir/ir_render.h`, in pieces with an `ORG` where a piece starts, a comment
 // where a sound-program block's bytes are left out, and an `INCBIN` where a
-// lifted file's bytes were; the data runs and the labels are the listing's. The
+// lifted file's bytes were — with its offset and length where the file is in
+// an editable form, since the form decodes to whole units and the length is
+// what clips it to the file; the data runs and the labels are the listing's. The
 // file opens with an `EQU` line for every hardware register its absolute
 // operands address and every label another file defines that it refers to, an
 // absolute operand that addresses a register is written as the register's name,

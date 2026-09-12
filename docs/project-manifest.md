@@ -19,9 +19,13 @@ findings outlive it, and how a name a person gives a file survives.
 > traces from those too, every range of bytes the transfer engines moved —
 > where from, where to, how many, and from which instruction — and lifts every
 > such range that begins in the image into a file of its own, recorded as an
-> `asset` line, where every range landed on the other side of the port and what
-> the PPU used that memory as, and the direct register and the data bank the
-> run saw at every site it executed. Read for what every path proves, it records the direct
+> `asset` line — a tile sheet, a palette, a tilemap, an OAM table or an HDMA
+> table in the editable form the path's extension names, where the run's facts
+> allow one — where every range landed on the other side of the port, what the
+> PPU used that memory as and at what depth, how every HDMA table was walked,
+> the previews written beside a file the run could not turn into a source,
+> every sample the DSP was told to play with the listening copy written of it,
+> and the direct register and the data bank the run saw at every site it executed. Read for what every path proves, it records the direct
 > register, the data bank and the stack pointer at every label where something
 > is proven, and the destinations of every jump through a table the bytes
 > bound, and traces from those too.
@@ -49,6 +53,9 @@ findings outlive it, and how a name a person gives a file survives.
   - [2.15 Where a staged range came from](#215-where-a-staged-range-came-from)
   - [2.16 What the CPU streamed](#216-what-the-cpu-streamed)
   - [2.17 Where a transfer landed](#217-where-a-transfer-landed)
+  - [2.18 How a table was walked](#218-how-a-table-was-walked)
+  - [2.19 Previews](#219-previews)
+  - [2.20 Samples](#220-samples)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -597,10 +604,10 @@ for, run for one second of its clock:
 
 ```
 asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 80
-asset    cgram/00_9200.bin Cgram as dma from $00:9200 bytes 16
-asset    oam/00_9300.bin Oam as dma from $00:9300 bytes 544
+asset    cgram/00_9200.pal Cgram as dma from $00:9200 bytes 16
+asset    oam/00_9300.oam Oam as dma from $00:9300 bytes 544
 asset    apu/00_9600.bin Apu as dma from $00:9600 bytes 8
-asset    hdma/00_9700.bin Cgram as table from $00:9700 bytes 7
+asset    hdma/00_9700.hdma Cgram as table from $00:9700 bytes 7
 asset    hdma/00_9710.bin Cgram as indirect from $00:9710 bytes 2
 asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2
 asset    vram/00_9900.bin Vram as staged from $00:9900 bytes 16
@@ -610,14 +617,39 @@ asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
 
 Three transfers from `$9000` that share bytes are the one file of eighty; the
 two blocks the HDMA table at `$9700` points at lie end to end and are two
-files. The transfer from `$01:FFF0` ran off its bank's end into `$01:0000`,
+files. The palette, the sprite table and the table are written in their
+forms; the tileset's landings were never drawn, so it is bytes under `vram/`. The transfer from `$01:FFF0` ran off its bank's end into `$01:0000`,
 which is work RAM, holding sixteen bytes the port had copied there from
 `$9900`: those are the `staged` file, the source of what the transfer carried
 on.
 
+The path's extension names the form the file is written in: `.png` for a tile
+sheet, `.pal` for a palette, `.map` for a tilemap, `.oam` for a sprite table,
+`.hdma` for an HDMA table ([asset-formats.md](asset-formats.md)), and `.bin`
+for bytes as they are. A file is written in a form only where the run's facts
+name one — a `dma` or `stream` file under `tiles/` whose every landing was
+read at one depth, under `maps/`, `cgram/` or `oam/`, or a `table` under
+`hdma/` walked under one unit — and only when encoding the bytes and decoding
+the form gives the bytes back exactly, which the disassembler checks before
+it writes; otherwise the file is `.bin`, and where a form was expected and
+did not hold, a `note` says which file and why. A file shorter than one unit
+of its form — one tile at its depth, one palette word, one map entry, one
+sprite, one HDMA entry — is `.bin` without a note. A `staged` file is the
+bytes a routine read, not what it built, and stays `.bin` with its
+[previews](#219-previews) beside it; so does a file under `vram/`, `apu/` or
+`staged/`, and an `indirect` block.
+
 The line is read back for its path: a person renames the file, changes the path
 here to match, and the next run lifts the same range — the same `from` and
-`bytes` — under that name. For a `dma`, `table` or `indirect` file the class,
+`bytes` — under that name. The extension is the form's, not the person's: a
+run that finds a different form writes the file with that form's extension
+under the same name, and says so in a `note`. A tree disassembled without a
+run writes an encoded file again from the image bytes at the depth, the
+palette and the unit the file on disk carries — the PNG's header and palette,
+the `.hdma`'s first line — since those facts were the run's and the line
+keeps only the path; a named file that is missing, or does not read as its
+form, is written as `.bin`, the path here changes to say so, and a `note`
+says why. For a `dma`, `table` or `indirect` file the class,
 the kind and the range are the run's and are written fresh, the `moved` lines
 being what keeps the file, and for a `proven` file they are the trace's, which
 finds the same transfer every time; a `staged` or `stream` file's evidence is written
@@ -835,7 +867,7 @@ a `staged` or `stream` file outlives the run through its `asset` line (§2.12).
 
 ```
 streamed <address> <register address> <register> <class> from <address> bytes <n> times <n>
-         at <lowest>-<highest> | none in <area> | none
+         at <lowest>-<highest> | none in <area> | none depth <2|4|8|none>
 ```
 
 A run of bytes the CPU carried to a data register one store at a time: the
@@ -844,10 +876,11 @@ the pair with `VMDATAH`, `CGDATA`, `OAMDATA`, an audio port for its pair — wit
 its name and class; after `from`, where the first byte came from and after
 `bytes` how many consecutive ones followed; after `times`, how many sightings
 of exactly this stream the run made; after `at`, where the bytes landed on the
-other side of the port, and after `in`, what the PPU used that memory as,
-exactly as a [`landed` line](#217-where-a-transfer-landed) says them — `none`
-and `none` for the audio ports, whose bytes land in no memory the run can
-name. A store continues a stream when its value
+other side of the port, after `in`, what the PPU used that memory as, and
+after `depth`, the colour depth of the tile areas it lies in, all three
+exactly as a [`landed` line](#217-where-a-transfer-landed) says them —
+`none`, `none` and `none` for the audio ports, whose bytes land in no memory
+the run can name. A store continues a stream when its value
 is the next byte and it was made at the same site as the last store or on one
 straight run from it — no jump, branch, call or return between the two. A
 sequence of one byte is not a stream. A stream seen again landing somewhere
@@ -867,8 +900,8 @@ count before its data, or an end mark after it, has read them all.
 The same cartridge's loops at `$8180` and `$84C0`:
 
 ```
-streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette
-streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown
+streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette depth none
+streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown depth none
 ```
 
 The first carried sixteen bytes of `$9200` and read an end mark after them, so
@@ -883,7 +916,7 @@ used as is unshown.
 
 ```
 landed   <address> channel <n> memory <address> bytes <n> as dma | table | indirect
-         at <lowest>-<highest> in <area> times <n>
+         at <lowest>-<highest> in <area> times <n> depth <2|4|8|none>
 ```
 
 Where the bytes of one [`moved`](#211-what-a-run-moved) range went on the
@@ -893,8 +926,9 @@ together; after `at`, the lowest and the highest address the port put a byte
 at — a VRAM word address, `$0000`–`$7FFF`, for a range to `VMDATAL` or
 `VMDATAH`; a palette word, `$00`–`$FF`, for one to `CGDATA`; an OAM byte,
 `$000`–`$21F`, for one to `OAMDATA` — after `in`, what the PPU used that memory
-as, and after `times`, how many sightings of exactly this landing the run
-made. A range whose bytes reach no data port — a table to the brightness
+as, after `times`, how many sightings of exactly this landing the run
+made, and after `depth`, the colour depth of the tile areas the landing lies
+in. A range whose bytes reach no data port — a table to the brightness
 register, a fill of a register, a read back into memory — has no line. A
 range the run saw land in two places has two lines, each with its own count,
 beside the one `moved` line. A fill from one byte lands, and has its line.
@@ -926,28 +960,37 @@ whatever the frame, since neither depends on a base. Whether a layer is enabled 
 not consulted: a layer the mode has keeps its bases whether or not it is shown
 this frame.
 
+The depth is read with the areas: each name base the extent lies in has the
+colour depth of its layer in the mode, 2, 4 or 8 bits a pixel; the sprite
+tiles are 4; and the whole of VRAM under Mode 7 is 8. When every tile area
+the landing lies in — over every frame it was read at — has one depth, the
+line says it; when they differ, or the landing lies in no tile area, in no
+area, or was never shown, it says `none`. A palette or OAM landing says
+`none`. The depth is what the lifted file's [form](#212-assets) is written
+at.
+
 A cartridge that uploads in forced blank, sets its bases, turns the screen on,
 and in later frames flips a base after uploading behind it, switches to Mode
 7, and blanks the screen again before one last upload, run for one second of
 its clock:
 
 ```
-landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1
-landed   $00:8066 channel 0 memory $00:9100 bytes 64 as dma at $0000-$001F in tilemap1 times 1
-landed   $00:8098 channel 0 memory $00:9200 bytes 64 as dma at $0FF0-$100F in tilemap3+tiles1+tiles2+tiles3 times 1
-landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1
-landed   $00:80FC channel 0 memory $00:9400 bytes 64 as dma at $6000-$601F in sprites times 1
-landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1
-landed   $00:815B channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 1
-landed   $00:8192 channel 0 memory $00:9900 bytes 32 as dma at $2100-$2178 in tiles1+tiles2+tiles3+sprites times 1
-landed   $00:81C9 channel 0 memory $00:9C00 bytes 64 as dma at $5C00-$5C1F in none times 1
-landed   $00:8232 channel 0 memory $7E:0400 bytes 32 as dma at $0020-$002F in tilemap1 times 1
-landed   $00:8349 channel 0 memory $00:9700 bytes 64 as dma at $7800-$781F in tilemap2 times 1
-landed   $00:837B channel 0 memory $00:9D00 bytes 64 as dma at $0200-$021F in tilemap1+tilemap2 times 1
-landed   $00:83BE channel 0 memory $00:9800 bytes 64 as dma at $0000-$001F in mode7 times 1
-landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1
-landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2
-landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1
+landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1 depth 4
+landed   $00:8066 channel 0 memory $00:9100 bytes 64 as dma at $0000-$001F in tilemap1 times 1 depth none
+landed   $00:8098 channel 0 memory $00:9200 bytes 64 as dma at $0FF0-$100F in tilemap3+tiles1+tiles2+tiles3 times 1 depth none
+landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1 depth none
+landed   $00:80FC channel 0 memory $00:9400 bytes 64 as dma at $6000-$601F in sprites times 1 depth 4
+landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1 depth none
+landed   $00:815B channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 1 depth none
+landed   $00:8192 channel 0 memory $00:9900 bytes 32 as dma at $2100-$2178 in tiles1+tiles2+tiles3+sprites times 1 depth none
+landed   $00:81C9 channel 0 memory $00:9C00 bytes 64 as dma at $5C00-$5C1F in none times 1 depth none
+landed   $00:8232 channel 0 memory $7E:0400 bytes 32 as dma at $0020-$002F in tilemap1 times 1 depth none
+landed   $00:8349 channel 0 memory $00:9700 bytes 64 as dma at $7800-$781F in tilemap2 times 1 depth none
+landed   $00:837B channel 0 memory $00:9D00 bytes 64 as dma at $0200-$021F in tilemap1+tilemap2 times 1 depth none
+landed   $00:83BE channel 0 memory $00:9800 bytes 64 as dma at $0000-$001F in mode7 times 1 depth 8
+landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1 depth none
+landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2 depth none
+landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1 depth none
 ```
 
 The first ten are the reset code's uploads, made in forced blank before any
@@ -968,12 +1011,168 @@ drew; and sends
 the sprite table on the three frames the screen is on — the port put it at
 `$000` on two of them, because the PPU reloads the OAM address at the start
 of every vertical blank, and at `$010` on the one the handler had moved the
-address first, so the one range has two lines.
+address first, so the one range has two lines. The tileset in the name base
+BG1 and BG2 share is 4 bits a pixel under Mode 1, and so are the sprite
+tiles; the sixty-four bytes from `$9200` reach BG3's name base as well, whose
+layer is 2 bits a pixel in that mode, so their depth is `none`; the Mode 7
+upload is 8.
 
 The line is written fresh and read back by nothing: the next run sees the
-landings again, and the one thing that follows from them — the directory a
-VRAM file lives under — is kept by the file's `asset` line.
+landings again, and the two things that follow from them — the directory a
+VRAM file lives under and the form it is written in — are kept by the file's
+`asset` line, whose path names both.
 
+
+### 2.18 How a table was walked
+
+```
+walked   <address> channel <n> memory <address> bytes <n> as table | indirect
+         unit <1|2|4> direct | indirect times <n>
+```
+
+How the HDMA engine read one [`moved`](#211-what-a-run-moved) range that is
+a table or an indirect block: the range's site, channel, memory address,
+count and kind, exactly as its `moved` line writes them, which is how the two
+are read together; after `unit`, how many bytes one line of the table
+transfers — the channel's transfer pattern as `DMAP` held it at the walk,
+patterns 0 → 1, 1 and 2 → 2, 3 through 5 → 4, 6 → 2, 7 → 4; then `direct`
+when the table's entries carry their data inline and `indirect` when each
+entry carries a pointer to it; and after `times`, how many sightings of
+exactly this walk the run made. A range walked under two patterns has two
+lines beside its one `moved` line. A general-purpose transfer has no line.
+
+The unit and the form are the two facts an HDMA table's bytes do not carry,
+and the [`.hdma` form](asset-formats.md#the-hdma-table-hdma) of a lifted
+table states them on its first line: the disassembler takes them from here.
+
+The `drawing` cartridge's two tables, one direct of unit 2 and one indirect,
+and the block the indirect one's entries point at, walked once a frame for a
+second of the clock:
+
+```
+walked   $00:81A8 channel 1 memory $00:A400 bytes 11 as table unit 2 direct times 60
+walked   $00:81A8 channel 2 memory $00:A410 bytes 7 as table unit 1 indirect times 60
+walked   $00:81A8 channel 2 memory $00:A420 bytes 4 as indirect unit 1 indirect times 60
+```
+
+The line is written fresh and read back by nothing. A tree disassembled
+without a run takes a table's unit from the `.hdma` file on disk
+([§2.12](#212-assets)).
+
+### 2.19 Previews
+
+```
+preview  <path> of <path> as tiles | palette | map | oam | hdma | mode7-tiles | mode7-map
+         [contents <n>]
+```
+
+A file written beside a lifted file to show what its bytes became, which
+nothing reads back and no bank file includes. The first path is the
+preview's, relative to the manifest; after `of`, the lifted file it is a
+preview of; after `as`, the form the preview is written in
+([asset-formats.md §Previews](asset-formats.md#previews)); and after
+`contents`, for a source a routine built its data from, how many distinct
+contents the file holds — absent for a Mode 7 file, whose bytes are their own
+picture.
+
+A [`staged`](#215-where-a-staged-range-came-from) file is the bytes a routine
+read to build what it sent — compressed, packed, indexed — and stays the
+source; the run keeps the bytes every extent was carried out with and the
+origin of each byte on its own, gives each content to the one source that
+supplied the most of its bytes — the lower address when two supplied the
+same, and no source when the routine made more of the bytes itself than any
+source supplied — and writes one preview per form beside that source,
+`<name>-tiles.png`, `<name>-palette.pal`, `<name>-map.map`, `<name>-oam.oam`
+or `<name>-hdma.hdma`, holding every content of that form in the order the
+run first carried each, so a buffer a decoder fills twice from one blob shows
+both in one file. A content is shown only where the run's facts name a form:
+a range that landed in tiles of one depth, in a tilemap, in the palette or in
+the sprite table, or a table walked under one unit; a content whose landing
+mixes a screen with tiles, lies in no area or was never shown is left out. A
+Mode 7 file under `vram/` — one range holding a map in its even bytes and
+tiles in its odd — gets two, `<name>-tiles.png` and `<name>-map.map`.
+
+The `drawing` cartridge fills one buffer of thirty-two bytes from eleven
+blobs and sends it out ten times — a blob of two parts, a part at a time, to
+the tiles; twenty-four bytes from one blob and eight from another to the
+tiles together; sixteen from each of two blobs to the tiles together; a
+second two-part blob, one part to tiles of two bits a pixel and the other to
+tiles of four; twenty-four bytes it clears itself and eight from a blob, to
+the tiles together; a buffer each byte of which adds two bytes of one blob to
+one of another, to the tiles; a blob to the tiles; a blob to the palette —
+and sends a Mode 7 block:
+
+```
+preview  staged/00_A500-tiles.png of staged/00_A500.bin as tiles contents 1
+preview  staged/00_A520-palette.pal of staged/00_A520.bin as palette contents 1
+preview  staged/00_A540-tiles.png of staged/00_A540.bin as tiles contents 2
+preview  staged/00_A580-tiles.png of staged/00_A580.bin as tiles contents 1
+preview  staged/00_A5A0-tiles.png of staged/00_A5A0.bin as tiles contents 1
+preview  staged/00_A5C0-tiles.png of staged/00_A5C0.bin as tiles contents 2
+preview  staged/00_A5E8-tiles.png of staged/00_A5E8.bin as tiles contents 1
+preview  vram/00_A600-tiles.png of vram/00_A600.bin as mode7-tiles
+preview  vram/00_A600-map.map of vram/00_A600.bin as mode7-map
+```
+
+Each two-part blob's one sheet holds both parts, the second's at the deeper of
+its two depths; the blob of twenty-four owns the content it shared with the
+blob of eight, whose file has no preview; of the two blobs of sixteen, the
+lower address owns theirs; the blob that supplied eight bytes of a buffer the
+routine cleared has no preview, since the routine made more of that content
+than the blob did; and of the two blobs summed into one buffer, the one that
+supplied two of every byte's three owns it.
+
+The line is written fresh and read back by nothing; a run that had no
+machine leaves the previews on disk as they were, since the disassembler
+never deletes a file.
+
+### 2.20 Samples
+
+```
+sample   <path> of <address> bytes <n> loop <address> in <path> at <offset> times <n>
+sample   <path> of <address> bytes <n> loop <address> unplaced times <n>
+```
+
+A sample the DSP was told to play, and the listening copy written of it. The
+first path is the WAV's, relative to the manifest
+([asset-formats.md §The listening copy](asset-formats.md#the-listening-copy-wav));
+after `of`, the audio address the sample's first block lies at; after
+`bytes`, how many bytes the sample holds — its blocks, nine bytes each, from
+the first to the one carrying the end flag; after `loop`, the address the
+directory entry gives the DSP to continue from at that flag; then where the
+image holds the bytes — `in` the file of the tree that carries them, a bank
+file, the sound program's file or a lifted file under `apu/`, `at` the image
+offset of the first — or `unplaced` when the image holds them nowhere as they
+are, or at more than one place; and after `times`, how many key-ons named the
+sample.
+
+The run's audio observer keeps a copy of the DSP's register file from every
+write the sound CPU makes through `$F2` and `$F3`; at each write to `KON`
+with a bit set it reads, for each voice named, the sample directory (`DIR`)
+and the voice's source number (`SRCN`), takes the entry's start and loop
+addresses from the audio memory, and walks the blocks from the start to the
+first whose header carries the end flag. A sample is one line however many
+voices or key-ons name it — the same start address and the same bytes; the
+same address with other bytes, a driver having loaded another sample over it,
+is another line and another file. A walk that reaches the end of the audio
+memory without an end flag names nothing, and a `note` says so.
+
+The `drawing` cartridge's sound program keys two voices on at once: voice 0
+on a sample of two blocks the cartridge uploaded with the program, voice 1 on
+one the program wrote into audio memory itself, which the image holds
+nowhere:
+
+```
+sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1
+sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1
+```
+
+The line is written fresh and read back by nothing; the WAV is a listening
+copy, which nothing includes and the verifier never reads. A run that had no
+machine leaves the WAVs on disk as they were.
+
+
+## 3. What is read back
 
 Two tools read a manifest, and each takes the lines that direct it.
 
@@ -1016,8 +1215,8 @@ directory, it reads:
   disassembler does.
 
 Everything else is what the last run found and is written fresh — the `access`,
-`dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed` and `landed`
-lines among them — and the next disassembly reads none of it back: they are what
+`dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed`, `landed`,
+`walked`, `preview` and `sample` lines among them — and the next disassembly reads none of it back: they are what
 the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. `snes_render` reads the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the

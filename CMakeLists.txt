@@ -116,12 +116,55 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   target_include_directories(snaggletooth_assembler PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
+  # The command-line assemblers include an asset back through the encoding
+  # reader, so an edited tile sheet or table assembles as its bytes.
+  target_link_libraries(snaggletooth_assembler PRIVATE snaggletooth_formats)
   target_compile_features(snaggletooth_assembler PUBLIC cxx_std_20)
   set_target_properties(snaggletooth_assembler PROPERTIES CXX_EXTENSIONS OFF)
   if(MSVC)
     target_compile_options(snaggletooth_assembler PRIVATE /W4 /WX)
   else()
     target_compile_options(snaggletooth_assembler PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # lodepng, vendored under third_party/lodepng, is the PNG encoder and decoder the
+  # tile codec reads and writes through. It is built as its own static library with
+  # a SYSTEM include so its warnings are not the toolkit's, and it is linked
+  # privately into the codec library so no lodepng symbol reaches a toolkit header.
+  add_library(snaggletooth_lodepng STATIC third_party/lodepng/lodepng.cpp)
+  target_include_directories(snaggletooth_lodepng SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/lodepng>
+  )
+  target_compile_features(snaggletooth_lodepng PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_lodepng PROPERTIES CXX_EXTENSIONS OFF)
+
+  # The asset codecs — the tile sheet, the palette, the tilemap, the OAM and HDMA
+  # tables, the WAV of a BRR sample, and the reader that turns an included asset
+  # back into the SNES bytes it was made from. Its own library over the standard
+  # library, lodepng, the machine's BRR decoder and the .spc tooling's WAV writer,
+  # so a tool that writes a tree and a tool that assembles one share one set of
+  # codecs.
+  add_library(snaggletooth_formats STATIC
+    tools/formats/png.cpp
+    tools/formats/tiles.cpp
+    tools/formats/text.cpp
+    tools/formats/palette.cpp
+    tools/formats/tilemap.cpp
+    tools/formats/oam.cpp
+    tools/formats/hdma.cpp
+    tools/formats/brr.cpp
+    tools/formats/reader.cpp
+  )
+  target_link_libraries(snaggletooth_formats PRIVATE snaggletooth_lodepng snaggletooth_spc)
+  target_include_directories(snaggletooth_formats PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_formats PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_formats PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_formats PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_formats PRIVATE -Wall -Wextra -Werror)
   endif()
 
   # The SPC700 tooling — the disassembler and the assembler. Separate from the .spc
@@ -286,6 +329,9 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   target_link_libraries(snaggletooth_rom PUBLIC
     snaggletooth::snaggletooth snaggletooth_disasm snaggletooth_cpu65816 snaggletooth_spc700
     snaggletooth_ir snaggletooth_ir_lockstep snaggletooth_ir_provenance snaggletooth_rom_render)
+  # The codecs: the disassembler writes a lifted file in its form, and the
+  # verifier reads one back through the encoding reader.
+  target_link_libraries(snaggletooth_rom PRIVATE snaggletooth_formats)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -515,13 +561,22 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/spc/loader_test.cpp
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp
+    tests/formats/png_test.cpp
+    tests/formats/tiles_test.cpp
+    tests/formats/palette_test.cpp
+    tests/formats/tilemap_test.cpp
+    tests/formats/oam_test.cpp
+    tests/formats/hdma_test.cpp
+    tests/formats/samples_test.cpp
+    tests/formats/reader_test.cpp
   )
-  # snaggletooth_spc links snaggletooth::snaggletooth publicly, and the
-  # differential links the representation and the cartridge tools publicly, which
-  # link both chip backends publicly, so the test target reaches the library, the
-  # tools and the backends through them — no separate direct links.
+  # The differential links the representation and the cartridge tools publicly,
+  # which link the library and both chip backends publicly and the codecs
+  # privately, and the codecs link the .spc tooling privately, so the test
+  # target reaches the library, the tools, the backends, the codecs and the .spc
+  # tooling through them — no separate direct links, which the Apple linker
+  # would report as duplicates.
   target_link_libraries(snaggletooth_tests PRIVATE
-    snaggletooth_spc
     snaggletooth_ir_differential
     GTest::gtest_main
   )
@@ -532,9 +587,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}"
     SNAGGLETOOTH_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   # The IPL-stub test seeds the stub into an audio machine through the internal
-  # seam in src/, so the test target reaches the private headers there.
+  # seam in src/, so the test target reaches the private headers there; the PNG
+  # face's test builds images through lodepng itself, so it reaches that header
+  # too, as the codec library does.
   target_include_directories(snaggletooth_tests PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+  target_include_directories(snaggletooth_tests SYSTEM PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/lodepng>)
   if(MSVC)
     target_compile_options(snaggletooth_tests PRIVATE /W4 /WX)
     # std::getenv is flagged C4996 ("unsafe") by MSVC; with /WX that stops the

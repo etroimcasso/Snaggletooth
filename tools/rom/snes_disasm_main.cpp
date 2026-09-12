@@ -24,12 +24,17 @@
 // boot; --boot-seconds bounds it (fifteen seconds of the master clock by default).
 //
 // The cartridge is also run, stepped, so the destinations its indirect jumps take
-// and the landings its instructions do not name become entries. --no-run skips
-// it; --run-seconds bounds it (sixty by default); --input replays a recorded run
+// and the landings its instructions do not name become entries, and so the
+// lifted files can be written in their editable forms — a tile sheet at the
+// depth the picture used it, with the palette the run held; a table under the
+// unit the engine walked it. --no-run skips it, and a tree written without a
+// run takes those facts from the files already on disk; --run-seconds bounds
+// it (sixty by default); --input replays a recorded run
 // into the controller ports while it goes, so the run reaches what a player
 // would; --input-dir names a directory of recorded runs, and the one named for
-// the image (`rom/input_script.h`, `scriptPathFor`) is replayed when it is
-// there and the ports stay empty when it is not.
+// the image (`rom/input_script.h`, `scriptFor`) is replayed when it is there,
+// the directory's `default.snaginput` when it is not, and the ports stay empty only
+// when the directory holds neither.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
@@ -159,12 +164,12 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (!inputDir.empty()) {
-    const std::filesystem::path script = snaggletooth::disasm::scriptPathFor(inputDir, imagePath);
+    const std::filesystem::path script = snaggletooth::disasm::scriptFor(inputDir, imagePath);
     if (std::filesystem::is_regular_file(script)) {
       inputPath = script.string();
       std::cout << "replaying " << script.string() << "\n";
     } else {
-      std::cout << "no recorded run at " << script.string() << "; the ports stay empty\n";
+      std::cout << "no recorded run at " << script.string() << " and no default.snaginput beside it; the ports stay empty\n";
     }
   }
 
@@ -211,6 +216,14 @@ int main(int argc, char** argv) {
   if (!quiet) request.progress = std::ref(printer);
 
   const std::filesystem::path directory(outDir);
+  // A lifted file the manifest names is read from the tree as it lies, for a
+  // disassembly without a run to take a sheet's depth and palette and a
+  // table's unit from.
+  request.readFile = [&](const std::string& file) -> std::optional<std::string> {
+    std::string text;
+    if (!readFile(directory / file, text)) return std::nullopt;
+    return text;
+  };
   const std::filesystem::path manifestPath = directory / "project.snagifest";
   std::string manifestText;
   if (readFile(manifestPath, manifestText)) {

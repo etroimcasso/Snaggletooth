@@ -4,6 +4,8 @@
 // serial port, so a scripted run reaches code the boot alone never does.
 
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <span>
 #include <string>
@@ -218,9 +220,34 @@ TEST(InputScriptReplay, TheRequestCarriesTheScriptIntoTheTree) {
 }
 
 TEST(InputScript, ADirectoryKeepsAnImagesRunUnderItsNameWithSpacesAsUnderscores) {
-  EXPECT_EQ(scriptPathFor("runs", "Some Game (U) [!].sfc").generic_string(), "runs/Some_Game_(U)_[!].txt");
-  EXPECT_EQ(scriptPathFor("runs", "/images/plain.smc").generic_string(), "runs/plain.txt");
-  EXPECT_EQ(scriptPathFor("a/b", "two  spaces.smc").generic_string(), "a/b/two__spaces.txt");
+  EXPECT_EQ(scriptPathFor("runs", "Some Game (U) [!].sfc").generic_string(), "runs/Some_Game_(U)_[!].snaginput");
+  EXPECT_EQ(scriptPathFor("runs", "/images/plain.smc").generic_string(), "runs/plain.snaginput");
+  EXPECT_EQ(scriptPathFor("a/b", "two  spaces.smc").generic_string(), "a/b/two__spaces.snaginput");
+}
+
+TEST(InputScript, ADirectoryPlaysItsDefaultForAnImageWithoutARunOfItsOwn) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() / "snaggletooth_input_script_default";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir);
+
+  // Neither file exists: the image's own path comes back, and it is not a file.
+  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "Some_Game_(U).snaginput");
+  EXPECT_FALSE(std::filesystem::is_regular_file(scriptFor(dir, "Some Game (U).sfc")));
+
+  {
+    std::ofstream(dir / "default.snaginput") << "frame 10 1 start\n";
+  }
+  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "default.snaginput");
+
+  {
+    std::ofstream(dir / "Some_Game_(U).snaginput") << "frame 20 1 a\n";
+  }
+  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "Some_Game_(U).snaginput");
+  EXPECT_EQ(scriptFor(dir, "Other Game.smc"), dir / "default.snaginput");
+
+  std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace

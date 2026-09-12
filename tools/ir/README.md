@@ -97,7 +97,7 @@ where the tree has one, refuses an image of
 another size than the file's own `image` line, runs the machine for
 `--seconds` of the master clock (sixty by default) with the recorded run
 `--input` replayed into the controller ports — or the run named for the image
-under `--input-dir` — and holds each interpreter to every access, every
+under `--input-dir`, or that directory's `default.snaginput` — and holds each interpreter to every access, every
 register and every cycle its CPU made. The report — `summary.txt`, `divergences.txt`,
 `forms.txt`, `constructs.txt`, `unlifted.txt`, `patched.txt` — lands under `-o`, the sound CPU's
 lines after the main CPU's and marked `apu`; one line sums

@@ -14,7 +14,7 @@
 // line before anything runs. `--input` replays a recorded run into the
 // controller ports, exactly as `snes_disasm --input` does, so the same run is
 // checked that produced the tree; `--input-dir` finds the run named for the
-// image under that directory, as `snes_disasm --input-dir` does, and leaves the
+// image under that directory, or its `default.snaginput`, as `snes_disasm --input-dir` does, and leaves the
 // ports empty when there is none.
 //
 // The report is written under `-o`: `summary.txt` (what was checked and how
@@ -145,12 +145,12 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (!inputDir.empty()) {
-    const std::filesystem::path script = snaggletooth::disasm::scriptPathFor(inputDir, imagePath);
+    const std::filesystem::path script = snaggletooth::disasm::scriptFor(inputDir, imagePath);
     if (std::filesystem::is_regular_file(script)) {
       inputPath = script.string();
       std::cout << "replaying " << script.string() << "\n";
     } else {
-      std::cout << "no recorded run at " << script.string() << "; the ports stay empty\n";
+      std::cout << "no recorded run at " << script.string() << " and no default.snaginput beside it; the ports stay empty\n";
     }
   }
 

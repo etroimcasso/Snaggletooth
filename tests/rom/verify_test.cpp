@@ -9,10 +9,13 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "examples/example_cartridges.h"
+#include "formats/png.h"
 #include "gtest/gtest.h"
+#include "lodepng.h"
 #include "rom/rom_verify.h"
 
 namespace snaggletooth::disasm {
@@ -36,7 +39,7 @@ Tree treeOf(const CartridgeDisassembly& d) {
   }
   if (d.sound) tree.files[d.sound->file] = renderSoundFile(d);
   for (const AssetFile& asset : d.assets) {
-    tree.files[asset.file] = std::string(asset.bytes.begin(), asset.bytes.end());
+    tree.files[asset.file] = std::string(asset.written.begin(), asset.written.end());
   }
   return tree;
 }
@@ -441,12 +444,15 @@ TEST(RomVerify, AMissingLiftedFileIsTheBankFilesError) {
   EXPECT_TRUE(fileNamed(report, "bank_01.asm").errors.empty());
 }
 
-TEST(RomVerify, AChangedByteInALiftedFileDiffersAtItsOffset) {
+TEST(RomVerify, AChangedWordInALiftedFileDiffersAtItsByte) {
   const std::vector<std::uint8_t> rom = liftingImage();
   Tree tree = treeOfRun(rom);
-  std::string& palette = tree.files.at("cgram/00_9200.bin");
-  ASSERT_EQ(palette.size(), 16u);
-  palette[3] = static_cast<char>(palette[3] ^ 0x01);
+  // The palette is text, one word a line; the second word's high byte is the
+  // first hex digit after its `$`, and changing it changes image offset $1203.
+  std::string& palette = tree.files.at("cgram/00_9200.pal");
+  const std::size_t secondLine = palette.find('\n') + 1u;
+  ASSERT_EQ(palette[secondLine], '$');
+  palette[secondLine + 1] = palette[secondLine + 1] == 'F' ? 'E' : 'F';
   const VerifyReport report = verify(tree, rom);
   EXPECT_FALSE(report.identical());
   EXPECT_EQ(report.differing, 1u);
@@ -495,6 +501,139 @@ TEST(RomVerify, APartIncludedFileVerifiesFromANestedBankFile) {
             std::string::npos) << tree.files.at("high.asm");
   const VerifyReport report = verify(tree, rom);
   EXPECT_TRUE(report.identical()) << renderReport(report);
+}
+
+// ---- the forms ---------------------------------------------------------------
+//
+// A tree whose lifted files are written in their editable forms verifies as
+// one of bytes does: the assembler decodes each on include. An edit to a form
+// differs at the byte it changes, and a file that is not its form is the
+// bank file's error naming it.
+
+namespace {
+
+using examples::drawingImage;
+
+Tree drawingTree() {
+  static const std::vector<std::uint8_t> rom = drawingImage();
+  return treeOfRun(rom, {});
+}
+
+}  // namespace
+
+TEST(RomVerify, ATreeWithEncodedFilesAssemblesToItsImage) {
+  const std::vector<std::uint8_t> rom = drawingImage();
+  const Tree tree = drawingTree();
+  ASSERT_NE(tree.files.find("tiles/00_9000.png"), tree.files.end());
+  ASSERT_NE(tree.files.find("hdma/00_A400.hdma"), tree.files.end());
+  EXPECT_NE(tree.files.at("bank_00.asm").find("        INCBIN \"tiles/00_9000.png\", 0, 112\n"), std::string::npos);
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  EXPECT_EQ(report.compared, rom.size());
+  ASSERT_EQ(report.files.size(), 1u);
+  EXPECT_EQ(report.files.front().runs, 1u) << "every include continues the bank's one range";
+}
+
+TEST(RomVerify, ASamplesWavInTheTreeIsNeverRead) {
+  // The drawing tree's run names a sample; its WAV sits under `apu/` and is
+  // nothing the manifest assembles, so whatever the file holds, the tree
+  // verifies as before.
+  const std::vector<std::uint8_t> rom = drawingImage();
+  Tree tree = drawingTree();
+  EXPECT_NE(tree.manifest.find("sample   apu/bank_00-0308.wav of $0308 bytes 18 loop $0311 in bank_00.asm at $002788 times 1\n"),
+            std::string::npos) << tree.manifest;
+  tree.files["apu/bank_00-0308.wav"] = "not a WAV at all";
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  EXPECT_EQ(report.compared, rom.size());
+}
+
+TEST(RomVerify, AnEditedPixelDiffersAtItsByte) {
+  const std::vector<std::uint8_t> rom = drawingImage();
+  Tree tree = drawingTree();
+  std::string& sheet = tree.files.at("tiles/00_9000.png");
+  formats::PngImage image = formats::decodePng(
+      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(sheet.data()), sheet.size()));
+  ASSERT_TRUE(image.ok()) << image.error;
+  // The top-left pixel of the first tile: its lowest bit is bit 7 of the
+  // tile's first byte, at image offset $1000.
+  image.image.indices[0] = static_cast<std::uint8_t>(image.image.indices[0] ^ 1u);
+  const formats::Bytes edited = formats::encodePng(image.image);
+  ASSERT_TRUE(edited.ok()) << edited.error;
+  sheet.assign(edited.bytes.begin(), edited.bytes.end());
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_FALSE(report.identical());
+  EXPECT_EQ(report.differing, 1u);
+  ASSERT_EQ(report.mismatches.size(), 1u);
+  EXPECT_EQ(report.mismatches.front().firstDifference, 0x1000u);
+}
+
+TEST(RomVerify, AnEditedTableEntryDiffersAtItsByte) {
+  const std::vector<std::uint8_t> rom = drawingImage();
+  Tree tree = drawingTree();
+  tree.files.at("hdma/00_A400.hdma") = replaceFirst(tree.files.at("hdma/00_A400.hdma"), "lines 2 $AA $BB", "lines 2 $AA $BC");
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_FALSE(report.identical());
+  ASSERT_EQ(report.mismatches.size(), 1u);
+  EXPECT_EQ(report.mismatches.front().firstDifference, 0x2402u);
+}
+
+TEST(RomVerify, ASheetThatIsNotIndexedIsTheBankFilesErrorNamingIt) {
+  const std::vector<std::uint8_t> rom = drawingImage();
+  Tree tree = drawingTree();
+  // A sheet re-saved as truecolour: the same picture, no indexes to read.
+  std::vector<unsigned char> pixels(32u * 8u * 3u, 40);
+  lodepng::State state;
+  state.info_raw.colortype = LCT_RGB;
+  state.info_raw.bitdepth = 8;
+  state.info_png.color.colortype = LCT_RGB;
+  state.info_png.color.bitdepth = 8;
+  state.encoder.auto_convert = 0;
+  std::vector<unsigned char> png;
+  ASSERT_EQ(lodepng::encode(png, pixels, 32, 8, state), 0u);
+  tree.files.at("tiles/00_9000.png").assign(png.begin(), png.end());
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_FALSE(report.identical());
+  const VerifiedFile bank = fileNamed(report, "bank_00.asm");
+  ASSERT_GE(bank.errors.size(), 2u);
+  bool named = false;
+  for (const assembler::Diagnostic& error : bank.errors) {
+    if (error.message.find("tiles/00_9000.png") != std::string::npos && error.message.find("indexed") != std::string::npos) {
+      named = true;
+    }
+  }
+  EXPECT_TRUE(named) << renderReport(report);
+  EXPECT_EQ(report.unplaced, rom.size()) << "the bank file produces nothing";
+}
+
+TEST(RomVerify, TheTreeOnDiskVerifiesWithItsFormsAndPreviews) {
+  const std::vector<std::uint8_t> rom = drawingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * 357'954u;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.previews.size(), 9u);
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth_verify_forms_tree";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  EXPECT_TRUE(std::filesystem::exists(dir / "tiles" / "00_9000.png"));
+  EXPECT_TRUE(std::filesystem::exists(dir / "staged" / "00_A500-tiles.png"));
+  EXPECT_TRUE(std::filesystem::exists(dir / "staged" / "00_A540-tiles.png"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "staged" / "00_A560-tiles.png")) << "a source that supplied the lesser share";
+  EXPECT_FALSE(std::filesystem::exists(dir / "staged" / "00_A5E0-tiles.png")) << "a content mostly the routine's own";
+  EXPECT_TRUE(std::filesystem::exists(dir / "vram" / "00_A600-map.map"));
+  for (const AssetFile& asset : d.assets) {
+    EXPECT_EQ(std::filesystem::file_size(dir / asset.file), asset.written.size()) << asset.file;
+  }
+  std::size_t rendered = 0;
+  ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
+  const VerifyReport report = verifyTree(dir, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace snaggletooth::disasm

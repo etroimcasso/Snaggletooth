@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "formats/reader.h"
+
 namespace snaggletooth::assembler {
 namespace {
 
@@ -104,12 +106,16 @@ int assemblerMain(int argc, char** argv, Dialect& dialect) {
   const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
   // An INCBIN's path arrives joined with the source's own directory, so it is
-  // read exactly as the source was.
-  const Reader reader = [](const std::string& path) -> std::optional<std::string> {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return std::nullopt;
-    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-  };
+  // read exactly as the source was; an asset among them — a `.png`, `.pal`,
+  // `.map`, `.oam` or `.hdma` — is decoded to the bytes it was made from, and
+  // one that does not decode is reported with its reason.
+  const Reader reader = formats::encodingReader(
+      [](const std::string& path) -> std::optional<std::string> {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return std::nullopt;
+        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+      },
+      [](const std::string& reason) { std::cerr << reason << "\n"; });
   const Assembly assembly = assemble(dialect, source, sourcePath, reader);
   if (!assembly.ok()) {
     for (const Diagnostic& error : assembly.errors) {

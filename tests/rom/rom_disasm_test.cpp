@@ -13,9 +13,17 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "examples/example_cartridges.h"
+#include "formats/brr.h"
+#include "formats/hdma.h"
+#include "formats/oam.h"
+#include "formats/palette.h"
+#include "formats/png.h"
+#include "formats/tilemap.h"
+#include "formats/tiles.h"
 #include "gtest/gtest.h"
 #include "ir/ir_text.h"
 #include "rom/rom_disasm.h"
@@ -1099,10 +1107,10 @@ TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
   // `$9900`, so those sixteen are lifted as the source they were staged from.
   const Expected expected[] = {
       {"vram/00_9000.bin", RegisterClass::Vram, MovedKind::Dma, 0x009000u, 80},
-      {"cgram/00_9200.bin", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
-      {"oam/00_9300.bin", RegisterClass::Oam, MovedKind::Dma, 0x009300u, 544},
+      {"cgram/00_9200.pal", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
+      {"oam/00_9300.oam", RegisterClass::Oam, MovedKind::Dma, 0x009300u, 544},
       {"apu/00_9600.bin", RegisterClass::Apu, MovedKind::Dma, 0x009600u, 8},
-      {"hdma/00_9700.bin", RegisterClass::Cgram, MovedKind::Table, 0x009700u, 7},
+      {"hdma/00_9700.hdma", RegisterClass::Cgram, MovedKind::Table, 0x009700u, 7},
       {"hdma/00_9710.bin", RegisterClass::Cgram, MovedKind::Indirect, 0x009710u, 2},
       {"hdma/00_9712.bin", RegisterClass::Cgram, MovedKind::Indirect, 0x009712u, 2},
       {"vram/00_9900.bin", RegisterClass::Vram, MovedKind::Staged, 0x009900u, 16},
@@ -1141,7 +1149,7 @@ TEST(RomAssets, RangesThatShareBytesAreOneFileAndRangesThatTouchAreTwo) {
 
 TEST(RomAssets, ARangeReadDownwardIsLiftedInImageOrder) {
   const CartridgeDisassembly d = lifted(liftingImage());
-  const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
+  const AssetFile* palette = assetNamed(d, "cgram/00_9200.pal");
   ASSERT_NE(palette, nullptr);
   ASSERT_EQ(palette->bytes.size(), 16u);
   for (std::size_t i = 0; i < 16; ++i) {
@@ -1259,9 +1267,11 @@ TEST(RomAssets, TheBankFileIncludesEachFileWhereItsBytesWere) {
   EXPECT_NE(bank0.find("\n; ---- $00:9000-$00:904F: 80 bytes a transfer carried to VMDATAL, in vram/00_9000.bin\n"
                        "        INCBIN \"vram/00_9000.bin\"\n"),
             std::string::npos) << bank0;
-  EXPECT_NE(bank0.find("; ---- $00:9700-$00:9706: an HDMA table walked to CGADD, in hdma/00_9700.bin\n"
-                       "        INCBIN \"hdma/00_9700.bin\"\n"),
-            std::string::npos);
+  // An encoded file's include carries the length: the form decodes to whole
+  // units, and the length is what clips it to the file.
+  EXPECT_NE(bank0.find("; ---- $00:9700-$00:9706: an HDMA table walked to CGADD, in hdma/00_9700.hdma\n"
+                       "        INCBIN \"hdma/00_9700.hdma\", 0, 7\n"),
+            std::string::npos) << bank0;
   EXPECT_NE(bank0.find("; ---- $00:9710-$00:9711: a block an HDMA entry pointed at, sent to CGADD, in hdma/00_9710.bin\n"),
             std::string::npos);
   EXPECT_EQ(bank0.find("; $00:9000  |"), std::string::npos) << "the lifted bytes are not DB rows";
@@ -1346,14 +1356,47 @@ TEST(RomAssets, ATreeWithoutARunLiftsWhatItReadBack) {
   const std::optional<ManifestInput> input = parseManifest(renderManifest(first), error);
   ASSERT_TRUE(input.has_value()) << error;
   request.assets = input->assets;
+  // Without a run, a table's unit is read from the file on disk: the tree
+  // the first pass wrote.
+  request.readFile = [&](const std::string& file) -> std::optional<std::string> {
+    for (const AssetFile& asset : first.assets) {
+      if (asset.file == file) return std::string(asset.written.begin(), asset.written.end());
+    }
+    return std::nullopt;
+  };
   const CartridgeDisassembly again = disassembleCartridge(request);
   ASSERT_EQ(again.assets.size(), first.assets.size());
   for (std::size_t i = 0; i < first.assets.size(); ++i) {
     EXPECT_EQ(again.assets[i].file, first.assets[i].file);
     EXPECT_EQ(again.assets[i].bytes, first.assets[i].bytes);
+    EXPECT_EQ(again.assets[i].written, first.assets[i].written) << again.assets[i].file;
   }
   EXPECT_EQ(renderRegion(regionNamed(again, "bank_00.asm"), again),
             renderRegion(regionNamed(first, "bank_00.asm"), first));
+  EXPECT_FALSE(anyNote(again, "written as bytes"));
+}
+
+TEST(RomAssets, WithoutARunAndWithoutTheFileOnDiskATableIsBytesAndSaysSo) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  const CartridgeDisassembly first = lifted(rom);
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = false;
+  request.moved = first.moved;
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(first), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  request.assets = input->assets;
+  const CartridgeDisassembly again = disassembleCartridge(request);
+  const AssetFile* table = assetNamed(again, "hdma/00_9700.bin");
+  ASSERT_NE(table, nullptr) << renderManifest(again);
+  EXPECT_EQ(table->written, table->bytes);
+  EXPECT_TRUE(anyNote(again, "hdma/00_9700.bin: the tree holds no such file to take the unit from; written as bytes"))
+      << (again.notes.empty() ? std::string("no notes") : again.notes.front());
+  // The forms that need no fact from the run are written either way.
+  EXPECT_NE(assetNamed(again, "cgram/00_9200.pal"), nullptr);
+  EXPECT_NE(assetNamed(again, "oam/00_9300.oam"), nullptr);
 }
 
 // ---- what the shadow lifts ---------------------------------------------------
@@ -1432,17 +1475,20 @@ TEST(RomAssets, AStreamIsLiftedAsTheRunItsInvocationRead) {
   // The loop carried sixteen bytes and read the end mark after them: the file
   // is the seventeen, and the `streamed` line still says sixteen.
   const CartridgeDisassembly d = stagedLift();
+  // The file is wider than the stream, so its bytes are not all palette and
+  // it stays bytes.
   const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
-  ASSERT_NE(palette, nullptr);
+  ASSERT_NE(palette, nullptr) << renderManifest(d);
   EXPECT_EQ(palette->kind, MovedKind::Stream);
   EXPECT_EQ(palette->classes, std::vector<RegisterClass>{RegisterClass::Cgram});
   EXPECT_EQ(palette->first, 0x009200u);
   EXPECT_EQ(palette->bytes.size(), 17u);
   EXPECT_EQ(palette->bytes[0], 0xE0u);
   EXPECT_EQ(palette->bytes[16], 0xFFu);
+  EXPECT_EQ(palette->written, palette->bytes);
   EXPECT_NE(renderManifest(d).find("asset    cgram/00_9200.bin Cgram as stream from $00:9200 bytes 17\n"),
             std::string::npos);
-  EXPECT_NE(renderManifest(d).find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette\n"),
+  EXPECT_NE(renderManifest(d).find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette depth none\n"),
             std::string::npos);
   EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d)
                 .find("; ---- $00:9200-$00:9210: 17 bytes a routine carried Cgram data from, in cgram/00_9200.bin\n"
@@ -1568,17 +1614,25 @@ CartridgeDisassembly landingLift(CartridgeRequest request = {}) {
 TEST(RomLandedFiles, TheLandedLineIsWrittenBesideItsMovedLineAndIsAKnownKind) {
   const CartridgeDisassembly d = landingLift();
   const std::string manifest = renderManifest(d);
-  EXPECT_NE(manifest.find("landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1\n"),
+  EXPECT_NE(manifest.find("landed   $00:8034 channel 0 memory $00:9000 bytes 64 as dma at $3000-$301F in tiles1+tiles2 times 1 depth 4\n"),
             std::string::npos) << manifest;
-  EXPECT_NE(manifest.find("landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1\n"),
+  EXPECT_NE(manifest.find("landed   $00:8129 channel 0 memory $00:9500 bytes 32 as dma at $10-$1F in palette times 1 depth none\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2\n"),
+  EXPECT_NE(manifest.find("landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam times 2 depth none\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1\n"),
+  EXPECT_NE(manifest.find("landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1 depth none\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1\n"),
+  EXPECT_NE(manifest.find("landed   $00:8401 channel 0 memory $00:9A00 bytes 64 as dma at $0100-$011F in unshown times 1 depth none\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1\n"),
+  EXPECT_NE(manifest.find("landed   $00:80CA channel 0 memory $00:9300 bytes 32 as dma at $5000-$500F in none times 1 depth none\n"),
+            std::string::npos);
+  // The depth: the tile areas' when they agree, `none` when they differ or
+  // there are none; Mode 7 is eight.
+  EXPECT_NE(manifest.find("landed   $00:8098 channel 0 memory $00:9200 bytes 64 as dma at $0FF0-$100F in tilemap3+tiles1+tiles2+tiles3 times 1 depth none\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:80FC channel 0 memory $00:9400 bytes 64 as dma at $6000-$601F in sprites times 1 depth 4\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:83BE channel 0 memory $00:9800 bytes 64 as dma at $0000-$001F in mode7 times 1 depth 8\n"),
             std::string::npos);
   // The copy into work RAM through the port lands in no memory, and has no line.
   EXPECT_EQ(manifest.find("landed   $00:8200"), std::string::npos);
@@ -1592,21 +1646,22 @@ TEST(RomLandedFiles, AVramFileTakesTheDirectoryItsLandingsName) {
   std::vector<std::string> files;
   for (const AssetFile& asset : d.assets) files.push_back(asset.file);
   EXPECT_EQ(files, (std::vector<std::string>{
-                       "tiles/00_9000.bin",   // the name base BG1 and BG2 share
-                       "maps/00_9100.bin",    // BG1's screen
+                       "tiles/00_9000.png",   // the name base BG1 and BG2 share, 4 bits a pixel
+                       "maps/00_9100.map",    // BG1's screen
                        "vram/00_9200.bin",    // across a screen and the name bases
                        "vram/00_9300.bin",    // no base reaches it
-                       "tiles/00_9400.bin",   // the sprite tiles
-                       "cgram/00_9500.bin",   // the palette
-                       "maps/00_9700.bin",    // BG2's screen, after the flip
+                       "tiles/00_9400.png",   // the sprite tiles
+                       "cgram/00_9500.pal",   // the palette
+                       "maps/00_9700.map",    // BG2's screen, after the flip
                        "vram/00_9800.bin",    // under Mode 7
-                       "tiles/00_9900.bin",   // the rotated words, in the name bases
+                       "tiles/00_9900.bin",   // the rotated words, in name bases of two depths
                        "vram/00_9A00.bin",    // no frame drew it
-                       "maps/00_9B00.bin",    // staged through work RAM into BG1's screen
-                       "maps/00_9D00.bin",    // BG2's screen through its wrap round the end of VRAM
-                       "oam/00_A000.bin",     // the sprite table
+                       "maps/00_9B00.bin",    // staged through work RAM into BG1's screen: a source
+                       "maps/00_9D00.map",    // BG2's screen through its wrap round the end of VRAM
+                       "oam/00_A000.oam",     // the sprite table
                    }))
       << renderManifest(d);
+  EXPECT_TRUE(anyNote(d, "tiles/00_9900.bin: its landings were read at two depths; written as bytes"));
 }
 
 TEST(RomLandedFiles, AStagedFileIsPlacedByWhereTheRangeBuiltFromItLanded) {
@@ -1622,8 +1677,8 @@ TEST(RomLandedFiles, AStagedFileIsPlacedByWhereTheRangeBuiltFromItLanded) {
 TEST(RomLandedFiles, TheBankFileIncludesAFileByThePathItsLandingsGaveIt) {
   const CartridgeDisassembly d = landingLift();
   const std::string bank = renderRegion(regionNamed(d, "bank_00.asm"), d);
-  EXPECT_NE(bank.find("        INCBIN \"tiles/00_9000.bin\"\n"), std::string::npos);
-  EXPECT_NE(bank.find("        INCBIN \"maps/00_9100.bin\"\n"), std::string::npos);
+  EXPECT_NE(bank.find("        INCBIN \"tiles/00_9000.png\", 0, 64\n"), std::string::npos) << bank;
+  EXPECT_NE(bank.find("        INCBIN \"maps/00_9100.map\", 0, 64\n"), std::string::npos);
   EXPECT_NE(bank.find("        INCBIN \"vram/00_9300.bin\"\n"), std::string::npos);
 }
 
@@ -1639,10 +1694,23 @@ TEST(RomLandedFiles, ANameAndATreeWithoutARunKeepThePath) {
   again.observeRun = false;
   again.moved = input->moved;
   again.assets = input->assets;
-  again.assets[0].file = "tiles/font.bin";  // a person's name for the tileset
+  again.assets[0].file = "tiles/font.png";  // a person's name for the tileset
+  // Without a run a sheet's depth and palette and a table's unit are read
+  // from the files on disk: the tree the run wrote, the tileset under its
+  // new name.
+  again.readFile = [&](const std::string& file) -> std::optional<std::string> {
+    for (std::size_t i = 0; i < ran.assets.size(); ++i) {
+      if ((i == 0 ? std::string("tiles/font.png") : ran.assets[i].file) == file) {
+        return std::string(ran.assets[i].written.begin(), ran.assets[i].written.end());
+      }
+    }
+    return std::nullopt;
+  };
   const CartridgeDisassembly kept = disassembleCartridge(again);
   ASSERT_EQ(kept.assets.size(), ran.assets.size()) << renderManifest(kept);
-  EXPECT_EQ(kept.assets[0].file, "tiles/font.bin");
+  EXPECT_EQ(kept.assets[0].file, "tiles/font.png");
+  EXPECT_EQ(kept.assets[0].depth, 4u);
+  EXPECT_EQ(kept.assets[0].written, ran.assets[0].written);
   for (std::size_t i = 1; i < ran.assets.size(); ++i) EXPECT_EQ(kept.assets[i].file, ran.assets[i].file);
   EXPECT_TRUE(kept.landed.empty()) << "nothing is read back";
   EXPECT_FALSE(anyNote(kept, "names no range this run lifted"));
@@ -1651,11 +1719,11 @@ TEST(RomLandedFiles, ANameAndATreeWithoutARunKeepThePath) {
 TEST(RomLandedFiles, TheStreamedLineCarriesTheLanding) {
   const CartridgeDisassembly d = stagedLift();
   const std::string manifest = renderManifest(d);
-  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette\n"),
+  EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette depth none\n"),
             std::string::npos) << manifest;
   EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $"),
             std::string::npos) << manifest;
-  EXPECT_NE(manifest.find(" in unshown\n"), std::string::npos);
+  EXPECT_NE(manifest.find(" in unshown depth none\n"), std::string::npos);
 }
 
 TEST(RomLandedFiles, TheLandingTreeStillAssemblesToItsImage) {
@@ -1730,8 +1798,8 @@ TEST(RomAssets, AProvenTransferIsLiftedAsItsFile) {
       {"vram/00_9000.bin", RegisterClass::Vram, MovedKind::Dma, 0x009000u, 32},
       {"vram/00_9040.bin", RegisterClass::Vram, MovedKind::Dma, 0x009040u, 16},
       {"vram/00_9100.bin", RegisterClass::Vram, MovedKind::Dma, 0x009100u, 48},
-      {"cgram/00_9200.bin", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
-      {"oam/00_9300.bin", RegisterClass::Oam, MovedKind::Proven, 0x009300u, 544},
+      {"cgram/00_9200.pal", RegisterClass::Cgram, MovedKind::Dma, 0x009200u, 16},
+      {"oam/00_9300.oam", RegisterClass::Oam, MovedKind::Proven, 0x009300u, 544},
   };
   const std::vector<std::uint8_t> rom = declaringImage();
   for (std::size_t i = 0; i < 5; ++i) {
@@ -1749,14 +1817,14 @@ TEST(RomAssets, AProvenTransferIsLiftedAsItsFile) {
   // The run confirmed the five it took, so nothing is noted.
   EXPECT_TRUE(d.notes.empty()) << d.notes.front();
   const std::string manifest = renderManifest(d);
-  EXPECT_NE(manifest.find("asset    oam/00_9300.bin Oam as proven from $00:9300 bytes 544\n"), std::string::npos)
+  EXPECT_NE(manifest.find("asset    oam/00_9300.oam Oam as proven from $00:9300 bytes 544\n"), std::string::npos)
       << manifest;
   EXPECT_NE(manifest.find("asset    vram/00_9100.bin Vram as dma from $00:9100 bytes 48\n"), std::string::npos)
       << "the proven piece joins the run's, and the file is the run's kind";
   EXPECT_NE(manifest.find("asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 32\n"), std::string::npos);
   const std::string bank0 = renderRegion(regionNamed(d, "bank_00.asm"), d);
-  EXPECT_NE(bank0.find("\n; ---- $00:9300-$00:951F: 544 bytes a transfer the code sets up to carry to OAMDATA, in oam/00_9300.bin\n"
-                       "        INCBIN \"oam/00_9300.bin\"\n"),
+  EXPECT_NE(bank0.find("\n; ---- $00:9300-$00:951F: 544 bytes a transfer the code sets up to carry to OAMDATA, in oam/00_9300.oam\n"
+                       "        INCBIN \"oam/00_9300.oam\", 0, 544\n"),
             std::string::npos)
       << bank0;
   EXPECT_NE(bank0.find("\n; ---- $00:9100-$00:912F: 48 bytes a transfer carried to VMDATAL, in vram/00_9100.bin\n"),
@@ -1786,8 +1854,9 @@ TEST(RomAssets, WithoutARunEveryProvenTransferIsLifted) {
   ASSERT_NE(block, nullptr);
   EXPECT_EQ(block->bytes.size(), 48u);
   EXPECT_EQ(assetNamed(d, "vram/00_9120.bin"), nullptr);
+  // Without a run and without a manifest, nothing names a form: bytes.
   const AssetFile* palette = assetNamed(d, "cgram/00_9200.bin");
-  ASSERT_NE(palette, nullptr);
+  ASSERT_NE(palette, nullptr) << renderManifest(d);
   ASSERT_EQ(palette->bytes.size(), 16u);
   EXPECT_EQ(palette->bytes[0], 0xE0u) << "read downward from $920F, lifted in image order";
   EXPECT_TRUE(d.notes.empty());
@@ -1827,16 +1896,18 @@ TEST(RomAssets, AProvenFilesPathSurvivesAndAnOrphanIsDropped) {
                     ManifestAsset{.file = "oam/gone.bin", .first = 0x009500u, .bytes = 5,
                                   .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven}};
   const CartridgeDisassembly d = declared(request);
-  EXPECT_NE(assetNamed(d, "oam/sprites.bin"), nullptr);
-  EXPECT_EQ(assetNamed(d, "oam/00_9300.bin"), nullptr);
-  EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d).find("        INCBIN \"oam/sprites.bin\"\n"),
+  // The name is the person's; the extension is the form's, and the change is said.
+  EXPECT_NE(assetNamed(d, "oam/sprites.oam"), nullptr) << renderManifest(d);
+  EXPECT_EQ(assetNamed(d, "oam/00_9300.oam"), nullptr);
+  EXPECT_NE(renderRegion(regionNamed(d, "bank_00.asm"), d).find("        INCBIN \"oam/sprites.oam\", 0, 544\n"),
             std::string::npos);
+  EXPECT_TRUE(anyNote(d, "asset oam/sprites.bin is written as oam/sprites.oam: the extension is the form's"));
   EXPECT_TRUE(anyNote(d, "asset oam/gone.bin at $00:9500 names no range this run lifted; dropped"));
   std::string error;
   const std::optional<ManifestInput> input = parseManifest(renderManifest(d), error);
   ASSERT_TRUE(input.has_value()) << error;
   const auto sprites = std::find_if(input->assets.begin(), input->assets.end(),
-                                    [](const ManifestAsset& a) { return a.file == "oam/sprites.bin"; });
+                                    [](const ManifestAsset& a) { return a.file == "oam/sprites.oam"; });
   ASSERT_NE(sprites, input->assets.end());
   EXPECT_EQ(sprites->kind, MovedKind::Proven);
 }
@@ -1847,6 +1918,564 @@ TEST(RomAssets, TheProvenTreeStillAssemblesToItsImage) {
   EXPECT_EQ(placement.unplaced, 0u);
   EXPECT_EQ(placement.placedTwice, 0u);
   EXPECT_EQ(placement.image, declaringImage());
+}
+
+// ---- the forms ---------------------------------------------------------------
+//
+// The drawing cartridge sends one of everything an editable form has a grammar
+// for; the cases pin which form each lifted file is written in, what a tile
+// sheet carries, what a table is written under, the previews beside a source
+// and a Mode 7 file, the new manifest lines, and that the tree still assembles.
+
+namespace {
+
+using examples::drawingImage;
+
+CartridgeDisassembly drawingLift(CartridgeRequest request = {}) {
+  static const std::vector<std::uint8_t> rom = drawingImage();
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  return disassembleCartridge(request);
+}
+
+std::string textOf(const std::vector<std::uint8_t>& bytes) { return std::string(bytes.begin(), bytes.end()); }
+
+}  // namespace
+
+TEST(RomLandedFiles, EachFileIsWrittenInItsFormAndGivesItsBytesBack) {
+  const CartridgeDisassembly d = drawingLift();
+  std::vector<std::string> files;
+  for (const AssetFile& asset : d.assets) files.push_back(asset.file);
+  EXPECT_EQ(files, (std::vector<std::string>{
+                       "tiles/00_9000.png",    // four bits a pixel, three tiles and a half
+                       "tiles/00_9100.png",    // two bits a pixel
+                       "tiles/00_9200.png",    // the sprite sheet
+                       "cgram/00_9300.pal",    // the palette
+                       "maps/00_9400.map",     // BG1's screen
+                       "oam/00_9C00.oam",      // the sprite table
+                       "hdma/00_A400.hdma",    // the direct table
+                       "hdma/00_A410.hdma",    // the indirect table
+                       "hdma/00_A420.bin",     // the block its entries point at: data, not a table
+                       "staged/00_A500.bin",   // a source a routine built its data from: the blob sent to the tiles
+                       "staged/00_A520.bin",   // the blob sent to the palette
+                       "staged/00_A540.bin",   // the blob of two parts
+                       "staged/00_A560.bin",   // the blob of eight
+                       "staged/00_A580.bin",   // and of twenty-four, sent with it
+                       "staged/00_A5A0.bin",   // the two blobs of sixteen
+                       "staged/00_A5B0.bin",
+                       "staged/00_A5C0.bin",   // the blob of two parts sent at two depths
+                       "staged/00_A5E0.bin",   // the eight bytes after twenty-four the routine cleared
+                       "staged/00_A5E8.bin",   // two bytes of every summed byte
+                       "staged/00_A5F4.bin",   // and the third
+                       "vram/00_A600.bin",     // the Mode 7 block
+                   }))
+      << renderManifest(d);
+  EXPECT_TRUE(d.notes.empty()) << d.notes.front();
+  for (const AssetFile& asset : d.assets) {
+    const std::string extension = asset.file.substr(asset.file.find_last_of('.') + 1);
+    formats::Bytes back;
+    if (extension == "png") back = formats::decodeTiles(asset.written);
+    else if (extension == "pal") back = formats::decodePalette(textOf(asset.written));
+    else if (extension == "map") back = formats::decodeTilemap(textOf(asset.written));
+    else if (extension == "oam") back = formats::decodeOam(textOf(asset.written));
+    else if (extension == "hdma") back = formats::decodeHdma(textOf(asset.written));
+    else back.bytes = asset.written;
+    ASSERT_TRUE(back.ok()) << asset.file << ": " << back.error;
+    ASSERT_GE(back.bytes.size(), asset.bytes.size()) << asset.file;
+    EXPECT_TRUE(std::equal(asset.bytes.begin(), asset.bytes.end(), back.bytes.begin())) << asset.file;
+    if (extension != "png") {
+      EXPECT_EQ(back.bytes.size(), asset.bytes.size()) << asset.file;
+    }
+  }
+}
+
+TEST(RomLandedFiles, ATileSheetCarriesItsDepthAndTheRunsPalette) {
+  const CartridgeDisassembly d = drawingLift();
+  const AssetFile* fourBit = assetNamed(d, "tiles/00_9000.png");
+  const AssetFile* twoBit = assetNamed(d, "tiles/00_9100.png");
+  const AssetFile* sprites = assetNamed(d, "tiles/00_9200.png");
+  ASSERT_NE(fourBit, nullptr);
+  ASSERT_NE(twoBit, nullptr);
+  ASSERT_NE(sprites, nullptr);
+  EXPECT_EQ(fourBit->depth, 4u);
+  EXPECT_EQ(twoBit->depth, 2u);
+  EXPECT_EQ(sprites->depth, 4u);
+  // Palette 0 of the depth, as the run held it: sixteen greys, five bits
+  // spread to eight, the top bit of entry five ignored.
+  ASSERT_EQ(fourBit->palette.size(), 16u * 4u);
+  for (std::size_t i = 0; i < 16; ++i) {
+    const std::uint8_t level = static_cast<std::uint8_t>((i << 3) | (i >> 2));
+    EXPECT_EQ(fourBit->palette[4u * i], level) << i;
+    EXPECT_EQ(fourBit->palette[4u * i + 1u], level) << i;
+    EXPECT_EQ(fourBit->palette[4u * i + 2u], level) << i;
+    EXPECT_EQ(fourBit->palette[4u * i + 3u], 255u) << i;
+  }
+  ASSERT_EQ(twoBit->palette.size(), 4u * 4u);
+  EXPECT_EQ(twoBit->palette[4u * 3u], 3u << 3 | 0u);
+  // The sprite sheet's is entries 128–143, which the run never wrote: black.
+  ASSERT_EQ(sprites->palette.size(), 16u * 4u);
+  for (std::size_t i = 0; i < 16; ++i) EXPECT_EQ(sprites->palette[4u * i], 0u) << i;
+  // The PNG on disk says the same.
+  const formats::PngImage image = formats::decodePng(fourBit->written);
+  ASSERT_TRUE(image.ok()) << image.error;
+  EXPECT_EQ(image.image.bitDepth, 4u);
+  EXPECT_EQ(image.image.palette, fourBit->palette);
+  EXPECT_EQ(image.image.width, 32u) << "as wide as its tiles: three and a half is four";
+  EXPECT_EQ(image.image.height, 8u) << "on one row";
+  // A file the palette RAM colours the other way stays exact: every other
+  // entry of the sprite palette is one colour, and every pixel keeps its index.
+  const formats::Bytes back = formats::decodeTiles(sprites->written);
+  ASSERT_TRUE(back.ok());
+  EXPECT_TRUE(std::equal(sprites->bytes.begin(), sprites->bytes.end(), back.bytes.begin()));
+}
+
+TEST(RomLandedFiles, ATableIsWrittenUnderTheUnitAndTheFormItWasWalked) {
+  const CartridgeDisassembly d = drawingLift();
+  const AssetFile* direct = assetNamed(d, "hdma/00_A400.hdma");
+  const AssetFile* indirect = assetNamed(d, "hdma/00_A410.hdma");
+  const AssetFile* block = assetNamed(d, "hdma/00_A420.bin");
+  ASSERT_NE(direct, nullptr);
+  ASSERT_NE(indirect, nullptr);
+  ASSERT_NE(block, nullptr);
+  EXPECT_EQ(direct->unit, 2u);
+  EXPECT_FALSE(direct->indirect);
+  EXPECT_EQ(textOf(direct->written),
+            "unit 2 direct\n"
+            "lines 2 $AA $BB\n"
+            "lines 3 repeat $01 $02 $03 $04 $05 $06\n"
+            "end\n");
+  EXPECT_EQ(indirect->unit, 1u);
+  EXPECT_TRUE(indirect->indirect);
+  EXPECT_EQ(textOf(indirect->written),
+            "unit 1 indirect\n"
+            "lines 3 $A420\n"
+            "lines 3 repeat $A421\n"
+            "end\n");
+  EXPECT_EQ(block->written, block->bytes);
+  EXPECT_EQ(block->unit, 1u);
+}
+
+TEST(RomLandedFiles, TheWalkedAndPreviewLinesAreWrittenAndAreKnownKinds) {
+  const CartridgeDisassembly d = drawingLift();
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("walked   $00:81A8 channel 1 memory $00:A400 bytes 11 as table unit 2 direct times "),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("walked   $00:81A8 channel 2 memory $00:A410 bytes 7 as table unit 1 indirect times "),
+            std::string::npos);
+  EXPECT_NE(manifest.find("walked   $00:81A8 channel 2 memory $00:A420 bytes 4 as indirect unit 1 indirect times "),
+            std::string::npos);
+  EXPECT_NE(manifest.find("preview  staged/00_A500-tiles.png of staged/00_A500.bin as tiles contents 1\n"),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("preview  staged/00_A520-palette.pal of staged/00_A520.bin as palette contents 1\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("preview  staged/00_A540-tiles.png of staged/00_A540.bin as tiles contents 2\n"),
+            std::string::npos);
+  EXPECT_NE(manifest.find("preview  vram/00_A600-tiles.png of vram/00_A600.bin as mode7-tiles\n"), std::string::npos);
+  EXPECT_NE(manifest.find("preview  vram/00_A600-map.map of vram/00_A600.bin as mode7-map\n"), std::string::npos);
+  EXPECT_NE(manifest.find("landed   $00:8070 channel 0 memory $00:9100 bytes 64 as dma at $5000-$501F in tiles3 times 1 depth 2\n"),
+            std::string::npos);
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(manifest, error);
+  ASSERT_TRUE(input.has_value()) << error;
+  EXPECT_TRUE(parseManifest("walked   $00:81A8 channel 1 memory $00:A400 bytes 11 as table unit 2 direct times 60\n", error)
+                  .has_value())
+      << error;
+  EXPECT_TRUE(parseManifest("preview  vram/x-map.map of vram/x.bin as mode7-map\n", error).has_value()) << error;
+  EXPECT_TRUE(parseManifest("preview  staged/x-tiles.png of staged/x.bin as tiles contents 3\n", error).has_value())
+      << error;
+  EXPECT_FALSE(parseManifest("walk     $00:81A8\n", error).has_value());
+}
+
+namespace {
+
+const PreviewFile* previewNamed(const CartridgeDisassembly& d, std::string_view file) {
+  for (const PreviewFile& preview : d.previews) {
+    if (preview.file == file) return &preview;
+  }
+  return nullptr;
+}
+
+std::vector<std::string> previewFiles(const CartridgeDisassembly& d) {
+  std::vector<std::string> files;
+  for (const PreviewFile& preview : d.previews) files.push_back(preview.file);
+  return files;
+}
+
+}  // namespace
+
+TEST(RomLandedFiles, APreviewIsWrittenPerSourceAndFormBesideItsSource) {
+  const CartridgeDisassembly d = drawingLift();
+  EXPECT_EQ(previewFiles(d), (std::vector<std::string>{
+                                 "staged/00_A500-tiles.png",    // the blob sent to the tiles
+                                 "staged/00_A520-palette.pal",  // the blob sent to the palette
+                                 "staged/00_A540-tiles.png",    // the blob of two parts: one sheet of both
+                                 "staged/00_A580-tiles.png",    // the blob of twenty-four owns the content it shared
+                                 "staged/00_A5A0-tiles.png",    // of the two blobs of sixteen, the lower address
+                                 "staged/00_A5C0-tiles.png",    // the blob sent at two depths: one sheet at the deeper
+                                 "staged/00_A5E8-tiles.png",    // the blob two of every summed byte's three came from
+                                 "vram/00_A600-tiles.png",      // the Mode 7 block
+                                 "vram/00_A600-map.map",
+                             }))
+      << renderManifest(d);
+  // The first blob's content went to tiles: an indexed PNG of the thirty-two
+  // bytes it was unpacked into, at BG1's depth, the palette the run held, one
+  // tile wide.
+  const PreviewFile* tiles = previewNamed(d, "staged/00_A500-tiles.png");
+  ASSERT_NE(tiles, nullptr);
+  EXPECT_EQ(tiles->of, "staged/00_A500.bin");
+  EXPECT_EQ(tiles->form, "tiles");
+  EXPECT_EQ(tiles->contents, 1u);
+  const formats::PngImage one = formats::decodePng(tiles->written);
+  ASSERT_TRUE(one.ok()) << one.error;
+  EXPECT_EQ(one.image.bitDepth, 4u);
+  EXPECT_EQ(one.image.width, 8u) << "one 4bpp tile";
+  const formats::Bytes unpacked = formats::decodeTiles(tiles->written);
+  ASSERT_TRUE(unpacked.ok()) << unpacked.error;
+  ASSERT_EQ(unpacked.bytes.size(), 32u);
+  for (std::size_t i = 0; i < 32; ++i) EXPECT_EQ(unpacked.bytes[i], 0x11u * (i / 8u + 1u)) << i;
+  // The second blob's went to the palette.
+  const PreviewFile* palette = previewNamed(d, "staged/00_A520-palette.pal");
+  ASSERT_NE(palette, nullptr);
+  EXPECT_EQ(palette->of, "staged/00_A520.bin");
+  EXPECT_EQ(palette->form, "palette");
+  EXPECT_EQ(palette->contents, 1u);
+  const formats::Bytes words = formats::decodePalette(textOf(palette->written));
+  ASSERT_TRUE(words.ok());
+  ASSERT_EQ(words.bytes.size(), 32u);
+  EXPECT_EQ(words.bytes[0], 0x1Fu);
+  EXPECT_EQ(words.bytes[4], 0x7Cu);
+  // The Mode 7 block: its odd bytes as an 8-bit sheet, its even bytes as
+  // tile numbers thirty-two a line; neither counts contents.
+  const PreviewFile* mode7Tiles = previewNamed(d, "vram/00_A600-tiles.png");
+  ASSERT_NE(mode7Tiles, nullptr);
+  EXPECT_EQ(mode7Tiles->form, "mode7-tiles");
+  EXPECT_EQ(mode7Tiles->contents, 0u);
+  const formats::PngImage sheet = formats::decodePng(mode7Tiles->written);
+  ASSERT_TRUE(sheet.ok()) << sheet.error;
+  EXPECT_EQ(sheet.image.bitDepth, 8u);
+  EXPECT_EQ(sheet.image.indices[0], static_cast<std::uint8_t>((1u * 71u + 3u) & 0xFFu)) << "the first odd byte";
+  EXPECT_EQ(sheet.image.indices[1], static_cast<std::uint8_t>((3u * 71u + 3u) & 0xFFu));
+  const PreviewFile* mode7Map = previewNamed(d, "vram/00_A600-map.map");
+  ASSERT_NE(mode7Map, nullptr);
+  EXPECT_EQ(mode7Map->form, "mode7-map");
+  EXPECT_EQ(mode7Map->contents, 0u);
+  EXPECT_EQ(textOf(mode7Map->written).substr(0, 12), "$00 $01 $02 ");
+  EXPECT_EQ(std::count(mode7Map->written.begin(), mode7Map->written.end(), '\n'), 2) << "sixty-four entries, two rows";
+  // Nothing is placed twice: a preview is not a source.
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.placedTwice, 0u);
+}
+
+TEST(RomLandedFiles, ASourcesContentsOfOneFormCombineInTheOrderCarried) {
+  const CartridgeDisassembly d = drawingLift();
+  // The blob of two parts was unpacked a part at a time into one buffer and
+  // each part sent to the tiles: two contents, one sheet, the first part's
+  // tile then the second's.
+  const PreviewFile* both = previewNamed(d, "staged/00_A540-tiles.png");
+  ASSERT_NE(both, nullptr);
+  EXPECT_EQ(both->contents, 2u);
+  const formats::PngImage image = formats::decodePng(both->written);
+  ASSERT_TRUE(image.ok()) << image.error;
+  EXPECT_EQ(image.image.width, 16u) << "two tiles side by side";
+  EXPECT_EQ(image.image.height, 8u);
+  const formats::Bytes back = formats::decodeTiles(both->written);
+  ASSERT_TRUE(back.ok()) << back.error;
+  ASSERT_EQ(back.bytes.size(), 64u);
+  const std::uint8_t first[4] = {0x12u, 0x34u, 0x56u, 0x78u};
+  const std::uint8_t second[4] = {0x9Au, 0xBCu, 0xDEu, 0xF0u};
+  for (std::size_t i = 0; i < 32; ++i) {
+    EXPECT_EQ(back.bytes[i], first[i / 8u]) << i;
+    EXPECT_EQ(back.bytes[32u + i], second[i / 8u]) << i;
+  }
+}
+
+TEST(RomLandedFiles, AContentBelongsToTheSourceThatSuppliedMostOfIt) {
+  const CartridgeDisassembly d = drawingLift();
+  // Twenty-four bytes from one blob and eight from another were sent
+  // together: the content is the first blob's, whose bytes are three of its
+  // four, and the second blob — at the lower address, so first by address —
+  // has no preview.
+  const PreviewFile* most = previewNamed(d, "staged/00_A580-tiles.png");
+  ASSERT_NE(most, nullptr) << renderManifest(d);
+  EXPECT_EQ(most->contents, 1u);
+  EXPECT_EQ(previewNamed(d, "staged/00_A560-tiles.png"), nullptr);
+  const formats::Bytes back = formats::decodeTiles(most->written);
+  ASSERT_TRUE(back.ok()) << back.error;
+  ASSERT_EQ(back.bytes.size(), 32u);
+  EXPECT_EQ(back.bytes[0], 0x21u);
+  EXPECT_EQ(back.bytes[23], 0x65u);
+  EXPECT_EQ(back.bytes[24], 0x87u) << "the eight bytes the other blob supplied are in the picture";
+  // Sixteen from each of two blobs: equal shares go to the lower address.
+  const PreviewFile* lower = previewNamed(d, "staged/00_A5A0-tiles.png");
+  ASSERT_NE(lower, nullptr);
+  EXPECT_EQ(lower->contents, 1u);
+  EXPECT_EQ(previewNamed(d, "staged/00_A5B0-tiles.png"), nullptr);
+  const formats::Bytes tied = formats::decodeTiles(lower->written);
+  ASSERT_TRUE(tied.ok());
+  ASSERT_EQ(tied.bytes.size(), 32u);
+  EXPECT_EQ(tied.bytes[0], 0xA9u);
+  EXPECT_EQ(tied.bytes[16], 0xEDu);
+  // Twenty-four bytes the routine cleared itself and eight from a blob: the
+  // routine made more of the content than the blob did, so it is the
+  // routine's and the blob shows nothing.
+  EXPECT_EQ(previewNamed(d, "staged/00_A5E0-tiles.png"), nullptr) << renderManifest(d);
+  // Every byte of the summed buffer came from three image bytes, two in one
+  // blob and one in another, at the higher address: byte by byte the first
+  // blob holds the most of the origin, so the content is its.
+  const PreviewFile* summed = previewNamed(d, "staged/00_A5E8-tiles.png");
+  ASSERT_NE(summed, nullptr) << renderManifest(d);
+  EXPECT_EQ(summed->contents, 1u);
+  EXPECT_EQ(previewNamed(d, "staged/00_A5F4-tiles.png"), nullptr);
+  const formats::Bytes sums = formats::decodeTiles(summed->written);
+  ASSERT_TRUE(sums.ok());
+  ASSERT_EQ(sums.bytes.size(), 32u);
+  EXPECT_EQ(sums.bytes[0], 0x03u);
+  EXPECT_EQ(sums.bytes[7], 0x88u);
+  // Every source is still lifted: a source without a preview is a file all the same.
+  EXPECT_NE(assetNamed(d, "staged/00_A560.bin"), nullptr);
+  EXPECT_NE(assetNamed(d, "staged/00_A5B0.bin"), nullptr);
+  EXPECT_NE(assetNamed(d, "staged/00_A5E0.bin"), nullptr);
+}
+
+TEST(RomLandedFiles, ContentsOfTwoDepthsShareOneSheetAtTheDeeper) {
+  const CartridgeDisassembly d = drawingLift();
+  // The blob's first part went to BG3's name base at two bits — two tiles —
+  // and its second to BG1's at four — one tile: one sheet of three 4bpp
+  // tiles, the two-bit tiles' planes above their own zero, with the palette
+  // of the four-bit content.
+  const PreviewFile* sheet = previewNamed(d, "staged/00_A5C0-tiles.png");
+  ASSERT_NE(sheet, nullptr) << renderManifest(d);
+  EXPECT_EQ(sheet->contents, 2u);
+  const formats::PngImage image = formats::decodePng(sheet->written);
+  ASSERT_TRUE(image.ok()) << image.error;
+  EXPECT_EQ(image.image.bitDepth, 4u);
+  EXPECT_EQ(image.image.width, 24u) << "three tiles";
+  EXPECT_EQ(image.image.height, 8u);
+  const AssetFile* fourBit = assetNamed(d, "tiles/00_9000.png");
+  ASSERT_NE(fourBit, nullptr);
+  EXPECT_EQ(image.image.palette, fourBit->palette) << "palette 0 of four bits, as the run held it";
+  const formats::Bytes back = formats::decodeTiles(sheet->written);
+  ASSERT_TRUE(back.ok()) << back.error;
+  ASSERT_EQ(back.bytes.size(), 96u);
+  const std::uint8_t first[4] = {0x0Au, 0x0Bu, 0x0Cu, 0x0Du};
+  const std::uint8_t second[4] = {0x1Eu, 0x2Fu, 0x3Au, 0x4Bu};
+  for (std::size_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(back.bytes[i], first[i / 8u]) << i << ": the first two-bit tile's planes 0 and 1";
+    EXPECT_EQ(back.bytes[16u + i], 0u) << i << ": its planes 2 and 3";
+    EXPECT_EQ(back.bytes[32u + i], first[2u + i / 8u]) << i << ": the second two-bit tile";
+    EXPECT_EQ(back.bytes[48u + i], 0u) << i;
+  }
+  for (std::size_t i = 0; i < 32; ++i) EXPECT_EQ(back.bytes[64u + i], second[i / 8u]) << i << ": the four-bit tile whole";
+}
+
+TEST(RomLandedFiles, TheBankFileIncludesAnEncodedFileWithItsLength) {
+  const CartridgeDisassembly d = drawingLift();
+  const std::string bank = renderRegion(regionNamed(d, "bank_00.asm"), d);
+  EXPECT_NE(bank.find("        INCBIN \"tiles/00_9000.png\", 0, 112\n"), std::string::npos) << bank;
+  EXPECT_NE(bank.find("        INCBIN \"maps/00_9400.map\", 0, 2048\n"), std::string::npos);
+  EXPECT_NE(bank.find("        INCBIN \"hdma/00_A400.hdma\", 0, 11\n"), std::string::npos);
+  EXPECT_NE(bank.find("        INCBIN \"hdma/00_A420.bin\"\n"), std::string::npos) << "bytes as they are: no length";
+  EXPECT_NE(bank.find("        INCBIN \"vram/00_A600.bin\"\n"), std::string::npos);
+  EXPECT_EQ(bank.find("-tiles.png"), std::string::npos) << "nothing includes a preview";
+}
+
+TEST(RomLandedFiles, TheDrawingTreeStillAssemblesToItsImage) {
+  const CartridgeDisassembly d = drawingLift();
+  const Placement placement = placeBytes(d);
+  EXPECT_EQ(placement.unplaced, 0u);
+  EXPECT_EQ(placement.placedTwice, 0u);
+  EXPECT_EQ(placement.image, drawingImage());
+}
+
+namespace {
+
+using examples::imageWithNmi;
+
+// A cartridge whose one HDMA table is walked under two units: channel 1 walks
+// it to the brightness register a byte a line from the start, and the
+// second frame's handler changes the channel's pattern to two bytes a line.
+std::vector<std::uint8_t> twoUnitsImage() {
+  std::vector<std::uint8_t> rom = imageWithNmi();
+  put(rom, 0x0000u, {
+      0xA9u, 0x0Fu, 0x8Du, 0x00u, 0x21u,       // $8000 INIDISP = $0F: the screen on
+      0xA9u, 0x00u, 0x8Du, 0x10u, 0x43u,       // $8005 DMAP1 = $00: direct, pattern 0, a byte a line
+      0xA9u, 0x00u, 0x8Du, 0x11u, 0x43u,       // $800A BBAD1 = $00: INIDISP
+      0xA9u, 0x00u, 0x8Du, 0x12u, 0x43u,       // $800F A1T1 low
+      0xA9u, 0x90u, 0x8Du, 0x13u, 0x43u,       // $8014 A1T1 high: $9000
+      0xA9u, 0x00u, 0x8Du, 0x14u, 0x43u,       // $8019 A1B1 = $00
+      0xA9u, 0x02u, 0x8Du, 0x0Cu, 0x42u,       // $801E HDMAEN = $02 (the write at $8020)
+      0xA9u, 0x80u, 0x8Du, 0x00u, 0x42u,       // $8023 NMITIMEN = $80
+      0x80u, 0xFEu,                            // $8028 BRA $8028
+  });
+  put(rom, 0x0310u, {                            // the emulation handler
+      0xEEu, 0x10u, 0x00u,                     // $8310 INC !$0010
+      0xADu, 0x10u, 0x00u,                     // $8313 LDA !$0010
+      0xC9u, 0x02u,                            // $8316 CMP #$02
+      0xD0u, 0x05u,                            // $8318 BNE $831F
+      0xA9u, 0x01u, 0x8Du, 0x10u, 0x43u,       // $831A DMAP1 = $01: pattern 1, two bytes a line, from the next frame
+      0xADu, 0x10u, 0x42u,                     // $831F LDA !$4210
+      0x40u,                                   // $8322 RTI
+  });
+  put(rom, 0x1000u, {0x01u, 0x0Fu, 0x01u, 0x0Eu, 0x00u, 0x00u, 0x00u});  // $9000: two entries of one line, then the end
+  return rom;
+}
+
+}  // namespace
+
+TEST(RomLandedFiles, ATableWalkedUnderTwoUnitsIsBytesAndSaysSo) {
+  static const std::vector<std::uint8_t> rom = twoUnitsImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 5u * kFrame;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  // Two walks of the one table, the ranges sharing bytes: one file, two units.
+  std::vector<unsigned> units;
+  for (const WalkedRange& walk : d.walked) {
+    if (walk.memory == 0x009000u && walk.kind == MovedKind::Table &&
+        std::find(units.begin(), units.end(), walk.unit) == units.end()) {
+      units.push_back(walk.unit);
+    }
+  }
+  std::sort(units.begin(), units.end());
+  EXPECT_EQ(units, (std::vector<unsigned>{1u, 2u})) << renderManifest(d);
+  const AssetFile* table = assetNamed(d, "hdma/00_9000.bin");
+  ASSERT_NE(table, nullptr) << renderManifest(d);
+  EXPECT_EQ(table->written, table->bytes);
+  EXPECT_EQ(assetNamed(d, "hdma/00_9000.hdma"), nullptr);
+  EXPECT_TRUE(anyNote(d, "hdma/00_9000.bin: the engine walked it under two units; written as bytes"))
+      << (d.notes.empty() ? std::string("no notes") : d.notes.front());
+}
+
+// ---- the samples' listening copies ------------------------------------------------
+//
+// The drawing cartridge's sound program keys two voices on: one on a sample the
+// boot captures inside an uploaded block, one on a sample the program built,
+// which the image holds nowhere. The cases pin where each WAV is written and
+// what it holds, the `sample` line, and the numbering of a second sample at one
+// address.
+
+namespace {
+
+CartridgeDisassembly drawingSoundLift() {
+  static const std::vector<std::uint8_t> rom = drawingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  return disassembleCartridge(request);
+}
+
+const SampleFile* sampleNamed(const CartridgeDisassembly& d, std::string_view file) {
+  for (const SampleFile& sample : d.samples) {
+    if (sample.file == file) return &sample;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(RomSamples, ASampleTheSoundProgramsBlockHoldsIsWrittenBesideIt) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  ASSERT_EQ(d.samples.size(), 2u) << renderManifest(d);
+  const SampleFile* uploaded = sampleNamed(d, "apu/driver-0308.wav");
+  ASSERT_NE(uploaded, nullptr) << renderManifest(d);
+  EXPECT_EQ(uploaded->start, 0x0308u);
+  EXPECT_EQ(uploaded->loop, 0x0311u);
+  EXPECT_EQ(uploaded->bytes.size(), 18u);
+  EXPECT_EQ(uploaded->in, "apu/driver.asm");
+  ASSERT_TRUE(uploaded->romOffset.has_value());
+  EXPECT_EQ(*uploaded->romOffset, 0x2788u) << "eight bytes into the block uploaded from $A780";
+  EXPECT_EQ(uploaded->times, 1u);
+  const formats::Bytes wav = formats::encodeBrrWav(uploaded->bytes);
+  ASSERT_TRUE(wav.ok()) << wav.error;
+  EXPECT_EQ(uploaded->written, wav.bytes) << "the machine's own decode";
+  EXPECT_EQ(uploaded->written.size(), 44u + 32u * 4u);
+}
+
+TEST(RomSamples, ASampleTheImageHoldsNowhereIsWrittenUnderSamples) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  const SampleFile* built = sampleNamed(d, "apu/samples/0330.wav");
+  ASSERT_NE(built, nullptr) << renderManifest(d);
+  EXPECT_EQ(built->start, 0x0330u);
+  EXPECT_EQ(built->loop, 0x0330u);
+  EXPECT_FALSE(built->romOffset.has_value());
+  EXPECT_TRUE(built->in.empty());
+  EXPECT_EQ(built->written, formats::encodeBrrWav(built->bytes).bytes);
+}
+
+TEST(RomSamples, TheSampleLineIsWrittenAndIsAKnownKind) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1\n"),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1\n"),
+            std::string::npos) << manifest;
+  std::string error;
+  EXPECT_TRUE(parseManifest(manifest, error).has_value()) << error;
+  EXPECT_TRUE(parseManifest("sample   apu/x-0308.wav of $0308 bytes 18 loop $0311 unplaced times 3\n", error).has_value())
+      << error;
+  EXPECT_FALSE(parseManifest("sampled  apu/x-0308.wav\n", error).has_value());
+}
+
+TEST(RomSamples, WithoutTheSoundCaptureTheBankFileHoldsTheBytes) {
+  const CartridgeDisassembly d = drawingLift();
+  const SampleFile* uploaded = sampleNamed(d, "apu/bank_00-0308.wav");
+  ASSERT_NE(uploaded, nullptr) << renderManifest(d);
+  EXPECT_EQ(uploaded->in, "bank_00.asm");
+  ASSERT_TRUE(uploaded->romOffset.has_value());
+  EXPECT_EQ(*uploaded->romOffset, 0x2788u);
+  EXPECT_NE(renderManifest(d).find("sample   apu/bank_00-0308.wav of $0308 bytes 18 loop $0311 in bank_00.asm at $002788 times 1\n"),
+            std::string::npos) << renderManifest(d);
+}
+
+TEST(RomSamples, ASecondSampleAtOneAddressTakesANumber) {
+  // The program goes on after the key-on: it rewrites the built sample's
+  // second byte and keys both voices on again, so the address $0330 names two
+  // samples the image holds nowhere.
+  std::vector<std::uint8_t> rom = drawingImage();
+  put(rom, 0x2758u, {
+      0xE8u, 0x11u, 0xC5u, 0x31u, 0x03u,  // $0258 MOV A,#$11 / MOV !$0331,A
+      0x8Fu, 0x03u, 0xF3u,                // $025D KON = $03 again
+      0x2Fu, 0xFEu,                       // $0260 BRA $0260
+  });
+  rom[0x024Bu] = 0x62u;  // CPX #$62 at $824A: the program is 98 bytes now
+  rom[0x0261u] = 0x63u;  // LDA #$63 at $8260: the next block's index is two past its last
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  std::vector<std::string> files;
+  for (const SampleFile& sample : d.samples) files.push_back(sample.file);
+  EXPECT_EQ(files, (std::vector<std::string>{"apu/driver-0308.wav", "apu/samples/0330.wav", "apu/samples/0330-2.wav"}))
+      << renderManifest(d);
+  const SampleFile* uploaded = sampleNamed(d, "apu/driver-0308.wav");
+  ASSERT_NE(uploaded, nullptr);
+  EXPECT_EQ(uploaded->times, 2u);
+}
+
+TEST(RomSamples, TheProjectWritesEveryWav) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() / "snaggletooth-samples-test";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, directory, error)) << error;
+  ASSERT_EQ(d.samples.size(), 2u);
+  for (const SampleFile& sample : d.samples) {
+    std::ifstream in(directory / sample.file, std::ios::binary);
+    ASSERT_TRUE(in.is_open()) << sample.file;
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    EXPECT_EQ(bytes, sample.written) << sample.file;
+  }
+  std::filesystem::remove_all(directory, ec);
 }
 
 }  // namespace snaggletooth::disasm

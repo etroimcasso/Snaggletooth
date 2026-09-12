@@ -4,7 +4,8 @@
 //
 // Reads the directory's `project.snagifest`, assembles every file it names —
 // the bank files under the 65816 dialect, the sound program under the SPC700
-// dialect — places each range and each placed block at the image offset the
+// dialect, an included tile sheet or table read back to the bytes it was made
+// from — places each range and each placed block at the image offset the
 // manifest gives, and compares the whole with the image byte for byte. The
 // report names every file, every run that differs with its first differing
 // byte, the bytes no file produced, and the verdict. `-o` writes the image the

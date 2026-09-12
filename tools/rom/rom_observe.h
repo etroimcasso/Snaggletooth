@@ -29,7 +29,10 @@
 // and reads, at the first frame the PPU draws after the range closed, what
 // the screen mode and the bases then say the memory was: a layer's map, a
 // name base, the sprite tiles, or nothing; a run that ends before a frame is
-// drawn says so.
+// drawn says so. With the areas it keeps what a lifted file's editable form
+// needs and the areas alone do not say: the colour depth of the tile areas
+// a landing lies in, the palette as it stood at the frame the landing was
+// read at, and the transfer unit an HDMA channel walked a table under.
 //
 // The same run lifts every instruction the CPU executes from the bytes it
 // fetched — wherever they lay: the image through any mirror, work RAM, a byte
@@ -53,15 +56,23 @@
 // CPU carries out itself, a store at a time, is such a range too; and a
 // sequence of stores the CPU made to a data register from consecutive image
 // bytes is recorded as the stream it is, with the run of image bytes its
-// carrier read as the file it is lifted as.
+// carrier read as the file it is lifted as. The bytes an extent of work RAM
+// was carried out with are kept too, once per distinct content, with where
+// they landed — which is what a preview of a source the run cannot turn back
+// into an editable file is made from.
 //
 // The sound CPU is held to the same check. The audio machine reports every
 // access the sound CPU makes and every instruction boundary it crosses; at
 // each boundary the run decodes the instruction about to run from the bytes at
 // the program counter, lifts it, and at the boundary after holds that node to
 // what the machine did between them — the upload stub's instructions and the
-// driver's alike, whatever the bytes came from. Nothing is computed from a
-// sound node yet; the check is the whole of it.
+// driver's alike, whatever the bytes came from. From the same accesses the run
+// keeps a copy of the DSP's register file — every write through `$F2` and
+// `$F3` — and at each key-on reads, for every voice named, the sample the DSP
+// is about to play: the directory entry the voice's source number selects,
+// and the blocks from its start to the first carrying the end flag. Those
+// samples, each once with how many key-ons named it, are what a listening
+// copy is written from.
 //
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
@@ -205,22 +216,6 @@ struct StagedWriter {
   std::vector<ir::OriginInterval> sources;
 };
 
-// One extent of work RAM carried to a register — by an engine, or by the CPU
-// a store at a time — and where its bytes came from: the lowest address and
-// the count, the origin of every byte together over every sighting of every
-// range and stream with that extent, and the writers, most bytes first. An
-// extent whose origin is empty was built from constants alone.
-struct StagedRange {
-  Address memory = 0;
-  std::uint32_t bytes = 0;
-  ir::OriginSet origin;
-  std::vector<StagedWriter> writers;
-};
-
-// Two staged ranges are the same extent when they begin at the same address
-// and run for the same count.
-[[nodiscard]] bool sameExtent(const StagedRange& a, const StagedRange& b);
-
 // The video memory a data port reaches: `VMDATAL`/`VMDATAH` VRAM, `CGDATA`
 // the palette, `OAMDATA` the sprite table.
 enum class PortMemory : std::uint8_t { Vram, Cgram, Oam };
@@ -249,26 +244,102 @@ constexpr std::uint16_t kAreaOam = 1u << 11;
 constexpr std::uint16_t kAreaTilemaps = kAreaTilemap1 | kAreaTilemap2 | kAreaTilemap3 | kAreaTilemap4;
 constexpr std::uint16_t kAreaTiles = kAreaTiles1 | kAreaTiles2 | kAreaTiles3 | kAreaTiles4 | kAreaSprites;
 
+// The colour depths a landing's tile areas were read at, one bit each: a
+// layer's name base at the layer's depth in the mode, the sprite tiles at
+// four bits a pixel, the whole of VRAM under Mode 7 at eight.
+constexpr std::uint8_t kDepth2 = 1u << 0;
+constexpr std::uint8_t kDepth4 = 1u << 1;
+constexpr std::uint8_t kDepth8 = 1u << 2;
+
 // Where the bytes of a range or a stream went on the other side of the port:
 // the memory, the lowest and the highest address the port put a byte at — a
-// VRAM word, a palette word, an OAM byte — and what the PPU used that memory
-// as. A VRAM landing is read at the first frame the PPU drew after its bytes
-// landed — bytes that land after a reading are read at the next drawn frame,
-// and the areas are the union — so `shown` is false for a landing no frame
-// was drawn after, and `areas` is then nothing; a palette or OAM landing is
-// read as it lands. `areas` empty with `shown` set is a stretch of VRAM no
-// base reaches.
+// VRAM word, a palette word, an OAM byte — what the PPU used that memory as,
+// and at what depth. A VRAM landing is read at the first frame the PPU drew
+// after its bytes landed — bytes that land after a reading are read at the
+// next drawn frame, and the areas and the depths are the union — so `shown`
+// is false for a landing no frame was drawn after, and `areas` is then
+// nothing; a palette or OAM landing is read as it lands. `areas` empty with
+// `shown` set is a stretch of VRAM no base reaches. `depths` is a bit per
+// depth the landing's tile areas were read at (`kDepth2`, `kDepth4`,
+// `kDepth8`), and `palette` names, among `RunObservation::palettes`, the
+// palette RAM as it stood at the first drawn frame a VRAM landing was read
+// at — nothing for a landing no frame drew, and for the palette and the
+// sprite table, which no palette colours.
 struct PortLanding {
   PortMemory memory = PortMemory::Vram;
   std::uint16_t lowest = 0;
   std::uint16_t highest = 0;
   bool shown = false;
   std::uint16_t areas = 0;
+  std::uint8_t depths = 0;
+  std::optional<std::size_t> palette;
 };
 
 // The areas as a manifest writes them: the names joined by `+`, `none` for a
 // shown landing in no area, `unshown` for one no frame drew.
 [[nodiscard]] std::string areaText(const PortLanding& landing);
+
+// The one depth a landing's tile areas share — 2, 4 or 8 — or nothing when
+// they were read at two depths or the landing lies in no tile area.
+[[nodiscard]] std::optional<unsigned> landingDepth(const PortLanding& landing);
+
+// The depth as a manifest writes it: `2`, `4`, `8` or `none`.
+[[nodiscard]] std::string depthText(const PortLanding& landing);
+
+// The bytes an extent of work RAM held when it was carried out, once per
+// distinct content: the bytes in address order, the origin of those bytes
+// together as the shadow held it at the carry — the image bytes they were
+// built from, which names the source file the content is a preview of — the
+// class of the register they went to and what the carry was to the engine — a
+// transfer, a table, an indirect block, or the CPU's own stores (`Stream`) —
+// where they landed on the other side of the port, read as a range's landing
+// is, for a table, the unit and the form the engine walked it under, the
+// origin of each of its bytes on its own — as runs of consecutive bytes with
+// one origin, in address order, which is what says how much of the content
+// each source supplied and how much the routine made itself — and the carry's
+// place in the run's order of carries, from zero, so contents from several
+// extents can be put in the order the run first carried each. A buffer a
+// decoder fills twice from one source is two contents; a table the engine
+// walks every frame from one buffer is one.
+struct ContentOrigin {
+  std::uint32_t bytes = 0;
+  ir::OriginSet origin;  // empty for bytes with no image origin: cleared, computed, read from a register
+};
+
+struct CarriedContent {
+  std::vector<std::uint8_t> bytes;
+  ir::OriginSet origin;
+  RegisterClass cls = RegisterClass::Display;
+  MovedKind kind = MovedKind::Dma;
+  std::optional<PortLanding> landing;
+  unsigned unit = 1;
+  bool indirect = false;
+  std::vector<ContentOrigin> byteOrigins;
+  std::uint32_t order = 0;
+};
+
+// Two contents are the same when the same bytes went to the same class the
+// same way, under the same unit and form for a table.
+[[nodiscard]] bool sameContent(const CarriedContent& a, const CarriedContent& b);
+
+// One extent of work RAM carried to a register — by an engine, or by the CPU
+// a store at a time — and where its bytes came from: the lowest address and
+// the count, the origin of every byte together over every sighting of every
+// range and stream with that extent, the writers, most bytes first, and the
+// contents the extent was carried out with, in the order the run first
+// carried each. An extent whose origin is empty was built from constants
+// alone.
+struct StagedRange {
+  Address memory = 0;
+  std::uint32_t bytes = 0;
+  ir::OriginSet origin;
+  std::vector<StagedWriter> writers;
+  std::vector<CarriedContent> contents;
+};
+
+// Two staged ranges are the same extent when they begin at the same address
+// and run for the same count.
+[[nodiscard]] bool sameExtent(const StagedRange& a, const StagedRange& b);
 
 // A port address as a manifest writes it: four hexadecimal digits for a VRAM
 // word, two for a palette word, three for an OAM byte.
@@ -289,8 +360,36 @@ struct LandedRange {
 };
 
 // The order landings are reported and written in: their ranges' order, then
-// by memory, lowest address, highest address, and what the memory was used as.
+// by memory, lowest address, highest address, what the memory was used as,
+// and the depth.
 [[nodiscard]] bool landedBefore(const LandedRange& a, const LandedRange& b);
+
+// How the HDMA engine read one table or indirect block: the fields that
+// identify the range — its `moved` line's site, channel, memory address,
+// count and kind — the bytes one line of the table transfers, as the
+// channel's `DMAP` pattern said at the walk (patterns 0 → 1, 1 and 2 → 2, 3
+// through 5 → 4, 6 → 2, 7 → 4), whether the entries carry pointers rather
+// than their data, and how many sightings of exactly this walk the run made.
+// The two are what a table's bytes do not carry, and what its text form
+// states on its first line.
+struct WalkedRange {
+  Address site = 0;
+  std::uint8_t channel = 0;
+  Address memory = 0;
+  std::uint32_t bytes = 0;
+  MovedKind kind = MovedKind::Table;
+  unsigned unit = 1;
+  bool indirect = false;
+  std::uint32_t times = 1;
+};
+
+// The bytes one line of an HDMA table transfers under a `DMAP` transfer
+// pattern, 0 through 7.
+[[nodiscard]] unsigned hdmaUnitOf(std::uint8_t pattern);
+
+// The order walks are reported and written in: their ranges' order, then by
+// unit, then direct before indirect.
+[[nodiscard]] bool walkedBefore(const WalkedRange& a, const WalkedRange& b);
 
 // A stream the CPU carried a byte at a time: consecutive stores to one data
 // register — `VMDATAL`/`VMDATAH` as one, `CGDATA`, `OAMDATA`, the audio ports
@@ -325,15 +424,38 @@ struct StreamedRange {
 // Two streams are the same when every field but the count and the source agrees.
 [[nodiscard]] bool sameStream(const StreamedRange& a, const StreamedRange& b);
 
+// One sample a key-on named: the address in the audio memory its first block
+// lies at and the address the directory entry gives the DSP to continue from
+// at the end flag — both read from the sample directory as the DSP reads
+// them, at the write to `KON` — the sample's bytes from its first block to
+// the first carrying the end flag, nine a block, as the audio memory held
+// them then, and how many key-ons named exactly this sample. A driver that
+// loads another sample over the same address names another sample.
+struct KeyedSample {
+  std::uint16_t start = 0;
+  std::uint16_t loop = 0;
+  std::vector<std::uint8_t> bytes;
+  std::uint32_t times = 1;
+};
+
+// Two samples are the same when they begin at the same address and hold the
+// same bytes.
+[[nodiscard]] bool sameSample(const KeyedSample& a, const KeyedSample& b);
+
 // Everything one run recorded: the targets the indirect jumps took, in site
 // order, then target order, each site/target/mode once; the ranges the engines
 // moved, in `rangeBefore` order, each distinct range once with its count;
 // where those ranges landed, in `landedBefore` order, each distinct landing
-// once with its count; the
+// once with its count; how each table was walked, in `walkedBefore` order,
+// each distinct walk once with its count; the palette RAM as it stood at
+// each drawn frame a landing was read at, each distinct palette once, which
+// the landings name by index; the
 // landings, in site order, then target order, each site/target/mode once; the
 // values seen, in address order; the staged extents, in address order, then
 // by count; the streams, in site order, then register, then where the bytes
-// came from, then where they landed; and what
+// came from, then where they landed; the samples the key-ons named, in start
+// order, then the shorter first, then by bytes, each distinct sample once
+// with its count; and what
 // the run beside the interpreter checked. `divergences` counts the steps on
 // which the node lifted from the fetches disagreed with the machine — each site
 // once in the notes, the interpreter realigned after — and is zero on every
@@ -346,10 +468,13 @@ struct RunObservation {
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
   std::vector<LandedRange> landed;
+  std::vector<WalkedRange> walked;
+  std::vector<std::vector<std::uint8_t>> palettes;  // 512 bytes each: the 256 words of palette RAM
   std::vector<Landing> ran;
   std::vector<SeenState> seen;
   std::vector<StagedRange> staged;
   std::vector<StreamedRange> streamed;
+  std::vector<KeyedSample> samples;
   std::uint64_t instructions = 0;  // steps the interpreter ran a node for and checked
   std::uint64_t interrupts = 0;    // hardware sequences run and checked
   std::size_t nodes = 0;           // distinct nodes lifted from fetches: an address, a mode, the bytes
@@ -377,7 +502,9 @@ struct RunObservation {
 // node disagreed with the machine is named once per site in `notes`, on
 // either CPU; so is a sound-CPU step whose bytes do not decode as one
 // instruction, or that did not fetch the instruction its program counter
-// named, which is not checked.
+// named, which is not checked; and so is a sample a key-on named whose
+// blocks reach the end of the audio memory without an end flag, once per
+// start address, which is not recorded.
 //
 // `input` is replayed into the controller ports as the run goes: at the start
 // of every frame, counted from power-on, each port is given what the script

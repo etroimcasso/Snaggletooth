@@ -19,7 +19,8 @@ shelling out to the tool.
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
 cartridges through four commands, one image at a time or `--jobs` of them at
 once — `snes_disasm` writes
-the program file, the manifest and the lifted files, `snes_render` writes the
+the program file, the manifest, the lifted files in their forms and the
+previews, `snes_render` writes the
 bank files from the program file, `snes_verify` assembles the tree back into a
 rebuilt image with the original's extension and compares it, and
 `snes_differential` replays the recorded run beside the interpreter — and

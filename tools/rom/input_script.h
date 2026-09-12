@@ -46,9 +46,16 @@ struct InputScript {
 // one frame, a button named twice, a word that is not a button.
 [[nodiscard]] std::optional<InputScript> parseInputScript(std::string_view text, std::string& error);
 
+// The run a directory holds for `image`: the file `scriptPathFor` names when it
+// exists, otherwise the directory's `default.snaginput` when that exists — the run
+// every image without one of its own is played through — and otherwise the
+// image's own path, which does not exist, so a caller finds no run to replay.
+[[nodiscard]] std::filesystem::path scriptFor(const std::filesystem::path& directory,
+                                              const std::filesystem::path& image);
+
 // Where a directory of recorded runs keeps the one for `image`: the image's file
-// name without its extension, each space an underscore, with `.txt` — so
-// `Some Game (U).sfc` has `Some_Game_(U).txt`. The file need not exist.
+// name without its extension, each space an underscore, with `.snaginput` — so
+// `Some Game (U).sfc` has `Some_Game_(U).snaginput`. The file need not exist.
 [[nodiscard]] std::filesystem::path scriptPathFor(const std::filesystem::path& directory,
                                                   const std::filesystem::path& image);
 
