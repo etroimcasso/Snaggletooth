@@ -22,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "examples/example_cartridges.h"
@@ -2022,6 +2023,155 @@ TEST(RomStaged, ADecrementingCarryKeepsItsContentInAddressOrder) {
   for (std::size_t i = 0; i < 16; ++i) EXPECT_EQ(content.bytes[i], 0x40u + i) << i;
   ASSERT_TRUE(content.landing.has_value());
   EXPECT_EQ(content.landing->areas, kAreaPalette);
+}
+
+// ---- the samples the key-ons named ---------------------------------------------
+//
+// The drawing cartridge's sound program keys two voices on at once: voice 0 on
+// the two-block sample uploaded with the directory, voice 1 on two headers the
+// program wrote over cleared memory. The cases pin what the run reads at the
+// key-on — the directory entry, the blocks to the end flag — how a sample
+// keyed on again is counted, that other bytes at the same address are another
+// sample, and that a walk without an end flag names nothing.
+
+namespace {
+
+// The uploaded sample as the image holds it, two blocks of shift 11.
+const std::vector<std::uint8_t> kUploadedSample = {0xB0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                                                   0xB3, 0x0F, 0xED, 0xCB, 0xA9, 0x87, 0x65, 0x43, 0x21};
+
+// The sample the program built: a first header, eight zero bytes the boot
+// left, a last header with the end and loop flags, eight more.
+const std::vector<std::uint8_t> kBuiltSample = {0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC3, 0, 0, 0, 0, 0, 0, 0, 0};
+
+const KeyedSample* sampleAt(const std::vector<KeyedSample>& samples, std::uint16_t start) {
+  for (const KeyedSample& s : samples) {
+    if (s.start == start) return &s;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(RomSamples, AKeyOnNamesEachVoicesSampleThroughTheDirectory) {
+  const RunObservation run = observe(drawingImage(), 4u * kFrame);
+  ASSERT_EQ(run.samples.size(), 2u);
+  const KeyedSample* uploaded = sampleAt(run.samples, 0x0308u);
+  const KeyedSample* built = sampleAt(run.samples, 0x0330u);
+  ASSERT_NE(uploaded, nullptr);
+  ASSERT_NE(built, nullptr);
+  EXPECT_EQ(uploaded->loop, 0x0311u) << "entry 0's loop address";
+  EXPECT_EQ(uploaded->bytes, kUploadedSample);
+  EXPECT_EQ(uploaded->times, 1u);
+  EXPECT_EQ(built->loop, 0x0330u);
+  EXPECT_EQ(built->bytes, kBuiltSample);
+  EXPECT_EQ(built->times, 1u);
+  EXPECT_EQ(&run.samples.front(), uploaded) << "in start order";
+}
+
+TEST(RomSamples, ASampleKeyedOnAgainCountsOnceAndOtherBytesThereAreAnother) {
+  // The program goes on after the key-on: it rewrites the built sample's
+  // second byte and keys both voices on again. The image holds the program's
+  // extra bytes after its ninetieth, so the upload is lengthened to carry them.
+  std::vector<std::uint8_t> rom = drawingImage();
+  put(rom, 0x2758u, {
+      0xE8u, 0x11u, 0xC5u, 0x31u, 0x03u,  // $0258 MOV A,#$11 / MOV !$0331,A
+      0x8Fu, 0x03u, 0xF3u,                // $025D KON = $03 again, the address register still at KON
+      0x2Fu, 0xFEu,                       // $0260 BRA $0260
+  });
+  rom[0x024Bu] = 0x62u;  // CPX #$62 at $824A: the program is 98 bytes now
+  rom[0x0261u] = 0x63u;  // LDA #$63 at $8260: the next block's index is two past its last
+  const RunObservation run = observe(rom, 4u * kFrame);
+  ASSERT_EQ(run.samples.size(), 3u);
+  const KeyedSample* uploaded = sampleAt(run.samples, 0x0308u);
+  ASSERT_NE(uploaded, nullptr);
+  EXPECT_EQ(uploaded->times, 2u) << "the same bytes at the same address, keyed on twice";
+  EXPECT_EQ(run.samples[1].start, 0x0330u);
+  EXPECT_EQ(run.samples[2].start, 0x0330u);
+  EXPECT_EQ(run.samples[1].bytes, kBuiltSample) << "the shorter first, then by bytes";
+  std::vector<std::uint8_t> rewritten = kBuiltSample;
+  rewritten[1] = 0x11u;
+  EXPECT_EQ(run.samples[2].bytes, rewritten);
+  EXPECT_EQ(run.samples[1].times, 1u);
+  EXPECT_EQ(run.samples[2].times, 1u);
+  EXPECT_FALSE(sameSample(run.samples[1], run.samples[2]));
+}
+
+TEST(RomSamples, AWriteToARegisterMirrorSetsNothing) {
+  // The program goes on after the key-on: it writes zero through the
+  // directory register's read-only mirror at $DD and keys both voices on
+  // again. The DSP keeps its directory, so the same two samples are named,
+  // the uploaded one twice.
+  std::vector<std::uint8_t> rom = drawingImage();
+  put(rom, 0x2758u, {
+      0x8Fu, 0xDDu, 0xF2u, 0x8Fu, 0x00u, 0xF3u,  // $0258 the mirror of DIR written with zero
+      0x8Fu, 0x4Cu, 0xF2u, 0x8Fu, 0x03u, 0xF3u,  // $025E KON = $03 again
+      0x2Fu, 0xFEu,                              // $0264 BRA $0264
+  });
+  rom[0x024Bu] = 0x66u;  // CPX #$66 at $824A: the program is 102 bytes now
+  rom[0x0261u] = 0x67u;  // LDA #$67 at $8260: the next block's index is two past its last
+  const RunObservation run = observe(rom, 4u * kFrame);
+  ASSERT_EQ(run.samples.size(), 2u);
+  const KeyedSample* uploaded = sampleAt(run.samples, 0x0308u);
+  ASSERT_NE(uploaded, nullptr);
+  EXPECT_EQ(uploaded->times, 2u);
+  EXPECT_EQ(uploaded->bytes, kUploadedSample);
+  EXPECT_NE(sampleAt(run.samples, 0x0330u), nullptr);
+}
+
+TEST(RomSamples, AKeyOnNamingNoVoiceNamesNothing) {
+  // The program goes on after the key-on and writes KON again with no bit
+  // set: nothing is keyed on, and the counts stay at one.
+  std::vector<std::uint8_t> rom = drawingImage();
+  put(rom, 0x2758u, {
+      0x8Fu, 0x00u, 0xF3u,  // $0258 KON = $00, the address register still at KON
+      0x2Fu, 0xFEu,         // $025B BRA $025B
+  });
+  rom[0x024Bu] = 0x5Du;  // CPX #$5D at $824A: the program is 93 bytes now
+  rom[0x0261u] = 0x5Eu;  // LDA #$5E at $8260: the next block's index is two past its last
+  const RunObservation run = observe(rom, 4u * kFrame);
+  ASSERT_EQ(run.samples.size(), 2u);
+  EXPECT_EQ(run.samples[0].times, 1u);
+  EXPECT_EQ(run.samples[1].times, 1u);
+}
+
+TEST(RomSamples, TheWalkPassesALoopFlagAndStopsAtTheEndFlag) {
+  // The uploaded sample's first block carries the loop flag alone and its
+  // last the end flag alone: the walk reads both blocks, since only the end
+  // flag stops it.
+  std::vector<std::uint8_t> rom = drawingImage();
+  rom[0x2780u + 8u] = 0xB2u;       // the first block: shift 11, loop, no end
+  rom[0x2780u + 8u + 9u] = 0xB1u;  // the last block: shift 11, end, no loop
+  const RunObservation run = observe(rom, 4u * kFrame);
+  const KeyedSample* uploaded = sampleAt(run.samples, 0x0308u);
+  ASSERT_NE(uploaded, nullptr);
+  ASSERT_EQ(uploaded->bytes.size(), 18u);
+  EXPECT_EQ(uploaded->bytes[0], 0xB2u);
+  EXPECT_EQ(uploaded->bytes[9], 0xB1u);
+}
+
+TEST(RomSamples, AWalkThatReachesTheEndOfMemoryWithoutAnEndFlagIsANoteAndNoSample) {
+  // Entry 0 is pointed at $FF01: from there the walk reads cleared memory,
+  // then the seven headers it meets in the upload stub's bytes at $FFC0 —
+  // every one even — and reaches the memory's end after twenty-eight blocks
+  // without a flag. Voice 1's built sample is named as before.
+  std::vector<std::uint8_t> rom = drawingImage();
+  rom[0x2780u] = 0x01u;  // entry 0: start $FF01
+  rom[0x2781u] = 0xFFu;
+  std::vector<std::string> notes;
+  const RunObservation run = observe(rom, 4u * kFrame, &notes);
+  ASSERT_EQ(run.samples.size(), 1u);
+  EXPECT_EQ(run.samples.front().start, 0x0330u);
+  const auto noted = [&](std::string_view text) {
+    return std::any_of(notes.begin(), notes.end(), [&](const std::string& n) { return n.find(text) != std::string::npos; });
+  };
+  EXPECT_TRUE(noted("run: the sample at $FF01 voice 0 keyed on reaches the end of the audio memory without an end flag; "
+                    "not recorded"))
+      << (notes.empty() ? std::string("no notes") : notes.front());
+  EXPECT_EQ(std::count_if(notes.begin(), notes.end(),
+                          [](const std::string& n) { return n.find("without an end flag") != std::string::npos; }),
+            1)
+      << "once per start address";
 }
 
 }  // namespace snaggletooth::disasm

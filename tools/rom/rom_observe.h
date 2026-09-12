@@ -66,8 +66,13 @@
 // each boundary the run decodes the instruction about to run from the bytes at
 // the program counter, lifts it, and at the boundary after holds that node to
 // what the machine did between them — the upload stub's instructions and the
-// driver's alike, whatever the bytes came from. Nothing is computed from a
-// sound node yet; the check is the whole of it.
+// driver's alike, whatever the bytes came from. From the same accesses the run
+// keeps a copy of the DSP's register file — every write through `$F2` and
+// `$F3` — and at each key-on reads, for every voice named, the sample the DSP
+// is about to play: the directory entry the voice's source number selects,
+// and the blocks from its start to the first carrying the end flag. Those
+// samples, each once with how many key-ons named it, are what a listening
+// copy is written from.
 //
 // A run sees what it exercised. Left alone, a cartridge reaches its title and
 // its attract mode; with a recorded run replayed into its controller ports it
@@ -419,6 +424,24 @@ struct StreamedRange {
 // Two streams are the same when every field but the count and the source agrees.
 [[nodiscard]] bool sameStream(const StreamedRange& a, const StreamedRange& b);
 
+// One sample a key-on named: the address in the audio memory its first block
+// lies at and the address the directory entry gives the DSP to continue from
+// at the end flag — both read from the sample directory as the DSP reads
+// them, at the write to `KON` — the sample's bytes from its first block to
+// the first carrying the end flag, nine a block, as the audio memory held
+// them then, and how many key-ons named exactly this sample. A driver that
+// loads another sample over the same address names another sample.
+struct KeyedSample {
+  std::uint16_t start = 0;
+  std::uint16_t loop = 0;
+  std::vector<std::uint8_t> bytes;
+  std::uint32_t times = 1;
+};
+
+// Two samples are the same when they begin at the same address and hold the
+// same bytes.
+[[nodiscard]] bool sameSample(const KeyedSample& a, const KeyedSample& b);
+
 // Everything one run recorded: the targets the indirect jumps took, in site
 // order, then target order, each site/target/mode once; the ranges the engines
 // moved, in `rangeBefore` order, each distinct range once with its count;
@@ -430,7 +453,9 @@ struct StreamedRange {
 // landings, in site order, then target order, each site/target/mode once; the
 // values seen, in address order; the staged extents, in address order, then
 // by count; the streams, in site order, then register, then where the bytes
-// came from, then where they landed; and what
+// came from, then where they landed; the samples the key-ons named, in start
+// order, then the shorter first, then by bytes, each distinct sample once
+// with its count; and what
 // the run beside the interpreter checked. `divergences` counts the steps on
 // which the node lifted from the fetches disagreed with the machine — each site
 // once in the notes, the interpreter realigned after — and is zero on every
@@ -449,6 +474,7 @@ struct RunObservation {
   std::vector<SeenState> seen;
   std::vector<StagedRange> staged;
   std::vector<StreamedRange> streamed;
+  std::vector<KeyedSample> samples;
   std::uint64_t instructions = 0;  // steps the interpreter ran a node for and checked
   std::uint64_t interrupts = 0;    // hardware sequences run and checked
   std::size_t nodes = 0;           // distinct nodes lifted from fetches: an address, a mode, the bytes
@@ -476,7 +502,9 @@ struct RunObservation {
 // node disagreed with the machine is named once per site in `notes`, on
 // either CPU; so is a sound-CPU step whose bytes do not decode as one
 // instruction, or that did not fetch the instruction its program counter
-// named, which is not checked.
+// named, which is not checked; and so is a sample a key-on named whose
+// blocks reach the end of the audio memory without an end flag, once per
+// start address, which is not recorded.
 //
 // `input` is replayed into the controller ports as the run goes: at the start
 // of every frame, counted from power-on, each port is given what the script

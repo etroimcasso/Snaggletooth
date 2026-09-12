@@ -390,6 +390,34 @@ that sends another program later — a different driver per level, samples
 streamed on demand — sends it after the capture ends, and those bytes stay in
 their banks as data.
 
+**The samples.** When the cartridge is [run](#running-the-cartridge), the
+audio observer keeps a copy of the DSP's register file from every write the
+sound CPU makes through `$F2` and `$F3`. At each write to `KON` with a bit set
+it reads, for each voice named, the sample directory and the voice's source
+number, takes the entry's start and loop addresses from the audio memory, and
+walks the sample's blocks from the start to the first whose header carries the
+end flag. Each distinct sample — its start address and its bytes — is matched
+whole to the image, as a block is, and gets a
+[`sample` line](project-manifest.md#220-samples) naming the file of the tree
+that holds the bytes and the image offset, or `unplaced` when the image holds
+them nowhere as they are, and a WAV beside that file
+([asset-formats.md §The listening copy](asset-formats.md#the-listening-copy-wav)):
+the blocks decoded by the machine's own decoder, once from start to end, at
+32 000 Hz. A sample the image holds nowhere — one the driver built or unpacked —
+gets its WAV under `apu/samples/`. Nothing includes a WAV and the verifier
+never reads one. The `drawing` cartridge, whose program keys one voice on a
+sample the cartridge uploaded and another on one the program wrote into
+cleared memory itself:
+
+```
+sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1
+sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1
+```
+
+A sample no key-on named is not written: the run cannot say what a byte the
+DSP never played is. A walk that reaches the end of the audio memory without
+an end flag is a `note`, and names nothing.
+
 ## Stops, and getting past them
 
 Static tracing ends where the bytes do not name the next address. The manifest
@@ -1298,7 +1326,8 @@ snaggletooth::disasm::renderTree("cartridge", rendered, error);  // the bank fil
 `disassembleCartridge` returns the header, the entries traced from, one
 `RegionListing` per region — its `SourceRegion` and its `Listing`, whole — the
 `SoundProgram` when one was captured, the `assets` lifted out of the banks, the
-`previews` written beside them, the `TraceStop`s, and `notes` for what the run
+`previews` written beside them, the `samples` the run's key-ons named, the
+`TraceStop`s, and `notes` for what the run
 could not do. Each `AssetFile` is its
 path — whose extension names its form — the `classes` of the registers its
 bytes went to — one, or two for a `staged/` file — and the `registerAddress`
@@ -1309,7 +1338,11 @@ the form needs and the file is written as: a sheet's `depth` and `palette`
 that go to disk — the form's encoding, or the bytes themselves. Each
 `PreviewFile` is its path, the lifted file it is `of`, its `form` as the
 `preview` line names it, how many distinct `contents` a source's preview
-holds, and its `written` bytes. `CartridgeRequest::assets` is the
+holds, and its `written` bytes. Each `SampleFile` is the WAV's path, the
+sample's `start` and `loop` addresses in the audio memory, its `bytes` as the
+audio memory held them, the `in` file and `romOffset` where the image holds
+them whole — absent when it does not — how many `times` a key-on named it, and
+the WAV's `written` bytes. `CartridgeRequest::assets` is the
 `ManifestAsset`s read back from the
 manifest — a path with the first address, length and classes it names — which
 give a file lifted again its path, and `CartridgeRequest::readFile` is a
@@ -1371,7 +1404,10 @@ whether two are one and `sameContent` whether two contents are — the `streamed
 `registerClass`, `bytes` and `times`, either the `memory` of the buffer
 carried or the `romOffset` carried with the `source` run it is lifted as, and
 its `landing` where the register is a video data port,
-`sameStream` likewise — and what the run beside the
+`sameStream` likewise — the `samples` the key-ons named, one `KeyedSample`
+per distinct sample: its `start` and `loop` addresses, its `bytes` and how
+many `times` a key-on named it, `sameSample` saying whether two are one — and
+what the run beside the
 interpreter checked — the `instructions` and `interrupts` it ran a node or a
 sequence for, the distinct `nodes` it lifted from the fetches, the
 `divergences` on which a node disagreed with the machine, each site once in
@@ -1416,7 +1452,7 @@ The disassembler's files are text from `renderProgramFile`,
 `renderSoundProgramFile` and `renderManifest`; `writeProject` writes them
 under a directory — the program file first, then the sound program's file
 where one was captured, the manifest, the lifted files in their forms under
-theirs, and the previews — and no bank file and no sound file. The sound program's nodes are
+theirs, the previews and the samples' WAVs — and no bank file and no sound file. The sound program's nodes are
 `CartridgeDisassembly::program.spc700`, lifted from the captured listing
 through `ir/spc700_lift.h`. `parseManifest` reads a manifest's entries,
 reached and derived targets, landings, moved ranges, assets, file split, map,
@@ -1524,7 +1560,9 @@ or starts from a handler the paths do not reach, stays in its bank.
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or
 `state` lines; the run holds every instruction the sound CPU executes to the
-audio machine, and computes nothing from them yet. A value carries as far as every path proves it and no further, so
+audio machine, and what it computes from the sound side is the samples the
+key-ons named — what the driver's data means beyond them, a sequence or an
+instrument table, is the game's format and is not read. A value carries as far as every path proves it and no further, so
 a channel configured from a table, or across a call that does not give the
 register back, leaves the fields it did not settle `none` rather than guessing at
 them. A routine's role counts what the bytes reach and what a run reached; a call

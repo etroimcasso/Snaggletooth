@@ -31,8 +31,14 @@ namespace snaggletooth::examples {
 // which adds two bytes of one blob to one of another (a byte from two
 // sources, unevenly); then a blob to word `$1200` and a blob to the palette
 // at entry sixteen; on the third it switches to Mode 7 and sends a block whose
-// even bytes are a map and whose odd bytes are tiles to word `$0000`. Every
-// site the tests name is commented with its address.
+// even bytes are a map and whose odd bytes are tiles to word `$0000`. After
+// the reset code, with the interrupt held off for the upload's length, it
+// speaks the audio upload protocol: a sound program to `$0200`, a sample
+// directory and a two-block sample to `$0300`, from two places in the image,
+// and starts the program, which sets the directory and two voices' sources,
+// writes a second sample's two headers over the cleared memory at `$0330`, and
+// keys both voices on at once — one sample the image holds, one it does not.
+// Every site the tests name is commented with its address.
 inline std::vector<std::uint8_t> drawingImage() {
   std::vector<std::uint8_t> rom = imageWithNmi();
   put(rom, 0x0000u, {
@@ -119,7 +125,61 @@ inline std::vector<std::uint8_t> drawingImage() {
       0xA9u, 0x0Fu, 0x8Fu, 0x00u, 0x21u, 0x00u,  // $81A0 INIDISP = $0F: the screen on
       0xA9u, 0x06u, 0x8Fu, 0x0Cu, 0x42u, 0x00u,  // $81A6 HDMAEN = $06: channels 1 and 2 (the write at $81A8)
       0xA9u, 0x80u, 0x8Fu, 0x00u, 0x42u, 0x00u,  // $81AC NMITIMEN = $80: the vertical-blank interrupt on
-      0x80u, 0xFEu,                            // $81B2 BRA $81B2
+      0x4Cu, 0x00u, 0x82u,                     // $81B2 JMP $8200: the sound upload
+  });
+  // The sound upload, with the interrupt off while the byte index is in X —
+  // the handler keeps nothing it uses — and on again once the program has
+  // started: the protocol's ready bytes, the program to $0200 one acknowledged
+  // byte at a time, the directory and the sample to $0300 the same way, then
+  // the start. The data bank is $7E, so every port access is long.
+  put(rom, 0x0200u, {
+      0xA9u, 0x00u, 0x8Fu, 0x00u, 0x42u, 0x00u,  // $8200 NMITIMEN = $00
+      0xAFu, 0x40u, 0x21u, 0x00u,              // $8206 LDA $00:2140     ; ready?
+      0xC9u, 0xAAu,                            // $820A CMP #$AA
+      0xD0u, 0xF8u,                            // $820C BNE $8206
+      0xAFu, 0x41u, 0x21u, 0x00u,              // $820E LDA $00:2141
+      0xC9u, 0xBBu,                            // $8212 CMP #$BB
+      0xD0u, 0xF0u,                            // $8214 BNE $8206
+      0xA9u, 0x00u, 0x8Fu, 0x42u, 0x21u, 0x00u,  // $8216 destination $0200, low
+      0xA9u, 0x02u, 0x8Fu, 0x43u, 0x21u, 0x00u,  // $821C and high
+      0xA9u, 0x01u, 0x8Fu, 0x41u, 0x21u, 0x00u,  // $8222 a transfer, not a start
+      0xA9u, 0xCCu, 0x8Fu, 0x40u, 0x21u, 0x00u,  // $8228 the kick
+      0xCFu, 0x40u, 0x21u, 0x00u,              // $822E CMP $00:2140     ; acknowledged?
+      0xD0u, 0xFAu,                            // $8232 BNE $822E
+      0xA2u, 0x00u,                            // $8234 LDX #$00
+      0xBFu, 0x00u, 0xA7u, 0x00u,              // $8236 LDA $00:A700,X   ; the program's next byte
+      0x8Fu, 0x41u, 0x21u, 0x00u,              // $823A STA $00:2141
+      0x8Au,                                   // $823E TXA              ; its index
+      0x8Fu, 0x40u, 0x21u, 0x00u,              // $823F STA $00:2140
+      0xCFu, 0x40u, 0x21u, 0x00u,              // $8243 CMP $00:2140     ; acknowledged?
+      0xD0u, 0xFAu,                            // $8247 BNE $8243
+      0xE8u,                                   // $8249 INX
+      0xE0u, 0x5Au,                            // $824A CPX #$5A         ; the program's 90 bytes
+      0xD0u, 0xE8u,                            // $824C BNE $8236
+      0xA9u, 0x00u, 0x8Fu, 0x42u, 0x21u, 0x00u,  // $824E destination $0300, low
+      0xA9u, 0x03u, 0x8Fu, 0x43u, 0x21u, 0x00u,  // $8254 and high
+      0xA9u, 0x01u, 0x8Fu, 0x41u, 0x21u, 0x00u,  // $825A a transfer
+      0xA9u, 0x5Bu, 0x8Fu, 0x40u, 0x21u, 0x00u,  // $8260 two past the last index
+      0xCFu, 0x40u, 0x21u, 0x00u,              // $8266 CMP $00:2140     ; acknowledged?
+      0xD0u, 0xFAu,                            // $826A BNE $8266
+      0xA2u, 0x00u,                            // $826C LDX #$00
+      0xBFu, 0x80u, 0xA7u, 0x00u,              // $826E LDA $00:A780,X   ; the directory's and the sample's next byte
+      0x8Fu, 0x41u, 0x21u, 0x00u,              // $8272 STA $00:2141
+      0x8Au,                                   // $8276 TXA
+      0x8Fu, 0x40u, 0x21u, 0x00u,              // $8277 STA $00:2140
+      0xCFu, 0x40u, 0x21u, 0x00u,              // $827B CMP $00:2140
+      0xD0u, 0xFAu,                            // $827F BNE $827B
+      0xE8u,                                   // $8281 INX
+      0xE0u, 0x1Au,                            // $8282 CPX #$1A         ; their 26 bytes
+      0xD0u, 0xE8u,                            // $8284 BNE $826E
+      0xA9u, 0x00u, 0x8Fu, 0x42u, 0x21u, 0x00u,  // $8286 start at $0200, low
+      0xA9u, 0x02u, 0x8Fu, 0x43u, 0x21u, 0x00u,  // $828C and high
+      0xA9u, 0x00u, 0x8Fu, 0x41u, 0x21u, 0x00u,  // $8292 zero starts the program
+      0xA9u, 0x1Bu, 0x8Fu, 0x40u, 0x21u, 0x00u,  // $8298 two past the last index
+      0xCFu, 0x40u, 0x21u, 0x00u,              // $829E CMP $00:2140     ; acknowledged?
+      0xD0u, 0xFAu,                            // $82A2 BNE $829E
+      0xA9u, 0x80u, 0x8Fu, 0x00u, 0x42u, 0x00u,  // $82A4 NMITIMEN = $80: the interrupt on again
+      0x80u, 0xFEu,                            // $82AA BRA $82AA
   });
   // The native vertical-blank handler, at $8320 — the vector is pointed at it
   // below — opening by setting both widths, since an interrupt's entry carries
@@ -363,6 +423,40 @@ inline std::vector<std::uint8_t> drawingImage() {
   for (std::size_t i = 0; i < 128; ++i) {                                                                       // $A600: Mode 7, a map in the even bytes and tiles in the odd
     rom[0x2600u + i] = static_cast<std::uint8_t>(i % 2u == 0u ? (i / 2u) & 0xFFu : (i * 71u + 3u) & 0xFFu);
   }
+  // The sound program, 90 bytes, uploaded to $0200: the directory at $0300,
+  // voice 0's source 0 and voice 1's source 1, voice 0 at full volume, both at
+  // the sample's own rate under a direct full gain, the main volume up and the
+  // DSP unmuted; then the second sample's two headers written over the zero
+  // bytes the boot left at $0330 — a sample the image holds nowhere — and both
+  // voices keyed on at once.
+  put(rom, 0x2700u, {
+      0x8Fu, 0x5Du, 0xF2u, 0x8Fu, 0x03u, 0xF3u,  // $0200 DIR = $03: the directory at $0300
+      0x8Fu, 0x04u, 0xF2u, 0x8Fu, 0x00u, 0xF3u,  // $0206 V0SRCN = 0
+      0x8Fu, 0x14u, 0xF2u, 0x8Fu, 0x01u, 0xF3u,  // $020C V1SRCN = 1
+      0x8Fu, 0x00u, 0xF2u, 0x8Fu, 0x7Fu, 0xF3u,  // $0212 V0VOLL = $7F
+      0x8Fu, 0x01u, 0xF2u, 0x8Fu, 0x7Fu, 0xF3u,  // $0218 V0VOLR = $7F
+      0x8Fu, 0x03u, 0xF2u, 0x8Fu, 0x10u, 0xF3u,  // $021E V0PITCHH = $10: pitch $1000, the sample's own rate
+      0x8Fu, 0x13u, 0xF2u, 0x8Fu, 0x10u, 0xF3u,  // $0224 V1PITCHH = $10
+      0x8Fu, 0x07u, 0xF2u, 0x8Fu, 0x7Fu, 0xF3u,  // $022A V0GAIN = $7F: direct, full
+      0x8Fu, 0x17u, 0xF2u, 0x8Fu, 0x7Fu, 0xF3u,  // $0230 V1GAIN = $7F
+      0x8Fu, 0x0Cu, 0xF2u, 0x8Fu, 0x7Fu, 0xF3u,  // $0236 MVOLL = $7F
+      0x8Fu, 0x1Cu, 0xF2u, 0x8Fu, 0x7Fu, 0xF3u,  // $023C MVOLR = $7F
+      0x8Fu, 0x6Cu, 0xF2u, 0x8Fu, 0x20u, 0xF3u,  // $0242 FLG = $20: unmuted, echo writes off
+      0xE8u, 0xC0u, 0xC5u, 0x30u, 0x03u,         // $0248 MOV A,#$C0 / MOV !$0330,A: the second sample's first header
+      0xE8u, 0xC3u, 0xC5u, 0x39u, 0x03u,         // $024D MOV A,#$C3 / MOV !$0339,A: its last, with the end and loop flags
+      0x8Fu, 0x4Cu, 0xF2u, 0x8Fu, 0x03u, 0xF3u,  // $0252 KON = $03: voices 0 and 1
+      0x2Fu, 0xFEu,                              // $0258 BRA $0258
+  });
+  // The directory and the first sample, 26 bytes, uploaded to $0300: entry 0
+  // starts at $0308 and loops at $0311, entry 1 at $0330 both; then the sample
+  // of two blocks at $0308 — shift 11, filter 0, the second block carrying the
+  // end and loop flags.
+  put(rom, 0x2780u, {
+      0x08u, 0x03u, 0x11u, 0x03u,                                            // $0300 entry 0: start $0308, loop $0311
+      0x30u, 0x03u, 0x30u, 0x03u,                                            // $0304 entry 1: start $0330, loop $0330
+      0xB0u, 0x12u, 0x34u, 0x56u, 0x78u, 0x9Au, 0xBCu, 0xDEu, 0xF0u,         // $0308 the first block
+      0xB3u, 0x0Fu, 0xEDu, 0xCBu, 0xA9u, 0x87u, 0x65u, 0x43u, 0x21u,         // $0311 the last block
+  });
   return rom;
 }
 

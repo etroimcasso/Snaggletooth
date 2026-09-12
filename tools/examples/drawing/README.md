@@ -1,9 +1,9 @@
 # drawing
 
 One bank, in native mode with the data bank at `$7E`. Reset sends, in forced
-blank, one of everything an editable form has a grammar for; the
-vertical-blank handler counts frames and does one thing more on each of the
-second and the third.
+blank, one of everything an editable form has a grammar for, then uploads a
+sound program that keys two voices on; the vertical-blank handler counts
+frames and does one thing more on each of the second and the third.
 
 From the image, channel 0 carries to VRAM a 4-bit tileset of three tiles and
 a half — 112 bytes — to word `$1000`, a 2-bit tileset of four tiles to
@@ -34,6 +34,15 @@ On the third it
 switches to Mode 7 and sends a block of 128 bytes, a map in its even bytes
 and tiles in its odd, to word `$0000`.
 
+After the reset code, with the vertical-blank interrupt held off for the
+upload's length, it speaks the audio upload protocol: a sound program of 90
+bytes to `$0200` from `$A700`, then a sample directory and a two-block sample
+to `$0300` from `$A780`, and starts the program. The program sets the
+directory at `$0300`, voice 0's source to entry 0 — the uploaded sample at
+`$0308`, looping at `$0311` — and voice 1's to entry 1, at `$0330`, where it
+writes a first and a last block header over the zero bytes the boot left;
+turns the volumes and the DSP on; and keys both voices on at once.
+
 What it shows: a `landed` line's `depth` — 4 for the name base BG1 and BG2
 share, 2 for BG3's, 4 for the sprite tiles, 8 under Mode 7, `none` for a
 screen, the palette and the sprite table; the palette RAM a tile sheet
@@ -52,12 +61,16 @@ deeper, a source that supplied eight bytes of a buffer the handler cleared
 has none since the handler made more of it, a source that supplied two of
 every summed byte's three image bytes owns that buffer, and the blob sent to
 the palette has a `.pal` — the Mode 7 block with
-a preview of its tiles and one of its map; and the bank file including every
-encoded file with its length.
+a preview of its tiles and one of its map; the bank file including every
+encoded file with its length; and two `sample` lines, one for the uploaded
+sample, whose bytes the sound program's file holds and whose WAV sits beside
+it, and one for the sample the program built, which the image holds nowhere,
+its WAV under `apu/samples/`.
 
 Read by `tests/rom/observe_test.cpp`, `tests/rom/rom_disasm_test.cpp` and
-`tests/rom/verify_test.cpp`; the source of the `walked` and `preview` lines
-in [`docs/project-manifest.md`](../../../docs/project-manifest.md), of the
-forms' examples in [`docs/asset-formats.md`](../../../docs/asset-formats.md),
-and of the encoded tree in
+`tests/rom/verify_test.cpp`; the source of the `walked`, `preview` and
+`sample` lines in [`docs/project-manifest.md`](../../../docs/project-manifest.md),
+of the forms' and the listening copy's examples in
+[`docs/asset-formats.md`](../../../docs/asset-formats.md), and of the encoded
+tree and the samples in
 [`docs/snes-disassembler.md`](../../../docs/snes-disassembler.md).

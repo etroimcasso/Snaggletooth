@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "examples/example_cartridges.h"
+#include "formats/brr.h"
 #include "formats/hdma.h"
 #include "formats/oam.h"
 #include "formats/palette.h"
@@ -2347,6 +2348,134 @@ TEST(RomLandedFiles, ATableWalkedUnderTwoUnitsIsBytesAndSaysSo) {
   EXPECT_EQ(assetNamed(d, "hdma/00_9000.hdma"), nullptr);
   EXPECT_TRUE(anyNote(d, "hdma/00_9000.bin: the engine walked it under two units; written as bytes"))
       << (d.notes.empty() ? std::string("no notes") : d.notes.front());
+}
+
+// ---- the samples' listening copies ------------------------------------------------
+//
+// The drawing cartridge's sound program keys two voices on: one on a sample the
+// boot captures inside an uploaded block, one on a sample the program built,
+// which the image holds nowhere. The cases pin where each WAV is written and
+// what it holds, the `sample` line, and the numbering of a second sample at one
+// address.
+
+namespace {
+
+CartridgeDisassembly drawingSoundLift() {
+  static const std::vector<std::uint8_t> rom = drawingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  return disassembleCartridge(request);
+}
+
+const SampleFile* sampleNamed(const CartridgeDisassembly& d, std::string_view file) {
+  for (const SampleFile& sample : d.samples) {
+    if (sample.file == file) return &sample;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(RomSamples, ASampleTheSoundProgramsBlockHoldsIsWrittenBesideIt) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  ASSERT_EQ(d.samples.size(), 2u) << renderManifest(d);
+  const SampleFile* uploaded = sampleNamed(d, "apu/driver-0308.wav");
+  ASSERT_NE(uploaded, nullptr) << renderManifest(d);
+  EXPECT_EQ(uploaded->start, 0x0308u);
+  EXPECT_EQ(uploaded->loop, 0x0311u);
+  EXPECT_EQ(uploaded->bytes.size(), 18u);
+  EXPECT_EQ(uploaded->in, "apu/driver.asm");
+  ASSERT_TRUE(uploaded->romOffset.has_value());
+  EXPECT_EQ(*uploaded->romOffset, 0x2788u) << "eight bytes into the block uploaded from $A780";
+  EXPECT_EQ(uploaded->times, 1u);
+  const formats::Bytes wav = formats::encodeBrrWav(uploaded->bytes);
+  ASSERT_TRUE(wav.ok()) << wav.error;
+  EXPECT_EQ(uploaded->written, wav.bytes) << "the machine's own decode";
+  EXPECT_EQ(uploaded->written.size(), 44u + 32u * 4u);
+}
+
+TEST(RomSamples, ASampleTheImageHoldsNowhereIsWrittenUnderSamples) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  const SampleFile* built = sampleNamed(d, "apu/samples/0330.wav");
+  ASSERT_NE(built, nullptr) << renderManifest(d);
+  EXPECT_EQ(built->start, 0x0330u);
+  EXPECT_EQ(built->loop, 0x0330u);
+  EXPECT_FALSE(built->romOffset.has_value());
+  EXPECT_TRUE(built->in.empty());
+  EXPECT_EQ(built->written, formats::encodeBrrWav(built->bytes).bytes);
+}
+
+TEST(RomSamples, TheSampleLineIsWrittenAndIsAKnownKind) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  const std::string manifest = renderManifest(d);
+  EXPECT_NE(manifest.find("sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1\n"),
+            std::string::npos) << manifest;
+  EXPECT_NE(manifest.find("sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1\n"),
+            std::string::npos) << manifest;
+  std::string error;
+  EXPECT_TRUE(parseManifest(manifest, error).has_value()) << error;
+  EXPECT_TRUE(parseManifest("sample   apu/x-0308.wav of $0308 bytes 18 loop $0311 unplaced times 3\n", error).has_value())
+      << error;
+  EXPECT_FALSE(parseManifest("sampled  apu/x-0308.wav\n", error).has_value());
+}
+
+TEST(RomSamples, WithoutTheSoundCaptureTheBankFileHoldsTheBytes) {
+  const CartridgeDisassembly d = drawingLift();
+  const SampleFile* uploaded = sampleNamed(d, "apu/bank_00-0308.wav");
+  ASSERT_NE(uploaded, nullptr) << renderManifest(d);
+  EXPECT_EQ(uploaded->in, "bank_00.asm");
+  ASSERT_TRUE(uploaded->romOffset.has_value());
+  EXPECT_EQ(*uploaded->romOffset, 0x2788u);
+  EXPECT_NE(renderManifest(d).find("sample   apu/bank_00-0308.wav of $0308 bytes 18 loop $0311 in bank_00.asm at $002788 times 1\n"),
+            std::string::npos) << renderManifest(d);
+}
+
+TEST(RomSamples, ASecondSampleAtOneAddressTakesANumber) {
+  // The program goes on after the key-on: it rewrites the built sample's
+  // second byte and keys both voices on again, so the address $0330 names two
+  // samples the image holds nowhere.
+  std::vector<std::uint8_t> rom = drawingImage();
+  put(rom, 0x2758u, {
+      0xE8u, 0x11u, 0xC5u, 0x31u, 0x03u,  // $0258 MOV A,#$11 / MOV !$0331,A
+      0x8Fu, 0x03u, 0xF3u,                // $025D KON = $03 again
+      0x2Fu, 0xFEu,                       // $0260 BRA $0260
+  });
+  rom[0x024Bu] = 0x62u;  // CPX #$62 at $824A: the program is 98 bytes now
+  rom[0x0261u] = 0x63u;  // LDA #$63 at $8260: the next block's index is two past its last
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  std::vector<std::string> files;
+  for (const SampleFile& sample : d.samples) files.push_back(sample.file);
+  EXPECT_EQ(files, (std::vector<std::string>{"apu/driver-0308.wav", "apu/samples/0330.wav", "apu/samples/0330-2.wav"}))
+      << renderManifest(d);
+  const SampleFile* uploaded = sampleNamed(d, "apu/driver-0308.wav");
+  ASSERT_NE(uploaded, nullptr);
+  EXPECT_EQ(uploaded->times, 2u);
+}
+
+TEST(RomSamples, TheProjectWritesEveryWav) {
+  const CartridgeDisassembly d = drawingSoundLift();
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() / "snaggletooth-samples-test";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, directory, error)) << error;
+  ASSERT_EQ(d.samples.size(), 2u);
+  for (const SampleFile& sample : d.samples) {
+    std::ifstream in(directory / sample.file, std::ios::binary);
+    ASSERT_TRUE(in.is_open()) << sample.file;
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    EXPECT_EQ(bytes, sample.written) << sample.file;
+  }
+  std::filesystem::remove_all(directory, ec);
 }
 
 }  // namespace snaggletooth::disasm

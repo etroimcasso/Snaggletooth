@@ -139,9 +139,11 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
   set_target_properties(snaggletooth_lodepng PROPERTIES CXX_EXTENSIONS OFF)
 
   # The asset codecs — the tile sheet, the palette, the tilemap, the OAM and HDMA
-  # tables, and the reader that turns an included asset back into the SNES bytes it
-  # was made from. Its own library over the standard library and lodepng, so a tool
-  # that writes a tree and a tool that assembles one share one set of codecs.
+  # tables, the WAV of a BRR sample, and the reader that turns an included asset
+  # back into the SNES bytes it was made from. Its own library over the standard
+  # library, lodepng, the machine's BRR decoder and the .spc tooling's WAV writer,
+  # so a tool that writes a tree and a tool that assembles one share one set of
+  # codecs.
   add_library(snaggletooth_formats STATIC
     tools/formats/png.cpp
     tools/formats/tiles.cpp
@@ -150,9 +152,10 @@ if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
     tools/formats/tilemap.cpp
     tools/formats/oam.cpp
     tools/formats/hdma.cpp
+    tools/formats/brr.cpp
     tools/formats/reader.cpp
   )
-  target_link_libraries(snaggletooth_formats PRIVATE snaggletooth_lodepng)
+  target_link_libraries(snaggletooth_formats PRIVATE snaggletooth_lodepng snaggletooth_spc)
   target_include_directories(snaggletooth_formats PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
@@ -564,15 +567,16 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/formats/tilemap_test.cpp
     tests/formats/oam_test.cpp
     tests/formats/hdma_test.cpp
+    tests/formats/samples_test.cpp
     tests/formats/reader_test.cpp
   )
-  # snaggletooth_spc links snaggletooth::snaggletooth publicly, and the
-  # differential links the representation and the cartridge tools publicly, which
-  # link both chip backends publicly and the codecs privately, so the test target
-  # reaches the library, the tools, the backends and the codecs through them — no
-  # separate direct links.
+  # The differential links the representation and the cartridge tools publicly,
+  # which link the library and both chip backends publicly and the codecs
+  # privately, and the codecs link the .spc tooling privately, so the test
+  # target reaches the library, the tools, the backends, the codecs and the .spc
+  # tooling through them — no separate direct links, which the Apple linker
+  # would report as duplicates.
   target_link_libraries(snaggletooth_tests PRIVATE
-    snaggletooth_spc
     snaggletooth_ir_differential
     GTest::gtest_main
   )

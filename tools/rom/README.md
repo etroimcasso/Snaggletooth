@@ -34,9 +34,10 @@ where the run saw the picture use every landing of it as one or the other —
 each in its editable form where the run's facts name one
 ([docs/asset-formats.md](../../docs/asset-formats.md)): a tile sheet as an
 indexed PNG at the depth the picture used it, with the palette the run held; a
-palette, a tilemap, a sprite table and an HDMA table as text; and bytes with a
+palette, a tilemap, a sprite table and an HDMA table as text; bytes with a
 preview beside them for a source a routine built its data from and for a Mode
-7 block. It writes no bank file and no sound file: `snes_render` writes those
+7 block; and a WAV of every sample the run's key-ons named, beside the file
+holding its bytes. It writes no bank file and no sound file: `snes_render` writes those
 from the program files. The trace starts at the vectors and follows control flow across
 banks; the sound program is captured by booting the cartridge on the machine,
 matched back to the image bytes it was read from, and lifted from its listing
@@ -97,7 +98,11 @@ every run of bytes the CPU carried from the image to a data register as a
 `streamed` line and a `stream` file holding the run its carrier read, each
 source with a preview of what the buffer built from it became, as `preview`
 lines — see
-[Where the bytes came from](../../docs/snes-disassembler.md#where-the-bytes-came-from). `--no-run`
+[Where the bytes came from](../../docs/snes-disassembler.md#where-the-bytes-came-from) —
+and, from a copy of the DSP's register file the audio observer keeps, every
+sample a key-on named, matched whole to the image and written as a WAV the
+machine's own decoder produced, as `sample` lines — see
+[The sound program](../../docs/snes-disassembler.md#the-sound-program). `--no-run`
 skips the run, and a tree written without one takes a sheet's depth and
 palette and a table's unit from the files already on disk; `--run-seconds N`
 bounds it; `--input <script>` plays it,
@@ -134,7 +139,8 @@ The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whol
 run, `captureUpload` for the boot alone, `placeBytes` for the count,
 `renderProgramFile`, `renderSoundProgramFile` and `renderManifest` for the
 three files, and `writeProject` for everything it writes, the lifted files
-(`AssetFile`, each in its form) and the previews (`PreviewFile`) included. Full page:
+(`AssetFile`, each in its form), the previews (`PreviewFile`) and the samples'
+WAVs (`SampleFile`) included. Full page:
 [docs/snes-disassembler.md](../../docs/snes-disassembler.md); the manifest's
 grammar: [docs/project-manifest.md](../../docs/project-manifest.md).
 

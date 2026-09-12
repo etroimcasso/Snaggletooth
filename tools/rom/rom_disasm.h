@@ -177,6 +177,26 @@ struct PreviewFile {
   std::vector<std::uint8_t> written;
 };
 
+// A WAV written of a sample a run's key-on named
+// (`docs/asset-formats.md` §The listening copy), which nothing includes and
+// the verifier never reads: its path — `apu/<name>-<address>.wav` beside the
+// file of the tree that holds the sample's bytes, `apu/samples/<address>.wav`
+// for a sample the image holds nowhere whole — the sample's `start` and `loop`
+// addresses in the audio memory, its `bytes` as the audio memory held them,
+// the file the bytes are `in` and their `romOffset` where the image holds
+// them at exactly one place, both absent otherwise, how many key-ons named
+// it, and the WAV's bytes.
+struct SampleFile {
+  std::string file;
+  std::uint16_t start = 0;
+  std::uint16_t loop = 0;
+  std::vector<std::uint8_t> bytes;
+  std::string in;
+  std::optional<std::size_t> romOffset;
+  std::uint32_t times = 1;
+  std::vector<std::uint8_t> written;
+};
+
 // An asset as the manifest records it, read back for its path — a person's
 // rename survives a run when the file it names is lifted again with the same
 // first byte and length — and, for a file the run's shadow named (`staged`,
@@ -258,6 +278,10 @@ struct CartridgeDisassembly {
   // within a file, in the order the run first carried each content. Written
   // fresh by a run and read back by nothing; empty without one.
   std::vector<PreviewFile> previews;
+  // The samples the run's key-ons named, in the run's order (`rom_observe.h`),
+  // each matched whole to the image and written as a WAV. Written fresh by a
+  // run and read back by nothing; empty without one.
+  std::vector<SampleFile> samples;
   // The targets the bytes prove the indirect jumps take — a pointer in the image
   // selected by an index every path bounds — this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_facts.h`. A jump every
@@ -446,8 +470,8 @@ struct ManifestInput {
 
 // Writes what the disassembly found under `directory`, creating it and its
 // directories: `program.snagir` first, then `apu.snagir` where a sound program
-// was captured, `project.snagifest`, every lifted file in its form, and every
-// preview. No bank file and no sound file is written here; `snes_render`
+// was captured, `project.snagifest`, every lifted file in its form, every
+// preview, and every sample's WAV. No bank file and no sound file is written here; `snes_render`
 // writes those from the program files and the manifest. False, with `error`
 // set, when a file cannot be written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,

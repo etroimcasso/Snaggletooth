@@ -13,6 +13,7 @@
 #include "ir/ir_lockstep.h"
 #include "ir/ir_text.h"
 #include "ir/spc700_lift.h"
+#include "snaggletooth/apu/dsp.h"
 #include "snaggletooth/cpu/cpu65816.h"
 #include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/snes.h"
@@ -1219,11 +1220,36 @@ struct Lockstep {
 // The fetched bytes are held to the decoded ones too, so an instruction whose
 // bytes changed between the boundary and its fetch is noted rather than
 // checked against the wrong node.
+//
+// The same accesses keep a copy of the DSP's register file: a write to `$F2`
+// selects a register and a write to `$F3` sets it, and a write to `KON` with a
+// bit set is a key-on of each voice named. At each key-on the sample the DSP is
+// about to play is read from the audio memory as the machine holds it then —
+// the directory entry `DIR` and the voice's `SRCN` select, through the
+// machine's own reading of it, and the blocks from its start to the first
+// carrying the end flag, stopping at the memory's end — and kept once per
+// distinct sample with a count.
 struct AudioLockstep final : ApuObserver {
+  // The DSP's address register and its register file as the CPU last wrote
+  // them; a write to `$F3` while the address is $80 or above sets nothing,
+  // since those are the file's read-only mirrors.
+  static constexpr std::uint8_t kDspRegisters = 0x80u;
+  static constexpr std::uint16_t kDspAddressPort = 0x00F2u;
+  static constexpr std::uint16_t kDspDataPort = 0x00F3u;
+  static constexpr std::uint8_t kDspKon = 0x4Cu;
+  static constexpr std::uint8_t kDspDir = 0x5Du;
+  static constexpr std::uint8_t kDspSrcn = 0x04u;  // voice v's source number is at v * $10 + 4
+  static constexpr std::size_t kAudioMemory = 65536;
+  static constexpr std::size_t kBrrBlock = 9;
+
   const Snes& machine;
   std::vector<std::string>& notes;
   ir::Spc700Interpreter interpreter;
   std::vector<ir::Spc700Access> accesses;  // since the last boundary, in order
+  std::uint8_t dspAddress = 0;
+  std::array<std::uint8_t, kDspRegisters> dsp{};
+  std::vector<KeyedSample> samples;
+  std::set<std::uint16_t> unendedStarts;  // a start already noted as having no end flag
 
   // The nodes lifted so far, one per address and bytes — so bytes the program
   // rewrote at an address are a second node there.
@@ -1252,6 +1278,55 @@ struct AudioLockstep final : ApuObserver {
 
   void access(std::uint16_t address, std::uint8_t value, bool write) override {
     accesses.push_back(ir::Spc700Access{.address = address, .value = value, .write = write});
+    if (!write) return;
+    if (address == kDspAddressPort) {
+      dspAddress = value;
+    } else if (address == kDspDataPort && dspAddress < kDspRegisters) {
+      dsp[dspAddress] = value;
+      if (dspAddress == kDspKon && value != 0u) keyOn(value);
+    }
+  }
+
+  // Each voice `mask` names keyed on: its sample read from the audio memory as
+  // the machine holds it now — the memory itself, which is what the DSP reads,
+  // not the CPU's view with the boot ROM over its window — and kept once with
+  // its count.
+  void keyOn(std::uint8_t mask) {
+    const std::span<const std::uint8_t, kAudioMemory> ram(machine.state().apu.ram);
+    for (unsigned voice = 0; voice < 8; ++voice) {
+      if ((mask & (1u << voice)) == 0u) continue;
+      const std::uint8_t srcn = dsp[(voice << 4) | kDspSrcn];
+      const BrrSource source = readBrrSource(ram, dsp[kDspDir], srcn);
+      KeyedSample sample{.start = source.start, .loop = source.loop, .bytes = {}, .times = 1};
+      // The blocks from the start to the first carrying the end flag; a walk
+      // that reaches the end of the audio memory without one names nothing.
+      bool ended = false;
+      std::size_t at = source.start;
+      while (at + kBrrBlock <= kAudioMemory) {
+        const std::uint8_t header = ram[at];
+        for (std::size_t k = 0; k < kBrrBlock; ++k) sample.bytes.push_back(ram[at + k]);
+        at += kBrrBlock;
+        if ((header & 0x01u) != 0u) {
+          ended = true;
+          break;
+        }
+      }
+      if (!ended) {
+        if (unendedStarts.insert(source.start).second) {
+          notes.push_back("run: the sample at " + formatAddress(source.start, 16) + " voice " +
+                          std::to_string(voice) +
+                          " keyed on reaches the end of the audio memory without an end flag; not recorded");
+        }
+        continue;
+      }
+      const auto known = std::find_if(samples.begin(), samples.end(),
+                                      [&](const KeyedSample& s) { return sameSample(s, sample); });
+      if (known == samples.end()) {
+        samples.push_back(std::move(sample));
+      } else {
+        ++known->times;
+      }
+    }
   }
 
   void instruction(const Spc700State& before, const Spc700State& after,
@@ -1392,6 +1467,8 @@ bool sameStream(const StreamedRange& a, const StreamedRange& b) {
 bool sameContent(const CarriedContent& a, const CarriedContent& b) {
   return a.bytes == b.bytes && a.cls == b.cls && a.kind == b.kind && a.unit == b.unit && a.indirect == b.indirect;
 }
+
+bool sameSample(const KeyedSample& a, const KeyedSample& b) { return a.start == b.start && a.bytes == b.bytes; }
 
 unsigned hdmaUnitOf(std::uint8_t pattern) {
   static constexpr unsigned kUnits[8] = {1, 2, 2, 4, 4, 4, 2, 4};
@@ -1620,6 +1697,14 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   observation.spc700Instructions = audio.instructions;
   observation.spc700Nodes = audio.nodes.size();
   observation.spc700Divergences = audio.diverged;
+  // The samples the key-ons named: by start, the shorter first, then by bytes.
+  observation.samples = std::move(audio.samples);
+  std::sort(observation.samples.begin(), observation.samples.end(),
+            [](const KeyedSample& a, const KeyedSample& b) {
+              if (a.start != b.start) return a.start < b.start;
+              if (a.bytes.size() != b.bytes.size()) return a.bytes.size() < b.bytes.size();
+              return a.bytes < b.bytes;
+            });
 
   // What was staged: every extent, in address order then by count, its
   // writers most bytes first.

@@ -534,6 +534,20 @@ TEST(RomVerify, ATreeWithEncodedFilesAssemblesToItsImage) {
   EXPECT_EQ(report.files.front().runs, 1u) << "every include continues the bank's one range";
 }
 
+TEST(RomVerify, ASamplesWavInTheTreeIsNeverRead) {
+  // The drawing tree's run names a sample; its WAV sits under `apu/` and is
+  // nothing the manifest assembles, so whatever the file holds, the tree
+  // verifies as before.
+  const std::vector<std::uint8_t> rom = drawingImage();
+  Tree tree = drawingTree();
+  EXPECT_NE(tree.manifest.find("sample   apu/bank_00-0308.wav of $0308 bytes 18 loop $0311 in bank_00.asm at $002788 times 1\n"),
+            std::string::npos) << tree.manifest;
+  tree.files["apu/bank_00-0308.wav"] = "not a WAV at all";
+  const VerifyReport report = verify(tree, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  EXPECT_EQ(report.compared, rom.size());
+}
+
 TEST(RomVerify, AnEditedPixelDiffersAtItsByte) {
   const std::vector<std::uint8_t> rom = drawingImage();
   Tree tree = drawingTree();

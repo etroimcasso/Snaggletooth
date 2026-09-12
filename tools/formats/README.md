@@ -8,6 +8,8 @@ PNG, and palettes, tilemaps, OAM and HDMA tables as text.
 
 Each codec encodes SNES bytes to its form and decodes the form back to the same
 bytes, so a form is a source an assembly can include in place of a raw `.bin`.
+Two encoders go one way only — the Mode 7 previews, and the WAV of a BRR sample
+— and are views, never sources.
 
 ## Contents
 
@@ -31,6 +33,7 @@ Everything lives in `snaggletooth::formats`.
 | `encodeMode7Map` | A Mode 7 map, a byte an entry, → `$XX` text thirty-two a line; a preview, never decoded. |
 | `encodeOam`, `decodeOam` | OAM bytes ↔ `.oam` text. |
 | `encodeHdma`, `decodeHdma` | An HDMA table ↔ `.hdma` text. |
+| `encodeBrrWav` | A BRR sample's blocks → a WAV of what the DSP plays, through the machine's decoder; a listening copy, never decoded. |
 | `encodingReader` | Wraps an `assembler::Reader` so an included asset is decoded by extension. |
 
 ## Using it
@@ -46,9 +49,11 @@ if (!png.ok()) { /* png.error names what was wrong */ }
 The library target is `snaggletooth_formats`; `tools/` is on its public include
 path. PNG encoding and decoding is [lodepng](../../third_party/lodepng/README.md),
 built as `snaggletooth_lodepng` and linked privately so no lodepng symbol reaches
-a header here. The library has no command line of its own: the cartridge
-disassembler writes a lifted file through it, and `snes_verify` and the two
-command-line assemblers read an included asset back through `encodingReader`.
+a header here; the BRR decoder is the machine's own, and the WAV writer is
+[`../spc/`](../spc/README.md)'s, both linked privately too. The library has no
+command line of its own: the cartridge disassembler writes a lifted file and a
+sample's WAV through it, and `snes_verify` and the two command-line assemblers
+read an included asset back through `encodingReader`.
 
 ## See also
 

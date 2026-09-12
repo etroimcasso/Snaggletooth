@@ -31,11 +31,11 @@ every file lifted by its directory and by the form its path names with the
 bytes it holds, every staged extent by what the shadow found of its source —
 exact, approximate, computed, from a register, unwritten — every landing by
 what the PPU used the memory as and by its depth, every walk by its unit and
-form, every preview by its form, and every routine with what it calls and
-reaches.
+form, every preview by its form, every sample the key-ons named by whether the
+image holds it, and every routine with what it calls and reaches.
 
 Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
-`moved`, `landed`, `walked`, `asset`, `preview`, `origin`, `staged`,
+`moved`, `landed`, `walked`, `asset`, `preview`, `sample`, `origin`, `staged`,
 `streamed`, `state` and `seen` lines, so a corpus run says how far the trace,
 the run, the analysis and the shadow reached.
 
@@ -92,7 +92,11 @@ def facts(tree):
     walked = [f"unit {w[11]} {w[12]}" for w in manifestLines(tree, "walked", 15)]
     # preview <path> of <path> as <form> [contents <n>]
     previews = [w[5] for w in manifestLines(tree, "preview", 6) + manifestLines(tree, "preview", 8)]
-    return classes, registers, valued, len(accesses), dmas, moved, assets, landed, walked, previews
+    # sample <path> of <address> bytes <n> loop <address> in <path> at <offset> times <n>
+    # sample <path> of <address> bytes <n> loop <address> unplaced times <n>
+    samples = ([("placed", int(w[5]), int(w[13])) for w in manifestLines(tree, "sample", 14)]
+               + [("unplaced", int(w[5]), int(w[10])) for w in manifestLines(tree, "sample", 11)])
+    return classes, registers, valued, len(accesses), dmas, moved, assets, landed, walked, previews, samples
 
 
 def staged(tree):
@@ -234,6 +238,7 @@ def main():
     corpusFormBytes = collections.Counter()
     corpusWalks = collections.Counter()
     corpusPreviews = collections.Counter()
+    corpusSamples = collections.Counter()
     corpusReaches = collections.Counter()
     corpusThrough = collections.Counter()
     factTotals = collections.Counter()
@@ -260,12 +265,14 @@ def main():
             summary += (f"; {kinds['stop']} stops, {kinds['reached']} reached, {kinds['ran']} ran, "
                         f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['landed']} landed, "
                         f"{kinds['walked']} walked, {kinds['asset']} assets, {kinds['preview']} previews, "
+                        f"{kinds['sample']} samples, "
                         f"{kinds['origin']} origin, {kinds['staged']} staged, {kinds['streamed']} streamed, "
                         f"{kinds['state']} state lines, {kinds['seen']} seen lines")
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:
-            classes, registers, valued, accesses, dmas, movedLines, assets, landedLines, walkedLines, previewLines = facts(tree)
+            (classes, registers, valued, accesses, dmas, movedLines, assets, landedLines, walkedLines, previewLines,
+             sampleLines) = facts(tree)
             corpusClasses.update(classes)
             corpusRegisters.update(registers)
             factTotals["accesses"] += accesses
@@ -305,6 +312,11 @@ def main():
             corpusWalks.update(walkedLines)
             factTotals["previews"] += len(previewLines)
             corpusPreviews.update(previewLines)
+            factTotals["samples"] += len(sampleLines)
+            for placement, size, times in sampleLines:
+                corpusSamples[placement] += 1
+                factTotals["sampleBytes"] += size
+                factTotals["keyOns"] += times
             sourceKinds, spanned, used, stagedLines, streamedLines = staged(tree)
             corpusSources.update(sourceKinds)
             factTotals["sourceSpanned"] += spanned
@@ -317,7 +329,9 @@ def main():
             summary += (f"; {accesses} accesses ({valued} with a value), {len(dmas)} transfers, "
                         f"{len(movedLines)} moved ({imageRanges} from the image), "
                         f"{len(assets)} assets ({sum(s for _, s, _, _ in assets)} bytes; {forms or 'none'}), "
-                        f"{len(previewLines)} previews; {top}"
+                        f"{len(previewLines)} previews, {len(sampleLines)} samples "
+                        f"({sum(1 for p, _, _ in sampleLines if p == 'placed')} placed, "
+                        f"{sum(t for _, _, t in sampleLines)} key-ons); {top}"
                         f"; sources: {sources or 'none'}, {spanned} bytes spanned, {used} used")
         if args.routines:
             found = routines(tree)
@@ -383,6 +397,10 @@ def main():
             print(f"  {k:<16} {v}")
         print(f"\npreviews by form, whole corpus ({factTotals['previews']} preview lines):")
         for k, v in corpusPreviews.most_common():
+            print(f"  {k:<12} {v}")
+        print(f"\nsamples the key-ons named, whole corpus ({factTotals['samples']} sample lines, "
+              f"{factTotals['sampleBytes']} bytes, {factTotals['keyOns']} key-ons):")
+        for k, v in corpusSamples.most_common():
             print(f"  {k:<12} {v}")
         print(f"\nstaged sources, whole corpus ({factTotals['staged']} staged lines, "
               f"{factTotals['streamed']} streams; {factTotals['sourceSpanned']} bytes spanned, "

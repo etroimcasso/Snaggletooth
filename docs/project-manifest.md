@@ -23,8 +23,9 @@ findings outlive it, and how a name a person gives a file survives.
 > table in the editable form the path's extension names, where the run's facts
 > allow one — where every range landed on the other side of the port, what the
 > PPU used that memory as and at what depth, how every HDMA table was walked,
-> the previews written beside a file the run could not turn into a source, and
-> the direct register and the data bank the run saw at every site it executed. Read for what every path proves, it records the direct
+> the previews written beside a file the run could not turn into a source,
+> every sample the DSP was told to play with the listening copy written of it,
+> and the direct register and the data bank the run saw at every site it executed. Read for what every path proves, it records the direct
 > register, the data bank and the stack pointer at every label where something
 > is proven, and the destinations of every jump through a table the bytes
 > bound, and traces from those too.
@@ -54,6 +55,7 @@ findings outlive it, and how a name a person gives a file survives.
   - [2.17 Where a transfer landed](#217-where-a-transfer-landed)
   - [2.18 How a table was walked](#218-how-a-table-was-walked)
   - [2.19 Previews](#219-previews)
+  - [2.20 Samples](#220-samples)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -1124,6 +1126,51 @@ The line is written fresh and read back by nothing; a run that had no
 machine leaves the previews on disk as they were, since the disassembler
 never deletes a file.
 
+### 2.20 Samples
+
+```
+sample   <path> of <address> bytes <n> loop <address> in <path> at <offset> times <n>
+sample   <path> of <address> bytes <n> loop <address> unplaced times <n>
+```
+
+A sample the DSP was told to play, and the listening copy written of it. The
+first path is the WAV's, relative to the manifest
+([asset-formats.md §The listening copy](asset-formats.md#the-listening-copy-wav));
+after `of`, the audio address the sample's first block lies at; after
+`bytes`, how many bytes the sample holds — its blocks, nine bytes each, from
+the first to the one carrying the end flag; after `loop`, the address the
+directory entry gives the DSP to continue from at that flag; then where the
+image holds the bytes — `in` the file of the tree that carries them, a bank
+file, the sound program's file or a lifted file under `apu/`, `at` the image
+offset of the first — or `unplaced` when the image holds them nowhere as they
+are, or at more than one place; and after `times`, how many key-ons named the
+sample.
+
+The run's audio observer keeps a copy of the DSP's register file from every
+write the sound CPU makes through `$F2` and `$F3`; at each write to `KON`
+with a bit set it reads, for each voice named, the sample directory (`DIR`)
+and the voice's source number (`SRCN`), takes the entry's start and loop
+addresses from the audio memory, and walks the blocks from the start to the
+first whose header carries the end flag. A sample is one line however many
+voices or key-ons name it — the same start address and the same bytes; the
+same address with other bytes, a driver having loaded another sample over it,
+is another line and another file. A walk that reaches the end of the audio
+memory without an end flag names nothing, and a `note` says so.
+
+The `drawing` cartridge's sound program keys two voices on at once: voice 0
+on a sample of two blocks the cartridge uploaded with the program, voice 1 on
+one the program wrote into audio memory itself, which the image holds
+nowhere:
+
+```
+sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1
+sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1
+```
+
+The line is written fresh and read back by nothing; the WAV is a listening
+copy, which nothing includes and the verifier never reads. A run that had no
+machine leaves the WAVs on disk as they were.
+
 
 ## 3. What is read back
 
@@ -1169,7 +1216,7 @@ directory, it reads:
 
 Everything else is what the last run found and is written fresh — the `access`,
 `dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed`, `landed`,
-`walked` and `preview` lines among them — and the next disassembly reads none of it back: they are what
+`walked`, `preview` and `sample` lines among them — and the next disassembly reads none of it back: they are what
 the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. `snes_render` reads the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the

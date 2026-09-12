@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "cpu65816/cpu65816_asm.h"
+#include "formats/brr.h"
 #include "formats/hdma.h"
 #include "formats/oam.h"
 #include "formats/palette.h"
@@ -1546,6 +1547,76 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   writePreviews(out, facts);
 }
 
+// The file of the tree that holds `length` image bytes from `offset` whole: a
+// lifted file, a placed block of the sound program, or the bank file whose
+// region the first byte's address lies in; nothing when no file does.
+std::optional<std::string> fileHolding(const CartridgeDisassembly& out, std::size_t offset, std::size_t length) {
+  for (const AssetFile& asset : out.assets) {
+    if (offset >= asset.romOffset && offset + length <= asset.romOffset + asset.bytes.size()) return asset.file;
+  }
+  if (out.sound) {
+    for (const UploadBlock& block : out.sound->capture.blocks) {
+      if (block.romOffset && offset >= *block.romOffset && offset + length <= *block.romOffset + block.bytes.size()) {
+        return out.sound->file;
+      }
+    }
+  }
+  const std::optional<std::uint32_t> address = romAddress(out.header.map, offset);
+  if (!address) return std::nullopt;
+  for (const RegionListing& region : out.regions) {
+    if (*address >= region.region.first && *address <= region.region.last) return region.region.file;
+  }
+  return std::nullopt;
+}
+
+// A file's name without its directory and its extension.
+std::string basenameOf(const std::string& file) {
+  const std::string stem = stemOf(file);
+  const std::size_t slash = stem.find_last_of('/');
+  return slash == std::string::npos ? stem : stem.substr(slash + 1);
+}
+
+// Writes the samples the run's key-ons named: each matched whole to the image
+// as a sound-program block is, its WAV beside the file that holds its bytes —
+// under `apu/samples/` when the image holds them nowhere whole — and a second
+// sample at the same address taking `-2` before its extension, a third `-3`.
+void writeSamples(CartridgeDisassembly& out, std::span<const std::uint8_t> rom,
+                  const std::vector<KeyedSample>& keyed) {
+  out.samples.clear();
+  std::set<std::string> taken;
+  for (const KeyedSample& sample : keyed) {
+    SampleFile file{.file = {},
+                    .start = sample.start,
+                    .loop = sample.loop,
+                    .bytes = sample.bytes,
+                    .in = {},
+                    .romOffset = std::nullopt,
+                    .times = sample.times,
+                    .written = {}};
+    const formats::Bytes wav = formats::encodeBrrWav(sample.bytes);
+    if (!wav.ok()) {
+      out.notes.push_back("sample at " + address16(sample.start) + ": " + wav.error + "; not written");
+      continue;
+    }
+    file.written = wav.bytes;
+    file.romOffset = uniqueOffset(rom, sample.bytes);
+    std::string stem = "apu/samples/" + hex(sample.start, 4);
+    if (file.romOffset) {
+      const std::optional<std::string> holder = fileHolding(out, *file.romOffset, sample.bytes.size());
+      if (holder) {
+        file.in = *holder;
+        stem = "apu/" + basenameOf(*holder) + "-" + hex(sample.start, 4);
+      } else {
+        file.romOffset.reset();
+      }
+    }
+    std::string path = stem + ".wav";
+    for (unsigned n = 2; !taken.insert(path).second; ++n) path = stem + "-" + std::to_string(n) + ".wav";
+    file.file = std::move(path);
+    out.samples.push_back(std::move(file));
+  }
+}
+
 }  // namespace
 
 std::optional<UploadCapture> captureUpload(std::span<const std::uint8_t> rom,
@@ -1698,9 +1769,13 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // this run's over them — a range this run saw again carries this run's count,
   // one it did not see is kept as it was.
   out.moved = request.moved;
+  // The samples the run's key-ons named, written once the files that could
+  // hold their bytes are known.
+  std::vector<KeyedSample> keyed;
   if (request.observeRun) {
     RunObservation observation =
         observeRun(request.rom, request.runMasterCycles, request.input, out.notes, request.progress);
+    keyed = std::move(observation.samples);
     for (const ReachedTarget& seen : observation.reached) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
         return sameSighting(r, seen);
@@ -2000,6 +2075,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // the listings say where the instructions are, the sound program says where
   // its blocks are, and the routines say who wrote what.
   liftAssets(out, request);
+  writeSamples(out, request.rom, keyed);
   return out;
 }
 
@@ -2230,6 +2306,17 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
     out += "preview  " + preview.file + " of " + preview.of + " as " + preview.form;
     if (preview.contents != 0u) out += " contents " + std::to_string(preview.contents);
     out += "\n";
+  }
+
+  // The samples the key-ons named, each with the WAV written of it and where
+  // the image holds its bytes.
+  if (!disassembly.samples.empty()) out += "\n";
+  for (const SampleFile& sample : disassembly.samples) {
+    out += "sample   " + sample.file + " of " + address16(sample.start) + " bytes " +
+           std::to_string(sample.bytes.size()) + " loop " + address16(sample.loop);
+    out += sample.romOffset ? " in " + sample.in + " at $" + hex(static_cast<std::uint32_t>(*sample.romOffset), 6)
+                            : std::string(" unplaced");
+    out += " times " + std::to_string(sample.times) + "\n";
   }
 
   // What the run built from each file: one line per file, staged extent whose
@@ -2512,6 +2599,10 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
   for (const PreviewFile& preview : disassembly.previews) {
     const std::string_view bytes(reinterpret_cast<const char*>(preview.written.data()), preview.written.size());
     if (!writeFile(directory / preview.file, bytes, error)) return false;
+  }
+  for (const SampleFile& sample : disassembly.samples) {
+    const std::string_view bytes(reinterpret_cast<const char*>(sample.written.data()), sample.written.size());
+    if (!writeFile(directory / sample.file, bytes, error)) return false;
   }
   return true;
 }

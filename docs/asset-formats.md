@@ -5,7 +5,8 @@ A cartridge's graphics, palettes and tables are bytes the hardware reads directl
 the toolkit reads and writes for each of them: a tile sheet as an indexed PNG, and the palette,
 tilemap, OAM and HDMA tables as text. Each form is exact both ways — the bytes encode to the form
 and the form decodes back to the same bytes — so a form is a source the assembler can include in
-place of a raw `.bin`.
+place of a raw `.bin`. Beside them are two kinds of file that go one way only: the previews of a
+source the run cannot turn back, and the WAV written of every sample the DSP was told to play.
 
 The codecs live in `snaggletooth_formats` (`tools/formats/`). The [cartridge
 disassembler](snes-disassembler.md#the-assets) writes a lifted file in its form where the run's facts
@@ -22,6 +23,7 @@ described at the end of this page. Every example below is the `drawing` cartridg
 - [The HDMA table (`.hdma`)](#the-hdma-table-hdma)
 - [Which form a lifted file takes](#which-form-a-lifted-file-takes)
 - [Previews](#previews)
+- [The listening copy (`.wav`)](#the-listening-copy-wav)
 - [Including an asset](#including-an-asset)
 - [Where to change it](#where-to-change-it)
 
@@ -247,6 +249,41 @@ of a buffer the routine cleared has no preview: the routine made more of that co
 did. Of the two blobs summed into one buffer, the one that supplied two of every byte's three owns
 it, and the other has no preview.
 
+## The listening copy (`.wav`)
+
+A sample the DSP plays is BRR: blocks of nine bytes, a header — the shift, the filter, the loop and
+end flags — and sixteen four-bit values, decoded through the filter as each block is played. The
+disassembler does not turn a sample into a source; the bytes stay in the file that holds them — a
+bank file, the sound program's file or a lifted file under `apu/` — and beside them the run writes a
+WAV of what the DSP would play: the blocks from the sample's start to the first carrying the end
+flag, decoded by the machine's own decoder, once from start to end with the loop not followed, as
+16-bit PCM at 32 000 Hz — the decoder's 15-bit values as they are, the one channel written to both.
+Nothing includes it, the verifier never reads it, and nothing is re-encoded from it.
+
+Which samples: the ones a key-on named. The run's audio observer keeps a copy of the DSP's register
+file from every write the sound CPU makes through `$F2` and `$F3`, and at each write to `KON` with a
+bit set reads, for each voice named, the sample directory and the voice's source number, takes the
+entry's start and loop from the audio memory and walks the blocks. The WAV is
+`apu/<name>-<address>.wav`, `<name>` the file's without its extension and `<address>` the sample's
+start in the audio memory as four hexadecimal digits, beside a sample the image holds whole at one
+place — its file is the one of the tree that carries those image bytes — and `apu/samples/<address>.wav`
+for one the image holds nowhere as it is, or at more than one place: a sample a driver built or
+unpacked. A second sample at the same address with other bytes takes `-2` before its extension, a
+third `-3`. The manifest's [`sample` line](project-manifest.md#220-samples) names each with its
+bytes, its loop address, the file and the offset holding it, and how many key-ons named it.
+
+The `drawing` cartridge uploads a sound program with a two-block sample and a directory; the program
+writes a second sample's headers into cleared audio memory and keys both voices on:
+
+```
+sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1
+sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1
+```
+
+The first is in the block the boot captured, so its WAV sits beside `apu/driver.asm`; the second is
+two headers over sixteen zero bytes the boot left, which the image holds nowhere, so its WAV is under
+`apu/samples/`.
+
 ## Including an asset
 
 An assembler reads an included file's bytes through a reader. The encoding reader wraps one so that,
@@ -272,10 +309,12 @@ read through this reader, so an edited sheet or table assembles as its bytes.
 
 The codecs are in `tools/formats/`: `png.{h,cpp}` and `tiles.{h,cpp}` for the tile sheet and the
 Mode 7 sheet, `palette`, `tilemap` (the Mode 7 map with it), `oam` and `hdma` for the text forms,
-and `reader.{h,cpp}` for the encoding reader. Each is covered by `tests/formats/`. PNG encoding and
-decoding is [lodepng](../third_party/lodepng/README.md), vendored under `third_party/`. Which form
-a lifted file takes, and the previews, are the disassembler's in `tools/rom/rom_disasm.cpp`, under
-the facts `tools/rom/rom_observe.cpp` records — the depth, the palette and the unit — and are
-covered by `tests/rom/`. The assemblers that include these files are described in
+`brr.{h,cpp}` for the listening copy, and `reader.{h,cpp}` for the encoding reader. Each is covered
+by `tests/formats/`. PNG encoding and decoding is [lodepng](../third_party/lodepng/README.md),
+vendored under `third_party/`; the BRR decoder is the machine's own (`snaggletooth/apu/dsp.h`) and
+the WAV writer `tools/spc/`'s. Which form a lifted file takes, the previews and the samples are the
+disassembler's in `tools/rom/rom_disasm.cpp`, under the facts `tools/rom/rom_observe.cpp` records —
+the depth, the palette, the unit, and the samples the key-ons named — and are covered by
+`tests/rom/`. The assemblers that include these files are described in
 [assemblers.md](assemblers.md); the lexicon's `INCBIN` is in
 [assembly-lexicon.md §5.4](assembly-lexicon.md).
