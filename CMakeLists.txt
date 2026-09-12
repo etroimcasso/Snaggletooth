@@ -22,6 +22,11 @@ endif()
 # parent build (the parent runs its own suite). Override with -DSNAGGLETOOTH_BUILD_TESTS=ON/OFF.
 option(SNAGGLETOOTH_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 
+# On by default when Snaggletooth is the top-level project; off when it is vendored into a
+# parent build. A parent build sets it on to link the tool libraries and command-line tools
+# without the test suite. Override with -DSNAGGLETOOTH_BUILD_TOOLS=ON/OFF.
+option(SNAGGLETOOTH_BUILD_TOOLS "Build the tool libraries and command-line tools" ${PROJECT_IS_TOP_LEVEL})
+
 add_library(snaggletooth STATIC
   src/version.cpp
   src/apu.cpp
@@ -49,10 +54,10 @@ endif()
 
 # The .spc tooling — the loader, the WAV writer, and the spc_render command-line
 # renderer. A small static helper carries the loader and writer so the CLI and the
-# tests both link them. Built for a top-level developer build or whenever the tests
-# are on; a parent build that vendors the library and runs its own suite pulls in
-# none of it.
-if(PROJECT_IS_TOP_LEVEL OR SNAGGLETOOTH_BUILD_TESTS)
+# tests both link them. Built when the tools are on — the default for a top-level
+# build — or whenever the tests are on, which need them; a parent build that vendors
+# the library gets none of them unless it asks with SNAGGLETOOTH_BUILD_TOOLS.
+if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
   add_library(snaggletooth_spc STATIC
     tools/spc/spc_loader.cpp
     tools/spc/wav_writer.cpp

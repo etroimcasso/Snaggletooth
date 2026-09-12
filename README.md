@@ -149,6 +149,9 @@ add_subdirectory(snaggletooth)
 target_link_libraries(your_target PRIVATE snaggletooth::snaggletooth)
 ```
 
+The tools are off in a parent build unless it sets `SNAGGLETOOTH_BUILD_TOOLS`, which builds the
+tool libraries and command-line tools without the suite.
+
 The public headers are under [`include/snaggletooth/`](include/snaggletooth); the pages under
 [`docs/`](docs/README.md) describe each component's surface and how to drive it.
 
@@ -188,7 +191,8 @@ cmake -B build -DSNAGGLETOOTH_65816_VECTORS=/path/to/65816/v1 \
 
 `SNAGGLETOOTH_BOOT_ROM` names a 64-byte audio boot ROM a host holds its own dump of; without
 it the acceptance tests boot on the built-in upload program instead.
-`SNAGGLETOOTH_BUILD_TESTS` turns the suite and the tools on or off explicitly.
+`SNAGGLETOOTH_BUILD_TESTS` turns the suite on or off explicitly, and `SNAGGLETOOTH_BUILD_TOOLS`
+the tools.
 
 ## Documentation
 

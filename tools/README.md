@@ -50,9 +50,10 @@ changes, never at build time; its docstring carries the usage.
 
 ## Building
 
-The tools build whenever Snaggletooth is the top-level project or the tests are on
-(`SNAGGLETOOTH_BUILD_TESTS`). A parent build that vendors the library gets none of
-them. Each is its own target:
+The tools build when `SNAGGLETOOTH_BUILD_TOOLS` is on — the default for a top-level
+build — or when the tests are on (`SNAGGLETOOTH_BUILD_TESTS`). A parent build that
+vendors the library sets the first to have them without the suite. Each is its own
+target:
 
 ```
 cmake --build build --target snes_disasm snes_render snes_verify snes_lift snes_differential snes_examples cpu65816_disasm spc700_disasm cpu65816_asm spc700_asm rom_render spc_render
