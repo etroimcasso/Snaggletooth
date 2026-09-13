@@ -21,6 +21,7 @@ boot-ROM window*).
 ## Contents
 
 - [Constructing and stepping](#constructing-and-stepping)
+  - [Running in storage you hold](#running-in-storage-you-hold)
   - [What a cycle is](#what-a-cycle-is)
 - [The register overlay](#the-register-overlay)
   - [DSP register file](#dsp-register-file)
@@ -69,6 +70,40 @@ nothing: `run(a)` then `run(b)` leaves the machine exactly where one `run(a + b)
 
 Calling `step()` after a run stopped mid-instruction finishes the instruction in progress rather than
 starting a new one, and returns only the cycles it still owed.
+
+### Running in storage you hold
+
+`Apu(ApuState* storage)` builds the same seeded power-on machine over an `ApuState` you own. That
+object is the machine's state for the machine's life: every cycle reads and writes it in place,
+`state()` returns it, and `restore()` and `reset()` write into it. Nothing is copied on a step or a
+run, which is what a host that keeps the machine's state inside a larger value wants — the
+[SNES machine](snes-machine.md#snapshot-and-restore) holds its audio machine's state inside its own
+snapshot this way.
+
+```cpp
+snaggletooth::ApuState storage;
+snaggletooth::Apu apu(&storage);  // seeds power-on into `storage`
+
+apu.loadRam(0x0200, program);
+apu.setPc(0x0200);
+apu.step();
+
+// storage.cpu.a == 0x2A, with no call to state()
+```
+
+To start from a state of your own, assign it into the storage and call `reload()`: the live core is
+reloaded from the object, the sample slot re-locked, and pending frames discarded — what `restore()`
+does after its own assignment.
+
+```cpp
+storage = snapshot;  // a state captured earlier
+apu.reload();        // the machine resumes from it
+```
+
+Keep the storage alive as long as the machine runs. A machine is moved, never copied, and a moved
+machine keeps its storage. To move the storage itself, move the object first and then the machine
+after it with `Apu(std::move(apu), &newStorage)`; the live core, pending frames, the mapped image
+and the observer all come across.
 
 ### What a cycle is
 
@@ -255,7 +290,9 @@ apu.restore(snapshot);                                 // rewind to the capture
 ```
 
 This is the whole-state-as-a-value model: `Apu` holds no hidden state, so a snapshot plus a record of
-host port writes replays a session exactly.
+host port writes replays a session exactly. A machine built over storage you hold takes a snapshot
+the same way and resumes from one assigned into its storage with `reload()` (see
+[Running in storage you hold](#running-in-storage-you-hold)).
 
 ## Host RAM access
 
@@ -370,7 +407,7 @@ access, every register and every cycle the observer reports.
 - `include/snaggletooth/apu/apu.h` — the `ApuState`/`TimerState` value structs, the `Apu` class and
   the `ApuObserver` interface.
 - `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, `reset()`,
-  `peek()` and the observer's boundary report.
+  `reload()`, `peek()` and the observer's boundary report.
 - `tests/apu/` — the overlay, port, timer, cycle-timing and observer suites, each derived from the
   register and low-level-timing documentation.
 - [docs/spc700-cpu.md](spc700-cpu.md) — the CPU core the machine wraps.

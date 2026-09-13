@@ -290,9 +290,20 @@ class Snes {
   // with its program counter at the cartridge's reset vector.
   explicit Snes(SnesConfig config);
 
+  // A machine is moved, never copied or assigned: the audio machine inside it
+  // runs in the machine's own state, and a move carries the machine after its
+  // state to the new place. A copy would run two audio machines over one state.
+  // The move names every member in `snes.cpp`; a member added to the machine
+  // joins that list.
+  Snes(const Snes&) = delete;
+  Snes& operator=(const Snes&) = delete;
+  Snes(Snes&& moved) noexcept;
+  Snes& operator=(Snes&&) = delete;
+
   // The whole machine as a value. state() is coherent at any cycle the machine has
-  // stopped on, mid-instruction included; restore() replaces the mutable machine
-  // and resumes exactly there, keeping the cartridge and clock rate in place.
+  // stopped on, mid-instruction included, and answers the machine's own state
+  // without copying it; restore() replaces the mutable machine and resumes exactly
+  // there, keeping the cartridge and clock rate in place.
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
   // Takes the state by const reference rather than by value: a SnesState is a quarter
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
@@ -437,9 +448,11 @@ class Snes {
   // Commits the arithmetic result when its cycle countdown expires.
   void commitMath() noexcept;
 
-  // Reloads the live CPU and APU from state_ after a construct or restore.
+  // Reloads the live cores from state_ after a construct or restore: the CPU from
+  // its register set, the audio machine from the state it runs in.
   void load();
-  // Copies the live CPU and APU back into state_ before a public return.
+  // Copies the live CPU's register set into state_ before a public return. The
+  // audio machine's state is state_.apu itself, so nothing else is copied.
   void sync();
 
   std::uint8_t busRead(std::uint32_t address);
@@ -552,8 +565,8 @@ class Snes {
   [[nodiscard]] Cpu65816State powerOnCpu() const;
 
   Cpu65816 cpu_;                     // the live CPU while the machine runs
-  Apu apu_;                          // the live audio machine, paced by the interleave
-  SnesState state_;                  // work RAM, registers and counters are authoritative here
+  SnesState state_;                  // the machine's state: work RAM, registers, counters and the audio machine's whole state are authoritative here
+  Apu apu_;                          // the live audio machine, paced by the interleave, running in state_.apu (declared after it: the storage exists before the machine built over it)
   std::vector<std::uint8_t> rom_;    // the cartridge image, fixed for the machine's life
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
   CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it

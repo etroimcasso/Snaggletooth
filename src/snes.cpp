@@ -54,14 +54,15 @@ constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 }  // namespace
 
 Snes::Snes(SnesConfig config)
-    : rom_(config.rom.begin(), config.rom.end()), region_(config.region) {
+    : apu_(&state_.apu),  // the audio machine runs in the snapshot's own storage, seeded at power-on
+      rom_(config.rom.begin(), config.rom.end()),
+      region_(config.region) {
   map_ = config.map.value_or(detectCartridgeMap(rom_));
   const std::size_t save = config.saveRamBytes.value_or(declaredSaveRamBytes(rom_));
   state_.sram.assign(save > kMaxSaveRamBytes ? kMaxSaveRamBytes : save, 0u);
   const ApuRatio ratio = region_ == Region::Pal ? kPalApu : kNtscApu;
   apuNum_ = ratio.num;
   apuDen_ = ratio.den;
-  state_.apu = apu_.state();  // the APU's seeded post-boot ready state
   if (config.iplStub) {
     // Seed the upload stub over the ready state: the audio CPU runs the handshake
     // and posts its own ready bytes, the way it does when the console powers on.
@@ -82,6 +83,22 @@ Snes::Snes(SnesConfig config)
   load();
 }
 
+Snes::Snes(Snes&& moved) noexcept
+    : cpu_(std::move(moved.cpu_)),
+      state_(std::move(moved.state_)),
+      apu_(std::move(moved.apu_), &state_.apu),  // the audio machine follows its state here
+      rom_(std::move(moved.rom_)),
+      region_(moved.region_),
+      map_(moved.map_),
+      apuNum_(moved.apuNum_),
+      apuDen_(moved.apuDen_),
+      lastCost_(moved.lastCost_),
+      videoAdvanced_(moved.videoAdvanced_),
+      observer_(moved.observer_),
+      portLanding_(moved.portLanding_) {
+  moved.observer_ = nullptr;
+}
+
 void Snes::restore(const SnesState& state) {
   state_ = state;
   load();
@@ -89,7 +106,7 @@ void Snes::restore(const SnesState& state) {
 
 void Snes::load() {
   cpu_.restore(state_.cpu);
-  apu_.restore(state_.apu);
+  apu_.reload();  // its state is state_.apu, written in place by the restore or the seeding above
   // The NMI pin's remembered level is not part of the snapshot, so re-derive it from
   // the flags and enables and sync it WITHOUT minting an edge: the pending latch, if
   // one was in flight, rides the snapshot on its own. Driving it as a fresh assertion
@@ -100,8 +117,9 @@ void Snes::load() {
 }
 
 void Snes::sync() {
+  // The audio machine's state is already in state_.apu; only the live CPU's
+  // register set has a copy to write back.
   state_.cpu = cpu_.state();
-  state_.apu = apu_.state();
 }
 
 Cpu65816State Snes::powerOnCpu() const {

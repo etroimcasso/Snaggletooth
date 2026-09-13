@@ -38,6 +38,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -118,11 +119,40 @@ class Apu {
   Apu();
   explicit Apu(ApuState state);
 
+  // The seeded power-on machine over state that lives elsewhere: `storage` is the
+  // machine's whole state for the machine's life, seeded here exactly as Apu()
+  // seeds its own, then read and written in place by every cycle. state() answers
+  // that object and restore() and reset() write into it. The caller keeps it alive
+  // for as long as the machine runs. A caller that wants a different starting
+  // state assigns it into the storage and calls reload().
+  explicit Apu(ApuState* storage);
+
+  // A machine is moved, never copied: a copy would either run two machines over
+  // one storage or split an owning machine from its snapshot. A moved machine
+  // keeps its storage — its own, or the caller's object it was built over.
+  Apu(const Apu&) = delete;
+  Apu& operator=(const Apu&) = delete;
+  Apu(Apu&&) noexcept = default;
+  Apu& operator=(Apu&&) noexcept = default;
+
+  // The machine `moved` carrying on in `storage`, which already holds its state:
+  // the owner of the storage the machine was built over has moved that object to
+  // a new place and moves the machine after it. The live core, the pending output,
+  // the mapped image, the observer and the boundary record all come across; the
+  // state is read from `storage` from here on and `moved` is left with nothing.
+  Apu(Apu&& moved, ApuState* storage) noexcept;
+
   // The whole machine as a value. state() is coherent at any cycle the machine
   // has stopped on, mid-instruction included; restore() replaces every field and
   // resumes exactly there.
-  [[nodiscard]] const ApuState& state() const noexcept { return state_; }
+  [[nodiscard]] const ApuState& state() const noexcept { return *state_; }
   void restore(ApuState state);
+
+  // Resumes from the state as it now stands after the storage was written from
+  // outside — the owner of the storage assigned a snapshot into it. The live core
+  // is reloaded from it, the DSP's sample slot re-locked to the master counter, and
+  // pending output discarded, as restore() does after its own assignment.
+  void reload();
 
   // Re-seeds the post-IPL state with the documented reset differences: the timer
   // outputs clear to 0 (the power-on value is $F), but the targets and the master
@@ -141,10 +171,10 @@ class Apu {
   // overlay — RAM is RAM from the host side, and a read of $00F0-$00FF returns
   // the underlying byte, not the register the CPU would see.
   [[nodiscard]] std::uint8_t readRam(std::uint16_t address) const noexcept {
-    return state_.ram[address];
+    return state_->ram[address];
   }
   void writeRam(std::uint16_t address, std::uint8_t value) noexcept {
-    state_.ram[address] = value;
+    state_->ram[address] = value;
   }
   void loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) noexcept;
 
@@ -216,8 +246,8 @@ class Apu {
     }
   };
 
-  // Reloads the live CPU from state_ and re-locks the DSP sample slot to the master
-  // counter after a construct, restore, or reset.
+  // Reloads the live CPU from the state and re-locks the DSP sample slot to the
+  // master counter after a construct, restore, reload, or reset.
   void syncCpuAndSlot();
 
   // Takes the live CPU's state as the `before` of the next boundary reported
@@ -254,7 +284,12 @@ class Apu {
   void sampleFrame();
 
   Spc700 cpu_;      // the live CPU state while the machine runs
-  ApuState state_;  // RAM, overlay and timers are authoritative here; cpu is synced before every return
+  // The machine's state: RAM, overlay, timers and the DSP are authoritative in it,
+  // and cpu is written back before every return. An owning machine (Apu(),
+  // Apu(ApuState)) keeps it in owned_; one built over storage (Apu(ApuState*))
+  // leaves owned_ empty and state_ points at the caller's object.
+  std::unique_ptr<ApuState> owned_;
+  ApuState* state_ = nullptr;
   std::vector<StereoFrame> frames_;  // DSP output awaiting the host's drain; not part of the snapshot
   std::optional<std::array<std::uint8_t, kIplWindowBytes>> iplImage_;  // the $FFC0 window image; config, absent by default, kept across restore()/reset()
   ApuObserver* observer_ = nullptr;  // told every access and every boundary; none by default
