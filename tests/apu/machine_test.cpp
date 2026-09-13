@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -257,6 +258,99 @@ TEST(ApuSnapshot, ConstructFromStateSeedsTheCpu) {
   EXPECT_EQ(apu.state().cpu.pc, 0x0200);
   apu.step();
   EXPECT_EQ(apu.state().cpu.a, 0x5C);
+}
+
+TEST(ApuSnapshot, AMachineOverStorageSeedsPowerOnIntoIt) {
+  // Built over a caller's object, the machine seeds the same power-on state into
+  // it that Apu() seeds into its own, and state() is that object.
+  ApuState storage{};
+  storage.cpu.sp = 0x00;  // not the power-on values, so the seeding shows
+  storage.test = 0xFF;
+  Apu apu(&storage);
+  EXPECT_EQ(&apu.state(), &storage);
+  EXPECT_EQ(storage.cpu.sp, 0xEF);
+  EXPECT_EQ(storage.test, 0x0A);
+  EXPECT_EQ(storage.control, 0xB0);
+  EXPECT_EQ(storage.outputPorts[0], 0xAA);
+  EXPECT_EQ(storage.outputPorts[1], 0xBB);
+  EXPECT_EQ(storage.dsp[0x6C], 0xE0);
+  EXPECT_EQ(storage.timers[2].stage3, 0x0F);
+}
+
+TEST(ApuSnapshot, AMachineOverStorageRunsInIt) {
+  // Every write a run makes is in the storage with no call to state().
+  ApuState storage{};
+  Apu apu(&storage);
+  const std::array<std::uint8_t, 5> program{0x8F, 0x22, 0xF8,   // MOV $F8,#$22 (AUXIO)
+                                            0xE8, 0x33};        // MOV A,#$33
+  apu.loadRam(0x0200, program);
+  apu.setPc(0x0200);
+  apu.step();
+  apu.step();
+  EXPECT_EQ(storage.ram[0x00F8], 0x22);
+  EXPECT_EQ(storage.auxPorts[0], 0x22);
+  EXPECT_EQ(storage.cpu.a, 0x33);
+  EXPECT_EQ(storage.cpu.pc, 0x0205);
+  EXPECT_NE(storage.divider, 0u);
+}
+
+TEST(ApuSnapshot, ReloadResumesFromAStateAssignedIntoTheStorage) {
+  // A snapshot restored on an owning machine and the same snapshot assigned into
+  // a storage machine's object then reloaded run identically, and the reload
+  // discards the frames pending from before it, as restore() does.
+  Apu original = run({0xE8, 0x40,             // MOV A,#$40   (runs)
+                      0x8F, 0x77, 0xF8}, 1);  // MOV $F8,#$77 (pending at the snapshot)
+  const ApuState snap = original.state();
+
+  Apu owning;
+  owning.restore(snap);
+
+  ApuState storage{};
+  Apu over(&storage);
+  over.run(96);
+  ASSERT_FALSE(over.takeFrames().empty());  // the DSP delivers while it runs
+  over.run(96);                             // frames pending again
+  storage = snap;
+  over.reload();
+  EXPECT_TRUE(over.takeFrames().empty());
+
+  owning.step();
+  over.step();
+  EXPECT_EQ(over.state().cpu.pc, owning.state().cpu.pc);
+  EXPECT_EQ(over.state().divider, owning.state().divider);
+  EXPECT_EQ(storage.ram[0x00F8], 0x77);  // the pending instruction ran in the storage
+}
+
+TEST(ApuSnapshot, AMovedMachineCarriesOnInItsStorage) {
+  ApuState storage{};
+  Apu first(&storage);
+  const std::array<std::uint8_t, 2> program{0xE8, 0x5C};  // MOV A,#$5C
+  first.loadRam(0x0200, program);
+  first.setPc(0x0200);
+  Apu second(std::move(first));
+  EXPECT_EQ(&second.state(), &storage);
+  second.step();
+  EXPECT_EQ(storage.cpu.a, 0x5C);
+}
+
+TEST(ApuSnapshot, AMachineCarriesOnInStorageItsStateWasMovedTo) {
+  // The owner moves the state to a new place and the machine after it: the live
+  // core finishes the instruction it was inside, in the new place, and the old
+  // place is untouched from then on.
+  ApuState here{};
+  Apu machine(&here);
+  const std::array<std::uint8_t, 2> program{0xE8, 0x5C};  // MOV A,#$5C
+  machine.loadRam(0x0200, program);
+  machine.setPc(0x0200);
+  machine.run(1);  // one cycle into the two-cycle instruction
+  ASSERT_NE(here.cpu.tcu, 0u);
+
+  ApuState there = here;
+  Apu moved(std::move(machine), &there);
+  EXPECT_EQ(&moved.state(), &there);
+  moved.step();
+  EXPECT_EQ(there.cpu.a, 0x5C);
+  EXPECT_EQ(here.cpu.a, 0x00);
 }
 
 // ── Host access and stepping ────────────────────────────────────────────────

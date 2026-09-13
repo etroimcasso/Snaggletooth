@@ -569,6 +569,11 @@ machine.run(100'000);
 machine.restore(saved);   // back to the saved cycle, exactly
 ```
 
+`state()` returns the machine's own state, not a copy of it: the audio machine runs inside
+`state().apu` (the [APU machine](apu-machine.md#running-in-storage-you-hold) built over that
+object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
+moved, never copied; a moved machine carries its audio machine after its state.
+
 ## Gotchas
 
 - The reset vector is read from the cartridge at construction. An image with a zero vector starts the

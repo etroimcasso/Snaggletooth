@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <utility>
 
 namespace snaggletooth {
@@ -35,51 +36,77 @@ ApuState powerOnState() {
 
 }  // namespace
 
-Apu::Apu() : state_(powerOnState()) { syncCpuAndSlot(); }
+Apu::Apu() : owned_(std::make_unique<ApuState>(powerOnState())), state_(owned_.get()) {
+  syncCpuAndSlot();
+}
 
-Apu::Apu(ApuState state) : state_(std::move(state)) { syncCpuAndSlot(); }
+Apu::Apu(ApuState state)
+    : owned_(std::make_unique<ApuState>(std::move(state))), state_(owned_.get()) {
+  syncCpuAndSlot();
+}
+
+Apu::Apu(ApuState* storage) : state_(storage) {
+  *state_ = powerOnState();
+  syncCpuAndSlot();
+}
+
+Apu::Apu(Apu&& moved, ApuState* storage) noexcept
+    : cpu_(std::move(moved.cpu_)),
+      state_(storage),
+      frames_(std::move(moved.frames_)),
+      iplImage_(std::move(moved.iplImage_)),
+      observer_(moved.observer_),
+      boundaryState_(moved.boundaryState_),
+      sinceBoundary_(moved.sinceBoundary_) {
+  moved.state_ = nullptr;
+  moved.observer_ = nullptr;
+}
 
 void Apu::restore(ApuState state) {
-  state_ = std::move(state);
+  *state_ = std::move(state);
+  reload();
+}
+
+void Apu::reload() {
   syncCpuAndSlot();
   frames_.clear();  // pending output belongs to the machine that produced it
 }
 
 void Apu::syncCpuAndSlot() {
-  cpu_.restore(state_.cpu);
+  cpu_.restore(state_->cpu);
   markBoundary();
   // The DSP's sample slot rides the master counter: after a cycle that leaves the
   // counter at D, the DSP has run slot (D-1) and its cursor sits at D mod 32. A
   // restored or seeded state re-establishes that lockstep so the machine drives
   // the schedule without passing the phase every cycle.
-  state_.dsp.slotCursor = static_cast<std::uint8_t>(state_.divider & 31u);
+  state_->dsp.slotCursor = static_cast<std::uint8_t>(state_->divider & 31u);
 }
 
 void Apu::writePort(std::uint8_t index, std::uint8_t value) {
-  if (index < 4) state_.inputPorts[index] = value;
+  if (index < 4) state_->inputPorts[index] = value;
 }
 
 std::uint8_t Apu::readPort(std::uint8_t index) const noexcept {
-  return index < 4 ? state_.outputPorts[index] : 0;
+  return index < 4 ? state_->outputPorts[index] : 0;
 }
 
 void Apu::loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) noexcept {
   for (std::uint8_t b : bytes) {
-    state_.ram[address] = b;
+    state_->ram[address] = b;
     address = static_cast<std::uint16_t>(address + 1);
   }
 }
 
 void Apu::setPc(std::uint16_t pc) {
-  state_.cpu.pc = pc;
-  cpu_.restore(state_.cpu);
+  state_->cpu.pc = pc;
+  cpu_.restore(state_->cpu);
   markBoundary();
 }
 
 std::uint8_t Apu::peek(std::uint16_t address) const noexcept {
-  if (iplImage_ && address >= kIplWindowBase && (state_.control & kControlIplRom) != 0u)
+  if (iplImage_ && address >= kIplWindowBase && (state_->control & kControlIplRom) != 0u)
     return (*iplImage_)[address - kIplWindowBase];
-  return state_.ram[address];
+  return state_->ram[address];
 }
 
 void Apu::mapIplRom(std::span<const std::uint8_t, kIplWindowBytes> image) {
@@ -91,8 +118,8 @@ void Apu::mapIplRom(std::span<const std::uint8_t, kIplWindowBytes> image) {
 void Apu::machineCycle() {
   // The counter wraps at 65536, a multiple of 128, 32 and 16, so every phase
   // below survives the wrap unbroken.
-  ++state_.divider;
-  const std::uint16_t phase = state_.divider;
+  ++state_->divider;
+  const std::uint16_t phase = state_->divider;
 
   // The clocked events, on their documented slots of the DSP's 32-cycle sample
   // frame: T0 and T1 tick on the first slot of every fourth frame, T2 on the
@@ -123,8 +150,8 @@ void Apu::machineCycle() {
 
 void Apu::tickTimer(std::size_t index) {
   const std::uint8_t enable = static_cast<std::uint8_t>(1u << index);
-  if (!(state_.control & enable)) return;  // stage 2 only counts while enabled
-  TimerState& t = state_.timers[index];
+  if (!(state_->control & enable)) return;  // stage 2 only counts while enabled
+  TimerState& t = state_->timers[index];
   t.stage2 = static_cast<std::uint8_t>(t.stage2 + 1);  // 0-255 wraparound
   // Post-increment comparator: a target of 0 matches only after 256 counts.
   if (t.stage2 == t.target) {
@@ -138,8 +165,8 @@ void Apu::sampleFrame() {
   // finished stereo frame, which joins the queue. The span is writable so the echo
   // unit can write its feedback straight into APU RAM (its own bus access — no
   // overlay), the delay line the echo depends on.
-  const std::span<std::uint8_t, 65536> ram{state_.ram};
-  const SlotResult sample = stepDspCycle(state_.dsp, ram);
+  const std::span<std::uint8_t, 65536> ram{state_->ram};
+  const SlotResult sample = stepDspCycle(state_->dsp, ram);
   if (sample.delivered) frames_.push_back(sample.frame);
 }
 
@@ -157,13 +184,13 @@ std::uint32_t Apu::step() {
       ++cycles;
     } while (!cpu_.atInstructionBoundary());
   }
-  state_.cpu = cpu_.state();  // the snapshot is coherent wherever the machine stops
+  state_->cpu = cpu_.state();  // the snapshot is coherent wherever the machine stops
   return cycles;
 }
 
 std::uint64_t Apu::run(std::uint64_t budget) {
   for (std::uint64_t n = 0; n < budget; ++n) machineCycle();
-  state_.cpu = cpu_.state();
+  state_->cpu = cpu_.state();
   return budget;
 }
 
@@ -176,7 +203,7 @@ std::vector<StereoFrame> Apu::takeFrames() {
 void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
   // The DSP owns the write's semantics — ENDX's acknowledge, KON's arming, the
   // stamp a DSP-written register carries (see cpuWriteDspRegister).
-  cpuWriteDspRegister(state_.dsp, reg, value);
+  cpuWriteDspRegister(state_->dsp, reg, value);
 }
 
 void Apu::reset() {
@@ -185,14 +212,14 @@ void Apu::reset() {
   // both ride it — the targets are retained, and RAM above zero page keeps its
   // contents; the timer outputs go to 0 rather than the power-on $F. Everything
   // else returns to its documented reset value via powerOnState.
-  fresh.divider = state_.divider;
+  fresh.divider = state_->divider;
   for (std::size_t i = 0; i < fresh.timers.size(); ++i) {
-    fresh.timers[i].target = state_.timers[i].target;
+    fresh.timers[i].target = state_->timers[i].target;
     fresh.timers[i].stage3 = 0x00;
   }
   for (std::size_t addr = 0x0100; addr < fresh.ram.size(); ++addr)
-    fresh.ram[addr] = state_.ram[addr];
-  state_ = std::move(fresh);
+    fresh.ram[addr] = state_->ram[addr];
+  *state_ = std::move(fresh);
   syncCpuAndSlot();
   frames_.clear();  // a reset abandons any un-drained output
 }
@@ -204,9 +231,9 @@ std::uint8_t Apu::busRead(std::uint16_t address) {
   // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
   // (busWrite always hits RAM), so a driver can scratch the window and still read the
   // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
-  if (iplImage_ && address >= kIplWindowBase && (state_.control & kControlIplRom) != 0u)
+  if (iplImage_ && address >= kIplWindowBase && (state_->control & kControlIplRom) != 0u)
     return (*iplImage_)[address - kIplWindowBase];
-  return state_.ram[address];
+  return state_->ram[address];
 }
 
 void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
@@ -214,19 +241,19 @@ void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
     writeRegister(static_cast<std::uint8_t>(address), value);
     return;
   }
-  state_.ram[address] = value;
+  state_->ram[address] = value;
 }
 
 std::uint8_t Apu::readRegister(std::uint8_t reg) {
   switch (reg) {
-    case 0xF2: return state_.dspAddr;                       // DSPADDR reads back the latched address
-    case 0xF3: return state_.dsp[state_.dspAddr & 0x7Fu];   // DSPDATA masks the address with $7F
+    case 0xF2: return state_->dspAddr;                       // DSPADDR reads back the latched address
+    case 0xF3: return state_->dsp[state_->dspAddr & 0x7Fu];   // DSPDATA masks the address with $7F
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:             // input ports: what the host last wrote
-      return state_.inputPorts[reg - 0xF4u];
+      return state_->inputPorts[reg - 0xF4u];
     case 0xF8: case 0xF9:                                   // AUXIO: the port's own byte, not the RAM beneath
-      return state_.auxPorts[reg - 0xF8u];
+      return state_->auxPorts[reg - 0xF8u];
     case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
-      TimerState& t = state_.timers[reg - 0xFDu];
+      TimerState& t = state_->timers[reg - 0xFDu];
       const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
       t.stage3 = 0;
       return out;
@@ -244,52 +271,52 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
   switch (reg) {
     case 0xF0:  // TEST
       if (cpu_.state().psw & kFlagP) return;
-      state_.ram[reg] = value;
-      state_.test = value;
+      state_->ram[reg] = value;
+      state_->test = value;
       return;
     case 0xF1: {  // CONTROL
-      const std::uint8_t previous = state_.control;
-      state_.ram[reg] = value;
-      state_.control = value;
+      const std::uint8_t previous = state_->control;
+      state_->ram[reg] = value;
+      state_->control = value;
       // Bit 4 clears input ports 0/1, bit 5 clears input ports 2/3 — a one-time
       // zeroing on every write with the bit set, never a 0->1 transition.
-      if (value & 0x10u) { state_.inputPorts[0] = 0; state_.inputPorts[1] = 0; }
-      if (value & 0x20u) { state_.inputPorts[2] = 0; state_.inputPorts[3] = 0; }
+      if (value & 0x10u) { state_->inputPorts[0] = 0; state_->inputPorts[1] = 0; }
+      if (value & 0x20u) { state_->inputPorts[2] = 0; state_->inputPorts[3] = 0; }
       // A timer enable going 0->1 resets that timer's stage-2 and stage-3
       // counters; the shared stage-1 divider is left running.
-      for (std::size_t i = 0; i < state_.timers.size(); ++i) {
+      for (std::size_t i = 0; i < state_->timers.size(); ++i) {
         const std::uint8_t enable = static_cast<std::uint8_t>(1u << i);
         if ((value & enable) && !(previous & enable)) {
-          state_.timers[i].stage2 = 0;
-          state_.timers[i].stage3 = 0;
+          state_->timers[i].stage2 = 0;
+          state_->timers[i].stage3 = 0;
         }
       }
       return;
     }
     case 0xF2:  // DSPADDR
-      state_.ram[reg] = value;
-      state_.dspAddr = value;
+      state_->ram[reg] = value;
+      state_->dspAddr = value;
       return;
     case 0xF3:  // DSPDATA: writes beyond address $7F are ignored
-      state_.ram[reg] = value;
-      if (state_.dspAddr <= 0x7Fu) writeDspRegister(state_.dspAddr, value);
+      state_->ram[reg] = value;
+      if (state_->dspAddr <= 0x7Fu) writeDspRegister(state_->dspAddr, value);
       return;
     case 0xF4: case 0xF5: case 0xF6: case 0xF7:  // output ports: SPC700 -> host
-      state_.ram[reg] = value;
-      state_.outputPorts[reg - 0xF4u] = value;
+      state_->ram[reg] = value;
+      state_->outputPorts[reg - 0xF4u] = value;
       return;
     case 0xFA: case 0xFB: case 0xFC:  // TnTARGET
-      state_.ram[reg] = value;
-      state_.timers[reg - 0xFAu].target = value;
+      state_->ram[reg] = value;
+      state_->timers[reg - 0xFAu].target = value;
       return;
     case 0xF8: case 0xF9:  // AUXIO: the port keeps its own byte beside the RAM's
-      state_.ram[reg] = value;
-      state_.auxPorts[reg - 0xF8u] = value;
+      state_->ram[reg] = value;
+      state_->auxPorts[reg - 0xF8u] = value;
       return;
     // A write to a TnOUT register ($FD-$FF) lands in RAM but drives nothing, so
     // it needs only the RAM write.
     default:
-      state_.ram[reg] = value;
+      state_->ram[reg] = value;
       return;
   }
 }

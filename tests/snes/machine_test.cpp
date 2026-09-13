@@ -3,6 +3,7 @@
 // restore, and a halted core.
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -165,6 +166,48 @@ TEST(SnesMachine, RestoreResumesFromMidInstruction) {
   m.restore(snap);
   m.run(300);
   EXPECT_EQ(key(m), after);
+}
+
+TEST(SnesMachine, RestoreReloadsTheAudioMachinesLiveCore) {
+  // The sound CPU resumes from the snapshot's register set, not from wherever
+  // the live core had run to: after the restore, the same cycles reach the same
+  // program counter and instruction progress as the first time.
+  Snes m = loopMachine();
+  m.run(500);
+  const SnesState snap = m.state();
+  m.run(1500);
+  const Spc700State after = m.state().apu.cpu;
+
+  m.restore(snap);
+  m.run(1500);
+  EXPECT_EQ(m.state().apu.cpu.pc, after.pc);
+  EXPECT_EQ(m.state().apu.cpu.tcu, after.tcu);
+  EXPECT_EQ(m.state().apu.cpu.a, after.a);
+}
+
+TEST(SnesMachine, TheSnapshotIsTheStorageTheAudioMachineRunsIn) {
+  // state() answers one object for the machine's life, and the audio machine's
+  // progress is in it after a run.
+  Snes m = loopMachine();
+  const SnesState* const object = &m.state();
+  m.run(2000);
+  EXPECT_EQ(&m.state(), object);
+  EXPECT_NE(m.state().apu.divider, 0u);
+}
+
+TEST(SnesMachine, AMovedMachineRunsOnIdentically) {
+  // The audio machine follows the state to the new place: a moved machine and an
+  // unmoved twin run the same 1500 cycles to the same key, the APU's counter
+  // included.
+  Snes a = loopMachine();
+  Snes b = loopMachine();
+  a.run(500);
+  b.run(500);
+  Snes moved(std::move(a));
+  moved.run(1500);
+  b.run(1500);
+  EXPECT_EQ(key(moved), key(b));
+  EXPECT_TRUE(moved.state().wram == b.state().wram);
 }
 
 // ---- a halted core --------------------------------------------------------
