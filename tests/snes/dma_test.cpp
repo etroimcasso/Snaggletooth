@@ -124,8 +124,8 @@ TEST(SnesDma, CopiesToVramWithTheTwoRegisterPattern) {
   };
   Snes m = runDma(ch, 0x01u, [](SnesState& s) {
     for (std::uint8_t i = 0; i < 8; ++i) s.wram[0x10u + i] = static_cast<std::uint8_t>(0xA0u + i);
-    s.vmain = 0x80u;  // increment after the high byte, step one word
-    s.vmadd = 0x0000u;
+    s.ppu.vmain = 0x80u;  // increment after the high byte, step one word
+    s.ppu.vmadd = 0x0000u;
   });
   for (std::uint8_t i = 0; i < 8; ++i) {
     EXPECT_EQ(m.vram()[i], static_cast<std::uint8_t>(0xA0u + i)) << "byte " << int(i);
@@ -146,8 +146,8 @@ TEST(SnesDma, FixedAddressFillsFromOneByte) {
   };
   Snes m = runDma(ch, 0x01u, [](SnesState& s) {
     s.wram[0x20u] = 0xCDu;
-    s.vmain = 0x80u;
-    s.vmadd = 0x0000u;
+    s.ppu.vmain = 0x80u;
+    s.ppu.vmadd = 0x0000u;
   });
   EXPECT_EQ(m.vram()[0], 0xCDu);
   EXPECT_EQ(m.vram()[1], 0xCDu);
@@ -328,7 +328,7 @@ Snes hdmaMachine(std::initializer_list<std::uint8_t> table, std::uint8_t dmap = 
   s.hdmaen = 0x01u;
   std::uint16_t addr = 0x0300u;
   for (std::uint8_t byte : table) s.wram[addr++] = byte;
-  s.inidisp = 0x80u;  // a known starting value distinct from the table's
+  s.ppu.inidisp =0x80u;  // a known starting value distinct from the table's
   m.restore(s);
   return m;
 }
@@ -338,10 +338,10 @@ TEST(SnesDma, HdmaDeliversAcrossScanlines) {
   // on line 0, $0B on line 2; nothing changes it after.
   Snes m = hdmaMachine({0x02u, 0x0Au, 0x01u, 0x0Bu, 0x00u});
   m.run(kLine + 1200u);            // past line 0's delivery
-  EXPECT_EQ(m.state().inidisp, 0x0Au);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au);
   EXPECT_EQ(m.state().vpos, 1u);
   m.run(2u * kLine);               // through line 2's delivery
-  EXPECT_EQ(m.state().inidisp, 0x0Bu);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Bu);
   EXPECT_EQ(m.state().hdmaActive & 1u, 0u);  // terminated
 }
 
@@ -351,17 +351,17 @@ TEST(SnesDma, HdmaRepeatWritesEveryLine) {
   // successive bytes.
   Snes m = hdmaMachine({0x83u, 0x10u, 0x11u, 0x12u, 0x00u});  // repeat for 3 lines
   m.run(1200u);                     // line 0
-  EXPECT_EQ(m.state().inidisp, 0x10u);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x10u);
   m.run(kLine);                     // line 1
-  EXPECT_EQ(m.state().inidisp, 0x11u);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x11u);
   m.run(kLine);                     // line 2
-  EXPECT_EQ(m.state().inidisp, 0x12u);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x12u);
 }
 
 TEST(SnesDma, HdmaZeroLineCountTerminatesImmediately) {
   Snes m = hdmaMachine({0x00u});    // a stop as the very first entry
   m.run(2u * kLine);
-  EXPECT_EQ(m.state().inidisp, 0x80u);       // never written
+  EXPECT_EQ(m.state().ppu.inidisp, 0x80u);       // never written
   EXPECT_EQ(m.state().hdmaActive & 1u, 0u);  // never activated
 }
 
@@ -374,17 +374,17 @@ TEST(SnesDma, HdmaDeactivatesAtVblank) {
   s.hdmaen = 0x01u;
   s.wram[0x300u] = 0xFFu;  // repeat for 127 lines
   for (std::uint16_t i = 0x301u; i <= 0x37Fu; ++i) s.wram[i] = 0x0Au;  // every line writes $0A
-  s.inidisp = 0x80u;
+  s.ppu.inidisp =0x80u;
   m.restore(s);
 
   m.run(kVblankFirstDelivery);
-  EXPECT_EQ(m.state().inidisp, 0x0Au);         // delivered during the visible picture
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au);         // delivered during the visible picture
   EXPECT_EQ(m.state().hdmaActive & 1u, 0u);    // and deactivated at vblank
   SnesState s2 = m.state();
-  s2.inidisp = 0x33u;                          // a marker a vblank delivery would overwrite
+  s2.ppu.inidisp =0x33u;                          // a marker a vblank delivery would overwrite
   m.restore(s2);
   m.run(4u * kLine);
-  EXPECT_EQ(m.state().inidisp, 0x33u);         // untouched through vblank
+  EXPECT_EQ(m.state().ppu.inidisp, 0x33u);         // untouched through vblank
 }
 
 }  // namespace

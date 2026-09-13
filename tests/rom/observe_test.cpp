@@ -1416,8 +1416,8 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
   EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Cgram by sub_0083C0 exact\n"),
             std::string::npos);
   // A buffer the CPU carried out: the stream names the buffer, the buffer's
-  // source is the file.
-  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown depth none\n"),
+  // source is the file. Its eight words follow the 53 the transfers sent.
+  EXPECT_NE(manifest.find("streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003C in unshown depth none\n"),
             std::string::npos);
   EXPECT_NE(manifest.find("origin   $7F:0800 bytes 16 from $00:9600 bytes 16 using 16 by sub_008480 exact\n"),
             std::string::npos);

@@ -27,14 +27,13 @@ constexpr ApuRatio kPalApu{.num = 102400u, .den = 2128137u};
 
 // The scanline structure. A line is 1364 master cycles (341 dots) except NTSC's line
 // 240 on an odd frame, which is four cycles short to keep the colour signal in step;
-// a frame is 262 lines on NTSC and 312 on PAL. Vblank begins at line 225 (overscan,
-// which would move it to 240, is out of scope with the rest of the real PPU) and runs
-// to the last line; line 0 is the end of vblank. The active picture spans master
-// cycles 88..1112 within a line, which bounds the horizontal-blank flag.
+// a frame is 262 lines on NTSC and 312 on PAL. Vblank begins at kVblankStartLine
+// (`ppu.h`; overscan, which would move it to 240, is not modelled) and runs to the
+// last line; line 0 is the end of vblank. The active picture spans master cycles
+// 88..1112 within a line, which bounds the horizontal-blank flag.
 constexpr std::uint16_t kLineMaster = 1364u;
 constexpr std::uint16_t kShortLineMaster = 1360u;
 constexpr std::uint16_t kShortLineV = 240u;
-constexpr std::uint16_t kVblankStartLine = 225u;
 constexpr std::uint16_t kNtscLines = 262u;
 constexpr std::uint16_t kPalLines = 312u;
 constexpr std::uint16_t kActiveStart = 88u;
@@ -273,7 +272,12 @@ std::uint8_t Snes::routeRead(std::uint32_t address) {
   const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
   if (systemBank) {
     if (offset <= 0x1FFF) return latch(state_.wram[offset]);
-    if (offset >= 0x2100 && offset <= 0x213F) return readPpuReg(offset);
+    if (offset >= 0x2100 && offset <= 0x213F) {
+      // A byte the PPU drove goes onto the data bus; a register with nothing to
+      // say leaves the bus as it was, which is what the read returns.
+      const std::optional<std::uint8_t> v = Ppu{state_.ppu}.read(offset, ppuInputs());
+      return v.has_value() ? latch(*v) : state_.mdr;
+    }
     if (offset >= 0x2140 && offset <= 0x217F) {
       return latch(apu_.readPort(static_cast<std::uint8_t>(offset & 3u)));
     }
@@ -305,7 +309,7 @@ void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
       return;
     }
     if (offset >= 0x2100 && offset <= 0x213F) {
-      writePpuReg(offset, value);
+      portLanding_ = Ppu{state_.ppu}.write(offset, value, ppuInputs());
       return;
     }
     if (offset >= 0x2140 && offset <= 0x217F) {
@@ -406,7 +410,7 @@ void Snes::advanceLine() noexcept {
   if (state_.vpos == kVblankStartLine) {
     state_.vblankNmi = true;  // the NMI flag is set at the start of vblank, whether or not NMIs are enabled
     state_.hdmaActive = 0u;   // and every HDMA channel deactivates for the rest of the frame
-    if ((state_.inidisp & 0x80u) == 0u) reloadOamAddress();  // the PPU, done drawing, takes the OAM address back to the reload value
+    Ppu{state_.ppu}.beginVblank();  // the PPU, done drawing, takes the OAM address back to the reload value
     if ((state_.nmitimen & 1u) != 0u) {
       // The auto-joypad read runs each frame it is enabled: it strobes the pads
       // now, clocks their bits out over the window, and lands them as it ends.
@@ -495,163 +499,16 @@ void Snes::commitMath() noexcept {
   state_.mathOp = MathOp::None;
 }
 
-std::uint16_t Snes::vramWordAddress() const noexcept {
-  // The address translation left-rotates the low 8, 9 or 10 bits of the word address
-  // by three, so a bitmap laid out by increasing tile number reads back as rows.
-  const std::uint16_t addr = state_.vmadd;
-  switch ((state_.vmain >> 2) & 3u) {
-    case 1: return static_cast<std::uint16_t>((addr & 0xFF00u) | ((addr << 3) & 0x00F8u) | ((addr >> 5) & 0x0007u));
-    case 2: return static_cast<std::uint16_t>((addr & 0xFE00u) | ((addr << 3) & 0x01F8u) | ((addr >> 6) & 0x0007u));
-    case 3: return static_cast<std::uint16_t>((addr & 0xFC00u) | ((addr << 3) & 0x03F8u) | ((addr >> 7) & 0x0007u));
-    default: return addr;
-  }
-}
-
-std::uint16_t Snes::readVramWord() const noexcept {
-  const std::uint16_t word = vramWordAddress();
-  const std::size_t byte = static_cast<std::size_t>(word) << 1;
-  return static_cast<std::uint16_t>(state_.vram[byte & 0xFFFFu] |
-                                    (state_.vram[(byte + 1u) & 0xFFFFu] << 8));
-}
-
-void Snes::stepVramAddress(bool highByte) noexcept {
-  // The increment happens after the low or the high byte, whichever $2115 bit 7
-  // selects — so an access to the other byte leaves the address alone.
-  const bool incrementOnHigh = (state_.vmain & 0x80u) != 0u;
-  if (highByte != incrementOnHigh) return;
-  static constexpr std::uint16_t kStep[4] = {1u, 32u, 128u, 128u};
-  state_.vmadd = static_cast<std::uint16_t>(state_.vmadd + kStep[state_.vmain & 3u]);
-}
-
-std::uint8_t Snes::readPpuReg(std::uint16_t offset) {
-  switch (offset) {
-    case 0x2139: {  // RDVRAML: the low byte of the prefetch register
-      const std::uint8_t v = static_cast<std::uint8_t>(state_.vramLatch & 0xFFu);
-      if ((state_.vmain & 0x80u) == 0u) {
-        state_.vramLatch = readVramWord();  // prefetch from the OLD address, THEN increment (the documented glitch)
-        stepVramAddress(/*highByte=*/false);
-      }
-      return latch(v);
-    }
-    case 0x213A: {  // RDVRAMH: the high byte of the prefetch register
-      const std::uint8_t v = static_cast<std::uint8_t>(state_.vramLatch >> 8);
-      if ((state_.vmain & 0x80u) != 0u) {
-        state_.vramLatch = readVramWord();
-        stepVramAddress(/*highByte=*/true);
-      }
-      return latch(v);
-    }
-    case 0x2138: {  // RDOAM: the byte at the OAM address, which then steps
-      const std::uint16_t at = state_.oamAddress & 0x3FFu;
-      const std::size_t index = at >= 0x200u ? 0x200u | (at & 0x1Fu) : at;
-      state_.oamAddress = static_cast<std::uint16_t>((at + 1u) & 0x3FFu);
-      return latch(state_.oam[index]);
-    }
-    case 0x213B: {  // RDCGRAM: two reads make a word; the high byte's top bit is open bus
-      const std::uint16_t byte = static_cast<std::uint16_t>(state_.cgadd) << 1;
-      std::uint8_t v;
-      if (!state_.cgLatchHigh) {
-        v = state_.cgram[byte & 0x1FFu];
-        state_.cgLatchHigh = true;
-      } else {
-        v = static_cast<std::uint8_t>((state_.cgram[(byte + 1u) & 0x1FFu] & 0x7Fu) | (state_.mdr & 0x80u));
-        state_.cgadd = static_cast<std::uint8_t>(state_.cgadd + 1u);
-        state_.cgLatchHigh = false;
-      }
-      return latch(v);
-    }
-    default:
-      break;
-  }
-  return state_.mdr;  // a read of an unmodelled PPU register is open bus
-}
-
-void Snes::writePpuReg(std::uint16_t offset, std::uint8_t value) {
-  switch (offset) {
-    case 0x2100: {  // forced blank and brightness
-      const bool released = (state_.inidisp & 0x80u) != 0u && (value & 0x80u) == 0u;
-      state_.inidisp = value;
-      // Forced blank released on vblank's first line: the PPU reloads the OAM
-      // address then, as it would have at the line's start with the screen on.
-      if (released && state_.vpos == kVblankStartLine) reloadOamAddress();
-      return;
-    }
-    case 0x2101: state_.objsel = value; return;
-    case 0x2102:  // OAMADDL: the low eight bits of the reload value, and the address takes the whole value
-      state_.oamadd = static_cast<std::uint16_t>((state_.oamadd & 0xFF00u) | value);
-      reloadOamAddress();
-      return;
-    case 0x2103:  // OAMADDH: the ninth bit and the priority-rotation bit
-      state_.oamadd = static_cast<std::uint16_t>((state_.oamadd & 0x00FFu) | (value << 8));
-      reloadOamAddress();
-      return;
-    case 0x2104: {  // OAMDATA: a word through the latch below $200, a byte above it, mirrored past $21F
-      const std::uint16_t at = state_.oamAddress & 0x3FFu;
-      if (at >= 0x200u) {
-        const std::size_t index = 0x200u | (at & 0x1Fu);
-        state_.oam[index] = value;
-        portLanding_ = static_cast<std::uint16_t>(index);
-      } else if ((at & 1u) == 0u) {
-        state_.oamLatch = value;
-        portLanding_ = at;
-      } else {
-        state_.oam[at - 1u] = state_.oamLatch;
-        state_.oam[at] = value;
-        portLanding_ = at;
-      }
-      state_.oamAddress = static_cast<std::uint16_t>((at + 1u) & 0x3FFu);
-      return;
-    }
-    case 0x2105: state_.bgmode = value; return;
-    case 0x2107: state_.bg1sc = value; return;
-    case 0x2108: state_.bg2sc = value; return;
-    case 0x2109: state_.bg3sc = value; return;
-    case 0x210A: state_.bg4sc = value; return;
-    case 0x210B: state_.bg12nba = value; return;
-    case 0x210C: state_.bg34nba = value; return;
-    case 0x2115: state_.vmain = value; return;  // increment mode and address translation
-    case 0x2116:
-      state_.vmadd = static_cast<std::uint16_t>((state_.vmadd & 0xFF00u) | value);
-      state_.vramLatch = readVramWord();  // changing the address prefetches the new word
-      return;
-    case 0x2117:
-      state_.vmadd = static_cast<std::uint16_t>((state_.vmadd & 0x00FFu) | (value << 8));
-      state_.vramLatch = readVramWord();
-      return;
-    case 0x2118: {  // VMDATAL: the low byte of the addressed word
-      const std::uint16_t word = static_cast<std::uint16_t>(vramWordAddress() & 0x7FFFu);
-      state_.vram[static_cast<std::size_t>(word) << 1] = value;
-      portLanding_ = word;
-      stepVramAddress(/*highByte=*/false);  // a write never prefetches
-      return;
-    }
-    case 0x2119: {  // VMDATAH: the high byte of the addressed word
-      const std::uint16_t word = static_cast<std::uint16_t>(vramWordAddress() & 0x7FFFu);
-      state_.vram[(static_cast<std::size_t>(word) << 1) + 1u] = value;
-      portLanding_ = word;
-      stepVramAddress(/*highByte=*/true);
-      return;
-    }
-    case 0x2121:  // CGADD: setting the address resets the low/high flip-flop
-      state_.cgadd = value;
-      state_.cgLatchHigh = false;
-      return;
-    case 0x2122:  // CGDATA: the low byte is held, the high byte commits the word
-      portLanding_ = state_.cgadd;
-      if (!state_.cgLatchHigh) {
-        state_.cgLatch = value;
-        state_.cgLatchHigh = true;
-      } else {
-        const std::uint16_t byte = static_cast<std::uint16_t>(state_.cgadd) << 1;
-        state_.cgram[byte & 0x1FFu] = state_.cgLatch;
-        state_.cgram[(byte + 1u) & 0x1FFu] = static_cast<std::uint8_t>(value & 0x7Fu);
-        state_.cgadd = static_cast<std::uint8_t>(state_.cgadd + 1u);
-        state_.cgLatchHigh = false;
-      }
-      return;
-    case 0x212C: state_.tm = value; return;
-    default: return;  // the stub does not model the other PPU registers
-  }
+PpuInputs Snes::ppuInputs() const noexcept {
+  return PpuInputs{
+      .hdot = static_cast<std::uint16_t>(state_.hpos >> 2),  // four master cycles per dot
+      .vpos = state_.vpos,
+      .field = state_.field,
+      .vblank = state_.vpos >= kVblankStartLine,
+      .hblank = state_.hpos < kActiveStart || state_.hpos >= kActiveEnd,
+      .pal = region_ == Region::Pal,
+      .extLatch = (state_.wrio & 0x80u) != 0u,
+  };
 }
 
 std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
@@ -676,6 +533,7 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
           (state_.autoJoyClocks != 0u ? 0x01u : 0x00u));
       return latch(v);
     }
+    case 0x4213: return latch(state_.wrio);  // RDIO: the port's lines, which nothing on the console drives, so as written
     case 0x4214: return latch(static_cast<std::uint8_t>(state_.rddiv & 0xFFu));
     case 0x4215: return latch(static_cast<std::uint8_t>(state_.rddiv >> 8));
     case 0x4216: return latch(static_cast<std::uint8_t>(state_.rdmpy & 0xFFu));
@@ -695,6 +553,12 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
       if (((value >> 4) & 3u) == 0u) state_.timeup = false;  // disabling the IRQ acknowledges it
       state_.nmitimen = value;
       return;
+    case 0x4201: {  // WRIO: the I/O port; its top bit falling latches the PPU's counters
+      const bool fell = (state_.wrio & 0x80u) != 0u && (value & 0x80u) == 0u;
+      state_.wrio = value;
+      if (fell) Ppu{state_.ppu}.latchCounters(ppuInputs());
+      return;
+    }
     case 0x4202: state_.wrmpya = value; return;
     case 0x4203:  // WRMPYB: its write starts the multiply
       state_.wrmpyb = value;
@@ -720,7 +584,7 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x420B: triggerDma(value); return;             // start a general-purpose DMA on each selected channel
     case 0x420C: state_.hdmaen = value; return;         // enable HDMA on the selected channels
     case 0x420D: state_.memsel = static_cast<std::uint8_t>(value & 1u); return;
-    default: return;  // $4201 WRIO and the read-only ports ignore writes
+    default: return;  // the read-only ports ignore writes
   }
 }
 

@@ -240,7 +240,7 @@ std::uint8_t depthBit(std::uint8_t depth) {
 // the bases as they stand: each layer the mode has, its screen and its name
 // base at the layer's colour depth in that mode; the sprite tiles; the whole
 // of VRAM under Mode 7 — with the depth of every name base met.
-VramUse vramAreas(const SnesState& state, std::uint16_t lowest, std::uint16_t highest) {
+VramUse vramAreas(const PpuState& state, std::uint16_t lowest, std::uint16_t highest) {
   const std::uint8_t mode = state.bgmode & 7u;
   if (mode == 7u) return VramUse{.areas = kAreaMode7, .depths = kDepth8};
   // Per mode, each layer's colour depth in bits — zero for a layer the mode
@@ -478,7 +478,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
       case PortMemory::Cgram: landing.areas = kAreaPalette; return;
       case PortMemory::Oam: landing.areas = kAreaOam; return;
       case PortMemory::Vram: {
-        const VramUse use = vramAreas(machine.state(), landing.lowest, landing.highest);
+        const VramUse use = vramAreas(machine.state().ppu, landing.lowest, landing.highest);
         landing.areas |= use.areas;
         landing.depths |= use.depths;
         if (!landing.palette) landing.palette = paletteNow();
@@ -490,7 +490,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
   // The palette RAM as it stands, interned: the index of the copy equal to it.
   // A run holds few distinct copies, so they are searched, not indexed.
   std::size_t paletteNow() {
-    const std::span<const std::uint8_t> cgram = machine.state().cgram;
+    const std::span<const std::uint8_t> cgram = machine.cgram();
     std::vector<std::uint8_t> copy(cgram.begin(), cgram.end());
     for (std::size_t i = 0; i < palettes.size(); ++i) {
       if (palettes[i] == copy) return i;
@@ -619,7 +619,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
   // stream that closed since the last such frame — against the mode and the
   // bases as they stand.
   void frameDrawn() {
-    if ((machine.state().inidisp & 0x80u) != 0u) return;
+    if (machine.state().ppu.forcedBlank()) return;
     for (std::uint8_t c = 0; c < 8; ++c) {
       for (std::optional<Open>* open : {&dma[c], &table[c], &indirect[c]}) {
         if (!*open || !(*open)->landing || !(*open)->unread) continue;

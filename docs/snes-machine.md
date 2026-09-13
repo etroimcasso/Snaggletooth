@@ -8,10 +8,11 @@ against the CPU on its own clock.
 
 The machine is the system minus the picture. It does not draw. What it has is a complete memory map, an
 exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ, the DMA and HDMA
-engines, the hardware multiply/divide unit, the two controller ports, a PPU register file that fills
-video memory without rendering it, and the audio machine running underneath — enough to load a
-cartridge, run its code under interrupts, play it, and hear it. A host that wants to watch the bus
-rather than the state sets an [observer](#the-bus-observer), and is told every access in order.
+engines, the hardware multiply/divide unit, the two controller ports, the [PPU's](ppu.md) complete
+register file and the three video memories it fills through its ports, and the audio machine running
+underneath — enough to load a cartridge, run its code under interrupts, play it, and hear it. A host
+that wants to watch the bus rather than the state sets an [observer](#the-bus-observer), and is told
+every access in order.
 
 ## Contents
 
@@ -27,7 +28,7 @@ rather than the state sets an [observer](#the-bus-observer), and is told every a
 - [The video counters and interrupts](#the-video-counters-and-interrupts)
 - [The controller ports](#the-controller-ports)
 - [The multiply/divide unit](#the-multiplydivide-unit)
-- [The video registers (a stub)](#the-video-registers-a-stub)
+- [The PPU register file](#the-ppu-register-file)
 - [DMA and HDMA](#dma-and-hdma)
   - [General-purpose DMA](#general-purpose-dma)
   - [HDMA](#hdma)
@@ -344,12 +345,16 @@ remainder.
 // LDA $4216                                 -> 63
 ```
 
-## The video registers (a stub)
+## The PPU register file
 
-There is no rendering PPU, but the register file that feeds one is here so a program can fill video
-memory and a host can read what it drew. `vram()` returns the 64 KB of video RAM, `cgram()` the
-512-byte palette and `oam()` the 544-byte sprite table; all three are read faces, filled through the
-ports the console uses.
+The PPU is reached at `$2100-$213F`, and its whole register file is here, kept exactly as the console
+keeps it: every write with the latches it passes through, every read with the value it answers, and
+the windows in which the video memories can be reached. Its state is one value inside the machine's,
+`state().ppu`, so a snapshot carries it. Nothing renders; [ppu.md](ppu.md) describes the register file
+in full — the scroll and Mode 7 latches, the multiplier, the counter latch, the status registers, the
+open-bus values, the power-on state. This section covers the three memory ports, which the machine's
+read faces are the other side of: `vram()` returns the 64 KB of video RAM, `cgram()` the 512-byte
+palette and `oam()` the 544-byte sprite table.
 
 The VRAM port is a word address at `$2116/$2117` and a data pair at `$2118/$2119`. `$2115` selects the
 increment (after the low or the high byte, by 1, 32, or 128 words) and an optional address translation
@@ -368,9 +373,11 @@ blank is released during the first line of vertical blank — so a program that 
 sends its sprite table every frame lands it at the same place every frame, and one that sends while the
 screen is off continues from wherever the last access left the address.
 
-`$2100` (forced blank and brightness), `$2101` (the sprite sizes and their name base), `$2105` (the
-screen mode and the tile sizes), the background base registers (`$2107-$210C`), and the main-screen
-enables (`$212C`) store their values for a PPU to read. The screen powers on in forced blank.
+Each port reaches its memory only in the window the hardware allows — VRAM and OAM in vertical blank or
+forced blank, the palette in horizontal blank too. Outside it a write is ignored and the access reported
+to the [observer](#the-bus-observer) carries no landing, while the address steps as it would have; the
+rule is stated in full in [ppu.md](ppu.md#the-memories-and-their-windows). The screen powers on in
+forced blank, so a program that fills the memories before turning the picture on reaches them freely.
 
 ## DMA and HDMA
 

@@ -94,7 +94,7 @@ char glyphAscii(std::uint16_t tile) {
 // whose low ten bits are the tile index. Trailing blank lines are dropped.
 std::vector<std::string> decodeScreen(const Snes& m) {
   const std::span<const std::uint8_t> vram = m.vram();
-  const std::uint32_t base = static_cast<std::uint32_t>(m.state().bg1sc & 0xFCu) << 9;  // bytes
+  const std::uint32_t base = static_cast<std::uint32_t>(m.state().ppu.bg1sc & 0xFCu) << 9;  // bytes
   std::vector<std::string> lines;
   for (int row = 0; row < 28; ++row) {
     std::string line;

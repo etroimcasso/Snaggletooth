@@ -22,6 +22,7 @@ what is unstarted.
 |---|---|
 | Hear a cartridge or a dump | [spc-rendering.md](spc-rendering.md) |
 | Run a whole SNES machine | [snes-machine.md](snes-machine.md) |
+| See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
 | Run the audio unit alone | [apu-machine.md](apu-machine.md) |
 | Understand how sound is produced | [dsp.md](dsp.md) |
 | Read the code a dump contains | [spc700-disassembler.md](spc700-disassembler.md) |
@@ -51,7 +52,8 @@ what is unstarted.
 
 | Page | Covers |
 |---|---|
-| [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the controller ports, the multiply/divide unit, the PPU register file, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
+| [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the controller ports, the multiply/divide unit, the PPU's memory ports, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
+| [ppu.md](ppu.md) | The PPU's register file — every write with the latches it passes through, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
 | [snes-cartridge.md](snes-cartridge.md) | The cartridge as a value — a copier's header ahead of a dump, the header and its vectors, the LoROM, HiROM and ExHiROM maps, where every bus address lands in the image, and the save windows |
 | [65816-cpu.md](65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 
@@ -93,6 +95,6 @@ examples, then the gotchas worth knowing before they cost an afternoon. Every pa
 Contents list under its opening.
 
 A page describes what the code does now. Where a subject is modelled but not yet complete, the page
-says so in place rather than leaving the reader to infer it — the PPU register file, for instance,
-is a storage stub with no rendering behind it, and [snes-machine.md](snes-machine.md) says as much
-where it describes those registers.
+says so in place rather than leaving the reader to infer it — the PPU's register file, for instance,
+is complete while nothing renders from it, and [ppu.md](ppu.md) says as much where it describes
+the registers.
