@@ -385,7 +385,7 @@ TEST(SnesObserver, AnHdmaEventIsReportedInTheEnginesName) {
   EXPECT_EQ(hdma[2].address, 0x002100u);
   EXPECT_TRUE(hdma[2].write);
   EXPECT_EQ(int{hdma[2].value}, 0x0F);
-  EXPECT_EQ(m.state().inidisp, 0x0Fu);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Fu);
 }
 
 // ---- where a port write landed ----------------------------------------------------------
@@ -494,8 +494,8 @@ TEST(SnesObserver, AnEnginesWriteToAPortLandsToo) {
   s.dma[0].a1t = 0x0010u;
   s.dma[0].a1b = 0x7Eu;
   s.dma[0].das = 4;
-  s.vmain = 0x80u;
-  s.vmadd = 0x0100u;
+  s.ppu.vmain = 0x80u;
+  s.ppu.vmadd = 0x0100u;
   m.restore(s);
   Recorder r;
   m.setObserver(&r);
@@ -611,7 +611,7 @@ TEST(SnesObserver, AnIndirectEntrysPointerIsTheTablesAndItsDataIsNot) {
   EXPECT_TRUE(hdma[4].write);
   EXPECT_FALSE(hdma[4].table);
   for (const BusAccess& a : hdma) EXPECT_EQ(int{a.channel}, 1);
-  EXPECT_EQ(m.state().inidisp, 0x0Fu);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Fu);
 }
 
 // ---- the machine with and without one --------------------------------------------

@@ -1,7 +1,11 @@
-// The PPU register-file stub: the VRAM port with its address increment, translation
-// and read-prefetch glitch; the CGRAM port with its two-byte word and open-bus top
-// bit; and the plain background and display registers. Nothing renders — programs
-// drive the ports and the video memory is read back through the host faces.
+// The PPU's three memory ports and the display registers behind them: the VRAM
+// port with its address increment, translation and read-prefetch glitch; the
+// CGRAM port with its two-byte word and open-bus top bit; the OAM port with its
+// latch, its mirror and its reload; and the plain background and display
+// registers. Programs drive the ports and the video memory is read back through
+// the host faces. Every write here is made in forced blank or vertical blank,
+// where the memories can be reached; the windows themselves are pinned in
+// ppu_registers_test.cpp.
 
 #include <cstdint>
 #include <vector>
@@ -36,7 +40,7 @@ TEST(SnesPpuStub, VramWriteReachesVideoMemory) {
   });
   EXPECT_EQ(m.vram()[0x20], 0x34u);   // word $0010 -> bytes $20/$21
   EXPECT_EQ(m.vram()[0x21], 0x12u);
-  EXPECT_EQ(m.state().vmadd, 0x0011u);  // stepped by one word
+  EXPECT_EQ(m.state().ppu.vmadd, 0x0011u);  // stepped by one word
 }
 
 TEST(SnesPpuStub, VramAddressStepsByTheSelectedAmount) {
@@ -49,7 +53,7 @@ TEST(SnesPpuStub, VramAddressStepsByTheSelectedAmount) {
       0xA9, 0xBB, 0x8D, 0x19, 0x21,  // VMDATAH (steps by 32)
       0xDB,
   });
-  EXPECT_EQ(m.state().vmadd, 0x0120u);  // $0100 + 32
+  EXPECT_EQ(m.state().ppu.vmadd, 0x0120u);  // $0100 + 32
 }
 
 TEST(SnesPpuStub, VramAddressTranslationRotatesTheLowBits) {
@@ -65,7 +69,7 @@ TEST(SnesPpuStub, VramAddressTranslationRotatesTheLowBits) {
   });
   EXPECT_EQ(m.vram()[0x10], 0xAAu);     // word $0008 -> bytes $10/$11
   EXPECT_EQ(m.vram()[0x11], 0xBBu);
-  EXPECT_EQ(m.state().vmadd, 0x0002u);  // the raw address steps; translation is only applied to the access
+  EXPECT_EQ(m.state().ppu.vmadd, 0x0002u);  // the raw address steps; translation is only applied to the access
 }
 
 TEST(SnesPpuStub, VramReadPrefetchReturnsTheFirstWordTwice) {
@@ -103,7 +107,7 @@ TEST(SnesPpuStub, CgramWriteTakesTwoBytesToMakeAWord) {
   });
   EXPECT_EQ(m.cgram()[0x20], 0x34u);    // word $10 -> bytes $20/$21
   EXPECT_EQ(m.cgram()[0x21], 0x12u);
-  EXPECT_EQ(m.state().cgadd, 0x11u);    // stepped by one word
+  EXPECT_EQ(m.state().ppu.cgadd, 0x11u);    // stepped by one word
 }
 
 TEST(SnesPpuStub, CgramHighByteKeepsOnlySevenBits) {
@@ -143,7 +147,9 @@ TEST(SnesPpuStub, CgramReadReturnsBothBytesInTurn) {
       0xDB,
   });
   EXPECT_EQ(m.state().wram[0x60], 0xCDu);
-  EXPECT_EQ(m.state().wram[0x61], 0x2Bu);  // top bit clear, so the raw value reads back
+  // The high half's top bit is the chip's second-half open bus: the $CD the low
+  // half just answered with has it set.
+  EXPECT_EQ(m.state().wram[0x61], 0xABu);
 }
 
 // ---- the plain display registers ------------------------------------------
@@ -156,15 +162,15 @@ TEST(SnesPpuStub, ForcedBlankAndBackgroundRegistersStore) {
       0xA9, 0x13, 0x8D, 0x2C, 0x21,  // TM = $13
       0xDB,
   });
-  EXPECT_EQ(m.state().inidisp, 0x0Fu);
-  EXPECT_EQ(m.state().bg1sc, 0xABu);
-  EXPECT_EQ(m.state().bg12nba, 0xCDu);
-  EXPECT_EQ(m.state().tm, 0x13u);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Fu);
+  EXPECT_EQ(m.state().ppu.bg1sc, 0xABu);
+  EXPECT_EQ(m.state().ppu.bg12nba, 0xCDu);
+  EXPECT_EQ(m.state().ppu.tm, 0x13u);
 }
 
 TEST(SnesPpuStub, PowerOnStartsInForcedBlank) {
   Snes m = run({0xDB});  // STP immediately, touch nothing
-  EXPECT_NE(m.state().inidisp & 0x80u, 0u);  // the screen is off at power-on
+  EXPECT_NE(m.state().ppu.inidisp & 0x80u, 0u);  // the screen is off at power-on
 }
 
 TEST(SnesPpuStub, ObjectSelectAndScreenModeStore) {
@@ -174,9 +180,9 @@ TEST(SnesPpuStub, ObjectSelectAndScreenModeStore) {
       0xA9, 0x35, 0x8D, 0x0C, 0x21,  // BG34NBA = $35
       0xDB,
   });
-  EXPECT_EQ(m.state().objsel, 0x63u);
-  EXPECT_EQ(m.state().bgmode, 0x09u);
-  EXPECT_EQ(m.state().bg34nba, 0x35u);
+  EXPECT_EQ(m.state().ppu.objsel, 0x63u);
+  EXPECT_EQ(m.state().ppu.bgmode, 0x09u);
+  EXPECT_EQ(m.state().ppu.bg34nba, 0x35u);
 }
 
 // ---- OAM ------------------------------------------------------------------
@@ -189,8 +195,8 @@ TEST(SnesPpuStub, WritingTheOamAddressSetsTheReloadValueAndTheAddress) {
       0xA9, 0x81, 0x8D, 0x03, 0x21,  // OAMADDH = $81: the high bit and priority rotation
       0xDB,
   });
-  EXPECT_EQ(m.state().oamadd, 0x8105u);
-  EXPECT_EQ(m.state().oamAddress, 0x020Au);  // ($105 & $1FF) << 1
+  EXPECT_EQ(m.state().ppu.oamadd, 0x8105u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x020Au);  // ($105 & $1FF) << 1
 }
 
 TEST(SnesPpuStub, OamDataWritesAWordThroughTheLatchAndStepsTheAddress) {
@@ -203,7 +209,7 @@ TEST(SnesPpuStub, OamDataWritesAWordThroughTheLatchAndStepsTheAddress) {
   });
   EXPECT_EQ(m.oam()[4], 0x34u);
   EXPECT_EQ(m.oam()[5], 0x12u);
-  EXPECT_EQ(m.state().oamAddress, 6u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 6u);
 }
 
 TEST(SnesPpuStub, TheLowByteIsHeldUntilTheHighByteCommitsIt) {
@@ -235,7 +241,7 @@ TEST(SnesPpuStub, OamDataAboveTheTableWritesTheByteAndTheTopMirrors) {
   });
   EXPECT_EQ(m.oam()[0x200], 0xCCu);
   EXPECT_EQ(m.oam()[0x201], 0xBBu);
-  EXPECT_EQ(m.state().oamAddress, 0x221u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x221u);
 }
 
 TEST(SnesPpuStub, OamReadReturnsTheByteAndSteps) {
@@ -251,18 +257,19 @@ TEST(SnesPpuStub, OamReadReturnsTheByteAndSteps) {
   });
   EXPECT_EQ(m.state().wram[0x60], 0xCDu);
   EXPECT_EQ(m.state().wram[0x61], 0xABu);
-  EXPECT_EQ(m.state().oamAddress, 2u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 2u);
 }
 
 // A machine that has written two OAM bytes from address $20 (so the address
-// stands at $22), with the screen as `inidisp` says, idling in a loop.
+// stands at $22) in the forced blank it powered on in, then set the screen as
+// `inidisp` says, idling in a loop.
 Snes oamMachine(std::uint8_t inidisp) {
   std::vector<std::uint8_t> rom = {
-      0xA9, inidisp, 0x8D, 0x00, 0x21,  // INIDISP
       0xA9, 0x10, 0x8D, 0x02, 0x21,     // OAMADDL = $10 -> address $20
       0xA9, 0x00, 0x8D, 0x03, 0x21,     // OAMADDH = 0
       0xA9, 0x11, 0x8D, 0x04, 0x21,     // OAMDATA
       0xA9, 0x22, 0x8D, 0x04, 0x21,     // OAMDATA -> address $22
+      0xA9, inidisp, 0x8D, 0x00, 0x21,  // INIDISP
       0x80, 0xFE,                       // BRA *
   };
   rom.resize(0x8000u, 0x00u);
@@ -278,15 +285,15 @@ constexpr std::uint32_t kLine = 1364u;
 
 TEST(SnesPpuStub, TheOamAddressReloadsAtTheStartOfVblankWhenTheScreenIsOn) {
   Snes m = oamMachine(0x0Fu);
-  EXPECT_EQ(m.state().oamAddress, 0x22u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x22u);
   while (m.state().vpos < kVblankStart) m.run(kLine);
-  EXPECT_EQ(m.state().oamAddress, 0x20u) << "the reload value, doubled, at the start of vblank";
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x20u) << "the reload value, doubled, at the start of vblank";
 }
 
 TEST(SnesPpuStub, TheOamAddressDoesNotReloadInForcedBlank) {
   Snes m = oamMachine(0x80u);
   while (m.state().vpos < kVblankStart) m.run(kLine);
-  EXPECT_EQ(m.state().oamAddress, 0x22u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x22u);
 }
 
 // The machine of `oamMachine`, moved to line `vpos` in forced blank and about
@@ -317,25 +324,26 @@ Snes releasingMachine(std::uint16_t vpos) {
 
 TEST(SnesPpuStub, ReleasingForcedBlankDuringTheFirstVblankLineReloadsTheOamAddress) {
   Snes m = releasingMachine(kVblankStart);
-  EXPECT_EQ(m.state().oamAddress, 0x20u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x20u);
 }
 
 TEST(SnesPpuStub, ReleasingForcedBlankOnAnyOtherLineLeavesTheOamAddressAlone) {
   Snes later = releasingMachine(kVblankStart + 1u);
-  EXPECT_EQ(later.state().oamAddress, 0x22u);
+  EXPECT_EQ(later.state().ppu.oamAddress, 0x22u);
   Snes earlier = releasingMachine(100u);
-  EXPECT_EQ(earlier.state().oamAddress, 0x22u);
+  EXPECT_EQ(earlier.state().ppu.oamAddress, 0x22u);
 }
 
 TEST(SnesPpuStub, WritingTheBrightnessWithTheScreenAlreadyOnDoesNotReload) {
   // The same write on line 225, but forced blank was already off: nothing
-  // was released, so the address stands.
+  // was released, so the address stands. The sprite bytes go in during the
+  // power-on forced blank, before the screen is turned on.
   std::vector<std::uint8_t> rom = {
-      0xA9, 0x0F, 0x8D, 0x00, 0x21,  // INIDISP = $0F: the screen on
       0xA9, 0x10, 0x8D, 0x02, 0x21,  // OAMADDL = $10 -> address $20
       0xA9, 0x00, 0x8D, 0x03, 0x21,  // OAMADDH = 0
       0xA9, 0x11, 0x8D, 0x04, 0x21,  // OAMDATA
       0xA9, 0x22, 0x8D, 0x04, 0x21,  // OAMDATA -> address $22
+      0xA9, 0x0F, 0x8D, 0x00, 0x21,  // INIDISP = $0F: the screen on
       0xA9, 0x07, 0x8D, 0x00, 0x21,  // INIDISP = $07: the brightness alone
       0xDB,
   };
@@ -350,7 +358,7 @@ TEST(SnesPpuStub, WritingTheBrightnessWithTheScreenAlreadyOnDoesNotReload) {
   m.restore(s);
   m.step();
   m.step();
-  EXPECT_EQ(m.state().oamAddress, 0x22u);
+  EXPECT_EQ(m.state().ppu.oamAddress, 0x22u);
 }
 
 }  // namespace

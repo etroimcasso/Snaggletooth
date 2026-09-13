@@ -1,14 +1,15 @@
 #pragma once
 
 // The SNES machine — the 5A22 (its 65816 core) wired to the console's memory map,
-// the work RAM, and the APU across the communication ports.
+// the work RAM, the PPU's register file, and the APU across the communication ports.
 //
-// The machine owns the CPU, the 128 KB of work RAM, and the audio machine. Its
-// bus maps a 24-bit address the way the console does: work RAM in banks $7E-$7F
-// and mirrored into the low pages of every system bank, the cartridge ROM and its
-// save RAM in whichever windows the cartridge's map gives them, the APU
-// communication ports at $2140-$2143, and the work-RAM data port at $2180-$2183.
-// A read of an unmapped address returns the last value the data bus carried.
+// The machine owns the CPU, the 128 KB of work RAM, the PPU's state, and the audio
+// machine. Its bus maps a 24-bit address the way the console does: work RAM in
+// banks $7E-$7F and mirrored into the low pages of every system bank, the
+// cartridge ROM and its save RAM in whichever windows the cartridge's map gives
+// them, the PPU at $2100-$213F, the APU communication ports at $2140-$2143, and
+// the work-RAM data port at $2180-$2183. A read of an unmapped address returns
+// the last value the data bus carried.
 //
 // Every access is priced by the region it reaches. The console runs three memory
 // speeds — six, eight, or twelve master cycles per access — and the machine
@@ -42,6 +43,7 @@
 #include "snaggletooth/apu/apu.h"
 #include "snaggletooth/cpu/cpu65816.h"
 #include "snaggletooth/snes/cartridge.h"
+#include "snaggletooth/snes/ppu.h"
 
 namespace snaggletooth {
 
@@ -243,34 +245,17 @@ struct SnesState {
   std::array<std::uint8_t, 2> joyClocks{};  // per port: bits clocked out since the latch (16 = at the padding)
   std::uint16_t autoJoyClocks = 0;      // master cycles left in the auto-read busy window (0 = idle)
   std::array<std::uint8_t, 8> joy{};    // $4218-$421F: the four 16-bit pad reads
+  // The programmable I/O port ($4201 written, $4213 read back). Its top bit is the
+  // PPU's counter-latch line: while high the software latch works, and its fall
+  // latches the counters itself. Every line reads back as written, since nothing
+  // on the console drives one.
+  std::uint8_t wrio = 0xFF;
 
-  // ---- the PPU register-file stub -------------------------------------------
-  // Video memory and the register fields that reach it. Nothing renders — the arrays
-  // are exposed for a host to read, and the ports store into them the way the console
-  // does, so a program that fills VRAM, the palette or the sprite table leaves the
-  // memory a real PPU would have seen.
-  std::array<std::uint8_t, 65536> vram{};  // 64 KB video RAM (32K words)
-  std::array<std::uint8_t, 512> cgram{};   // 512 B palette RAM (256 words)
-  std::array<std::uint8_t, 544> oam{};     // 512 B of sprite entries and the 32 B of high bits
-  std::uint8_t inidisp = 0x80;  // $2100: bit7 forced blank (set at power-on), bits3-0 brightness
-  std::uint8_t objsel = 0;      // $2101: sprite sizes, name select and name base
-  std::uint16_t oamadd = 0;     // $2102/$2103 as written: the 9-bit reload value, the priority-rotation bit above it
-  std::uint16_t oamAddress = 0; // the 10-bit OAM byte address the port is at: the reload value doubled on a write to $2102/$2103 and at the start of vblank, stepped by every access
-  std::uint8_t oamLatch = 0;    // the low byte held between the two halves of a write below $200
-  std::uint8_t bgmode = 0;      // $2105: the screen mode and the tile sizes
-  std::uint8_t vmain = 0;       // $2115: VRAM address increment mode and translation
-  std::uint16_t vmadd = 0;      // $2116/$2117: the VRAM word address
-  std::uint16_t vramLatch = 0;  // the 16-bit read-prefetch register behind $2139/$213A
-  std::uint8_t cgadd = 0;       // $2121: the CGRAM word address
-  bool cgLatchHigh = false;     // the $2122/$213B low/high access flip-flop (false = low byte next)
-  std::uint8_t cgLatch = 0;     // the low byte held between the two halves of a CGRAM write
-  std::uint8_t bg1sc = 0;       // $2107: BG1 screen base and size
-  std::uint8_t bg2sc = 0;       // $2108: BG2 screen base and size
-  std::uint8_t bg3sc = 0;       // $2109: BG3 screen base and size
-  std::uint8_t bg4sc = 0;       // $210A: BG4 screen base and size
-  std::uint8_t bg12nba = 0;     // $210B: BG1/BG2 character base
-  std::uint8_t bg34nba = 0;     // $210C: BG3/BG4 character base
-  std::uint8_t tm = 0;          // $212C: main-screen layer enables
+  // ---- the PPU ------------------------------------------------------------
+  // The picture processor's whole state — its register file, the latches, and the
+  // three video memories — as one value (`ppu.h`). Held here and nowhere else, so
+  // a snapshot carries it and restore() puts it back.
+  PpuState ppu{};
 
   // ---- DMA and HDMA ---------------------------------------------------------
   // The eight channels and the two enable registers, plus the engines' progress.
@@ -343,13 +328,13 @@ class Snes {
   void setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept;
   [[nodiscard]] const std::optional<Joypad>& joypad(JoypadPort port) const noexcept;
 
-  // The video memory a host reads to see what the program drew. Nothing renders it —
-  // the register ports store here the way the console does, and these faces hand the
+  // The video memory a host reads to see what the program put there. The PPU's
+  // ports fill it the way the console does (`ppu.h`), and these faces hand the
   // bytes back. VRAM is 64 KB (32K words), CGRAM 512 bytes (256 palette words), OAM
   // 544 bytes (128 four-byte sprite entries and 32 bytes of their high bits).
-  [[nodiscard]] std::span<const std::uint8_t> vram() const noexcept { return state_.vram; }
-  [[nodiscard]] std::span<const std::uint8_t> cgram() const noexcept { return state_.cgram; }
-  [[nodiscard]] std::span<const std::uint8_t> oam() const noexcept { return state_.oam; }
+  [[nodiscard]] std::span<const std::uint8_t> vram() const noexcept { return state_.ppu.vram; }
+  [[nodiscard]] std::span<const std::uint8_t> cgram() const noexcept { return state_.ppu.cgram; }
+  [[nodiscard]] std::span<const std::uint8_t> oam() const noexcept { return state_.ppu.oam; }
 
   // The observer told every access the machine makes and every internal CPU
   // cycle, or none, which is how the machine starts. It is the host's object and
@@ -524,21 +509,15 @@ class Snes {
   std::uint8_t readWramPort(std::uint16_t offset);
   void writeWramPort(std::uint16_t offset, std::uint8_t value);
 
-  // The PPU register file ($2100-$213F): the forced-blank, mode and base fields, the
-  // VRAM and CGRAM ports with their address translation and prefetch, and the OAM
-  // port with its reload. Nothing renders. A write to a data port records where the
-  // port put the byte in `portLanding_`, for the access's report.
-  std::uint8_t readPpuReg(std::uint16_t offset);
-  void writePpuReg(std::uint16_t offset, std::uint8_t value);
-  // Reinitialises the OAM address from the reload value: at the start of vblank
-  // when the screen is on, and when forced blank is released during vblank's
-  // first line.
-  void reloadOamAddress() noexcept {
-    state_.oamAddress = static_cast<std::uint16_t>((state_.oamadd & 0x1FFu) << 1);
-  }
+  // The PPU's input pins as they stand: where the beam is, the frame parity, the
+  // two blank signals as $4212 reports them, the clock rate, and the level of the
+  // counter-latch line. Built for every access to $2100-$213F; the PPU itself is
+  // Ppu (`ppu.h`) over `state_.ppu`, and a write to a data port answers where the
+  // port put the byte, recorded in `portLanding_` for the access's report.
+  [[nodiscard]] PpuInputs ppuInputs() const noexcept;
 
   // The CPU-side registers ($4200-$421F): interrupt enables and flags, the H/V timer
-  // settings, the multiply/divide unit, and the auto-joypad read.
+  // settings, the multiply/divide unit, the I/O port, and the auto-joypad read.
   std::uint8_t readCpuReg(std::uint16_t offset);
   void writeCpuReg(std::uint16_t offset, std::uint8_t value);
 
@@ -551,17 +530,9 @@ class Snes {
   void latchJoypads() noexcept;
   [[nodiscard]] std::uint8_t clockJoypad(std::size_t port) noexcept;
 
-  // The VRAM word the address currently reaches, after any $2115 address translation.
-  [[nodiscard]] std::uint16_t vramWordAddress() const noexcept;
-  // The 16-bit word at that address, the value the read-prefetch register takes.
-  [[nodiscard]] std::uint16_t readVramWord() const noexcept;
-  // Advances the VRAM word address by the step $2115 selects, after a low- or
-  // high-byte access as the increment mode directs.
-  void stepVramAddress(bool highByte) noexcept;
-
   // Moves the beam to the next scanline, wrapping the frame and toggling its parity,
-  // and setting or clearing the vblank flag and starting the auto-joypad read at the
-  // boundaries the console does.
+  // and setting or clearing the vblank flag, telling the PPU vblank has begun, and
+  // starting the auto-joypad read at the boundaries the console does.
   void advanceLine() noexcept;
   // The auto-read's end: the sixteen bits it clocked out of each port land in
   // $4218-$421F.

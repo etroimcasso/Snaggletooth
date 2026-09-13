@@ -19,33 +19,36 @@ namespace snaggletooth::examples {
 // to VRAM, `$7F:0300` to OAM, `$7E:0400` to VRAM, `$7E:0500` to VRAM, `$7F:0700`
 // to VRAM and then to CGRAM, and a loop carries `$7F:0800` to `VMDATAL` a word
 // at a time — and channel 1 walks the table in `$7F:0600` to `INIDISP` every
-// frame while the program idles. Every site the tests name is commented with
-// its address.
+// frame while the program idles. The VRAM port is set to step a word at a time
+// before anything is sent, so the ranges land one after another from word 0.
+// Every site the tests name is commented with its address.
 inline std::vector<std::uint8_t> stagingImage() {
   std::vector<std::uint8_t> rom = loRomImage(1);
   put(rom, 0x0000u, {
       0x18u, 0xFBu,                // $8000 CLC / XCE       -> native
       0xE2u, 0x30u,                // $8002 SEP #$30        A8, X8
-      0xA9u, 0x7Fu,                // $8004 LDA #$7F
-      0x48u, 0xABu,                // $8006 PHA / PLB       DBR = $7F
-      0x20u, 0x00u, 0x81u,         // $8008 JSR !$8100      unpack $9000 -> $7F:0000
-      0x20u, 0x40u, 0x81u,         // $800B JSR !$8140      copy $9100 -> $7F:0100
-      0x20u, 0x80u, 0x81u,         // $800E JSR !$8180      stream $9200 -> CGDATA
-      0x20u, 0xA0u, 0x81u,         // $8011 JSR !$81A0      fill $7F:0300 from a constant
-      0x20u, 0xC0u, 0x81u,         // $8014 JSR !$81C0      transfer $9300 -> $7E:0400 through the port
-      0x20u, 0x00u, 0x83u,         // $8017 JSR !$8300      store $9100, $9101 -> $7E:0500 through the port
-      0x20u, 0x10u, 0x82u,         // $801A JSR !$8210      $7F:0000 -> VRAM
-      0x20u, 0x50u, 0x82u,         // $801D JSR !$8250      $7F:0100 -> VRAM
-      0x20u, 0x90u, 0x82u,         // $8020 JSR !$8290      $7F:0300 -> OAM
-      0x20u, 0xD0u, 0x82u,         // $8023 JSR !$82D0      $7E:0400 -> VRAM
-      0x20u, 0x40u, 0x83u,         // $8026 JSR !$8340      $7E:0500 -> VRAM
-      0x20u, 0xC0u, 0x83u,         // $8029 JSR !$83C0      copy $9500 -> $7F:0700
-      0x20u, 0x00u, 0x84u,         // $802C JSR !$8400      $7F:0700 -> VRAM
-      0x20u, 0x40u, 0x84u,         // $802F JSR !$8440      $7F:0700 -> CGRAM
-      0x20u, 0x80u, 0x84u,         // $8032 JSR !$8480      copy $9600 -> $7F:0800
-      0x20u, 0xC0u, 0x84u,         // $8035 JSR !$84C0      carry $7F:0800 -> VMDATAL a word at a time
-      0x20u, 0x80u, 0x83u,         // $8038 JSR !$8380      copy $9400 -> $7F:0600 and walk it to INIDISP
-      0x80u, 0xFEu,                // $803B BRA *           idle while the frames walk the table
+      0xA9u, 0x80u,                // $8004 LDA #$80
+      0x8Fu, 0x15u, 0x21u, 0x00u,  // $8006 STA $00:2115    VMAIN: a word address, stepped after the high byte
+      0xA9u, 0x7Fu,                // $800A LDA #$7F
+      0x48u, 0xABu,                // $800C PHA / PLB       DBR = $7F
+      0x20u, 0x00u, 0x81u,         // $800E JSR !$8100      unpack $9000 -> $7F:0000
+      0x20u, 0x40u, 0x81u,         // $8011 JSR !$8140      copy $9100 -> $7F:0100
+      0x20u, 0x80u, 0x81u,         // $8014 JSR !$8180      stream $9200 -> CGDATA
+      0x20u, 0xA0u, 0x81u,         // $8017 JSR !$81A0      fill $7F:0300 from a constant
+      0x20u, 0xC0u, 0x81u,         // $801A JSR !$81C0      transfer $9300 -> $7E:0400 through the port
+      0x20u, 0x00u, 0x83u,         // $801D JSR !$8300      store $9100, $9101 -> $7E:0500 through the port
+      0x20u, 0x10u, 0x82u,         // $8020 JSR !$8210      $7F:0000 -> VRAM
+      0x20u, 0x50u, 0x82u,         // $8023 JSR !$8250      $7F:0100 -> VRAM
+      0x20u, 0x90u, 0x82u,         // $8026 JSR !$8290      $7F:0300 -> OAM
+      0x20u, 0xD0u, 0x82u,         // $8029 JSR !$82D0      $7E:0400 -> VRAM
+      0x20u, 0x40u, 0x83u,         // $802C JSR !$8340      $7E:0500 -> VRAM
+      0x20u, 0xC0u, 0x83u,         // $802F JSR !$83C0      copy $9500 -> $7F:0700
+      0x20u, 0x00u, 0x84u,         // $8032 JSR !$8400      $7F:0700 -> VRAM
+      0x20u, 0x40u, 0x84u,         // $8035 JSR !$8440      $7F:0700 -> CGRAM
+      0x20u, 0x80u, 0x84u,         // $8038 JSR !$8480      copy $9600 -> $7F:0800
+      0x20u, 0xC0u, 0x84u,         // $803B JSR !$84C0      carry $7F:0800 -> VMDATAL a word at a time
+      0x20u, 0x80u, 0x83u,         // $803E JSR !$8380      copy $9400 -> $7F:0600 and walk it to INIDISP
+      0x80u, 0xFEu,                // $8041 BRA *           idle while the frames walk the table
   });
   // The decoder: pairs of a count and a value until a count of zero. The count
   // goes to a counter in the direct page; only the value reaches the output.
