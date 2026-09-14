@@ -66,6 +66,25 @@ constexpr std::uint64_t kChunkMaster = 89341ull;
 
 constexpr std::uint64_t kNanosPerSecond = 1000000000ull;
 
+// The nanosecond the Nth frame is due at, counted from the run's start. The frame
+// count and the exact frame interval are multiplied apart rather than together: the
+// whole product passes 64 bits at frame 4693, a little over a minute in, and a
+// deadline that has wrapped is behind the clock, so the run stops waiting between
+// frames and sprints until the wrap climbs back past it. Splitting the interval into
+// its whole nanoseconds and the fraction left over keeps every deadline exact and
+// leaves room for a run of a thousand billion frames.
+constexpr std::uint64_t kFrameWholeNanos = kNanosPerSecond * kNtscFrameElevenths / kNtscMaster;
+constexpr std::uint64_t kFrameRemainder = kNanosPerSecond * kNtscFrameElevenths % kNtscMaster;
+[[nodiscard]] constexpr std::uint64_t frameDueAt(std::uint64_t frames) {
+  return frames * kFrameWholeNanos + frames * kFrameRemainder / kNtscMaster;
+}
+
+// Two deadlines worked out by hand from 1,000,000,000 * 3,931,026 / 236,250,000:
+// the first frame's, and one past the point a single product passes 64 bits, so a
+// rearrangement that loses the fraction or wraps again does not compile.
+static_assert(frameDueAt(1u) == 16639263ull);
+static_assert(frameDueAt(4693u) == 78088063568ull);
+
 // The DSP's own rate and shape, which the playback device is asked for directly so
 // nothing resamples what the machine made.
 constexpr int kSampleRate = 32000;
@@ -228,8 +247,7 @@ class Player final : public snaggletooth::FrameObserver {
 
     // The console's own rate: each frame is held until its share of the run has
     // passed, so a machine that emulates faster than the console runs is watchable.
-    const std::uint64_t deadline =
-        started_ + frames_ * kNanosPerSecond * kNtscFrameElevenths / kNtscMaster;
+    const std::uint64_t deadline = started_ + frameDueAt(frames_);
     const std::uint64_t before = SDL_GetTicksNS();
     if (before < deadline) SDL_DelayNS(deadline - before);
 
