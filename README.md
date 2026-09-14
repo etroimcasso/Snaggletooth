@@ -69,10 +69,11 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 The audio core is feature-complete, and the main machine draws: the PPU resolves a pixel per
 visible dot and hands each finished frame over, so a cartridge can be watched running in a window
-and recorded while it runs. Mode 1's first background is complete — its tilemaps at every size,
-its characters, both flips, 16×16 blocks, the palette, scrolling and the brightness the converter
-applies; the remaining layers, the sprites, the windows and colour math, and the other screen
-modes are the work in front of the picture now. The cartridge toolkit reads a whole cartridge
+and recorded while it runs. Mode 1 is complete — all three of its backgrounds in the priority
+order the mode register names, their tilemaps at every size, their characters at four colours and
+at sixteen, both flips, 16×16 blocks, the palettes, scrolling and the brightness the converter
+applies; the sprites, the sub screen, the windows and colour math, and the other screen modes are
+the work in front of the picture now. The cartridge toolkit reads a whole cartridge
 into a source tree that rebuilds it, with the work of making that tree readable — the bytes the
 hardware received as files of their own kind, named for what the picture used them as — still
 under way. The public embedding API has not been started. Each row links to the page that
@@ -95,7 +96,7 @@ describes the component in full.
 | [SNES machine](docs/snes-machine.md) | in progress — the three cartridge maps, work RAM and its data port, the APU ports, region-priced cycles at both clock rates, exact master-cycle budgeting, the complete beam with its dot map and every per-line event at its own master offset — the blank flags, the taller picture, interlace, the two interrupts' trigger points and the memory refresh — the multiply/divide unit, the PPU with its three video memories filled through their ports and its picture resolved a dot at a time, eight DMA/HDMA channels, the controller ports, the audio boot handshake, and two observers — one told every access and where each video port write landed, one told every finished frame |
 | [Cartridge](docs/snes-cartridge.md) | built — the header's map, size, title, checksum and vectors; a copier's header ahead of a dump, read and dropped; LoROM, HiROM and ExHiROM; where every bus address lands in the image; the save windows |
 | Public embedding API | not started |
-| [PPU](docs/ppu.md) | in progress — **it draws**: a pixel resolved per visible dot from the registers and memories as they stand at that dot, each finished frame handed to a frame observer as eight bits a channel, with the converter's brightness scaling and forced blank. Mode 1's first background is complete — the tilemap at every size, the character address, four bitplanes, both flips, 16×16 blocks, the palette, colour 0's transparency, scrolling and the backdrop. The register file is complete beneath it: every write with its latches, every read with its open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which the video memories can be reached. The remaining backgrounds, the sprites, the sub screen, the windows and colour math, and the other screen modes are still to come — see the [roadmap](#roadmap) |
+| [PPU](docs/ppu.md) | in progress — **it draws**: a pixel resolved per visible dot from the registers and memories as they stand at that dot, each finished frame handed to a frame observer as eight bits a channel, with the converter's brightness scaling and forced blank. Mode 1 is complete — its three backgrounds in the order the mode register puts them, the tilemap at every size, the character address at both depths, the bitplanes, both flips, 16×16 blocks, the palettes, colour 0's transparency, scrolling and the backdrop. The register file is complete beneath it: every write with its latches, every read with its open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which the video memories can be reached. The sprites, the sub screen, the windows and colour math, and the other screen modes are still to come — see the [roadmap](#roadmap) |
 
 ### The toolkit
 
@@ -233,10 +234,9 @@ Snaggletooth is built audio-first:
 2. **The full machine** — the 5A22 (the main CPU with its DMA and timing hardware), the PPU, and
    the system glue that binds them to the audio core.
 
-The PPU is the piece under way, and it draws: a cartridge runs in a window with its first
-background on screen, recorded as it runs. The rest of the picture — the other backgrounds, the
-sprites, the sub screen, the windows and colour math, and the other screen modes — follows in
-order. After it, the machine is taken through the range of cartridge types until they boot, and
+The PPU is the piece under way, and it draws: a cartridge runs in a window with the whole of its
+Mode 1 picture on screen, recorded as it runs. The rest of the picture — the sprites, the sub
+screen, the windows and colour math, and the other screen modes — follows in order. After it, the machine is taken through the range of cartridge types until they boot, and
 the DSP returns to close out its three sub-tests with the wider body of real software available to
 exercise it.
 

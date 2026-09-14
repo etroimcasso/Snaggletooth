@@ -1,11 +1,13 @@
 // The picture the PPU draws, and the seam it hands it over: the frame observer's
-// terms, the raster's shape, the converter's bytes, and Mode 1's BG1 complete — the
-// tilemap formula at its four sizes, the character address, the four bitplanes and
-// their order, both flips, 16x16 blocks, the palette bits, colour 0's transparency,
-// scrolling, the backdrop, and the layers the main screen does not enable. Every
-// expectation is computed by hand from the register page; the pictures are placed
-// as a program would have left them, and one case drives the whole path from a
-// cartridge that writes the video memories through their ports.
+// terms, the raster's shape, the converter's bytes, and Mode 1 complete — the
+// tilemap formula at its four sizes, the character address, the bitplanes and their
+// order at both depths, both flips, 16x16 blocks, the palette bits, colour 0's
+// transparency, scrolling, the backdrop, the registers each of the three
+// backgrounds reads, the priority chart across them and the register that exchanges
+// it for the other, and the layers the main screen does not show. Every expectation
+// is computed by hand from the register page; the pictures are placed as a program
+// would have left them, and one case drives the whole path from a cartridge that
+// writes the video memories through their ports.
 
 #include <array>
 #include <cstdint>
@@ -30,6 +32,29 @@ constexpr std::uint32_t kCharByte = 0x8000u;
 // A screen's worth of map is $800 bytes, so the next screen begins $400 entries on.
 constexpr unsigned kScreenEntries = 0x400u;
 
+// The other two backgrounds Mode 1 draws, placed clear of BG1: BG2's map at byte
+// $4000 and BG3's at $4800, which the six base bits reach as screens 8 and 9, and
+// their characters at $A000 and $C000. BG1's own 64x64 map runs to $27FF, so
+// nothing here overlaps it.
+constexpr std::uint8_t kMapBase2 = 0x20u;    // $2108: screen 8, size 00
+constexpr std::uint8_t kMapBase3 = 0x24u;    // $2109: screen 9, size 00
+constexpr std::uint8_t kCharBases12 = 0x54u; // $210B: BG1 at $8000, BG2 at $A000
+constexpr std::uint8_t kCharBase3 = 0x06u;   // $210C: BG3 at $C000
+
+// Where a background keeps its pieces and how deep its characters are: the byte
+// address its screen base names, the byte address its character base names, and
+// its bitplanes in Mode 1 — four for the two sixteen-colour backgrounds, two for
+// BG3's four.
+struct Layout {
+  std::uint32_t map;
+  std::uint32_t characters;
+  unsigned planes;
+};
+
+constexpr Layout kBg1{.map = kMapByte, .characters = kCharByte, .planes = 4u};
+constexpr Layout kBg2{.map = 0x4000u, .characters = 0xA000u, .planes = 4u};
+constexpr Layout kBg3{.map = 0x4800u, .characters = 0xC000u, .planes = 2u};
+
 // The palette words these cases use. A word is 15 bits, blue-green-red from the top.
 constexpr std::uint16_t kBackdrop = 0x0C41u;  // red 1, green 2, blue 3
 constexpr std::uint16_t kRed = 0x001Fu;
@@ -37,6 +62,8 @@ constexpr std::uint16_t kGreen = 0x03E0u;
 constexpr std::uint16_t kBlue = 0x7C00u;
 constexpr std::uint16_t kWhite = 0x7FFFu;
 constexpr std::uint16_t kYellow = 0x03FFu;
+constexpr std::uint16_t kCyan = 0x7FE0u;
+constexpr std::uint16_t kMagenta = 0x7C1Fu;
 
 using Rgba = std::array<std::uint8_t, 4>;
 
@@ -49,6 +76,8 @@ constexpr Rgba kGreenOut{0u, 255u, 0u, 255u};
 constexpr Rgba kBlueOut{0u, 0u, 255u, 255u};
 constexpr Rgba kWhiteOut{255u, 255u, 255u, 255u};
 constexpr Rgba kYellowOut{255u, 255u, 0u, 255u};
+constexpr Rgba kCyanOut{0u, 255u, 255u, 255u};
+constexpr Rgba kMagentaOut{255u, 0u, 255u, 255u};
 constexpr Rgba kBlack{0u, 0u, 0u, 255u};
 
 // The frames a run finished, one of them kept whole — the first, unless a case
@@ -119,45 +148,43 @@ void putColour(PpuState& ppu, unsigned word, std::uint16_t colour) {
   ppu.cgram[word * 2u + 1u] = static_cast<std::uint8_t>(colour >> 8);
 }
 
-// A tilemap entry `index` words into the map, the same way.
-void putEntry(PpuState& ppu, unsigned index, std::uint16_t entry) {
-  ppu.vram[kMapByte + index * 2u] = static_cast<std::uint8_t>(entry & 0xFFu);
-  ppu.vram[kMapByte + index * 2u + 1u] = static_cast<std::uint8_t>(entry >> 8);
+// A tilemap entry `index` words into a background's map, the same way.
+void putEntry(PpuState& ppu, const Layout& bg, unsigned index, std::uint16_t entry) {
+  ppu.vram[(bg.map + index * 2u) & 0xFFFFu] = static_cast<std::uint8_t>(entry & 0xFFu);
+  ppu.vram[(bg.map + index * 2u + 1u) & 0xFFFFu] = static_cast<std::uint8_t>(entry >> 8);
 }
 
 using TileRows = std::array<std::array<std::uint8_t, 8>, 8>;
 
-// A 16-colour character at a byte address: eight rows of eight colour indices, as
-// four bitplanes — planes 0 and 1 in the low and high bytes of eight words, then
-// planes 2 and 3 in the same form — with the leftmost pixel of a row in bit 7.
-void putTileAt(PpuState& ppu, std::uint32_t byteAddress, const TileRows& rows) {
+// A character at a byte address, at as many bitplanes as the caller names: eight
+// rows of eight colour indices, planes 0 and 1 in the low and high bytes of eight
+// words and planes 2 and 3 in the same form sixteen bytes on, with the leftmost
+// pixel of a row in bit 7.
+void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
+               const TileRows& rows) {
   for (unsigned row = 0u; row < 8u; ++row) {
-    std::array<std::uint8_t, 4> planes{};
-    for (unsigned column = 0u; column < 8u; ++column) {
-      const unsigned bit = 7u - column;
-      for (unsigned plane = 0u; plane < 4u; ++plane) {
-        planes[plane] = static_cast<std::uint8_t>(
-            planes[plane] | (((rows[row][column] >> plane) & 1u) << bit));
+    for (unsigned plane = 0u; plane < planes; ++plane) {
+      std::uint8_t bits = 0u;
+      for (unsigned column = 0u; column < 8u; ++column) {
+        bits = static_cast<std::uint8_t>(
+            bits | (((rows[row][column] >> plane) & 1u) << (7u - column)));
       }
+      const std::uint32_t at = byteAddress + (plane / 2u) * 16u + (plane % 2u) + row * 2u;
+      ppu.vram[at & 0xFFFFu] = bits;
     }
-    ppu.vram[(byteAddress + row * 2u) & 0xFFFFu] = planes[0];
-    ppu.vram[(byteAddress + row * 2u + 1u) & 0xFFFFu] = planes[1];
-    ppu.vram[(byteAddress + 16u + row * 2u) & 0xFFFFu] = planes[2];
-    ppu.vram[(byteAddress + 16u + row * 2u + 1u) & 0xFFFFu] = planes[3];
   }
 }
 
-// The same, for a character the base above holds: 32 bytes a character at four
-// bitplanes.
-void putTile(PpuState& ppu, unsigned tile, const TileRows& rows) {
-  putTileAt(ppu, kCharByte + tile * 32u, rows);
+// The same, for a character a background's own base holds: eight bytes a bitplane.
+void putTile(PpuState& ppu, const Layout& bg, unsigned tile, const TileRows& rows) {
+  putTileAt(ppu, bg.characters + tile * 8u * bg.planes, bg.planes, rows);
 }
 
 // A character every pixel of which is one colour index.
-void putSolidTile(PpuState& ppu, unsigned tile, std::uint8_t index) {
+void putSolidTile(PpuState& ppu, const Layout& bg, unsigned tile, std::uint8_t index) {
   TileRows rows{};
   for (auto& row : rows) row.fill(index);
-  putTile(ppu, tile, rows);
+  putTile(ppu, bg, tile, rows);
 }
 
 // A PPU placed to draw: Mode 1 with 8x8 tiles, BG1 alone on the main screen at full
@@ -180,7 +207,24 @@ PpuState screen() {
   putColour(ppu, 2u, kGreen);
   putColour(ppu, 4u, kBlue);
   putColour(ppu, 8u, kWhite);
+  putColour(ppu, 5u, kCyan);     // BG3's palette 1 colour 1, and BG1's palette 0 colour 5
+  putColour(ppu, 9u, kMagenta);  // BG3's palette 2 colour 1
   putColour(ppu, 49u, kYellow);  // palette 3's colour 1
+  return ppu;
+}
+
+// The same picture with all three of Mode 1's backgrounds placed and shown: BG2 and
+// BG3 take the bases above beside BG1's, each carries the same -1 vertical offset,
+// and the main screen has all three.
+PpuState threeBackgrounds() {
+  PpuState ppu = screen();
+  ppu.bg2sc = kMapBase2;
+  ppu.bg3sc = kMapBase3;
+  ppu.bg12nba = kCharBases12;
+  ppu.bg34nba = kCharBase3;
+  ppu.bg2vofs = 0x3FFu;
+  ppu.bg3vofs = 0x3FFu;
+  ppu.tm = 0x07u;
   return ppu;
 }
 
@@ -270,8 +314,8 @@ TEST(SnesPpuPicture, AMachineNobodyWatchesRunsExactlyAsOneBeingWatchedDoes) {
   Snes watched(SnesConfig{.rom = rom});
   Snes unwatched(SnesConfig{.rom = rom});
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
   SnesState placed = watched.state();
   placed.ppu = ppu;
   watched.restore(placed);
@@ -310,8 +354,8 @@ TEST(SnesPpuPicture, TheBackdropShowsWhereNoLayerDraws) {
 
 TEST(SnesPpuPicture, ForcedBlankIsABlackFrame) {
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
   ppu.inidisp = 0x8Fu;  // forced blank, brightness 15
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -321,8 +365,8 @@ TEST(SnesPpuPicture, ForcedBlankIsABlackFrame) {
 
 TEST(SnesPpuPicture, BrightnessZeroIsABlackFrame) {
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
   ppu.inidisp = 0x00u;  // the screen on, brightness 0, which is off
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -335,8 +379,8 @@ TEST(SnesPpuPicture, BrightnessScalesEveryChannel) {
   // an exact half, which is rounded up — and the backdrop's 1, 2 and 3 give 4, 8
   // and 12.
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x0008u);  // a tile in colour index 8, which is white
-  putSolidTile(ppu, 8u, 8u);
+  putEntry(ppu, kBg1, 0u, 0x0008u);  // a tile in colour index 8, which is white
+  putSolidTile(ppu, kBg1, 8u, 8u);
   ppu.inidisp = 0x07u;
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -351,7 +395,7 @@ TEST(SnesPpuPicture, TheLeftmostPixelOfARowIsBitSevenAndThePlanesAreTwoWordsApar
   // further right: plane 0 is the index's low bit and lies in the row's first byte,
   // plane 1 in its second, and planes 2 and 3 sixteen bytes on in the same order.
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x0001u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
   const std::uint32_t tile = kCharByte + 32u;
   ppu.vram[tile] = 0x80u;         // plane 0, the leftmost pixel: index 1
   ppu.vram[tile + 1u] = 0x40u;    // plane 1, one pixel right: index 2
@@ -371,11 +415,11 @@ TEST(SnesPpuPicture, ColourZeroOfATileIsTransparentAndTheBackdropShowsThrough) {
   // transparent, not because the two words happen to hold the same colour.
   PpuState ppu = screen();
   putColour(ppu, 48u, kWhite);  // palette 3's colour 0, which nothing may ever show
-  putEntry(ppu, 0u, static_cast<std::uint16_t>((3u << 10) | 1u));
+  putEntry(ppu, kBg1, 0u, static_cast<std::uint16_t>((3u << 10) | 1u));
   TileRows rows{};
   for (auto& row : rows) row.fill(1u);
   rows[2][3] = 0u;  // one hole in an otherwise solid character
-  putTile(ppu, 1u, rows);
+  putTile(ppu, kBg1, 1u, rows);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kYellowOut);
@@ -386,8 +430,8 @@ TEST(SnesPpuPicture, ThePaletteBitsChooseSixteenColoursApart) {
   // Palette 3 of a 16-colour background begins at word 3 * 16 = 48, so its colour 1
   // is word 49.
   PpuState ppu = screen();
-  putEntry(ppu, 0u, static_cast<std::uint16_t>((3u << 10) | 1u));
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 0u, static_cast<std::uint16_t>((3u << 10) | 1u));
+  putSolidTile(ppu, kBg1, 1u, 1u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kYellowOut);
@@ -398,10 +442,10 @@ TEST(SnesPpuPicture, TheCharacterBaseAndTheTileNumberNameTheCharacter) {
   // a character on from there.
   PpuState ppu = screen();
   ppu.bg12nba = 0x02u;
-  putEntry(ppu, 0u, 0x0003u);
+  putEntry(ppu, kBg1, 0u, 0x0003u);
   TileRows rows{};
   for (auto& row : rows) row.fill(2u);
-  putTileAt(ppu, 0x4000u + 3u * 32u, rows);
+  putTileAt(ppu, 0x4000u + 3u * 32u, 4u, rows);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
@@ -413,8 +457,8 @@ TEST(SnesPpuPicture, TheTilemapEntryForAPositionIsRowsOfThirtyTwo) {
   // The entry for tile (X, Y) of one screen is ((Y & 0x1F) << 5) + (X & 0x1F) words
   // into the map, so tile (1, 1) covers the picture from (8, 8).
   PpuState ppu = screen();
-  putEntry(ppu, 1u * 32u + 1u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 1u * 32u + 1u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(8u, 8u), kRedOut);
@@ -428,11 +472,11 @@ TEST(SnesPpuPicture, TheScreenBaseStepsAWholeScreenAtATime) {
   // 1 is word $400 and not the $200 a half-screen step would give. A tile is placed
   // at each, and the picture shows the one the base names.
   PpuState ppu = screen();  // base 1
-  putEntry(ppu, 0u, 0x0001u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
   ppu.vram[0x0400u] = 0x02u;  // where a half-screen step would look: word $200
   ppu.vram[0x0401u] = 0x00u;
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kRedOut);
@@ -440,10 +484,10 @@ TEST(SnesPpuPicture, TheScreenBaseStepsAWholeScreenAtATime) {
 
 TEST(SnesPpuPicture, ASingleScreenMapRepeatsEveryTwoHundredAndFiftySixPixels) {
   PpuState ppu = screen();  // size 00: one 32x32 screen
-  putEntry(ppu, 0u, 0x0001u);                 // screen A's first tile
-  putEntry(ppu, kScreenEntries, 0x0002u);     // where a second screen would begin
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);                 // screen A's first tile
+  putEntry(ppu, kBg1, kScreenEntries, 0x0002u);     // where a second screen would begin
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
   ppu.bg1hofs = 256u;
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -453,10 +497,10 @@ TEST(SnesPpuPicture, ASingleScreenMapRepeatsEveryTwoHundredAndFiftySixPixels) {
 TEST(SnesPpuPicture, TheWideMapPutsItsSecondScreenToTheRight) {
   PpuState ppu = screen();
   ppu.bg1sc = static_cast<std::uint8_t>(kMapBase | 0x01u);  // 64x32
-  putEntry(ppu, 0u, 0x0001u);
-  putEntry(ppu, kScreenEntries, 0x0002u);
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putEntry(ppu, kBg1, kScreenEntries, 0x0002u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
   ppu.bg1hofs = 256u;
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -466,10 +510,10 @@ TEST(SnesPpuPicture, TheWideMapPutsItsSecondScreenToTheRight) {
 TEST(SnesPpuPicture, TheTallMapPutsItsSecondScreenBelow) {
   PpuState ppu = screen();
   ppu.bg1sc = static_cast<std::uint8_t>(kMapBase | 0x02u);  // 32x64
-  putEntry(ppu, 0u, 0x0001u);
-  putEntry(ppu, kScreenEntries, 0x0002u);
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putEntry(ppu, kBg1, kScreenEntries, 0x0002u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
   ppu.bg1vofs = 255u;  // the first line of the picture is row 256 of the background
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -481,12 +525,12 @@ TEST(SnesPpuPicture, TheLargeMapPutsItsScreensRightAndBelow) {
   // them: (Y & 0x20) << 6 words rather than << 5.
   PpuState ppu = screen();
   ppu.bg1sc = static_cast<std::uint8_t>(kMapBase | 0x03u);
-  putEntry(ppu, 0u, 0x0001u);                      // A
-  putEntry(ppu, kScreenEntries, 0x0002u);          // B, to the right
-  putEntry(ppu, 2u * kScreenEntries, 0x0004u);     // C, below
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
-  putSolidTile(ppu, 4u, 4u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);                      // A
+  putEntry(ppu, kBg1, kScreenEntries, 0x0002u);          // B, to the right
+  putEntry(ppu, kBg1, 2u * kScreenEntries, 0x0004u);     // C, below
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
+  putSolidTile(ppu, kBg1, 4u, 4u);
 
   PpuState right = ppu;
   right.bg1hofs = 256u;
@@ -505,10 +549,10 @@ TEST(SnesPpuPicture, TheLargeMapPutsItsScreensRightAndBelow) {
 
 TEST(SnesPpuPicture, AHorizontalFlipReversesTheRow) {
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x4001u);  // bit 14: flip horizontally
+  putEntry(ppu, kBg1, 0u, 0x4001u);  // bit 14: flip horizontally
   TileRows rows{};
   rows[0][0] = 1u;
-  putTile(ppu, 1u, rows);
+  putTile(ppu, kBg1, 1u, rows);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(7u, 0u), kRedOut);
@@ -517,10 +561,10 @@ TEST(SnesPpuPicture, AHorizontalFlipReversesTheRow) {
 
 TEST(SnesPpuPicture, AVerticalFlipReversesTheColumn) {
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x8001u);  // bit 15: flip vertically
+  putEntry(ppu, kBg1, 0u, 0x8001u);  // bit 15: flip vertically
   TileRows rows{};
   rows[0][0] = 1u;
-  putTile(ppu, 1u, rows);
+  putTile(ppu, kBg1, 1u, rows);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 7u), kRedOut);
@@ -532,11 +576,11 @@ TEST(SnesPpuPicture, AVerticalFlipReversesTheColumn) {
 TEST(SnesPpuPicture, ABlockIsTheTileAndTheThreeAfterItByOneAndSixteen) {
   PpuState ppu = screen();
   ppu.bgmode = 0x11u;  // Mode 1, and $2105 bit 4: BG1 in 16x16 blocks
-  putEntry(ppu, 0u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);    // the block's top left
-  putSolidTile(ppu, 2u, 2u);    // Tile + 1, its top right
-  putSolidTile(ppu, 17u, 4u);   // Tile + 16, its bottom left
-  putSolidTile(ppu, 18u, 8u);   // Tile + 17, its bottom right
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);    // the block's top left
+  putSolidTile(ppu, kBg1, 2u, 2u);    // Tile + 1, its top right
+  putSolidTile(ppu, kBg1, 17u, 4u);   // Tile + 16, its bottom left
+  putSolidTile(ppu, kBg1, 18u, 8u);   // Tile + 17, its bottom right
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kRedOut);
@@ -549,11 +593,11 @@ TEST(SnesPpuPicture, ABlocksNumbersRunOnRatherThanWrappingWithinIt) {
   // Tile $2FF gives $2FF, $300, $30F and $310 — only the ten-bit total wraps.
   PpuState ppu = screen();
   ppu.bgmode = 0x11u;
-  putEntry(ppu, 0u, 0x02FFu);
-  putSolidTile(ppu, 0x2FFu, 1u);
-  putSolidTile(ppu, 0x300u, 2u);
-  putSolidTile(ppu, 0x30Fu, 4u);
-  putSolidTile(ppu, 0x310u, 8u);
+  putEntry(ppu, kBg1, 0u, 0x02FFu);
+  putSolidTile(ppu, kBg1, 0x2FFu, 1u);
+  putSolidTile(ppu, kBg1, 0x300u, 2u);
+  putSolidTile(ppu, kBg1, 0x30Fu, 4u);
+  putSolidTile(ppu, kBg1, 0x310u, 8u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kRedOut);
@@ -565,11 +609,11 @@ TEST(SnesPpuPicture, ABlocksNumbersRunOnRatherThanWrappingWithinIt) {
 TEST(SnesPpuPicture, ABlockFlipsWholeRatherThanByItsParts) {
   PpuState ppu = screen();
   ppu.bgmode = 0x11u;
-  putEntry(ppu, 0u, 0xC001u);  // both flips
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
-  putSolidTile(ppu, 17u, 4u);
-  putSolidTile(ppu, 18u, 8u);
+  putEntry(ppu, kBg1, 0u, 0xC001u);  // both flips
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
+  putSolidTile(ppu, kBg1, 17u, 4u);
+  putSolidTile(ppu, kBg1, 18u, 8u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kWhiteOut);  // what was the block's bottom right
@@ -582,8 +626,8 @@ TEST(SnesPpuPicture, ABlockFlipsWholeRatherThanByItsParts) {
 
 TEST(SnesPpuPicture, ScrollingMovesThePictureByWholeTiles) {
   PpuState ppu = screen();
-  putEntry(ppu, 1u, 0x0001u);  // the tile at (1, 0)
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 1u, 0x0001u);  // the tile at (1, 0)
+  putSolidTile(ppu, kBg1, 1u, 1u);
   ppu.bg1hofs = 8u;
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -594,10 +638,10 @@ TEST(SnesPpuPicture, ScrollingMovesThePictureByWholeTiles) {
 
 TEST(SnesPpuPicture, ScrollingMovesThePictureWithinATile) {
   PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x0001u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
   TileRows rows{};
   rows[0][3] = 1u;  // one pixel, four columns in
-  putTile(ppu, 1u, rows);
+  putTile(ppu, kBg1, 1u, rows);
   ppu.bg1hofs = 3u;
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
@@ -609,13 +653,330 @@ TEST(SnesPpuPicture, ThePictureBeginsOnTheSecondRowOfTheTileWithNoVerticalScroll
   // line is the background's row 1 — which is why games write -1 into it.
   PpuState ppu = screen();
   ppu.bg1vofs = 0u;
-  putEntry(ppu, 0u, 0x0001u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
   TileRows rows{};
   rows[1][0] = 1u;  // the tile's second row
-  putTile(ppu, 1u, rows);
+  putTile(ppu, kBg1, 1u, rows);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+}
+
+// ---- BG2, the second sixteen-colour background --------------------------------
+
+TEST(SnesPpuPicture, Bg2ReadsItsMapFromItsOwnScreenRegister) {
+  // $2108 names BG2's map where $2107 names BG1's, so a tile placed in one does not
+  // show in the other.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x02u;  // BG2 alone on the main screen
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putEntry(ppu, kBg2, 0u, 0x0002u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg2, 2u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg2ReadsItsCharactersFromTheHighHalfOfTheBaseRegister) {
+  // $210B holds BG2's base in bits 4-7 and BG1's in bits 0-3.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x02u;
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);  // at $8000, which the low half names
+  putSolidTile(ppu, kBg2, 1u, 4u);  // at $A000, which the high half names
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kBlueOut);
+}
+
+TEST(SnesPpuPicture, Bg2ScrollsByItsOwnRegisters) {
+  // $210F moves BG2 and leaves BG1 where it is.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x03u;
+  putEntry(ppu, kBg1, 4u, 0x0001u);  // BG1's tile at (4, 0): the picture from x = 32
+  putEntry(ppu, kBg2, 1u, 0x0002u);  // BG2's at (1, 0): from x = 8
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg2, 2u, 2u);
+  ppu.bg2hofs = 8u;                  // which brings BG2's to the left edge
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+  EXPECT_EQ(picture.at(32u, 0u), kRedOut);
+}
+
+TEST(SnesPpuPicture, Bg2TakesItsTileSizeFromItsOwnBit) {
+  // $2105 bit 5 is BG2's 16x16 bit as bit 4 is BG1's, and the block is the same
+  // Tile, Tile + 1, Tile + 16, Tile + 17.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x02u;
+  ppu.bgmode = 0x21u;  // Mode 1, BG2 in 16x16 blocks and BG1 in 8x8
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putSolidTile(ppu, kBg2, 1u, 1u);   // the block's top left
+  putSolidTile(ppu, kBg2, 18u, 2u);  // Tile + 17, its bottom right
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+  EXPECT_EQ(picture.at(8u, 8u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg2IsShownByItsOwnMainScreenBit) {
+  // $212C bit 1 is BG2's. On the sub screen alone it draws nothing.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x00u;
+  ppu.ts = 0x02u;
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putSolidTile(ppu, kBg2, 1u, 1u);
+  const Picture hidden = draw(ppu);
+  ASSERT_EQ(hidden.frames, 1u);
+  EXPECT_EQ(hidden.at(0u, 0u), kBackdropOut);
+
+  ppu.tm = 0x02u;
+  const Picture shown = draw(ppu);
+  ASSERT_EQ(shown.frames, 1u);
+  EXPECT_EQ(shown.at(0u, 0u), kRedOut);
+}
+
+// ---- BG3, the four-colour background ------------------------------------------
+
+TEST(SnesPpuPicture, Bg3IsTwoBitplanesAndReadsNothingAboveThem) {
+  // Four colours means planes 0 and 1 alone. The sixteen bytes a sixteen-colour
+  // character would keep planes 2 and 3 in belong to the next characters here, and
+  // filling them changes no pixel.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x04u;  // BG3 alone
+  putEntry(ppu, kBg3, 0u, 0x0001u);
+  putSolidTile(ppu, kBg3, 1u, 1u);
+  for (unsigned byte = 0u; byte < 16u; ++byte) {
+    ppu.vram[kBg3.characters + 16u + 16u + byte] = 0xFFu;
+  }
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);  // colour 1, not the 13 four planes would give
+}
+
+TEST(SnesPpuPicture, Bg3CharactersAreSixteenBytesApart) {
+  // Eight bytes a bitplane, so a four-colour character is half a sixteen-colour one.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x04u;
+  putEntry(ppu, kBg3, 0u, 0x0003u);
+  putSolidTile(ppu, kBg3, 3u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg3PalettesAreFourColoursApart) {
+  // A four-colour background's palette begins ppp * 4 words in, so palette 1's
+  // colour 1 is word 5 and palette 2's is word 9.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x04u;
+  putEntry(ppu, kBg3, 0u, static_cast<std::uint16_t>((1u << 10) | 1u));
+  putEntry(ppu, kBg3, 1u, static_cast<std::uint16_t>((2u << 10) | 2u));
+  putSolidTile(ppu, kBg3, 1u, 1u);
+  putSolidTile(ppu, kBg3, 2u, 1u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kCyanOut);
+  EXPECT_EQ(picture.at(8u, 0u), kMagentaOut);
+}
+
+TEST(SnesPpuPicture, Bg3ReadsItsMapAndCharactersFromItsOwnRegisters) {
+  // $2109 names BG3's map and $210C bits 0-3 its characters, neither of which the
+  // other two backgrounds' registers reach.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x04u;
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putEntry(ppu, kBg3, 0u, 0x0002u);
+  putSolidTile(ppu, kBg3, 2u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg3ScrollsByItsOwnRegisters) {
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x04u;
+  putEntry(ppu, kBg3, 1u, 0x0001u);  // the tile at (1, 0)
+  putSolidTile(ppu, kBg3, 1u, 2u);
+  ppu.bg3hofs = 8u;
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg3TakesItsTileSizeFromItsOwnBit) {
+  // $2105 bit 6 is BG3's, and a block of four-colour characters runs on by one and
+  // sixteen as any other does.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x04u;
+  ppu.bgmode = 0x41u;  // Mode 1, BG3 in 16x16 blocks
+  putEntry(ppu, kBg3, 0u, 0x0001u);
+  putSolidTile(ppu, kBg3, 1u, 1u);
+  putSolidTile(ppu, kBg3, 18u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+  EXPECT_EQ(picture.at(8u, 8u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg3IsShownByItsOwnMainScreenBit) {
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x00u;
+  ppu.ts = 0x04u;
+  putEntry(ppu, kBg3, 0u, 0x0001u);
+  putSolidTile(ppu, kBg3, 1u, 1u);
+  const Picture hidden = draw(ppu);
+  ASSERT_EQ(hidden.frames, 1u);
+  EXPECT_EQ(hidden.at(0u, 0u), kBackdropOut);
+
+  ppu.tm = 0x04u;
+  const Picture shown = draw(ppu);
+  ASSERT_EQ(shown.frames, 1u);
+  EXPECT_EQ(shown.at(0u, 0u), kRedOut);
+}
+
+TEST(SnesPpuPicture, Mode1GivesNoBackgroundPalettesOfItsOwn) {
+  // Where Mode 0 starts each background's palettes 32 words apart, Mode 1 starts
+  // all three at word 0: BG3's palette 1 colour 1 and BG1's palette 0 colour 5 are
+  // one and the same word.
+  PpuState third = threeBackgrounds();
+  third.tm = 0x04u;
+  putEntry(third, kBg3, 0u, static_cast<std::uint16_t>((1u << 10) | 1u));
+  putSolidTile(third, kBg3, 1u, 1u);
+  const Picture fourColour = draw(third);
+  ASSERT_EQ(fourColour.frames, 1u);
+  EXPECT_EQ(fourColour.at(0u, 0u), kCyanOut);
+
+  PpuState first = threeBackgrounds();
+  first.tm = 0x01u;
+  putEntry(first, kBg1, 0u, 0x0001u);
+  putSolidTile(first, kBg1, 1u, 5u);
+  const Picture sixteenColour = draw(first);
+  ASSERT_EQ(sixteenColour.frames, 1u);
+  EXPECT_EQ(sixteenColour.at(0u, 0u), kCyanOut);
+}
+
+// ---- the priority chart --------------------------------------------------------
+
+TEST(SnesPpuPicture, BothTilePrioritiesShowOverTheBackdrop) {
+  PpuState ppu = screen();
+  putEntry(ppu, kBg1, 0u, 0x2001u);  // bit 13: tile priority 1
+  putEntry(ppu, kBg1, 1u, 0x0002u);  // the tile beside it at priority 0
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg1, 2u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+  EXPECT_EQ(picture.at(8u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg1CoversBg2AtTheSameTilePriority) {
+  PpuState ppu = threeBackgrounds();
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg2, 1u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+}
+
+TEST(SnesPpuPicture, HighPriorityBg2CoversLowPriorityBg1) {
+  // The chart runs A B a b, so B is in front of a: both of BG2's priorities are not
+  // simply behind both of BG1's.
+  PpuState ppu = threeBackgrounds();
+  putEntry(ppu, kBg1, 0u, 0x0001u);  // BG1 at tile priority 0
+  putEntry(ppu, kBg2, 0u, 0x2001u);  // BG2 at tile priority 1
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg2, 1u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, HighPriorityBg1CoversHighPriorityBg2) {
+  PpuState ppu = threeBackgrounds();
+  putEntry(ppu, kBg1, 0u, 0x2001u);
+  putEntry(ppu, kBg2, 0u, 0x2001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg2, 1u, 2u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+}
+
+TEST(SnesPpuPicture, LowPriorityBg2CoversBg3sHighPriorityTiles) {
+  // C sits behind b in the chart, so BG3's high-priority tiles are behind even the
+  // low-priority tiles of the other two.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x06u;  // BG2 and BG3
+  putEntry(ppu, kBg2, 0u, 0x0001u);  // BG2 at tile priority 0
+  putEntry(ppu, kBg3, 0u, 0x2001u);  // BG3 at tile priority 1
+  putSolidTile(ppu, kBg2, 1u, 2u);
+  putSolidTile(ppu, kBg3, 1u, 1u);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, TheBg3PriorityBitPutsItsHighTilesInFrontOfEverything) {
+  // $2105 bit 3 exchanges one chart for the other: C moves from behind b to in
+  // front of A.
+  PpuState ppu = threeBackgrounds();
+  putEntry(ppu, kBg1, 0u, 0x2001u);  // BG1 at tile priority 1
+  putEntry(ppu, kBg3, 0u, 0x2001u);  // BG3 at tile priority 1
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  putSolidTile(ppu, kBg3, 1u, 2u);
+
+  const Picture behind = draw(ppu);
+  ASSERT_EQ(behind.frames, 1u);
+  EXPECT_EQ(behind.at(0u, 0u), kRedOut);
+
+  ppu.bgmode = 0x09u;  // Mode 1 with BG3's priority bit set
+  const Picture front = draw(ppu);
+  ASSERT_EQ(front.frames, 1u);
+  EXPECT_EQ(front.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, Bg3sLowPriorityTilesStayLastUnderEitherChart) {
+  // Only C moves; c is the background nearest the backdrop either way.
+  PpuState ppu = threeBackgrounds();
+  ppu.tm = 0x06u;
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putEntry(ppu, kBg3, 0u, 0x0001u);
+  putSolidTile(ppu, kBg2, 1u, 2u);
+  putSolidTile(ppu, kBg3, 1u, 1u);
+
+  const Picture normal = draw(ppu);
+  ASSERT_EQ(normal.frames, 1u);
+  EXPECT_EQ(normal.at(0u, 0u), kGreenOut);
+
+  ppu.bgmode = 0x09u;
+  const Picture raised = draw(ppu);
+  ASSERT_EQ(raised.frames, 1u);
+  EXPECT_EQ(raised.at(0u, 0u), kGreenOut);
+}
+
+TEST(SnesPpuPicture, ATransparentPixelFallsThroughToWhatIsBehindIt) {
+  // Colour 0 is transparent on every background, so BG2 shows through BG1's hole
+  // and the backdrop through both.
+  PpuState ppu = threeBackgrounds();
+  TileRows front{};
+  front[0][0] = 1u;
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putTile(ppu, kBg1, 1u, front);
+  TileRows behind{};
+  behind[0][0] = 2u;
+  behind[0][1] = 2u;
+  putEntry(ppu, kBg2, 0u, 0x0001u);
+  putTile(ppu, kBg2, 1u, behind);
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
+  EXPECT_EQ(picture.at(1u, 0u), kGreenOut);
+  EXPECT_EQ(picture.at(2u, 0u), kBackdropOut);
 }
 
 // ---- what this block does not draw -------------------------------------------
@@ -624,30 +985,18 @@ TEST(SnesPpuPicture, ALayerEnabledOnlyOnTheSubScreenDrawsNothing) {
   PpuState ppu = screen();
   ppu.tm = 0x00u;
   ppu.ts = 0x01u;  // BG1 on the sub screen alone
-  putEntry(ppu, 0u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kBackdropOut);
 }
 
-TEST(SnesPpuPicture, BothTilePrioritiesShowOverTheBackdrop) {
-  PpuState ppu = screen();
-  putEntry(ppu, 0u, 0x2001u);  // bit 13: tile priority 1
-  putEntry(ppu, 1u, 0x0002u);  // the tile beside it at priority 0
-  putSolidTile(ppu, 1u, 1u);
-  putSolidTile(ppu, 2u, 2u);
-  const Picture picture = draw(ppu);
-  ASSERT_EQ(picture.frames, 1u);
-  EXPECT_EQ(picture.at(0u, 0u), kRedOut);
-  EXPECT_EQ(picture.at(8u, 0u), kGreenOut);
-}
-
 TEST(SnesPpuPicture, AModeThisBlockDoesNotDrawShowsTheBackdrop) {
   PpuState ppu = screen();
   ppu.bgmode = 0x03u;  // Mode 3, whose BG1 is 256 colours
-  putEntry(ppu, 0u, 0x0001u);
-  putSolidTile(ppu, 1u, 1u);
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
   EXPECT_EQ(picture.at(0u, 0u), kBackdropOut);

@@ -22,10 +22,9 @@ constexpr unsigned kFullScale = 31u * 16u;
                                    kFullScale);
 }
 
-// The character data's shape: four bitplanes of eight rows for a 16-colour tile, so
-// 32 bytes a character, with planes 2 and 3 the sixteen bytes after planes 0 and 1.
-constexpr std::size_t kCharacterBytes = 32u;
-constexpr std::size_t kHighPlanes = 16u;
+// The character data's shape: eight rows of a bitplane fill eight words, so a pair
+// of bitplanes takes sixteen bytes and the next pair begins sixteen bytes on.
+constexpr std::size_t kPlanePairBytes = 16u;
 
 }  // namespace
 
@@ -124,28 +123,57 @@ std::array<std::uint8_t, 4> Ppu::convert(std::uint16_t colour) const noexcept {
           channelByte((colour >> 10) & 0x1Fu, brightness), 255u};
 }
 
-std::optional<std::uint8_t> Ppu::sampleBg1(std::uint16_t x, std::uint16_t line) const noexcept {
+Ppu::Background Ppu::mode1Bg1() const noexcept {
+  return Background{.screen = s_.bg1sc,
+                    .characterBase = static_cast<std::uint8_t>(s_.bg12nba & 0x0Fu),
+                    .horizontal = s_.bg1hofs,
+                    .vertical = s_.bg1vofs,
+                    .large = (s_.bgmode & 0x10u) != 0u,
+                    .planes = 4u};
+}
+
+Ppu::Background Ppu::mode1Bg2() const noexcept {
+  // $210B keeps BG2's character base in its high nibble, above BG1's.
+  return Background{.screen = s_.bg2sc,
+                    .characterBase = static_cast<std::uint8_t>(s_.bg12nba >> 4),
+                    .horizontal = s_.bg2hofs,
+                    .vertical = s_.bg2vofs,
+                    .large = (s_.bgmode & 0x20u) != 0u,
+                    .planes = 4u};
+}
+
+Ppu::Background Ppu::mode1Bg3() const noexcept {
+  // Mode 1's third background is four colours, so two bitplanes.
+  return Background{.screen = s_.bg3sc,
+                    .characterBase = static_cast<std::uint8_t>(s_.bg34nba & 0x0Fu),
+                    .horizontal = s_.bg3hofs,
+                    .vertical = s_.bg3vofs,
+                    .large = (s_.bgmode & 0x40u) != 0u,
+                    .planes = 2u};
+}
+
+std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_t x,
+                                      std::uint16_t line) const noexcept {
   // Where the position falls in the background. The offsets are the low ten bits of
-  // the two scroll registers, and the display never falls outside the background:
+  // its two scroll registers, and the display never falls outside the background:
   // the masks below wrap it at its own size, whatever that size is.
-  const bool large = (s_.bgmode & 0x10u) != 0u;  // $2105 bit 4: BG1 in 16x16 blocks
-  const unsigned side = large ? 16u : 8u;
-  const unsigned bgX = x + (s_.bg1hofs & 0x03FFu);
-  const unsigned bgY = line + (s_.bg1vofs & 0x03FFu);
+  const unsigned side = background.large ? 16u : 8u;
+  const unsigned bgX = x + (background.horizontal & 0x03FFu);
+  const unsigned bgY = line + (background.vertical & 0x03FFu);
   const unsigned tileX = bgX / side;
   const unsigned tileY = bgY / side;
 
-  // The tilemap word for that tile: the base $2107 names, the row and column within
-  // one 32x32 screen, and the terms that carry a wide or tall map into its further
-  // screens, which follow the first at $800 bytes each.
+  // The tilemap word for that tile: the base its screen register names, the row and
+  // column within one 32x32 screen, and the terms that carry a wide or tall map into
+  // its further screens, which follow the first at $800 bytes each.
   //
   // The base counts whole screens: a 32x32 screen is $400 words, so the six bits of
-  // $2107 step the map in $400-word units and reach every 2 KB boundary of the
-  // memory.
-  const bool wide = (s_.bg1sc & 0x01u) != 0u;
-  const bool tall = (s_.bg1sc & 0x02u) != 0u;
-  unsigned word = (static_cast<unsigned>(s_.bg1sc >> 2) << 10) + ((tileY & 0x1Fu) << 5) +
-                  (tileX & 0x1Fu);
+  // the register step the map in $400-word units and reach every 2 KB boundary of
+  // the memory.
+  const bool wide = (background.screen & 0x01u) != 0u;
+  const bool tall = (background.screen & 0x02u) != 0u;
+  unsigned word = (static_cast<unsigned>(background.screen >> 2) << 10) +
+                  ((tileY & 0x1Fu) << 5) + (tileX & 0x1Fu);
   if (tall) word += (tileY & 0x20u) << (wide ? 6u : 5u);
   if (wide) word += (tileX & 0x20u) << 5;
   const std::size_t entryAt = (static_cast<std::size_t>(word) << 1) & 0xFFFFu;
@@ -172,36 +200,73 @@ std::optional<std::uint8_t> Ppu::sampleBg1(std::uint16_t x, std::uint16_t line) 
   }
   tile &= 0x03FFu;
 
-  // The character the tile names, under the base $210B holds for BG1. Planes 0 and 1
-  // are the low and high bytes of the row's word and planes 2 and 3 the same word
-  // sixteen bytes on; the leftmost pixel of a row is bit 7.
-  const std::size_t character =
-      ((static_cast<std::size_t>(s_.bg12nba & 0x0Fu) << 13) + tile * kCharacterBytes) & 0xFFFFu;
+  // The character the tile names, under the base the layer's own nibble holds: eight
+  // bytes a bitplane, so sixteen for a four-colour character and thirty-two for a
+  // sixteen-colour one.
+  const std::size_t character = ((static_cast<std::size_t>(background.characterBase) << 13) +
+                                 tile * 8u * background.planes) &
+                                0xFFFFu;
   const std::size_t row = (character + inY * 2u) & 0xFFFFu;
+
+  // The planes, low bit first: 0 and 1 in the low and high bytes of the row's word,
+  // then each further pair sixteen bytes on. The leftmost pixel of a row is bit 7.
   const unsigned bit = 7u - inX;
-  const unsigned index = ((s_.vram[row] >> bit) & 1u) |
-                         (((s_.vram[(row + 1u) & 0xFFFFu] >> bit) & 1u) << 1) |
-                         (((s_.vram[(row + kHighPlanes) & 0xFFFFu] >> bit) & 1u) << 2) |
-                         (((s_.vram[(row + kHighPlanes + 1u) & 0xFFFFu] >> bit) & 1u) << 3);
+  unsigned index = 0u;
+  for (unsigned plane = 0u; plane < background.planes; ++plane) {
+    const std::size_t at =
+        (row + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
+    index |= ((s_.vram[at] >> bit) & 1u) << plane;
+  }
   if (index == 0u) return std::nullopt;  // colour 0 of any palette is transparent
 
-  // A 16-colour background's palette is sixteen words on from the one before it.
+  // A background's palette is as many words on as it has colours, and Mode 1 gives
+  // none of the three a starting palette of its own.
   const unsigned palette = (entry >> 10) & 0x07u;
-  return static_cast<std::uint8_t>(palette * 16u + index);
+  return Shown{.word = static_cast<std::uint8_t>(palette * (1u << background.planes) + index),
+               .priority = (entry & 0x2000u) != 0u};
 }
 
 std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) const noexcept {
   // Forced blank drives black, whatever the memories hold.
   if (s_.forcedBlank()) return {0u, 0u, 0u, 255u};
 
-  // The first layer the main screen enables with something to show here, and the
-  // backdrop — palette word 0 — under all of them. BG1 of Mode 1 is the layer this
-  // chip draws; a layer enabled only on the sub screen shows nowhere, and the modes
-  // whose backgrounds are not 16 colours show their backdrop.
-  std::uint8_t word = 0u;
-  if ((s_.bgmode & 0x07u) == 1u && (s_.tm & 0x01u) != 0u) {
-    if (const std::optional<std::uint8_t> bg1 = sampleBg1(x, line)) word = *bg1;
+  // Mode 1 is the mode this chip draws; the others show their backdrop. Each of its
+  // three backgrounds is sampled once, and only where $212C puts it on the main
+  // screen: a background enabled on the sub screen alone shows nowhere.
+  std::optional<Shown> bg1;
+  std::optional<Shown> bg2;
+  std::optional<Shown> bg3;
+  if ((s_.bgmode & 0x07u) == 1u) {
+    if ((s_.tm & 0x01u) != 0u) bg1 = sample(mode1Bg1(), x, line);
+    if ((s_.tm & 0x02u) != 0u) bg2 = sample(mode1Bg2(), x, line);
+    if ((s_.tm & 0x04u) != 0u) bg3 = sample(mode1Bg3(), x, line);
   }
+
+  // Front to back, by the chart Mode 1 keeps. With no sprites drawn yet these are
+  // its background entries: BG1 and BG2 at tile priority 1, then the same two at
+  // priority 0, then BG3's two — except that $2105 bit 3 lifts BG3's high-priority
+  // tiles in front of everything. The backdrop, palette word 0, is under them all.
+  const auto shows = [](const std::optional<Shown>& background, bool priority) {
+    return background.has_value() && background->priority == priority;
+  };
+  const bool bg3InFront = (s_.bgmode & 0x08u) != 0u;
+  std::uint8_t word = 0u;
+  if (bg3InFront && shows(bg3, true)) {
+    word = bg3->word;
+  } else if (shows(bg1, true)) {
+    word = bg1->word;
+  } else if (shows(bg2, true)) {
+    word = bg2->word;
+  } else if (shows(bg1, false)) {
+    word = bg1->word;
+  } else if (shows(bg2, false)) {
+    word = bg2->word;
+  } else if (!bg3InFront && shows(bg3, true)) {
+    word = bg3->word;
+  } else if (shows(bg3, false)) {
+    word = bg3->word;
+  }
+
   const std::size_t at = static_cast<std::size_t>(word) << 1;
   return convert(static_cast<std::uint16_t>(s_.cgram[at] | (s_.cgram[at + 1u] << 8)));
 }

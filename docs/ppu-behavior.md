@@ -17,6 +17,9 @@ disagree it names the disagreement and what decided it.
 - [The characters](#the-characters)
   - [The character base counts 8 KB blocks](#the-character-base-counts-8-kb-blocks)
   - [A 16×16 block's numbers run on rather than wrapping inside it](#a-1616-blocks-numbers-run-on-rather-than-wrapping-inside-it)
+- [The priority order](#the-priority-order)
+  - [Only BG3's high-priority tiles move when $2105 bit 3 is set](#only-bg3s-high-priority-tiles-move-when-2105-bit-3-is-set)
+  - [Mode 1 gives no background a palette offset of its own](#mode-1-gives-no-background-a-palette-offset-of-its-own)
 - [The picture's edges](#the-pictures-edges)
   - [The console outputs no scanline 0](#the-console-outputs-no-scanline-0)
   - [Where the visible span ends is not settled by the documents](#where-the-visible-span-ends-is-not-settled-by-the-documents)
@@ -125,6 +128,35 @@ With `$2105`'s size bit set, an entry names `Tile`, `Tile+1`, `Tile+16`, `Tile+1
 
 *Documented and corroborated*, and stated explicitly by both sources because the intuitive reading is
 the wrong one.
+
+## The priority order
+
+### Only BG3's high-priority tiles move when $2105 bit 3 is set
+
+Anomie's Mode 1 list and fullsnes's chart give the same order, but fullsnes's is easy to misread.
+It prints `BG3.1a` at the very top and `BG3.1b` further down — `a` meaning the bit set and `b`
+meaning it clear — and then prints `BG3.0a` and `BG3.0b` on two **adjacent** rows near the bottom,
+which looks like BG3's low-priority tiles moving as well. Nothing sits between those two rows, so
+they name one and the same place. Anomie's list says it in words: BG3's priority-0 tiles are last
+either way, and only its priority-1 tiles change position.
+
+*Documented and corroborated*, once fullsnes's adjacent pair is read as a single place. Both charts
+then give, front to back and writing letters for backgrounds:
+
+```
+A B a b C c        and with the bit set:   C A B a b c
+```
+
+### Mode 1 gives no background a palette offset of its own
+
+Mode 0's four backgrounds start their palettes 32 words apart — Anomie gives `ppp*4 + (BG#-1)*32`
+for it — and the natural assumption is that the other modes do something similar. They do not.
+Anomie's Mode 1 formula is `ppp*ncolors` with no per-background term, so BG3's four-colour palette 1
+and BG1's sixteen-colour palette 0 name overlapping words. fullsnes's CGRAM index table agrees from
+the other direction: its four-colour BG palettes live at `01h-1Fh` for every background *except*
+BG2–BG4 in Mode 0, which are the ones given ranges of their own.
+
+*Documented and corroborated*, by two sources that state it in opposite forms.
 
 ## The picture's edges
 

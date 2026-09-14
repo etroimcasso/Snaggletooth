@@ -127,28 +127,48 @@ blank leaves below it; the frame's first line draws nothing, which is why a back
 registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
 the dots after it and not the ones before.
 
-**Mode 1's BG1 is what the chip draws**, on the main screen `$212C` enables:
+**Mode 1 is what the chip draws**: its three backgrounds, each on the main screen `$212C` enables.
+BG1 and BG2 are sixteen colours, BG3 is four.
 
 - The tilemap entry for a position is `(Base << 10) + ((Y & 0x1F) << 5) + (X & 0x1F)` words, plus
-  the terms a wide or tall map adds — `Base` being `$2107` bits 2–7, which count whole 32×32
-  screens of `$400` words, and the map's own size wrapping the position.
+  the terms a wide or tall map adds — `Base` being bits 2–7 of the background's own screen
+  register (`$2107`, `$2108`, `$2109`), which count whole 32×32 screens of `$400` words, and the
+  map's own size wrapping the position.
 - The entry is `vhopppcc cccccccc`: both flips, the tile's priority, its palette, its number.
-- The character is `(Base << 13) + Tile × 32` bytes from `$210B` bits 0–3, as four bitplanes —
-  planes 0 and 1 in the low and high bytes of eight words, then planes 2 and 3 the same way — with
-  the leftmost pixel of a row in bit 7.
-- `$2105` bit 4 makes each entry a 16×16 block of `Tile`, `Tile+1`, `Tile+16`, `Tile+17`. The
-  numbers run on rather than wrapping inside the block, and a flip reverses the block whole.
-- Colour 0 of any palette is transparent, and the backdrop — palette word 0 — shows where no
-  enabled layer has anything.
+- The character is `(Base << 13) + Tile × 8 × planes` bytes, `Base` being the background's nibble
+  of `$210B` (BG1 low, BG2 high) or `$210C` (BG3 low). Planes 0 and 1 are the low and high bytes of
+  eight words and each further pair is sixteen bytes on, so a four-colour character is sixteen
+  bytes and a sixteen-colour one is thirty-two. The leftmost pixel of a row is bit 7.
+- The palette a tile shows in begins `ppp` × its colours into CGRAM — sixteen words apart for BG1
+  and BG2, four for BG3 — and Mode 1 gives none of the three a starting palette of its own, so
+  BG3's palette 1 and BG1's palette 0 name the same words. Colour 0 of any palette is transparent.
+- `$2105` bits 4, 5 and 6 make each entry of BG1, BG2 or BG3 a 16×16 block of `Tile`, `Tile+1`,
+  `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a flip
+  reverses the block whole.
+- Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1,
+  `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3.
+
+**The order the three are drawn in**, front to back, is the one `$2105` names. Writing `A` and `a`
+for BG1's tiles at priority 1 and 0 and the same for the others, it is
+
+```
+A B a b C c        and with $2105 bit 3 set:   C A B a b c
+```
+
+so bit 3 lifts BG3's high-priority tiles from behind everything to in front of everything, and
+leaves its low-priority tiles where they are. The first background in that order with a
+non-transparent pixel is the one shown; where none has one, the backdrop — palette word 0 — shows.
+Sprites take their own places in this order and are not drawn yet.
 
 **The converter drives eight bits a channel.** A palette word is five bits a channel, and `INIDISP`
 brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 255 / (31 × 16))` in
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
-**What is not drawn yet**, so a reader does not go looking for it: sprites; BG2, BG3 and BG4; the
-sub screen, so a layer enabled only on `$212D` shows nowhere; the windows and colour math; and
-every mode but 1, which show their backdrop. Each arrives with its own work.
+**What is not drawn yet**, so a reader does not go looking for it: sprites; BG4, which Mode 1 does
+not have, so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows
+nowhere; the windows and colour math; mosaic; and every mode but 1, which show their backdrop. Each
+arrives with its own work.
 
 ## Writes and their latches
 
