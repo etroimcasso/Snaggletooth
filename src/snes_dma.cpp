@@ -251,13 +251,16 @@ void Snes::hdmaCycle() {
       }
     }
 
-    // Count the line down; a repeat entry writes every line, a plain one only on
-    // its first. When the counter empties, load the next entry.
-    const std::uint8_t entry = ch.nltr;
-    const std::uint8_t count = static_cast<std::uint8_t>((entry & 0x7Fu) - 1u);
-    ch.nltr = static_cast<std::uint8_t>((entry & 0x80u) | (count & 0x7Fu));
+    // The whole byte counts down, and the table's two ranges fall out of that one
+    // rule. $01-$80 transfer on their first line and stand quiet for the rest of
+    // theirs; $81-$FF transfer on every line of theirs. The count reaching zero
+    // loads the next entry. $80 is the line the two ranges meet on — one transfer,
+    // then 127 quiet lines — and it comes out right only because the borrow reaches
+    // the top bit and clears it. Masking that bit out of the subtraction makes $80
+    // repeat 127 times instead, which is a channel that never stops.
+    ch.nltr = static_cast<std::uint8_t>(ch.nltr - 1u);
     const std::uint8_t bit = static_cast<std::uint8_t>(1u << c);
-    if ((entry & 0x80u) != 0u) {
+    if ((ch.nltr & 0x80u) != 0u) {
       state_.hdmaDoWrite |= bit;
     } else {
       state_.hdmaDoWrite = static_cast<std::uint8_t>(state_.hdmaDoWrite & ~bit);
