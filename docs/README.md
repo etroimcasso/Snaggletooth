@@ -2,8 +2,9 @@
 
 Snaggletooth is a clean-room SNES implementation, built audio-first. These pages describe what is
 built and how to use it. Every value in them is derived from public hardware documentation and
-validated against it; where the published documentation disagrees with the hardware, the page that
-settles the case is [s-dsp-behavior.md](s-dsp-behavior.md).
+validated against it; where the published documentation disagrees with the hardware, the pages that
+settle the case are [s-dsp-behavior.md](s-dsp-behavior.md) for the audio chip and
+[ppu-behavior.md](ppu-behavior.md) for the picture processor.
 
 The [project README](../README.md) carries the status table — what is live, what is partial, and
 what is unstarted.
@@ -56,7 +57,8 @@ what is unstarted.
 | Page | Covers |
 |---|---|
 | [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the beam with its dot map and the master offset of every event a line carries, vertical blank under the taller picture, interlace, the two interrupts' trigger points and the memory refresh, the controller ports, the multiply/divide unit, the PPU's memory ports, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
-| [ppu.md](ppu.md) | The PPU's register file — every write with the latches it passes through, the dot map the counter latch answers, the frame's shape under interlace and the taller picture, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
+| [ppu-behavior.md](ppu-behavior.md) | Where the published PPU documentation is incomplete, ambiguous or wrong — the tilemap and character bases, the picture's edges, the brightness law, the latch flag — and what settles each case |
+| [ppu.md](ppu.md) | The PPU — the picture it draws and the frame observer it hands each one to, Mode 1's first background, the converter; and the register file beneath: every write with the latches it passes through, the dot map the counter latch answers, the frame's shape under interlace and the taller picture, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
 | [snes-cartridge.md](snes-cartridge.md) | The cartridge as a value — a copier's header ahead of a dump, the header and its vectors, the LoROM, HiROM and ExHiROM maps, where every bus address lands in the image, and the save windows |
 | [65816-cpu.md](65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 

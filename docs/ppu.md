@@ -6,6 +6,10 @@ console keeps it — every write with the latches it passes through, every read 
 answers and the side effects it has, the windows in which the three video memories can be reached,
 and the picture the chip draws from them, which a host watches through a frame observer.
 
+Where the published documentation is incomplete, ambiguous or wrong, [ppu-behavior.md](ppu-behavior.md)
+records what the sources say, how they disagree and what settles each case — the tilemap and character
+bases, the picture's edges, the brightness law and the latch flag among them.
+
 ## Contents
 
 - [The surface](#the-surface)
