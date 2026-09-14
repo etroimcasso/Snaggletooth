@@ -23,6 +23,7 @@ what is unstarted.
 | Hear a cartridge or a dump | [spc-rendering.md](spc-rendering.md) |
 | Run a whole SNES machine | [snes-machine.md](snes-machine.md) |
 | See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
+| Place an access at an exact dot, or know what a line and a frame are worth | [snes-machine.md §The video counters and interrupts](snes-machine.md#the-video-counters-and-interrupts) |
 | Run the audio unit alone | [apu-machine.md](apu-machine.md) |
 | Understand how sound is produced | [dsp.md](dsp.md) |
 | Read the code a dump contains | [spc700-disassembler.md](spc700-disassembler.md) |
@@ -52,8 +53,8 @@ what is unstarted.
 
 | Page | Covers |
 |---|---|
-| [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the video counters and their interrupts, the controller ports, the multiply/divide unit, the PPU's memory ports, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
-| [ppu.md](ppu.md) | The PPU's register file — every write with the latches it passes through, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
+| [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the beam with its dot map and the master offset of every event a line carries, vertical blank under the taller picture, interlace, the two interrupts' trigger points and the memory refresh, the controller ports, the multiply/divide unit, the PPU's memory ports, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
+| [ppu.md](ppu.md) | The PPU's register file — every write with the latches it passes through, the dot map the counter latch answers, the frame's shape under interlace and the taller picture, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
 | [snes-cartridge.md](snes-cartridge.md) | The cartridge as a value — a copier's header ahead of a dump, the header and its vectors, the LoROM, HiROM and ExHiROM maps, where every bus address lands in the image, and the save windows |
 | [65816-cpu.md](65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 

@@ -26,6 +26,11 @@ every access in order.
 - [The audio upload stub](#the-audio-upload-stub)
   - [Running a console's own boot ROM](#running-a-consoles-own-boot-rom)
 - [The video counters and interrupts](#the-video-counters-and-interrupts)
+  - [The line and the frame](#the-line-and-the-frame)
+  - [Vertical blank](#vertical-blank)
+  - [The blank flags](#the-blank-flags)
+  - [The interrupts](#the-interrupts)
+  - [The memory refresh](#the-memory-refresh)
 - [The controller ports](#the-controller-ports)
 - [The multiply/divide unit](#the-multiplydivide-unit)
 - [The PPU register file](#the-ppu-register-file)
@@ -35,6 +40,7 @@ every access in order.
 - [The bus observer](#the-bus-observer)
 - [Snapshot and restore](#snapshot-and-restore)
 - [Gotchas](#gotchas)
+- [What remains open](#what-remains-open)
 - [See also](#see-also)
 
 ## Building a machine
@@ -258,32 +264,104 @@ behaviour: test software that checksums the boot ROM is satisfied only by the co
 ## The video counters and interrupts
 
 The machine tracks where the beam is even though it draws nothing. `hpos` is the master cycle within the
-current scanline and `vpos` is the scanline down the frame; both advance as the machine runs. A scanline
-is 1364 master cycles (341 dots of four cycles each), and a frame is 262 lines on NTSC or 312 on PAL. The
-visible picture is lines 1 to 224; vertical blank runs from line 225 to the last line, and line 0 is the
-line after it. To keep the colour signal in step, NTSC shortens line 240 by one dot on every other frame;
-the `field` bit alternates each frame and selects it. (Interlace and overscan belong to the real PPU and
-are out of scope here — the structure modelled is the non-interlace one.)
+current scanline and `vpos` is the scanline down the frame; both advance as the machine runs, so a
+mid-frame snapshot resumes on the exact cycle.
+
+### The line and the frame
+
+A scanline is 1364 master cycles and carries 340 dots. Most dots are four cycles, but **dots 323 and 327
+are six**, which is what the counter latch at `$213C` answers and why a dot is not a quarter of `hpos`
+past dot 322. Two lines a frame are not 1364 cycles long:
+
+| Line | Length | When |
+|---|---|---|
+| Any line | 1364 | ordinarily |
+| NTSC line 240 | 1360 — 340 four-cycle dots, and no long ones | on an odd field, interlace off |
+| PAL line 311 | 1368 — the four extra cycles are dot 340's | on an odd field, interlace on |
+
+Dot 340 therefore exists only on that one PAL line; no read anywhere else latches it.
+
+A frame is 262 lines on NTSC and 312 on PAL, and an **interlaced frame of even parity runs one line
+longer** — NTSC's line 262, PAL's line 312, which belongs to vertical blank like the lines before it. The
+parity is `field`, which `$213F` bit 7 reports: 0 names the first frame of an interlaced pair and 1 the
+second. It toggles as each frame's first line reaches H = 1, four master cycles in, whether or not
+`$2133` bit 0 asks for interlace. The console leaves reset at H = 0 of line 0 with the flag clear, so the
+first frame it runs is the pair's second.
+
+Two frames together are a whole number of colour clocks, which is what the irregular lines are for:
+714,732 master cycles on NTSC and 716,100 interlaced; 851,136 on PAL and 852,504 interlaced.
+
+### Vertical blank
+
+`$2133` bit 2 chooses the line vertical blank begins on, 225 or 240. Beginning is a latched fact rather
+than a comparison of `vpos`: the machine decides at the start of every line from 225 on while the blank
+has not begun, and begins it if the line is 240 or later or if the bit is clear as that line starts. Once
+begun it holds to the frame's end and clears at the start of line 0.
+
+That gives the bit three useful behaviours. Set before line 225, it moves the blank to line 240. Set and
+then cleared between the two lines, it begins the blank at the start of the next line. Set *after* the
+blank has begun, it resumes nothing — but the PPU holds its video memories shut as though the picture
+were still running, to line 240 ([the PPU's windows](ppu.md#the-memories-and-their-windows)).
+
+From the line the blank begins on, in order: the vertical-blank flag at the line's start, the NMI flag two
+master cycles later, the HDMA channels deactivating for the rest of the frame, the
+[auto-read](#the-controller-ports) of the controllers starting, and the sprite table's address returning
+to its reload value at dot 10. A later change to `$2133` re-fires none of them.
+
+### The blank flags
+
+`$4212` reports the beam directly. Bit 7 is the vertical-blank fact above. **Bit 6 is raised when the beam
+passes H = 274 and lowered when it passes H = 1 of the next line** — on every line of the frame, vertical
+blank's own lines and a forced-blank frame included. The line's first four master cycles still carry the
+previous line's blank. Bit 0 is set while the auto-read is busy.
+
+### The interrupts
 
 Two interrupt sources reach the CPU, both driven from these counters:
 
-- **The vertical-blank NMI.** The flag at `$4210` bit 7 sets at the start of vblank and clears at its
-  end, and reading `$4210` acknowledges it. While the flag is set and `$4200` bit 7 enables NMIs, the NMI
-  line is asserted; enabling NMIs mid-vblank raises the line there and then. Reading the flag before
-  re-enabling avoids taking an old NMI twice.
-- **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: at a horizontal dot (`$4207/$4208`), at a
-  vertical line (`$4209/$420A`), or at both. When the counter reaches it, `$4211` bit 7 latches and the
-  IRQ line asserts; reading `$4211` or disabling the IRQ acknowledges it. An IRQ handler must acknowledge,
-  or it runs again.
+- **The vertical-blank NMI.** The flag at `$4210` bit 7 sets two master cycles into the blank's first
+  line and clears at the start of line 0, and reading `$4210` acknowledges it. While the flag is set and
+  `$4200` bit 7 enables NMIs, the NMI line is asserted; enabling NMIs mid-blank raises the line there and
+  then. Reading the flag before re-enabling avoids taking an old NMI twice.
+- **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: a horizontal position (`$4207/$4208`), a
+  vertical line (`$4209/$420A`), or both. The flag at `$4211` bit 7 is raised when the beam passes the
+  point the mode names, and the IRQ line follows it; reading `$4211` or selecting no compare acknowledges
+  it. A handler that does neither runs again.
 
-`$4212` reports the current position directly: bit 7 is set during vblank, bit 6 during hblank (outside
-the active picture, which spans master cycles 88 to 1112), and bit 0 while the
-[auto-read](#the-controller-ports) of the controllers is busy.
+  | Mode | The point |
+  |---|---|
+  | H only | 14 + 4 × HTIME master cycles into every line |
+  | H and V | the same point, on line VTIME |
+  | V only, and either H mode with HTIME = 0 | 1374 master cycles after the previous line began — ten into a line following a normal one, fourteen after the short line, six after the long one |
+
+  The crossing is noted as the cycle ticks and the flag is raised at the cycle's end under the mode the
+  cycle leaves behind, so a write to `$4200` that arms the timer in the very cycle its point is crossed
+  is in time, and one that disarms it in that cycle keeps the flag down.
 
 ```cpp
 // A minimal vblank-NMI loop: enable the NMI, then let the machine run into vblank.
 // LDA #$80 ; STA $4200 ; ...   the handler at the $FFFA vector runs once per frame.
 ```
+
+### The memory refresh
+
+Once a line the CPU is held off the bus for **40 master cycles** while memory refreshes. The point walks
+an eight-cycle grid near the middle of the line — 538 cycles into line 0 of the first frame, then the
+point on that grid nearest 536 into each line after it, so consecutive ordinary lines come up 538 and 534
+and a line of another length re-phases the pair. `SnesState::refreshAt` names the next one and
+`refreshLeft` the cycles left in one under way.
+
+What it means for a caller:
+
+- **An instruction whose cycles span the point costs 40 more**, and `step()` returns that. A program runs
+  about 3 % slower against the beam, the APU and every HDMA and IRQ event, which is the console.
+- **`run()` may stop inside a pause** and carries the rest of it, so its overshoot stays within one
+  access and `run(a)` then `run(b)` still advances the machine exactly as `run(a + b)`.
+- **A halted core is not paused.** It makes no bus cycle to hold off the bus, so a machine stopped on STP
+  or waiting on WAI keeps its exact six-cycle idle grid.
+- **The observer is told nothing.** A pause is neither an access nor a CPU cycle, any more than a
+  transfer's overhead cycles are, so cycle counts taken through the observer are unchanged.
+- **A snapshot taken inside a pause restores into the rest of it.**
 
 ## The controller ports
 
@@ -597,6 +675,44 @@ moved, never copied; a moved machine carries its audio machine after its state.
 - An observer sees fetches too: to count only the data an instruction touched, drop `OpcodeFetch` and
   `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle
   the CPU spent, count its accesses and the internal cycles together.
+- A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
+  Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
+  the console spends.
+- The frame parity a machine runs its first frame at is 1, not 0: the console leaves reset with the flag
+  clear and the toggle at H = 1 of line 0 is four cycles away. A program reading `$213F` bit 7 to pick a
+  field sees the pair's second frame first.
+- `hpos` is master cycles, not dots, and past dot 322 the two stop being a factor of four apart. Read
+  the dot through `$213C` or the PPU's own input rather than dividing.
+
+## What remains open
+
+Questions the documentation leaves about the beam, recorded rather than decided by invention:
+
+- **Where the refresh sits.** anomie measures it about 536 cycles into the line on an eight-cycle grid,
+  which is what the machine does; the register page puts it at H = 133.5 with a half-dot stutter between
+  frames, which is what its own latch quantities need. The two differ by a few cycles.
+- **Whether the refresh grid and a transfer's alignment grid are one.** A transfer aligns to a multiple
+  of eight master cycles since power-on and the refresh's grid is offset two from it.
+- **Whether a transfer in flight is cut by the refresh.** Here a DMA byte or an HDMA event completes and
+  the pause follows it.
+- **A wait released inside a pause.** A halted core is not paused, so a WAI whose interrupt arrives
+  inside one wakes up to 40 cycles earlier than a console's would.
+- **The timer's measured exceptions.** anomie reports no IRQ for dot 153 on the short line, and none on
+  a frame's last line — measurements without a mechanism, so neither is modelled.
+- **What `$4212` bit 7 shows** when the taller picture is asked for after vertical blank has begun. The
+  memories shut; the flag here stays the latched fact.
+- **Asking for the taller picture at the very start of line 225.** anomie measures the NMI one line
+  later, at 226, with the last HDMA still on line 224 — the two effects skewed against each other — and
+  reports that asking for it at any later line does nothing at all. No mechanism is given for either,
+  and the machine here holds vertical blank to line 240 instead. Clearing the bit in that window is
+  measured and modelled: the blank begins at the start of the line that follows.
+- **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length
+  is decided by the state as its own line runs.
+- **The auto-read's start**, which anomie puts somewhere in dots 32.5 to 95.5 on a 256-cycle grid. It
+  begins here as vertical blank does, and its window is the documented 4224 cycles.
+- **The PAL interlaced frame length.** The register page gives 426,936 cycles for one such frame
+  (313 lines plus four), but the extra line belongs to the even field and the long line to the odd one,
+  so neither frame takes both. The pair here is 425,572 and 426,932.
 
 ## See also
 

@@ -11,6 +11,7 @@ so that a program's dialogue with the chip is already what the hardware would ha
 
 - [The surface](#the-surface)
 - [What the chip is told](#what-the-chip-is-told)
+- [The frame](#the-frame)
 - [Writes and their latches](#writes-and-their-latches)
 - [The memories and their windows](#the-memories-and-their-windows)
 - [The multiplier](#the-multiplier)
@@ -47,6 +48,47 @@ At every access the machine hands the PPU its input pins as `PpuInputs`: the bea
 the frame parity, the vertical- and horizontal-blank signals as `$4212` reports them, the clock
 rate, and the level of the counter-latch line, which is bit 7 of the I/O port written at `$4201`.
 The chip learns nothing else about the machine; every rule below is stated in those terms.
+
+The dot is not a quarter of the line's master cycle throughout. A line carries 340 dots and most are
+four master cycles, but **dots 323 and 327 are six** — which is what the counter latch answers, and why
+the last dot of an ordinary line is 339 rather than 340. Dot 340 exists on one line only: PAL's line 311
+on an odd interlaced field, which runs 1368 cycles. The short line, NTSC's 240 on an odd field with
+interlace off, is 340 four-cycle dots and has no long ones.
+
+| Master cycles into the line | Dot |
+|---|---|
+| 0–1291 | 0–322, four cycles each |
+| 1292–1297 | 323 |
+| 1298–1309 | 324–326 |
+| 1310–1315 | 327 |
+| 1316–1363 | 328–339 |
+| 1364–1367 | 340, on the long line only |
+
+## The frame
+
+The chip is told the frame's shape through `$2133`, and two of its bits change what the beam does. The
+machine's own account of the line and frame lengths, the frame parity and every event's master offset is
+under [the video counters](snes-machine.md#the-video-counters-and-interrupts); what the chip does with
+them is here.
+
+**Bit 2 — the taller picture.** Vertical blank begins at line 240 instead of 225, so the picture is 239
+lines rather than 224. The chip reads the bit from its own register, so a change reaches the beam at the
+start of the next line that asks.
+
+**Bit 0 — interlace.** The frame of even parity runs one line longer, and PAL's line 311 of an odd field
+runs four cycles long. The parity is `$213F` bit 7, which the chip answers from its field pin.
+
+Three events belong to the chip rather than the machine:
+
+- **The sprite table's address returns to its reload value at dot 10 of vertical blank's first line** —
+  which line that is, the chip takes from its own bit 2 — unless the screen is in forced blank, when it
+  was not drawing and the address stands. Releasing forced blank during that line reloads it there and
+  then.
+- **The two sprite overflow flags in `$213E` clear as the frame's first line begins**, unless the screen
+  is in forced blank: they belong to the picture just finished, and a frame the chip spent blank leaves
+  whatever they hold.
+- **The counter latch** captures the dot above and the line, on a read of `$2137` or the latch line
+  falling.
 
 ## Writes and their latches
 
@@ -88,7 +130,14 @@ Outside its window a write is ignored: the byte does not land, and the access re
 same — VRAM's by the step `$2115` selects, OAM's by one, CGRAM's flip-flop and word address as they
 would have. A read outside the window answers with the chip's open bus for that port (below) and
 steps the same way; a VRAM read does not refill the prefetch register, and setting the VRAM address
-does not load it. Vertical blank is lines 225 to the end of the frame; line 0 is not part of it.
+does not load it.
+
+Vertical blank here is the machine's latched fact, not a comparison of the line: it runs from the line
+`$2133` bit 2 chooses — 225 or 240 — to the end of the frame, and line 0 is not part of it. One state
+parts the windows from that fact. **Asking for the taller picture after the blank has already begun shuts
+the memories again until line 240**: it resumes neither the picture nor anything the blank stopped, but
+the chip holds VRAM, the sprite table and the palette's blank-only half as though it were still drawing.
+Forced blank opens them regardless.
 
 ```cpp
 // The screen on, the beam inside the picture: nothing lands, the address moves.
@@ -167,7 +216,22 @@ Each of these is a question the documentation leaves, recorded rather than decid
   the address the chip's own palette fetch was at; until the fetch is built there is no honest
   address, so the write does not land.
 - Whether reading `$213F` clears the latch flag while a condition that sets it is still active.
-- Whether the software latch works when the port's bit 7 *was* high but is no longer.
+- Whether the software latch works when the port's bit 7 was high and has since fallen.
 - The pixel or so the chip draws from the old value when `INIDISP` is written (the register page's
   early-read note); a drawing-side matter.
 - Bit 7 of `VMAIN` at power-on, which the documentation marks unknown and this state leaves clear.
+- How to count the line's long dots. The register page states the dot clock as four five-cycle dots and
+  its own measured latch quantities as two six-cycle ones; the latch is what a program can read, so the
+  two six-cycle dots are what the chip answers.
+- What `$4212` bit 7 reports while the taller picture is asked for after vertical blank has begun. The
+  memories shut; the flag stays the blank's latched fact.
+- When a mid-frame change to the interlace bit reaches the frame's irregular lines. Each length is
+  decided by the state as its own line runs.
+- Whether the sprite table reloads on *any* fall of `INIDISP` bit 7, as anomie has it, or only during
+  vertical blank's first line, as the register page has it. The register page is followed.
+- Exactly where in the frame's first line the overflow flags clear. The register page marks the dot
+  itself uncertain; they clear as the line begins.
+- Whether the overflow flags clear in a frame the chip spent in forced blank. anomie has them reset at
+  vertical blank's end with no exception; the register page excepts forced blank, which is followed.
+- Whether the overflow flags are set regardless of the sprite enables, as the register page states. The
+  flags have nothing to set them until the chip draws sprites.

@@ -202,11 +202,33 @@ struct SnesState {
   // ---- the video position ---------------------------------------------------
   // Where the beam is, tracked in master cycles within the scanline and in whole
   // scanlines down the frame. Both advance as the machine runs, so a mid-frame
-  // snapshot resumes on the exact dot. The frame-parity bit alternates every frame
-  // and selects the one short scanline NTSC uses to keep the colour signal in step.
+  // snapshot resumes on the exact dot. The frame-parity bit toggles as each frame's
+  // first line begins and chooses the frame's one irregular scanline.
   std::uint16_t hpos = 0;   // master cycles into the current scanline (0..lineLength-1)
-  std::uint16_t vpos = 0;   // the current scanline (0..261 NTSC, 0..311 PAL)
-  std::uint8_t field = 0;   // frame parity (0/1); NTSC line 240 is short on odd frames
+  std::uint16_t vpos = 0;   // the current scanline (0..261 NTSC, 0..311 PAL, one further under interlace)
+  // The frame parity, which STAT78 bit 7 answers: 0 names the first frame of an
+  // interlaced pair and 1 the second. It toggles at H = 1 of line 0, and the console
+  // comes out of reset at H = 0, V = 0 with the flag clear — so the first frame it
+  // runs is the pair's second, four cycles after the machine starts.
+  std::uint8_t field = 0;
+
+  // Vertical blank is a latched fact, not a comparison: the machine decides at the
+  // start of each line from kVblankStartLine on, and once it has begun it holds to
+  // the frame's end no matter what SETINI says afterwards. The line it began on
+  // dates the two events that follow — the NMI flag and the sprite table's reload.
+  bool inVblank = false;
+  std::uint16_t vblankBeginLine = 0;
+
+  // The length of the line before this one, which dates the H/V timer's trigger
+  // point when HTIME is zero: that point is 1374 master cycles after the previous
+  // line began. A normal line at power-on, as the line before line 0 is.
+  std::uint16_t previousLineMaster = 1364;
+
+  // The memory refresh. The CPU is held off the bus for forty master cycles once a
+  // line, at a point that walks an eight-cycle grid. Both fields are state: a
+  // snapshot taken inside a pause restores into the rest of it.
+  std::uint64_t refreshAt = 538;  // the master cycle the next pause begins after
+  std::uint8_t refreshLeft = 0;   // master cycles left in the pause in progress (0 = none)
 
   // ---- the interrupt registers ----------------------------------------------
   std::uint8_t nmitimen = 0;    // $4200: bit7 NMI enable, bits5-4 H/V IRQ mode, bit0 auto-joypad enable
@@ -430,20 +452,42 @@ class Snes {
   // by the master cycles it now owes.
   void machineCycle();
 
-  // Advances the machine's own events by `cost` master cycles: the H/V counters and
-  // the vblank flag, the H/V-timer compare, the arithmetic unit, and the auto-joypad
-  // window. It runs before the cycle's memory access resolves, so a register read
-  // sees the event it shares the cycle with. Called exactly once per cycle.
+  // The master cycles the refresh holds the CPU off the bus, spent a fast cycle at a
+  // time, and what every cycle ends with: the timer's crossing settled, the interrupt
+  // lines driven, the master counter advanced and the audio machine paced.
+  void refreshCycle();
+  void closeCycle();
+
+  // Advances the machine's own events by `cost` master cycles: the beam and every
+  // event its line carries, the H/V timer's trigger points, the arithmetic unit, and
+  // the auto-joypad window. It runs before the cycle's memory access resolves, so a
+  // register read sees the event it shares the cycle with. Called exactly once per
+  // cycle.
   void tickVideo(std::uint32_t cost);
 
-  // Recomputes the NMI and IRQ line levels from the flags and enables as they now
-  // stand and drives them onto the core. It runs after the cycle's access, so a
-  // write that enables an interrupt takes effect this cycle and is sampled next.
-  void driveLines();
+  // The events inside one line, for the master-cycle span (`from`, `to`] of a line
+  // that began at `lineStart`: the frame's parity, vertical blank's NMI flag and the
+  // sprite table's reload, the H/V timer's points, and the refresh.
+  void crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
 
-  // The master-cycle length of the current scanline: 1364, except NTSC's line 240 on
-  // an odd frame, which is four cycles short to keep the colour signal in step.
+  // Raises the timer flag when the crossing this cycle noted is the one the mode now
+  // selects. Part of closing a cycle.
+  void settleTimer() noexcept;
+
+  // The master-cycle length of the current scanline and the number of lines in the
+  // current frame. One line a frame is four cycles short or four long, and an
+  // interlaced frame of even parity carries one line more.
   [[nodiscard]] std::uint16_t lineLength() const noexcept;
+  [[nodiscard]] std::uint16_t frameLines() const noexcept;
+
+  // The beam's dot, by a map whose dots 323 and 327 are six master cycles wide, and
+  // whether the horizontal-blank flag stands. Both are what the PPU is told.
+  [[nodiscard]] std::uint16_t hdot() const noexcept;
+  [[nodiscard]] bool inHblank() const noexcept;
+
+  // The master cycle the refresh pauses on for a line beginning at `lineStart`: the
+  // point on the previous pause's eight-cycle grid nearest the middle of that line.
+  [[nodiscard]] std::uint64_t nextRefresh(std::uint64_t lineStart) const noexcept;
 
   // Commits the arithmetic result when its cycle countdown expires.
   void commitMath() noexcept;
@@ -543,15 +587,14 @@ class Snes {
   void latchJoypads() noexcept;
   [[nodiscard]] std::uint8_t clockJoypad(std::size_t port) noexcept;
 
-  // Moves the beam to the next scanline, wrapping the frame and toggling its parity,
-  // and setting or clearing the vblank flag, telling the PPU vblank has begun, and
-  // starting the auto-joypad read at the boundaries the console does.
-  void advanceLine() noexcept;
+  // Takes the beam to the line beginning at `lineStart`, wrapping the frame, and runs
+  // the events that line's start carries: the frame's own — the overflow flags and
+  // vertical blank's end — or the decision whether vertical blank begins here, with
+  // the HDMA channels and the auto-joypad read that follow from it.
+  void advanceLine(std::uint64_t lineStart) noexcept;
   // The auto-read's end: the sixteen bits it clocked out of each port land in
   // $4218-$421F.
   void finishAutoJoypadRead() noexcept;
-  // Whether the H/V-timer condition currently holds, by the mode $4200 selects.
-  [[nodiscard]] bool irqConditionMet() const noexcept;
 
   // Records `value` as the data bus's last byte and returns it, so an unmapped read
   // that follows sees it.
@@ -574,6 +617,12 @@ class Snes {
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
   bool videoAdvanced_ = false;       // whether this cycle's access already ticked the machine's events
+  // The H/V timer's points the cycle in progress crossed, which the mode as the cycle
+  // ends decides between. They belong to the cycle, not to the machine, so a snapshot
+  // does not carry them.
+  bool timerHPoint_ = false;         // the H point, on whatever line
+  bool timerHPointOnVLine_ = false;  // the H point, on the line VTIME names
+  bool timerZeroOnVLine_ = false;    // the H = 0 point, on that line
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
   std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported
 };
