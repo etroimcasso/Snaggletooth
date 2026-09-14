@@ -17,6 +17,7 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 - [The frame](#the-frame)
 - [The picture](#the-picture)
 - [The sprites](#the-sprites)
+- [The masking windows](#the-masking-windows)
 - [Writes and their latches](#writes-and-their-latches)
 - [The memories and their windows](#the-memories-and-their-windows)
 - [The multiplier](#the-multiplier)
@@ -168,8 +169,9 @@ frame rather than no frame.
 
 **What is not drawn yet**, so a reader does not go looking for it: BG4, which Mode 1 does not have,
 so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows nowhere;
-the windows and colour math; mosaic; and every mode but 1, which show their backdrop and their
-sprites nowhere. Each arrives with its own work.
+colour math; mosaic; and every mode but 1, which show their backdrop and their sprites nowhere. Each
+arrives with its own work. The windows that take layers away are drawn, and have [their own
+section](#the-masking-windows).
 
 ## The sprites
 
@@ -260,6 +262,50 @@ Time's count, while it draws where its own X puts it, which is nowhere on the pi
 **Both flags are raised whether or not `$212C` bit 4 shows the sprites at all**, and they are cleared
 as the next picture begins — except after a frame the chip spent in forced blank, where it drew
 nothing and they stand.
+
+## The masking windows
+
+Two horizontal windows take layers away. Each is a span of picture positions, and where a layer's
+own settings say the two windows cover a position, that layer shows nothing there and the priority
+order falls through to whatever stands behind it — down to the backdrop, which no window reaches.
+
+**A window is a span between two edges, both ends inside it.** Window 1 runs from `$2126` to
+`$2127` and window 2 from `$2128` to `$2129`, in picture positions 0 to 255. Edges that meet make a
+window one pixel wide, and a left edge standing past its right makes one with no range at all, false
+everywhere. The windows have **no vertical extent**: a program shapes one down the picture by moving
+its edges line by line, which is what HDMA into these four registers is for.
+
+**Every layer keeps four bits of its own**, in the nibble `$2123`, `$2124` or `$2125` holds for it —
+BG1, BG3 and OBJ in the low nibble of their register, BG2, BG4 and the colour window in the high:
+
+| bit of the nibble | 3 | 2 | 1 | 0 |
+|---|---|---|---|---|
+| | enable window 2 | invert window 2 | enable window 1 | invert window 1 |
+
+An inversion bit replaces its window with the inverse of it, so the span becomes everything outside
+the span.
+
+**The two combine by the logic the layer names** in its own pair of bits — `$212A` holds the four
+backgrounds, two bits each from BG1 in the low pair, and `$212B` holds OBJ in its low pair and the
+colour window in the pair above:
+
+| bits | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| | OR | AND | XOR | XNOR |
+
+The logic applies only where the layer enables both windows. With one enabled, that window is the
+answer on its own; with neither, nothing is covered.
+
+**`$212E` decides which layers the result takes away** on the main screen, one bit a layer in the
+order BG1, BG2, BG3, BG4, OBJ — and it gates the mask rather than the window, so a layer whose
+windows are enabled but whose bit is clear is masked nowhere. A masked sprite is masked whole: the
+line buffer's entry at that position is not consulted, and the sprite's priority answers nothing.
+`$212F` is the same register for the sub screen.
+
+**Every one of these registers is read at the position it shapes**, and nothing about them is
+carried from one position to the next. So an edge a program moves part-way along a line changes the
+rest of that line and leaves what is already drawn alone, and an edge a transfer delivers in the
+blank between two lines is the one the whole of the next line is drawn under.
 
 ## Writes and their latches
 

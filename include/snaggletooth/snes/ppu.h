@@ -363,6 +363,26 @@ class Ppu {
   [[nodiscard]] std::size_t spriteCharacter(const Sprite& sprite, unsigned column,
                                             unsigned row) const noexcept;
 
+  // The six things a window can be enabled for. Each keeps four bits of a window
+  // selector — two enables and two inversions — and two bits of a logic register,
+  // and the first five have a bit of this value in the two mask registers. The
+  // colour window has none: it feeds colour math and no layer's visibility.
+  enum class Layer : unsigned { Bg1 = 0u, Bg2 = 1u, Bg3 = 2u, Bg4 = 3u, Object = 4u, Colour = 5u };
+
+  // Whether the windows cover a picture position for one layer. Each window is the
+  // span its two edges name, both ends inclusive and empty where the left edge
+  // stands past the right, taken as written or inverted as the layer's own bits
+  // direct. Where the layer enables both, they are combined by the logic its two
+  // bits of $212A or $212B name; where it enables one, that window is the answer;
+  // where it enables neither, nothing is covered.
+  [[nodiscard]] bool windowCovers(Layer layer, std::uint16_t x) const noexcept;
+
+  // Whether a layer shows nothing at a picture position on the screen whose mask
+  // register this is: the windows cover the position and that register names the
+  // layer. The backdrop has no bit in either register and is never masked.
+  [[nodiscard]] bool masked(Layer layer, std::uint8_t maskRegister,
+                            std::uint16_t x) const noexcept;
+
   // The three backgrounds Mode 1 draws, each with the registers it reads.
   [[nodiscard]] Background mode1Bg1() const noexcept;
   [[nodiscard]] Background mode1Bg2() const noexcept;

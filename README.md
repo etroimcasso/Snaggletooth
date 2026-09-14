@@ -109,10 +109,15 @@ Each row links to the page that describes the component in full.
   the opposite directions the two passes run in, each raising its own flag in `$213E` at the point
   that raises it; the one X position counted a screen from where it draws; and the sprite `$2103`
   and the sprite-table port put in front of every other.
+- **Layers are taken away by the two masking windows.** Each window a span whose ends are both
+  inside it, per-layer enable and inversion bits, the four combining logics, and `$212E` deciding
+  which layers on the main screen the result reaches — with the backdrop under them all, which no
+  window touches. Read at the position they shape, so an edge moved part-way along a line changes
+  the rest of it, and one a transfer delivers between two lines shapes the whole of the next.
 - **The register file is complete beneath it.** Every write with its latches, every read with its
   open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which
   each video memory can be reached.
-- **Not yet:** the sub screen, the windows and colour math, mosaic, and every mode but 1 — see the
+- **Not yet:** the sub screen and colour math, mosaic, and every mode but 1 — see the
   [roadmap](#roadmap).
 
 ### The toolkit
@@ -271,9 +276,9 @@ Snaggletooth is built audio-first:
    the system glue that binds them to the audio core.
 
 The PPU is the piece under way, and it draws: a cartridge runs in a window with the whole of its
-Mode 1 picture on screen, its sprites over it under the counts the chip can afford, recorded as it
-runs. The rest of the picture — the sub screen, the windows and colour math, mosaic, and the other
-screen modes — follows in order. After it, the machine is taken through the range of cartridge types until they
+Mode 1 picture on screen, its sprites over it under the counts the chip can afford, the masking
+windows taking layers away where a program puts them, recorded as it runs. The rest of the picture —
+the sub screen and colour math, mosaic, and the other screen modes — follows in order. After it, the machine is taken through the range of cartridge types until they
 boot, and
 the DSP returns to close out its three sub-tests with the wider body of real software available to
 exercise it.

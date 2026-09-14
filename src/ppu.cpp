@@ -436,28 +436,82 @@ std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_
                .priority = (entry & 0x2000u) != 0u};
 }
 
+bool Ppu::windowCovers(Layer layer, std::uint16_t x) const noexcept {
+  // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
+  // one, BG2, BG4 and the colour window in the high — and the two logic registers
+  // give every layer a pair of bits of its own, the four backgrounds filling one
+  // register and the sprites and the colour window the low half of the other.
+  const unsigned index = static_cast<unsigned>(layer);
+  const std::uint8_t selector =
+      index < 2u ? s_.w12sel : (index < 4u ? s_.w34sel : s_.wobjsel);
+  const unsigned bits = (selector >> ((index & 1u) * 4u)) & 0x0Fu;
+  const std::uint8_t logic = index < 4u ? s_.wbglog : s_.wobjlog;
+  const unsigned op = (logic >> ((index & 3u) * 2u)) & 0x03u;
+
+  // A window runs from its left edge to its right, both ends inclusive — so edges
+  // that meet are one pixel wide, and a left edge past the right is a window with
+  // no range at all. The layer's inversion bit replaces it with its inverse.
+  const auto spans = [x](std::uint8_t left, std::uint8_t right) {
+    return x >= left && x <= right;
+  };
+  const bool window1 = spans(s_.wh0, s_.wh1) != ((bits & 0x01u) != 0u);
+  const bool window2 = spans(s_.wh2, s_.wh3) != ((bits & 0x04u) != 0u);
+
+  const bool enable1 = (bits & 0x02u) != 0u;
+  const bool enable2 = (bits & 0x08u) != 0u;
+  if (!enable1) return enable2 && window2;
+  if (!enable2) return window1;
+
+  // Both enabled: the logic the layer's own pair of bits names. XNOR is the
+  // inverse of XOR, which is the two agreeing.
+  switch (op) {
+    case 0u: return window1 || window2;   // OR
+    case 1u: return window1 && window2;   // AND
+    case 2u: return window1 != window2;   // XOR
+    default: return window1 == window2;   // XNOR
+  }
+}
+
+bool Ppu::masked(Layer layer, std::uint8_t maskRegister, std::uint16_t x) const noexcept {
+  // The mask register's bits run BG1, BG2, BG3, BG4, OBJ, in the order the layers
+  // are numbered, and it gates the mask rather than the window: a layer whose
+  // windows are enabled but whose bit is clear is masked nowhere.
+  const unsigned bit = 1u << static_cast<unsigned>(layer);
+  return (maskRegister & bit) != 0u && windowCovers(layer, x);
+}
+
 std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) const noexcept {
   // Forced blank drives black, whatever the memories hold.
   if (s_.forcedBlank()) return {0u, 0u, 0u, 255u};
 
   // Mode 1 is the mode this chip draws; the others show their backdrop. Each of its
   // three backgrounds is sampled once, and only where $212C puts it on the main
-  // screen: a layer enabled on the sub screen alone shows nowhere.
+  // screen and the windows leave it there: a layer enabled on the sub screen alone
+  // shows nowhere, and one the windows mask shows nothing at this dot, so the chart
+  // below falls through to whatever stands behind it.
+  //
+  // The window registers are read here, at the dot they shape, and nothing about
+  // them is carried from one dot to the next — which is what lets a program move an
+  // edge part-way along a line, and what lets a transfer shape a window down the
+  // picture a line at a time.
   std::optional<Shown> bg1;
   std::optional<Shown> bg2;
   std::optional<Shown> bg3;
   if ((s_.bgmode & 0x07u) == 1u) {
-    if ((s_.tm & 0x01u) != 0u) bg1 = sample(mode1Bg1(), x, line);
-    if ((s_.tm & 0x02u) != 0u) bg2 = sample(mode1Bg2(), x, line);
-    if ((s_.tm & 0x04u) != 0u) bg3 = sample(mode1Bg3(), x, line);
+    if ((s_.tm & 0x01u) != 0u && !masked(Layer::Bg1, s_.tmw, x)) bg1 = sample(mode1Bg1(), x, line);
+    if ((s_.tm & 0x02u) != 0u && !masked(Layer::Bg2, s_.tmw, x)) bg2 = sample(mode1Bg2(), x, line);
+    if ((s_.tm & 0x04u) != 0u && !masked(Layer::Bg3, s_.tmw, x)) bg3 = sample(mode1Bg3(), x, line);
   }
 
   // The sprite the line buffer holds here, where $212C puts sprites on the main
-  // screen. Only the topmost sprite reached the buffer, so only its priority
-  // speaks to the backgrounds. A line Time did not gather shows none.
+  // screen and the windows leave them there. Only the topmost sprite reached the
+  // buffer, so only its priority speaks to the backgrounds, and a masked sprite is
+  // masked whole — whatever the buffer holds at this dot is not consulted. A line
+  // Time did not gather shows none.
   std::uint8_t spriteWord = 0u;
   std::uint8_t spritePriority = kNoSprite;
-  if ((s_.tm & 0x10u) != 0u && s_.sprites.line == line && (s_.bgmode & 0x07u) == 1u) {
+  if ((s_.tm & 0x10u) != 0u && s_.sprites.line == line && (s_.bgmode & 0x07u) == 1u &&
+      !masked(Layer::Object, s_.tmw, x)) {
     spriteWord = s_.sprites.word[x];
     spritePriority = s_.sprites.priority[x];
   }
