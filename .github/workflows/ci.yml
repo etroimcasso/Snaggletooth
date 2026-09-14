@@ -30,6 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: false
+          submodules: recursive
 
       - name: Stage SPC700 vectors
         run: |
@@ -119,6 +120,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Stage SPC700 vectors
         shell: powershell
@@ -210,6 +213,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: false
+          submodules: recursive
 
       - name: Stage SPC700 vectors
         run: |
@@ -303,6 +307,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           clean: false
+          submodules: recursive
 
       - name: Stage SPC700 vectors
         run: |
@@ -394,6 +399,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Stage SPC700 vectors
         shell: powershell

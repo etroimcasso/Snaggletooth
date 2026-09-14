@@ -44,6 +44,7 @@
 #include "snaggletooth/cpu/cpu65816.h"
 #include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/ppu.h"
+#include "snaggletooth/snes/video_frame.h"
 
 namespace snaggletooth {
 
@@ -377,6 +378,15 @@ class Snes {
   void setObserver(BusObserver* observer) noexcept { observer_ = observer; }
   [[nodiscard]] BusObserver* observer() const noexcept { return observer_; }
 
+  // The observer told every frame the PPU finishes (FrameObserver,
+  // `video_frame.h`), or none, which is how the machine starts. The machine
+  // resolves a pixel per visible dot only while one is set, so a machine nobody
+  // is watching draws nothing; what a program can observe is the same either way.
+  // Like the bus observer it is the host's object and not part of the state: a
+  // snapshot does not carry it and restore() leaves it in place.
+  void setFrameObserver(FrameObserver* observer) noexcept;
+  [[nodiscard]] FrameObserver* frameObserver() const noexcept { return frameObserver_; }
+
   // The audio machine's observer (ApuObserver, `apu/apu.h`), told every access
   // the sound CPU makes and every instruction boundary it crosses, under the
   // same terms as the bus observer: the host's object, not part of the state,
@@ -464,6 +474,17 @@ class Snes {
   // register read sees the event it shares the cycle with. Called exactly once per
   // cycle.
   void tickVideo(std::uint32_t cost);
+
+  // Resolves the picture's pixels for the visible dots the master-cycle span
+  // (`from`, `to`] of a line beginning at `lineStart` passed, each from the
+  // registers and memories as they stand at its own dot. Runs only while a frame
+  // observer is set.
+  void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
+
+  // Hands the finished picture to the frame observer: the rows the frame's own
+  // vertical blank left below it, the frame's parity, and the raster the dots
+  // wrote. Called as the beam reaches the next frame's first line.
+  void deliverFrame();
 
   // The events inside one line, for the master-cycle span (`from`, `to`] of a line
   // that began at `lineStart`: the frame's parity, vertical blank's NMI flag and the
@@ -625,6 +646,15 @@ class Snes {
   bool timerZeroOnVLine_ = false;    // the H = 0 point, on that line
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
   std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported
+  FrameObserver* frameObserver_ = nullptr;  // told every finished frame; none by default
+  // The picture in progress, four bytes a pixel, as wide as a line and as tall as
+  // the taller picture — enough for either. It is output rather than state, so it
+  // lives on the machine and not in its state value, and it exists only while
+  // someone is watching. The frame's own height says how much of it that frame is.
+  std::vector<std::uint8_t> raster_;
+  bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
+  std::uint16_t framePictureLines_ = 0;  // the lines the finished picture holds
+  std::uint8_t frameField_ = 0;          // the parity that picture ran under
 };
 
 }  // namespace snaggletooth

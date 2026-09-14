@@ -173,6 +173,11 @@ struct PpuState {
   [[nodiscard]] std::uint16_t vblankStartLine() const noexcept {
     return overscan() ? kOverscanVblankStartLine : kVblankStartLine;
   }
+
+  // Two are the same when every register, latch and counter is, and every byte of
+  // the three memories — the whole of what a program put into the chip, in one
+  // comparison.
+  [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
 
 // The chip's behaviour over one PpuState. Built by the machine over its own
@@ -209,7 +214,24 @@ class Ppu {
   // frame the chip spent in forced blank leaves them as they were.
   void beginFrame() noexcept;
 
+  // The four bytes the chip's converter drives at picture position (x, y): red,
+  // green, blue, then 255. x runs across a line's 256 pixels and y down the
+  // picture's lines from its first. The colour is the one the main screen's
+  // enabled layers name at that dot, or the backdrop where none of them shows,
+  // scaled by INIDISP's brightness. Forced blank and brightness zero are black.
+  [[nodiscard]] std::array<std::uint8_t, 4> pixel(std::uint16_t x,
+                                                  std::uint16_t y) const noexcept;
+
  private:
+  // The palette word BG1 shows at a picture position, or nothing where its tile's
+  // pixel is colour 0, which every palette treats as transparent.
+  [[nodiscard]] std::optional<std::uint8_t> sampleBg1(std::uint16_t x,
+                                                      std::uint16_t y) const noexcept;
+
+  // The converter's four bytes for one 15-bit palette word at the brightness
+  // INIDISP holds.
+  [[nodiscard]] std::array<std::uint8_t, 4> convert(std::uint16_t colour) const noexcept;
+
   // Whether vertical blank is open to the memories, and whether the taller picture
   // was asked for after the blank had already begun — which shuts them again until
   // the line that picture ends on.

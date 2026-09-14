@@ -23,6 +23,8 @@ what is unstarted.
 | Hear a cartridge or a dump | [spc-rendering.md](spc-rendering.md) |
 | Run a whole SNES machine | [snes-machine.md](snes-machine.md) |
 | See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
+| Watch a cartridge run, and record the run | [tools/player/README.md](../tools/player/README.md) |
+| Take the picture the machine draws | [ppu.md §The picture](ppu.md#the-picture) |
 | Place an access at an exact dot, or know what a line and a frame are worth | [snes-machine.md §The video counters and interrupts](snes-machine.md#the-video-counters-and-interrupts) |
 | Run the audio unit alone | [apu-machine.md](apu-machine.md) |
 | Understand how sound is produced | [dsp.md](dsp.md) |
@@ -96,6 +98,6 @@ examples, then the gotchas worth knowing before they cost an afternoon. Every pa
 Contents list under its opening.
 
 A page describes what the code does now. Where a subject is modelled but not yet complete, the page
-says so in place rather than leaving the reader to infer it — the PPU's register file, for instance,
-is complete while nothing renders from it, and [ppu.md](ppu.md) says as much where it describes
-the registers.
+says so in place rather than leaving the reader to infer it — the PPU, for instance, draws Mode 1's
+first background and not yet the others, the sprites or the colour math, and
+[ppu.md](ppu.md) says which is which where it describes the picture.

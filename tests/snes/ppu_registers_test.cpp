@@ -229,6 +229,38 @@ TEST(SnesPpuRegisters, TheLatchLineFallingCapturesTheBeam) {
   EXPECT_NE(m.state().wram[0x52] & 0x40u, 0u);
 }
 
+TEST(SnesPpuRegisters, TheLatchFlagClearsOnAReadWhileTheLatchLineIsHigh) {
+  // The software latch raises the flag; the read that reports it also clears it, so
+  // a second read finds it down.
+  Snes m = runAt(join({{kLdaAbs, 0x37u, 0x21u}, load(0x3Fu, 0x50u), load(0x3Fu, 0x51u)}),
+                 kPictureLine, kLatchPlacement);
+  EXPECT_NE(m.state().wram[0x50] & 0x40u, 0u);
+  EXPECT_EQ(m.state().wram[0x51] & 0x40u, 0u);
+  EXPECT_FALSE(m.state().ppu.countersLatched);
+}
+
+TEST(SnesPpuRegisters, TheLatchFlagStaysSetWhileTheLatchLineIsLow) {
+  // The flag is cleared by a read only while $4201 bit 7 is set. STZ $4201 takes the
+  // line low — latching the counters as it falls — so every read after it reports a
+  // flag that stays raised.
+  Snes m = runAt(join({{kStzAbs, 0x01u, 0x42u}, load(0x3Fu, 0x50u), load(0x3Fu, 0x51u)}),
+                 kPictureLine, kLatchPlacement);
+  EXPECT_NE(m.state().wram[0x50] & 0x40u, 0u);
+  EXPECT_NE(m.state().wram[0x51] & 0x40u, 0u);
+  EXPECT_TRUE(m.state().ppu.countersLatched);
+}
+
+TEST(SnesPpuRegisters, ReadingStat78ResetsBothCountersHalvesWhateverTheLatchLine) {
+  // The high/low selector is reset as a side effect of the read itself, which the
+  // latch line does not gate: with the line low, a read of STAT78 between two reads
+  // of OPHCT still puts the second back on the low half.
+  Snes m = runAt(join({{kStzAbs, 0x01u, 0x42u}, load(0x3Cu, 0x50u), load(0x3Fu, 0x51u),
+                       load(0x3Cu, 0x52u)}),
+                 kPictureLine, kLatchPlacement);
+  EXPECT_EQ(m.state().wram[0x50], kLatchedDot);
+  EXPECT_EQ(m.state().wram[0x52], kLatchedDot);
+}
+
 TEST(SnesPpuRegisters, TheIoPortReadsBackAsWritten) {
   Snes m = run(join({{kLdaImm, 0x5Au, kStaAbs, 0x01u, 0x42u, kLdaAbs, 0x13u, 0x42u, kStaAbs, 0x50u, 0x00u}}));
   EXPECT_EQ(m.state().wrio, 0x5Au);

@@ -57,6 +57,17 @@ constexpr std::uint16_t kNmiFlagOffset = 2u;
 constexpr std::uint16_t kOamReloadOffset = 40u;
 constexpr std::uint16_t kHdmaDeliver = 1112u;
 
+// The picture the chip draws: dots 22 to 277 of every line the frame's own vertical
+// blank leaves below it, the first line of a frame drawing nothing. Every one of
+// those dots is four master cycles wide, the two long ones lying well past them.
+constexpr std::uint16_t kFirstPictureDot = 22u;
+constexpr std::uint16_t kLastPictureDot = 277u;
+constexpr std::uint16_t kPictureWidth = kLastPictureDot - kFirstPictureDot + 1u;
+constexpr std::uint16_t kTallestPicture = kOverscanVblankStartLine - 1u;
+constexpr std::size_t kPixelBytes = 4u;
+constexpr std::size_t kRowBytes = kPictureWidth * kPixelBytes;
+constexpr std::size_t kRasterBytes = kRowBytes * kTallestPicture;
+
 // The H/V timer's trigger points. With an H position to compare against, the flag is
 // raised 14 master cycles past four times it; with none, 1374 master cycles after the
 // previous line began — which is ten into a line following a normal one, fourteen
@@ -130,8 +141,17 @@ Snes::Snes(Snes&& moved) noexcept
       timerHPointOnVLine_(moved.timerHPointOnVLine_),
       timerZeroOnVLine_(moved.timerZeroOnVLine_),
       observer_(moved.observer_),
-      portLanding_(moved.portLanding_) {
+      portLanding_(moved.portLanding_),
+      frameObserver_(moved.frameObserver_),
+      raster_(std::move(moved.raster_)),
+      frameFinished_(moved.frameFinished_),
+      framePictureLines_(moved.framePictureLines_) {
   moved.observer_ = nullptr;
+  moved.frameObserver_ = nullptr;
+}
+
+void Snes::setFrameObserver(FrameObserver* observer) noexcept {
+  frameObserver_ = observer;
 }
 
 void Snes::restore(const SnesState& state) {
@@ -566,6 +586,46 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
   }
 }
 
+void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
+  // The first line of a frame draws nothing, and the lines from this frame's own
+  // vertical blank on are past the picture.
+  if (state_.vpos == 0u || state_.inVblank) return;
+  if (raster_.empty()) {
+    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
+    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
+  }
+
+  // The dots the span passed, by the same reckoning the line's events use: a dot is
+  // reached when the span covers the master cycle it begins on.
+  const std::uint64_t first = (from - lineStart) / 4u + 1u;
+  const std::uint64_t last = (to - lineStart) / 4u;
+  const std::uint64_t dot = first < kFirstPictureDot ? kFirstPictureDot : first;
+  const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
+
+  const Ppu ppu{state_.ppu};
+  std::uint8_t* const row = raster_.data() + (state_.vpos - 1u) * kRowBytes;
+  for (std::uint64_t at = dot; at <= stop; ++at) {
+    const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
+    const std::array<std::uint8_t, 4> colour = ppu.pixel(x, state_.vpos);
+    std::uint8_t* const pixel = row + static_cast<std::size_t>(x) * kPixelBytes;
+    pixel[0] = colour[0];
+    pixel[1] = colour[1];
+    pixel[2] = colour[2];
+    pixel[3] = colour[3];
+  }
+}
+
+void Snes::deliverFrame() {
+  if (frameObserver_ == nullptr || raster_.empty()) return;
+  const std::size_t bytes = static_cast<std::size_t>(framePictureLines_) * kRowBytes;
+  frameObserver_->frame(VideoFrame{
+      .pixels = std::span<const std::uint8_t>(raster_.data(), bytes),
+      .width = kPictureWidth,
+      .height = framePictureLines_,
+      .field = frameField_,
+  });
+}
+
 void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   state_.vpos = static_cast<std::uint16_t>(state_.vpos + 1u);
   if (state_.vpos >= frameLines()) state_.vpos = 0u;
@@ -573,6 +633,16 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   state_.refreshAt = nextRefresh(lineStart);
 
   if (state_.vpos == 0u) {
+    // The picture the beam has just finished is as tall as its own vertical blank
+    // left it, and carries the parity it ran under — both read here, before the
+    // frame beginning now changes either.
+    if (frameObserver_ != nullptr) {
+      frameFinished_ = true;
+      frameField_ = state_.field;
+      framePictureLines_ = state_.vblankBeginLine > 1u
+          ? static_cast<std::uint16_t>(state_.vblankBeginLine - 1u)
+          : static_cast<std::uint16_t>(state_.ppu.vblankStartLine() - 1u);
+    }
     state_.inVblank = false;     // the frame begins in the picture
     state_.vblankNmi = false;    // and the NMI flag clears with it
     state_.hdmaInited = false;   // the new frame re-initialises HDMA at line 0
@@ -628,6 +698,9 @@ void Snes::tickVideo(std::uint32_t cost) {
     const std::uint64_t lineEnd = lineStart + lineLength();
     const std::uint64_t stop = end < lineEnd ? end : lineEnd;
     crossLine(lineStart, at, stop);
+    // The picture is resolved a dot at a time, from the registers and the memories
+    // as they stand at each one. A machine nobody is watching resolves nothing.
+    if (frameObserver_ != nullptr) drawSpan(lineStart, at, stop);
     at = stop;
     state_.hpos = static_cast<std::uint16_t>(at - lineStart);
     if (at == lineEnd) {
@@ -653,6 +726,13 @@ void Snes::tickVideo(std::uint32_t cost) {
     state_.hdmaLineFired = true;
     state_.hdmaRunPending = true;
     state_.hdmaIniting = false;
+  }
+
+  // A picture the beam finished this cycle goes to whoever is watching, with
+  // everything the cycle owed the machine already done.
+  if (frameFinished_) {
+    frameFinished_ = false;
+    deliverFrame();
   }
 }
 

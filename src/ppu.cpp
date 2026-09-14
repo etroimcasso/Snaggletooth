@@ -14,6 +14,19 @@ namespace {
   return (low >= 0x4u && low <= 0x6u) || (low >= 0x8u && low <= 0xAu);
 }
 
+// The byte the converter drives for one five-bit channel at brightness N: the
+// exact rational value * (N + 1) * 255 / (31 * 16), rounded once, in integers.
+constexpr unsigned kFullScale = 31u * 16u;
+[[nodiscard]] std::uint8_t channelByte(unsigned value, unsigned brightness) noexcept {
+  return static_cast<std::uint8_t>((value * (brightness + 1u) * 255u + kFullScale / 2u) /
+                                   kFullScale);
+}
+
+// The character data's shape: four bitplanes of eight rows for a 16-colour tile, so
+// 32 bytes a character, with planes 2 and 3 the sixteen bytes after planes 0 and 1.
+constexpr std::size_t kCharacterBytes = 32u;
+constexpr std::size_t kHighPlanes = 16u;
+
 }  // namespace
 
 std::int32_t PpuState::multiplyResult() const noexcept {
@@ -96,6 +109,101 @@ void Ppu::beginFrame() noexcept {
   if (s_.forcedBlank()) return;
   s_.rangeOver = false;
   s_.timeOver = false;
+}
+
+// ---- the picture -------------------------------------------------------------
+
+std::array<std::uint8_t, 4> Ppu::convert(std::uint16_t colour) const noexcept {
+  // A palette word is five bits a channel, blue then green then red from the top,
+  // and the converter scales each by (N + 1) / 16 for INIDISP's brightness N. A
+  // brightness of zero is the screen off, which is black whatever the word holds.
+  const unsigned brightness = s_.inidisp & 0x0Fu;
+  if (brightness == 0u) return {0u, 0u, 0u, 255u};
+  return {channelByte(colour & 0x1Fu, brightness),
+          channelByte((colour >> 5) & 0x1Fu, brightness),
+          channelByte((colour >> 10) & 0x1Fu, brightness), 255u};
+}
+
+std::optional<std::uint8_t> Ppu::sampleBg1(std::uint16_t x, std::uint16_t line) const noexcept {
+  // Where the position falls in the background. The offsets are the low ten bits of
+  // the two scroll registers, and the display never falls outside the background:
+  // the masks below wrap it at its own size, whatever that size is.
+  const bool large = (s_.bgmode & 0x10u) != 0u;  // $2105 bit 4: BG1 in 16x16 blocks
+  const unsigned side = large ? 16u : 8u;
+  const unsigned bgX = x + (s_.bg1hofs & 0x03FFu);
+  const unsigned bgY = line + (s_.bg1vofs & 0x03FFu);
+  const unsigned tileX = bgX / side;
+  const unsigned tileY = bgY / side;
+
+  // The tilemap word for that tile: the base $2107 names, the row and column within
+  // one 32x32 screen, and the terms that carry a wide or tall map into its further
+  // screens, which follow the first at $800 bytes each.
+  //
+  // The base counts whole screens: a 32x32 screen is $400 words, so the six bits of
+  // $2107 step the map in $400-word units and reach every 2 KB boundary of the
+  // memory.
+  const bool wide = (s_.bg1sc & 0x01u) != 0u;
+  const bool tall = (s_.bg1sc & 0x02u) != 0u;
+  unsigned word = (static_cast<unsigned>(s_.bg1sc >> 2) << 10) + ((tileY & 0x1Fu) << 5) +
+                  (tileX & 0x1Fu);
+  if (tall) word += (tileY & 0x20u) << (wide ? 6u : 5u);
+  if (wide) word += (tileX & 0x20u) << 5;
+  const std::size_t entryAt = (static_cast<std::size_t>(word) << 1) & 0xFFFFu;
+  const std::uint16_t entry =
+      static_cast<std::uint16_t>(s_.vram[entryAt] | (s_.vram[(entryAt + 1u) & 0xFFFFu] << 8));
+
+  // The entry is vhopppcc cccccccc: the two flips, the tile's priority, its palette
+  // and its number. A flip reverses the whole tile, a 16x16 block included.
+  unsigned inX = bgX % side;
+  unsigned inY = bgY % side;
+  if ((entry & 0x4000u) != 0u) inX = side - 1u - inX;
+  if ((entry & 0x8000u) != 0u) inY = side - 1u - inY;
+
+  // A 16x16 block is Tile, Tile + 1, Tile + 16 and Tile + 17. The numbers run on
+  // rather than wrapping within the block; only the ten-bit number itself wraps.
+  unsigned tile = entry & 0x03FFu;
+  if (inX >= 8u) {
+    ++tile;
+    inX -= 8u;
+  }
+  if (inY >= 8u) {
+    tile += 16u;
+    inY -= 8u;
+  }
+  tile &= 0x03FFu;
+
+  // The character the tile names, under the base $210B holds for BG1. Planes 0 and 1
+  // are the low and high bytes of the row's word and planes 2 and 3 the same word
+  // sixteen bytes on; the leftmost pixel of a row is bit 7.
+  const std::size_t character =
+      ((static_cast<std::size_t>(s_.bg12nba & 0x0Fu) << 13) + tile * kCharacterBytes) & 0xFFFFu;
+  const std::size_t row = (character + inY * 2u) & 0xFFFFu;
+  const unsigned bit = 7u - inX;
+  const unsigned index = ((s_.vram[row] >> bit) & 1u) |
+                         (((s_.vram[(row + 1u) & 0xFFFFu] >> bit) & 1u) << 1) |
+                         (((s_.vram[(row + kHighPlanes) & 0xFFFFu] >> bit) & 1u) << 2) |
+                         (((s_.vram[(row + kHighPlanes + 1u) & 0xFFFFu] >> bit) & 1u) << 3);
+  if (index == 0u) return std::nullopt;  // colour 0 of any palette is transparent
+
+  // A 16-colour background's palette is sixteen words on from the one before it.
+  const unsigned palette = (entry >> 10) & 0x07u;
+  return static_cast<std::uint8_t>(palette * 16u + index);
+}
+
+std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) const noexcept {
+  // Forced blank drives black, whatever the memories hold.
+  if (s_.forcedBlank()) return {0u, 0u, 0u, 255u};
+
+  // The first layer the main screen enables with something to show here, and the
+  // backdrop — palette word 0 — under all of them. BG1 of Mode 1 is the layer this
+  // chip draws; a layer enabled only on the sub screen shows nowhere, and the modes
+  // whose backgrounds are not 16 colours show their backdrop.
+  std::uint8_t word = 0u;
+  if ((s_.bgmode & 0x07u) == 1u && (s_.tm & 0x01u) != 0u) {
+    if (const std::optional<std::uint8_t> bg1 = sampleBg1(x, line)) word = *bg1;
+  }
+  const std::size_t at = static_cast<std::size_t>(word) << 1;
+  return convert(static_cast<std::uint16_t>(s_.cgram[at] | (s_.cgram[at + 1u] << 8)));
 }
 
 // ---- the write-twice latches -------------------------------------------------
@@ -224,8 +332,10 @@ std::optional<std::uint8_t> Ppu::read(std::uint16_t offset, const PpuInputs& in)
       const std::uint8_t v = static_cast<std::uint8_t>(
           ((in.field & 1u) << 7) | (s_.countersLatched ? 0x40u : 0x00u) | (s_.ppu2Bus & 0x20u) |
           (in.pal ? 0x10u : 0x00u) | 0x03u);
-      // The read also clears the flag and resets both counters' flip-flops.
-      s_.countersLatched = false;
+      // The read clears the latch flag, but only while the latch line is high. The
+      // two counters' flip-flops it resets whatever that line is doing: that is a
+      // side effect of the read itself.
+      if (in.extLatch) s_.countersLatched = false;
       s_.ophctHigh = false;
       s_.opvctHigh = false;
       s_.ppu2Bus = v;

@@ -15,6 +15,8 @@ shelling out to the tool.
 | [`ir/`](ir/README.md) | `snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential` | `snes_lift`, `snes_differential` | [ir.md](../docs/ir.md) |
 | [`examples/`](examples/README.md) | — (header-only) | `snes_examples` | one README per cartridge |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
+| [`video/`](video/README.md) | `snaggletooth_video` | — | [ppu.md](../docs/ppu.md) |
+| [`player/`](player/README.md) | — | `snes_player` | [ppu.md](../docs/ppu.md), [input-script.md](../docs/input-script.md) |
 
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
 cartridges through four commands, one image at a time or `--jobs` of them at

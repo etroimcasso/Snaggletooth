@@ -27,6 +27,11 @@ option(SNAGGLETOOTH_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 # without the test suite. Override with -DSNAGGLETOOTH_BUILD_TOOLS=ON/OFF.
 option(SNAGGLETOOTH_BUILD_TOOLS "Build the tool libraries and command-line tools" ${PROJECT_IS_TOP_LEVEL})
 
+# The player shows a running cartridge in a window, which is the one thing here that needs
+# SDL. It follows the tools, and switching it off leaves everything else — and the library,
+# which never links SDL at all — exactly as it was.
+option(SNAGGLETOOTH_BUILD_PLAYER "Build the player, which needs SDL3" ${PROJECT_IS_TOP_LEVEL})
+
 add_library(snaggletooth STATIC
   src/version.cpp
   src/apu.cpp
@@ -92,6 +97,24 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(rom_render PRIVATE /W4 /WX)
   else()
     target_compile_options(rom_render PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # The video writer — the machine's pictures as an uncompressed AVI, hand-written
+  # the way the WAV writer is, so a recording is exactly what the machine drove and
+  # no encoder is linked in. The player records with it and the suite pins its bytes.
+  add_library(snaggletooth_video STATIC
+    tools/video/avi_writer.cpp
+  )
+  target_link_libraries(snaggletooth_video PUBLIC snaggletooth::snaggletooth)
+  target_include_directories(snaggletooth_video PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
+  )
+  target_compile_features(snaggletooth_video PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_video PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_video PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_video PRIVATE -Wall -Wextra -Werror)
   endif()
 
   # The disassembly framework — the tracer and the renderer, which do not depend on
@@ -449,6 +472,41 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
   endif()
 endif()
 
+# The player — a window showing a cartridge as it runs, recording the same run. It is the
+# only target that touches SDL, and it needs the tool libraries as well, so it follows both
+# switches.
+if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
+  # A parent build that already has SDL supplies it; otherwise the pinned submodule is
+  # built from source, statically, with the subsystems a window does not need switched off.
+  # Added SYSTEM so SDL's headers are not held to this project's warning bar.
+  if(NOT TARGET SDL3::SDL3)
+    set(SDL_SHARED       OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC       ON  CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_AUDIO        OFF CACHE BOOL "" FORCE)  # a run's sound is its WAV, not a live sink
+    set(SDL_CAMERA       OFF CACHE BOOL "" FORCE)
+    set(SDL_HAPTIC       OFF CACHE BOOL "" FORCE)
+    set(SDL_JOYSTICK     OFF CACHE BOOL "" FORCE)  # the run is driven by a script
+    set(SDL_POWER        OFF CACHE BOOL "" FORCE)
+    set(SDL_DIALOG       OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/sdl EXCLUDE_FROM_ALL SYSTEM)
+  endif()
+
+  add_executable(snes_player tools/player/snes_player_main.cpp)
+  # The cartridge tools reach the .spc tooling — and so the WAV writer — publicly, so
+  # the player takes it through them; naming it again is a duplicate the Apple linker
+  # reports.
+  target_link_libraries(snes_player PRIVATE snaggletooth_rom snaggletooth_video SDL3::SDL3)
+  # SDL_MAIN_HANDLED stops SDL's headers redefining main; the tool calls SDL_SetMainReady
+  # before SDL_Init, so it keeps a plain main() of its own.
+  target_compile_definitions(snes_player PRIVATE SDL_MAIN_HANDLED)
+  if(MSVC)
+    target_compile_options(snes_player PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_player PRIVATE -Wall -Wextra -Werror)
+  endif()
+endif()
+
 if(SNAGGLETOOTH_BUILD_TESTS)
   enable_testing()
 
@@ -548,6 +606,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/ppu_stub_test.cpp
     tests/snes/ppu_registers_test.cpp
     tests/snes/ppu_beam_test.cpp
+    tests/snes/ppu_backgrounds_test.cpp
     tests/snes/dma_test.cpp
     tests/snes/ipl_stub_test.cpp
     tests/snes/boot_rom_test.cpp
@@ -577,6 +636,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/formats/hdma_test.cpp
     tests/formats/samples_test.cpp
     tests/formats/reader_test.cpp
+    tests/tools/avi_test.cpp
   )
   # The differential links the representation and the cartridge tools publicly,
   # which link the library and both chip backends publicly and the codecs
@@ -584,8 +644,11 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   # target reaches the library, the tools, the backends, the codecs and the .spc
   # tooling through them — no separate direct links, which the Apple linker
   # would report as duplicates.
+  # The video writer is nothing else's dependency, so the test target links it
+  # itself; everything else arrives through the differential.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_ir_differential
+    snaggletooth_video
     GTest::gtest_main
   )
   target_compile_definitions(snaggletooth_tests PRIVATE
