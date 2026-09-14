@@ -701,6 +701,11 @@ Questions the documentation leaves about the beam, recorded rather than decided 
   a frame's last line — measurements without a mechanism, so neither is modelled.
 - **What `$4212` bit 7 shows** when the taller picture is asked for after vertical blank has begun. The
   memories shut; the flag here stays the latched fact.
+- **Asking for the taller picture at the very start of line 225.** anomie measures the NMI one line
+  later, at 226, with the last HDMA still on line 224 — the two effects skewed against each other — and
+  reports that asking for it at any later line does nothing at all. No mechanism is given for either,
+  and the machine here holds vertical blank to line 240 instead. Clearing the bit in that window is
+  measured and modelled: the blank begins at the start of the line that follows.
 - **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length
   is decided by the state as its own line runs.
 - **The auto-read's start**, which anomie puts somewhere in dots 32.5 to 95.5 on a 256-cycle grid. It

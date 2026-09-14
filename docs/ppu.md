@@ -231,5 +231,7 @@ Each of these is a question the documentation leaves, recorded rather than decid
   vertical blank's first line, as the register page has it. The register page is followed.
 - Exactly where in the frame's first line the overflow flags clear. The register page marks the dot
   itself uncertain; they clear as the line begins.
+- Whether the overflow flags clear in a frame the chip spent in forced blank. anomie has them reset at
+  vertical blank's end with no exception; the register page excepts forced blank, which is followed.
 - Whether the overflow flags are set regardless of the sprite enables, as the register page states. The
   flags have nothing to set them until the chip draws sprites.
