@@ -662,7 +662,7 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   // line after this one.
   Ppu sprites{state_.ppu};
   sprites.timeSprites(state_.vpos);
-  sprites.beginRange();
+  sprites.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
 
   if (state_.vpos == 0u) {
     // The picture the beam has just finished is as tall as its own vertical blank

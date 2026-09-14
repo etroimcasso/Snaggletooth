@@ -4,12 +4,26 @@
 // palettes above the backgrounds', the four sprite places in Mode 1's priority
 // chart, index order and the rule that only the topmost sprite answers the
 // backgrounds, the main screen's own bit, and the pass across a line's dots that
-// reads $2101 as it stands at each. Every expectation is computed by hand from the
-// register page; the pictures are placed as a program would have left them.
+// reads $2101 as it stands at each.
+//
+// Then what the chip can afford and where the walk begins: the sprites Range
+// keeps and the tiles Time loads, in the opposite directions they run in, the two
+// overflow flags at the points that raise them, the one position nine bits reach
+// that is counted somewhere other than where it draws, and the sprite $2103 and
+// the sprite-table port put in front of every other.
+//
+// Every expectation is computed by hand from the register page; the pictures are
+// placed as a program would have left them. The staged cartridges at the end are
+// run and nothing more.
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -749,9 +763,12 @@ TEST(SpritePasses, ARangePassReadsObselAsItStandsAtEachSpritesOwnDot) {
   machine.restore(state);
   machine.run(kPastEverySpritesDot - 600u);
 
+  // Every sprite whose dot came after the write is in range and the ones before it
+  // are not, so the thirty-two Range keeps are the thirty-two beginning there.
   const SnesState finished = machine.state();
-  ASSERT_EQ(finished.ppu.sprites.found, kSprites - examined);
+  ASSERT_EQ(finished.ppu.sprites.found, 32u);
   EXPECT_EQ(finished.ppu.sprites.inRange[0], examined);
+  EXPECT_EQ(finished.ppu.sprites.inRange[31], static_cast<std::uint8_t>(examined + 31u));
 }
 
 TEST(SpritePasses, ForcedBlankWalksNowhereAndGathersNothing) {
@@ -809,6 +826,357 @@ TEST(SpritePasses, EvaluationRunsOnAMachineNobodyIsWatching) {
   EXPECT_GT(picture.frames, 0u);
   EXPECT_TRUE(watched.state().ppu == unwatched.state().ppu);
   EXPECT_GT(watched.state().ppu.sprites.line, 0u);
+}
+
+// ---- what the chip can afford ------------------------------------------------
+
+// A line of an NTSC frame, in master cycles, and a point inside line `line` past
+// every sprite's dot: the pass running there has finished walking OAM and is
+// gathering for the line after it, and the line's own Time pass has already run
+// in the blank that began it.
+constexpr std::uint64_t kLineMaster = 1364u;
+std::uint64_t pastTheDotsOf(unsigned line) {
+  return static_cast<std::uint64_t>(line) * kLineMaster + kPastEverySpritesDot;
+}
+
+// A row of sprites all alike, at one position, from index `from` up.
+void putSpriteRun(PpuState& ppu, unsigned from, unsigned count, int x, std::uint8_t y,
+                  bool large) {
+  for (unsigned index = from; index < from + count; ++index) {
+    putSprite(ppu, index, x, y, 0u, attributes(false, false, 3u, 0u, false), large);
+  }
+}
+
+TEST(SpriteLimits, RangeKeepsThirtyTwoSpritesAndTheThirtyThirdRaisesItsFlag) {
+  PpuState ppu = screen();
+  putSpriteTile(ppu, 0u, solid(1u));
+  putSpriteRun(ppu, 0u, 32u, 0, 0u, false);
+
+  SnesState state = after(ppu, kPastEverySpritesDot);
+  EXPECT_EQ(state.ppu.sprites.found, 32u);
+  EXPECT_EQ(state.ppu.sprites.inRange[31], 31u);
+  EXPECT_FALSE(state.ppu.rangeOver);
+
+  putSpriteRun(ppu, 32u, 1u, 0, 0u, false);
+  state = after(ppu, kPastEverySpritesDot);
+  EXPECT_EQ(state.ppu.sprites.found, 32u);  // the thirty-third is not kept
+  EXPECT_EQ(state.ppu.sprites.inRange[31], 31u);
+  EXPECT_TRUE(state.ppu.rangeOver);
+}
+
+TEST(SpriteLimits, TheRangeOverflowFlagWaitsForTheOverflowingSpritesOwnDot) {
+  PpuState ppu = screen();
+  putSpriteTile(ppu, 0u, solid(1u));
+  putSpriteRun(ppu, 0u, 32u, 0, 0u, false);
+  putSpriteRun(ppu, 100u, 1u, 0, 0u, false);
+
+  // Sprite 100 is examined at dot 22 + 100 * 2 = 222, which is 888 master cycles
+  // into the line. 600 master cycles is dot 150: the thirty-two sprites Range can
+  // keep are all found, and the sprite that is one too many has not been reached.
+  const SnesState early = after(ppu, 600u);
+  EXPECT_EQ(early.ppu.sprites.found, 32u);
+  EXPECT_FALSE(early.ppu.rangeOver);
+
+  EXPECT_TRUE(after(ppu, kPastEverySpritesDot).ppu.rangeOver);
+}
+
+TEST(SpriteLimits, BothOverflowFlagsAreRaisedWhetherOrNotTheSpritesAreShown) {
+  PpuState ppu = screen();
+  ppu.tm = 0x00u;  // nothing at all on the main screen
+  putSpriteBlock(ppu, 0u, 16u, 16u, 1u);
+  // Thirty-five sprites of two tiles a row: three more than Range keeps, and the
+  // thirty-two it does keep are sixty-four tiles against Time's thirty-four.
+  putSpriteRun(ppu, 0u, 35u, 0, 0u, true);
+
+  const SnesState state = after(ppu, pastTheDotsOf(2u));
+  EXPECT_TRUE(state.ppu.rangeOver);
+  EXPECT_TRUE(state.ppu.timeOver);
+}
+
+TEST(SpriteLimits, TimeLoadsThirtyFourTilesBackwardsFromTheLastSpriteRangeKept) {
+  PpuState ppu = screen();
+  ppu.objsel = static_cast<std::uint8_t>(kSpriteBase | (2u << 5));  // 8x8 and 64x64
+  putSpriteBlock(ppu, 0u, 64u, 64u, 1u);
+  putSpriteColour(ppu, 1u, 1u, kGreen);
+  putSpriteColour(ppu, 2u, 1u, kBlue);
+
+  // Five sprites of eight tiles a row, forty tiles against Time's thirty-four.
+  // Range keeps them in index order; Time walks that order backwards, so sprite 4
+  // is loaded whole, sprites 3, 2 and 1 take the count to thirty-two, and sprite 0
+  // — the first Range kept — gets the two that are left, its leftmost two.
+  putSprite(ppu, 0u, 0, 10u, 0u, attributes(false, false, 3u, 1u, false), true);
+  putSpriteRun(ppu, 1u, 3u, 128, 10u, true);
+  putSprite(ppu, 4u, 192, 10u, 0u, attributes(false, false, 3u, 2u, false), true);
+
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, 10u), kGreenOut);
+  EXPECT_EQ(picture.at(15u, 10u), kGreenOut);
+  EXPECT_EQ(picture.at(16u, 10u), kBackdropOut);
+  EXPECT_EQ(picture.at(63u, 10u), kBackdropOut);
+  EXPECT_EQ(picture.at(128u, 10u), kRedOut);
+  EXPECT_EQ(picture.at(191u, 10u), kRedOut);
+  // Loaded whole, which is what says the count ran from this end and not the other.
+  EXPECT_EQ(picture.at(192u, 10u), kBlueOut);
+  EXPECT_EQ(picture.at(255u, 10u), kBlueOut);
+  EXPECT_TRUE(after(ppu, pastTheDotsOf(11u)).ppu.timeOver);
+}
+
+TEST(SpriteLimits, TimeCountsOnlyTheTilesStandingOnThePicture) {
+  PpuState ppu = screen();
+  putSpriteBlock(ppu, 0u, 16u, 16u, 1u);
+
+  // Eighteen sprites of two tiles a row: thirty-six tiles, two past what Time
+  // loads, so on the picture they raise the flag.
+  putSpriteRun(ppu, 0u, 18u, 0, 0u, true);
+  EXPECT_TRUE(after(ppu, pastTheDotsOf(8u)).ppu.timeOver);
+
+  // At X = -15 each sprite's left tile stands at -15 and its right at -7, and only
+  // the second of those counts: eighteen tiles, inside the count.
+  putSpriteRun(ppu, 0u, 18u, -15, 0u, true);
+  EXPECT_FALSE(after(ppu, pastTheDotsOf(8u)).ppu.timeOver);
+
+  // At X = 250 the left tile stands at 250 and the right at 258, and again only
+  // one of the two counts.
+  putSpriteRun(ppu, 0u, 18u, 250, 0u, true);
+  EXPECT_FALSE(after(ppu, pastTheDotsOf(8u)).ppu.timeOver);
+}
+
+TEST(SpriteLimits, ASpriteAtTheFarSideOfNineBitsDrawsNowhereAndStillFillsARangeSlot) {
+  PpuState ppu = screen();
+  putSpriteBlock(ppu, 0u, 16u, 16u, 1u);
+  putSpriteColour(ppu, 1u, 1u, kGreen);
+
+  // X = -256 is the one position nine bits reach that is the picture's own left
+  // edge a whole screen over. Range counts it there and keeps it; it draws where
+  // its X puts it, which is nowhere.
+  putSprite(ppu, 0u, -256, 20u, 0u, attributes(false, false, 3u, 1u, false), true);
+  putSprite(ppu, 1u, 0, 20u, 0u, attributes(false, false, 3u, 0u, false), true);
+
+  const SnesState state = after(ppu, pastTheDotsOf(21u));
+  EXPECT_EQ(state.ppu.sprites.found, 2u);
+  EXPECT_EQ(state.ppu.sprites.inRange[0], 0u);
+
+  // Sprite 0 is in front of sprite 1, so drawing it at the position Range counted
+  // it at would put its colour here instead.
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, 20u), kRedOut);
+  EXPECT_EQ(picture.at(15u, 20u), kRedOut);
+}
+
+TEST(SpriteLimits, ASpriteAtTheFarSideOfNineBitsTakesItsTilesFromTimesCount) {
+  PpuState ppu = screen();
+  putSpriteBlock(ppu, 0u, 16u, 16u, 1u);
+  putSpriteColour(ppu, 1u, 1u, kGreen);
+
+  // Seventeen sprites of two tiles take Time's whole count, so the sprite Range
+  // kept first has nothing left and does not draw.
+  putSprite(ppu, 0u, 100, 20u, 0u, attributes(false, false, 3u, 1u, false), true);
+  putSpriteRun(ppu, 1u, 17u, 0, 20u, true);
+  EXPECT_EQ(after(ppu, pastTheDotsOf(21u)).ppu.sprites.found, 18u);
+  EXPECT_EQ(draw(ppu).at(100u, 20u), kBackdropOut);
+
+  // The last of them at the far side of nine bits draws nothing and takes its two
+  // tiles all the same.
+  putSprite(ppu, 17u, -256, 20u, 0u, attributes(false, false, 3u, 0u, false), true);
+  EXPECT_EQ(after(ppu, pastTheDotsOf(21u)).ppu.sprites.found, 18u);
+  EXPECT_EQ(draw(ppu).at(100u, 20u), kBackdropOut);
+
+  // The same sprite parked off the left edge instead is out of Range, and the two
+  // tiles it is not taking are the two the first sprite draws with.
+  putSprite(ppu, 17u, -64, 20u, 0u, attributes(false, false, 3u, 0u, false), true);
+  EXPECT_EQ(after(ppu, pastTheDotsOf(21u)).ppu.sprites.found, 17u);
+  EXPECT_EQ(draw(ppu).at(100u, 20u), kGreenOut);
+}
+
+// ---- where the walk begins ---------------------------------------------------
+
+TEST(SpritePriorityRotation, TheWalkBeginsAtTheSpriteThePortsAddressStandsIn) {
+  PpuState ppu = screen();
+  putSpriteTile(ppu, 0u, solid(1u));
+  for (unsigned index = 0u; index < 4u; ++index) {
+    putSprite(ppu, index, static_cast<int>(index) * 20, 20u, 0u,
+              attributes(false, false, 3u, 0u, false), false);
+  }
+
+  // The reload value $104 stands the port at word $104, which is sprite 2's first
+  // word. Without $2103 bit 7 the walk begins at sprite 0 regardless.
+  ppu.oamadd = 0x0104u;
+  ppu.oamAddress = 0x0208u;
+  SnesState state = after(ppu, pastTheDotsOf(21u));
+  ASSERT_EQ(state.ppu.sprites.found, 4u);
+  EXPECT_EQ(state.ppu.sprites.first, 0u);
+  EXPECT_EQ(state.ppu.sprites.inRange[0], 0u);
+  EXPECT_EQ(state.ppu.sprites.inRange[3], 3u);
+
+  // With it, the walk begins at sprite 2 and wraps past 127 to reach the two below
+  // it — an order that reads differently from either end.
+  ppu.oamadd = 0x8104u;
+  state = after(ppu, pastTheDotsOf(21u));
+  ASSERT_EQ(state.ppu.sprites.found, 4u);
+  EXPECT_EQ(state.ppu.sprites.first, 2u);
+  EXPECT_EQ(state.ppu.sprites.inRange[0], 2u);
+  EXPECT_EQ(state.ppu.sprites.inRange[1], 3u);
+  EXPECT_EQ(state.ppu.sprites.inRange[2], 0u);
+  EXPECT_EQ(state.ppu.sprites.inRange[3], 1u);
+}
+
+TEST(SpritePriorityRotation, TheSpriteTheWalkBeginsAtIsInFrontOfEveryOther) {
+  PpuState ppu = screen();
+  putSpriteTile(ppu, 0u, solid(1u));
+  putSpriteColour(ppu, 1u, 1u, kGreen);
+  putSprite(ppu, 0u, 50, 20u, 0u, attributes(false, false, 3u, 0u, false), false);
+  putSprite(ppu, 2u, 50, 20u, 0u, attributes(false, false, 3u, 1u, false), false);
+
+  ppu.oamadd = 0x0104u;
+  ppu.oamAddress = 0x0208u;
+  EXPECT_EQ(draw(ppu).at(50u, 20u), kRedOut);
+
+  ppu.oamadd = 0x8104u;
+  EXPECT_EQ(draw(ppu).at(50u, 20u), kGreenOut);
+}
+
+TEST(SpritePriorityRotation, ThePortParkedOnARecordsLastByteAddsTheLineToIt) {
+  PpuState ppu = screen();
+  putSpriteTile(ppu, 0u, solid(1u));
+  putSpriteColour(ppu, 1u, 1u, kGreen);
+  putSpriteColour(ppu, 2u, 1u, kBlue);
+
+  // Every sprite at Y = 63 and at the same position, each one hiding the ones the
+  // walk reaches after it. Two of them are told apart by their palettes.
+  putSpriteRun(ppu, 0u, kSprites, 0, 63u, false);
+  putSprite(ppu, 63u, 0, 63u, 0u, attributes(false, false, 3u, 1u, false), false);
+  putSprite(ppu, 64u, 0, 63u, 0u, attributes(false, false, 3u, 2u, false), false);
+
+  // The port at byte 3 is standing on the last byte of sprite 0's record, so the
+  // walk begins at sprite 0 plus the line it is matching: sprite 63 leads the pass
+  // for picture line 64, sprite 64 the pass for line 65.
+  ppu.oamadd = 0x8000u;
+  ppu.oamAddress = 0x0003u;
+  const Picture odd = draw(ppu);
+  EXPECT_EQ(odd.at(0u, 63u), kGreenOut);
+  EXPECT_EQ(odd.at(0u, 64u), kBlueOut);
+
+  // One byte back it is standing inside the record instead, and the line is not
+  // added: sprite 0 leads every line.
+  ppu.oamAddress = 0x0002u;
+  const Picture plain = draw(ppu);
+  EXPECT_EQ(plain.at(0u, 63u), kRedOut);
+  EXPECT_EQ(plain.at(0u, 64u), kRedOut);
+}
+
+// ---- the staged cartridges ---------------------------------------------------
+
+// The cartridges under SNAGGLETOOTH_PPU_ROMS are run and nothing else: no source
+// of theirs is opened and nothing from any of them is written down here. What one
+// of them exercises is learned by running it, the way a commercial cartridge's
+// register writes are. Unset, these cases register and skip with a reason.
+//
+//   cmake -B build -DSNAGGLETOOTH_PPU_ROMS=/path/to/ppu-testroms
+//
+// SNAGGLETOOTH_REQUIRE_PPU_ROMS in the environment turns a missing cartridge into
+// a failure instead of a skip, for a machine that is meant to have them.
+const char* romDirectory() { return SNAGGLETOOTH_PPU_ROMS; }
+
+bool romsRequired() {
+  const char* required = std::getenv("SNAGGLETOOTH_REQUIRE_PPU_ROMS");
+  return required != nullptr && *required != '\0';
+}
+
+// The first file of that name anywhere under the directory, or nothing.
+std::string findRom(const std::string& name) {
+  const std::string root = romDirectory();
+  if (root.empty()) return {};
+  std::error_code failed;
+  std::filesystem::recursive_directory_iterator walk(root, failed);
+  if (failed) return {};
+  for (const std::filesystem::directory_entry& entry : walk) {
+    if (entry.is_regular_file(failed) && entry.path().filename() == name) {
+      return entry.path().string();
+    }
+  }
+  return {};
+}
+
+std::vector<std::uint8_t> readRom(const std::string& path) {
+  std::ifstream file(path, std::ios::binary);
+  return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(file)),
+                                   std::istreambuf_iterator<char>());
+}
+
+// What a cartridge's own run made of the chip's two sprite limits: the most
+// sprites any line kept, and whether either flag was raised anywhere in it.
+struct Crowding {
+  unsigned mostKept = 0;
+  bool rangeOver = false;
+  bool timeOver = false;
+};
+
+Crowding crowd(const std::vector<std::uint8_t>& rom, unsigned lines) {
+  Snes machine(SnesConfig{.rom = rom});
+  Crowding seen;
+  for (unsigned line = 0u; line < lines; ++line) {
+    machine.run(kLineMaster);
+    const PpuState& ppu = machine.state().ppu;
+    if (static_cast<unsigned>(ppu.sprites.found) > seen.mostKept) {
+      seen.mostKept = ppu.sprites.found;
+    }
+    if (ppu.rangeOver) seen.rangeOver = true;
+    if (ppu.timeOver) seen.timeOver = true;
+  }
+  return seen;
+}
+
+// Loads a staged cartridge, or skips the calling case when there is none to load.
+// `ran` reports whether `rom` holds one, so a caller stops rather than asserting
+// on a cartridge it never read.
+void load(const std::string& name, std::vector<std::uint8_t>& rom, bool& ran) {
+  ran = false;
+  const std::string path = findRom(name);
+  if (path.empty()) {
+    if (romsRequired()) {
+      ADD_FAILURE() << name
+                    << " not found under SNAGGLETOOTH_PPU_ROMS and the cartridges are required";
+      return;
+    }
+    GTEST_SKIP() << name << ": set SNAGGLETOOTH_PPU_ROMS to the staged cartridge directory to run it";
+  }
+  rom = readRom(path);
+  if (rom.size() < 0x8000u) {
+    ADD_FAILURE() << name << " is too small to be a cartridge image";
+    return;
+  }
+  ran = true;
+}
+
+// Three seconds of run at sixty frames of 262 lines.
+constexpr unsigned kThreeSeconds = 3u * 60u * 262u;
+
+TEST(PpuCartridges, ACartridgeThatCrowdsALineIsHeldToWhatRangeCanKeep) {
+  std::vector<std::uint8_t> rom;
+  bool ran = false;
+  load("gradient-test.sfc", rom, ran);
+  if (!ran) return;
+
+  // This one puts every sprite OAM can describe across one line, which is four
+  // times what the chip keeps — so it says both halves of the rule: no line holds
+  // more than the count, and the flag a program can read is raised.
+  const Crowding seen = crowd(rom, kThreeSeconds);
+  EXPECT_LE(seen.mostKept, 32u);
+  EXPECT_TRUE(seen.rangeOver);
+}
+
+TEST(PpuCartridges, ACartridgeThatCrowdsNothingRaisesNeitherFlag) {
+  std::vector<std::uint8_t> rom;
+  bool ran = false;
+  load("twoship.sfc", rom, ran);
+  if (!ran) return;
+
+  // The passes run on every cartridge; the flags belong to the ones that ask for
+  // more than the chip has.
+  const Crowding seen = crowd(rom, kThreeSeconds);
+  EXPECT_LE(seen.mostKept, 32u);
+  EXPECT_FALSE(seen.rangeOver);
+  EXPECT_FALSE(seen.timeOver);
 }
 
 }  // namespace

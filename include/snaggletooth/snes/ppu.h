@@ -48,6 +48,12 @@ constexpr std::uint16_t kOverscanVblankStartLine = 240u;
 constexpr unsigned kSprites = 128u;
 constexpr std::uint16_t kPictureWidth = 256u;
 
+// What the chip can afford on one line: the sprites Range keeps, and the 8x8
+// tiles Time loads from them. A sprite past the first is dropped and a tile past
+// the second is not loaded, and each raises its own flag in $213E.
+constexpr unsigned kSpritesPerLine = 32u;
+constexpr unsigned kSpriteTilesPerLine = 34u;
+
 // The palette word a sprite claims sits at 128 or above, so 0 is a word no
 // sprite can name; a position holds this priority where no sprite claimed it,
 // one past the three the hardware has.
@@ -57,9 +63,11 @@ constexpr std::uint8_t kNoSprite = 4u;
 // the pass over the line after it that is still running.
 //
 // Range walks OAM across a line's visible dots, two dots a sprite, and keeps
-// the ones the next line crosses. Time then runs in the horizontal blank that
-// follows and draws those sprites into the line buffer, back to front, so the
-// sprite nearest the front keeps every position it claims.
+// the first kSpritesPerLine the next line crosses. Time then runs in the
+// horizontal blank that follows and draws those sprites into the line buffer,
+// back to front, so the sprite nearest the front keeps every position it
+// claims — up to kSpriteTilesPerLine tiles, after which it loads nothing more.
+// The two passes run in opposite directions along the sprites Range kept.
 struct SpriteLine {
   // The line buffer Time filled, and the line it was filled for. A position
   // holds the palette word the sprite claiming it named and that sprite's own
@@ -68,13 +76,13 @@ struct SpriteLine {
   std::array<std::uint8_t, kPictureWidth> priority{};
   std::uint16_t line = 0;
 
-  // The pass in flight: the sprites Range has kept so far, in the order it
-  // found them, and how far along OAM it has walked. The chip keeps 32 of them;
-  // the room here is for every sprite OAM can describe, because the count is a
-  // rule Time obeys rather than a limit on what the pass can hold.
-  std::array<std::uint8_t, kSprites> inRange{};
+  // The pass in flight: the sprites Range has kept so far, in the order it found
+  // them, how far along OAM it has walked, and the sprite it began at — which
+  // $2103 bit 7 moves, and which the walk counts from and wraps around.
+  std::array<std::uint8_t, kSpritesPerLine> inRange{};
   std::uint8_t found = 0;
   std::uint8_t scanned = 0;
+  std::uint8_t first = 0;
 
   [[nodiscard]] bool operator==(const SpriteLine&) const noexcept = default;
 };
@@ -193,8 +201,10 @@ struct PpuState {
   bool countersLatched = false;  // $213F bit 6: new values have been latched since the last read of $213F
 
   // ---- status -----------------------------------------------------------------
-  bool rangeOver = false;  // $213E bit 6: more than 32 sprites on a line
-  bool timeOver = false;   // $213E bit 7: more than 34 sprite slivers on a line
+  // Raised by the two passes whether or not $212C shows the sprites at all, and
+  // cleared as the next picture begins.
+  bool rangeOver = false;  // $213E bit 6: Range met more sprites than it can keep
+  bool timeOver = false;   // $213E bit 7: Time met more tiles than it can load
 
   // ---- the chip's two open-bus values -----------------------------------------
   // Each half of the chip remembers the last byte read through its own ports and
@@ -268,19 +278,25 @@ class Ppu {
   // picture's first — so a write to $2101 landing mid-line reaches the sprites
   // whose dots have not gone by and no others. A sprite is kept when the line
   // crosses it and any part of it stands at or right of the picture's left
-  // edge. The chip is not examining OAM while it renders nothing, so forced
-  // blank walks nowhere.
+  // edge, up to kSpritesPerLine of them; the sprite that would be one too many
+  // raises $213E bit 6 at its own dot. The chip is not examining OAM while it
+  // renders nothing, so forced blank walks nowhere.
   void rangeSprite(std::uint16_t line) noexcept;
 
   // Time drawing the sprites Range kept into the line buffer, in the horizontal
-  // blank before that line begins: back to front, so the sprite nearest the
-  // front holds every position it claims, and its priority is the one the
-  // backgrounds answer. Forced blank gathers nothing and leaves the buffer for
-  // a line no picture will ask about.
+  // blank before that line begins: from the last sprite Range kept back towards
+  // the first, so the sprite nearest the front holds every position it claims,
+  // and its priority is the one the backgrounds answer. It loads
+  // kSpriteTilesPerLine 8x8 tiles standing on the picture and no more, counting
+  // each sprite's left to right; the tile that would be one too many raises
+  // $213E bit 7. Forced blank gathers nothing and leaves the buffer for a line
+  // no picture will ask about.
   void timeSprites(std::uint16_t line) noexcept;
 
-  // The line boundary handing Range a fresh pass over OAM.
-  void beginRange() noexcept;
+  // The line boundary handing Range a fresh pass over OAM for `line`, and with
+  // it the sprite the walk begins at: sprite 0, or the one $2103 bit 7 and the
+  // sprite-table port's own address name between them.
+  void beginRange(std::uint16_t line) noexcept;
 
   // The four bytes the chip's converter drives at picture position (x, y): red,
   // green, blue, then 255. x runs across a line's 256 pixels and y down the
@@ -333,6 +349,12 @@ class Ppu {
 
   // The record OAM holds for a sprite, the high table's two bits included.
   [[nodiscard]] Sprite spriteAt(std::uint8_t index) const noexcept;
+
+  // The sprite the walk for `line` begins at, which is also the sprite in front
+  // of every other. $2103 bit 7 clear leaves it sprite 0; set, it is the sprite
+  // the port's own address stands in, and where that address is parked on the
+  // last byte of a record the line the pass is matching is added to it.
+  [[nodiscard]] std::uint8_t firstSprite(std::uint16_t line) const noexcept;
 
   // The byte address in VRAM of the character holding the sprite's pixel at
   // column and row, both counted from its top left after flipping. A sprite's

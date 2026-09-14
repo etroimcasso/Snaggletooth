@@ -62,6 +62,14 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
   return row;
 }
 
+// Where Range and Time count a sprite. Nine bits of X reach one position that is
+// the picture's left edge a whole screen away, and the chip counts a sprite
+// standing there as though it stood at the edge itself — while drawing it where
+// its own X puts it, which is off the picture altogether.
+[[nodiscard]] int countedX(int x) noexcept {
+  return x == -static_cast<int>(kPictureWidth) ? 0 : x;
+}
+
 // The row a vertical flip shows in that row's place. A flip reverses the whole
 // sprite rather than its characters — except that a rectangular sprite flips as
 // though it were two square sprites stacked, so rows "01234567" become
@@ -197,9 +205,24 @@ std::size_t Ppu::spriteCharacter(const Sprite& sprite, unsigned column,
   return static_cast<std::size_t>(word) * 2u;
 }
 
-void Ppu::beginRange() noexcept {
+std::uint8_t Ppu::firstSprite(std::uint16_t line) const noexcept {
+  // Without $2103's top bit the walk begins at sprite 0, whatever the port is
+  // doing.
+  if ((s_.oamadd & 0x8000u) == 0u) return 0u;
+
+  // With it, the sprite the port's own address stands in — the address counts
+  // bytes and a record is four of them. Standing on the last byte of a record it
+  // carries the line the pass is matching as well, which is the line before the
+  // one the sprites it finds will draw on.
+  unsigned sprite = static_cast<unsigned>(s_.oamAddress) >> 2;
+  if ((s_.oamAddress & 0x03u) == 0x03u) sprite += static_cast<unsigned>(line) - 1u;
+  return static_cast<std::uint8_t>(sprite & 0x7Fu);
+}
+
+void Ppu::beginRange(std::uint16_t line) noexcept {
   s_.sprites.scanned = 0u;
   s_.sprites.found = 0u;
+  s_.sprites.first = firstSprite(line);
 }
 
 void Ppu::rangeSprite(std::uint16_t line) noexcept {
@@ -208,13 +231,24 @@ void Ppu::rangeSprite(std::uint16_t line) noexcept {
   if (s_.forcedBlank()) return;
   if (static_cast<unsigned>(s_.sprites.scanned) >= kSprites) return;
 
-  // The sprite this dot belongs to, against $2101 as it stands at this dot.
-  const std::uint8_t index = s_.sprites.scanned;
+  // The sprite this dot belongs to: the walk counts from the sprite it began at
+  // and wraps past the last, and reads $2101 as it stands at this dot.
+  const auto index = static_cast<std::uint8_t>(
+      (static_cast<unsigned>(s_.sprites.first) + s_.sprites.scanned) & 0x7Fu);
   ++s_.sprites.scanned;
   const Sprite sprite = spriteAt(index);
 
   if (!rowCrossed(sprite.y, sprite.height, line).has_value()) return;
-  if (sprite.x <= -static_cast<int>(sprite.width)) return;  // nothing of it stands on the picture
+  if (countedX(sprite.x) <= -static_cast<int>(sprite.width)) {
+    return;  // nothing of it stands on the picture
+  }
+
+  // Range keeps so many of them and no more; the sprite that is one too many
+  // raises its flag here, at its own dot.
+  if (static_cast<unsigned>(s_.sprites.found) >= kSpritesPerLine) {
+    s_.rangeOver = true;
+    return;
+  }
   s_.sprites.inRange[s_.sprites.found] = index;
   ++s_.sprites.found;
 }
@@ -230,6 +264,7 @@ void Ppu::timeSprites(std::uint16_t line) noexcept {
   // writes last and keeps every position it claims — its priority with it, which
   // is why a sprite in front at priority 0 hides one behind it at priority 3 from
   // a background that shows above priority 0.
+  unsigned tiles = 0u;
   for (unsigned nth = s_.sprites.found; nth-- > 0u;) {
     const Sprite sprite = spriteAt(s_.sprites.inRange[nth]);
     const std::optional<unsigned> crossed = rowCrossed(sprite.y, sprite.height, line);
@@ -240,29 +275,47 @@ void Ppu::timeSprites(std::uint16_t line) noexcept {
     const unsigned row = flipVertical ? flipRow(*crossed, sprite.width) : *crossed;
     const auto priority = static_cast<std::uint8_t>((sprite.attributes >> 4) & 0x03u);
     const unsigned palette = (sprite.attributes >> 1) & 0x07u;
+    const int counted = countedX(sprite.x);
 
-    for (unsigned column = 0u; column < sprite.width; ++column) {
-      const int x = sprite.x + static_cast<int>(column);
-      if (x < 0 || x >= static_cast<int>(kPictureWidth)) continue;
-
-      // A horizontal flip reverses the whole sprite, so the leftmost position
-      // takes the rightmost of its pixels.
-      const unsigned source = flipHorizontal ? sprite.width - 1u - column : column;
-      const std::size_t character = spriteCharacter(sprite, source, row);
-      const std::size_t at = (character + (row % kCharacterSide) * 2u) & 0xFFFFu;
-      const unsigned bit = kCharacterSide - 1u - source % kCharacterSide;
-      unsigned index = 0u;
-      for (unsigned plane = 0u; plane < kSpritePlanes; ++plane) {
-        const std::size_t byteAt =
-            (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
-        index |= ((s_.vram[byteAt] >> bit) & 1u) << plane;
+    // A sprite's row is loaded a tile at a time, left to right. Time has so many
+    // tiles to spend on a line and spends them only on tiles that stand on the
+    // picture; the tile that is one too many raises its flag and is not loaded,
+    // and neither is anything behind it in the walk.
+    for (unsigned across = 0u; across < sprite.width; across += kCharacterSide) {
+      const int tileX = counted + static_cast<int>(across);
+      if (tileX <= -static_cast<int>(kCharacterSide) ||
+          tileX >= static_cast<int>(kPictureWidth)) {
+        continue;
       }
-      if (index == 0u) continue;  // colour 0 of a sprite's palette is transparent too
+      if (tiles >= kSpriteTilesPerLine) {
+        s_.timeOver = true;
+        continue;
+      }
+      ++tiles;
 
-      // Eight sixteen-colour palettes, beginning at CGRAM word 128.
-      s_.sprites.word[static_cast<std::size_t>(x)] =
-          static_cast<std::uint8_t>(128u + palette * 16u + index);
-      s_.sprites.priority[static_cast<std::size_t>(x)] = priority;
+      for (unsigned column = across; column < across + kCharacterSide; ++column) {
+        const int x = sprite.x + static_cast<int>(column);
+        if (x < 0 || x >= static_cast<int>(kPictureWidth)) continue;
+
+        // A horizontal flip reverses the whole sprite, so the leftmost position
+        // takes the rightmost of its pixels.
+        const unsigned source = flipHorizontal ? sprite.width - 1u - column : column;
+        const std::size_t character = spriteCharacter(sprite, source, row);
+        const std::size_t at = (character + (row % kCharacterSide) * 2u) & 0xFFFFu;
+        const unsigned bit = kCharacterSide - 1u - source % kCharacterSide;
+        unsigned index = 0u;
+        for (unsigned plane = 0u; plane < kSpritePlanes; ++plane) {
+          const std::size_t byteAt =
+              (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
+          index |= ((s_.vram[byteAt] >> bit) & 1u) << plane;
+        }
+        if (index == 0u) continue;  // colour 0 of a sprite's palette is transparent too
+
+        // Eight sixteen-colour palettes, beginning at CGRAM word 128.
+        s_.sprites.word[static_cast<std::size_t>(x)] =
+            static_cast<std::uint8_t>(128u + palette * 16u + index);
+        s_.sprites.priority[static_cast<std::size_t>(x)] = priority;
+      }
     }
   }
 }

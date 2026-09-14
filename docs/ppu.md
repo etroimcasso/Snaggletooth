@@ -168,9 +168,8 @@ frame rather than no frame.
 
 **What is not drawn yet**, so a reader does not go looking for it: BG4, which Mode 1 does not have,
 so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows nowhere;
-the windows and colour math; mosaic; sprite priority rotation, `$2103` bit 7, which is stored and
-not yet applied; the two sprite limits, so every sprite the line crosses is drawn; and every mode
-but 1, which show their backdrop and their sprites nowhere. Each arrives with its own work.
+the windows and colour math; mosaic; and every mode but 1, which show their backdrop and their
+sprites nowhere. Each arrives with its own work.
 
 ## The sprites
 
@@ -207,10 +206,19 @@ chooses between the two sizes.
   and not `76543210`.
 - **A sprite's palette is `128 + ppp × 16`**, sixteen colours from CGRAM word 128 up, and its colour 0
   is transparent like every other. `$212C` bit 4 puts the sprites on the main screen.
-- **Among themselves sprites are ordered by index**: sprite 0 is in front of sprite 1 and so on. Only
-  the topmost sprite at a position reaches the picture, so **only its priority answers the
-  backgrounds** — two overlapping sprites, the front one at priority 0 and the one behind at priority
-  3, are both hidden by a background that shows above priority 0.
+- **Among themselves sprites are ordered by index** from the sprite the walk begins at: that one is in
+  front of the next, and so on around the table. Only the topmost sprite at a position reaches the
+  picture, so **only its priority answers the backgrounds** — two overlapping sprites, the front one at
+  priority 0 and the one behind at priority 3, are both hidden by a background that shows above
+  priority 0.
+- **`$2103` bit 7 moves where the walk begins.** Clear, it is sprite 0. Set, it is the sprite the
+  sprite-table port's own address stands in — the address counts bytes and a record is four of them,
+  so the sprite is that address divided by four, held to seven bits. **Where the address is standing
+  on the last byte of a record**, the line the pass is matching is added to it as well, which is what
+  makes a table of sprites at one Y hand a different one the front on each successive line. The port's
+  address returns to `$2102/$2103`'s reload value at the start of vertical blank, so a program that
+  writes the pair and then steps the address moves the front sprite for one frame and gets the reload
+  value's sprite on the next.
 
 **The two passes.** Sprites are the one part of the picture not resolved at the dot that shows them.
 **Range** walks the sprite table across the visible dots of the line *before* the one it is gathering
@@ -225,6 +233,33 @@ whether or not a frame observer is set, because the two overflow flags they set 
 `$213E`; what the passes leave is part of `PpuState`, so a snapshot carries a half-walked pass and a
 restore resumes it. A chip in forced blank is rendering nothing, so it walks nowhere and gathers
 nothing.
+
+**What the chip can afford.** Each pass has a count, and the two run in opposite directions along the
+sprites Range kept:
+
+- **Range keeps 32 sprites.** It walks from the sprite the order begins at towards higher indices,
+  wrapping past the last, and keeps the first 32 the line crosses with any part of them at or right of
+  the left edge. The sprite that would be one too many is dropped and **raises `$213E` bit 6 at its own
+  dot** — the walk carries on so later sprites still take their dots, but nothing more is kept.
+- **Time loads 34 8×8 tiles.** It walks **from the last sprite Range kept back towards the first**,
+  taking each sprite's tiles left to right, and counts only the tiles standing on the picture: a tile
+  is counted where `−8 < X < 256`. The tile that would be one too many is not loaded and **raises
+  `$213E` bit 7**, and neither is anything behind it in the walk — which is why a crowded line loses
+  the sprites nearest the front rather than the ones behind.
+
+Because Time spends its count from the back, the sprites it drops are the ones the walk began at; and
+because Range keeps only the first 32 it meets, the sprites *it* drops are the ones furthest along the
+walk. Moving where the walk begins therefore moves which sprites survive a crowded line, which is what
+`$2103` bit 7 is for.
+
+**A sprite at the far side of nine bits.** X is nine bits read as signed, and the one position it
+reaches that is a whole screen from the left edge — `X = −256`, the same place as `X = 256` — is
+**counted by both passes as though it stood at 0**, filling a slot in Range and taking its tiles from
+Time's count, while it draws where its own X puts it, which is nowhere on the picture.
+
+**Both flags are raised whether or not `$212C` bit 4 shows the sprites at all**, and they are cleared
+as the next picture begins — except after a frame the chip spent in forced blank, where it drew
+nothing and they stand.
 
 ## Writes and their latches
 
@@ -369,12 +404,15 @@ Each of these is a question the documentation leaves, recorded rather than decid
   itself uncertain; they clear as the line begins.
 - Whether the overflow flags clear in a frame the chip spent in forced blank. anomie has them reset at
   vertical blank's end with no exception; the register page excepts forced blank, which is followed.
-- Whether the overflow flags are set regardless of the sprite enables, as the register page states. The
-  two limits that set them are not built, so nothing sets them yet.
 - Whether the two overflow flags can be raised on the same line by different sprites, and which dot the
   chip reports if a program latches the counters between them.
-- What a sprite whose Y puts part of it above the picture contributes to the count of characters the
-  chip can load in a horizontal blank.
+- What a sprite whose Y puts part of it above the picture contributes to Time's count. Its tiles are
+  counted by their X alone, which is what both sources describe; whether the chip charges for the rows
+  above the picture is not stated.
+- Whether the sprite-table port's address has to be standing on a record's *last* byte for the line to
+  be added to the front sprite, or on some other one. anomie's own arithmetic and his worked example
+  disagree by two bytes; the example and the sentence beside it agree on the last byte, and that is
+  what is built — see [`ppu-behavior.md`](ppu-behavior.md#the-front-sprite-oddity-is-stated-three-ways-and-two-of-them-agree).
 - What the sprite line holds on the first line after forced blank lifts part-way through a frame. The
   passes do not run under the blank, so the line the blank interrupted was never gathered; the buffer
   is read only for the line it was gathered for, so that line shows no sprites at all.
