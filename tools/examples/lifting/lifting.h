@@ -174,8 +174,14 @@ inline std::vector<std::uint8_t> liftingImage() {
       0xA9u, 0x97u, 0x8Du, 0x13u, 0x43u,       // $828F A1T1 high: the table at $9700
       0xA9u, 0x00u, 0x8Du, 0x14u, 0x43u,       // $8294 A1B1 = $00
       0xA9u, 0x00u, 0x8Du, 0x17u, 0x43u,       // $8299 DASB1 = $00: the blocks' bank
-      0xA9u, 0x02u, 0x8Du, 0x0Cu, 0x42u,       // $829E HDMAEN = $02 (the write at $82A0)
-      0x80u, 0xFEu,                            // $82A3 BRA *: idle while the frames walk the table
+      // The channel comes in away from the top of a frame, where the one point that
+      // reloads a channel has gone by, so it is handed its own cursor and a count of
+      // one for its first line to spend on reaching the table.
+      0xA9u, 0x00u, 0x8Du, 0x18u, 0x43u,       // $829E A2A1 low
+      0xA9u, 0x97u, 0x8Du, 0x19u, 0x43u,       // $82A3 A2A1 high: the cursor at $9700
+      0xA9u, 0x01u, 0x8Du, 0x1Au, 0x43u,       // $82A8 NLTR1 = $01
+      0xA9u, 0x02u, 0x8Du, 0x0Cu, 0x42u,       // $82AD HDMAEN = $02 (the write at $82AF)
+      0x80u, 0xFEu,                            // $82B2 BRA *: idle while the frames walk the table
   });
   for (std::size_t i = 0; i < 80; ++i) rom[0x1000u + i] = static_cast<std::uint8_t>(0x10u + i);   // the tileset and what follows it
   for (std::size_t i = 0; i < 16; ++i) rom[0x1200u + i] = static_cast<std::uint8_t>(0xE0u + i);   // the palette

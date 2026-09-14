@@ -17,7 +17,8 @@ their second half at `$7000`; the screen on; channel 1 enabled on a direct
 HDMA table of unit 2 — one entry of two lines, one of three lines repeated,
 then the end — to the window registers, and channel 2 on an indirect table
 of unit 1 to the brightness register, whose two entries point at a block of
-one byte and a block of three; and the vertical-blank interrupt on. On the
+one byte and a block of three, both armed part-way down a picture and so
+handed their own table cursors and a count of one first; and the vertical-blank interrupt on. On the
 first and the second frames the handler fills thirty-two bytes at `$7E:1000`
 from run-length blobs and sends them out ten times through that one buffer,
 six on the first frame and four on the second, so each frame's sends fit its

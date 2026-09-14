@@ -79,48 +79,67 @@ inline std::vector<std::uint8_t> movingImage() {
       0xA9u, 0x95u, 0x8Du, 0x53u, 0x43u,   // $80E6 A1T5 high: the table at $9510
       0xA9u, 0x00u, 0x8Du, 0x54u, 0x43u,   // $80EB A1B5 = $00
       0xA9u, 0x00u, 0x8Du, 0x57u, 0x43u,   // $80F0 DASB5 = $00: the blocks' bank
-      0xA9u, 0x30u, 0x8Du, 0x0Cu, 0x42u,   // $80F5 HDMAEN = $30: channels 4 and 5 (the write at $80F7)
+      // A channel started away from the top of a frame has missed the one point that
+      // reloads it, so the program hands it its own cursor and a count of one, which
+      // the first line spends to reach the table's first entry.
+      0xA9u, 0x00u, 0x8Du, 0x48u, 0x43u,   // $80F5 A2A4 low
+      0xA9u, 0x95u, 0x8Du, 0x49u, 0x43u,   // $80FA A2A4 high: the cursor at $9500
+      0xA9u, 0x01u, 0x8Du, 0x4Au, 0x43u,   // $80FF NLTR4 = $01
+      0xA9u, 0x10u, 0x8Du, 0x58u, 0x43u,   // $8104 A2A5 low
+      0xA9u, 0x95u, 0x8Du, 0x59u, 0x43u,   // $8109 A2A5 high: the cursor at $9510
+      0xA9u, 0x01u, 0x8Du, 0x5Au, 0x43u,   // $810E NLTR5 = $01
+      0xA9u, 0x30u, 0x8Du, 0x0Cu, 0x42u,   // $8113 HDMAEN = $30: channels 4 and 5 (the write at $8115)
       // ---- channel 6: a direct table written into work RAM first ----
-      0xA2u, 0x00u,                        // $80FA LDX #$00
-      0x8Au,                               // $80FC TXA
-      0x9Du, 0x01u, 0x04u,                 // $80FD STA !$0401,X   the values 0..255 at $0401
-      0xE8u,                               // $8100 INX
-      0xD0u, 0xF9u,                        // $8101 BNE $80FC
-      0xA9u, 0xFFu, 0x8Du, 0x00u, 0x04u,   // $8103 $0400 = $FF: repeat on 127 lines
-      0xA9u, 0x00u, 0x8Du, 0x80u, 0x04u,   // $8108 $0480 = $00: stop
-      0xA9u, 0x00u, 0x8Du, 0x60u, 0x43u,   // $810D DMAP6 = $00: direct, pattern 0
-      0xA9u, 0x00u, 0x8Du, 0x61u, 0x43u,   // $8112 BBAD6 = $00: INIDISP
-      0xA9u, 0x00u, 0x8Du, 0x62u, 0x43u,   // $8117 A1T6 low
-      0xA9u, 0x04u, 0x8Du, 0x63u, 0x43u,   // $811C A1T6 high: the table at $0400
-      0xA9u, 0x7Eu, 0x8Du, 0x64u, 0x43u,   // $8121 A1B6 = $7E
-      0xA9u, 0x70u, 0x8Du, 0x0Cu, 0x42u,   // $8126 HDMAEN = $70: channel 6 joins 4 and 5 (the write at $8128)
+      0xA2u, 0x00u,                        // $8118 LDX #$00
+      0x8Au,                               // $811A TXA
+      0x9Du, 0x01u, 0x04u,                 // $811B STA !$0401,X   the values 0..255 at $0401
+      0xE8u,                               // $811E INX
+      0xD0u, 0xF9u,                        // $811F BNE $811A
+      0xA9u, 0xFFu, 0x8Du, 0x00u, 0x04u,   // $8121 $0400 = $FF: repeat on 127 lines
+      0xA9u, 0x00u, 0x8Du, 0x80u, 0x04u,   // $8126 $0480 = $00: stop
+      // Nothing was running when 4 and 5 came in, so their first line only fetched.
+      // Channel 6 comes in while they are going, and such a channel delivers on its
+      // first line before it fetches anything — so its cursor starts one byte below
+      // the table, on a brightness that line can spend, and reaches the table itself
+      // on the line after. Every later frame begins at the top of the frame, where the
+      // cursor is reloaded from A1T6 and the table is entered at its own first byte.
+      0xA9u, 0x0Fu, 0x8Du, 0xFFu, 0x03u,   // $812B $03FF = $0F: the joining line's brightness
+      0xA9u, 0x00u, 0x8Du, 0x60u, 0x43u,   // $8130 DMAP6 = $00: direct, pattern 0
+      0xA9u, 0x00u, 0x8Du, 0x61u, 0x43u,   // $8135 BBAD6 = $00: INIDISP
+      0xA9u, 0x00u, 0x8Du, 0x62u, 0x43u,   // $813A A1T6 low
+      0xA9u, 0x04u, 0x8Du, 0x63u, 0x43u,   // $813F A1T6 high: the table at $0400
+      0xA9u, 0x7Eu, 0x8Du, 0x64u, 0x43u,   // $8144 A1B6 = $7E
+      0xA9u, 0xFFu, 0x8Du, 0x68u, 0x43u,   // $8149 A2A6 low
+      0xA9u, 0x03u, 0x8Du, 0x69u, 0x43u,   // $814E A2A6 high: the cursor at $03FF
+      0xA9u, 0x01u, 0x8Du, 0x6Au, 0x43u,   // $8153 NLTR6 = $01
+      0xA9u, 0x70u, 0x8Du, 0x0Cu, 0x42u,   // $8158 HDMAEN = $70: channel 6 joins 4 and 5 (the write at $815A)
       // ---- channel 7: the sprite table, sent from the handler ----
-      0xA9u, 0x00u, 0x8Du, 0x70u, 0x43u,   // $812B DMAP7 = $00: A->B, increment, pattern 0
-      0xA9u, 0x04u, 0x8Du, 0x71u, 0x43u,   // $8130 BBAD7 = $04: OAMDATA
-      0xA9u, 0x7Eu, 0x8Du, 0x74u, 0x43u,   // $8135 A1B7 = $7E
+      0xA9u, 0x00u, 0x8Du, 0x70u, 0x43u,   // $815D DMAP7 = $00: A->B, increment, pattern 0
+      0xA9u, 0x04u, 0x8Du, 0x71u, 0x43u,   // $8162 BBAD7 = $04: OAMDATA
+      0xA9u, 0x7Eu, 0x8Du, 0x74u, 0x43u,   // $8167 A1B7 = $7E
       // ---- channel 0 again: a tileset in three chunks ----
-      0xA9u, 0x01u, 0x8Du, 0x00u, 0x43u,   // $813A DMAP0 = $01: A->B, increment, pattern 1
-      0xA9u, 0x00u, 0x8Du, 0x02u, 0x43u,   // $813F A1T0 low
-      0xA9u, 0x96u, 0x8Du, 0x03u, 0x43u,   // $8144 A1T0 high: $9600
-      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,   // $8149 DAS0 low = 16
-      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,   // $814E DAS0 high
-      0x20u, 0x8Eu, 0x81u,                 // $8153 JSR send
-      0xA9u, 0x10u, 0x8Du, 0x02u, 0x43u,   // $8156 A1T0 low: $9610, where the first chunk ended
-      0xA9u, 0x96u, 0x8Du, 0x03u, 0x43u,   // $815B A1T0 high
-      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,   // $8160 DAS0 low = 16
-      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,   // $8165 DAS0 high
-      0x20u, 0x8Eu, 0x81u,                 // $816A JSR send
-      0xA9u, 0x20u, 0x8Du, 0x02u, 0x43u,   // $816D A1T0 low: $9620, where the second ended
-      0xA9u, 0x96u, 0x8Du, 0x03u, 0x43u,   // $8172 A1T0 high
-      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,   // $8177 DAS0 low = 16
-      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,   // $817C DAS0 high
-      0xA9u, 0x01u,                        // $8181 LDA #$01
-      0x8Fu, 0x0Bu, 0x42u, 0x80u,          // $8183 STA >$80:420B: MDMAEN through a mirror bank
-      0xA9u, 0x80u, 0x8Du, 0x00u, 0x42u,   // $8187 NMITIMEN = $80: NMI on
-      0x80u, 0xFEu,                        // $818C BRA $818C
-      0xA9u, 0x01u,                        // $818E send: LDA #$01
-      0x8Du, 0x0Bu, 0x42u,                 // $8190 STA !MDMAEN      (the write at $8190, twice)
-      0x60u,                               // $8193 RTS
+      0xA9u, 0x01u, 0x8Du, 0x00u, 0x43u,   // $816C DMAP0 = $01: A->B, increment, pattern 1
+      0xA9u, 0x00u, 0x8Du, 0x02u, 0x43u,   // $8171 A1T0 low
+      0xA9u, 0x96u, 0x8Du, 0x03u, 0x43u,   // $8176 A1T0 high: $9600
+      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,   // $817B DAS0 low = 16
+      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,   // $8180 DAS0 high
+      0x20u, 0xC0u, 0x81u,                 // $8185 JSR send
+      0xA9u, 0x10u, 0x8Du, 0x02u, 0x43u,   // $8188 A1T0 low: $9610, where the first chunk ended
+      0xA9u, 0x96u, 0x8Du, 0x03u, 0x43u,   // $818D A1T0 high
+      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,   // $8192 DAS0 low = 16
+      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,   // $8197 DAS0 high
+      0x20u, 0xC0u, 0x81u,                 // $819C JSR send
+      0xA9u, 0x20u, 0x8Du, 0x02u, 0x43u,   // $819F A1T0 low: $9620, where the second ended
+      0xA9u, 0x96u, 0x8Du, 0x03u, 0x43u,   // $81A4 A1T0 high
+      0xA9u, 0x10u, 0x8Du, 0x05u, 0x43u,   // $81A9 DAS0 low = 16
+      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,   // $81AE DAS0 high
+      0xA9u, 0x01u,                        // $81B3 LDA #$01
+      0x8Fu, 0x0Bu, 0x42u, 0x80u,          // $81B5 STA >$80:420B: MDMAEN through a mirror bank
+      0xA9u, 0x80u, 0x8Du, 0x00u, 0x42u,   // $81B9 NMITIMEN = $80: NMI on
+      0x80u, 0xFEu,                        // $81BE BRA $81BE
+      0xA9u, 0x01u,                        // $81C0 send: LDA #$01
+      0x8Du, 0x0Bu, 0x42u,                 // $81C2 STA !MDMAEN      (the write at $81C2, twice)
+      0x60u,                               // $81C5 RTS
   });
   put(rom, 0x0310u, {                        // the emulation handler: the program stays in emulation mode
       0xA9u, 0x00u, 0x8Du, 0x72u, 0x43u,   // $8310 A1T7 low

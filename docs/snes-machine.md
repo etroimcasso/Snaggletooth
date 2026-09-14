@@ -528,6 +528,24 @@ the frame, `$01-$80` to write one unit and then wait that many scanlines, or `$8
 to write a unit on each of the next `count` lines. A direct table holds the data inline; an indirect table
 (bit 6 of `dmap`) holds a 16-bit pointer per entry, and the data is read from `dasb:das`.
 
+`$420C` is read on every line, not only at the frame's start, so a program can take a channel out of the
+picture part-way down and put it back. A channel taken out delivers nothing while its bit is clear and
+keeps its place in its table, so putting it back resumes where it stood — and a channel whose table has
+already stopped stays stopped until the next frame.
+
+A channel armed part-way down a picture has missed the initialisation, so it is not reloaded: it runs from
+the cursor in `a2a` and the count in `nltr` exactly as the program leaves them, and `a1t` is not consulted
+until the next frame begins. Set both before arming it. Whether its first line delivers depends on what
+else is running: a channel that joins channels already delivering writes a unit before it fetches anything,
+so point `a2a` one unit below the table; a channel armed while `$420C` is empty fetches first, so point
+`a2a` at the table itself.
+
+```cpp
+// Armed part-way down a picture, with nothing else running: give the channel its own
+// cursor and a count of one, which the first line spends reaching the table's entry.
+//   $43x8/$43x9 = the table address        $43xA = $01        then $420C
+```
+
 ```cpp
 // Change brightness partway down the screen: write $2100 on line 0, then again on line 2.
 //   table: 02 0A 01 0B 00

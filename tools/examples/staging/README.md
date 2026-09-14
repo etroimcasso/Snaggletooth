@@ -20,7 +20,9 @@ through the same port; a copy at `$8380` moves a three-byte HDMA table from
 Then the transfers send `$7F:0000` and `$7F:0100` to VRAM, `$7F:0300` to OAM,
 `$7E:0400` and `$7E:0500` to VRAM, and `$7F:0700` to VRAM and then to CGRAM; a
 loop at `$84C0` carries `$7F:0800` to `VMDATAL` a word at a time; and channel 1
-walks the table in `$7F:0600` to `INIDISP` every frame while the program idles.
+— armed part-way down a picture, so handed its own table cursor and a count of
+one first — walks the table in `$7F:0600` to `INIDISP` every frame while the
+program idles.
 
 What it shows: a decompressed range whose origin is a comb of the value bytes,
 reported with its span and lifted from it; a copied range whose origin is

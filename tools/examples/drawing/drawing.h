@@ -123,9 +123,18 @@ inline std::vector<std::uint8_t> drawingImage() {
       0xA9u, 0x00u, 0x8Fu, 0x24u, 0x43u, 0x00u,  // $8194 A1B2 = $00
       0xA9u, 0x00u, 0x8Fu, 0x27u, 0x43u, 0x00u,  // $819A DASB2 = $00: the blocks' bank
       0xA9u, 0x0Fu, 0x8Fu, 0x00u, 0x21u, 0x00u,  // $81A0 INIDISP = $0F: the screen on
-      0xA9u, 0x06u, 0x8Fu, 0x0Cu, 0x42u, 0x00u,  // $81A6 HDMAEN = $06: channels 1 and 2 (the write at $81A8)
-      0xA9u, 0x80u, 0x8Fu, 0x00u, 0x42u, 0x00u,  // $81AC NMITIMEN = $80: the vertical-blank interrupt on
-      0x4Cu, 0x00u, 0x82u,                     // $81B2 JMP $8200: the sound upload
+      // Both channels come in away from the top of a frame, where the one point that
+      // reloads a channel has gone by, so each is handed its own cursor and a count of
+      // one for its first line to spend on reaching its table.
+      0xA9u, 0x00u, 0x8Fu, 0x18u, 0x43u, 0x00u,  // $81A6 A2A1 low
+      0xA9u, 0xA4u, 0x8Fu, 0x19u, 0x43u, 0x00u,  // $81AC A2A1 high: the cursor at $A400
+      0xA9u, 0x01u, 0x8Fu, 0x1Au, 0x43u, 0x00u,  // $81B2 NLTR1 = $01
+      0xA9u, 0x10u, 0x8Fu, 0x28u, 0x43u, 0x00u,  // $81B8 A2A2 low
+      0xA9u, 0xA4u, 0x8Fu, 0x29u, 0x43u, 0x00u,  // $81BE A2A2 high: the cursor at $A410
+      0xA9u, 0x01u, 0x8Fu, 0x2Au, 0x43u, 0x00u,  // $81C4 NLTR2 = $01
+      0xA9u, 0x06u, 0x8Fu, 0x0Cu, 0x42u, 0x00u,  // $81CA HDMAEN = $06: channels 1 and 2 (the write at $81CC)
+      0xA9u, 0x80u, 0x8Fu, 0x00u, 0x42u, 0x00u,  // $81D0 NMITIMEN = $80: the vertical-blank interrupt on
+      0x4Cu, 0x00u, 0x82u,                     // $81D6 JMP $8200: the sound upload
   });
   // The sound upload, with the interrupt off while the byte index is in X —
   // the handler keeps nothing it uses — and on again once the program has

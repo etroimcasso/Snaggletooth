@@ -14,7 +14,10 @@ the brightness register; channel 5 an indirect table at `$9510` to the palette
 port, whose two blocks lie at `$9522` and `$9520` in the same bank — the second
 entry's block ending exactly where the first entry's begins; channel 6 a direct
 table of 129 bytes the program first writes into work RAM at `$7E:0400`,
-enabled by a second write to `HDMAEN`. Channel 0 then carries 48 bytes from
+enabled by a second write to `HDMAEN`. All three are armed part-way down a
+picture, so each is handed its own table cursor and a count of one before its
+bit is set; and because channel 6 joins two channels already delivering, its
+cursor starts one byte below the table, on a brightness its first line spends. Channel 0 then carries 48 bytes from
 `$9600` in three chunks of sixteen: the first two started by one instruction in
 a subroutine, the third by a long store to `MDMAEN` through bank `$80`. Channel
 7 sends 544 bytes from `$7E:0200` to OAM, started from the handler on every

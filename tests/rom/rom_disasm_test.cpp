@@ -2060,11 +2060,11 @@ TEST(RomLandedFiles, ATableIsWrittenUnderTheUnitAndTheFormItWasWalked) {
 TEST(RomLandedFiles, TheWalkedAndPreviewLinesAreWrittenAndAreKnownKinds) {
   const CartridgeDisassembly d = drawingLift();
   const std::string manifest = renderManifest(d);
-  EXPECT_NE(manifest.find("walked   $00:81A8 channel 1 memory $00:A400 bytes 11 as table unit 2 direct times "),
+  EXPECT_NE(manifest.find("walked   $00:81CC channel 1 memory $00:A400 bytes 11 as table unit 2 direct times "),
             std::string::npos) << manifest;
-  EXPECT_NE(manifest.find("walked   $00:81A8 channel 2 memory $00:A410 bytes 7 as table unit 1 indirect times "),
+  EXPECT_NE(manifest.find("walked   $00:81CC channel 2 memory $00:A410 bytes 7 as table unit 1 indirect times "),
             std::string::npos);
-  EXPECT_NE(manifest.find("walked   $00:81A8 channel 2 memory $00:A420 bytes 4 as indirect unit 1 indirect times "),
+  EXPECT_NE(manifest.find("walked   $00:81CC channel 2 memory $00:A420 bytes 4 as indirect unit 1 indirect times "),
             std::string::npos);
   EXPECT_NE(manifest.find("preview  staged/00_A500-tiles.png of staged/00_A500.bin as tiles contents 1\n"),
             std::string::npos) << manifest;

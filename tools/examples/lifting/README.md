@@ -18,7 +18,9 @@ past the bank's end, so the last sixteen come from `$01:0000`, which is not
 the image. A read of VRAM back into `$9B00` writes into the image, which takes
 nothing, and is not lifted; the same sixteen bytes at `$9C00` go to `VMDATAL`
 and then to `VMDATAH`, one class and two registers, which the pass refuses.
-Channel 1 walks an indirect HDMA table at `$9700` whose two entries point at
+Channel 1 is armed part-way down a picture, so it is handed its own table
+cursor and a count of one before its bit is set; it walks an indirect HDMA
+table at `$9700` whose two entries point at
 two-byte blocks at `$9712` and `$9710`.
 
 What it shows: a file under each directory the pass writes; ranges that share

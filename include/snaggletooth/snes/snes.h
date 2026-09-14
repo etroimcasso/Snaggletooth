@@ -298,7 +298,8 @@ struct SnesState {
   std::uint64_t dmaPauseMaster = 0; // the master counter at the transfer's pause, for the resume rounding
   bool dmaResumePad = false;        // the first CPU cycle after the transfer owes the resume-rounding pad
 
-  std::uint8_t hdmaActive = 0;   // channels still running HDMA this frame (a bit clears when a table terminates)
+  std::uint8_t hdmaActive = 0;   // channels that have taken part in HDMA this frame and whose tables are still running; a line delivers on the channels this and hdmaen both name
+  std::uint8_t hdmaEnded = 0;    // channels whose tables terminated this frame, which $420C cannot restart before the next one
   std::uint8_t hdmaDoWrite = 0;  // per channel: whether this scanline delivers a value (rather than waiting)
   bool hdmaInited = false;       // the start-of-frame initialisation has run this frame
   bool hdmaLineFired = false;    // this scanline's delivery has been triggered
@@ -562,10 +563,12 @@ class Snes {
   [[nodiscard]] std::uint32_t resumePad(std::uint32_t cpuCycle) const noexcept;
 
   // The HDMA engine: one whole event — the start-of-frame initialisation, or a
-  // single visible scanline's delivery for every active channel — and the helper
-  // that loads the next table entry into a channel.
+  // single visible scanline's delivery for every active channel — the helper that
+  // loads the next table entry into a channel, and the $420C write, which takes a
+  // channel out of the picture's remaining lines or brings one into them.
   void hdmaCycle();
   void hdmaLoadEntry(std::uint8_t index, bool indirect);
+  void enableHdma(std::uint8_t channels);
 
   // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
   // register files, read and written by their documented layout.
