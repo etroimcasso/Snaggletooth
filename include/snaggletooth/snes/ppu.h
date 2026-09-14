@@ -27,17 +27,19 @@
 
 namespace snaggletooth {
 
-// The first line of vertical blank. The picture ends on line 224; vblank runs
-// from this line to the end of the frame, and line 0 is the end of vblank.
+// The two lines vertical blank can begin on. The picture ends on line 224, or on
+// line 239 when SETINI bit 2 asks for the taller one; vblank runs from its start
+// line to the end of the frame, and line 0 is the end of vblank.
 constexpr std::uint16_t kVblankStartLine = 225u;
+constexpr std::uint16_t kOverscanVblankStartLine = 240u;
 
 // The machine as the PPU sees it at one access.
 struct PpuInputs {
-  std::uint16_t hdot = 0;   // the beam's dot within the line (0..339)
+  std::uint16_t hdot = 0;   // the beam's dot within the line (0..340), by the dot map's two long dots
   std::uint16_t vpos = 0;   // the beam's line
   std::uint8_t field = 0;   // the frame parity, toggled every frame
-  bool vblank = false;      // the vertical-blank signal: line kVblankStartLine to the frame's end
-  bool hblank = false;      // the horizontal-blank signal: outside the line's active span
+  bool vblank = false;      // the vertical-blank signal: raised at the start line and held to the frame's end
+  bool hblank = false;      // the horizontal-blank signal: raised at H=274 and lowered at H=1, on every line
   bool pal = false;         // the clock-rate pin: 50 Hz when set
   bool extLatch = true;     // the counter-latch line's level, WRIO bit 7 (high when nothing pulls it)
 };
@@ -160,6 +162,17 @@ struct PpuState {
   [[nodiscard]] std::int32_t multiplyResult() const noexcept;
 
   [[nodiscard]] bool forcedBlank() const noexcept { return (inidisp & 0x80u) != 0u; }
+
+  // The two signals SETINI gives the 5A22: bit 0 asks for an interlaced frame,
+  // bit 2 for the taller picture, which moves vertical blank's start line to
+  // kOverscanVblankStartLine.
+  [[nodiscard]] bool interlace() const noexcept { return (setini & 0x01u) != 0u; }
+  [[nodiscard]] bool overscan() const noexcept { return (setini & 0x04u) != 0u; }
+
+  // The line vertical blank begins on with SETINI as it stands.
+  [[nodiscard]] std::uint16_t vblankStartLine() const noexcept {
+    return overscan() ? kOverscanVblankStartLine : kVblankStartLine;
+  }
 };
 
 // The chip's behaviour over one PpuState. Built by the machine over its own
@@ -187,11 +200,22 @@ class Ppu {
   // the flag raised. The machine calls it when WRIO bit 7 goes from 1 to 0.
   void latchCounters(const PpuInputs& in) noexcept;
 
-  // The beam reaching the first line of vertical blank: with the screen on, the
-  // OAM address returns to the reload value.
+  // The beam reaching dot 10 of vertical blank's first line: with the screen on,
+  // the OAM address returns to the reload value.
   void beginVblank() noexcept;
 
+  // The beam reaching the frame's first line: with the screen on, the two sprite
+  // overflow flags clear. They were set by the last picture the chip drew, so a
+  // frame the chip spent in forced blank leaves them as they were.
+  void beginFrame() noexcept;
+
  private:
+  // Whether vertical blank is open to the memories, and whether the taller picture
+  // was asked for after the blank had already begun — which shuts them again until
+  // the line that picture ends on.
+  [[nodiscard]] bool inVblankWindow(const PpuInputs& in) const noexcept;
+  [[nodiscard]] bool overscanLate(const PpuInputs& in) const noexcept;
+
   // Whether each memory can be reached now. VRAM and the sprite table only in
   // vertical blank or forced blank; the palette in horizontal blank too.
   [[nodiscard]] bool vramReachable(const PpuInputs& in) const noexcept;

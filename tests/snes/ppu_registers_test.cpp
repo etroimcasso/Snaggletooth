@@ -51,6 +51,11 @@ Snes runAt(std::vector<std::uint8_t> program, std::uint16_t vpos, std::uint16_t 
   s.vpos = vpos;
   s.hpos = hpos;
   s.wrio = wrio;
+  // Vertical blank is a latched fact rather than a comparison, so a beam placed by
+  // hand carries it: a machine on a line past the start line is one whose blank began
+  // there, which is what the placement means.
+  s.inVblank = vpos >= s.ppu.vblankStartLine();
+  if (s.inVblank) s.vblankBeginLine = s.ppu.vblankStartLine();
   m.restore(s);
   m.setObserver(observer);
   while (m.state().cpu.run == CpuRunState::Running) m.step();
@@ -243,10 +248,13 @@ TEST(SnesPpuRegisters, Stat77CarriesTheFirstHalfsOpenBusAndVersion) {
 }
 
 TEST(SnesPpuRegisters, Stat78CarriesTheClockRateAndVersion) {
+  // Bit 7 is the frame parity, which the machine's first frame takes at H = 1 of its
+  // first line: the console leaves reset with the flag clear, so that frame is the
+  // pair's second and the bit reads set through it.
   Snes ntsc = run(join({load(0x3Fu, 0x50u)}));
-  EXPECT_EQ(ntsc.state().wram[0x50], 0x03u);
+  EXPECT_EQ(ntsc.state().wram[0x50], 0x83u);
   Snes pal = run(join({load(0x3Fu, 0x50u)}), Region::Pal);
-  EXPECT_EQ(pal.state().wram[0x50], 0x13u);
+  EXPECT_EQ(pal.state().wram[0x50], 0x93u);
 }
 
 TEST(SnesPpuRegisters, Stat78CarriesTheFrameParity) {

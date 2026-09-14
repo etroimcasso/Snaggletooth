@@ -86,10 +86,10 @@ the component in full.
 | Component | Status |
 |---|---|
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
-| [SNES machine](docs/snes-machine.md) | in progress — the three cartridge maps, work RAM and its data port, the APU ports, region-priced cycles at both clock rates, exact master-cycle budgeting, video counters with the NMI and the timer IRQ, the multiply/divide unit, the PPU's register file with its three video memories filled through their ports, eight DMA/HDMA channels, the controller ports, the audio boot handshake, and an observer told every access and where each video port write landed; the rendering PPU remains |
+| [SNES machine](docs/snes-machine.md) | in progress — the three cartridge maps, work RAM and its data port, the APU ports, region-priced cycles at both clock rates, exact master-cycle budgeting, the complete beam with its dot map and every per-line event at its own master offset — the blank flags, the taller picture, interlace, the two interrupts' trigger points and the memory refresh — the multiply/divide unit, the PPU's register file with its three video memories filled through their ports, eight DMA/HDMA channels, the controller ports, the audio boot handshake, and an observer told every access and where each video port write landed; the rendering PPU remains |
 | [Cartridge](docs/snes-cartridge.md) | built — the header's map, size, title, checksum and vectors; a copier's header ahead of a dump, read and dropped; LoROM, HiROM and ExHiROM; where every bus address lands in the image; the save windows |
 | Public embedding API | not started |
-| [PPU](docs/ppu.md) | in progress — the register file complete: every write with its latches, every read with its open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which the video memories can be reached; nothing renders yet — see the [roadmap](#roadmap) |
+| [PPU](docs/ppu.md) | in progress — the register file complete: every write with its latches, every read with its open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which the video memories can be reached; the frame's shape and the dot map the counter answers; nothing renders yet — see the [roadmap](#roadmap) |
 
 ### The toolkit
 

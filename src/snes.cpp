@@ -25,19 +25,51 @@ struct ApuRatio {
 constexpr ApuRatio kNtscApu{.num = 5632u, .den = 118125u};
 constexpr ApuRatio kPalApu{.num = 102400u, .den = 2128137u};
 
-// The scanline structure. A line is 1364 master cycles (341 dots) except NTSC's line
-// 240 on an odd frame, which is four cycles short to keep the colour signal in step;
-// a frame is 262 lines on NTSC and 312 on PAL. Vblank begins at kVblankStartLine
-// (`ppu.h`; overscan, which would move it to 240, is not modelled) and runs to the
-// last line; line 0 is the end of vblank. The active picture spans master cycles
-// 88..1112 within a line, which bounds the horizontal-blank flag.
+// The scanline structure. A line is 1364 master cycles and carries 340 dots: every
+// dot is four cycles except 323 and 327, which are six. Two lines a frame are not
+// 1364 — NTSC's line 240 on an odd field is four cycles short, and PAL's line 311 on
+// an odd interlaced field four long — and an interlaced frame of even parity runs one
+// line past the 262 NTSC and 312 PAL a frame otherwise has, which is where dot 340
+// exists at all.
 constexpr std::uint16_t kLineMaster = 1364u;
 constexpr std::uint16_t kShortLineMaster = 1360u;
+constexpr std::uint16_t kLongLineMaster = 1368u;
 constexpr std::uint16_t kShortLineV = 240u;
+constexpr std::uint16_t kLongLineV = 311u;
 constexpr std::uint16_t kNtscLines = 262u;
 constexpr std::uint16_t kPalLines = 312u;
-constexpr std::uint16_t kActiveStart = 88u;
-constexpr std::uint16_t kActiveEnd = 1112u;
+
+// Where the dot map's two long dots begin and end, in master cycles into the line.
+constexpr std::uint16_t kFirstLongDot = 1292u;
+constexpr std::uint16_t kAfterFirstLongDot = 1298u;
+constexpr std::uint16_t kSecondLongDot = 1310u;
+constexpr std::uint16_t kAfterSecondLongDot = 1316u;
+
+// The per-line events, as master cycles into the line they belong to. The blank flag
+// is raised at H = 274 and lowered again at H = 1 of the line that follows, on every
+// line of the frame; the frame's parity toggles at H = 1 of its first line; vertical
+// blank's own line raises the NMI flag at H = 0.5 and hands the sprite table back at
+// H = 10; and each visible line delivers its HDMA at dot 278.
+constexpr std::uint16_t kHblankClear = 4u;
+constexpr std::uint16_t kHblankSet = 1096u;
+constexpr std::uint16_t kFieldToggle = 4u;
+constexpr std::uint16_t kNmiFlagOffset = 2u;
+constexpr std::uint16_t kOamReloadOffset = 40u;
+constexpr std::uint16_t kHdmaDeliver = 1112u;
+
+// The H/V timer's trigger points. With an H position to compare against, the flag is
+// raised 14 master cycles past four times it; with none, 1374 master cycles after the
+// previous line began — which is ten into a line following a normal one, fourteen
+// after the short one and six after the long one.
+constexpr std::uint16_t kTimerHOrigin = 14u;
+constexpr std::uint16_t kTimerLineSpan = 1374u;
+
+// The memory refresh: the CPU is held off the bus for forty master cycles once a
+// line, at the point on an eight-cycle grid nearest 536 into the line, spent a fast
+// cycle at a time so a run can stop inside one.
+constexpr std::uint16_t kRefreshMaster = 40u;
+constexpr std::uint16_t kRefreshTarget = 536u;
+constexpr std::uint32_t kRefreshStep = 6u;
 
 // The multiply/divide unit is clocked by the CPU, so its documented latencies are
 // counted in CPU cycles — the same wait no matter the memory speed. Multiply is
@@ -94,6 +126,9 @@ Snes::Snes(Snes&& moved) noexcept
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
       videoAdvanced_(moved.videoAdvanced_),
+      timerHPoint_(moved.timerHPoint_),
+      timerHPointOnVLine_(moved.timerHPointOnVLine_),
+      timerZeroOnVLine_(moved.timerZeroOnVLine_),
       observer_(moved.observer_),
       portLanding_(moved.portLanding_) {
   moved.observer_ = nullptr;
@@ -135,7 +170,40 @@ Cpu65816State Snes::powerOnCpu() const {
   };
 }
 
+void Snes::closeCycle() {
+  // What every cycle ends with, whatever it was for: the timer's crossing settles
+  // under the mode the cycle leaves behind, the interrupt lines take their levels from
+  // the flags and enables as they now stand — so a register write this cycle is
+  // settled for the next fetch to sample — and the master counter advances, paying the
+  // audio machine the share of it that its own crystal owes.
+  settleTimer();
+  cpu_.setNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
+  cpu_.setIrqLine(state_.timeup);
+  state_.master += lastCost_;
+  state_.apuPhase += lastCost_ * apuNum_;
+  const std::uint64_t apuCycles = state_.apuPhase / apuDen_;
+  state_.apuPhase %= apuDen_;
+  if (apuCycles != 0) apu_.run(apuCycles);
+}
+
+void Snes::refreshCycle() {
+  // The memory refresh, with the CPU held off the bus. Time passes as it does in any
+  // cycle — the beam moves and the audio machine is paced — but no access is made and
+  // the observer is told nothing: a pause is not a cycle the CPU spent, any more than
+  // a transfer's overhead is. It is spent a fast cycle at a time, so a run may stop
+  // inside one and carry the rest of it in the state.
+  lastCost_ = state_.refreshLeft < kRefreshStep ? state_.refreshLeft : kRefreshStep;
+  state_.refreshLeft = static_cast<std::uint8_t>(state_.refreshLeft - lastCost_);
+  tickVideo(lastCost_);
+  closeCycle();
+}
+
 void Snes::machineCycle() {
+  if (state_.refreshLeft != 0u) {
+    refreshCycle();
+    return;
+  }
+
   // A bus access overwrites this with its region's cost; a halted cycle makes no
   // access and keeps the fast rate, the same rate an internal cycle charges.
   lastCost_ = 6;
@@ -175,19 +243,14 @@ void Snes::machineCycle() {
     tickVideo(lastCost_);
   }
 
-  // Drive the interrupt lines from the flags and enables as they now stand, after any
-  // register write this cycle, so the level is settled for the next fetch to sample.
-  driveLines();
-
-  state_.master += lastCost_;
-  state_.apuPhase += lastCost_ * apuNum_;
-  const std::uint64_t apuCycles = state_.apuPhase / apuDen_;
-  state_.apuPhase %= apuDen_;
-  if (apuCycles != 0) apu_.run(apuCycles);
+  closeCycle();
 }
 
 std::uint32_t Snes::step() {
   const std::uint64_t before = state_.master;
+  // A refresh the last call left part-way through is spent first: it is not an
+  // instruction, and the instruction this call owes is the one after it.
+  while (state_.refreshLeft != 0u) machineCycle();
   if (cpu_.state().run != CpuRunState::Running) {
     machineCycle();  // one idle cycle, which may be the one that ends a wait
   } else {
@@ -397,48 +460,141 @@ void Snes::writeWramPort(std::uint16_t offset, std::uint8_t value) {
 }
 
 std::uint16_t Snes::lineLength() const noexcept {
-  // NTSC drops one dot (four master cycles) from line 240 on odd frames.
-  if (region_ == Region::Ntsc && state_.field == 1u && state_.vpos == kShortLineV) {
-    return kShortLineMaster;
+  // One line a frame is not 1364: NTSC drops a dot from line 240 on an odd field
+  // unless the frame is interlaced, and PAL adds one to line 311 on an odd field when
+  // it is. Each is decided by the state as its own line runs.
+  const bool oddField = state_.field == 1u;
+  if (region_ == Region::Ntsc) {
+    if (oddField && state_.vpos == kShortLineV && !state_.ppu.interlace()) {
+      return kShortLineMaster;
+    }
+    return kLineMaster;
   }
+  if (oddField && state_.vpos == kLongLineV && state_.ppu.interlace()) return kLongLineMaster;
   return kLineMaster;
 }
 
-bool Snes::irqConditionMet() const noexcept {
-  const std::uint8_t mode = static_cast<std::uint8_t>((state_.nmitimen >> 4) & 3u);
-  if (mode == 0u) return false;
-  const std::uint16_t hdot = static_cast<std::uint16_t>(state_.hpos >> 2);  // four master cycles per dot
-  const bool hReached = hdot >= state_.htime;   // the H compare, met once the beam passes the dot
-  const bool vAt = state_.vpos == state_.vtime;  // the V compare, met across the whole line
-  switch (mode) {
-    case 1: return hReached;          // H=H at any line
-    case 2: return vAt;               // V=V at H=0 (the line start)
-    default: return hReached && vAt;  // H=H and V=V
+std::uint16_t Snes::frameLines() const noexcept {
+  // An interlaced frame of even parity carries one line more than the frame otherwise
+  // has, and that line is vertical blank's like the ones before it.
+  const std::uint16_t base = region_ == Region::Ntsc ? kNtscLines : kPalLines;
+  return state_.ppu.interlace() && state_.field == 0u
+             ? static_cast<std::uint16_t>(base + 1u)
+             : base;
+}
+
+std::uint16_t Snes::hdot() const noexcept {
+  // The dot the beam is on. Dots 323 and 327 are six master cycles wide and every
+  // other dot is four, so past dot 322 the count falls behind a plain quarter of the
+  // position and dot 340 is reached only on a line that runs 1368. The short line
+  // keeps 340 even dots and none of this applies to it.
+  const std::uint16_t h = state_.hpos;
+  if (lineLength() == kShortLineMaster || h < kFirstLongDot) {
+    return static_cast<std::uint16_t>(h >> 2);
+  }
+  if (h < kAfterFirstLongDot) return 323u;
+  if (h < kSecondLongDot) return static_cast<std::uint16_t>(324u + (h - kAfterFirstLongDot) / 4u);
+  if (h < kAfterSecondLongDot) return 327u;
+  if (h < kLineMaster) return static_cast<std::uint16_t>(328u + (h - kAfterSecondLongDot) / 4u);
+  return 340u;
+}
+
+bool Snes::inHblank() const noexcept {
+  // The flag stands from H = 274 to H = 1 of the next line, so the line's first four
+  // master cycles are still the previous line's blank.
+  return state_.hpos < kHblankClear || state_.hpos >= kHblankSet;
+}
+
+std::uint64_t Snes::nextRefresh(std::uint64_t lineStart) const noexcept {
+  // Each pause is the point on the previous pause's eight-cycle grid that lies
+  // nearest the middle of its own line, so consecutive normal lines come up 538 and
+  // 534 cycles in and a line of another length re-phases the pair.
+  const std::uint64_t target = lineStart + kRefreshTarget;
+  const std::uint64_t ahead = (target - state_.refreshAt) % 8u;
+  return ahead <= 4u ? target - ahead : target + (8u - ahead);
+}
+
+void Snes::settleTimer() noexcept {
+  // A crossing is noted as the cycle ticks and the flag is raised at the cycle's end
+  // under the mode the cycle leaves behind, so a write that arms the timer in the very
+  // cycle its point is crossed is in time and one that disarms it is too.
+  switch (static_cast<std::uint8_t>((state_.nmitimen >> 4) & 3u)) {
+    case 1: if (timerHPoint_) state_.timeup = true; return;        // H = H on every line
+    case 2: if (timerZeroOnVLine_) state_.timeup = true; return;   // V = V, with no H to compare
+    case 3: if (timerHPointOnVLine_) state_.timeup = true; return; // H = H and V = V
+    default: return;                                               // the timer is off
   }
 }
 
-void Snes::advanceLine() noexcept {
-  const std::uint16_t total = region_ == Region::Ntsc ? kNtscLines : kPalLines;
+void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
+  // The events inside a line, each at its own master offset, for the span the cycle
+  // just covered. A point is passed when the span reaches it, and a span never starts
+  // before its own line — so an event at offset 0 can never be passed here and belongs
+  // to advanceLine, which runs as the line begins. Everything below lies past it.
+  const auto passed = [from, to](std::uint64_t point) noexcept {
+    return from < point && point <= to;
+  };
+
+  if (state_.vpos == 0u && passed(lineStart + kFieldToggle)) {
+    state_.field ^= 1u;  // the frame takes its parity as its first line begins
+  }
+
+  // Vertical blank's line raises the NMI flag two cycles after the signal itself, and
+  // hands the sprite table's address back at dot 10. Neither re-fires: they are dated
+  // from the line the blank began on, which comes once a frame.
+  if (state_.inVblank && state_.vpos == state_.vblankBeginLine) {
+    if (passed(lineStart + kNmiFlagOffset)) state_.vblankNmi = true;
+    if (passed(lineStart + kOamReloadOffset)) Ppu{state_.ppu}.beginVblank();
+  }
+
+  const std::uint64_t zeroPoint = lineStart + kTimerLineSpan - state_.previousLineMaster;
+  const std::uint64_t hPoint = state_.htime != 0u
+      ? lineStart + kTimerHOrigin + 4ull * state_.htime
+      : zeroPoint;
+  const bool onTimerLine = state_.vpos == state_.vtime;
+  if (passed(hPoint)) {
+    timerHPoint_ = true;
+    if (onTimerLine) timerHPointOnVLine_ = true;
+  }
+  if (onTimerLine && passed(zeroPoint)) timerZeroOnVLine_ = true;
+
+  // The refresh: the cycle whose tick reaches the point finishes on its own time, and
+  // the pause runs before the next one. A halted core makes no bus cycle to hold off
+  // the bus, so nothing pauses it.
+  if (passed(state_.refreshAt) && cpu_.state().run == CpuRunState::Running) {
+    state_.refreshLeft = static_cast<std::uint8_t>(kRefreshMaster);
+  }
+}
+
+void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   state_.vpos = static_cast<std::uint16_t>(state_.vpos + 1u);
-  if (state_.vpos >= total) {
-    state_.vpos = 0u;
-    state_.field ^= 1u;  // the next frame carries the other parity
-  }
+  if (state_.vpos >= frameLines()) state_.vpos = 0u;
   state_.hdmaLineFired = false;  // each scanline may trigger its own HDMA delivery
-  if (state_.vpos == kVblankStartLine) {
-    state_.vblankNmi = true;  // the NMI flag is set at the start of vblank, whether or not NMIs are enabled
-    state_.hdmaActive = 0u;   // and every HDMA channel deactivates for the rest of the frame
-    Ppu{state_.ppu}.beginVblank();  // the PPU, done drawing, takes the OAM address back to the reload value
-    if ((state_.nmitimen & 1u) != 0u) {
-      // The auto-joypad read runs each frame it is enabled: it strobes the pads
-      // now, clocks their bits out over the window, and lands them as it ends.
-      latchJoypads();
-      state_.autoJoyClocks = kAutoJoyClocks;
-    }
-  }
+  state_.refreshAt = nextRefresh(lineStart);
+
   if (state_.vpos == 0u) {
-    state_.vblankNmi = false;    // and clears at the end of vblank
+    state_.inVblank = false;     // the frame begins in the picture
+    state_.vblankNmi = false;    // and the NMI flag clears with it
     state_.hdmaInited = false;   // the new frame re-initialises HDMA at line 0
+    Ppu{state_.ppu}.beginFrame();  // the overflow flags belong to the picture just drawn
+    return;
+  }
+  if (state_.inVblank) return;  // begun is begun; a later SETINI change re-fires nothing
+
+  // Vertical blank begins at the line SETINI asks for, and the machine asks again at
+  // the start of every line until it has: the bit cleared between the two start lines
+  // begins the blank at the next line, and the bit set after it has begun changes
+  // nothing.
+  if (state_.vpos < kVblankStartLine) return;
+  if (state_.vpos < kOverscanVblankStartLine && state_.ppu.overscan()) return;
+  state_.inVblank = true;
+  state_.vblankBeginLine = state_.vpos;
+  state_.hdmaActive = 0u;  // every HDMA channel deactivates for the rest of the frame
+  if ((state_.nmitimen & 1u) != 0u) {
+    // The auto-joypad read runs each frame it is enabled: it strobes the pads now,
+    // clocks their bits out over the window, and lands them as it ends.
+    latchJoypads();
+    state_.autoJoyClocks = kAutoJoyClocks;
   }
 }
 
@@ -458,20 +614,33 @@ void Snes::tickVideo(std::uint32_t cost) {
     if (state_.autoJoyClocks == 0u) finishAutoJoypadRead();
   }
 
-  // Advance the beam by the cycle's master cost, wrapping scanlines as it goes. The
-  // H/V-timer flag latches on the rising edge of its condition, so a compare the step
-  // moves across raises it exactly once.
-  const bool metBefore = irqConditionMet();
-  state_.hpos = static_cast<std::uint16_t>(state_.hpos + cost);
-  while (state_.hpos >= lineLength()) {
-    state_.hpos = static_cast<std::uint16_t>(state_.hpos - lineLength());
-    advanceLine();
+  // Advance the beam by the cycle's master cost, one line's share at a time, so every
+  // event the span passes is placed at its own master offset. The line's events come
+  // first, then the line's end hands the beam to the next one.
+  timerHPoint_ = false;
+  timerHPointOnVLine_ = false;
+  timerZeroOnVLine_ = false;
+
+  std::uint64_t at = state_.master;
+  const std::uint64_t end = at + cost;
+  std::uint64_t lineStart = at - state_.hpos;
+  while (at < end) {
+    const std::uint64_t lineEnd = lineStart + lineLength();
+    const std::uint64_t stop = end < lineEnd ? end : lineEnd;
+    crossLine(lineStart, at, stop);
+    at = stop;
+    state_.hpos = static_cast<std::uint16_t>(at - lineStart);
+    if (at == lineEnd) {
+      state_.previousLineMaster = static_cast<std::uint16_t>(lineEnd - lineStart);
+      lineStart = lineEnd;
+      state_.hpos = 0u;
+      advanceLine(lineStart);
+    }
   }
-  if (irqConditionMet() && !metBefore) state_.timeup = true;
 
   // HDMA triggers, each latched so it fires once: the frame's initialisation as the
-  // beam passes dot 6 of line 0, and a delivery as it passes dot 278 of every
-  // visible line. Triggering only marks the event pending; it runs on the next
+  // beam passes dot 6 of line 0, and a delivery as it passes dot 278 of every line the
+  // picture still owns. Triggering only marks the event pending; it runs on the next
   // machine cycle, so it preempts a general-purpose DMA at a whole byte.
   if (!state_.hdmaInited && state_.vpos == 0u && state_.hpos >= 24u &&
       state_.hdmaen != 0u) {
@@ -479,20 +648,12 @@ void Snes::tickVideo(std::uint32_t cost) {
     state_.hdmaRunPending = true;
     state_.hdmaIniting = true;
   }
-  if (!state_.hdmaLineFired && state_.vpos <= 224u && state_.hpos >= kActiveEnd &&
+  if (!state_.hdmaLineFired && !state_.inVblank && state_.hpos >= kHdmaDeliver &&
       state_.hdmaActive != 0u) {
     state_.hdmaLineFired = true;
     state_.hdmaRunPending = true;
     state_.hdmaIniting = false;
   }
-}
-
-void Snes::driveLines() {
-  // The NMI line is asserted while the flag is set and NMIs are enabled; enabling
-  // while the flag is high raises the line, which is the documented mid-vblank
-  // trigger. The IRQ line follows the timer flag directly.
-  cpu_.setNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
-  cpu_.setIrqLine(state_.timeup);
 }
 
 void Snes::commitMath() noexcept {
@@ -519,11 +680,11 @@ void Snes::commitMath() noexcept {
 
 PpuInputs Snes::ppuInputs() const noexcept {
   return PpuInputs{
-      .hdot = static_cast<std::uint16_t>(state_.hpos >> 2),  // four master cycles per dot
+      .hdot = hdot(),
       .vpos = state_.vpos,
       .field = state_.field,
-      .vblank = state_.vpos >= kVblankStartLine,
-      .hblank = state_.hpos < kActiveStart || state_.hpos >= kActiveEnd,
+      .vblank = state_.inVblank,
+      .hblank = inHblank(),
       .pal = region_ == Region::Pal,
       .extLatch = (state_.wrio & 0x80u) != 0u,
   };
@@ -544,11 +705,9 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
       return latch(v);
     }
     case 0x4212: {  // HVBJOY: vblank (bit 7), hblank (bit 6), auto-joypad busy (bit 0), open bus between
-      const bool vblank = state_.vpos >= kVblankStartLine;
-      const bool hblank = state_.hpos < kActiveStart || state_.hpos >= kActiveEnd;
       const std::uint8_t v = static_cast<std::uint8_t>(
-          (vblank ? 0x80u : 0x00u) | (hblank ? 0x40u : 0x00u) | (state_.mdr & 0x3Eu) |
-          (state_.autoJoyClocks != 0u ? 0x01u : 0x00u));
+          (state_.inVblank ? 0x80u : 0x00u) | (inHblank() ? 0x40u : 0x00u) |
+          (state_.mdr & 0x3Eu) | (state_.autoJoyClocks != 0u ? 0x01u : 0x00u));
       return latch(v);
     }
     case 0x4213: return latch(state_.wrio);  // RDIO: the port's lines, which nothing on the console drives, so as written

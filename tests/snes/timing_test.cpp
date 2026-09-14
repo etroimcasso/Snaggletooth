@@ -32,8 +32,8 @@ Snes stoppedMachine(Region region = Region::Ntsc) {
   return m;
 }
 
-// A machine that runs `program` from $8000 with the given interrupt vectors, used to
-// observe an NMI or IRQ handler's effect. A zero vector is left as the loader set it.
+// A machine that runs `program` from $8000 with the given interrupt vectors, for
+// observing an NMI or IRQ handler's effect. A zero vector is left as the loader set it.
 Snes vectoredMachine(std::initializer_list<std::uint8_t> program,
                      std::uint16_t nmi = 0, std::uint16_t irq = 0) {
   std::vector<std::uint8_t> rom(program.begin(), program.end());
@@ -73,8 +73,10 @@ TEST(SnesTiming, VblankFlagIsClearThroughTheVisiblePicture) {
 }
 
 TEST(SnesTiming, VblankFlagSetsAtLine225) {
+  // The NMI flag follows the vertical-blank signal by two master cycles, at H = 0.5,
+  // so the line's own start is a cycle too early to read it.
   Snes m = stoppedMachine();
-  m.run(225u * kLine);
+  m.run(225u * kLine + 6u);
   EXPECT_EQ(m.state().vpos, 225u);
   EXPECT_TRUE(m.state().vblankNmi);
 }
@@ -119,10 +121,14 @@ TEST(SnesTiming, OddFramesShortenLine240ToKeepColourSync) {
 }
 
 TEST(SnesTiming, FrameParityTogglesEachFrame) {
+  // A frame takes its parity at H = 1 of its own first line, so the machine's first
+  // frame runs as the pair's second and the next one toggles back.
   Snes m = stoppedMachine();
   EXPECT_EQ(m.state().field, 0u);
-  m.run(262u * kLine);  // one even frame
+  m.run(6u);
   EXPECT_EQ(m.state().field, 1u);
+  m.run(262u * kLine);  // through that frame and past the next line 0
+  EXPECT_EQ(m.state().field, 0u);
 }
 
 TEST(SnesTiming, PalRunsThreeHundredTwelveLines) {

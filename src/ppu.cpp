@@ -24,10 +24,26 @@ std::int32_t PpuState::multiplyResult() const noexcept {
 
 // ---- the memories' windows ---------------------------------------------------
 
-bool Ppu::vramReachable(const PpuInputs& in) const noexcept { return in.vblank || s_.forcedBlank(); }
-bool Ppu::oamReachable(const PpuInputs& in) const noexcept { return in.vblank || s_.forcedBlank(); }
+bool Ppu::inVblankWindow(const PpuInputs& in) const noexcept {
+  // Vertical blank opens the memories — except when the taller picture was asked for
+  // after the blank had already begun. That resumes nothing the blank stopped, but the
+  // chip holds its memories as though it were still drawing, to the line the taller
+  // picture ends on.
+  return in.vblank && !(overscanLate(in));
+}
+
+bool Ppu::overscanLate(const PpuInputs& in) const noexcept {
+  return s_.overscan() && in.vpos < kOverscanVblankStartLine;
+}
+
+bool Ppu::vramReachable(const PpuInputs& in) const noexcept {
+  return inVblankWindow(in) || s_.forcedBlank();
+}
+bool Ppu::oamReachable(const PpuInputs& in) const noexcept {
+  return inVblankWindow(in) || s_.forcedBlank();
+}
 bool Ppu::cgramReachable(const PpuInputs& in) const noexcept {
-  return in.vblank || in.hblank || s_.forcedBlank();
+  return inVblankWindow(in) || in.hblank || s_.forcedBlank();
 }
 
 // ---- the VRAM port -----------------------------------------------------------
@@ -69,6 +85,17 @@ void Ppu::beginVblank() noexcept {
   // The PPU, done drawing, takes the OAM address back to the reload value — but
   // not in forced blank, when it was not drawing.
   if (!s_.forcedBlank()) reloadOamAddress();
+}
+
+// ---- the frame's start -------------------------------------------------------
+
+void Ppu::beginFrame() noexcept {
+  // The overflow flags belong to the picture the chip has just finished, and it
+  // clears them as it starts the next one. In forced blank it drew nothing, so
+  // whatever they hold stands.
+  if (s_.forcedBlank()) return;
+  s_.rangeOver = false;
+  s_.timeOver = false;
 }
 
 // ---- the write-twice latches -------------------------------------------------
@@ -219,8 +246,9 @@ std::optional<std::uint16_t> Ppu::write(std::uint16_t offset, std::uint8_t value
       const bool released = s_.forcedBlank() && (value & 0x80u) == 0u;
       s_.inidisp = value;
       // Forced blank released on vblank's first line: the PPU reloads the OAM
-      // address then, as it would have at the line's start with the screen on.
-      if (released && in.vpos == kVblankStartLine) reloadOamAddress();
+      // address then, as it would have at dot 10 of that line with the screen on.
+      // Which line that is, the chip reads from its own SETINI.
+      if (released && in.vpos == s_.vblankStartLine()) reloadOamAddress();
       return std::nullopt;
     }
     case 0x2101: s_.objsel = value; return std::nullopt;
