@@ -1,15 +1,20 @@
 #pragma once
 
-// The PPU's register file and the three video memories behind it.
+// The PPU: its register file, the three video memories behind it, and the
+// picture it resolves from them a pixel at a time.
 //
 // The picture processor sits on the B bus at $2100-$213F. Its registers are
 // written by the CPU and the transfer engines and read back through the few
 // ports that read at all; the register file, VRAM, the palette and the sprite
-// table are the whole of what a program can put into the chip. Nothing here
-// draws: this is the state a renderer reads, kept exactly as the hardware
-// keeps it — the write-twice latches, the address flip-flops, the counter
-// latch, the two open-bus values the chip's halves remember, and the windows
-// in which each memory can be reached.
+// table are the whole of what a program can put into the chip, and they are
+// kept exactly as the hardware keeps them — the write-twice latches, the
+// address flip-flops, the counter latch, the two open-bus values the chip's
+// halves remember, and the windows in which each memory can be reached.
+//
+// A pixel is resolved from that state as it stands at the pixel's own dot, so a
+// program that writes a register mid-line changes the rest of the line. Mode 1
+// is the mode the chip draws: its three backgrounds, in the priority order
+// $2105 names, over the backdrop.
 //
 // The state is a plain value, PpuState, held once inside the machine's state
 // and nowhere else, so a snapshot of the machine carries the PPU whole and a
@@ -173,6 +178,11 @@ struct PpuState {
   [[nodiscard]] std::uint16_t vblankStartLine() const noexcept {
     return overscan() ? kOverscanVblankStartLine : kVblankStartLine;
   }
+
+  // Two are the same when every register, latch and counter is, and every byte of
+  // the three memories — the whole of what a program put into the chip, in one
+  // comparison.
+  [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
 
 // The chip's behaviour over one PpuState. Built by the machine over its own
@@ -209,7 +219,50 @@ class Ppu {
   // frame the chip spent in forced blank leaves them as they were.
   void beginFrame() noexcept;
 
+  // The four bytes the chip's converter drives at picture position (x, y): red,
+  // green, blue, then 255. x runs across a line's 256 pixels and y down the
+  // picture's lines from its first. The colour is the one the main screen's
+  // enabled backgrounds name at that dot, taken in the mode's priority order, or
+  // the backdrop where none of them shows, scaled by INIDISP's brightness. Forced
+  // blank and brightness zero are black.
+  [[nodiscard]] std::array<std::uint8_t, 4> pixel(std::uint16_t x,
+                                                  std::uint16_t y) const noexcept;
+
  private:
+  // One background as its own registers describe it. The mode fixes the depth: a
+  // sixteen-colour background is four bitplanes and a four-colour one is two, and
+  // a character takes eight bytes for each.
+  struct Background {
+    std::uint8_t screen;         // its $2107-$210A: the map's base and the map's size
+    std::uint8_t characterBase;  // its nibble of $210B or $210C, counting 8 KB blocks
+    std::uint16_t horizontal;    // its horizontal offset register
+    std::uint16_t vertical;      // its vertical offset register
+    bool large;                  // its bit of $2105: 16x16 blocks rather than 8x8 tiles
+    unsigned planes;             // its bitplanes, and so its colours: 1 << planes
+  };
+
+  // What a background shows at a picture position: the palette word its tile's
+  // pixel names, and the tile's own priority bit, which decides where the pixel
+  // sits in the mode's order.
+  struct Shown {
+    std::uint8_t word;
+    bool priority;
+  };
+
+  // What a background shows at a picture position, or nothing where its tile's
+  // pixel is colour 0, which every palette treats as transparent.
+  [[nodiscard]] std::optional<Shown> sample(const Background& background, std::uint16_t x,
+                                            std::uint16_t y) const noexcept;
+
+  // The three backgrounds Mode 1 draws, each with the registers it reads.
+  [[nodiscard]] Background mode1Bg1() const noexcept;
+  [[nodiscard]] Background mode1Bg2() const noexcept;
+  [[nodiscard]] Background mode1Bg3() const noexcept;
+
+  // The converter's four bytes for one 15-bit palette word at the brightness
+  // INIDISP holds.
+  [[nodiscard]] std::array<std::uint8_t, 4> convert(std::uint16_t colour) const noexcept;
+
   // Whether vertical blank is open to the memories, and whether the taller picture
   // was asked for after the blank had already begun — which shuts them again until
   // the line that picture ends on.

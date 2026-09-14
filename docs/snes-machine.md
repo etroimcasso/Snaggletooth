@@ -9,10 +9,12 @@ against the CPU on its own clock.
 The machine is the system minus the picture. It does not draw. What it has is a complete memory map, an
 exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ, the DMA and HDMA
 engines, the hardware multiply/divide unit, the two controller ports, the [PPU's](ppu.md) complete
-register file and the three video memories it fills through its ports, and the audio machine running
-underneath — enough to load a cartridge, run its code under interrupts, play it, and hear it. A host
-that wants to watch the bus rather than the state sets an [observer](#the-bus-observer), and is told
-every access in order.
+register file and the three video memories it fills through its ports, the picture it draws from
+them, and the audio machine running underneath — enough to load a cartridge, run its code under
+interrupts, play it, watch it and hear it. A host that wants to watch the bus rather than the state
+sets an [observer](#the-bus-observer), and is told every access in order; one that wants the picture
+sets a frame observer ([ppu.md §The picture](ppu.md#the-picture)) and is handed every frame the PPU
+finishes.
 
 ## Contents
 

@@ -3,15 +3,19 @@
 The picture processor is the part of the [machine](snes-machine.md) a program reaches at
 `$2100`–`$213F`. This page describes what is built of it: the whole register file, exactly as the
 console keeps it — every write with the latches it passes through, every read with the value it
-answers and the side effects it has, and the windows in which the three video memories can be
-reached. Nothing here draws. The register file is the state a renderer reads, and it is complete
-so that a program's dialogue with the chip is already what the hardware would have seen.
+answers and the side effects it has, the windows in which the three video memories can be reached,
+and the picture the chip draws from them, which a host watches through a frame observer.
+
+Where the published documentation is incomplete, ambiguous or wrong, [ppu-behavior.md](ppu-behavior.md)
+records what the sources say, how they disagree and what settles each case — the tilemap and character
+bases, the picture's edges, the brightness law and the latch flag among them.
 
 ## Contents
 
 - [The surface](#the-surface)
 - [What the chip is told](#what-the-chip-is-told)
 - [The frame](#the-frame)
+- [The picture](#the-picture)
 - [Writes and their latches](#writes-and-their-latches)
 - [The memories and their windows](#the-memories-and-their-windows)
 - [The multiplier](#the-multiplier)
@@ -89,6 +93,82 @@ Three events belong to the chip rather than the machine:
   whatever they hold.
 - **The counter latch** captures the dot above and the line, on a read of `$2137` or the latch line
   falling.
+
+## The picture
+
+A host that wants to see what a program draws sets a frame observer on the machine
+(`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, as the beam
+reaches the next frame's first line:
+
+```cpp
+struct Watcher final : FrameObserver {
+  void frame(const VideoFrame& picture) override {
+    picture.pixels;  // row-major from the top, four bytes a pixel: red, green, blue, 255
+    picture.width;   // 256
+    picture.height;  // 224, or 239 under the taller picture
+    picture.field;   // the parity the frame ran under
+  }
+};
+
+Snes m(SnesConfig{.rom = rom});
+Watcher watcher;
+m.setFrameObserver(&watcher);
+m.run(cycles);
+```
+
+The span is the machine's own buffer and is valid for the call; a host that keeps a picture copies
+it. The observer is not part of the state — a snapshot does not carry it and `restore()` leaves it
+in place — and the chip resolves pixels only while one is set, so a machine nobody is watching
+draws nothing and a program cannot tell the difference.
+
+**One pixel per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical
+blank leaves below it; the frame's first line draws nothing, which is why a background offset of
+−1 is what puts a tilemap's first row on the picture's first line. Each pixel is resolved from the
+registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
+the dots after it and not the ones before.
+
+**Mode 1 is what the chip draws**: its three backgrounds, each on the main screen `$212C` enables.
+BG1 and BG2 are sixteen colours, BG3 is four.
+
+- The tilemap entry for a position is `(Base << 10) + ((Y & 0x1F) << 5) + (X & 0x1F)` words, plus
+  the terms a wide or tall map adds — `Base` being bits 2–7 of the background's own screen
+  register (`$2107`, `$2108`, `$2109`), which count whole 32×32 screens of `$400` words, and the
+  map's own size wrapping the position.
+- The entry is `vhopppcc cccccccc`: both flips, the tile's priority, its palette, its number.
+- The character is `(Base << 13) + Tile × 8 × planes` bytes, `Base` being the background's nibble
+  of `$210B` (BG1 low, BG2 high) or `$210C` (BG3 low). Planes 0 and 1 are the low and high bytes of
+  eight words and each further pair is sixteen bytes on, so a four-colour character is sixteen
+  bytes and a sixteen-colour one is thirty-two. The leftmost pixel of a row is bit 7.
+- The palette a tile shows in begins `ppp` × its colours into CGRAM — sixteen words apart for BG1
+  and BG2, four for BG3 — and Mode 1 gives none of the three a starting palette of its own, so
+  BG3's palette 1 and BG1's palette 0 name the same words. Colour 0 of any palette is transparent.
+- `$2105` bits 4, 5 and 6 make each entry of BG1, BG2 or BG3 a 16×16 block of `Tile`, `Tile+1`,
+  `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a flip
+  reverses the block whole.
+- Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1,
+  `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3.
+
+**The order the three are drawn in**, front to back, is the one `$2105` names. Writing `A` and `a`
+for BG1's tiles at priority 1 and 0 and the same for the others, it is
+
+```
+A B a b C c        and with $2105 bit 3 set:   C A B a b c
+```
+
+so bit 3 lifts BG3's high-priority tiles from behind everything to in front of everything, and
+leaves its low-priority tiles where they are. The first background in that order with a
+non-transparent pixel is the one shown; where none has one, the backdrop — palette word 0 — shows.
+Sprites take their own places in this order and are not drawn yet.
+
+**The converter drives eight bits a channel.** A palette word is five bits a channel, and `INIDISP`
+brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 255 / (31 × 16))` in
+integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
+frame rather than no frame.
+
+**What is not drawn yet**, so a reader does not go looking for it: sprites; BG4, which Mode 1 does
+not have, so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows
+nowhere; the windows and colour math; mosaic; and every mode but 1, which show their backdrop. Each
+arrives with its own work.
 
 ## Writes and their latches
 
@@ -235,3 +315,12 @@ Each of these is a question the documentation leaves, recorded rather than decid
   vertical blank's end with no exception; the register page excepts forced blank, which is followed.
 - Whether the overflow flags are set regardless of the sprite enables, as the register page states. The
   flags have nothing to set them until the chip draws sprites.
+- Where the picture's last dot is. The event list gives the visible span as dots 22–277 and marks it
+  with its own question mark; the span is taken as written rather than rounded to something tidier.
+- How far ahead of a dot the chip fetches that dot's map entry and character. A pixel is resolved from
+  the registers and memories as they stand at its own dot, which is where a mid-picture write lands;
+  the distance itself is a measurement against a test ROM that has not been made.
+- What a write to a scroll register mid-line does to a tile whose entry the chip has already fetched.
+- How the palette's own mid-line access window sits against the chip's fetch of the colours it is
+  drawing with.
+- What the memory refresh's pause does to a counter latched inside it.

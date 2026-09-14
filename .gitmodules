@@ -1,0 +1,8 @@
+# SDL3 — pinned to release-3.4.16 (commit fa2c02bb). The gitlink commit object is
+# the authoritative pin; this note records which release it corresponds to. Built
+# statically from source and linked into the player, which is the only target that
+# reaches it: the library itself never links SDL. A parent build that already
+# defines SDL3::SDL3 supplies it instead and this copy is not configured.
+[submodule "third_party/sdl"]
+	path = third_party/sdl
+	url = https://github.com/libsdl-org/SDL.git
