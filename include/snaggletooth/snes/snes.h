@@ -481,6 +481,14 @@ class Snes {
   // observer is set.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
 
+  // Walks the PPU's Range pass as far as master cycle `to` of a line beginning at
+  // `lineStart` reaches — two dots a sprite from the picture's first — finding the
+  // sprites the next line crosses. How far the pass has already walked is the
+  // chip's own, so the span needs only its end. Unlike the picture, this runs
+  // whether or not anyone is watching: a program can read what the pass found
+  // through $213E.
+  void rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept;
+
   // Hands the finished picture to the frame observer: the rows the frame's own
   // vertical blank left below it, the frame's parity, and the raster the dots
   // wrote. Called as the beam reaches the next frame's first line.

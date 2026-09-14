@@ -13,8 +13,13 @@
 //
 // A pixel is resolved from that state as it stands at the pixel's own dot, so a
 // program that writes a register mid-line changes the rest of the line. Mode 1
-// is the mode the chip draws: its three backgrounds, in the priority order
-// $2105 names, over the backdrop.
+// is the mode the chip draws: its three backgrounds and the sprites, in the
+// priority order $2105 names, over the backdrop.
+//
+// Sprites are the one part of the picture not resolved at the dot that shows
+// them. A line's sprites are found and gathered during the line before it, in
+// two passes the chip runs across that line's dots, and what those passes leave
+// is part of the chip's state.
 //
 // The state is a plain value, PpuState, held once inside the machine's state
 // and nowhere else, so a snapshot of the machine carries the PPU whole and a
@@ -27,6 +32,7 @@
 // clock rate and the level of the counter-latch line. It learns nothing else.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -37,6 +43,41 @@ namespace snaggletooth {
 // line to the end of the frame, and line 0 is the end of vblank.
 constexpr std::uint16_t kVblankStartLine = 225u;
 constexpr std::uint16_t kOverscanVblankStartLine = 240u;
+
+// The sprites OAM describes, and the pixels a line of picture holds.
+constexpr unsigned kSprites = 128u;
+constexpr std::uint16_t kPictureWidth = 256u;
+
+// The palette word a sprite claims sits at 128 or above, so 0 is a word no
+// sprite can name; a position holds this priority where no sprite claimed it,
+// one past the three the hardware has.
+constexpr std::uint8_t kNoSprite = 4u;
+
+// What the chip's two sprite passes leave behind: the line they gathered, and
+// the pass over the line after it that is still running.
+//
+// Range walks OAM across a line's visible dots, two dots a sprite, and keeps
+// the ones the next line crosses. Time then runs in the horizontal blank that
+// follows and draws those sprites into the line buffer, back to front, so the
+// sprite nearest the front keeps every position it claims.
+struct SpriteLine {
+  // The line buffer Time filled, and the line it was filled for. A position
+  // holds the palette word the sprite claiming it named and that sprite's own
+  // priority against the backgrounds, or kNoSprite where none claimed it.
+  std::array<std::uint8_t, kPictureWidth> word{};
+  std::array<std::uint8_t, kPictureWidth> priority{};
+  std::uint16_t line = 0;
+
+  // The pass in flight: the sprites Range has kept so far, in the order it
+  // found them, and how far along OAM it has walked. The chip keeps 32 of them;
+  // the room here is for every sprite OAM can describe, because the count is a
+  // rule Time obeys rather than a limit on what the pass can hold.
+  std::array<std::uint8_t, kSprites> inRange{};
+  std::uint8_t found = 0;
+  std::uint8_t scanned = 0;
+
+  [[nodiscard]] bool operator==(const SpriteLine&) const noexcept = default;
+};
 
 // The machine as the PPU sees it at one access.
 struct PpuInputs {
@@ -55,6 +96,9 @@ struct PpuState {
   std::array<std::uint8_t, 65536> vram{};  // 64 KB video RAM (32K words)
   std::array<std::uint8_t, 512> cgram{};   // 512 B palette RAM (256 words)
   std::array<std::uint8_t, 544> oam{};     // 512 B of sprite entries and the 32 B of high bits
+
+  // What Range and Time have made of that sprite table for the line being drawn.
+  SpriteLine sprites{};
 
   // ---- display ----------------------------------------------------------------
   std::uint8_t inidisp = 0x80;  // $2100: bit7 forced blank (set at power-on), bits3-0 brightness
@@ -219,12 +263,31 @@ class Ppu {
   // frame the chip spent in forced blank leaves them as they were.
   void beginFrame() noexcept;
 
+  // Range examining the next sprite, for the line after the one now running.
+  // The machine calls it at that sprite's own dot — two dots a sprite from the
+  // picture's first — so a write to $2101 landing mid-line reaches the sprites
+  // whose dots have not gone by and no others. A sprite is kept when the line
+  // crosses it and any part of it stands at or right of the picture's left
+  // edge. The chip is not examining OAM while it renders nothing, so forced
+  // blank walks nowhere.
+  void rangeSprite(std::uint16_t line) noexcept;
+
+  // Time drawing the sprites Range kept into the line buffer, in the horizontal
+  // blank before that line begins: back to front, so the sprite nearest the
+  // front holds every position it claims, and its priority is the one the
+  // backgrounds answer. Forced blank gathers nothing and leaves the buffer for
+  // a line no picture will ask about.
+  void timeSprites(std::uint16_t line) noexcept;
+
+  // The line boundary handing Range a fresh pass over OAM.
+  void beginRange() noexcept;
+
   // The four bytes the chip's converter drives at picture position (x, y): red,
   // green, blue, then 255. x runs across a line's 256 pixels and y down the
   // picture's lines from its first. The colour is the one the main screen's
-  // enabled backgrounds name at that dot, taken in the mode's priority order, or
-  // the backdrop where none of them shows, scaled by INIDISP's brightness. Forced
-  // blank and brightness zero are black.
+  // enabled backgrounds and the line's sprites name at that dot, taken in the
+  // mode's priority order, or the backdrop where none of them shows, scaled by
+  // INIDISP's brightness. Forced blank and brightness zero are black.
   [[nodiscard]] std::array<std::uint8_t, 4> pixel(std::uint16_t x,
                                                   std::uint16_t y) const noexcept;
 
@@ -253,6 +316,30 @@ class Ppu {
   // pixel is colour 0, which every palette treats as transparent.
   [[nodiscard]] std::optional<Shown> sample(const Background& background, std::uint16_t x,
                                             std::uint16_t y) const noexcept;
+
+  // One sprite as its OAM record describes it: its position, the first of its
+  // characters, its attribute byte, and the size its own flag chose from the
+  // pair $2101 names. X is nine bits read as signed, so a sprite can hang off
+  // the left edge; Y is eight, and its wrap is what brings a tall sprite's
+  // lower part in at the top of the picture.
+  struct Sprite {
+    int x;
+    std::uint8_t y;
+    std::uint8_t tile;
+    std::uint8_t attributes;  // vhoopppN
+    unsigned width;
+    unsigned height;
+  };
+
+  // The record OAM holds for a sprite, the high table's two bits included.
+  [[nodiscard]] Sprite spriteAt(std::uint8_t index) const noexcept;
+
+  // The byte address in VRAM of the character holding the sprite's pixel at
+  // column and row, both counted from its top left after flipping. A sprite's
+  // tiles wrap inside the 16x16 character table, each nibble of the number on
+  // its own, which is not how a background's 16x16 block runs on.
+  [[nodiscard]] std::size_t spriteCharacter(const Sprite& sprite, unsigned column,
+                                            unsigned row) const noexcept;
 
   // The three backgrounds Mode 1 draws, each with the registers it reads.
   [[nodiscard]] Background mode1Bg1() const noexcept;

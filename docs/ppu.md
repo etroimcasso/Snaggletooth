@@ -16,6 +16,7 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 - [What the chip is told](#what-the-chip-is-told)
 - [The frame](#the-frame)
 - [The picture](#the-picture)
+- [The sprites](#the-sprites)
 - [Writes and their latches](#writes-and-their-latches)
 - [The memories and their windows](#the-memories-and-their-windows)
 - [The multiplier](#the-multiplier)
@@ -148,27 +149,82 @@ BG1 and BG2 are sixteen colours, BG3 is four.
 - Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1,
   `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3.
 
-**The order the three are drawn in**, front to back, is the one `$2105` names. Writing `A` and `a`
-for BG1's tiles at priority 1 and 0 and the same for the others, it is
+**The order the layers are drawn in**, front to back, is the one `$2105` names. Writing `A` and `a`
+for BG1's tiles at priority 1 and 0, the same for the others, and a digit for a sprite at that
+sprite priority, it is
 
 ```
-A B a b C c        and with $2105 bit 3 set:   C A B a b c
+3 A B 2 a b 1 C 0 c        and with $2105 bit 3 set:   C 3 A B 2 a b 1 0 c
 ```
 
-so bit 3 lifts BG3's high-priority tiles from behind everything to in front of everything, and
-leaves its low-priority tiles where they are. The first background in that order with a
+so bit 3 lifts BG3's high-priority tiles from behind a sprite at priority 1 to in front of
+everything, and leaves its low-priority tiles where they are. The first layer in that order with a
 non-transparent pixel is the one shown; where none has one, the backdrop — palette word 0 — shows.
-Sprites take their own places in this order and are not drawn yet.
 
 **The converter drives eight bits a channel.** A palette word is five bits a channel, and `INIDISP`
 brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 255 / (31 × 16))` in
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
-**What is not drawn yet**, so a reader does not go looking for it: sprites; BG4, which Mode 1 does
-not have, so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows
-nowhere; the windows and colour math; mosaic; and every mode but 1, which show their backdrop. Each
-arrives with its own work.
+**What is not drawn yet**, so a reader does not go looking for it: BG4, which Mode 1 does not have,
+so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows nowhere;
+the windows and colour math; mosaic; sprite priority rotation, `$2103` bit 7, which is stored and
+not yet applied; the two sprite limits, so every sprite the line crosses is drawn; and every mode
+but 1, which show their backdrop and their sprites nowhere. Each arrives with its own work.
+
+## The sprites
+
+A sprite is a record in the sprite table, and 128 of them describe the whole of what the chip can
+put in front of the backgrounds. The **low table** is 128 records of four bytes — X's low eight bits,
+Y, the first character's low eight bits, then `vhoopppN` — and the **high table** is 32 bytes of two
+bits a sprite, four sprites to a byte from the low pair up: the ninth bit of X, then the flag that
+chooses between the two sizes.
+
+- **X is nine bits read as signed**, so a sprite can stand off the left edge with only its right-hand
+  columns on the picture. **Y is eight**, and the subtraction that finds which of the sprite's rows a
+  line crosses is eight bits wide — which is what brings a tall sprite hung above the picture back in
+  at the top. A sprite whose Y is N has its top row on picture line N + 1.
+- **`$2101` bits 7–5 name a pair of sizes** and the record's own flag chooses between them:
+
+  | `sss` | small | large |  | `sss` | small | large |
+  |---|---|---|---|---|---|---|
+  | 0 | 8×8 | 16×16 | | 4 | 16×16 | 64×64 |
+  | 1 | 8×8 | 32×32 | | 5 | 32×32 | 64×64 |
+  | 2 | 8×8 | 64×64 | | 6 | 16×32 | 32×64 |
+  | 3 | 16×16 | 32×32 | | 7 | 16×32 | 32×32 |
+
+- **A sprite's characters live in one of two 16×16 tables**, `N` choosing between them. The word
+  address of its first is `((Base << 13) + (Tile << 4) + (N ? ((Name + 1) << 12) : 0)) & 0x7FFF`,
+  `Base` being `$2101` bits 2–0 and `Name` its bits 4–3 — so a `Name` of 0 puts the second table
+  immediately after the first. A sprite's character is always sixteen colours: four bitplanes,
+  thirty-two bytes, laid out as a background's are.
+- **A sprite's numbers wrap inside the 16×16 table**, the low nibble across and the high nibble down,
+  each on its own: a 16×16 sprite whose first character is `$FF` is made of `$FF`, `$F0`, `$0F` and
+  `$00`. **This is the opposite of a background's 16×16 block**, whose numbers run on — `$2FF` gives
+  `$2FF`, `$300`, `$30F`, `$310`.
+- **A flip reverses the whole sprite**, not its characters — except that a rectangular sprite flips
+  vertically as though it were two square sprites stacked, so its rows `01234567` become `32107654`
+  and not `76543210`.
+- **A sprite's palette is `128 + ppp × 16`**, sixteen colours from CGRAM word 128 up, and its colour 0
+  is transparent like every other. `$212C` bit 4 puts the sprites on the main screen.
+- **Among themselves sprites are ordered by index**: sprite 0 is in front of sprite 1 and so on. Only
+  the topmost sprite at a position reaches the picture, so **only its priority answers the
+  backgrounds** — two overlapping sprites, the front one at priority 0 and the one behind at priority
+  3, are both hidden by a background that shows above priority 0.
+
+**The two passes.** Sprites are the one part of the picture not resolved at the dot that shows them.
+**Range** walks the sprite table across the visible dots of the line *before* the one it is gathering
+for, two dots a sprite from the picture's first, keeping the sprites that line crosses and that have
+at least one column at or right of the left edge. **Time** then runs in the horizontal blank that
+follows and draws those sprites into a line buffer, back to front, so the sprite nearest the front
+keeps every position it claims.
+
+The pass reads `$2101` **as it stands at each sprite's own dot**, so a write landing mid-line reaches
+the sprites whose dots have not gone by and no others. Both passes belong to the machine and run
+whether or not a frame observer is set, because the two overflow flags they set are readable through
+`$213E`; what the passes leave is part of `PpuState`, so a snapshot carries a half-walked pass and a
+restore resumes it. A chip in forced blank is rendering nothing, so it walks nowhere and gathers
+nothing.
 
 ## Writes and their latches
 
@@ -314,7 +370,14 @@ Each of these is a question the documentation leaves, recorded rather than decid
 - Whether the overflow flags clear in a frame the chip spent in forced blank. anomie has them reset at
   vertical blank's end with no exception; the register page excepts forced blank, which is followed.
 - Whether the overflow flags are set regardless of the sprite enables, as the register page states. The
-  flags have nothing to set them until the chip draws sprites.
+  two limits that set them are not built, so nothing sets them yet.
+- Whether the two overflow flags can be raised on the same line by different sprites, and which dot the
+  chip reports if a program latches the counters between them.
+- What a sprite whose Y puts part of it above the picture contributes to the count of characters the
+  chip can load in a horizontal blank.
+- What the sprite line holds on the first line after forced blank lifts part-way through a frame. The
+  passes do not run under the blank, so the line the blank interrupted was never gathered; the buffer
+  is read only for the line it was gathered for, so that line shows no sprites at all.
 - Where the picture's last dot is. The event list gives the visible span as dots 22–277 and marks it
   with its own question mark; the span is taken as written rather than rounded to something tidier.
 - How far ahead of a dot the chip fetches that dot's map entry and character. A pixel is resolved from

@@ -26,6 +26,7 @@ what is unstarted.
 | See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
 | Watch a cartridge run, and record the run | [tools/player/README.md](../tools/player/README.md) |
 | Take the picture the machine draws | [ppu.md §The picture](ppu.md#the-picture) |
+| See how a line's sprites are found and drawn, and what a mid-line write to `$2101` reaches | [ppu.md §The sprites](ppu.md#the-sprites), [ppu-behavior.md §The sprites](ppu-behavior.md#the-sprites) |
 | Place an access at an exact dot, or know what a line and a frame are worth | [snes-machine.md §The video counters and interrupts](snes-machine.md#the-video-counters-and-interrupts) |
 | Run the audio unit alone | [apu-machine.md](apu-machine.md) |
 | Understand how sound is produced | [dsp.md](dsp.md) |
@@ -57,8 +58,8 @@ what is unstarted.
 | Page | Covers |
 |---|---|
 | [snes-machine.md](snes-machine.md) | The machine — the cartridge under its map and its save RAM, work RAM and its data port, the APU ports, region-by-region cycle cost at both clock rates, the beam with its dot map and the master offset of every event a line carries, vertical blank under the taller picture, interlace, the two interrupts' trigger points and the memory refresh, the controller ports, the multiply/divide unit, the PPU's memory ports, DMA and HDMA, the boot handshake, the bus observer, and stepping, running and snapshotting |
-| [ppu-behavior.md](ppu-behavior.md) | Where the published PPU documentation is incomplete, ambiguous or wrong — the tilemap and character bases, the picture's edges, the brightness law, the latch flag — and what settles each case |
-| [ppu.md](ppu.md) | The PPU — the picture it draws and the frame observer it hands each one to, Mode 1's three backgrounds and the order it puts them in, the converter; and the register file beneath: every write with the latches it passes through, the dot map the counter latch answers, the frame's shape under interlace and the taller picture, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
+| [ppu-behavior.md](ppu-behavior.md) | Where the published PPU documentation is incomplete, ambiguous or wrong — the tilemap and character bases, a sprite's own wrap and the two undocumented size pairs, the schedule the two sprite passes keep, the picture's edges, the brightness law, the latch flag — and what settles each case |
+| [ppu.md](ppu.md) | The PPU — the picture it draws and the frame observer it hands each one to, Mode 1's three backgrounds and the sprites over them in the order it puts them all in, the two passes that find a line's sprites during the line before it, the converter; and the register file beneath: every write with the latches it passes through, the dot map the counter latch answers, the frame's shape under interlace and the taller picture, the windows in which VRAM, the sprite table and the palette can be reached, the multiplier, the H/V counter latch, the status registers, the three open-bus values a read can answer with, the power-on state, and what the documentation leaves open |
 | [snes-cartridge.md](snes-cartridge.md) | The cartridge as a value — a copier's header ahead of a dump, the header and its vectors, the LoROM, HiROM and ExHiROM maps, where every bus address lands in the image, and the save windows |
 | [65816-cpu.md](65816-cpu.md) | The main CPU core — its bus and state, the operand-width and emulation-mode machinery, what each cycle drives, and the vector suite |
 
@@ -101,5 +102,6 @@ Contents list under its opening.
 
 A page describes what the code does now. Where a subject is modelled but not yet complete, the page
 says so in place rather than leaving the reader to infer it — the PPU, for instance, draws Mode 1
-and not yet the other modes, the sprites or the colour math, and [ppu.md](ppu.md) says which is
-which where it describes the picture.
+and not yet the other modes or the colour math, and draws every sprite a line crosses rather than
+the 32 the hardware keeps, and [ppu.md](ppu.md) says which is which where it describes the
+picture.
