@@ -470,11 +470,11 @@ constexpr Address kFill = 0x008043u;      // channel 0, 64 bytes from the one by
 constexpr Address kReadBack = 0x00806Bu;  // channel 1, 16 bytes of VRAM into $7E:0300
 constexpr Address kPair = 0x0080B6u;      // channels 2 and 3 under one mask
 constexpr Address kZeroMask = 0x0080BBu;  // a write of zero
-constexpr Address kTables = 0x0080F7u;    // HDMA channels 4 and 5
-constexpr Address kRamTable = 0x008128u;  // HDMA channel 6, its table in work RAM
+constexpr Address kTables = 0x008115u;    // HDMA channels 4 and 5
+constexpr Address kRamTable = 0x00815Au;  // HDMA channel 6, its table in work RAM
 constexpr Address kSprites = 0x008326u;   // channel 7 from the handler, every frame
-constexpr Address kChunks = 0x008190u;    // channel 0 twice from one instruction, the chunks adjacent
-constexpr Address kMirror = 0x008183u;    // channel 0 once more, MDMAEN written through bank $80
+constexpr Address kChunks = 0x0081C2u;    // channel 0 twice from one instruction, the chunks adjacent
+constexpr Address kMirror = 0x0081B5u;    // channel 0 once more, MDMAEN written through bank $80
 
 TEST(RomMoved, ATransferIsRecordedFromTheInstructionThatStartedIt) {
   const std::vector<std::uint8_t> rom = movingImage();
@@ -655,15 +655,19 @@ TEST(RomMoved, ARangeSeenEveryFrameIsCountedNotRepeated) {
 
 TEST(RomMoved, ARunTheBudgetCutsRecordsWhatMoved) {
   // Channel 6's table takes 127 lines to walk. A run that ends part-way down a
-  // frame leaves the walk unfinished, and the bytes it did read are a range.
+  // frame leaves the walk unfinished, and the bytes it did read are a range. The
+  // channel is brought in part-way down the first frame, and a channel brought in
+  // while others are going delivers before it fetches, so that frame's walk begins a
+  // byte below the table and is one byte longer than the frames that begin at the top.
   const std::vector<std::uint8_t> rom = movingImage();
   const std::vector<MovedRange> seen = moved(rom, 2u * kFrame + 60u * 1364u);
   const std::vector<const MovedRange*> walks = rangesAt(seen, kRamTable, 6);
-  ASSERT_EQ(walks.size(), 2u) << "one whole walk, one the budget cut";
-  EXPECT_EQ(walks[0]->bytes, 129u);
-  EXPECT_LT(walks[1]->bytes, 129u);
-  EXPECT_GT(walks[1]->bytes, 1u);
-  EXPECT_EQ(walks[1]->times, 1u);
+  ASSERT_EQ(walks.size(), 3u) << "the frame it joined, one whole walk, one the budget cut";
+  EXPECT_EQ(walks[0]->bytes, 130u) << "the cursor's byte, the entry, 127 values and the terminator";
+  EXPECT_EQ(walks[1]->bytes, 129u);
+  EXPECT_LT(walks[2]->bytes, 129u);
+  EXPECT_GT(walks[2]->bytes, 1u);
+  EXPECT_EQ(walks[2]->times, 1u);
 }
 
 TEST(RomMoved, TwoRunsSeeTheSameRanges) {
@@ -724,7 +728,7 @@ TEST(RomMoved, TheManifestCarriesTheRangesAndReadsThemBack) {
                           "increment bytes 8 as dma times 1\n"),
             std::string::npos)
       << manifest;
-  EXPECT_NE(manifest.find("moved    $00:80F7 channel 5 to-register $00:2121 CGADD Cgram memory $00:9520 "
+  EXPECT_NE(manifest.find("moved    $00:8115 channel 5 to-register $00:2121 CGADD Cgram memory $00:9520 "
                           "increment bytes 2 as indirect times "),
             std::string::npos)
       << manifest;
@@ -1371,7 +1375,7 @@ TEST(RomStaged, ARangeSentTwoPlacesIsOneExtentWithOneSource) {
   ASSERT_NE(both, nullptr);
   EXPECT_EQ(both->origin.image, intervals({{0x1500u, 0x1507u}}));
   ASSERT_EQ(both->writers.size(), 1u);
-  EXPECT_EQ(both->writers.front().writer.site, 0x0083C9u);
+  EXPECT_EQ(both->writers.front().writer.site, 0x0083E9u);
   // Two sightings, one per transfer: the writer's count is the bytes over both.
   EXPECT_EQ(both->writers.front().bytes, 16u);
 }
@@ -1409,11 +1413,11 @@ TEST(RomStaged, TheManifestCarriesTheLinesAndTheNextReadsPastThem) {
   EXPECT_NE(manifest.find("streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$07 in palette depth none\n"),
             std::string::npos);
   // A source sent two places: one file, a `staged` line per class it fed.
-  EXPECT_NE(manifest.find("origin   $7F:0700 bytes 8 from $00:9500 bytes 8 using 8 by sub_0083C0 exact\n"),
+  EXPECT_NE(manifest.find("origin   $7F:0700 bytes 8 from $00:9500 bytes 8 using 8 by sub_0083E0 exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Vram by sub_0083C0 exact\n"),
+  EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Vram by sub_0083E0 exact\n"),
             std::string::npos);
-  EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Cgram by sub_0083C0 exact\n"),
+  EXPECT_NE(manifest.find("staged   staged/00_9500.bin at $7F:0700 bytes 8 to Cgram by sub_0083E0 exact\n"),
             std::string::npos);
   // A buffer the CPU carried out: the stream names the buffer, the buffer's
   // source is the file. Its eight words follow the 53 the transfers sent.
@@ -1798,7 +1802,7 @@ TEST(RomLanded, AWalkKeepsTheUnitAndTheForm) {
   ASSERT_EQ(whole.size(), 3u) << run.walked.size();
   // In their ranges' order: channel 1's direct table, channel 2's indirect
   // table, then the block channel 2's entries point at.
-  EXPECT_EQ(whole[0]->site, 0x0081A8u);
+  EXPECT_EQ(whole[0]->site, 0x0081CCu);
   EXPECT_EQ(whole[0]->channel, 1u);
   EXPECT_EQ(whole[0]->memory, 0x00A400u);
   EXPECT_EQ(whole[0]->bytes, 11u);
@@ -1816,7 +1820,7 @@ TEST(RomLanded, AWalkKeepsTheUnitAndTheForm) {
   EXPECT_TRUE(whole[2]->indirect);
   EXPECT_EQ(whole[0]->times, whole[1]->times);
   // The walk joins its range as a landing does.
-  const MovedRange* table = rangeAt(run.moved, 0x0081A8u, 1, 0x00A400u);
+  const MovedRange* table = rangeAt(run.moved, 0x0081CCu, 1, 0x00A400u);
   ASSERT_NE(table, nullptr);
   EXPECT_EQ(table->bytes, whole[0]->bytes);
   EXPECT_EQ(table->times, whole[0]->times);

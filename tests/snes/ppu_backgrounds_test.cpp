@@ -267,7 +267,7 @@ PpuState threeBackgrounds() {
     return differs("the controller ports");
   }
   if (a.mdmaen != b.mdmaen || a.hdmaen != b.hdmaen || a.hdmaActive != b.hdmaActive ||
-      a.hdmaInited != b.hdmaInited) {
+      a.hdmaEnded != b.hdmaEnded || a.hdmaInited != b.hdmaInited) {
     return differs("the transfer engines");
   }
   return ::testing::AssertionSuccess();

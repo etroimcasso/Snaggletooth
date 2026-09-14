@@ -677,7 +677,15 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
     }
     state_.inVblank = false;     // the frame begins in the picture
     state_.vblankNmi = false;    // and the NMI flag clears with it
-    state_.hdmaInited = false;   // the new frame re-initialises HDMA at line 0
+    // The new frame re-initialises HDMA at line 0, and everything the last frame's
+    // channels stood on is the last frame's. The clearing happens here rather than in
+    // the initialisation itself because a frame that begins with $420C empty holds no
+    // initialisation at all, and a channel the program brings in later must still find
+    // a clean slate.
+    state_.hdmaInited = false;
+    state_.hdmaActive = 0u;
+    state_.hdmaEnded = 0u;
+    state_.hdmaDoWrite = 0u;
     Ppu{state_.ppu}.beginFrame();  // the overflow flags belong to the picture just drawn
     return;
   }
@@ -757,7 +765,7 @@ void Snes::tickVideo(std::uint32_t cost) {
     state_.hdmaIniting = true;
   }
   if (!state_.hdmaLineFired && !state_.inVblank && state_.hpos >= kHdmaDeliver &&
-      state_.hdmaActive != 0u) {
+      (state_.hdmaActive & state_.hdmaen) != 0u) {
     state_.hdmaLineFired = true;
     state_.hdmaRunPending = true;
     state_.hdmaIniting = false;
@@ -874,7 +882,7 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x4209: state_.vtime = static_cast<std::uint16_t>((state_.vtime & 0x0100u) | value); return;
     case 0x420A: state_.vtime = static_cast<std::uint16_t>((state_.vtime & 0x00FFu) | ((value & 1u) << 8)); return;
     case 0x420B: triggerDma(value); return;             // start a general-purpose DMA on each selected channel
-    case 0x420C: state_.hdmaen = value; return;         // enable HDMA on the selected channels
+    case 0x420C: enableHdma(value); return;             // enable HDMA on the selected channels
     case 0x420D: state_.memsel = static_cast<std::uint8_t>(value & 1u); return;
     default: return;  // the read-only ports ignore writes
   }

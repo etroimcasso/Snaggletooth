@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -398,6 +399,317 @@ TEST(SnesDma, HdmaEightyTransfersOnceAndHoldsTheChannelQuietForTheRestOfThePictu
   m.restore(marked);
   m.run(100u * kLine);
   EXPECT_EQ(m.state().ppu.inidisp, 0x33u);  // and nothing for a hundred lines after it
+}
+
+// ---- $420C while the picture is being drawn --------------------------------
+
+// A machine that runs a program from the frame origin with channel 0 armed against a
+// table in work RAM, so the program can take the channel away or bring it in while the
+// picture is being drawn. `delay` counts iterations of a two-instruction loop the
+// program runs before its first store, which is how a store is placed on a chosen
+// line; every case asserts where its store actually landed rather than predicting it.
+// `stores` are (value, low byte of a bank-zero address) pairs, written in order.
+Snes hdmaWritingMachine(std::uint8_t delay,
+                        std::initializer_list<std::pair<std::uint8_t, std::uint8_t>> stores,
+                        std::initializer_list<std::uint8_t> table, std::uint8_t hdmaen,
+                        std::uint8_t secondDelay = 0u) {
+  std::vector<std::uint8_t> program{0xA2u, delay,   // LDX #delay
+                                    0xCAu,          // $8002 DEX
+                                    0xD0u, 0xFDu};  // BNE $8002
+  bool first = true;
+  for (const auto& [value, low] : stores) {
+    if (!first && secondDelay != 0u) {
+      program.insert(program.end(), {0xA2u, secondDelay, 0xCAu, 0xD0u, 0xFDu});
+    }
+    first = false;
+    program.insert(program.end(), {0xA9u, value, 0x8Du, low, 0x42u});
+  }
+  program.push_back(0xDBu);  // STP
+
+  std::vector<std::uint8_t> rom = program;
+  rom.resize(0x8000u, 0x00u);
+  rom[0x7FFCu] = 0x00u;  // reset -> $8000
+  rom[0x7FFDu] = 0x80u;
+  Snes m(SnesConfig{.rom = rom});
+  SnesState s = m.state();
+  s.master = 0; s.consumed = 0; s.apuPhase = 0;
+  s.hpos = 0; s.vpos = 0; s.field = 0;
+  s.dma[0] = DmaChannel{.dmap = 0x00u, .bbad = 0x00u, .a1t = 0x0300u, .a1b = 0x7Eu};
+  s.hdmaen = hdmaen;
+  std::uint16_t addr = 0x0300u;
+  for (std::uint8_t byte : table) s.wram[addr++] = byte;
+  s.ppu.inidisp = 0x80u;
+  m.restore(s);
+  return m;
+}
+
+// The dot a line's delivery is taken at; a store landing before it on its line is a
+// store the line's delivery sees.
+constexpr std::uint16_t kDeliverDot = 1112u;
+
+// Each case runs its program to the halt that ends it, then works from where the
+// program's last store actually landed rather than predicting a line: a store belongs
+// to a line the picture draws, and lands before that line's delivery, and the run
+// after it is measured from there.
+void runToTheHalt(Snes& m) {
+  for (int n = 0; n < 4000 && m.state().cpu.run == CpuRunState::Running; ++n) m.step();
+  ASSERT_NE(m.state().cpu.run, CpuRunState::Running) << "the program reached its halt";
+}
+
+void expectStoreLandedOnADrawnLineBeforeItsDelivery(const Snes& m) {
+  ASSERT_FALSE(m.state().inVblank) << "the store belongs to a line the picture draws";
+  ASSERT_GE(m.state().vpos, 1u) << "and to a line past the frame's own reload";
+  ASSERT_LT(m.state().hpos, kDeliverDot) << "and lands before that line's delivery";
+}
+
+// Runs to just past the delivery of the line the machine is on.
+void runPastThisLinesDelivery(Snes& m) {
+  m.run(kDeliverDot - m.state().hpos + 50u);
+}
+
+TEST(SnesDma, HdmaAChannelTakenAwayMidPictureStopsDelivering) {
+  // A repeat entry would write a fresh value on every line of the picture. The program
+  // clears $420C part-way down, and no line after that delivers — while the channel's
+  // table is left where it stood, not ended.
+  Snes m = hdmaWritingMachine(40u, {{0x00u, 0x0Cu}}, {}, 0x01u);
+  SnesState s = m.state();
+  s.wram[0x300u] = 0xFFu;  // repeat for 127 lines
+  for (std::uint16_t i = 0; i < 127u; ++i) {
+    s.wram[0x301u + i] = static_cast<std::uint8_t>(0x01u + i);  // a distinct value per line
+  }
+  m.restore(s);
+
+  runToTheHalt(m);
+  expectStoreLandedOnADrawnLineBeforeItsDelivery(m);
+  EXPECT_NE(m.state().ppu.inidisp, 0x80u) << "the lines before the store delivered";
+
+  SnesState marked = m.state();
+  marked.ppu.inidisp = 0x33u;  // a marker any further delivery would overwrite
+  m.restore(marked);
+  m.run(4u * kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x33u) << "and no line after it delivered";
+  EXPECT_NE(m.state().hdmaActive & 1u, 0u) << "the channel's table has not ended";
+}
+
+TEST(SnesDma, HdmaAChannelTakenAwayLeavesTheOnesStillNamedDelivering) {
+  // Two channels repeat together and the program takes only one of them away. The
+  // line's work is per channel, so the one still named in $420C goes on delivering.
+  Snes m = hdmaWritingMachine(40u, {{0x02u, 0x0Cu}}, {}, 0x03u);
+  SnesState s = m.state();
+  s.wram[0x300u] = 0xFFu;  // channel 0 repeats to INIDISP
+  for (std::uint16_t i = 0; i < 127u; ++i) {
+    s.wram[0x301u + i] = static_cast<std::uint8_t>(0x01u + i);
+  }
+  s.dma[1] = DmaChannel{.dmap = 0x00u, .bbad = 0x05u, .a1t = 0x0400u, .a1b = 0x7Eu};
+  s.wram[0x400u] = 0xFFu;  // channel 1 repeats to BGMODE
+  for (std::uint16_t i = 0; i < 127u; ++i) {
+    s.wram[0x401u + i] = static_cast<std::uint8_t>(0x01u + i);
+  }
+  m.restore(s);
+
+  runToTheHalt(m);
+  expectStoreLandedOnADrawnLineBeforeItsDelivery(m);
+  SnesState marked = m.state();
+  marked.ppu.inidisp = 0x33u;
+  marked.ppu.bgmode = 0x33u;
+  m.restore(marked);
+  m.run(3u * kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x33u) << "the channel taken away delivered nothing";
+  EXPECT_NE(m.state().ppu.bgmode, 0x33u) << "the channel still named went on delivering";
+}
+
+TEST(SnesDma, HdmaAChannelTakenAwayCostsThePictureNothing) {
+  // A channel out of $420C is not work the picture does, so the lines after it is taken
+  // away leave the processor exactly the time it would have had if nothing were armed
+  // at all. The program counts in work RAM; the two runs must reach the same count.
+  const std::vector<std::uint8_t> counting{
+      0xEEu, 0x00u, 0x00u,   // $8000 INC $0000
+      0xD0u, 0xFBu,          // $8003 BNE $8000
+      0xEEu, 0x01u, 0x00u,   // $8005 INC $0001
+      0x80u, 0xF6u,          // $8008 BRA $8000
+  };
+
+  const auto count = [&counting](std::uint8_t active) {
+    std::vector<std::uint8_t> rom = counting;
+    rom.resize(0x8000u, 0x00u);
+    rom[0x7FFCu] = 0x00u;
+    rom[0x7FFDu] = 0x80u;
+    Snes m(SnesConfig{.rom = rom});
+    SnesState s = m.state();
+    s.master = 0; s.consumed = 0; s.apuPhase = 0;
+    s.hpos = 0; s.vpos = 0; s.field = 0;
+    s.dma[0] = DmaChannel{.dmap = 0x00u, .bbad = 0x00u, .a1t = 0x0300u, .a1b = 0x7Eu};
+    s.hdmaen = 0x00u;   // taken away
+    s.hdmaActive = active;  // but its table would still be running
+    s.wram[0x300u] = 0xFFu;
+    m.restore(s);
+    m.run(20u * kLine);
+    return static_cast<unsigned>(m.state().wram[1]) * 256u + m.state().wram[0];
+  };
+
+  EXPECT_EQ(count(0x01u), count(0x00u));
+}
+
+TEST(SnesDma, HdmaAChannelPutBackResumesWhereItStood) {
+  // Taken away and given back a line later: the table keeps its place, so the value
+  // that lands next is further down the entry than the one taken away interrupted —
+  // never the table's first value again.
+  Snes m = hdmaWritingMachine(40u, {{0x00u, 0x0Cu}, {0x01u, 0x0Cu}}, {}, 0x01u, 36u);
+  SnesState s = m.state();
+  s.wram[0x300u] = 0xFFu;
+  for (std::uint16_t i = 0; i < 127u; ++i) {
+    s.wram[0x301u + i] = static_cast<std::uint8_t>(0x01u + i);
+  }
+  m.restore(s);
+
+  runToTheHalt(m);
+  expectStoreLandedOnADrawnLineBeforeItsDelivery(m);
+  ASSERT_NE(m.state().ppu.inidisp, 0x80u) << "the lines before the take-away delivered";
+
+  // The entry counts a line down whether or not the channel is named, so once it is
+  // named again the values that land go on stepping by one a line — which a channel
+  // that had started its table over, or spent a line fetching, could not do.
+  runPastThisLinesDelivery(m);
+  const std::uint8_t resumed = m.state().ppu.inidisp;
+  m.run(kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, static_cast<std::uint8_t>(resumed + 1u));
+  m.run(kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, static_cast<std::uint8_t>(resumed + 2u));
+  m.run(kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, static_cast<std::uint8_t>(resumed + 3u));
+}
+
+TEST(SnesDma, HdmaAChannelBroughtInMidPictureKeepsTheCursorTheProgramGaveIt) {
+  // Nothing was armed as the frame began, so no reload has happened and none will: the
+  // channel walks from the cursor in $43x8, and the table start in $43x2 — which names
+  // somewhere else entirely — is not consulted.
+  Snes m = hdmaWritingMachine(40u, {{0x01u, 0x0Cu}}, {}, 0x00u);
+  SnesState s = m.state();
+  s.dma[0].a1t = 0x0500u;   // a table start the frame's reload would have used
+  s.wram[0x500u] = 0x01u;   // holding a different entry entirely
+  s.wram[0x501u] = 0x77u;
+  s.dma[0].a2a = 0x0300u;   // the cursor the program set
+  s.dma[0].nltr = 0x01u;    // one line to spend reaching the table
+  s.wram[0x300u] = 0x02u;   // $7E:0300: two lines of $0A, then stop
+  s.wram[0x301u] = 0x0Au;
+  s.wram[0x302u] = 0x00u;
+  m.restore(s);
+
+  runToTheHalt(m);
+  expectStoreLandedOnADrawnLineBeforeItsDelivery(m);
+  ASSERT_NE(m.state().hdmaActive & 1u, 0u) << "the write brought the channel in";
+  runPastThisLinesDelivery(m);
+  m.run(kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au) << "the cursor's table, not the one A1T names";
+}
+
+TEST(SnesDma, HdmaAChannelBroughtInAloneFetchesBeforeItDelivers) {
+  // $420C was empty, so this is the picture's first channel: the line it comes in on
+  // spends the count the program left and fetches the table's own entry, delivering
+  // nothing, and the line after that carries the table's value.
+  Snes m = hdmaWritingMachine(40u, {{0x01u, 0x0Cu}}, {0x02u, 0x0Au, 0x00u}, 0x00u);
+  SnesState s = m.state();
+  s.dma[0].a2a = 0x0300u;
+  s.dma[0].nltr = 0x01u;
+  m.restore(s);
+
+  runToTheHalt(m);
+  expectStoreLandedOnADrawnLineBeforeItsDelivery(m);
+  runPastThisLinesDelivery(m);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x80u) << "nothing delivered on the line it came in on";
+  m.run(kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au) << "and the table's value on the line after";
+}
+
+TEST(SnesDma, HdmaAChannelJoiningChannelsAlreadyGoingDeliversOnItsFirstLine) {
+  // Channel 1 is armed as the frame begins, so HDMA is already running when channel 0
+  // is brought in. That channel delivers before it fetches, so the byte its cursor
+  // names goes out as a value rather than being read as a count.
+  Snes m = hdmaWritingMachine(40u, {{0x03u, 0x0Cu}}, {}, 0x02u);
+  SnesState s = m.state();
+  s.dma[1] = DmaChannel{.dmap = 0x00u, .bbad = 0x32u, .a1t = 0x0400u, .a1b = 0x7Eu};
+  s.wram[0x400u] = 0xFFu;  // channel 1 repeats, keeping HDMA running all picture
+  for (std::uint16_t i = 0x401u; i <= 0x47Fu; ++i) s.wram[i] = 0x00u;
+  s.dma[0].a2a = 0x0300u;
+  s.dma[0].nltr = 0x01u;
+  s.wram[0x300u] = 0x0Fu;  // the cursor's byte: a value here, not a count
+  s.wram[0x301u] = 0x02u;  // the entry the fetch after it takes
+  s.wram[0x302u] = 0x0Au;
+  s.wram[0x303u] = 0x00u;
+  m.restore(s);
+
+  runToTheHalt(m);
+  expectStoreLandedOnADrawnLineBeforeItsDelivery(m);
+  runPastThisLinesDelivery(m);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Fu) << "the cursor's byte went out as a value";
+}
+
+TEST(SnesDma, HdmaAChannelWhoseTableEndedCannotBeBroughtBackInThePicture) {
+  // The first entry is a terminator, so the channel is done for the frame before it
+  // delivers anything. Taking it out of $420C and putting it back does not restart it.
+  Snes m = hdmaWritingMachine(40u, {{0x00u, 0x0Cu}, {0x01u, 0x0Cu}}, {0x00u, 0x0Au}, 0x01u, 36u);
+  runToTheHalt(m);
+  EXPECT_EQ(m.state().hdmaActive & 1u, 0u) << "ended at the frame's own reload";
+  m.run(4u * kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x80u) << "and never delivered";
+  EXPECT_EQ(m.state().hdmaActive & 1u, 0u);
+}
+
+TEST(SnesDma, HdmaATableThatEndsPartWayDownThePictureCannotBeBroughtBack) {
+  // The table terminates on its second line rather than at the picture's own reload.
+  // Cycling $420C afterwards must not start it again: what follows the terminator
+  // would go out as a value if it did.
+  Snes m = hdmaWritingMachine(90u, {{0x00u, 0x0Cu}, {0x01u, 0x0Cu}}, {}, 0x01u, 36u);
+  SnesState s = m.state();
+  s.wram[0x300u] = 0x01u;  // one line of $0A
+  s.wram[0x301u] = 0x0Au;
+  s.wram[0x302u] = 0x00u;  // then the terminator
+  s.wram[0x303u] = 0x5Au;  // and a value a restarted channel would reach
+  m.restore(s);
+
+  runToTheHalt(m);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au) << "the one line the table named";
+  EXPECT_EQ(m.state().hdmaActive & 1u, 0u) << "ended part-way down the picture";
+  m.run(4u * kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au) << "and nothing after the terminator went out";
+}
+
+TEST(SnesDma, HdmaAPictureThatOpensWithNoChannelArmedStillClearsWhatTheLastOneLeft) {
+  // The start-of-frame reload is what clears a channel's per-picture state, and a
+  // picture that opens with $420C empty runs no reload at all — so the picture's own
+  // boundary clears it, and a channel whose table ended is free to be brought in again.
+  Snes m = haltedMachine();
+  SnesState s = m.state();
+  s.hdmaen = 0x00u;
+  s.hdmaActive = 0x01u;
+  s.hdmaEnded = 0x01u;
+  s.hdmaDoWrite = 0x01u;
+  s.vpos = 260u;
+  s.inVblank = true;
+  m.restore(s);
+
+  m.run(3u * kLine);
+  ASSERT_LT(m.state().vpos, 3u) << "the run crossed into the next picture";
+  EXPECT_EQ(m.state().hdmaEnded, 0u);
+  EXPECT_EQ(m.state().hdmaActive, 0u);
+  EXPECT_EQ(m.state().hdmaDoWrite, 0u);
+}
+
+TEST(SnesDma, HdmaAWriteInTheVerticalBlankBringsNothingIn) {
+  // The blank has no lines left to join, and the frame after it hands every channel
+  // its table afresh.
+  Snes m = hdmaWritingMachine(40u, {{0x01u, 0x0Cu}}, {0x02u, 0x0Au, 0x00u}, 0x00u);
+  SnesState s = m.state();
+  s.vpos = 226u;  // inside the vertical blank
+  s.inVblank = true;
+  s.dma[0].a2a = 0x0300u;
+  s.dma[0].nltr = 0x01u;
+  m.restore(s);
+
+  runToTheHalt(m);
+  ASSERT_TRUE(m.state().inVblank) << "the store belongs to the blank";
+  EXPECT_EQ(m.state().hdmaActive & 1u, 0u) << "nothing joined";
+  EXPECT_EQ(m.state().ppu.inidisp, 0x80u);
 }
 
 TEST(SnesDma, HdmaDeactivatesAtVblank) {

@@ -42,7 +42,7 @@ inline std::vector<std::uint8_t> stagingImage() {
       0x20u, 0x90u, 0x82u,         // $8026 JSR !$8290      $7F:0300 -> OAM
       0x20u, 0xD0u, 0x82u,         // $8029 JSR !$82D0      $7E:0400 -> VRAM
       0x20u, 0x40u, 0x83u,         // $802C JSR !$8340      $7E:0500 -> VRAM
-      0x20u, 0xC0u, 0x83u,         // $802F JSR !$83C0      copy $9500 -> $7F:0700
+      0x20u, 0xE0u, 0x83u,         // $802F JSR !$83E0      copy $9500 -> $7F:0700
       0x20u, 0x00u, 0x84u,         // $8032 JSR !$8400      $7F:0700 -> VRAM
       0x20u, 0x40u, 0x84u,         // $8035 JSR !$8440      $7F:0700 -> CGRAM
       0x20u, 0x80u, 0x84u,         // $8038 JSR !$8480      copy $9600 -> $7F:0800
@@ -191,25 +191,32 @@ inline std::vector<std::uint8_t> stagingImage() {
       0x8Fu, 0x10u, 0x43u, 0x00u,  // $8396 STA $00:4310    DMAP1 = $00: direct, one register
       0x8Fu, 0x11u, 0x43u, 0x00u,  // $839A STA $00:4311    BBAD1 = $00: INIDISP
       0x8Fu, 0x12u, 0x43u, 0x00u,  // $839E STA $00:4312    A1T1 low
-      0xA9u, 0x06u,                // $83A2 LDA #$06
-      0x8Fu, 0x13u, 0x43u, 0x00u,  // $83A4 STA $00:4313    A1T1 high: $0600
-      0xA9u, 0x7Fu,                // $83A8 LDA #$7F
-      0x8Fu, 0x14u, 0x43u, 0x00u,  // $83AA STA $00:4314    A1B1 = $7F
-      0xA9u, 0x02u,                // $83AE LDA #$02
-      0x8Fu, 0x0Cu, 0x42u, 0x00u,  // $83B0 STA $00:420C    HDMAEN = $02 (the write at $83B0)
-      0x60u,                       // $83B4 RTS
+      // The channel comes in away from the top of a frame, where the one point that
+      // reloads a channel has gone by, so the program hands it its own cursor and a
+      // count of one for the first line to spend on reaching the table.
+      0x8Fu, 0x18u, 0x43u, 0x00u,  // $83A2 STA $00:4318    A2A1 low
+      0xA9u, 0x06u,                // $83A6 LDA #$06
+      0x8Fu, 0x13u, 0x43u, 0x00u,  // $83A8 STA $00:4313    A1T1 high: $0600
+      0x8Fu, 0x19u, 0x43u, 0x00u,  // $83AC STA $00:4319    A2A1 high: the cursor at $0600
+      0xA9u, 0x7Fu,                // $83B0 LDA #$7F
+      0x8Fu, 0x14u, 0x43u, 0x00u,  // $83B2 STA $00:4314    A1B1 = $7F
+      0xA9u, 0x01u,                // $83B6 LDA #$01
+      0x8Fu, 0x1Au, 0x43u, 0x00u,  // $83B8 STA $00:431A    NLTR1 = $01
+      0x1Au,                       // $83BC INC A
+      0x8Fu, 0x0Cu, 0x42u, 0x00u,  // $83BD STA $00:420C    HDMAEN = $02 (the write at $83BD)
+      0x60u,                       // $83C1 RTS
   });
   // A copy of eight bytes that two transfers then send two places.
-  put(rom, 0x03C0u, {
-      0xC2u, 0x10u,                // $83C0 REP #$10        sub_0083C0
-      0xA2u, 0x00u, 0x00u,         // $83C2 LDX #$0000
-      0xBFu, 0x00u, 0x95u, 0x00u,  // $83C5 LDA $00:9500,X
-      0x9Du, 0x00u, 0x07u,         // $83C9 STA !$0700,X    $7F:0700+X
-      0xE8u,                       // $83CC INX
-      0xE0u, 0x08u, 0x00u,         // $83CD CPX #$0008
-      0xD0u, 0xF3u,                // $83D0 BNE $83C5
-      0xE2u, 0x10u,                // $83D2 SEP #$10
-      0x60u,                       // $83D4 RTS
+  put(rom, 0x03E0u, {
+      0xC2u, 0x10u,                // $83E0 REP #$10        sub_0083E0
+      0xA2u, 0x00u, 0x00u,         // $83E2 LDX #$0000
+      0xBFu, 0x00u, 0x95u, 0x00u,  // $83E5 LDA $00:9500,X
+      0x9Du, 0x00u, 0x07u,         // $83E9 STA !$0700,X    $7F:0700+X
+      0xE8u,                       // $83EC INX
+      0xE0u, 0x08u, 0x00u,         // $83ED CPX #$0008
+      0xD0u, 0xF3u,                // $83F0 BNE $83E5
+      0xE2u, 0x10u,                // $83F2 SEP #$10
+      0x60u,                       // $83F4 RTS
   });
   transfer(0x0400u, 0x01u, 0x18u, 0x00u, 0x07u, 0x7Fu, 0x08u);  // $8400: $7F:0700, 8 -> VMDATAL (the write at $842C)
   transfer(0x0440u, 0x00u, 0x22u, 0x00u, 0x07u, 0x7Fu, 0x08u);  // $8440: $7F:0700, 8 -> CGDATA (the write at $846C)

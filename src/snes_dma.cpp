@@ -192,13 +192,41 @@ void Snes::hdmaLoadEntry(std::uint8_t index, bool indirect) {
   }
 }
 
+void Snes::enableHdma(std::uint8_t channels) {
+  // $420C. A channel the write takes away stops delivering from the next line: the
+  // bit gates a line's work, and the channel's place in its table is kept, so putting
+  // it back resumes where it stood. A channel the write brings in for the first time
+  // this frame joins the lines that are left with its registers exactly as the program
+  // set them — nothing is reloaded, because the frame's one reload has passed — and it
+  // delivers on its first line only if HDMA was already running, which is the
+  // difference the console shows between starting the frame's first channel midway and
+  // adding another to channels already going. A channel whose table has ended is done
+  // until the next frame and this cannot bring it back.
+  const std::uint8_t joining =
+      static_cast<std::uint8_t>(channels & ~state_.hdmaen & ~state_.hdmaActive &
+                                ~state_.hdmaEnded);
+  const bool running = state_.hdmaen != 0u;
+  state_.hdmaen = channels;
+  // The vertical blank has no lines left to join: every channel is already out for the
+  // frame, and the frame beginning after it hands each one its table afresh.
+  if (joining == 0u || state_.inVblank) return;
+  state_.hdmaActive = static_cast<std::uint8_t>(state_.hdmaActive | joining);
+  if (running) {
+    state_.hdmaDoWrite = static_cast<std::uint8_t>(state_.hdmaDoWrite | joining);
+  } else {
+    state_.hdmaDoWrite = static_cast<std::uint8_t>(state_.hdmaDoWrite & ~joining);
+  }
+}
+
 void Snes::hdmaCycle() {
   std::uint32_t cost = kHdmaOverhead;
 
   if (state_.hdmaIniting) {
     // Start of frame: point each enabled channel's table cursor at its table start
-    // and load its first entry. A channel whose first byte is $00 never activates.
+    // and load its first entry. A channel whose first byte is $00 is done for the
+    // frame before it delivers anything.
     state_.hdmaActive = 0u;
+    state_.hdmaEnded = 0u;
     state_.hdmaDoWrite = 0u;
     for (std::uint8_t c = 0; c < 8; ++c) {
       if (((state_.hdmaen >> c) & 1u) == 0u) continue;
@@ -210,6 +238,8 @@ void Snes::hdmaCycle() {
       if (ch.nltr != 0u) {
         state_.hdmaActive |= static_cast<std::uint8_t>(1u << c);
         state_.hdmaDoWrite |= static_cast<std::uint8_t>(1u << c);
+      } else {
+        state_.hdmaEnded |= static_cast<std::uint8_t>(1u << c);
       }
     }
     lastCost_ = cost;
@@ -218,9 +248,11 @@ void Snes::hdmaCycle() {
     return;
   }
 
-  // A visible scanline's delivery, for every channel still active this frame.
+  // A visible scanline's delivery, for every channel whose table is still running and
+  // whose bit $420C still holds.
+  const std::uint8_t delivering = static_cast<std::uint8_t>(state_.hdmaActive & state_.hdmaen);
   for (std::uint8_t c = 0; c < 8; ++c) {
-    if (((state_.hdmaActive >> c) & 1u) == 0u) continue;
+    if (((delivering >> c) & 1u) == 0u) continue;
     DmaChannel& ch = state_.dma[c];
     const bool indirect = (ch.dmap & 0x40u) != 0u;
     cost += kHdmaChannel;
@@ -271,6 +303,7 @@ void Snes::hdmaCycle() {
       if (ch.nltr == 0u) {  // a terminator ends the channel for the frame
         state_.hdmaActive = static_cast<std::uint8_t>(state_.hdmaActive & ~bit);
         state_.hdmaDoWrite = static_cast<std::uint8_t>(state_.hdmaDoWrite & ~bit);
+        state_.hdmaEnded = static_cast<std::uint8_t>(state_.hdmaEnded | bit);
       } else {
         state_.hdmaDoWrite |= bit;  // the new entry writes on its first line
       }
