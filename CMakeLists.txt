@@ -483,7 +483,7 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
     set(SDL_SHARED       OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC       ON  CACHE BOOL "" FORCE)
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-    set(SDL_AUDIO        OFF CACHE BOOL "" FORCE)  # a run's sound is its WAV, not a live sink
+    set(SDL_AUDIO        ON  CACHE BOOL "" FORCE)  # the player puts the run's sound out as it runs
     set(SDL_CAMERA       OFF CACHE BOOL "" FORCE)
     set(SDL_HAPTIC       OFF CACHE BOOL "" FORCE)
     set(SDL_JOYSTICK     OFF CACHE BOOL "" FORCE)  # the run is driven by a script

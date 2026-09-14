@@ -1,12 +1,15 @@
-// snes_player — runs a cartridge in a window and records the same run.
+// snes_player — runs a cartridge in a window, with its sound, and records the run
+// when asked to.
 //
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
-//                       [--input <script> | --input-dir <directory>] [--quiet]
+//                       [--input <script> | --input-dir <directory>] [--mute] [--quiet]
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
 // own rate, with that rate in its title so what the run costs is visible while it
-// runs. It closes when the window is closed or when --seconds of the master clock
-// have been spent; nothing else stops it.
+// runs, and the DSP's own 32 kHz stereo goes to the default playback device as the
+// machine produces it. It closes when the window is closed or when --seconds of the
+// master clock have been spent; nothing else stops it. --mute leaves the sound where
+// it is made, and a machine with no playback device runs silent and says so.
 //
 // The buttons come from a recorded run rather than the keyboard: --input names a
 // script and --input-dir a directory of them, from which the one named for the image
@@ -17,7 +20,8 @@
 // --out writes what the run produced into a directory, named after the image: an
 // uncompressed AVI of every frame exactly as the machine drove it, a table of what
 // each frame cost, and the sound as a WAV. They come together — one run, one set of
-// evidence.
+// evidence — and without it the run keeps none of them, so nothing accumulates
+// behind a run nobody asked to record.
 //
 // The machine runs at the NTSC clock rate.
 
@@ -62,6 +66,19 @@ constexpr std::uint64_t kChunkMaster = 89341ull;
 
 constexpr std::uint64_t kNanosPerSecond = 1000000000ull;
 
+// The DSP's own rate and shape, which the playback device is asked for directly so
+// nothing resamples what the machine made.
+constexpr int kSampleRate = 32000;
+constexpr int kChannels = 2;
+constexpr int kBytesPerSample = kChannels * static_cast<int>(sizeof(std::int16_t));
+
+// How far the sound is allowed to run ahead of the speakers before a chunk is left
+// out: a quarter of a second, which is latency a person notices. The machine is
+// paced to the console's frame interval and the device consumes at its own crystal,
+// so the two drift apart slowly; dropping a chunk costs a tenth of a frame of sound
+// and puts the queue back where it belongs.
+constexpr int kQueueBoundBytes = kSampleRate * kBytesPerSample / 4;
+
 // The rate a frame's interval works out to, in thousandths of a frame a second, so a
 // rate is reported exactly without leaving the integers.
 [[nodiscard]] std::uint64_t milliFps(std::uint64_t nanos, std::uint64_t frames) {
@@ -86,9 +103,48 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
 [[noreturn]] void usage(const char* program) {
   std::cerr << "usage: " << program
             << " <image> [--out <directory>] [--seconds N] [--scale N]"
-               " [--input <script> | --input-dir <directory>] [--quiet]\n";
+               " [--input <script> | --input-dir <directory>] [--mute] [--quiet]\n";
   std::exit(2);
 }
+
+// The default playback device, taking the DSP's frames as they are made. A tool
+// that could not open one still runs — the machine is the point and the picture is
+// still there — so every method is safe on a sink that never opened.
+class Sound {
+ public:
+  ~Sound() {
+    if (stream_ != nullptr) SDL_DestroyAudioStream(stream_);
+  }
+
+  Sound(const Sound&) = delete;
+  Sound& operator=(const Sound&) = delete;
+  Sound() = default;
+
+  // Opens the device at the DSP's own rate and starts it. Says why it could not
+  // rather than failing the run.
+  void open() {
+    const SDL_AudioSpec spec{.format = SDL_AUDIO_S16, .channels = kChannels, .freq = kSampleRate};
+    stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+    if (stream_ == nullptr) {
+      std::cerr << "no sound: " << SDL_GetError() << "\n";
+      return;
+    }
+    SDL_ResumeAudioStreamDevice(stream_);
+  }
+
+  // The frames the machine has just made, handed to the device — unless the sound
+  // already queued has run far enough ahead of the speakers that keeping this chunk
+  // would only add to the delay.
+  void put(const std::vector<snaggletooth::StereoFrame>& frames) {
+    if (stream_ == nullptr || frames.empty()) return;
+    if (SDL_GetAudioStreamQueued(stream_) > kQueueBoundBytes) return;
+    SDL_PutAudioStreamData(stream_, frames.data(),
+                           static_cast<int>(frames.size() * sizeof(snaggletooth::StereoFrame)));
+  }
+
+ private:
+  SDL_AudioStream* stream_ = nullptr;
+};
 
 // The window, the recording and the table, all fed by the frames the machine
 // finishes. It is the machine's frame observer, so every one of them arrives here as
@@ -257,6 +313,7 @@ int main(int argc, char** argv) {
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
   bool quiet = false;
+  bool mute = false;
 
   for (int at = 1; at < argc; ++at) {
     const std::string arg = argv[at];
@@ -287,6 +344,8 @@ int main(int argc, char** argv) {
         std::cerr << "--scale needs a number\n";
         usage(argv[0]);
       }
+    } else if (arg == "--mute") {
+      mute = true;
     } else if (arg == "--quiet") {
       quiet = true;
     } else if (imagePath.empty()) {
@@ -345,18 +404,26 @@ int main(int argc, char** argv) {
   }
 
   SDL_SetMainReady();
-  if (!SDL_Init(SDL_INIT_VIDEO)) {
+  // The audio subsystem is asked for only where the sound is wanted, so a muted run
+  // opens no device at all.
+  const SDL_InitFlags subsystems = SDL_INIT_VIDEO | (mute ? 0u : SDL_INIT_AUDIO);
+  if (!SDL_Init(subsystems)) {
     std::cerr << "cannot start SDL: " << SDL_GetError() << "\n";
     return 1;
   }
+  // SDL is shut down by this, and it is declared before everything that holds
+  // something SDL gave out — the window, its renderer and texture, the audio
+  // stream — so those are all destroyed first, on every path out of main. An audio
+  // stream destroyed after the shutdown reaches a device the shutdown has already
+  // freed, which ends the run in a segmentation fault however it was closed.
+  const struct Shutdown {
+    ~Shutdown() { SDL_Quit(); }
+  } shutdown;
 
   Snes machine(snaggletooth::SnesConfig{.rom = rom});
   const std::string stem = std::filesystem::path(imagePath).stem().string();
   Player player(machine, script, scale, stem);
-  if (!player.open()) {
-    SDL_Quit();
-    return 1;
-  }
+  if (!player.open()) return 1;
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);
     player.record(outDir, stem);
@@ -367,18 +434,26 @@ int main(int argc, char** argv) {
   machine.setJoypad(snaggletooth::JoypadPort::Two,
                     script.padAt(snaggletooth::JoypadPort::Two, 0u));
 
+  Sound speakers;
+  if (!mute) speakers.open();
+
+  // The sound is kept only where it is going to be written out; a run nobody asked
+  // to record hands each chunk to the speakers and lets it go.
+  const bool recording = !outDir.empty();
   const std::uint64_t bound = seconds * kMasterPerSecond;
   std::vector<snaggletooth::StereoFrame> sound;
   while (!player.closed() && (bound == 0u || machine.state().master < bound)) {
     machine.run(kChunkMaster);
     const std::vector<snaggletooth::StereoFrame> produced = machine.takeFrames();
-    sound.insert(sound.end(), produced.begin(), produced.end());
+    speakers.put(produced);
+    if (recording) sound.insert(sound.end(), produced.begin(), produced.end());
   }
   machine.setFrameObserver(nullptr);
   player.finish();
 
-  if (!outDir.empty()) {
-    const std::vector<std::uint8_t> wav = snaggletooth::spc::writeWav(sound, 32000u);
+  if (recording) {
+    const std::vector<std::uint8_t> wav =
+        snaggletooth::spc::writeWav(sound, static_cast<std::uint32_t>(kSampleRate));
     const std::filesystem::path path = std::filesystem::path(outDir) / (stem + ".wav");
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(wav.data()), static_cast<std::streamsize>(wav.size()));
@@ -386,7 +461,5 @@ int main(int argc, char** argv) {
   if (!quiet) {
     std::cerr << player.frames() << " frames at " << rateText(player.meanMilliFps()) << " fps\n";
   }
-
-  SDL_Quit();
   return 0;
 }
