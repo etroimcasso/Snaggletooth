@@ -17,6 +17,12 @@ disagree it names the disagreement and what decided it.
 - [The characters](#the-characters)
   - [The character base counts 8 KB blocks](#the-character-base-counts-8-kb-blocks)
   - [A 16×16 block's numbers run on rather than wrapping inside it](#a-1616-blocks-numbers-run-on-rather-than-wrapping-inside-it)
+- [The sprites](#the-sprites)
+  - [A sprite's numbers wrap inside its table, which is the opposite of a block's](#a-sprites-numbers-wrap-inside-its-table-which-is-the-opposite-of-a-blocks)
+  - [Sizes 6 and 7 are undocumented and both sources print them anyway](#sizes-6-and-7-are-undocumented-and-both-sources-print-them-anyway)
+  - [The two passes' schedule: the documents give it from opposite ends and reconcile exactly](#the-two-passes-schedule-the-documents-give-it-from-opposite-ends-and-reconcile-exactly)
+  - [The two counts run in opposite directions along the same sprites](#the-two-counts-run-in-opposite-directions-along-the-same-sprites)
+  - [The front-sprite oddity is stated three ways and two of them agree](#the-front-sprite-oddity-is-stated-three-ways-and-two-of-them-agree)
 - [The priority order](#the-priority-order)
   - [Only BG3's high-priority tiles move when $2105 bit 3 is set](#only-bg3s-high-priority-tiles-move-when-2105-bit-3-is-set)
   - [Mode 1 gives no background a palette offset of its own](#mode-1-gives-no-background-a-palette-offset-of-its-own)
@@ -129,6 +135,99 @@ With `$2105`'s size bit set, an entry names `Tile`, `Tile+1`, `Tile+16`, `Tile+1
 *Documented and corroborated*, and stated explicitly by both sources because the intuitive reading is
 the wrong one.
 
+## The sprites
+
+### A sprite's numbers wrap inside its table, which is the opposite of a block's
+
+A sprite's first character number is a row and a column in a 16×16 table, and **each nibble wraps on
+its own**: a 16×16 sprite whose first character is `$FF` is made of `$FF`, `$F0`, `$0F` and `$00`.
+Set beside the rule above — where a background's 16×16 block runs on from `$2FF` to `$300` — the two
+are exactly opposite, for the same layout in the same memory.
+
+*Documented and corroborated*, and stated at length by Anomie precisely because it surprises: "tile 0
+is to the right of tile `$0F` and below tile `$F0`… tile `$FF` is to the left of tile `$F0` and above
+tile `$0F`."
+
+### Sizes 6 and 7 are undocumented and both sources print them anyway
+
+`$2101` bits 7–5 select a pair of sizes. Both sources list all eight pairs and both mark the last
+two — 16×32/32×64 and 16×32/32×32 — as undocumented. They agree on the dimensions, and 44 % of a
+census of 740 drawing titles use a pair beyond the first, so the two are built rather than left to be
+discovered.
+
+*Documented but contested* only in the sense that the hardware's own documentation never named them;
+the two secondary sources agree exactly.
+
+### The two passes' schedule: the documents give it from opposite ends and reconcile exactly
+
+Anomie's timing document describes the mechanism. The PPU spends **256 memory-access cycles** on the
+visible span, and "during this time, OAM is being examined to determine the first 32 sprites on the
+next scanline"; then "during H-Blank, 68 memory access cycles are devoted to loading the next
+scanline from 34 4-bit sprite tiles." **128 sprites over 256 cycles is two cycles a sprite.**
+
+fullsnes states the same arithmetic from the other end, as the dots at which the overflow flags are
+raised: range overflow at `H = OAM.INDEX × 2`, time overflow at `H = 0` of the following line.
+
+The two documents' `V` agrees once the line the console renders and does not output is counted. A
+sprite whose Y is N first draws on line N + 1, so the pass that first finds it runs during line N —
+fullsnes's `V = OBJ.YLOC` exactly. And the horizontal blank at the end of line N contains
+`V = N + 1, H = 0`, because the blank is raised at `H = 274` and lowered at `H = 1` of the next line.
+fullsnes's time-overflow dot is that point exactly.
+
+*Documented and corroborated.* **Neither source needs bending**, and the two together fix not just
+that the passes happen a line early but where inside the line each sprite is examined — which is what
+decides where a mid-line write to `$2101` lands. A census measured **23,471 writes to `$2101` inside
+the visible picture across 70 titles, 9 of them by HDMA**, so the question is not hypothetical: a
+renderer that evaluated a whole line at one instant would take every one of those writes either
+wholly early or wholly late.
+
+### The two counts run in opposite directions along the same sprites
+
+Anomie's four numbered steps put the directions plainly. Range starts "with the FirstSprite" and
+determines "the first 32 sprites on this scanline", counting only those with `−size < X < 256`, and
+sets `$213E` bit 6 where there are more. Time then starts "with the last sprite in Range" and loads
+"up to 34 8×8 tiles (from left-to-right, after flipping)", counting only those with `−8 < X < 256`,
+and sets bit 7 where there are more. fullsnes gives the same two numbers as the flags' names — more
+than 32 sprites, more than 8×34 pixels — and adds that both are set "regardless of OBJ
+enable/disable in 212Ch".
+
+*Documented and corroborated.* The consequence is the one that matters and it is not symmetric: Time
+spends its count from the *back* of Range, so the tiles it runs out of belong to the sprites nearest
+the front. A crowded line therefore loses the sprites the walk began at, which is exactly what the
+`$2103` bit 7 walk position exists to move around.
+
+Anomie's step 0 is the other half of the counting rule: a sprite at `X = 256` "or `X = −256`, same
+difference" is considered at `X = 0` for both passes, and his step 3 adds that this "doesn't mean you
+actually draw it at X=0". Nine bits of signed X reach `−256` and not `256`, so there is one such
+position rather than two.
+
+### The front-sprite oddity is stated three ways and two of them agree
+
+With `$2103` bit 7 set, anomie gives the front sprite as `(OAMAddr & 0xFE) >> 1` from the internal OAM
+*word* address, and his worked example fixes the arithmetic: `$2102/3` set to `$104` gives sprite 2,
+and four bytes written past it gives sprite 3.
+
+Then the oddity. He states it three ways in one paragraph, and they do not all agree:
+
+1. **The algebra.** Set `$2102/3 = A`, write `4n + 2(A & 1) + 1` bytes, and the front sprite becomes
+   `((OAMAddr >> 1) + Y) & 0x7F` for the line `Y`. Working the byte address through — it starts at
+   `2A` and a write steps it one — that count leaves the port on **byte 1 of a record**, for every `A`.
+2. **The gloss beside it**, which says the count is chosen "so the next byte written would go to the
+   last byte in the 4-byte sprite record" — **byte 3**.
+3. **The worked example**: 128 sprites at `Y = 63`, `$8000` written to `$2102/3`, then three bytes read
+   from `$2138`, giving sprites 63 through 70 the front on successive lines. Three reads from a reload
+   value of zero leave the port on **byte 3**, and `(3 >> 2) + 63` is 63 — the example's own first
+   number.
+
+*Documented but contested, decided by the majority of one document against itself.* Two of the three
+statements say byte 3 and one says byte 1, and the two that agree are the ones carrying an
+independently checkable number: the example's sprites 63–70 come out right on byte 3 and wrong on byte
+1. So the line is added where **the port's address has both low bits set**, and the front sprite is
+`((address >> 2) + line − 1) & 0x7F` — the `− 1` being the same dummy-line offset the passes' schedule
+above turns on, since the pass matching a sprite at `Y = N` runs during line `N`. A test ROM that puts
+128 sprites at one Y and steps the port through all four byte positions would settle it outright; none
+has been run.
+
 ## The priority order
 
 ### Only BG3's high-priority tiles move when $2105 bit 3 is set
@@ -144,8 +243,12 @@ either way, and only its priority-1 tiles change position.
 then give, front to back and writing letters for backgrounds:
 
 ```
-A B a b C c        and with the bit set:   C A B a b c
+3 A B 2 a b 1 C 0 c        and with the bit set:   C 3 A B 2 a b 1 0 c
 ```
+
+with a digit for a sprite at that sprite priority. Reading fullsnes's chart this way also settles
+where the bit-set order leaves the `BG3.1b` row: it is the one place BG3's high-priority tiles
+vacate, and a sprite at priority 1 and one at priority 0 then sit next to each other.
 
 ### Mode 1 gives no background a palette offset of its own
 

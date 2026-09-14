@@ -62,7 +62,8 @@ constexpr std::uint16_t kHdmaDeliver = 1112u;
 // those dots is four master cycles wide, the two long ones lying well past them.
 constexpr std::uint16_t kFirstPictureDot = 22u;
 constexpr std::uint16_t kLastPictureDot = 277u;
-constexpr std::uint16_t kPictureWidth = kLastPictureDot - kFirstPictureDot + 1u;
+static_assert(kPictureWidth == kLastPictureDot - kFirstPictureDot + 1u,
+              "the picture is as wide as the dots it is drawn from");
 constexpr std::uint16_t kTallestPicture = kOverscanVblankStartLine - 1u;
 constexpr std::size_t kPixelBytes = 4u;
 constexpr std::size_t kRowBytes = kPictureWidth * kPixelBytes;
@@ -586,6 +587,29 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
   }
 }
 
+void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
+  // The pass belongs to a line the chip renders, and it is gathering for the line
+  // after it — so the frame's first line, which draws nothing, is the one that
+  // finds the picture's first line its sprites.
+  if (state_.inVblank) return;
+
+  // The sprites whose dots the span passed: sprite N is examined at the picture's
+  // first dot plus twice its place in the walk, so the 128 of them fill the 256
+  // dots of the visible span.
+  const std::uint64_t last = (to - lineStart) / 4u;
+  if (last < kFirstPictureDot) return;
+  const std::uint64_t reached = (last - kFirstPictureDot) / 2u + 1u;
+
+  Ppu ppu{state_.ppu};
+  const std::uint16_t line = static_cast<std::uint16_t>(state_.vpos + 1u);
+  while (static_cast<std::uint64_t>(state_.ppu.sprites.scanned) < reached &&
+         static_cast<unsigned>(state_.ppu.sprites.scanned) < kSprites) {
+    const std::uint8_t before = state_.ppu.sprites.scanned;
+    ppu.rangeSprite(line);
+    if (state_.ppu.sprites.scanned == before) return;  // forced blank walks nowhere
+  }
+}
+
 void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
   // The first line of a frame draws nothing, and the lines from this frame's own
   // vertical blank on are past the picture.
@@ -631,6 +655,14 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   if (state_.vpos >= frameLines()) state_.vpos = 0u;
   state_.hdmaLineFired = false;  // each scanline may trigger its own HDMA delivery
   state_.refreshAt = nextRefresh(lineStart);
+
+  // The horizontal blank the line just ended is where Time draws the sprites the
+  // Range pass across that line found — for the line beginning now, which holds
+  // H = 0 of it, hblank being lowered a dot later. Range then starts again, on the
+  // line after this one.
+  Ppu sprites{state_.ppu};
+  sprites.timeSprites(state_.vpos);
+  sprites.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
 
   if (state_.vpos == 0u) {
     // The picture the beam has just finished is as tall as its own vertical blank
@@ -698,6 +730,9 @@ void Snes::tickVideo(std::uint32_t cost) {
     const std::uint64_t lineEnd = lineStart + lineLength();
     const std::uint64_t stop = end < lineEnd ? end : lineEnd;
     crossLine(lineStart, at, stop);
+    // Finding the next line's sprites is the chip's own work and it does it for
+    // nobody's benefit, because a program can read what the pass found.
+    rangeSpan(lineStart, stop);
     // The picture is resolved a dot at a time, from the registers and the memories
     // as they stand at each one. A machine nobody is watching resolves nothing.
     if (frameObserver_ != nullptr) drawSpan(lineStart, at, stop);

@@ -365,6 +365,41 @@ TEST(SnesDma, HdmaZeroLineCountTerminatesImmediately) {
   EXPECT_EQ(m.state().hdmaActive & 1u, 0u);  // never activated
 }
 
+// The line-count byte's three cases, from the table format the register page prints:
+// $00 ends the channel, $01-$80 transfer once and then stand quiet for the rest of
+// their lines, and $81-$FF transfer on every one of theirs. The two ranges meet on
+// $80, which is one transfer followed by 127 quiet lines — the longest pause a single
+// entry can name, and what a table uses to hold a channel still to the end of a frame.
+
+TEST(SnesDma, HdmaAnEntryBelowTheRepeatRangeTransfersOnceAndThenStandsQuiet) {
+  // $04: one transfer on its first line, then three lines of nothing, then $0B.
+  Snes m = hdmaMachine({0x04u, 0x0Au, 0x01u, 0x0Bu, 0x00u});
+  m.run(1200u);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au);
+  SnesState marked = m.state();
+  marked.ppu.inidisp = 0x33u;  // a marker any further delivery would overwrite
+  m.restore(marked);
+  m.run(3u * kLine);           // lines 1, 2 and 3 are the entry's quiet ones
+  EXPECT_EQ(m.state().ppu.inidisp, 0x33u);
+  m.run(kLine);                // line 4 takes the next entry
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Bu);
+}
+
+TEST(SnesDma, HdmaEightyTransfersOnceAndHoldsTheChannelQuietForTheRestOfThePicture) {
+  // $80 is the top of the range that transfers once: its line, then 127 quiet ones,
+  // which reaches past the picture's last line. A channel that read the top bit as a
+  // repeat flag instead would write on all 128 of them.
+  Snes m = hdmaMachine({0x80u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu});
+  m.run(1200u);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x0Au);  // the one transfer, on line 0
+
+  SnesState marked = m.state();
+  marked.ppu.inidisp = 0x33u;
+  m.restore(marked);
+  m.run(100u * kLine);
+  EXPECT_EQ(m.state().ppu.inidisp, 0x33u);  // and nothing for a hundred lines after it
+}
+
 TEST(SnesDma, HdmaDeactivatesAtVblank) {
   // A repeat entry long enough to span the whole visible frame must still stop at
   // vblank: it delivers on the visible lines and never on a vblank line.

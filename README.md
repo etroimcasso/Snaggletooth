@@ -72,9 +72,11 @@ visible dot and hands each finished frame over, so a cartridge can be watched ru
 and recorded while it runs. Mode 1 is complete — all three of its backgrounds in the priority
 order the mode register names, their tilemaps at every size, their characters at four colours and
 at sixteen, both flips, 16×16 blocks, the palettes, scrolling and the brightness the converter
-applies; the sprites, the sub screen, the windows and colour math, and the other screen modes are
-the work in front of the picture now. The cartridge toolkit reads a whole cartridge
-into a source tree that rebuilds it, with the work of making that tree readable — the bytes the
+applies; and it draws the sprites — both tables, the eight size pairs, the flips, the palettes,
+their four places in the mode's priority order, the two counts the chip can afford on a line and the
+sprite a program can put in front of every other. The sub screen, the windows and colour math, and
+the other screen modes are the work in front of the picture now. The cartridge
+toolkit reads a whole cartridge into a source tree that rebuilds it, with the work of making that tree readable — the bytes the
 hardware received as files of their own kind, named for what the picture used them as — still
 under way. The public embedding API has not been started. Each row links to the page that
 describes the component in full.
@@ -96,7 +98,7 @@ describes the component in full.
 | [SNES machine](docs/snes-machine.md) | in progress — the three cartridge maps, work RAM and its data port, the APU ports, region-priced cycles at both clock rates, exact master-cycle budgeting, the complete beam with its dot map and every per-line event at its own master offset — the blank flags, the taller picture, interlace, the two interrupts' trigger points and the memory refresh — the multiply/divide unit, the PPU with its three video memories filled through their ports and its picture resolved a dot at a time, eight DMA/HDMA channels, the controller ports, the audio boot handshake, and two observers — one told every access and where each video port write landed, one told every finished frame |
 | [Cartridge](docs/snes-cartridge.md) | built — the header's map, size, title, checksum and vectors; a copier's header ahead of a dump, read and dropped; LoROM, HiROM and ExHiROM; where every bus address lands in the image; the save windows |
 | Public embedding API | not started |
-| [PPU](docs/ppu.md) | in progress — **it draws**: a pixel resolved per visible dot from the registers and memories as they stand at that dot, each finished frame handed to a frame observer as eight bits a channel, with the converter's brightness scaling and forced blank. Mode 1 is complete — its three backgrounds in the order the mode register puts them, the tilemap at every size, the character address at both depths, the bitplanes, both flips, 16×16 blocks, the palettes, colour 0's transparency, scrolling and the backdrop. The register file is complete beneath it: every write with its latches, every read with its open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which the video memories can be reached. The sprites, the sub screen, the windows and colour math, and the other screen modes are still to come — see the [roadmap](#roadmap) |
+| [PPU](docs/ppu.md) | in progress — **it draws**: a pixel resolved per visible dot from the registers and memories as they stand at that dot, each finished frame handed to a frame observer as eight bits a channel, with the converter's brightness scaling and forced blank. Mode 1 is complete — its three backgrounds in the order the mode register puts them, the tilemap at every size, the character address at both depths, the bitplanes, both flips, 16×16 blocks, the palettes, colour 0's transparency, scrolling and the backdrop. **The sprites draw**: both sprite tables, the eight size pairs, the two character tables and the wrap that is theirs and not a background's, both flips and the rule a rectangular sprite keeps, the palettes above the backgrounds', index order, and the four sprite places in the priority chart — found and gathered by two passes across the previous line's dots, which read `$2101` as it stands at each sprite's own dot and run whether or not anyone is watching. **Under the counts the chip can afford**: the 32 sprites a pass keeps and the 34 tiles the next one loads, in the opposite directions they run in, each raising its own flag in `$213E` at the point that raises it, the position nine bits reach that is counted a screen from where it draws, and the sprite `$2103` and the sprite-table port put in front of every other. The register file is complete beneath it: every write with its latches, every read with its open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which the video memories can be reached. The sub screen, the windows and colour math, and the other screen modes are still to come — see the [roadmap](#roadmap) |
 
 ### The toolkit
 
@@ -235,8 +237,10 @@ Snaggletooth is built audio-first:
    the system glue that binds them to the audio core.
 
 The PPU is the piece under way, and it draws: a cartridge runs in a window with the whole of its
-Mode 1 picture on screen, recorded as it runs. The rest of the picture — the sprites, the sub
-screen, the windows and colour math, and the other screen modes — follows in order. After it, the machine is taken through the range of cartridge types until they boot, and
+Mode 1 picture on screen, its sprites over it under the counts the chip can afford, recorded as it
+runs. The rest of the picture — the sub screen, the windows and colour math, and the other screen
+modes — follows in order. After it, the machine is taken through the range of cartridge types until they
+boot, and
 the DSP returns to close out its three sub-tests with the wider body of real software available to
 exercise it.
 

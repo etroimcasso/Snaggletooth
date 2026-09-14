@@ -483,7 +483,7 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
     set(SDL_SHARED       OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC       ON  CACHE BOOL "" FORCE)
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-    set(SDL_AUDIO        OFF CACHE BOOL "" FORCE)  # a run's sound is its WAV, not a live sink
+    set(SDL_AUDIO        ON  CACHE BOOL "" FORCE)  # the player puts the run's sound out as it runs
     set(SDL_CAMERA       OFF CACHE BOOL "" FORCE)
     set(SDL_HAPTIC       OFF CACHE BOOL "" FORCE)
     set(SDL_JOYSTICK     OFF CACHE BOOL "" FORCE)  # the run is driven by a script
@@ -539,6 +539,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   # The ROMs are third-party test binaries — staged locally, never vendored.
   set(SNAGGLETOOTH_BLARGG_ROMS "" CACHE PATH
       "Path to the directory holding the Blargg SPC test ROMs")
+
+  # Path to a directory holding the staged PPU test cartridges, searched
+  # recursively. When empty, the picture-processor cartridge tests register but
+  # skip with a visible reason. The images are third-party homebrew — staged
+  # locally, never vendored, and only ever run.
+  set(SNAGGLETOOTH_PPU_ROMS "" CACHE PATH
+      "Path to the directory holding the PPU test cartridges")
 
   # Path to a 64-byte audio boot ROM. When set, the acceptance tests boot the
   # machine on that image instead of the built-in upload stub, which is what a
@@ -607,6 +614,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/ppu_registers_test.cpp
     tests/snes/ppu_beam_test.cpp
     tests/snes/ppu_backgrounds_test.cpp
+    tests/snes/ppu_sprites_test.cpp
     tests/snes/dma_test.cpp
     tests/snes/ipl_stub_test.cpp
     tests/snes/boot_rom_test.cpp
@@ -655,6 +663,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     SNAGGLETOOTH_SPC700_VECTORS="${SNAGGLETOOTH_SPC700_VECTORS}"
     SNAGGLETOOTH_65816_VECTORS="${SNAGGLETOOTH_65816_VECTORS}"
     SNAGGLETOOTH_BLARGG_ROMS="${SNAGGLETOOTH_BLARGG_ROMS}"
+    SNAGGLETOOTH_PPU_ROMS="${SNAGGLETOOTH_PPU_ROMS}"
     SNAGGLETOOTH_BOOT_ROM="${SNAGGLETOOTH_BOOT_ROM}"
     SNAGGLETOOTH_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   # The IPL-stub test seeds the stub into an audio machine through the internal

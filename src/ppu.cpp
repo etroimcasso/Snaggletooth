@@ -26,6 +26,58 @@ constexpr unsigned kFullScale = 31u * 16u;
 // of bitplanes takes sixteen bytes and the next pair begins sixteen bytes on.
 constexpr std::size_t kPlanePairBytes = 16u;
 
+// A sprite's character is always sixteen colours, so four bitplanes, and a
+// character is eight pixels on a side.
+constexpr unsigned kSpritePlanes = 4u;
+constexpr unsigned kCharacterSide = 8u;
+
+// The two sizes $2101 bits 7-5 name, the sprite's own flag choosing between
+// them. The last two pairs are printed by both register documents and called
+// undocumented by both.
+struct SizePair {
+  unsigned smallWidth;
+  unsigned smallHeight;
+  unsigned largeWidth;
+  unsigned largeHeight;
+};
+constexpr std::array<SizePair, 8> kSpriteSizes{{
+    {.smallWidth = 8u, .smallHeight = 8u, .largeWidth = 16u, .largeHeight = 16u},
+    {.smallWidth = 8u, .smallHeight = 8u, .largeWidth = 32u, .largeHeight = 32u},
+    {.smallWidth = 8u, .smallHeight = 8u, .largeWidth = 64u, .largeHeight = 64u},
+    {.smallWidth = 16u, .smallHeight = 16u, .largeWidth = 32u, .largeHeight = 32u},
+    {.smallWidth = 16u, .smallHeight = 16u, .largeWidth = 64u, .largeHeight = 64u},
+    {.smallWidth = 32u, .smallHeight = 32u, .largeWidth = 64u, .largeHeight = 64u},
+    {.smallWidth = 16u, .smallHeight = 32u, .largeWidth = 32u, .largeHeight = 64u},
+    {.smallWidth = 16u, .smallHeight = 32u, .largeWidth = 32u, .largeHeight = 32u},
+}};
+
+// Which of a sprite's own rows a picture line crosses, or nothing where it
+// misses. A sprite whose Y is N first draws on line N + 1, because the console
+// renders a line it does not output; the subtraction is eight bits wide, which
+// is what brings a tall sprite hung above the picture back in at the top.
+[[nodiscard]] std::optional<unsigned> rowCrossed(unsigned y, unsigned height,
+                                                 std::uint16_t line) noexcept {
+  const unsigned row = (line - 1u - y) & 0xFFu;
+  if (row >= height) return std::nullopt;
+  return row;
+}
+
+// Where Range and Time count a sprite. Nine bits of X reach one position that is
+// the picture's left edge a whole screen away, and the chip counts a sprite
+// standing there as though it stood at the edge itself — while drawing it where
+// its own X puts it, which is off the picture altogether.
+[[nodiscard]] int countedX(int x) noexcept {
+  return x == -static_cast<int>(kPictureWidth) ? 0 : x;
+}
+
+// The row a vertical flip shows in that row's place. A flip reverses the whole
+// sprite rather than its characters — except that a rectangular sprite flips as
+// though it were two square sprites stacked, so rows "01234567" become
+// "32107654" and not "76543210".
+[[nodiscard]] unsigned flipRow(unsigned row, unsigned width) noexcept {
+  return (row / width) * width + (width - 1u - row % width);
+}
+
 }  // namespace
 
 std::int32_t PpuState::multiplyResult() const noexcept {
@@ -108,6 +160,164 @@ void Ppu::beginFrame() noexcept {
   if (s_.forcedBlank()) return;
   s_.rangeOver = false;
   s_.timeOver = false;
+}
+
+// ---- the sprite passes -------------------------------------------------------
+
+Ppu::Sprite Ppu::spriteAt(std::uint8_t index) const noexcept {
+  // Four bytes in the low table — X's low eight bits, Y, the first character,
+  // then vhoopppN — and two bits in the high table, which holds four sprites to
+  // a byte from the low pair up: the ninth bit of X, then the size flag.
+  const std::size_t at = static_cast<std::size_t>(index) * 4u;
+  const std::uint8_t high = s_.oam[512u + (index >> 2)];
+  const unsigned bits = (high >> ((index & 3u) * 2u)) & 3u;
+
+  // Nine bits of X read as signed, so a sprite can stand off the left edge.
+  const unsigned wide = s_.oam[at] | ((bits & 1u) << 8);
+  const SizePair& sizes = kSpriteSizes[(s_.objsel >> 5) & 7u];
+  const bool large = (bits & 2u) != 0u;
+  return Sprite{
+      .x = static_cast<int>(wide) - (wide >= 256u ? 512 : 0),
+      .y = s_.oam[at + 1u],
+      .tile = s_.oam[at + 2u],
+      .attributes = s_.oam[at + 3u],
+      .width = large ? sizes.largeWidth : sizes.smallWidth,
+      .height = large ? sizes.largeHeight : sizes.smallHeight,
+  };
+}
+
+std::size_t Ppu::spriteCharacter(const Sprite& sprite, unsigned column,
+                                 unsigned row) const noexcept {
+  // The number's low nibble is the character's column in the 16x16 table and
+  // its high nibble the row, and each wraps inside its own nibble: a 16x16
+  // sprite whose first character is $FF is made of $FF, $F0, $0F and $00.
+  const unsigned number = ((sprite.tile + column / kCharacterSide) & 0x0Fu) |
+                          ((((sprite.tile >> 4) + row / kCharacterSide) & 0x0Fu) << 4);
+
+  // The word address: the base $2101 bits 2-0 name, the character sixteen words
+  // on from the last, and the second table the gap the Name bits choose past the
+  // first — a gap of none putting the second table immediately after it.
+  const unsigned base = s_.objsel & 0x07u;
+  const unsigned name = (s_.objsel >> 3) & 0x03u;
+  const bool secondTable = (sprite.attributes & 0x01u) != 0u;
+  const unsigned word =
+      ((base << 13) + (number << 4) + (secondTable ? ((name + 1u) << 12) : 0u)) & 0x7FFFu;
+  return static_cast<std::size_t>(word) * 2u;
+}
+
+std::uint8_t Ppu::firstSprite(std::uint16_t line) const noexcept {
+  // Without $2103's top bit the walk begins at sprite 0, whatever the port is
+  // doing.
+  if ((s_.oamadd & 0x8000u) == 0u) return 0u;
+
+  // With it, the sprite the port's own address stands in — the address counts
+  // bytes and a record is four of them. Standing on the last byte of a record it
+  // carries the line the pass is matching as well, which is the line before the
+  // one the sprites it finds will draw on.
+  unsigned sprite = static_cast<unsigned>(s_.oamAddress) >> 2;
+  if ((s_.oamAddress & 0x03u) == 0x03u) sprite += static_cast<unsigned>(line) - 1u;
+  return static_cast<std::uint8_t>(sprite & 0x7Fu);
+}
+
+void Ppu::beginRange(std::uint16_t line) noexcept {
+  s_.sprites.scanned = 0u;
+  s_.sprites.found = 0u;
+  s_.sprites.first = firstSprite(line);
+}
+
+void Ppu::rangeSprite(std::uint16_t line) noexcept {
+  // A chip in forced blank is rendering nothing, so it walks no further along
+  // OAM and the pass stands where the blank found it.
+  if (s_.forcedBlank()) return;
+  if (static_cast<unsigned>(s_.sprites.scanned) >= kSprites) return;
+
+  // The sprite this dot belongs to: the walk counts from the sprite it began at
+  // and wraps past the last, and reads $2101 as it stands at this dot.
+  const auto index = static_cast<std::uint8_t>(
+      (static_cast<unsigned>(s_.sprites.first) + s_.sprites.scanned) & 0x7Fu);
+  ++s_.sprites.scanned;
+  const Sprite sprite = spriteAt(index);
+
+  if (!rowCrossed(sprite.y, sprite.height, line).has_value()) return;
+  if (countedX(sprite.x) <= -static_cast<int>(sprite.width)) {
+    return;  // nothing of it stands on the picture
+  }
+
+  // Range keeps so many of them and no more; the sprite that is one too many
+  // raises its flag here, at its own dot.
+  if (static_cast<unsigned>(s_.sprites.found) >= kSpritesPerLine) {
+    s_.rangeOver = true;
+    return;
+  }
+  s_.sprites.inRange[s_.sprites.found] = index;
+  ++s_.sprites.found;
+}
+
+void Ppu::timeSprites(std::uint16_t line) noexcept {
+  if (s_.forcedBlank()) return;
+
+  s_.sprites.line = line;
+  s_.sprites.word.fill(0u);
+  s_.sprites.priority.fill(kNoSprite);
+
+  // From the last sprite Range found backwards, so the sprite nearest the front
+  // writes last and keeps every position it claims — its priority with it, which
+  // is why a sprite in front at priority 0 hides one behind it at priority 3 from
+  // a background that shows above priority 0.
+  unsigned tiles = 0u;
+  for (unsigned nth = s_.sprites.found; nth-- > 0u;) {
+    const Sprite sprite = spriteAt(s_.sprites.inRange[nth]);
+    const std::optional<unsigned> crossed = rowCrossed(sprite.y, sprite.height, line);
+    if (!crossed.has_value()) continue;
+
+    const bool flipVertical = (sprite.attributes & 0x80u) != 0u;
+    const bool flipHorizontal = (sprite.attributes & 0x40u) != 0u;
+    const unsigned row = flipVertical ? flipRow(*crossed, sprite.width) : *crossed;
+    const auto priority = static_cast<std::uint8_t>((sprite.attributes >> 4) & 0x03u);
+    const unsigned palette = (sprite.attributes >> 1) & 0x07u;
+    const int counted = countedX(sprite.x);
+
+    // A sprite's row is loaded a tile at a time, left to right. Time has so many
+    // tiles to spend on a line and spends them only on tiles that stand on the
+    // picture; the tile that is one too many raises its flag and is not loaded,
+    // and neither is anything behind it in the walk.
+    for (unsigned across = 0u; across < sprite.width; across += kCharacterSide) {
+      const int tileX = counted + static_cast<int>(across);
+      if (tileX <= -static_cast<int>(kCharacterSide) ||
+          tileX >= static_cast<int>(kPictureWidth)) {
+        continue;
+      }
+      if (tiles >= kSpriteTilesPerLine) {
+        s_.timeOver = true;
+        continue;
+      }
+      ++tiles;
+
+      for (unsigned column = across; column < across + kCharacterSide; ++column) {
+        const int x = sprite.x + static_cast<int>(column);
+        if (x < 0 || x >= static_cast<int>(kPictureWidth)) continue;
+
+        // A horizontal flip reverses the whole sprite, so the leftmost position
+        // takes the rightmost of its pixels.
+        const unsigned source = flipHorizontal ? sprite.width - 1u - column : column;
+        const std::size_t character = spriteCharacter(sprite, source, row);
+        const std::size_t at = (character + (row % kCharacterSide) * 2u) & 0xFFFFu;
+        const unsigned bit = kCharacterSide - 1u - source % kCharacterSide;
+        unsigned index = 0u;
+        for (unsigned plane = 0u; plane < kSpritePlanes; ++plane) {
+          const std::size_t byteAt =
+              (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
+          index |= ((s_.vram[byteAt] >> bit) & 1u) << plane;
+        }
+        if (index == 0u) continue;  // colour 0 of a sprite's palette is transparent too
+
+        // Eight sixteen-colour palettes, beginning at CGRAM word 128.
+        s_.sprites.word[static_cast<std::size_t>(x)] =
+            static_cast<std::uint8_t>(128u + palette * 16u + index);
+        s_.sprites.priority[static_cast<std::size_t>(x)] = priority;
+      }
+    }
+  }
 }
 
 // ---- the picture -------------------------------------------------------------
@@ -232,7 +442,7 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
 
   // Mode 1 is the mode this chip draws; the others show their backdrop. Each of its
   // three backgrounds is sampled once, and only where $212C puts it on the main
-  // screen: a background enabled on the sub screen alone shows nowhere.
+  // screen: a layer enabled on the sub screen alone shows nowhere.
   std::optional<Shown> bg1;
   std::optional<Shown> bg2;
   std::optional<Shown> bg3;
@@ -242,27 +452,50 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
     if ((s_.tm & 0x04u) != 0u) bg3 = sample(mode1Bg3(), x, line);
   }
 
-  // Front to back, by the chart Mode 1 keeps. With no sprites drawn yet these are
-  // its background entries: BG1 and BG2 at tile priority 1, then the same two at
-  // priority 0, then BG3's two — except that $2105 bit 3 lifts BG3's high-priority
-  // tiles in front of everything. The backdrop, palette word 0, is under them all.
+  // The sprite the line buffer holds here, where $212C puts sprites on the main
+  // screen. Only the topmost sprite reached the buffer, so only its priority
+  // speaks to the backgrounds. A line Time did not gather shows none.
+  std::uint8_t spriteWord = 0u;
+  std::uint8_t spritePriority = kNoSprite;
+  if ((s_.tm & 0x10u) != 0u && s_.sprites.line == line && (s_.bgmode & 0x07u) == 1u) {
+    spriteWord = s_.sprites.word[x];
+    spritePriority = s_.sprites.priority[x];
+  }
+
+  // Front to back, by the chart Mode 1 keeps: a sprite at priority 3, BG1 and BG2
+  // at tile priority 1, a sprite at 2, the same two backgrounds at tile priority 0,
+  // a sprite at 1, BG3's high-priority tiles, a sprite at 0, then BG3's low —
+  // except that $2105 bit 3 lifts BG3's high-priority tiles in front of everything,
+  // taking them out of the place they otherwise hold. The backdrop, palette word 0,
+  // is under them all.
   const auto shows = [](const std::optional<Shown>& background, bool priority) {
     return background.has_value() && background->priority == priority;
+  };
+  const auto sprite = [spritePriority](std::uint8_t priority) {
+    return spritePriority == priority;
   };
   const bool bg3InFront = (s_.bgmode & 0x08u) != 0u;
   std::uint8_t word = 0u;
   if (bg3InFront && shows(bg3, true)) {
     word = bg3->word;
+  } else if (sprite(3u)) {
+    word = spriteWord;
   } else if (shows(bg1, true)) {
     word = bg1->word;
   } else if (shows(bg2, true)) {
     word = bg2->word;
+  } else if (sprite(2u)) {
+    word = spriteWord;
   } else if (shows(bg1, false)) {
     word = bg1->word;
   } else if (shows(bg2, false)) {
     word = bg2->word;
+  } else if (sprite(1u)) {
+    word = spriteWord;
   } else if (!bg3InFront && shows(bg3, true)) {
     word = bg3->word;
+  } else if (sprite(0u)) {
+    word = spriteWord;
   } else if (shows(bg3, false)) {
     word = bg3->word;
   }
