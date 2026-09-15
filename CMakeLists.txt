@@ -398,7 +398,8 @@ namespace snaggletooth::player {
 inline constexpr const char* kDefaultPadConfig = R\"SNAGPAD(${SNAGGLETOOTH_DEFAULT_SNAGPAD})SNAGPAD\";
 
 }  // namespace snaggletooth::player
-")
+"
+    NEWLINE_STYLE LF)
 
   target_link_libraries(snaggletooth_player_pads PUBLIC snaggletooth_rom)
   target_include_directories(snaggletooth_player_pads PUBLIC

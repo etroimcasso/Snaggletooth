@@ -253,6 +253,12 @@ TEST(PlayerPads, APinnedPortIsTakenBeforeAnAutoOne) {
 
 // ---- the configuration -------------------------------------------------------------
 
+// The file on disk and the text built into the binary are compared byte for byte,
+// which is what says the build read the file it claims to have read. That holds only
+// while nothing translates the file's line endings between the repository and the
+// build — `.gitattributes` marks it as data for exactly this reason, and the
+// generated header is written with the same endings. A checkout that converts them
+// reddens this on that platform alone.
 TEST(PlayerConfig, TheDefaultConfigParsesAndIsTheEmbeddedText) {
   const std::string onDisk = [] {
     std::string text;
