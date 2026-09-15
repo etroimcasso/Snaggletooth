@@ -25,6 +25,7 @@ Three things live in this repository:
 - [What is built](#what-is-built)
   - [The audio unit](#the-audio-unit)
   - [The main machine](#the-main-machine)
+  - [The coprocessors](#the-coprocessors)
   - [The toolkit](#the-toolkit)
   - [Validation](#validation)
 - [Getting started](#getting-started)
@@ -85,10 +86,28 @@ not do. Each row links to the page that describes the component in full.
 | Component | Status |
 |---|---|
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
-| [SNES machine](docs/snes-machine.md) | **in progress** — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake; no coprocessor |
+| [SNES machine](docs/snes-machine.md) | **in progress** — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake; no [coprocessor](#the-coprocessors) |
 | [Cartridge](docs/snes-cartridge.md) | **complete** — the header, LoROM, HiROM and ExHiROM, a copier's header read and dropped, where every bus address lands, the save windows |
 | [PPU](docs/ppu.md) | **in progress** — a pixel resolved at its own dot from the registers as they stand there, each frame handed to an observer; Mode 1's three backgrounds, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; the register file complete beneath them. Mosaic, the other seven modes, and the hires and interlaced pictures are not drawn |
 | Public embedding API | **not started** |
+
+### The coprocessors
+
+The cartridge header names which chip a cartridge carries beside the CPU, and the machine reports
+it; none of them runs. A cartridge that needs one does not boot.
+
+| Component | Status |
+|---|---|
+| DSP-1, DSP-2, DSP-3, DSP-4 | **not started** — the NEC µPD77C25 fixed-point DSPs, each with its own program |
+| SuperFX (GSU-1, GSU-2) | **not started** — the RISC coprocessor with its own ROM and RAM windows |
+| SA-1 | **not started** — a second 65816 at four times the clock, with its own memory map and DMA |
+| S-DD1 | **not started** — a decompression chip fed through DMA |
+| S-RTC | **not started** — the real-time clock |
+| OBC1 | **not started** — the sprite-attribute controller |
+| SPC7110 | **not started** — decompression and data-ROM banking, with an optional real-time clock |
+| ST010, ST011 | **not started** — the NEC µPD96050 DSPs |
+| ST018 | **not started** — the ARM coprocessor |
+| CX4 | **not started** — the Hitachi HG51B DSP |
 
 ### The toolkit
 
