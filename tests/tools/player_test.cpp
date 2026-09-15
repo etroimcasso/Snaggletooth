@@ -3,6 +3,7 @@
 // a device — a pad's state is a value handed in, and the letters a pad prints are
 // reported by whoever owns it — so every case here runs on every platform.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -253,13 +254,21 @@ TEST(PlayerPads, APinnedPortIsTakenBeforeAnAutoOne) {
 
 // ---- the configuration -------------------------------------------------------------
 
-// The file on disk and the text built into the binary are compared byte for byte,
-// which is what says the build read the file it claims to have read. That holds only
-// while nothing translates the file's line endings between the repository and the
-// build — `.gitattributes` marks it as data for exactly this reason, and the
-// generated header is written with the same endings. A checkout that converts them
-// reddens this on that platform alone.
+// What the file on disk says and what was built into the binary from it, compared —
+// which is what says the build read the file it claims to have read, and would catch
+// a stale copy, a truncated read or the wrong file entirely.
+//
+// The comparison is of CONTENT, with line endings set aside, because the endings
+// belong to whoever checked the file out rather than to the file: a checkout that
+// converts them leaves the build and the repository disagreeing about nothing, on
+// one platform, over a difference no reader of the configuration can observe.
+// `.gitattributes` asks for the file verbatim so a fresh clone is consistent, but
+// this case does not lean on that having been honoured.
 TEST(PlayerConfig, TheDefaultConfigParsesAndIsTheEmbeddedText) {
+  const auto lines = [](std::string text) {
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
+  };
   const std::string onDisk = [] {
     std::string text;
     std::ifstream in(std::string(SNAGGLETOOTH_SOURCE_DIR) + "/tools/player/default.snagpad",
@@ -268,10 +277,12 @@ TEST(PlayerConfig, TheDefaultConfigParsesAndIsTheEmbeddedText) {
     text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     return text;
   }();
-  EXPECT_EQ(onDisk, std::string(kDefaultPadConfig))
-      << "the file and the built-in default are one thing";
+  EXPECT_FALSE(onDisk.empty());
+  EXPECT_EQ(lines(onDisk), lines(std::string(kDefaultPadConfig)))
+      << "the file and the built-in default say the same thing";
   std::string error;
   EXPECT_TRUE(parsePadConfig(onDisk, error).has_value()) << error;
+  EXPECT_TRUE(parsePadConfig(kDefaultPadConfig, error).has_value()) << error;
 }
 
 TEST(PlayerConfig, AConfigReadsSectionsCommentsAndLists) {
