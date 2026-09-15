@@ -84,7 +84,12 @@ what a claim rests on.
 | The Analogue Super NT | Corroboration only, and weak. It is an FPGA reconstruction that **fails every Blargg test ROM**, so it does not carry a fine-grained behavioral question. Useful where a result is categorical — a picture that is entirely one colour or entirely another — and not otherwise. |
 
 Neither of those is original silicon. An observation from the console itself outranks both, and is
-named as the tiebreaker wherever one of them decided a question below.
+named as the tiebreaker wherever one of them decided a question below. **Every cartridge written
+here is owed a run on an original console, and none has had one yet:** the console that will run
+them is waiting on an original power supply, since it is not worth risking on any other. Until it
+runs them, a cartridge written here is run on Mesen, bsnes and snes9x, and the reading two of the
+three give is the one taken; a finding decided that way is provisional — held as stated, and
+reopened rather than defended if the console disagrees.
 
 ---
 
@@ -328,7 +333,8 @@ sub screen pixel's priority is not consulted, and neither is the question of whe
 
 This is a categorical result — ten cells of one colour, then ten of the other — which is not
 something a display setting or a timing difference can produce. Neither implementation is original
-silicon, so an observation from the console itself would outrank it.
+silicon, so an observation from the console itself would outrank it; the cartridge is on the list
+owed a console run (see [Sources](#sources)), and the finding is provisional until it has had one.
 
 ### The halving happens before the range is held, and the sub-screen backdrop is exempt
 
@@ -383,8 +389,8 @@ ordinary shape of a bug in that implementation.
 **What would settle it:** a commercial cartridge that forces part of the main screen black while
 asking for the halving, photographed on a real console — the picture its authors shipped, drawn by
 the silicon they wrote for. Failing that, the console running a cartridge written for the question.
-Neither implementation is silicon, so that observation would still outrank this — but the reading
-here is no longer a choice made under disagreement.
+Neither implementation is silicon, so that observation would still outrank this — but bsnes and
+snes9x agree with the reading here, and only Mesen does not.
 
 ## The picture's edges
 
