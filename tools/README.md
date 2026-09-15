@@ -17,6 +17,11 @@ shelling out to the tool.
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 | [`video/`](video/README.md) | `snaggletooth_video` | — | [ppu.md](../docs/ppu.md) |
 | [`player/`](player/README.md) | — | `snes_player` | [ppu.md](../docs/ppu.md), [input-script.md](../docs/input-script.md) |
+| [`inputs/`](inputs/README.md) | — (data) | — | [input-script.md](../docs/input-script.md) |
+
+`inputs/` is the one directory here that holds no code: the recorded runs the
+tools replay, and the `default.snaginput` that plays a cartridge with no run of
+its own, so `--input-dir tools/inputs` plays a whole library.
 
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
 cartridges through four commands, one image at a time or `--jobs` of them at

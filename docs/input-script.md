@@ -127,7 +127,8 @@ spaces as underscores, `.snaginput` — and may hold a `default.snaginput`. `scr
 the one to play: the image's own when it exists, else `default.snaginput`, else the
 image's own path so a caller finds nothing to replay. A `default.snaginput` that leaves
 a title and a menu behind is what lets every cartridge in a corpus be played
-before any has a run of its own.
+before any has a run of its own; `tools/inputs/` holds one, so `--input-dir
+tools/inputs` plays a whole library.
 
 `parseInputScript` returns the `InputScript` — its `events` in frame order, each
 an `InputEvent` of `frame`, `port` and the `Joypad` held — or nothing, with
@@ -154,3 +155,5 @@ and nothing described here is removed.
 - [The SNES machine §The controller ports](snes-machine.md#the-controller-ports)
   — how the machine presents a pad to the program.
 - [Project manifest](project-manifest.md) — the `reached` lines a run writes.
+- [tools/inputs/README.md](../tools/inputs/README.md) — the scripts that ship, and
+  the one a cartridge with no run of its own is played through.
