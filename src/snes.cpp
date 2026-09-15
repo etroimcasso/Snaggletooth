@@ -146,9 +146,13 @@ Snes::Snes(Snes&& moved) noexcept
       frameObserver_(moved.frameObserver_),
       raster_(std::move(moved.raster_)),
       frameFinished_(moved.frameFinished_),
-      framePictureLines_(moved.framePictureLines_) {
+      framePictureLines_(moved.framePictureLines_),
+      saveObserver_(moved.saveObserver_),
+      saveChanged_(moved.saveChanged_),
+      saveFinished_(moved.saveFinished_) {
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
+  moved.saveObserver_ = nullptr;
 }
 
 void Snes::setFrameObserver(FrameObserver* observer) noexcept {
@@ -157,6 +161,10 @@ void Snes::setFrameObserver(FrameObserver* observer) noexcept {
 
 void Snes::restore(const SnesState& state) {
   state_ = state;
+  // The caller replaced the save window along with everything else, which changes
+  // it as surely as a store does — and a save left disagreeing with the machine is
+  // worse than one written again.
+  saveChanged_ = true;
   load();
 }
 
@@ -437,6 +445,9 @@ void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
   }
   if (const std::optional<std::size_t> save = saveRamIndex(bank, offset)) {
     state_.sram[*save] = value;
+    // Every store into the save window arrives here, which is what lets the machine
+    // say a frame changed it without comparing anything (SaveObserver, `snes.h`).
+    saveChanged_ = true;
     return;
   }
   // A write to ROM or to an unmapped address changes nothing beyond the data bus.
@@ -650,6 +661,11 @@ void Snes::deliverFrame() {
   });
 }
 
+void Snes::deliverSave() {
+  if (saveObserver_ == nullptr) return;
+  saveObserver_->changed(std::span<const std::uint8_t>(state_.sram.data(), state_.sram.size()));
+}
+
 void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   state_.vpos = static_cast<std::uint16_t>(state_.vpos + 1u);
   if (state_.vpos >= frameLines()) state_.vpos = 0u;
@@ -674,6 +690,15 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
       framePictureLines_ = state_.vblankBeginLine > 1u
           ? static_cast<std::uint16_t>(state_.vblankBeginLine - 1u)
           : static_cast<std::uint16_t>(state_.ppu.vblankStartLine() - 1u);
+    }
+    // A frame that changed the save window is owed a report, handed over where the
+    // picture is rather than from here: this line advances inside a cycle that
+    // cannot throw, and what a host does with a save — writing a file, most
+    // plainly — can. The beam reaches this line whether or not anyone is watching
+    // the picture, so a save is reported to a host that asked for nothing else.
+    if (saveObserver_ != nullptr && saveChanged_) {
+      saveChanged_ = false;
+      saveFinished_ = true;
     }
     state_.inVblank = false;     // the frame begins in the picture
     state_.vblankNmi = false;    // and the NMI flag clears with it
@@ -776,6 +801,13 @@ void Snes::tickVideo(std::uint32_t cost) {
   if (frameFinished_) {
     frameFinished_ = false;
     deliverFrame();
+  }
+  // And the save window that frame changed, in the same place and for the same
+  // reason: the machine is between cycles here, so a host may do what it likes
+  // with the bytes, including throwing.
+  if (saveFinished_) {
+    saveFinished_ = false;
+    deliverSave();
   }
 }
 

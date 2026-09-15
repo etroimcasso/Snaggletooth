@@ -648,6 +648,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/ir/provenance_test.cpp
     tests/snes/machine_test.cpp
     tests/snes/observer_test.cpp
+    tests/snes/save_observer_test.cpp
     tests/snes/timing_test.cpp
     tests/snes/controller_test.cpp
     tests/snes/math_test.cpp

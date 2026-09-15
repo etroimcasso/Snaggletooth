@@ -254,6 +254,22 @@ class BusObserver {
   virtual void internal(std::uint32_t address, std::optional<CycleKind> kind) = 0;
 };
 
+// What a machine tells about the cartridge's battery-backed save window: that a
+// frame changed it, and what it holds now. The machine says WHEN and hands over
+// the bytes; where a save is kept, what it is called and whether it is written at
+// all are the host's, and the machine never learns any of it.
+class SaveObserver {
+ public:
+  virtual ~SaveObserver() = default;
+
+  // The save window changed during the frame just finished, and `save` is the
+  // whole of it as it now stands — the size the cartridge declares, not the bytes
+  // that moved. Told once per frame however many stores landed in it, and not at
+  // all in a frame where none did. The span is the machine's own storage and is
+  // valid for the call.
+  virtual void changed(std::span<const std::uint8_t> save) = 0;
+};
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
@@ -489,6 +505,16 @@ class Snes {
   void setFrameObserver(FrameObserver* observer) noexcept;
   [[nodiscard]] FrameObserver* frameObserver() const noexcept { return frameObserver_; }
 
+  // The observer told that a frame changed the cartridge's save window
+  // (SaveObserver, above), or none, which is how the machine starts. A host
+  // persists a save from it; the machine keeps no file and knows no path. On the
+  // same terms as the other observers: the host's object, not part of the state,
+  // so a snapshot does not carry it and restore() leaves it in place — though a
+  // restore replaces the window wholesale and is therefore reported, the caller
+  // having changed it as surely as a store would.
+  void setSaveObserver(SaveObserver* observer) noexcept { saveObserver_ = observer; }
+  [[nodiscard]] SaveObserver* saveObserver() const noexcept { return saveObserver_; }
+
   // The audio machine's observer (ApuObserver, `apu/apu.h`), told every access
   // the sound CPU makes and every instruction boundary it crosses, under the
   // same terms as the bus observer: the host's object, not part of the state,
@@ -595,6 +621,10 @@ class Snes {
   // vertical blank left below it, the frame's parity, and the raster the dots
   // wrote. Called as the beam reaches the next frame's first line.
   void deliverFrame();
+  // Hands the save window to the observer. Called from between cycles rather than
+  // from the line that finished the frame, because that line cannot throw and what
+  // a host does with a save can.
+  void deliverSave();
 
   // The events inside one line, for the master-cycle span (`from`, `to`] of a line
   // that began at `lineStart`: the frame's parity, vertical blank's NMI flag and the
@@ -767,6 +797,13 @@ class Snes {
   bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
   std::uint16_t framePictureLines_ = 0;  // the lines the finished picture holds
   std::uint8_t frameField_ = 0;          // the parity that picture ran under
+  SaveObserver* saveObserver_ = nullptr;  // told a frame changed the save window; none by default
+  // Whether anything has stored into the save window since it was last reported.
+  // One flag rather than a comparison: every store into the window goes through
+  // one site, so the machine already knows. It belongs to the report and not to
+  // the console, so a snapshot does not carry it.
+  bool saveChanged_ = false;
+  bool saveFinished_ = false;  // a frame that changed the window ended this cycle
 };
 
 }  // namespace snaggletooth
