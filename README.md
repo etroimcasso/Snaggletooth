@@ -8,8 +8,8 @@ Three things live in this repository:
 
 - **The library**, `snaggletooth::snaggletooth`: the audio unit (SPC700, APU machine, S-DSP)
   and the main machine (65816, cartridge, work RAM, DMA, timers, the audio handshake, and the
-  PPU), each stepped by a cycle budget the host supplies. **The PPU draws**: it resolves a pixel
-  per visible dot and hands each finished frame to whoever is watching.
+  PPU), each stepped by a cycle budget the host supplies. The PPU resolves a pixel per visible
+  dot and hands each finished frame to a frame observer.
 - **The tools**, under [`tools/`](tools/README.md): a player that shows a cartridge running in a
   window and records the same run, two tracing disassemblers and two assemblers, a
   whole-cartridge disassembler and its verifier, an intermediate representation with an
@@ -67,12 +67,9 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 ## What is built
 
-The audio core is feature-complete. The main machine draws — a cartridge runs in a window at the
-console's own rate and is recorded while it runs, with the whole of Mode 1 and its sprites on
-screen. The toolkit reads a cartridge into a source tree that rebuilds it byte for byte. The public
-embedding API has not been started.
-
-Each row links to the page that describes the component in full.
+One row per component. The status is one of three — **complete**, **in progress**, **not
+started** — followed by what the component does today and, where it is in progress, what it does
+not do. Each row links to the page that describes the component in full.
 
 ### The audio unit
 
@@ -80,89 +77,37 @@ Each row links to the page that describes the component in full.
 |---|---|
 | [SPC700 CPU core](docs/spc700-cpu.md) | **complete** — 256 opcodes, cycle-stepped, every cycle checked against the SingleStepTests vectors |
 | [APU machine](docs/apu-machine.md) | **complete** — the RAM and its register overlay, three timers on their documented slots, the communication ports, exact cycle budgets |
-| [S-DSP](docs/dsp.md) | feature-complete — the whole voice pipeline, the echo delay line and the intra-sample register schedule; three test-ROM sub-tests still mismatch ([below](#validation)) |
-| [SPC dump loader and WAV renderer](docs/spc-rendering.md) | in progress — loads a dump and renders 32 kHz WAV; not yet validated against reference renders |
+| [S-DSP](docs/dsp.md) | **in progress** — the whole voice pipeline, the echo delay line and the intra-sample register schedule; three sub-tests of the DSP test ROM report a wrong checksum ([Validation](#validation)) |
+| [SPC dump loader and WAV renderer](docs/spc-rendering.md) | **in progress** — loads a dump and renders 32 kHz WAV; the output is not compared against a reference render |
 
 ### The main machine
 
 | Component | Status |
 |---|---|
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
-| [SNES machine](docs/snes-machine.md) | in progress — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake |
-| [Cartridge](docs/snes-cartridge.md) | built — the header, LoROM, HiROM and ExHiROM, a copier's header read and dropped, where every bus address lands, the save windows |
-| [PPU](docs/ppu.md) | in progress — Mode 1 and its sprites draw ([below](#the-ppu)) |
-| Public embedding API | not started |
-
-#### The PPU
-
-- **It draws.** A pixel is resolved at its own visible dot from the registers and memories as they
-  stand there, so a program that writes mid-line changes the rest of the line. Each finished frame
-  goes to an observer as eight bits a channel, at the brightness the display register holds.
-- **Mode 1 is complete.** Three backgrounds in the order the mode register names and in both of the
-  orders it names, tilemaps at every size, characters at both depths, both flips, 16×16 blocks, the
-  palettes, colour 0's transparency, scrolling, and the backdrop under everything.
-- **The sprites draw.** Both OAM tables, the eight size pairs, two character tables with the wrap
-  that is theirs and not a background's, both flips, the palettes above the backgrounds', index
-  order, and the four sprite places in the priority chart — found by two passes across the previous
-  line's dots, which read `$2101` as it stands at each sprite's own dot.
-- **Under the counts the chip can afford.** Thirty-two sprites kept and thirty-four tiles loaded, in
-  the opposite directions the two passes run in, each raising its own flag in `$213E` at the point
-  that raises it; the one X position counted a screen from where it draws; and the sprite `$2103`
-  and the sprite-table port put in front of every other.
-- **Layers are taken away by the two masking windows.** Each window a span whose ends are both
-  inside it, per-layer enable and inversion bits, the four combining logics, and `$212E` deciding
-  which layers on the main screen the result reaches — with the backdrop under them all, which no
-  window touches. Read at the position they shape, so an edge moved part-way along a line changes
-  the rest of it, and one a transfer delivers between two lines shapes the whole of the next.
-- **The register file is complete beneath it.** Every write with its latches, every read with its
-  open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which
-  each video memory can be reached.
-- **The sub screen and colour math.** `$212D` puts layers on a second screen that is never shown by
-  itself; colour math adds it, or the fixed colour, to the main screen's pixel — per channel, with
-  an operator, an optional halving that happens before the channel is held to its range, and a bit
-  for each of the six things the main screen can show. `$2130`'s two regions force the main colour
-  black and prevent the math, each named against a sixth window of its own. Sprites take math only
-  from the upper four palettes — a rule a shipped cartridge in the library depends on to render
-  correctly.
-- **Not yet:** mosaic and every mode but 1 — see the
-  [roadmap](#roadmap).
+| [SNES machine](docs/snes-machine.md) | **in progress** — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake; no coprocessor |
+| [Cartridge](docs/snes-cartridge.md) | **complete** — the header, LoROM, HiROM and ExHiROM, a copier's header read and dropped, where every bus address lands, the save windows |
+| [PPU](docs/ppu.md) | **in progress** — a pixel resolved at its own dot from the registers as they stand there, each frame handed to an observer; Mode 1's three backgrounds, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; the register file complete beneath them. Mosaic, the other seven modes, and the hires and interlaced pictures are not drawn |
+| Public embedding API | **not started** |
 
 ### The toolkit
 
 | Component | Status |
 |---|---|
-| [Disassembly framework](docs/disassembly-framework.md) | built — traces control flow so data is never read as code, carries a per-path context, and reports a conflict rather than guessing |
-| [SPC700 disassembler](docs/spc700-disassembler.md) | built — names hardware registers, marks run-time-patched bytes, cycle costs measured from the core |
-| [65816 disassembler](docs/65816-disassembler.md) | built — carries the register widths through `REP`, `SEP` and `XCE`, and reports an operand nothing settled |
-| [Cartridge disassembler](docs/snes-disassembler.md) | in progress — a whole cartridge into a source tree that rebuilds it ([below](#the-cartridge-disassembler)) |
-| [Cartridge verifier](docs/snes-disassembler.md#verifying-the-tree) | built — reassembles a tree and reports every difference from the image; thirty-one cartridges across all three maps rebuild byte for byte |
-| [Assemblers](docs/assemblers.md) | built — both dialects over one [common layer](docs/assembly-lexicon.md), each built from its disassembler's own table so every opcode round-trips |
-| [Intermediate representation](docs/ir.md) | built — both instruction sets lifted into one form with no bytes in it, with an interpreter per chip, a renderer back to source, and a dataflow over every path |
-
-#### The cartridge disassembler
-
-- **The tree.** One source file per bank, and a manifest naming the files, the entries, the stops,
-  every register the code reaches, every transfer, and each routine with its calls and its role.
-- **The sound program too.** Captured from the machine as the boot uploads it, lifted into a program
-  file of its own, and written back as SPC700 source from that file.
-- **Run, not only read.** The cartridge runs on the machine — unattended or played from an
-  [input script](docs/input-script.md) — so the destinations its indirect jumps take become entries,
-  every instruction the run executes is lifted from the bytes the CPU fetched and checked against
-  the chip, and the registers seen at every site are recorded.
-- **What the transfers moved.** Every range an engine moved is recorded with where it came from and
-  where it landed, and every such range beginning in the image is lifted into a file of its own —
-  a tile sheet, a palette, a tilemap, a sprite table or an HDMA table, as the run's own facts name
-  the form, each exact both ways and included back by the assembler.
-- **Proved, not guessed.** A dataflow runs the lifted effects over every path and proves the
-  registers, the stored values and the bounded jump tables the trace then follows.
-- **Not yet:** the coprocessors have no backend.
-
+| [Disassembly framework](docs/disassembly-framework.md) | **complete** — traces control flow so data is never read as code, carries a per-path context, and reports a conflict rather than guessing |
+| [SPC700 disassembler](docs/spc700-disassembler.md) | **complete** — names hardware registers, marks run-time-patched bytes, cycle costs measured from the core |
+| [65816 disassembler](docs/65816-disassembler.md) | **complete** — carries the register widths through `REP`, `SEP` and `XCE`, and reports an operand nothing settled |
+| [Cartridge disassembler](docs/snes-disassembler.md) | **in progress** — a whole cartridge into a source tree: a file per bank, the sound program the boot uploads as a program file and source of its own, and a manifest of the entries, the stops, the registers, the transfers and the routines; the cartridge is run, unattended or under an [input script](docs/input-script.md), so the jumps only a run resolves become entries, every executed instruction is lifted from the bytes the CPU fetched and checked against the chip, and every range a transfer engine moved is written as a file of its kind — tile sheet, palette, tilemap, sprite table, HDMA table — that the assembler includes back. The coprocessors have no backend |
+| [Cartridge verifier](docs/snes-disassembler.md#verifying-the-tree) | **complete** — reassembles a tree and reports every difference from the image; thirty-one cartridges across all three maps rebuild byte for byte |
+| [Assemblers](docs/assemblers.md) | **complete** — both dialects over one [common layer](docs/assembly-lexicon.md), each built from its disassembler's own table so every opcode round-trips |
+| [Intermediate representation](docs/ir.md) | **complete** — both instruction sets lifted into one form with no bytes in it, with an interpreter per chip, a renderer back to source, and a dataflow that proves the registers, the stored values and the bounded jump tables over every path |
+| [Player](tools/player/README.md) | **complete** — a cartridge in a window at the console's own rate, with its sound, driven by an input script and recorded as it runs |
 
 ### Validation
 
 Beyond the per-cycle vector suites, the machine runs self-checking SPC test ROMs end-to-end. The
-CPU, timer and memory-access-timing ROMs pass in full. The DSP ROM does not yet: three of its
-sub-tests still report a wrong checksum, and every other sub-test in it passes.
+CPU, timer and memory-access-timing ROMs pass in full. Every sub-test of the DSP ROM passes but
+three, which report a wrong checksum.
 
 | Sub-test still failing | What it exercises |
 |---|---|
@@ -282,14 +227,11 @@ Snaggletooth is built audio-first:
 2. **The full machine** — the 5A22 (the main CPU with its DMA and timing hardware), the PPU, and
    the system glue that binds them to the audio core.
 
-The PPU is the piece under way, and it draws: a cartridge runs in a window with the whole of its
-Mode 1 picture on screen, its sprites over it under the counts the chip can afford, the masking
-windows taking layers away where a program puts them, the sub screen and the colour math over it,
-recorded as it runs. The rest of the picture —
-the sub screen and colour math, mosaic, and the other screen modes — follows in order. After it, the machine is taken through the range of cartridge types until they
-boot, and
-the DSP returns to close out its three sub-tests with the wider body of real software available to
-exercise it.
+The PPU is the component in progress. What it draws and what it does not is in its row under
+[What is built](#the-main-machine); the remaining modes, mosaic, and the hires and interlaced
+pictures follow in that order. After the PPU, the machine is taken through the range of cartridge
+types until they boot, and the DSP's three failing sub-tests are closed with the wider body of real
+software then available to exercise it.
 
 **1.0 means a fully-featured, accurate SNES emulator core.** No dates are promised; each
 component ships when it meets the accuracy bar.
