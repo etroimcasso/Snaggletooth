@@ -17,6 +17,7 @@
 
 #include "gtest/gtest.h"
 #include "player/default_snagpad.h"
+#include "player/display.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
 #include "rom/input_script.h"
@@ -443,6 +444,80 @@ TEST(PlayerRecorder, ARecordedRunReplaysItself) {
     EXPECT_EQ(replay->padAt(JoypadPort::Two, at), run[at].second) << "port 2 at frame " << at;
   }
   EXPECT_EQ(writeInputScript(*replay), text) << "writing the parse back is the same text";
+}
+
+// ---- the display -------------------------------------------------------------------
+
+// The rates the four cases below are written against: the console's own, and the
+// panels a run meets. 60.000 is the panel every fixed-refresh display of that family
+// reports; 59.94 is the one a television-rate mode reports, as the ratio it is.
+constexpr FrameRate kNtsc = consoleFrameRate(consoleClock(Region::Ntsc));
+constexpr FrameRate kPal = consoleFrameRate(consoleClock(Region::Pal));
+constexpr FrameRate kPanel60 = {.numerator = 60u, .denominator = 1u};
+constexpr FrameRate kPanel5994 = {.numerator = 60000u, .denominator = 1001u};
+constexpr FrameRate kPanel50 = {.numerator = 50u, .denominator = 1u};
+constexpr FrameRate kPanel75 = {.numerator = 75u, .denominator = 1u};
+constexpr FrameRate kPanel144 = {.numerator = 144u, .denominator = 1u};
+
+TEST(PlayerDisplay, ADisplayCloseToTheConsoleIsLockedTo) {
+  EXPECT_TRUE(locksTo(kNtsc, kPanel60)) << "60.000 against the console's 60.0988";
+  EXPECT_TRUE(locksTo(kNtsc, kPanel5994)) << "59.94 against the console's 60.0988";
+  EXPECT_TRUE(locksTo(kNtsc, kNtsc)) << "a panel at the console's own rate";
+  EXPECT_FALSE(locksTo(kNtsc, kPanel50));
+  EXPECT_FALSE(locksTo(kNtsc, kPanel75));
+  EXPECT_FALSE(locksTo(kNtsc, kPanel144));
+  // A 50 Hz machine takes the other half of the same line: the panel it lines up with
+  // is the one a 60 Hz machine does not.
+  EXPECT_TRUE(locksTo(kPal, kPanel50));
+  EXPECT_FALSE(locksTo(kPal, kPanel60));
+  // A panel nobody could read a rate from is never locked to, whichever way round.
+  EXPECT_FALSE(locksTo(kNtsc, FrameRate{}));
+}
+
+TEST(PlayerDisplay, TheLockedRateIsTheDisplaysOwn) {
+  const Pacing pacing = paceRun(kNtsc, kPanel60, Vsync::Auto);
+  EXPECT_TRUE(pacing.locked);
+  EXPECT_EQ(pacing.rate.numerator, kPanel60.numerator);
+  EXPECT_EQ(pacing.rate.denominator, kPanel60.denominator);
+  // A second of a 60.000 Hz panel is sixty refreshes, so the first frame of a run held
+  // to it is owed a sixtieth of a second in and not the console's own interval.
+  EXPECT_EQ(FramePace(pacing.rate).owedAt(1u), 16666666ull);
+  EXPECT_EQ(FrameDeadline(Region::Ntsc).owedAt(1u), 16639263ull) << "the console's own";
+  // And it stays the panel's rate over a run: an hour of it is 216,000 refreshes.
+  EXPECT_EQ(FramePace(pacing.rate).owedAt(216000u), 3600000000000ull) << "an hour, exactly";
+}
+
+TEST(PlayerDisplay, TheSampleRateFollowsTheLockedRate) {
+  // 32000 x 60.000 / 60.0988: the machine makes 32,000 samples a second of its own
+  // time, and a second of its own time now takes 60.0988/60.000 seconds of the
+  // panel's, so the device is told the stream arrives this much slower.
+  const Pacing pacing = paceRun(kNtsc, kPanel60, Vsync::Auto);
+  EXPECT_EQ(pacedSampleRate(32000, kNtsc, pacing.rate), 31947);
+  // The other direction is the same arithmetic: a panel faster than the console.
+  EXPECT_EQ(pacedSampleRate(32000, kNtsc, FrameRate{.numerator = 61u, .denominator = 1u}), 32480);
+  // A run held to the console's own rate is handed the rate the machine makes.
+  EXPECT_EQ(pacedSampleRate(32000, kNtsc, kNtsc), 32000)
+      << "a run held to the console's own rate takes the rate the machine makes";
+  EXPECT_EQ(pacedSampleRate(32000, kPal, kPal), 32000);
+}
+
+TEST(PlayerDisplay, AnUnlockableDisplayKeepsTheConsolesRate) {
+  const Pacing pacing = paceRun(kPal, kPanel60, Vsync::Auto);
+  EXPECT_FALSE(pacing.locked);
+  EXPECT_EQ(pacing.rate.numerator, kPal.numerator);
+  EXPECT_EQ(pacing.rate.denominator, kPal.denominator);
+  EXPECT_EQ(FramePace(pacing.rate).owedAt(1u), FrameDeadline(Region::Pal).owedAt(1u));
+  EXPECT_EQ(pacedSampleRate(32000, kPal, pacing.rate), 32000) << "and the sound is unchanged";
+  // A panel that could not be read leaves the run on the console's rate as well.
+  EXPECT_FALSE(paceRun(kNtsc, FrameRate{}, Vsync::Auto).locked);
+  EXPECT_FALSE(paceRun(kNtsc, FrameRate{}, Vsync::On).locked);
+  // The flag names the arrangement rather than asking for one: a panel the band would
+  // refuse is held to when a run asks for it, and one the band would take is not when
+  // a run asks it not to be.
+  EXPECT_TRUE(paceRun(kNtsc, kPanel144, Vsync::On).locked);
+  EXPECT_EQ(paceRun(kNtsc, kPanel144, Vsync::On).rate.numerator, kPanel144.numerator);
+  EXPECT_FALSE(paceRun(kNtsc, kPanel60, Vsync::Off).locked);
+  EXPECT_EQ(paceRun(kNtsc, kPanel60, Vsync::Off).rate.numerator, kNtsc.numerator);
 }
 
 }  // namespace snaggletooth::player
