@@ -127,6 +127,99 @@ TEST(InputScript, APortTheScriptNeverNamesHasNoPad) {
   EXPECT_FALSE(InputScript{}.padAt(JoypadPort::One, 0).has_value());
 }
 
+// ---- a port with nothing in it ---------------------------------------------------------
+
+TEST(InputScript, UnpluggedIsAPortWithNoControllerFromThatFrame) {
+  const InputScript s = script("frame 0 2 unplugged\nframe 500 2 none\n");
+  EXPECT_TRUE(s.names(JoypadPort::Two)) << "the script named it; what it said was that it is empty";
+  EXPECT_FALSE(s.padAt(JoypadPort::Two, 0).has_value());
+  EXPECT_FALSE(s.padAt(JoypadPort::Two, 499).has_value());
+  EXPECT_EQ(s.padAt(JoypadPort::Two, 500), Joypad{}) << "a controller, nothing pressed";
+  EXPECT_EQ(s.padAt(JoypadPort::Two, 100000), Joypad{});
+}
+
+TEST(InputScript, APortNamedFirstWithAButtonIsPluggedFromPowerOn) {
+  // Every script written before the word existed keeps its meaning: a port whose
+  // first line presses something has a controller from frame zero.
+  const InputScript s = script("frame 120 1 start\n");
+  EXPECT_EQ(s.padAt(JoypadPort::One, 0), Joypad{});
+  EXPECT_EQ(s.padAt(JoypadPort::One, 119), Joypad{});
+  EXPECT_EQ(s.padAt(JoypadPort::One, 120), (Joypad{.start = true}));
+
+  // And a port whose first line is the word does not, from frame zero either.
+  const InputScript late = script("frame 400 2 unplugged\nframe 800 2 a\n");
+  EXPECT_FALSE(late.padAt(JoypadPort::Two, 0).has_value());
+  EXPECT_FALSE(late.padAt(JoypadPort::Two, 399).has_value());
+  EXPECT_EQ(late.padAt(JoypadPort::Two, 800), (Joypad{.a = true}));
+}
+
+TEST(InputScript, UnpluggedStandsAlone) {
+  EXPECT_NE(refusal("frame 10 1 unplugged a\n").find("stands alone"), std::string::npos);
+  EXPECT_NE(refusal("frame 10 1 unplugged none\n").find("stands alone"), std::string::npos);
+  EXPECT_NE(refusal("frame 10 1 none unplugged\n").find("stands alone"), std::string::npos);
+  EXPECT_NE(refusal("frame 10 1 a unplugged\n").find("stands alone"), std::string::npos);
+}
+
+// ---- writing one -----------------------------------------------------------------------
+
+TEST(InputScript, WritesOneLinePerEventInWireOrder) {
+  const InputScript s = script("frame 120 1 Start\nframe 200 1 r x left b\nframe 200 2 up\n");
+  EXPECT_EQ(writeInputScript(s),
+            "frame 120 1 start\n"
+            "frame 200 1 b left x r\n"
+            "frame 200 2 up\n")
+      << "buttons in the order the pad shifts them out, whatever order they were written in";
+}
+
+TEST(InputScript, AnEmptyPadWritesNoneAndNoPadWritesUnplugged) {
+  const InputScript s = script("frame 1 1 none\nframe 2 2 unplugged\n");
+  EXPECT_EQ(writeInputScript(s), "frame 1 1 none\nframe 2 2 unplugged\n");
+  EXPECT_EQ(writeInputScript(InputScript{}), "") << "a script with no lines writes no text";
+}
+
+TEST(InputScript, TheWriterAndTheParserAgreeOnEveryButtonName) {
+  // One event per button, each written and read back as the one button it names.
+  for (const Button button : buttons()) {
+    InputScript one;
+    Joypad pad;
+    pad.hold(button, true);
+    one.events.push_back(InputEvent{.frame = 7, .port = JoypadPort::One, .plugged = true, .pad = pad});
+    const std::string text = writeInputScript(one);
+    EXPECT_EQ(text, "frame 7 1 " + std::string(buttonName(button)) + "\n");
+    const InputScript back = script(text);
+    ASSERT_EQ(back.events.size(), 1u);
+    EXPECT_EQ(back.events[0].pad, pad) << buttonName(button);
+  }
+}
+
+TEST(InputScript, ARoundTripPresentsTheSamePadAtEveryFrame) {
+  const InputScript s = script(
+      "frame 0 1 none\nframe 0 2 unplugged\nframe 5 1 right\nframe 9 1 right b\n"
+      "frame 12 2 none\nframe 14 1 unplugged\nframe 18 2 start\n");
+  const InputScript back = script(writeInputScript(s));
+  for (std::uint32_t frame = 0; frame <= 25u; ++frame) {
+    EXPECT_EQ(back.padAt(JoypadPort::One, frame), s.padAt(JoypadPort::One, frame))
+        << "port 1 at frame " << frame;
+    EXPECT_EQ(back.padAt(JoypadPort::Two, frame), s.padAt(JoypadPort::Two, frame))
+        << "port 2 at frame " << frame;
+  }
+}
+
+TEST(InputScript, ASecondRoundTripIsByteIdentical) {
+  const std::string once = writeInputScript(script(
+      "; a comment the writer does not keep\n"
+      "frame 0 1 NONE\nframe 5 1 Right B\nframe 9 2 unplugged\nframe 20 1 none\n"));
+  EXPECT_EQ(writeInputScript(script(once)), once);
+}
+
+TEST(InputScript, APortWithNoEventsStaysUnnamed) {
+  const InputScript s = script("frame 3 1 a\n");
+  const InputScript back = script(writeInputScript(s));
+  EXPECT_TRUE(back.names(JoypadPort::One));
+  EXPECT_FALSE(back.names(JoypadPort::Two)) << "nothing is written for a port never named";
+  EXPECT_FALSE(back.padAt(JoypadPort::Two, 3).has_value());
+}
+
 // ---- the replay ----------------------------------------------------------------------
 
 TEST(InputScriptReplay, TheBootAloneReachesNeitherTarget) {

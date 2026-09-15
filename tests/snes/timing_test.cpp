@@ -207,7 +207,7 @@ TEST(SnesTiming, ArmingNoIrqModeLeavesTheFlagClear) {
   EXPECT_FALSE(m.state().timeup);
 }
 
-// ---- restore does not mint a spurious NMI (F1.f refresh, amendment 2) ------
+// ---- restore does not mint a spurious NMI -----------------------------------------
 
 TEST(SnesTiming, RestoreInVblankDoesNotMintASecondNmi) {
   // The concrete defect the no-edge sync guards against: NMI taken, the $4210 flag
@@ -236,6 +236,72 @@ TEST(SnesTiming, RestoreInVblankDoesNotMintASecondNmi) {
   restored->run(2000u);  // still within the same vblank; no new frame edge
 
   EXPECT_EQ(restored->state().wram[0x30], 1u);  // no spurious second NMI from the restore
+}
+
+// ---- the console's own rate -------------------------------------------------------
+
+TEST(SnesTiming, EachRegionRunsAtItsOwnRate) {
+  const ConsoleClock sixty = consoleClock(Region::Ntsc);
+  EXPECT_EQ(sixty.masterCyclesPerFrame, 357366u)
+      << "262 lines of 1364, less the four one line of every second frame drops";
+  EXPECT_EQ(sixty.hertzNumerator, 236250000u);
+  EXPECT_EQ(sixty.hertzDenominator, 11u)
+      << "the master clock is not a whole number of cycles a second";
+
+  const ConsoleClock fifty = consoleClock(Region::Pal);
+  EXPECT_EQ(fifty.masterCyclesPerFrame, 425568u) << "312 lines of 1364";
+  EXPECT_EQ(fifty.hertzNumerator, 21281370u);
+  EXPECT_EQ(fifty.hertzDenominator, 1u);
+
+  // What the two work out to, in millionths of a frame a second: neither console
+  // runs at the round number it is spoken of by.
+  const auto microFps = [](const ConsoleClock& clock) {
+    return 1000000ull * clock.hertzNumerator / (clock.hertzDenominator * clock.masterCyclesPerFrame);
+  };
+  EXPECT_EQ(microFps(sixty), 60098813u) << "not 60";
+  EXPECT_EQ(microFps(fifty), 50006978u) << "not 50";
+}
+
+TEST(SnesTiming, AFrameIsOwedAtItsHandComputedNanosecond) {
+  constexpr FrameDeadline sixty(Region::Ntsc);
+  EXPECT_EQ(sixty.owedAt(0u), 0u) << "the first frame of a run is owed at once";
+  EXPECT_EQ(sixty.owedAt(1u), 16639263ull);
+  EXPECT_EQ(sixty.owedAt(4693u), 78088063568ull)
+      << "past the frame a single product passes 64 bits at";
+  EXPECT_EQ(sixty.owedAt(100000u), 1663926349206ull);
+
+  constexpr FrameDeadline fifty(Region::Pal);
+  EXPECT_EQ(fifty.owedAt(0u), 0u);
+  EXPECT_EQ(fifty.owedAt(1u), 19997208ull);
+  EXPECT_EQ(fifty.owedAt(4693u), 93846901021ull);
+  EXPECT_EQ(fifty.owedAt(100000u), 1999720882631ull);
+}
+
+TEST(SnesTiming, TheDeadlineStaysExactWhereAWholeProductWouldHaveWrapped) {
+  // Five billion frames is past where the whole product wraps by three orders of
+  // magnitude, and the answer is still the exact one — which is what lets a run be
+  // paced by its frame number rather than by accumulating an interval.
+  constexpr FrameDeadline sixty(Region::Ntsc);
+  EXPECT_EQ(sixty.owedAt(5000000000ull), 83196317460317460ull);
+  constexpr FrameDeadline fifty(Region::Pal);
+  EXPECT_EQ(fifty.owedAt(5000000000ull), 99986044131557319ull);
+}
+
+TEST(SnesTiming, TheDeadlineNeverBanksTimeBetweenFrames) {
+  for (const Region region : {Region::Ntsc, Region::Pal}) {
+    const FrameDeadline deadline(region);
+    std::uint64_t previous = 0;
+    for (std::uint64_t frame = 1u; frame <= 20000u; ++frame) {
+      const std::uint64_t owed = deadline.owedAt(frame);
+      const std::uint64_t gap = owed - previous;
+      // Every frame is owed a whole interval later, give or take the one nanosecond
+      // the fraction rounds by — never less, so lateness is never banked, and never
+      // a second more, so the run does not drift slow.
+      ASSERT_GE(gap, deadline.wholeNanos()) << "frame " << frame;
+      ASSERT_LE(gap, deadline.wholeNanos() + 1u) << "frame " << frame;
+      previous = owed;
+    }
+  }
 }
 
 }  // namespace

@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "snaggletooth/apu/apu.h"
@@ -52,6 +53,78 @@ namespace snaggletooth {
 // paced against; the memory-region speeds, counted in master cycles, are the same
 // in both.
 enum class Region : std::uint8_t { Ntsc, Pal };
+
+// What a console of this region runs at: its master clock as the exact ratio it is
+// — the 60 Hz console's is 236,250,000 / 11 Hz, which is not a whole number of
+// cycles a second — and the master cycles one of its frames takes.
+//
+// The frame is the one a picture that is not interlaced draws: 262 lines of 1364
+// master cycles less the four that one line of every second frame drops, and 312
+// of the same. An interlaced picture carries a line more on one field of every
+// pair, so a run that interlaces is not held to this.
+struct ConsoleClock {
+  std::uint64_t masterCyclesPerFrame = 0;
+  std::uint64_t hertzNumerator = 0;
+  std::uint64_t hertzDenominator = 1;
+};
+
+[[nodiscard]] constexpr ConsoleClock consoleClock(Region region) noexcept {
+  return region == Region::Pal ? ConsoleClock{.masterCyclesPerFrame = 425568u,
+                                              .hertzNumerator = 21281370u,
+                                              .hertzDenominator = 1u}
+                               : ConsoleClock{.masterCyclesPerFrame = 357366u,
+                                              .hertzNumerator = 236250000u,
+                                              .hertzDenominator = 11u};
+}
+
+// When each frame of a run is owed, in nanoseconds from the run's start — the
+// console's own rate, for a host holding a run to it.
+//
+// It does not read a clock and does not wait: a host that wants to show a run at
+// the speed the console ran it asks when the next frame is due and waits however
+// it waits, which keeps the sleeping where the host's own loop is. A host with a
+// clock of its own — one stepping the machine a tick at a time — ignores this and
+// spends cycle budgets instead.
+//
+// The frame count and the interval are multiplied apart rather than together. The
+// whole product passes 64 bits inside a couple of minutes, and a deadline that has
+// wrapped is behind the clock, so a run stops waiting between frames and sprints
+// until the wrap climbs back past it. Split into whole nanoseconds and the
+// fraction left over, every deadline is exact out past 150 billion frames, which
+// is eighty years at the console's rate.
+class FrameDeadline {
+ public:
+  explicit constexpr FrameDeadline(Region region) noexcept
+      : divisor_(consoleClock(region).hertzNumerator),
+        whole_(nanosNumerator(region) / consoleClock(region).hertzNumerator),
+        remainder_(nanosNumerator(region) % consoleClock(region).hertzNumerator) {}
+
+  // The nanosecond the Nth frame of the run is owed at.
+  [[nodiscard]] constexpr std::uint64_t owedAt(std::uint64_t frames) const noexcept {
+    return frames * whole_ + frames * remainder_ / divisor_;
+  }
+
+  // One frame's interval, in whole nanoseconds and the fraction left over it.
+  [[nodiscard]] constexpr std::uint64_t wholeNanos() const noexcept { return whole_; }
+
+ private:
+  static constexpr std::uint64_t nanosNumerator(Region region) noexcept {
+    const ConsoleClock clock = consoleClock(region);
+    return 1000000000ull * clock.masterCyclesPerFrame * clock.hertzDenominator;
+  }
+
+  std::uint64_t divisor_;
+  std::uint64_t whole_;
+  std::uint64_t remainder_;
+};
+
+// Both regions' first frame and one past the point a single product passes 64
+// bits, worked out by hand, so a rearrangement that loses the fraction or wraps
+// again does not compile.
+static_assert(FrameDeadline(Region::Ntsc).owedAt(1u) == 16639263ull);
+static_assert(FrameDeadline(Region::Ntsc).owedAt(4693u) == 78088063568ull);
+static_assert(FrameDeadline(Region::Pal).owedAt(1u) == 19997208ull);
+static_assert(FrameDeadline(Region::Pal).owedAt(4693u) == 93846901021ull);
 
 // The arithmetic unit's current job, if any. A write to the multiplier or the
 // divisor starts one; it finishes its documented number of cycles later, at which
@@ -74,10 +147,33 @@ struct DmaChannel {
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
 };
 
+// A standard controller's twelve buttons, in the order the pad shifts them out —
+// which is the order they sit in the word the auto-read registers hold, and the
+// order a recorded run names them in. The set is the console's, so it is fixed:
+// a controller with other buttons is a different controller, not a longer list.
+enum class Button : std::uint8_t {
+  B, Y, Select, Start, Up, Down, Left, Right, A, X, L, R,
+};
+inline constexpr std::size_t kButtonCount = 12;
+
+// Every button, in that order, for a caller walking the set.
+[[nodiscard]] std::span<const Button> buttons() noexcept;
+
+// What a button is called — "b", "select", "l" — and the button a name stands
+// for, or nothing for a word that names none. Names are read in any case. This is
+// the one place the twelve are spelled: a tool that reads a button out of a file
+// and a host that prints one both ask here, so no two of them can disagree.
+[[nodiscard]] std::string_view buttonName(Button button) noexcept;
+[[nodiscard]] std::optional<Button> buttonFromName(std::string_view name) noexcept;
+
 // A standard controller's twelve buttons as a value: true is pressed. A pad is
 // presented to the machine with Snes::setJoypad and read by the program through
 // the auto-read registers or the serial ports; the machine samples it when it
 // latches, so a value set at any point in a frame is what that frame's read sees.
+//
+// A pad with nothing pressed is not an empty port: Snes::setJoypad takes an
+// optional, and nothing at all is a socket with no controller in it, which a
+// program can tell apart from this. See the port comment on setJoypad.
 struct Joypad {
   bool b = false;
   bool y = false;
@@ -91,6 +187,11 @@ struct Joypad {
   bool x = false;
   bool l = false;
   bool r = false;
+
+  // One button by name, read and written, so a caller working from the Button set
+  // does not repeat the twelve fields to reach them.
+  [[nodiscard]] bool holds(Button button) const noexcept;
+  void hold(Button button, bool pressed) noexcept;
 
   // The sixteen bits the pad shifts out, in the layout the auto-read registers
   // hold them: bit 15 is B, the first bit on the wire, down to bit 4 for R; bits

@@ -1,0 +1,6 @@
+# The tools' own data formats are read and written byte for byte, and one of them is
+# embedded into a binary at build time and compared against the file it came from. A
+# checkout that translates their line endings makes the file and the build disagree
+# on a platform nobody was looking at, so these are stored and checked out verbatim.
+*.snagpad    -text
+*.snaginput  -text

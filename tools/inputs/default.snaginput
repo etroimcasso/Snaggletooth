@@ -1,0 +1,80 @@
+; The run every cartridge without a script of its own is played through:
+; A every two seconds and Start every eight, ten frames each, to leave a
+; title and a menu behind; Right held from twenty seconds in, so a level
+; that has begun is walked; and B every three seconds or so from thirty-five,
+; since the button a game jumps with is A on some and B on others.
+frame 120 1 a
+frame 130 1 none
+frame 240 1 a
+frame 250 1 none
+frame 360 1 a
+frame 370 1 none
+frame 480 1 start
+frame 490 1 none
+frame 600 1 a
+frame 610 1 none
+frame 720 1 a
+frame 730 1 none
+frame 840 1 a
+frame 850 1 none
+frame 960 1 start
+frame 970 1 none
+frame 1080 1 a
+frame 1090 1 none
+frame 1190 1 right
+frame 1200 1 right a
+frame 1210 1 right
+frame 1320 1 right a
+frame 1330 1 right
+frame 1440 1 right start
+frame 1450 1 right
+frame 1560 1 right a
+frame 1570 1 right
+frame 1680 1 right a
+frame 1690 1 right
+frame 1800 1 right a
+frame 1810 1 right
+frame 1920 1 right start
+frame 1930 1 right
+frame 2040 1 right a
+frame 2050 1 right
+frame 2100 1 right b
+frame 2110 1 right
+frame 2160 1 right a
+frame 2170 1 right
+frame 2280 1 right a
+frame 2290 1 right
+frame 2300 1 right b
+frame 2310 1 right
+frame 2400 1 right start
+frame 2410 1 right
+frame 2500 1 right b
+frame 2510 1 right
+frame 2520 1 right a
+frame 2530 1 right
+frame 2640 1 right a
+frame 2650 1 right
+frame 2700 1 right b
+frame 2710 1 right
+frame 2760 1 right a
+frame 2770 1 right
+frame 2880 1 right start
+frame 2890 1 right
+frame 2900 1 right b
+frame 2910 1 right
+frame 3000 1 right a
+frame 3010 1 right
+frame 3100 1 right b
+frame 3110 1 right
+frame 3120 1 right a
+frame 3130 1 right
+frame 3240 1 right a
+frame 3250 1 right
+frame 3300 1 right b
+frame 3310 1 right
+frame 3360 1 right start
+frame 3370 1 right
+frame 3480 1 right a
+frame 3490 1 right
+frame 3500 1 right b
+frame 3510 1 right
