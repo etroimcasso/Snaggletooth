@@ -6,24 +6,54 @@ run when asked to.
 ```
 snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
-                    [--region ntsc|pal] [--mute] [--quiet]
+                    [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]
 snes_player --default-config
 ```
 
-The window shows the picture the machine draws, frame by frame, at the console's own rate, with
-that rate in its title so what the run costs is visible while it runs. It closes when the window
-is closed or when `--seconds` of the master clock have been spent; nothing else stops it.
+The window shows the picture the machine draws, frame by frame, at the rate the run is held to,
+with the rate it achieves in its title so what the run costs is visible while it runs. It closes
+when the window is closed or when `--seconds` of the master clock have been spent; nothing else
+stops it.
 
 The machine runs at the rate the cartridge's own country byte asks for, so a 50 Hz cartridge boots
 rather than refusing, and is paced at 50 Hz. `--region` sets it by hand for an image that does not
 say, or one patched to run at the other rate while still declaring the first.
 
-The sound goes to the default playback device as the machine makes it, at the DSP's own 32 kHz
-stereo, so nothing resamples what the chip produced. `--mute` opens no device at all, and a machine
-that has none runs silent and says why. Where the queued sound runs more than a quarter of a second
-ahead of the speakers a chunk is left out rather than added to the delay: the machine is paced to
-the console's frame interval and the device consumes at its own crystal, so the two drift apart
-over a long run.
+## The rate it runs at
+
+A television took whatever the console sent it. A fixed-refresh panel does not, and the two rates
+are not the same number: the 60 Hz console draws 60.0988 frames a second and a 60 Hz panel refreshes
+60.000 times, so a run paced to the console alone puts a frame on the wrong side of a refresh about
+once every ten seconds — shown twice, or torn — for as long as it runs, with nothing to pull the
+phase back once something has moved it.
+
+So the run is held to the panel instead, wherever the panel is within one part in a hundred of the
+console: the window waits for a refresh and every refresh carries one new frame. The first thing a
+run says is which of the two rates it took —
+
+```
+held to the display at 60.000 Hz
+the console's own 60.099 Hz
+```
+
+**A held run is a sixth of a per cent slow by the wall clock, and exact in every other sense.** Every
+cycle is emulated as it always was and a recording of a held run is byte-identical to a recording of
+an unheld one; what changes is the rate at which frames are asked for. A panel at another rate
+entirely — 50 Hz, 144 Hz — is not one a run can be held to, so the run keeps the console's own rate
+there and the beat comes back with it.
+
+`--vsync` names the arrangement outright: `on` holds the run to whatever the panel reports, `off`
+keeps the console's rate and hands every present straight back, and `auto`, the default, decides by
+the rule above.
+
+The sound goes to the default playback device as the machine makes it, 32 kHz stereo. The device is
+told the rate the run *delivers* at rather than the rate the chip makes: a held run makes its
+samples that same sixth of a per cent slower, and a device consuming 32,000 a second would run dry
+every few minutes. A run on the console's own rate is handed the chip's own 32 kHz and nothing
+resamples it. `--mute` opens no device at all, and a machine that has none runs silent and says why.
+Where the queued sound runs more than a quarter of a second ahead of the speakers a chunk is left
+out rather than added to the delay: the device consumes at its own crystal, so the two still drift
+apart slowly over a long run.
 
 ## Playing it
 
@@ -65,7 +95,7 @@ asked for:
 |---|---|
 | `<image>.avi` | every frame exactly as the machine drove it, uncompressed (`../video/README.md`) |
 | `<image>.csv` | a row a frame: wall and emulation time in nanoseconds, master cycles, dots drawn, and the rate instantaneous and mean |
-| `<image>.wav` | the sound the run produced, 32 kHz stereo |
+| `<image>.wav` | the sound the run produced, 32 kHz stereo — the chip's own rate, whatever the panel showing it runs at |
 | `<image>.snaginput` | the buttons, as a script that replays the run |
 
 They come together — one run, one set of evidence. The script is written whatever drove the run, so
@@ -82,8 +112,11 @@ The sound is taken from the machine between frames, a quarter of a frame at a ti
 straight to the device.
 
 The mapping is `snaggletooth_player_pads`, which holds no reference to any windowing library and
-opens no device: it turns a controller's reported state into the `Joypad` the machine takes. Every
-call that touches a real device is in this tool.
+opens no device: it turns a controller's reported state into the `Joypad` the machine takes. The
+rate arithmetic in `display.h` is the same kind of thing — it is handed what a panel reports and
+answers with the rate to pace by, when each frame of that pacing is owed, and the rate to open a
+device at, so all of it is checked by the suite. Every call that touches a real device is in this
+tool.
 
 This is the only target that links SDL. It is built when `SNAGGLETOOTH_BUILD_PLAYER` and
 `SNAGGLETOOTH_BUILD_TOOLS` are both on — the default for a top-level build — and takes SDL from a

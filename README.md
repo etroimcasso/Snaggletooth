@@ -120,7 +120,7 @@ it; none of them runs. A cartridge that needs one does not boot.
 | [Cartridge verifier](docs/snes-disassembler.md#verifying-the-tree) | **complete** — reassembles a tree and reports every difference from the image; thirty-one cartridges across all three maps rebuild byte for byte |
 | [Assemblers](docs/assemblers.md) | **complete** — both dialects over one [common layer](docs/assembly-lexicon.md), each built from its disassembler's own table so every opcode round-trips |
 | [Intermediate representation](docs/ir.md) | **complete** — both instruction sets lifted into one form with no bytes in it, with an interpreter per chip, a renderer back to source, and a dataflow that proves the registers, the stored values and the bounded jump tables over every path |
-| [Player](tools/player/README.md) | **complete** — a cartridge in a window at the console's own rate, with its sound, driven by an input script and recorded as it runs |
+| [Player](tools/player/README.md) | **complete** — a cartridge in a window, held to the display where the display is close enough to the console and to the console's own rate where it is not, with its sound at the rate the run delivers, driven by a keyboard, a controller or an input script, and recorded as it runs |
 
 ### Validation
 

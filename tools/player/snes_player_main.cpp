@@ -3,7 +3,7 @@
 //
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
 //               [--input <script> | --input-dir <directory>] [--config <file>]
-//               [--region ntsc|pal] [--mute] [--quiet]
+//               [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -35,6 +35,15 @@
 // The machine runs at the rate the cartridge's own country byte asks for, so a 50 Hz
 // cartridge boots and is paced at 50 Hz; --region overrides a cartridge that does not
 // say.
+//
+// The run is then held to the panel it is shown on, where the panel is within one part
+// in a hundred of the console: the window waits for a refresh and each refresh carries
+// one new frame, so no frame is shown twice and none is torn. A 60 Hz console on a
+// 60.000 Hz panel runs a sixth of a per cent slow by the wall clock — every cycle is
+// still emulated exactly, and the sound is opened a sixth of a per cent slower so it
+// stays with the picture. A panel at another rate entirely leaves the run on the
+// console's own, and --vsync names either arrangement outright. Which one a run took is
+// the first thing it says.
 
 #include <cstddef>
 #include <cstdint>
@@ -52,6 +61,7 @@
 #include "SDL3/SDL.h"
 #include "SDL3/SDL_main.h"  // SDL_SetMainReady, which the tool calls to keep its own main()
 #include "player/default_snagpad.h"
+#include "player/display.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
 #include "rom/input_script.h"
@@ -68,26 +78,24 @@ using snaggletooth::Snes;
 using snaggletooth::VideoFrame;
 namespace player = snaggletooth::player;
 
-constexpr std::uint64_t kNanosPerSecond = 1000000000ull;
-
 // The DSP's own rate and shape, which the playback device is asked for directly so
 // nothing resamples what the machine made.
 constexpr int kSampleRate = 32000;
 constexpr int kChannels = 2;
 constexpr int kBytesPerSample = kChannels * static_cast<int>(sizeof(std::int16_t));
 
-// How far the sound is allowed to run ahead of the speakers before a chunk is left
-// out: a quarter of a second, which is latency a person notices. The machine is
-// paced to the console's frame interval and the device consumes at its own crystal,
-// so the two drift apart slowly; dropping a chunk costs a tenth of a frame of sound
-// and puts the queue back where it belongs.
-constexpr int kQueueBoundBytes = kSampleRate * kBytesPerSample / 4;
-
 // The rate a frame's interval works out to, in thousandths of a frame a second, so a
 // rate is reported exactly without leaving the integers.
 [[nodiscard]] std::uint64_t milliFps(std::uint64_t nanos, std::uint64_t frames) {
   if (nanos == 0u) return 0u;
-  return frames * 1000u * kNanosPerSecond / nanos;
+  return frames * 1000u * player::kNanosPerSecond / nanos;
+}
+
+// A rate the tool holds as a ratio, in the same thousandths a measured one is
+// reported in, so the rate a run is held to and the rate it achieves read alike.
+[[nodiscard]] std::uint64_t milliFps(player::FrameRate rate) {
+  if (!player::isRate(rate)) return 0u;
+  return (rate.numerator * 1000u + rate.denominator / 2u) / rate.denominator;
 }
 
 [[nodiscard]] std::string rateText(std::uint64_t milli) {
@@ -108,7 +116,7 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
   std::cerr << "usage: " << program
             << " <image> [--out <directory>] [--seconds N] [--scale N]"
                " [--input <script> | --input-dir <directory>] [--config <file>]"
-               " [--region ntsc|pal] [--mute] [--quiet]\n       "
+               " [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]\n       "
             << program << " --default-config\n";
   std::exit(2);
 }
@@ -313,10 +321,17 @@ class Sound {
   Sound& operator=(const Sound&) = delete;
   Sound() = default;
 
-  // Opens the device at the DSP's own rate and starts it. Says why it could not
-  // rather than failing the run.
-  void open() {
-    const SDL_AudioSpec spec{.format = SDL_AUDIO_S16, .channels = kChannels, .freq = kSampleRate};
+  // Opens the device and starts it, telling it the rate the run delivers samples at
+  // — the DSP's own where the run is held to the console, a shade under it where the
+  // run is held to a slower panel. Says why it could not rather than failing the run.
+  void open(int rate) {
+    // How far the sound may run ahead of the speakers before a chunk is left out: a
+    // quarter of a second, which is latency a person notices. The machine is paced to a
+    // frame interval and the device consumes at its own crystal, so the two drift apart
+    // slowly; dropping a chunk costs a tenth of a frame of sound and puts the queue back
+    // where it belongs.
+    bound_ = rate * kBytesPerSample / 4;
+    const SDL_AudioSpec spec{.format = SDL_AUDIO_S16, .channels = kChannels, .freq = rate};
     stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
     if (stream_ == nullptr) {
       std::cerr << "no sound: " << SDL_GetError() << "\n";
@@ -330,13 +345,14 @@ class Sound {
   // would only add to the delay.
   void put(const std::vector<snaggletooth::StereoFrame>& frames) {
     if (stream_ == nullptr || frames.empty()) return;
-    if (SDL_GetAudioStreamQueued(stream_) > kQueueBoundBytes) return;
+    if (SDL_GetAudioStreamQueued(stream_) > bound_) return;
     SDL_PutAudioStreamData(stream_, frames.data(),
                            static_cast<int>(frames.size() * sizeof(snaggletooth::StereoFrame)));
   }
 
  private:
   SDL_AudioStream* stream_ = nullptr;
+  int bound_ = 0;
 };
 
 // The window, the recording and the table, all fed by the frames the machine
@@ -345,7 +361,8 @@ class Sound {
 class Player final : public snaggletooth::FrameObserver {
  public:
   Player(Snes& machine, snaggletooth::Region region, const snaggletooth::disasm::InputScript& script,
-         bool scripted, Devices& devices, unsigned scale, const std::string& title)
+         bool scripted, Devices& devices, unsigned scale, player::Vsync vsync,
+         const std::string& title)
       : machine_(machine),
         deadline_(region),
         clock_(snaggletooth::consoleClock(region)),
@@ -353,6 +370,8 @@ class Player final : public snaggletooth::FrameObserver {
         scripted_(scripted),
         devices_(devices),
         scale_(scale),
+        vsync_(vsync),
+        pacing_{.rate = player::consoleFrameRate(clock_), .locked = false},
         title_(title) {}
 
   ~Player() override {
@@ -385,6 +404,7 @@ class Player final : public snaggletooth::FrameObserver {
       return false;
     }
     SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
+    holdToPanel();
     started_ = SDL_GetTicksNS();
     lastFrame_ = started_;
     resumed_ = started_;
@@ -407,6 +427,9 @@ class Player final : public snaggletooth::FrameObserver {
       std::cerr << "cannot write the table; the run goes on without one\n";
     }
   }
+
+  // Which rate the run is held to, and whether that rate is the panel's.
+  [[nodiscard]] player::Pacing pacing() const noexcept { return pacing_; }
 
   [[nodiscard]] bool closed() const noexcept { return closed_; }
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
@@ -438,13 +461,17 @@ class Player final : public snaggletooth::FrameObserver {
     }
     if (recording_) recording_->add(picture);
 
-    // The console's own rate: each frame is held until its share of the run has
-    // passed, so a machine that emulates faster than the console runs is watchable.
-    const std::uint64_t due = started_ + deadline_.owedAt(frames_);
+    // Each frame is held until its share of the run has passed, so a machine that
+    // emulates faster than the console runs is watchable. The share is the panel's
+    // where the run is held to one and the console's where it is not, and it bounds the
+    // rate whether or not the present waits — a panel that will not wait, or a
+    // compositor that hands back a present without one, then costs the run its phase
+    // rather than its speed.
+    const std::uint64_t due = started_ + owedAt(frames_);
     const std::uint64_t before = SDL_GetTicksNS();
     if (before < due) {
       SDL_DelayNS(due - before);
-    } else if (before - due > kForgivenDebt * deadline_.wholeNanos()) {
+    } else if (before - due > kForgivenDebt * interval()) {
       // The run lost real time — the window went away, the machine was descheduled —
       // and it is not getting it back. The origin moves forward by what was lost, so
       // the frames after this one are owed from here. Without that, every deadline is
@@ -512,6 +539,40 @@ class Player final : public snaggletooth::FrameObserver {
   // makes a moment's interruption into seconds of the game at the wrong speed.
   static constexpr std::uint64_t kForgivenDebt = 2u;
 
+  // What the run is held to, decided once the window is up and the panel it opened on
+  // can be asked what it runs at. A panel within a hundredth of the console's rate
+  // carries one frame per refresh, so the run takes the panel's rate and the present is
+  // asked to wait for one; any other panel, or one that reports no rate at all, leaves
+  // the run on the console's own with the present handed straight back.
+  void holdToPanel() {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
+    player::FrameRate panel;
+    if (mode != nullptr && mode->refresh_rate_numerator > 0 &&
+        mode->refresh_rate_denominator > 0) {
+      panel = player::FrameRate{
+          .numerator = static_cast<std::uint64_t>(mode->refresh_rate_numerator),
+          .denominator = static_cast<std::uint64_t>(mode->refresh_rate_denominator)};
+    }
+    pacing_ = player::paceRun(player::consoleFrameRate(clock_), panel, vsync_);
+    if (!pacing_.locked) return;
+    panel_.emplace(pacing_.rate);
+    if (!SDL_SetRenderVSync(renderer_, 1)) {
+      // The rate still holds — the frame interval is the panel's either way — and only
+      // the phase within a refresh is lost, so the run goes on and says what it lost.
+      std::cerr << "the picture will not wait for a refresh: " << SDL_GetError() << "\n";
+    }
+  }
+
+  // When the Nth frame is owed, and what one frame's interval is: the panel's where the
+  // run is held to one, the console's where it is not.
+  [[nodiscard]] std::uint64_t owedAt(std::uint64_t frames) const {
+    return panel_ ? panel_->owedAt(frames) : deadline_.owedAt(frames);
+  }
+
+  [[nodiscard]] std::uint64_t interval() const {
+    return panel_ ? panel_->wholeNanos() : deadline_.wholeNanos();
+  }
+
   void show(const VideoFrame& picture) {
     const SDL_Rect rows{0, 0, static_cast<int>(picture.width), static_cast<int>(picture.height)};
     SDL_UpdateTexture(texture_, &rows, picture.pixels.data(),
@@ -556,6 +617,9 @@ class Player final : public snaggletooth::FrameObserver {
   Devices& devices_;
   player::PadRecorder recorder_;
   unsigned scale_;
+  player::Vsync vsync_;
+  player::Pacing pacing_;                   // the rate the run is held to
+  std::optional<player::FramePace> panel_;  // and its deadlines, where that is the panel's
   std::string title_;
   SDL_Window* window_ = nullptr;
   SDL_Renderer* renderer_ = nullptr;
@@ -583,6 +647,7 @@ int main(int argc, char** argv) {
   std::string inputDir;
   std::string configPath;
   std::string regionName;
+  player::Vsync vsync = player::Vsync::Auto;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
   bool quiet = false;
@@ -612,6 +677,18 @@ int main(int argc, char** argv) {
       regionName = next("--region");
       if (regionName != "ntsc" && regionName != "pal") {
         std::cerr << "--region is ntsc or pal\n";
+        usage(argv[0]);
+      }
+    } else if (arg == "--vsync") {
+      const std::string choice = next("--vsync");
+      if (choice == "on") {
+        vsync = player::Vsync::On;
+      } else if (choice == "off") {
+        vsync = player::Vsync::Off;
+      } else if (choice == "auto") {
+        vsync = player::Vsync::Auto;
+      } else {
+        std::cerr << "--vsync is on, off or auto\n";
         usage(argv[0]);
       }
     } else if (arg == "--seconds") {
@@ -778,8 +855,15 @@ int main(int argc, char** argv) {
 
   Snes machine(snaggletooth::SnesConfig{.rom = rom, .region = region});
   const std::string stem = std::filesystem::path(imagePath).stem().string();
-  Player player(machine, region, script, scripted, devices, scale, stem);
+  Player player(machine, region, script, scripted, devices, scale, vsync, stem);
   if (!player.open()) return 1;
+  // Which of the two arrangements the run took, before anything else it does: a run
+  // that feels wrong is asked this first, and nobody should have to guess at it.
+  const snaggletooth::player::Pacing pacing = player.pacing();
+  if (!quiet) {
+    std::cerr << (pacing.locked ? "held to the display at " : "the console's own ")
+              << rateText(milliFps(pacing.rate)) << " Hz\n";
+  }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);
     player.record(outDir, stem);
@@ -788,7 +872,15 @@ int main(int argc, char** argv) {
   player.beginRun();
 
   Sound speakers;
-  if (!mute) speakers.open();
+  // The device is told the rate the run delivers at rather than the rate the DSP makes:
+  // a run held to a panel slower than the console makes its samples that fraction
+  // slower too, and a device consuming the DSP's own rate would run dry every few
+  // minutes. What is written to a file is untouched — a recording is the machine's
+  // output at its own rate, whatever the panel showing it runs at.
+  if (!mute) {
+    speakers.open(snaggletooth::player::pacedSampleRate(
+        kSampleRate, snaggletooth::player::consoleFrameRate(clock), pacing.rate));
+  }
 
   // How much the machine is run between drains of its sound: a quarter of a frame,
   // so the queue stays short without the loop spinning.
