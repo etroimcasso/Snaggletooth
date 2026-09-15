@@ -436,28 +436,92 @@ std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_
                .priority = (entry & 0x2000u) != 0u};
 }
 
-std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) const noexcept {
-  // Forced blank drives black, whatever the memories hold.
-  if (s_.forcedBlank()) return {0u, 0u, 0u, 255u};
+bool Ppu::windowCovers(Layer layer, std::uint16_t x) const noexcept {
+  // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
+  // one, BG2, BG4 and the colour window in the high — and the two logic registers
+  // give every layer a pair of bits of its own, the four backgrounds filling one
+  // register and the sprites and the colour window the low half of the other.
+  const unsigned index = static_cast<unsigned>(layer);
+  const std::uint8_t selector =
+      index < 2u ? s_.w12sel : (index < 4u ? s_.w34sel : s_.wobjsel);
+  const unsigned bits = (selector >> ((index & 1u) * 4u)) & 0x0Fu;
+  const std::uint8_t logic = index < 4u ? s_.wbglog : s_.wobjlog;
+  const unsigned op = (logic >> ((index & 3u) * 2u)) & 0x03u;
+
+  // A window runs from its left edge to its right, both ends inclusive — so edges
+  // that meet are one pixel wide, and a left edge past the right is a window with
+  // no range at all. The layer's inversion bit replaces it with its inverse.
+  const auto spans = [x](std::uint8_t left, std::uint8_t right) {
+    return x >= left && x <= right;
+  };
+  const bool window1 = spans(s_.wh0, s_.wh1) != ((bits & 0x01u) != 0u);
+  const bool window2 = spans(s_.wh2, s_.wh3) != ((bits & 0x04u) != 0u);
+
+  const bool enable1 = (bits & 0x02u) != 0u;
+  const bool enable2 = (bits & 0x08u) != 0u;
+  if (!enable1) return enable2 && window2;
+  if (!enable2) return window1;
+
+  // Both enabled: the logic the layer's own pair of bits names. XNOR is the
+  // inverse of XOR, which is the two agreeing.
+  switch (op) {
+    case 0u: return window1 || window2;   // OR
+    case 1u: return window1 && window2;   // AND
+    case 2u: return window1 != window2;   // XOR
+    default: return window1 == window2;   // XNOR
+  }
+}
+
+bool Ppu::masked(Layer layer, std::uint8_t maskRegister, std::uint16_t x) const noexcept {
+  // The mask register's bits run BG1, BG2, BG3, BG4, OBJ, in the order the layers
+  // are numbered, and it gates the mask rather than the window: a layer whose
+  // windows are enabled but whose bit is clear is masked nowhere.
+  const unsigned bit = 1u << static_cast<unsigned>(layer);
+  return (maskRegister & bit) != 0u && windowCovers(layer, x);
+}
+
+std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
+                                          std::uint16_t line) const noexcept {
+  // The two screens differ in which register puts layers on them and which one
+  // masks those layers. Everything below is the same for both.
+  const std::uint8_t enables = screen == Screen::Main ? s_.tm : s_.ts;
+  const std::uint8_t maskRegister = screen == Screen::Main ? s_.tmw : s_.tsw;
 
   // Mode 1 is the mode this chip draws; the others show their backdrop. Each of its
-  // three backgrounds is sampled once, and only where $212C puts it on the main
-  // screen: a layer enabled on the sub screen alone shows nowhere.
+  // three backgrounds is sampled once, and only where the screen's own register puts
+  // it there and the windows leave it: a layer this screen does not enable shows
+  // nothing here, and one the windows mask shows nothing at this dot, so the order
+  // below falls through to whatever stands behind it.
+  //
+  // The window registers are read here, at the dot they shape, and nothing about
+  // them is carried from one dot to the next — which is what lets a program move an
+  // edge part-way along a line, and what lets a transfer shape a window down the
+  // picture a line at a time.
   std::optional<Shown> bg1;
   std::optional<Shown> bg2;
   std::optional<Shown> bg3;
   if ((s_.bgmode & 0x07u) == 1u) {
-    if ((s_.tm & 0x01u) != 0u) bg1 = sample(mode1Bg1(), x, line);
-    if ((s_.tm & 0x02u) != 0u) bg2 = sample(mode1Bg2(), x, line);
-    if ((s_.tm & 0x04u) != 0u) bg3 = sample(mode1Bg3(), x, line);
+    if ((enables & 0x01u) != 0u && !masked(Layer::Bg1, maskRegister, x)) {
+      bg1 = sample(mode1Bg1(), x, line);
+    }
+    if ((enables & 0x02u) != 0u && !masked(Layer::Bg2, maskRegister, x)) {
+      bg2 = sample(mode1Bg2(), x, line);
+    }
+    if ((enables & 0x04u) != 0u && !masked(Layer::Bg3, maskRegister, x)) {
+      bg3 = sample(mode1Bg3(), x, line);
+    }
   }
 
-  // The sprite the line buffer holds here, where $212C puts sprites on the main
-  // screen. Only the topmost sprite reached the buffer, so only its priority
-  // speaks to the backgrounds. A line Time did not gather shows none.
+  // The sprite the line buffer holds here, where the screen's register puts sprites
+  // on it and the windows leave them there. Only the topmost sprite reached the
+  // buffer, so only its priority speaks to the backgrounds, and a masked sprite is
+  // masked whole — whatever the buffer holds at this dot is not consulted. A line
+  // Time did not gather shows none. One buffer serves both screens: the passes run
+  // once a line, and which screen is asking changes nothing about what they found.
   std::uint8_t spriteWord = 0u;
   std::uint8_t spritePriority = kNoSprite;
-  if ((s_.tm & 0x10u) != 0u && s_.sprites.line == line && (s_.bgmode & 0x07u) == 1u) {
+  if ((enables & 0x10u) != 0u && s_.sprites.line == line && (s_.bgmode & 0x07u) == 1u &&
+      !masked(Layer::Object, maskRegister, x)) {
     spriteWord = s_.sprites.word[x];
     spritePriority = s_.sprites.priority[x];
   }
@@ -466,8 +530,8 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
   // at tile priority 1, a sprite at 2, the same two backgrounds at tile priority 0,
   // a sprite at 1, BG3's high-priority tiles, a sprite at 0, then BG3's low —
   // except that $2105 bit 3 lifts BG3's high-priority tiles in front of everything,
-  // taking them out of the place they otherwise hold. The backdrop, palette word 0,
-  // is under them all.
+  // taking them out of the place they otherwise hold. The screen's backdrop is
+  // under them all, and is what nothing here stands for.
   const auto shows = [](const std::optional<Shown>& background, bool priority) {
     return background.has_value() && background->priority == priority;
   };
@@ -475,33 +539,102 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
     return spritePriority == priority;
   };
   const bool bg3InFront = (s_.bgmode & 0x08u) != 0u;
-  std::uint8_t word = 0u;
-  if (bg3InFront && shows(bg3, true)) {
-    word = bg3->word;
-  } else if (sprite(3u)) {
-    word = spriteWord;
-  } else if (shows(bg1, true)) {
-    word = bg1->word;
-  } else if (shows(bg2, true)) {
-    word = bg2->word;
-  } else if (sprite(2u)) {
-    word = spriteWord;
-  } else if (shows(bg1, false)) {
-    word = bg1->word;
-  } else if (shows(bg2, false)) {
-    word = bg2->word;
-  } else if (sprite(1u)) {
-    word = spriteWord;
-  } else if (!bg3InFront && shows(bg3, true)) {
-    word = bg3->word;
-  } else if (sprite(0u)) {
-    word = spriteWord;
-  } else if (shows(bg3, false)) {
-    word = bg3->word;
+  if (bg3InFront && shows(bg3, true)) return Resolved{.word = bg3->word, .layer = Layer::Bg3};
+  if (sprite(3u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
+  if (shows(bg1, true)) return Resolved{.word = bg1->word, .layer = Layer::Bg1};
+  if (shows(bg2, true)) return Resolved{.word = bg2->word, .layer = Layer::Bg2};
+  if (sprite(2u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
+  if (shows(bg1, false)) return Resolved{.word = bg1->word, .layer = Layer::Bg1};
+  if (shows(bg2, false)) return Resolved{.word = bg2->word, .layer = Layer::Bg2};
+  if (sprite(1u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
+  if (!bg3InFront && shows(bg3, true)) return Resolved{.word = bg3->word, .layer = Layer::Bg3};
+  if (sprite(0u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
+  if (shows(bg3, false)) return Resolved{.word = bg3->word, .layer = Layer::Bg3};
+  return std::nullopt;
+}
+
+bool Ppu::regionCovers(unsigned region, std::uint16_t x) const noexcept {
+  // Each of $2130's two-bit fields names where it applies against the colour
+  // window: nowhere, outside it, inside it, or everywhere. With neither of the
+  // colour window's own windows enabled nothing is inside, so "outside" covers the
+  // whole line and "inside" covers none of it, which falls out of the resolution
+  // rather than being a case of its own.
+  switch (region & 0x03u) {
+    case 1u: return !windowCovers(Layer::Colour, x);
+    case 2u: return windowCovers(Layer::Colour, x);
+    case 3u: return true;
+    default: return false;
+  }
+}
+
+std::uint16_t Ppu::paletteColour(std::uint8_t word) const noexcept {
+  const std::size_t at = static_cast<std::size_t>(word) << 1;
+  return static_cast<std::uint16_t>(s_.cgram[at] | (s_.cgram[at + 1u] << 8));
+}
+
+std::uint16_t Ppu::fixedColour() const noexcept {
+  // $2132 keeps its three channels apart, five bits each, in the order a colour
+  // word holds them.
+  return static_cast<std::uint16_t>(s_.fixedRed | (s_.fixedGreen << 5) |
+                                    (s_.fixedBlue << 10));
+}
+
+std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) const noexcept {
+  // Forced blank drives black, whatever the memories hold.
+  if (s_.forcedBlank()) return {0u, 0u, 0u, 255u};
+
+  // The front-most pixel of the main screen, and the colour it stands for — unless
+  // $2130's upper region covers this position, which replaces that colour with
+  // black before any arithmetic and is remembered, because a pixel clipped this way
+  // is not halved afterwards.
+  const std::optional<Resolved> main = resolve(Screen::Main, x, line);
+  const bool clipped = regionCovers((s_.cgwsel >> 6) & 0x03u, x);
+  const std::uint16_t mainColour =
+      clipped ? 0u : paletteColour(main.has_value() ? main->word : 0u);
+
+  // Whether this pixel takes math: $2131 keeps a bit for each of the six things the
+  // main screen can show, the backdrop included, and $2130's lower region can
+  // prevent it over part of the line. A sprite is the exception the layer bit alone
+  // does not cover — only palettes 4 to 7 take math, which is a word of 192 or
+  // above, and a sprite from any palette below that never does whatever bit 4 says.
+  const unsigned layerBit = main.has_value() ? static_cast<unsigned>(main->layer) : 5u;
+  const bool spriteRefuses =
+      main.has_value() && main->layer == Layer::Object && main->word < 192u;
+  const bool maths = (s_.cgadsub & (1u << layerBit)) != 0u && !spriteRefuses &&
+                     !regionCovers((s_.cgwsel >> 4) & 0x03u, x);
+  if (!maths) return convert(mainColour);
+
+  // The addend. $2130 bit 1 clear names the fixed colour, and half applies to it as
+  // bit 6 asks; set, it names the front-most pixel of the sub screen — and where
+  // the sub screen shows nothing there, its backdrop is the fixed colour and half
+  // is not applied. The two paths reach the same colour by different arithmetic,
+  // which is why the exception is worth stating rather than folding together.
+  const bool fromSubScreen = (s_.cgwsel & 0x02u) != 0u;
+  std::uint16_t addend = fixedColour();
+  bool subBackdrop = true;
+  if (fromSubScreen) {
+    const std::optional<Resolved> sub = resolve(Screen::Sub, x, line);
+    subBackdrop = !sub.has_value();
+    if (sub.has_value()) addend = paletteColour(sub->word);
   }
 
-  const std::size_t at = static_cast<std::size_t>(word) << 1;
-  return convert(static_cast<std::uint16_t>(s_.cgram[at] | (s_.cgram[at + 1u] << 8)));
+  // Five bits a channel, added or subtracted, halved where bit 6 asks and neither
+  // exception forbids it, then held to the range a channel has. The halving comes
+  // before that hold and is observable there: two full channels added and halved
+  // are full, not half.
+  const bool subtract = (s_.cgadsub & 0x80u) != 0u;
+  const bool halve =
+      (s_.cgadsub & 0x40u) != 0u && !clipped && !(fromSubScreen && subBackdrop);
+  const auto channel = [&](unsigned shift) {
+    const unsigned above = (mainColour >> shift) & 0x1Fu;
+    const unsigned below = (addend >> shift) & 0x1Fu;
+    unsigned value = subtract ? (above > below ? above - below : 0u) : above + below;
+    if (halve) value >>= 1;
+    return static_cast<std::uint16_t>(value > 31u ? 31u : value);
+  };
+  const auto mathed = static_cast<std::uint16_t>(channel(0u) | (channel(5u) << 5) |
+                                                 (channel(10u) << 10));
+  return convert(mathed);
 }
 
 // ---- the write-twice latches -------------------------------------------------

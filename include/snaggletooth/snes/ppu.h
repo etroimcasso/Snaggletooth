@@ -363,6 +363,54 @@ class Ppu {
   [[nodiscard]] std::size_t spriteCharacter(const Sprite& sprite, unsigned column,
                                             unsigned row) const noexcept;
 
+  // The six things a window can be enabled for. Each keeps four bits of a window
+  // selector — two enables and two inversions — and two bits of a logic register,
+  // and the first five have a bit of this value in the two mask registers. The
+  // colour window has none: it feeds colour math and no layer's visibility.
+  enum class Layer : unsigned { Bg1 = 0u, Bg2 = 1u, Bg3 = 2u, Bg4 = 3u, Object = 4u, Colour = 5u };
+
+  // Whether the windows cover a picture position for one layer. Each window is the
+  // span its two edges name, both ends inclusive and empty where the left edge
+  // stands past the right, taken as written or inverted as the layer's own bits
+  // direct. Where the layer enables both, they are combined by the logic its two
+  // bits of $212A or $212B name; where it enables one, that window is the answer;
+  // where it enables neither, nothing is covered.
+  [[nodiscard]] bool windowCovers(Layer layer, std::uint16_t x) const noexcept;
+
+  // Whether a layer shows nothing at a picture position on the screen whose mask
+  // register this is: the windows cover the position and that register names the
+  // layer. The backdrop has no bit in either register and is never masked.
+  [[nodiscard]] bool masked(Layer layer, std::uint8_t maskRegister,
+                            std::uint16_t x) const noexcept;
+
+  // Which of the two screens a resolution is for. They differ in the register
+  // that puts layers on them and the register that masks those layers, and in
+  // nothing else: the same order decides both.
+  enum class Screen : unsigned { Main, Sub };
+
+  // What a screen shows at a picture position — the palette word and the layer it
+  // came from, which is what decides whether colour math reaches it. Nothing at
+  // all is that screen's backdrop: palette word 0 on the main screen, and the
+  // fixed colour on the sub screen, which has no word of its own.
+  struct Resolved {
+    std::uint8_t word;
+    Layer layer;
+  };
+
+  // The front-most pixel of one screen, by the order Mode 1 keeps, each layer
+  // taken only where that screen enables it and the windows leave it there.
+  [[nodiscard]] std::optional<Resolved> resolve(Screen screen, std::uint16_t x,
+                                                std::uint16_t line) const noexcept;
+
+  // Whether one of $2130's two-bit regions covers a picture position: 0 nowhere,
+  // 1 outside the colour window, 2 inside it, 3 everywhere. The colour window is
+  // the sixth thing a window can be enabled for and feeds these two fields alone.
+  [[nodiscard]] bool regionCovers(unsigned region, std::uint16_t x) const noexcept;
+
+  // The 15-bit colour a palette word names, and the one $2132 holds.
+  [[nodiscard]] std::uint16_t paletteColour(std::uint8_t word) const noexcept;
+  [[nodiscard]] std::uint16_t fixedColour() const noexcept;
+
   // The three backgrounds Mode 1 draws, each with the registers it reads.
   [[nodiscard]] Background mode1Bg1() const noexcept;
   [[nodiscard]] Background mode1Bg2() const noexcept;
