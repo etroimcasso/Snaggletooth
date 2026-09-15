@@ -16,12 +16,16 @@ shelling out to the tool.
 | [`examples/`](examples/README.md) | — (header-only) | `snes_examples` | one README per cartridge |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 | [`video/`](video/README.md) | `snaggletooth_video` | — | [ppu.md](../docs/ppu.md) |
-| [`player/`](player/README.md) | — | `snes_player` | [ppu.md](../docs/ppu.md), [input-script.md](../docs/input-script.md) |
+| [`player/`](player/README.md) | `snaggletooth_player_pads` | `snes_player` | [ppu.md](../docs/ppu.md), [pad-config.md](../docs/pad-config.md), [input-script.md](../docs/input-script.md) |
 | [`inputs/`](inputs/README.md) | — (data) | — | [input-script.md](../docs/input-script.md) |
 
 `inputs/` is the one directory here that holds no code: the recorded runs the
 tools replay, and the `default.snaginput` that plays a cartridge with no run of
 its own, so `--input-dir tools/inputs` plays a whole library.
+
+`player/` carries a library as well as its command: `snaggletooth_player_pads`
+turns a keyboard and a controller into the buttons a port holds, and opens no
+device of its own, so it is tested wherever the suite is.
 
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
 cartridges through four commands, one image at a time or `--jobs` of them at

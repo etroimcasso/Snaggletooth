@@ -890,6 +890,83 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
 
 // ---- the controller ports -----------------------------------------------------
 
+namespace {
+
+// The twelve, in the order the pad shifts them out, which is the order the Button
+// values themselves run in — so a button indexes this table directly.
+constexpr std::array<Button, kButtonCount> kButtonOrder{
+    Button::B,  Button::Y,    Button::Select, Button::Start,
+    Button::Up, Button::Down, Button::Left,   Button::Right,
+    Button::A,  Button::X,    Button::L,      Button::R,
+};
+
+constexpr std::array<std::string_view, kButtonCount> kButtonNames{
+    "b", "y", "select", "start", "up", "down", "left", "right", "a", "x", "l", "r",
+};
+
+constexpr char lowered(char c) noexcept {
+  return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
+}  // namespace
+
+std::span<const Button> buttons() noexcept { return kButtonOrder; }
+
+std::string_view buttonName(Button button) noexcept {
+  return kButtonNames[static_cast<std::size_t>(button)];
+}
+
+std::optional<Button> buttonFromName(std::string_view name) noexcept {
+  for (std::size_t i = 0; i < kButtonCount; ++i) {
+    const std::string_view candidate = kButtonNames[i];
+    if (candidate.size() != name.size()) continue;
+    bool same = true;
+    for (std::size_t c = 0; c < name.size(); ++c) {
+      if (lowered(name[c]) != candidate[c]) {
+        same = false;
+        break;
+      }
+    }
+    if (same) return kButtonOrder[i];
+  }
+  return std::nullopt;
+}
+
+bool Joypad::holds(Button button) const noexcept {
+  switch (button) {
+    case Button::B: return b;
+    case Button::Y: return y;
+    case Button::Select: return select;
+    case Button::Start: return start;
+    case Button::Up: return up;
+    case Button::Down: return down;
+    case Button::Left: return left;
+    case Button::Right: return right;
+    case Button::A: return a;
+    case Button::X: return x;
+    case Button::L: return l;
+    case Button::R: return r;
+  }
+  return false;
+}
+
+void Joypad::hold(Button button, bool pressed) noexcept {
+  switch (button) {
+    case Button::B: b = pressed; return;
+    case Button::Y: y = pressed; return;
+    case Button::Select: select = pressed; return;
+    case Button::Start: start = pressed; return;
+    case Button::Up: up = pressed; return;
+    case Button::Down: down = pressed; return;
+    case Button::Left: left = pressed; return;
+    case Button::Right: right = pressed; return;
+    case Button::A: a = pressed; return;
+    case Button::X: x = pressed; return;
+    case Button::L: l = pressed; return;
+    case Button::R: r = pressed; return;
+  }
+}
+
 std::uint16_t Joypad::bits() const noexcept {
   // The wire order, first bit highest: B Y Select Start Up Down Left Right A X L R,
   // then the four identity bits, zero for a standard pad.

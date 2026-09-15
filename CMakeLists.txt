@@ -372,6 +372,45 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
     target_compile_options(snaggletooth_rom PRIVATE -Wall -Wextra -Werror)
   endif()
 
+  # The pad library — turning what a person holds into what a controller port holds.
+  # It opens no device and makes no windowing-library call, so it builds and is tested
+  # wherever the suite is, whether or not the player itself is being built.
+  add_library(snaggletooth_player_pads STATIC
+    tools/player/pads.cpp
+    tools/player/pad_config.cpp
+  )
+  # The shipped configuration is embedded as the built-in default, read at configure
+  # time so the file and the default cannot say different things. Editing the file
+  # re-configures; nothing generated is committed.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/player/default.snagpad")
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tools/player/default.snagpad" SNAGGLETOOTH_DEFAULT_SNAGPAD)
+  file(CONFIGURE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/player/default_snagpad.h"
+    CONTENT "#pragma once
+
+// The shipped tools/player/default.snagpad, as the text the player parses when it is
+// handed no configuration of its own. Written at configure time from that file, so
+// the two are one thing.
+
+namespace snaggletooth::player {
+
+inline constexpr const char* kDefaultPadConfig = R\"SNAGPAD(${SNAGGLETOOTH_DEFAULT_SNAGPAD})SNAGPAD\";
+
+}  // namespace snaggletooth::player
+")
+
+  target_link_libraries(snaggletooth_player_pads PUBLIC snaggletooth_rom)
+  target_include_directories(snaggletooth_player_pads PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>)
+  target_compile_features(snaggletooth_player_pads PUBLIC cxx_std_20)
+  set_target_properties(snaggletooth_player_pads PROPERTIES CXX_EXTENSIONS OFF)
+  if(MSVC)
+    target_compile_options(snaggletooth_player_pads PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snaggletooth_player_pads PRIVATE -Wall -Wextra -Werror)
+  endif()
+
   # The lockstep — the interpreter held to one step of the machine: the observer
   # that collects a step, the bus that answers the interpreter with what the
   # machine read and checks every access, and the register and cycle checks
@@ -486,17 +525,18 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
     set(SDL_AUDIO        ON  CACHE BOOL "" FORCE)  # the player puts the run's sound out as it runs
     set(SDL_CAMERA       OFF CACHE BOOL "" FORCE)
     set(SDL_HAPTIC       OFF CACHE BOOL "" FORCE)
-    set(SDL_JOYSTICK     OFF CACHE BOOL "" FORCE)  # the run is driven by a script
+    set(SDL_JOYSTICK     ON  CACHE BOOL "" FORCE)  # the gamepad API a live run reads its pads through
     set(SDL_POWER        OFF CACHE BOOL "" FORCE)
     set(SDL_DIALOG       OFF CACHE BOOL "" FORCE)
     add_subdirectory(third_party/sdl EXCLUDE_FROM_ALL SYSTEM)
   endif()
 
   add_executable(snes_player tools/player/snes_player_main.cpp)
-  # The cartridge tools reach the .spc tooling — and so the WAV writer — publicly, so
-  # the player takes it through them; naming it again is a duplicate the Apple linker
-  # reports.
-  target_link_libraries(snes_player PRIVATE snaggletooth_rom snaggletooth_video SDL3::SDL3)
+  # The pad library reaches the cartridge tools publicly, which reach the .spc tooling
+  # and so the WAV writer; the player takes all of it through that one link. Naming any
+  # of them again is a duplicate the Apple linker reports.
+  target_link_libraries(snes_player PRIVATE
+    snaggletooth_player_pads snaggletooth_video SDL3::SDL3)
   # SDL_MAIN_HANDLED stops SDL's headers redefining main; the tool calls SDL_SetMainReady
   # before SDL_Init, so it keeps a plain main() of its own.
   target_compile_definitions(snes_player PRIVATE SDL_MAIN_HANDLED)
@@ -646,6 +686,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/formats/samples_test.cpp
     tests/formats/reader_test.cpp
     tests/tools/avi_test.cpp
+    tests/tools/player_test.cpp
   )
   # The differential links the representation and the cartridge tools publicly,
   # which link the library and both chip backends publicly and the codecs
@@ -657,6 +698,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   # itself; everything else arrives through the differential.
   target_link_libraries(snaggletooth_tests PRIVATE
     snaggletooth_ir_differential
+    snaggletooth_player_pads
     snaggletooth_video
     GTest::gtest_main
   )

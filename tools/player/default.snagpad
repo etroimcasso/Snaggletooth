@@ -1,0 +1,56 @@
+# The player's input configuration, and the one it uses when you do not hand it
+# another. Copy it, change what you want, and pass it with --config:
+#
+#     snes_player --default-config > mine.snagpad
+#     snes_player <image> --config mine.snagpad
+#
+# Every pad is read by WHERE ITS BUTTONS SIT rather than by the letters printed on
+# them, because the letters move between families and the positions do not: the
+# button under your thumb at the south position is the machine's B on every pad
+# ever made. The one exception is at the bottom of this file.
+
+[keyboard]
+port = 1
+b = z
+a = x
+y = a
+x = s
+l = q
+r = w
+start = return
+select = right shift
+up = up
+down = down
+left = left
+right = right
+
+[gamepad]
+port = auto
+b = south
+a = east
+y = west
+x = north
+l = left shoulder
+r = right shoulder
+start = start
+select = back
+up = dpad up, left stick up
+down = dpad down, left stick down
+left = dpad left, left stick left
+right = dpad right, left stick right
+
+# The GameCube pad prints the same four letters the machine does, in the same
+# places, so it is the one family read by its letters instead of its positions.
+# L and R are its analog triggers; Z sits where a right shoulder does and is left
+# alone. Everything this section does not name it takes from the one above.
+[gamepad gamecube]
+a = a
+b = b
+x = x
+y = y
+l = left trigger
+r = right trigger
+
+# Where later functions will bind. This release defines none, and a key here is
+# refused rather than quietly ignored.
+[hotkeys]

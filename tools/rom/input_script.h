@@ -22,10 +22,12 @@
 namespace snaggletooth::disasm {
 
 // One line of a script: from `frame` on, `port` holds exactly the buttons in
-// `pad`.
+// `pad` — or has no controller in it at all, which is what `plugged` false says.
+// `pad` is nothing pressed on a line that says the port is empty.
 struct InputEvent {
   std::uint32_t frame = 0;
   JoypadPort port = JoypadPort::One;
+  bool plugged = true;
   Joypad pad;
 };
 
@@ -33,13 +35,25 @@ struct InputEvent {
 struct InputScript {
   std::vector<InputEvent> events;
 
-  // Whether the script names `port` anywhere — that is, whether the port has a pad.
+  // Whether the script names `port` anywhere. A port it names is a port it says
+  // something about, which may be that nothing is plugged into it.
   [[nodiscard]] bool names(JoypadPort port) const noexcept;
 
-  // What `port` holds at `frame`: the last line at or before it, nothing pressed
-  // before the first, and no pad at all on a port the script never names.
+  // What `port` holds at `frame`: the last line at or before it, and before the
+  // first line, nothing pressed — with a controller exactly when that first line
+  // has one. A port the script never names has no controller at any frame.
   [[nodiscard]] std::optional<Joypad> padAt(JoypadPort port, std::uint32_t frame) const noexcept;
 };
+
+// A script as text, in the one form this writes: a `frame <n> <port> <buttons>`
+// line per event in event order, buttons in the order the pad shifts them out,
+// `none` for a controller with nothing pressed and `unplugged` for a port with no
+// controller, lower case, single spaces, a newline after every line, no comments.
+//
+// Two laws hold over it, and the suite pins both: parsing what this writes
+// presents the same controller on every port at every frame as the script it was
+// given, and writing that parse back is byte for byte the same text.
+[[nodiscard]] std::string writeInputScript(const InputScript& script);
 
 // Reads a script. Nothing, with `error` naming the line and what is wrong with
 // it, when a line does not parse: a frame out of order, a port named twice on

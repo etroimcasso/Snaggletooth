@@ -6,9 +6,12 @@
 // states them. Programs run from the cartridge and store what they read into work
 // RAM; the auto-read is observed on the machine state after a run of exact length.
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -82,6 +85,50 @@ TEST(SnesController, TheBitsFollowTheWireOrder) {
   const Joypad all{.b = true, .y = true, .select = true, .start = true, .up = true, .down = true,
                    .left = true, .right = true, .a = true, .x = true, .l = true, .r = true};
   EXPECT_EQ(all.bits(), 0xFFF0u) << "the identity bits of a standard pad are zero";
+}
+
+TEST(SnesController, TheButtonSetIsTheWireOrder) {
+  ASSERT_EQ(buttons().size(), kButtonCount);
+  EXPECT_EQ(buttons().front(), Button::B) << "B is the first bit on the wire";
+  EXPECT_EQ(buttons().back(), Button::R) << "R is the twelfth";
+  // The set and the wire layout cannot drift apart: the Nth button of the set is
+  // the Nth bit the pad shifts out, which the layout above pins independently.
+  for (std::size_t i = 0; i < kButtonCount; ++i) {
+    Joypad pad;
+    pad.hold(buttons()[i], true);
+    EXPECT_EQ(pad.bits(), static_cast<std::uint16_t>(0x8000u >> i)) << buttonName(buttons()[i]);
+  }
+}
+
+TEST(SnesController, EveryButtonIsNamedAndReadBackInAnyCase) {
+  for (const Button button : buttons()) {
+    const std::string_view name = buttonName(button);
+    EXPECT_FALSE(name.empty());
+    EXPECT_EQ(buttonFromName(name), button) << name;
+    std::string shouted(name);
+    for (char& c : shouted) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    EXPECT_EQ(buttonFromName(shouted), button) << shouted;
+  }
+  EXPECT_EQ(buttonName(Button::B), "b");
+  EXPECT_EQ(buttonName(Button::Select), "select");
+  EXPECT_EQ(buttonName(Button::R), "r");
+  EXPECT_FALSE(buttonFromName("fire").has_value()) << "a word that names no button";
+  EXPECT_FALSE(buttonFromName("").has_value());
+  EXPECT_FALSE(buttonFromName("bb").has_value()) << "a longer word beginning with one";
+}
+
+TEST(SnesController, AButtonIsHeldAndReleasedByName) {
+  for (const Button button : buttons()) {
+    Joypad pad;
+    EXPECT_FALSE(pad.holds(button)) << buttonName(button);
+    pad.hold(button, true);
+    for (const Button other : buttons()) {
+      EXPECT_EQ(pad.holds(other), other == button)
+          << buttonName(other) << " while " << buttonName(button) << " is held";
+    }
+    pad.hold(button, false);
+    EXPECT_EQ(pad, Joypad{}) << "releasing it leaves nothing pressed";
+  }
 }
 
 // ---- the auto-read ----------------------------------------------------------------

@@ -30,7 +30,9 @@ takes `--input <file>` instead and names the script directly.
 ## Adding one
 
 A cartridge that needs a run of its own gets a file named for it beside this one,
-written by hand to the grammar. **A script named for a commercial cartridge stays
+written by hand to the grammar — or recorded: `snes_player <image> --out <dir>`
+writes the run you just played as `<image>.snaginput`, which is the easy way to get
+a script that reaches somewhere a hand-written one would take all day to describe. **A script named for a commercial cartridge stays
 out of the repository**: the name identifies the image, and no title is named in a
 tracked file. Keep those in a local directory of your own and point `--input-dir`
 at it; a directory of your own that also holds a copy of `default.snaginput`
