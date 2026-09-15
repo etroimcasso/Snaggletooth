@@ -19,6 +19,7 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 - [The sprites](#the-sprites)
 - [The masking windows](#the-masking-windows)
 - [Writes and their latches](#writes-and-their-latches)
+- [The sub screen and colour math](#the-sub-screen-and-colour-math)
 - [The memories and their windows](#the-memories-and-their-windows)
 - [The multiplier](#the-multiplier)
 - [The counter latch](#the-counter-latch)
@@ -168,10 +169,10 @@ integers. Brightness 0 is the screen off, and forced blank is black; both give a
 frame rather than no frame.
 
 **What is not drawn yet**, so a reader does not go looking for it: BG4, which Mode 1 does not have,
-so `$212C` bit 3 shows nothing; the sub screen, so a layer enabled only on `$212D` shows nowhere;
-colour math; mosaic; and every mode but 1, which show their backdrop and their sprites nowhere. Each
-arrives with its own work. The windows that take layers away are drawn, and have [their own
-section](#the-masking-windows).
+so `$212C` bit 3 shows nothing; mosaic; and every mode but 1, which show their backdrop and their
+sprites nowhere. Each arrives with its own work. The windows that take layers away are drawn, and
+have [their own section](#the-masking-windows); so are the sub screen and colour math, which have
+[theirs](#the-sub-screen-and-colour-math).
 
 ## The sprites
 
@@ -331,6 +332,49 @@ a write stores its low five bits into each channel whose select bit (5, 6, 7) is
 The OAM address (`$2102`/`$2103`), the VRAM port control and address (`$2115`–`$2117`) and the
 palette address (`$2121`) behave as described under the machine's
 [video memory ports](snes-machine.md#the-ppu-register-file).
+
+## The sub screen and colour math
+
+`$212D` puts layers on the **sub screen** exactly as `$212C` puts them on the main one, and `$212F`
+masks them with the windows exactly as `$212E` does. **The sub screen is never shown by itself.** A
+layer enabled only there draws nowhere; it exists so that colour math has something to reach for.
+Its front-most pixel is found by the same order the main screen uses, sprites included — and where
+it shows nothing, **its backdrop is the fixed colour `$2132` holds**, not palette word 0.
+
+Colour math takes the main screen's pixel and one addend, a channel at a time, five bits each.
+
+**`$2131` decides the arithmetic.** Bit 7 subtracts rather than adds. Bits 5-0 name which of the six
+things the main screen can show the math reaches — BG1, BG2, BG3, BG4, the sprites, the backdrop — by
+the layer the front-most main pixel came from. **A sprite takes math only from palettes 4 to 7**;
+one drawn from a lower palette never does, whatever bit 4 says. Bit 6 halves the result, and the
+halving happens **before** the channel is held to 0–31, which is observable: two full channels added
+and halved are full, not half.
+
+**`$2130` decides where, and with what.** Bit 1 selects the addend: clear, the fixed colour; set, the
+sub screen's front-most pixel. Bits 7-6 replace the main colour with black before the arithmetic, and
+bits 5-4 prevent the arithmetic entirely; each is a two-bit region named against the **colour
+window** — 0 nowhere, 1 outside it, 2 inside it, 3 everywhere. The two are independent: a pixel can
+be blacked and still mathed, which lands the addend on black.
+
+The colour window is the sixth thing a window can be enabled for, in the high nibble of `$2125` with
+its logic in bits 3-2 of `$212B`. It is not gated by `$212E` or `$212F` — it feeds these two regions
+and nothing else. With neither of its windows enabled nothing is inside it, so a region of "outside"
+covers the whole line and one of "inside" covers none of it.
+
+**Two things escape the halving**, both of them worth knowing before a picture comes out at the wrong
+brightness:
+
+- a main pixel that bits 7-6 replaced with black, and
+- the addend where bit 1 asks for the sub screen and the sub screen shows nothing there, so its
+  backdrop is the fixed colour. Asking for the fixed colour directly, with bit 1 clear, halves
+  normally — the two paths reach the same colour by different arithmetic.
+
+Everything above is read at the dot it shapes, so a program that drives these registers once a line
+gets a picture that changes down the screen, and nothing is carried from one position to the next.
+
+Brightness is applied last, to the result. The evidence behind the two exemptions, and the one place
+the published documents and a reference emulator disagree, is in
+[`ppu-behavior.md`](ppu-behavior.md#colour-math).
 
 ## The memories and their windows
 

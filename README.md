@@ -117,7 +117,14 @@ Each row links to the page that describes the component in full.
 - **The register file is complete beneath it.** Every write with its latches, every read with its
   open bus, the multiplier, the H/V counter latch, the status registers, and the windows in which
   each video memory can be reached.
-- **Not yet:** the sub screen and colour math, mosaic, and every mode but 1 — see the
+- **The sub screen and colour math.** `$212D` puts layers on a second screen that is never shown by
+  itself; colour math adds it, or the fixed colour, to the main screen's pixel — per channel, with
+  an operator, an optional halving that happens before the channel is held to its range, and a bit
+  for each of the six things the main screen can show. `$2130`'s two regions force the main colour
+  black and prevent the math, each named against a sixth window of its own. Sprites take math only
+  from the upper four palettes — a rule a shipped cartridge in the library depends on to render
+  correctly.
+- **Not yet:** mosaic and every mode but 1 — see the
   [roadmap](#roadmap).
 
 ### The toolkit
@@ -277,7 +284,8 @@ Snaggletooth is built audio-first:
 
 The PPU is the piece under way, and it draws: a cartridge runs in a window with the whole of its
 Mode 1 picture on screen, its sprites over it under the counts the chip can afford, the masking
-windows taking layers away where a program puts them, recorded as it runs. The rest of the picture —
+windows taking layers away where a program puts them, the sub screen and the colour math over it,
+recorded as it runs. The rest of the picture —
 the sub screen and colour math, mosaic, and the other screen modes — follows in order. After it, the machine is taken through the range of cartridge types until they
 boot, and
 the DSP returns to close out its three sub-tests with the wider body of real software available to

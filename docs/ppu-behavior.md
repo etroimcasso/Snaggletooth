@@ -26,6 +26,12 @@ disagree it names the disagreement and what decided it.
 - [The priority order](#the-priority-order)
   - [Only BG3's high-priority tiles move when $2105 bit 3 is set](#only-bg3s-high-priority-tiles-move-when-2105-bit-3-is-set)
   - [Mode 1 gives no background a palette offset of its own](#mode-1-gives-no-background-a-palette-offset-of-its-own)
+- [The windows](#the-windows)
+  - [fullsnes prints the window-area field values off by one](#fullsnes-prints-the-window-area-field-values-off-by-one)
+- [Colour math](#colour-math)
+  - [Colour math does not consult the sub screen pixel's priority](#colour-math-does-not-consult-the-sub-screen-pixels-priority)
+  - [The halving happens before the range is held, and the sub-screen backdrop is exempt](#the-halving-happens-before-the-range-is-held-and-the-sub-screen-backdrop-is-exempt)
+  - [A force-blacked main pixel is not also halved](#a-force-blacked-main-pixel-is-not-also-halved)
 - [The picture's edges](#the-pictures-edges)
   - [The console outputs no scanline 0](#the-console-outputs-no-scanline-0)
   - [Where the visible span ends is not settled by the documents](#where-the-visible-span-ends-is-not-settled-by-the-documents)
@@ -71,6 +77,14 @@ what a claim rests on.
 | Anomie's SNES Timing Doc | Cross-check for the beam and the per-line event offsets. |
 | The staged PPU test ROMs | **Arbiter**, where one exercises the question. |
 | Commercial cartridges run on the machine | Arbiter of last resort: software written for the hardware, drawing what its authors saw. |
+| Cartridges written here for one question | **Arbiter**, where no document answers and no existing ROM asks. A picture whose colours state the answer, paired with a control image that must come out the other way — because a result every cell agrees on is also what an instrument that cannot register a negative would produce. |
+| Mesen | A reference implementation, and the usual first reading of a cartridge written here. Not decisive on its own: it is the outlier on the colour-math halving below. |
+| bsnes | A second reference implementation, of a separate lineage. Where it and Mesen agree the reading is strong; where they differ the question is open until silicon answers. |
+| snes9x | A third, independent of both. Not accuracy-first, so it does not carry a question alone — but it breaks a tie between the other two, which is what it did for the colour-math halving below. |
+| The Analogue Super NT | Corroboration only, and weak. It is an FPGA reconstruction that **fails every Blargg test ROM**, so it does not carry a fine-grained behavioral question. Useful where a result is categorical — a picture that is entirely one colour or entirely another — and not otherwise. |
+
+Neither of those is original silicon. An observation from the console itself outranks both, and is
+named as the tiebreaker wherever one of them decided a question below.
 
 ---
 
@@ -260,6 +274,117 @@ the other direction: its four-colour BG palettes live at `01h-1Fh` for every bac
 BG2–BG4 in Mode 0, which are the ones given ranges of their own.
 
 *Documented and corroborated*, by two sources that state it in opposite forms.
+
+## The windows
+
+### fullsnes prints the window-area field values off by one
+
+Each layer holds four bits of a window selector: an enable and an inversion for each of the two
+windows. fullsnes assigns those bits correctly — the inversion below the enable for each window —
+and then prints the field's values as `(0..1=Disable, 1=Inside, 2=Outside)`, which does not follow
+from its own bit assignment and does not agree with anomie or the register page.
+
+Read as bits, the two-bit field is: `0` and `1` disabled, `2` enabled and not inverted, `3` enabled
+and inverted. Read as fullsnes prints it, `1` is "inside" — but `1` has the enable bit clear.
+
+*Documented but contested, decided by a cartridge that had to come out right.* Final Fantasy III
+masks the outer eight pixels of each side of its picture. Its registers are `w12sel = $33` with
+`wh0 = 8` and `wh1 = 247`, and under the bit reading that decodes to window 1 enabled and inverted
+for BG1 and BG2 — everything outside the span `[8, 247]`, which is exactly columns 0–7 and 248–255.
+No other reading of the nibble produces the picture the game is known to draw. **Built as bits.**
+
+## Colour math
+
+### Colour math does not consult the sub screen pixel's priority
+
+fullsnes states that math occurs *"only if the front-most Sub Screen pixel has same or higher (XXX
+or is it same or lower — or is it ANY priority?) priority than the Main Screen pixel"* — with the
+author's own `XXX` inside the sentence. It names three mutually exclusive readings and commits to
+none. Anomie's numbered rendering steps carry no such condition, and neither does the register page;
+anomie's worked colour-math example maths a BG1-over-BG2 main screen against a sub screen of a
+*different* background without mentioning their relative priorities, which is the one place the
+condition would have to appear if it existed.
+
+Nothing in the documentation settles it, and choosing one of three readings would be inventing a
+direction their author did not know. So it was measured.
+
+*Documented but contested, decided by a cartridge written for this question.* The cartridge draws a
+grid of ten cells. Every cell adds the same main-screen pixel to a sub-screen pixel, with the two
+colours chosen so the result states the answer: the main screen is red, every sub-screen source is
+green, the operation is a plain add with no halving and no clipping, so a cell that mathed is yellow
+and one that did not is red. Down the picture, two bands vary the main pixel — BG1 at tile priority
+1, then BG1 at tile priority 0. Across it, five columns vary the sub pixel: BG2 at tile priority 1,
+BG2 at 0, BG3 at 1, BG3 at 0, and nothing at all, which leaves the sub screen's backdrop and carries
+no priority of any kind. The two backgrounds sit at four different places in the mode's order and
+carry both values of the tile-priority bit between them, so a rule reading the bit and a rule reading
+the position in the order would not produce the same picture.
+
+**Every one of the ten cells mathed**, on both implementations it was run on. A control image — the
+same picture with `$2131` reaching no layer — drew all ten red on both, so the grid does register a
+negative and an all-yellow result is not an artifact of a picture that can only draw yellow.
+
+So math is decided by the main pixel's layer, the two `$2130` regions and the `$2131` enables. **The
+sub screen pixel's priority is not consulted, and neither is the question of whether it has one.**
+
+This is a categorical result — ten cells of one colour, then ten of the other — which is not
+something a display setting or a timing difference can produce. Neither implementation is original
+silicon, so an observation from the console itself would outrank it.
+
+### The halving happens before the range is held, and the sub-screen backdrop is exempt
+
+Both sources agree that `$2131` bit 6 halves the result and that the halving comes before the
+channel is held to 0–31, which is observable: two full channels added and halved are full, not half.
+
+*Documented and corroborated, and confirmed by measurement* — the arithmetic is otherwise derived
+from one reading of two documents, which is the kind of claim that agrees with itself and with
+nothing real. A cartridge draws seven bands, each under its own `$2130`/`$2131` pair, and across each
+band a thirty-two step ramp of the main colour against a fixed addend of 16, so a band's ramp shape
+states its answer. The addition, the subtraction, both with and without halving, and the clamping at
+either end all came out as the documents describe.
+
+**The sub-screen backdrop is exempt from the halving.** Where `$2130` bit 1 asks for the sub screen
+as addend and the sub screen shows nothing at that position, its backdrop is the fixed colour and the
+halving is not applied — whereas asking for the fixed colour directly, with bit 1 clear, does halve.
+The band asking for the sub screen with halving on and nothing on the sub screen draws **the same
+ramp as the band that adds without halving**, not the same as the band that adds and halves; those
+two differ by one bit of `$2130` and have identical `$2131`, so if the halving applied to both they
+would be one picture. Read as a comparison *within* one frame, which settles it without depending on
+absolute colour.
+
+### A force-blacked main pixel is not also halved
+
+*Documented, corroborated, and confirmed against an independent implementation.* Both documents say
+the halving does not apply. One reimplementation applies it and is the outlier.
+
+- **anomie**, at `$2131`: *"Half color math. When set, the result of the color math is divided by 2
+  (except when $2130 bit 1 is set and the fixed color is used, or when color is cliped)."* He states
+  it twice more in the window section — *"the only difference is that half math will not occur"* and
+  *"whether the pixel colors (and half-math) will be clipped"*.
+- **fullsnes**: *"Half-Color (Bit6): Ignored if 'Force Main Screen Black' is used"*, and again —
+  *"color addition can be still applied (but, with the 'Div2' not being applied)"*.
+- **bsnes** does **not** halve it, agreeing with both documents.
+- **snes9x** does **not** halve it either — a third codebase, independent of bsnes and of both
+  documents' authors.
+- **Mesen** halves it, and stands alone.
+
+The cartridge that separates them draws four flat stripes — the unknown, a reference at full
+strength, a reference at half, and a black control — so the reading is which two stripes match
+rather than a judgement of shade. On bsnes the unknown matches the full-strength reference; on Mesen
+it matches the half.
+
+The two documents are not independent of each other — fullsnes credits anomie, so they may carry one
+observation rather than two. What settles the balance is the implementations: bsnes and snes9x share
+no lineage with each other or with either document's author, and all of them reach the same
+behaviour. One implementation differing from two documents and two independent codebases is the
+ordinary shape of a bug in that implementation.
+
+**What is built:** the halving is **not** applied to a forced-black pixel.
+
+**What would settle it:** a commercial cartridge that forces part of the main screen black while
+asking for the halving, photographed on a real console — the picture its authors shipped, drawn by
+the silicon they wrote for. Failing that, the console running a cartridge written for the question.
+Neither implementation is silicon, so that observation would still outrank this — but the reading
+here is no longer a choice made under disagreement.
 
 ## The picture's edges
 

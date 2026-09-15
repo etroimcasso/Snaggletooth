@@ -383,6 +383,34 @@ class Ppu {
   [[nodiscard]] bool masked(Layer layer, std::uint8_t maskRegister,
                             std::uint16_t x) const noexcept;
 
+  // Which of the two screens a resolution is for. They differ in the register
+  // that puts layers on them and the register that masks those layers, and in
+  // nothing else: the same order decides both.
+  enum class Screen : unsigned { Main, Sub };
+
+  // What a screen shows at a picture position — the palette word and the layer it
+  // came from, which is what decides whether colour math reaches it. Nothing at
+  // all is that screen's backdrop: palette word 0 on the main screen, and the
+  // fixed colour on the sub screen, which has no word of its own.
+  struct Resolved {
+    std::uint8_t word;
+    Layer layer;
+  };
+
+  // The front-most pixel of one screen, by the order Mode 1 keeps, each layer
+  // taken only where that screen enables it and the windows leave it there.
+  [[nodiscard]] std::optional<Resolved> resolve(Screen screen, std::uint16_t x,
+                                                std::uint16_t line) const noexcept;
+
+  // Whether one of $2130's two-bit regions covers a picture position: 0 nowhere,
+  // 1 outside the colour window, 2 inside it, 3 everywhere. The colour window is
+  // the sixth thing a window can be enabled for and feeds these two fields alone.
+  [[nodiscard]] bool regionCovers(unsigned region, std::uint16_t x) const noexcept;
+
+  // The 15-bit colour a palette word names, and the one $2132 holds.
+  [[nodiscard]] std::uint16_t paletteColour(std::uint8_t word) const noexcept;
+  [[nodiscard]] std::uint16_t fixedColour() const noexcept;
+
   // The three backgrounds Mode 1 draws, each with the registers it reads.
   [[nodiscard]] Background mode1Bg1() const noexcept;
   [[nodiscard]] Background mode1Bg2() const noexcept;

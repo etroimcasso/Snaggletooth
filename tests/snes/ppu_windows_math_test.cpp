@@ -634,5 +634,499 @@ TEST(Windows, AnEdgeDeliveredBetweenTwoLinesShapesTheWholeOfTheNext) {
   EXPECT_EQ(picture.at(255u, 40u), kRedOut);
 }
 
+
+// ---- colour math: the vocabulary these cases are written in ------------------
+
+// The byte the converter drives for a five-bit channel at brightness 15, from the
+// law the brightness scale states — value * (N + 1) * 255 / (31 * 16), rounded
+// once. By hand: 31 gives 255, 23 gives 189, 16 gives 132, 15 gives 123, 8 gives
+// 66, 3 gives 25, 2 gives 16 and 1 gives 8.
+constexpr std::uint8_t out(unsigned channel) {
+  return static_cast<std::uint8_t>((channel * 16u * 255u + 248u) / 496u);
+}
+
+// What the picture drives for a colour given as three five-bit channels.
+constexpr Rgba rgb(unsigned red, unsigned green, unsigned blue) {
+  return Rgba{out(red), out(green), out(blue), 255u};
+}
+
+// A palette word from three five-bit channels: red low, then green, then blue.
+constexpr std::uint16_t colourOf(unsigned red, unsigned green, unsigned blue) {
+  return static_cast<std::uint16_t>(red | (green << 5) | (blue << 10));
+}
+
+// The six things $2131 can reach, in the order it numbers them.
+constexpr std::uint8_t kMathBg1 = 0x01u;
+constexpr std::uint8_t kMathBg2 = 0x02u;
+constexpr std::uint8_t kMathBg3 = 0x04u;
+constexpr std::uint8_t kMathBg4 = 0x08u;
+constexpr std::uint8_t kMathObj = 0x10u;
+constexpr std::uint8_t kMathBackdrop = 0x20u;
+
+// $2131: the operator, the halving, and the layers the math reaches.
+constexpr std::uint8_t cgadsub(bool subtract, bool half, std::uint8_t layers) {
+  return static_cast<std::uint8_t>((subtract ? 0x80u : 0u) | (half ? 0x40u : 0u) | layers);
+}
+
+// Each of $2130's two regions is named against the colour window.
+constexpr std::uint8_t kNowhere = 0u;
+constexpr std::uint8_t kOutside = 1u;
+constexpr std::uint8_t kInside = 2u;
+constexpr std::uint8_t kEverywhere = 3u;
+
+// $2130: where the main colour is forced black, where math is prevented, and
+// whether the addend is the sub screen rather than the fixed colour.
+constexpr std::uint8_t cgwsel(std::uint8_t black, std::uint8_t prevent, bool subScreen) {
+  return static_cast<std::uint8_t>((black << 6) | (prevent << 4) | (subScreen ? 0x02u : 0u));
+}
+
+// The fixed colour $2132 holds, three five-bit channels.
+void putFixed(PpuState& ppu, unsigned red, unsigned green, unsigned blue) {
+  ppu.fixedRed = static_cast<std::uint8_t>(red);
+  ppu.fixedGreen = static_cast<std::uint8_t>(green);
+  ppu.fixedBlue = static_cast<std::uint8_t>(blue);
+}
+
+// BG1 alone on the main screen in one colour, nothing on the sub screen, and
+// colour math off until a case turns it on.
+PpuState mathScreen(std::uint16_t mainColour) {
+  PpuState ppu = screen();
+  ppu.tm = 0x01u;
+  ppu.ts = 0x00u;
+  putColour(ppu, 1u, mainColour);
+  return ppu;
+}
+
+// The colour window over the picture's left half, and nothing else windowed. Its
+// four bits live in the high nibble of $2125 and its logic in bits 3-2 of $212B.
+void putColourWindow(PpuState& ppu, std::uint8_t left, std::uint8_t right) {
+  ppu.wh0 = left;
+  ppu.wh1 = right;
+  ppu.wobjsel = highLayer(selector(true, false, false, false));
+}
+
+// ---- what the converter does with a mathed colour ----------------------------
+
+TEST(ColourMathVocabulary, TheChannelTableAgreesWithTheHandDerivedColours) {
+  // The helper above is the brightness law written out; these four are the values
+  // this file already derived by hand for its own palette, so the two agree or one
+  // of them is wrong.
+  EXPECT_EQ(rgb(31u, 0u, 0u), kRedOut);
+  EXPECT_EQ(rgb(0u, 31u, 0u), kGreenOut);
+  EXPECT_EQ(rgb(0u, 0u, 31u), kBlueOut);
+  EXPECT_EQ(rgb(1u, 2u, 3u), kBackdropOut);
+}
+
+// ---- the operation -----------------------------------------------------------
+
+TEST(ColourMath, NothingIsMathedUntilTheLayersBitIsSet) {
+  PpuState ppu = mathScreen(colourOf(16u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, 0u);  // no layer
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 0u, 0u));
+}
+
+TEST(ColourMath, TheFixedColourIsAddedChannelByChannel) {
+  PpuState ppu = mathScreen(colourOf(16u, 0u, 4u));
+  putFixed(ppu, 3u, 16u, 1u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(19u, 16u, 5u));
+}
+
+TEST(ColourMath, AnAdditionIsHeldAtTheTopOfAChannel) {
+  PpuState ppu = mathScreen(colourOf(31u, 20u, 0u));
+  putFixed(ppu, 16u, 20u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  // 31 + 16 and 20 + 20 both pass the top of a channel and stop there.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(31u, 31u, 0u));
+}
+
+TEST(ColourMath, ASubtractionTakesTheAddendAway) {
+  PpuState ppu = mathScreen(colourOf(24u, 31u, 8u));
+  putFixed(ppu, 8u, 1u, 3u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(true, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 30u, 5u));
+}
+
+TEST(ColourMath, ASubtractionIsHeldAtZero) {
+  PpuState ppu = mathScreen(colourOf(8u, 2u, 0u));
+  putFixed(ppu, 24u, 31u, 9u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(true, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(0u, 0u, 0u));
+}
+
+// ---- the halving -------------------------------------------------------------
+
+TEST(ColourMath, TheHalvingComesBeforeTheChannelIsHeld) {
+  PpuState ppu = mathScreen(colourOf(31u, 31u, 31u));
+  putFixed(ppu, 31u, 31u, 31u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, true, kMathBg1);
+  // Two full channels added are 62, halved 31 — and not the 15 that holding the
+  // sum first and halving afterwards would give.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(31u, 31u, 31u));
+}
+
+TEST(ColourMath, TheHalvingAppliesToASubtractionToo) {
+  PpuState ppu = mathScreen(colourOf(31u, 20u, 4u));
+  putFixed(ppu, 1u, 4u, 2u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(true, true, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(15u, 8u, 1u));
+}
+
+TEST(ColourMath, TheFixedColourAddendIsHalvedLikeAnyOther) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 16u, 0u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);  // bit 1 clear: the fixed colour
+  ppu.cgadsub = cgadsub(false, true, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(23u, 0u, 0u));  // (31 + 16) / 2
+}
+
+TEST(ColourMath, TheSubScreensBackdropIsNotHalved) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 16u, 0u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, true);  // the sub screen, which is empty
+  ppu.cgadsub = cgadsub(false, true, kMathBg1);
+  // The same two colours as the case above, reached by the other path: the sub
+  // screen shows nothing, so its backdrop is the fixed colour and the halving does
+  // not apply — 31 + 16 held at the top rather than (31 + 16) / 2.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(31u, 0u, 0u));
+}
+
+// ---- forcing the main colour black -------------------------------------------
+
+TEST(ColourMath, AForcedBlackPixelStillTakesTheAddendWhole) {
+  PpuState ppu = mathScreen(colourOf(31u, 31u, 31u));
+  putFixed(ppu, 16u, 8u, 0u);
+  ppu.cgwsel = cgwsel(kEverywhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 8u, 0u));
+}
+
+TEST(ColourMath, AForcedBlackPixelIsNotHalved) {
+  PpuState ppu = mathScreen(colourOf(31u, 31u, 31u));
+  putFixed(ppu, 16u, 8u, 0u);
+  ppu.cgwsel = cgwsel(kEverywhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, true, kMathBg1);
+  // The halving is asked for and does not happen, so the addend lands whole.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 8u, 0u));
+}
+
+TEST(ColourMath, SubtractingFromAForcedBlackPixelLeavesItBlack) {
+  PpuState ppu = mathScreen(colourOf(31u, 31u, 31u));
+  putFixed(ppu, 16u, 8u, 4u);
+  ppu.cgwsel = cgwsel(kEverywhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(true, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(0u, 0u, 0u));
+}
+
+// ---- the two regions, and the colour window they are named against -----------
+
+TEST(ColourMath, TheBlackRegionAppliesInsideTheColourWindowAlone) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  putColourWindow(ppu, 0u, 127u);
+  ppu.cgwsel = cgwsel(kInside, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, kRow), rgb(0u, 16u, 0u));    // forced black, then the addend
+  EXPECT_EQ(picture.at(127u, kRow), rgb(0u, 16u, 0u));
+  EXPECT_EQ(picture.at(128u, kRow), rgb(31u, 16u, 0u));  // outside it, the colour stands
+  EXPECT_EQ(picture.at(255u, kRow), rgb(31u, 16u, 0u));
+}
+
+TEST(ColourMath, TheBlackRegionAppliesOutsideTheColourWindowAlone) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  putColourWindow(ppu, 0u, 127u);
+  ppu.cgwsel = cgwsel(kOutside, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, kRow), rgb(31u, 16u, 0u));
+  EXPECT_EQ(picture.at(128u, kRow), rgb(0u, 16u, 0u));
+}
+
+TEST(ColourMath, TheBlackRegionCanApplyNowhereAndEverywhere) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  putColourWindow(ppu, 0u, 127u);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  const Picture never = draw(ppu);
+  EXPECT_EQ(never.at(0u, kRow), rgb(31u, 16u, 0u));
+  EXPECT_EQ(never.at(200u, kRow), rgb(31u, 16u, 0u));
+
+  ppu.cgwsel = cgwsel(kEverywhere, kNowhere, false);
+  const Picture always = draw(ppu);
+  EXPECT_EQ(always.at(0u, kRow), rgb(0u, 16u, 0u));
+  EXPECT_EQ(always.at(200u, kRow), rgb(0u, 16u, 0u));
+}
+
+TEST(ColourMath, ThePreventRegionStopsMathWhereItNames) {
+  PpuState ppu = mathScreen(colourOf(16u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  putColourWindow(ppu, 0u, 127u);
+  ppu.cgwsel = cgwsel(kNowhere, kInside, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, kRow), rgb(16u, 0u, 0u));    // prevented: the raw colour
+  EXPECT_EQ(picture.at(128u, kRow), rgb(16u, 16u, 0u));  // and mathed outside it
+}
+
+TEST(ColourMath, TheTwoRegionsAreIndependentOfEachOther) {
+  // The upper region blacks the whole line and the lower prevents nothing, so every
+  // position is both forced black and mathed — the two fields do not gate one
+  // another.
+  PpuState ppu = mathScreen(colourOf(31u, 31u, 0u));
+  putFixed(ppu, 4u, 8u, 12u);
+  putColourWindow(ppu, 0u, 127u);
+  ppu.cgwsel = cgwsel(kEverywhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, kRow), rgb(4u, 8u, 12u));
+  EXPECT_EQ(picture.at(200u, kRow), rgb(4u, 8u, 12u));
+}
+
+TEST(ColourMath, WithNoColourWindowEnabledEveryPositionIsOutside) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.wh0 = 0u;
+  ppu.wh1 = 127u;
+  ppu.wobjsel = 0u;  // the colour window enables neither of its windows
+  ppu.cgwsel = cgwsel(kOutside, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  // Nothing is inside, so "outside" covers the whole line.
+  EXPECT_EQ(picture.at(0u, kRow), rgb(0u, 16u, 0u));
+  EXPECT_EQ(picture.at(200u, kRow), rgb(0u, 16u, 0u));
+}
+
+TEST(ColourMath, TheColourWindowReadsItsOwnBitsAndNotTheSprites) {
+  PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.wh0 = 0u;
+  ppu.wh1 = 127u;
+  // The sprites' nibble of $2125, which is the low one, must not reach the colour
+  // window in the high one.
+  ppu.wobjsel = selector(true, false, false, false);
+  ppu.cgwsel = cgwsel(kInside, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, kRow), rgb(31u, 16u, 0u));  // nothing is inside
+  EXPECT_EQ(picture.at(200u, kRow), rgb(31u, 16u, 0u));
+}
+
+// ---- which pixels take math --------------------------------------------------
+
+TEST(ColourMath, EachLayerIsReachedByItsOwnBit) {
+  PpuState ppu = screen();
+  ppu.tm = 0x02u;  // BG2 alone on the main screen
+  ppu.ts = 0x00u;
+  putColour(ppu, 2u, colourOf(16u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);  // BG1's bit reaches BG2 nowhere
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 0u, 0u));
+
+  ppu.cgadsub = cgadsub(false, false, kMathBg2);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 16u, 0u));
+}
+
+TEST(ColourMath, Bg3IsReachedByItsOwnBitToo) {
+  PpuState ppu = screen();
+  ppu.tm = 0x04u;  // BG3 alone on the main screen
+  ppu.ts = 0x00u;
+  putColour(ppu, 5u, colourOf(8u, 0u, 0u));  // BG3 draws palette 1, colour 1
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+
+  ppu.cgadsub = cgadsub(false, false, kMathBg2);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(8u, 0u, 0u));
+
+  ppu.cgadsub = cgadsub(false, false, kMathBg3);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(8u, 16u, 0u));
+}
+
+TEST(ColourMath, TheBackdropHasABitOfItsOwn) {
+  PpuState ppu = screen();
+  ppu.tm = 0x00u;  // nothing on the main screen, so the backdrop shows
+  ppu.ts = 0x00u;
+  putColour(ppu, 0u, colourOf(8u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(8u, 0u, 0u));
+
+  ppu.cgadsub = cgadsub(false, false, kMathBackdrop);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(8u, 16u, 0u));
+}
+
+TEST(ColourMath, Bg4sBitReachesNothingInModeOne) {
+  PpuState ppu = mathScreen(colourOf(16u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg4);
+  // Mode 1 draws three backgrounds, so the fourth's bit names a layer that is not
+  // there and the pixel keeps its colour.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 0u, 0u));
+}
+
+TEST(ColourMath, ASpriteFromTheUpperPalettesTakesMath) {
+  PpuState ppu = screen();
+  ppu.tm = 0x10u;  // the sprites alone on the main screen
+  ppu.ts = 0x00u;
+  putTileAt(ppu, kSpriteCharByte, kSpritePlanes, solid(1u));
+  putColour(ppu, kSpritePaletteBase + 4u * 16u + 1u, colourOf(16u, 0u, 0u));
+  for (unsigned index = 0u; index < 16u; ++index) {
+    putSprite(ppu, index, static_cast<int>(index * 8u), static_cast<std::uint8_t>(kRow), 0u,
+              attributes(false, false, 3u, 4u, false), false);
+  }
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathObj);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 16u, 0u));
+}
+
+TEST(ColourMath, ASpriteFromTheLowerPalettesNeverDoes) {
+  PpuState ppu = screen();
+  ppu.tm = 0x10u;
+  ppu.ts = 0x00u;
+  putTileAt(ppu, kSpriteCharByte, kSpritePlanes, solid(1u));
+  putColour(ppu, kSpritePaletteBase + 3u * 16u + 1u, colourOf(16u, 0u, 0u));
+  for (unsigned index = 0u; index < 16u; ++index) {
+    putSprite(ppu, index, static_cast<int>(index * 8u), static_cast<std::uint8_t>(kRow), 0u,
+              attributes(false, false, 3u, 3u, false), false);
+  }
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathObj);
+  // The same bit as the case above, and a palette below the fourth, so no math.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 0u, 0u));
+}
+
+// ---- the sub screen ----------------------------------------------------------
+
+TEST(SubScreen, ALayerOnTheSubScreenAloneShowsNowhere) {
+  PpuState ppu = screen();
+  ppu.tm = 0x01u;  // BG1 on the main screen
+  ppu.ts = 0x02u;  // BG2 on the sub screen and nowhere else
+  putColour(ppu, 1u, colourOf(16u, 0u, 0u));
+  putColour(ppu, 2u, colourOf(0u, 31u, 0u));
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, 0u);  // math off
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 0u, 0u));
+}
+
+TEST(SubScreen, TheSubScreensFrontMostPixelIsTheAddend) {
+  PpuState ppu = screen();
+  ppu.tm = 0x01u;
+  ppu.ts = 0x02u;
+  putColour(ppu, 1u, colourOf(16u, 0u, 0u));
+  putColour(ppu, 2u, colourOf(0u, 8u, 4u));
+  putFixed(ppu, 31u, 31u, 31u);  // which the sub screen displaces
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, true);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 8u, 4u));
+}
+
+TEST(SubScreen, ItsBackdropIsTheFixedColourRatherThanPaletteWordZero) {
+  PpuState ppu = mathScreen(colourOf(8u, 0u, 0u));
+  putColour(ppu, 0u, colourOf(0u, 0u, 31u));  // the main backdrop, which is not it
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, true);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(8u, 16u, 0u));
+}
+
+TEST(SubScreen, TswMasksALayerSoItsBackdropReachesTheAddend) {
+  PpuState ppu = screen();
+  ppu.tm = 0x01u;
+  ppu.ts = 0x02u;
+  putColour(ppu, 1u, colourOf(8u, 0u, 0u));
+  putColour(ppu, 2u, colourOf(0u, 31u, 0u));
+  putFixed(ppu, 0u, 4u, 0u);
+  ppu.wh0 = 0u;
+  ppu.wh1 = 127u;
+  ppu.w12sel = highLayer(selector(true, false, false, false));  // BG2's nibble
+  ppu.tsw = 0x02u;
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, true);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(0u, kRow), rgb(8u, 4u, 0u));    // masked: the sub backdrop
+  EXPECT_EQ(picture.at(200u, kRow), rgb(8u, 31u, 0u));  // and BG2 where it is not
+}
+
+TEST(SubScreen, ItIsResolvedByTheSameOrderAsTheMainScreen) {
+  PpuState ppu = screen();
+  ppu.tm = 0x02u;  // BG2 on the main screen
+  ppu.ts = 0x05u;  // BG1 and BG3 on the sub screen
+  putColour(ppu, 2u, colourOf(8u, 0u, 0u));   // BG2, the main pixel
+  putColour(ppu, 1u, colourOf(0u, 16u, 0u));  // BG1, in front on the sub screen
+  putColour(ppu, 5u, colourOf(0u, 0u, 16u));  // BG3, behind it
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, true);
+  ppu.cgadsub = cgadsub(false, false, kMathBg2);
+  // Mode 1 puts BG1 in front of BG3 at the same tile priority, so BG1 is what the
+  // sub screen offers.
+  EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(8u, 16u, 0u));
+}
+
+// ---- the picture around the math ---------------------------------------------
+
+TEST(ColourMath, BrightnessScalesTheMathedResult) {
+  PpuState ppu = mathScreen(colourOf(16u, 0u, 0u));
+  putFixed(ppu, 0u, 16u, 0u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  ppu.inidisp = 0x07u;  // brightness 7, the screen on
+  const Rgba drawn = draw(ppu).at(100u, kRow);
+  const auto scaled = [](unsigned channel) {
+    return static_cast<std::uint8_t>((channel * 8u * 255u + 248u) / 496u);
+  };
+  EXPECT_EQ(drawn, (Rgba{scaled(16u), scaled(16u), scaled(0u), 255u}));
+}
+
+TEST(ColourMath, ForcedBlankIsBlackWithEveryPartOfTheMathOn) {
+  PpuState ppu = mathScreen(colourOf(31u, 31u, 31u));
+  putFixed(ppu, 31u, 31u, 31u);
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
+  ppu.cgadsub = cgadsub(false, false, kMathBg1);
+  ppu.inidisp = 0x8Fu;
+  EXPECT_EQ(draw(ppu).at(100u, kRow), (Rgba{0u, 0u, 0u, 255u}));
+}
+
+TEST(ColourMath, AMachineWithAnObserverAndOneWithoutAgreeInEveryField) {
+  PpuState ppu = mathScreen(colourOf(16u, 4u, 0u));
+  putFixed(ppu, 8u, 8u, 8u);
+  ppu.cgwsel = cgwsel(kInside, kNowhere, true);
+  ppu.cgadsub = cgadsub(false, true, kMathBg1);
+  putColourWindow(ppu, 40u, 200u);
+
+  Snes watched = machineWith(ppu);
+  Picture picture;
+  watched.setFrameObserver(&picture);
+  watched.run(kOneFrame);
+
+  Snes unwatched = machineWith(ppu);
+  unwatched.run(kOneFrame);
+
+  // Colour math adds no state, so a frame of it leaves the two machines identical —
+  // the pin the picture unit set, re-asserted by the first block since it to touch
+  // the dot path.
+  EXPECT_EQ(watched.state().ppu.cgwsel, unwatched.state().ppu.cgwsel);
+  EXPECT_EQ(watched.state().ppu.cgadsub, unwatched.state().ppu.cgadsub);
+  EXPECT_EQ(watched.state().ppu.sprites.line, unwatched.state().ppu.sprites.line);
+  EXPECT_EQ(watched.state().ppu.vram, unwatched.state().ppu.vram);
+  EXPECT_EQ(watched.state().ppu.cgram, unwatched.state().ppu.cgram);
+}
+
 }  // namespace
 }  // namespace snaggletooth
