@@ -88,7 +88,7 @@ not do. Each row links to the page that describes the component in full.
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
 | [SNES machine](docs/snes-machine.md) | **in progress** — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake; no [coprocessor](#the-coprocessors) |
 | [Cartridge](docs/snes-cartridge.md) | **complete** — the header, LoROM, HiROM and ExHiROM, a copier's header read and dropped, where every bus address lands, the save windows |
-| [PPU](docs/ppu.md) | **in progress** — a pixel resolved at its own dot from the registers as they stand there, each frame handed to an observer; Mode 1's three backgrounds, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; the register file complete beneath them. Mosaic, the other seven modes, and the hires and interlaced pictures are not drawn |
+| [PPU](docs/ppu.md) | **in progress** — a pixel resolved at its own dot from the registers as they stand there, each frame handed to an observer; the backgrounds of modes 0, 1, 3 and 7 at their depths, Mode 7's field through its matrix with EXTBG's second layer and direct colour, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; the register file complete beneath them. Mosaic, modes 2, 4, 5 and 6, and the hires and interlaced pictures are not drawn |
 | Public embedding API | **not started** |
 
 ### The coprocessors

@@ -52,9 +52,11 @@ machine never needs to touch it.
 ## What the chip is told
 
 At every access the machine hands the PPU its input pins as `PpuInputs`: the beam's dot and line,
-the frame parity, the vertical- and horizontal-blank signals as `$4212` reports them, the clock
-rate, and the level of the counter-latch line, which is bit 7 of the I/O port written at `$4201`.
-The chip learns nothing else about the machine; every rule below is stated in those terms.
+which half of the dot the access falls in, the frame parity, the vertical- and horizontal-blank
+signals as `$4212` reports them, the clock rate, and the level of the counter-latch line, which is
+bit 7 of the I/O port written at `$4201`. The chip learns nothing else about the machine; every rule
+below is stated in those terms. The dot's second half is the last two master cycles of a four-cycle
+dot and the last three of a six-cycle one; only [the multiplier](#the-multiplier) reads it.
 
 The dot is not a quarter of the line's master cycle throughout. A line carries 340 dots and most are
 four master cycles, but **dots 323 and 327 are six** — which is what the counter latch answers, and why
@@ -130,7 +132,7 @@ blank leaves below it; the frame's first line draws nothing, which is why a back
 registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
 the dots after it and not the ones before.
 
-**Modes 0, 1 and 3 are what the chip draws**, each background on the screen its own bit of `$212C`
+**Modes 0, 1, 3 and 7 are what the chip draws**, each background on the screen its own bit of `$212C`
 or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
 are and how deep each one is:
 
@@ -139,6 +141,10 @@ are and how deep each one is:
 | 0 | 4 colours | 4 colours | 4 colours | 4 colours |
 | 1 | 16 colours | 16 colours | 4 colours | — |
 | 3 | 256 colours | 16 colours | — | — |
+| 7 | 256 colours, the field | with `$2133` bit 6: the same field at 128 colours | — | — |
+
+Modes 0, 1 and 3 read tilemaps of characters, described next; Mode 7 reads a field of packed pixels
+through its matrix, described [after them](#mode-7-the-field).
 
 BG4 exists in Mode 0 alone, and reads registers of its own throughout: `$210A` for its map, the
 high nibble of `$210C` for its characters, `$2113`/`$2114` for its offsets, `$2105` bit 7 for its
@@ -174,13 +180,61 @@ at that sprite priority:
 mode 0   3 A B 2 a b 1 C D 0 c d
 mode 1   3 A B 2 a b 1 C 0 c        and with $2105 bit 3 set:   C 3 A B 2 a b 1 0 c
 mode 3   3 A 2 B 1 a 0 b
+mode 7   3 2 1 A 0                  and with $2133 bit 6 set:   3 2 B 1 A 0 b
 ```
 
 `$2105` bit 3 is **Mode 1's**: it lifts BG3's high-priority tiles from behind a sprite at priority 1
 to in front of everything, leaves its low-priority tiles where they are, and names no place in any
 other mode's order. The first layer in the order with a non-transparent pixel is the one shown;
 where none has one, the backdrop — palette word 0 — shows. Sprites are drawn in every mode, and
-the four places they take are the mode's as much as a background's are.
+the four places they take are the mode's as much as a background's are. Mode 7's field has one
+place and no priority bit; the second layer `$2133` bit 6 makes of it takes its priority from the
+pixel itself.
+
+### Mode 7: the field
+
+Mode 7's BG1 is one 1024×1024-pixel field rather than a tilemap of characters, and the chip reads it
+through a matrix. `$2105` bits 4–7 and `$2107`–`$210C` are not read: the map is always at the start
+of VRAM and 128×128 entries, and the characters are always 8×8.
+
+- **The layout.** The map and the characters are interleaved: the map is the LOW byte of each of the
+  first 16384 words and the characters are the HIGH bytes. The entry for field pixel `(X, Y)` is
+  byte `((Y >> 3) << 7 | (X >> 3)) << 1`, one byte naming one of 256 characters. Character `n`'s pixel
+  at `(X & 7, Y & 7)` is byte `((n << 6) | ((Y & 7) << 3) | (X & 7)) << 1 | 1` — one pixel per byte,
+  not bitplanes. The pixel byte is the CGRAM word, all 256 of them; zero is transparent.
+- **The transform.** With `x` the picture column, `line` the line (1 for the first drawn), `a`–`d`
+  the four matrix registers `$211B`–`$211E` as signed 8.8 values, the centre `$211F`/`$2120` and the
+  scroll `$210D`/`$210E` (through the Mode 7 latch) as 13-bit signed pixels:
+
+  ```
+  sx = x    XOR $FF if $211A bit 0        sy = line XOR $FF if $211A bit 1
+  ox = clip(scroll.x − centre.x)          oy = clip(scroll.y − centre.y)
+  X  = (a·ox & ~63) + (b·oy & ~63) + centre.x·256 + (b·sy & ~63) + a·sx
+  Y  = (c·ox & ~63) + (d·oy & ~63) + centre.y·256 + (d·sy & ~63) + c·sx
+  ```
+
+  `clip` keeps the difference's low ten bits under the difference's own sign, so 1024 clips to 0
+  and −1025 to −1. Each product with the offset or the line drops its low six bits before the sum;
+  the product with the column is added whole. `X` and `Y` are in 1/256 pixel: bits 8–10 are the
+  pixel within its character, bits 11–17 the map entry, and anything above them is a position
+  outside the field. Everything is read from the registers as they stand at the dot, so a matrix
+  written between lines changes the lines after it and one written mid-line changes the rest of
+  that line. Mode 7 scrolls by `$210D`/`$210E` as the Mode 7 latch assembled them, not by BG1's own
+  offsets.
+- **Outside the field**, `$211A` bits 7–6 decide: `0x` wraps the position into the field at 1024;
+  `10` shows nothing; `11` shows character 0's pixel at the position's low three bits, transformed
+  like any other.
+- **The flips.** `$211A` bit 0 mirrors the columns and bit 1 the lines: a flipped line `L` reads field
+  row `L XOR 255`, so the first line drawn reads row 254 and row 255 is never shown.
+- **Direct colour** (`$2130` bit 0) reads the field's pixel as `BBGGGRRR` like any 256-colour
+  background's, with every tile bit zero, since this map has no palette field: `$FF` is red 28,
+  green 28, blue 24.
+- **EXTBG.** `$2133` bit 6 gives Mode 7 a BG2 that is the same field, read through the same matrix
+  and scrolled by the same registers: the pixel's bit 7 is its priority and its low seven bits are
+  its CGRAM word, so it has 128 colours, a pixel whose low seven bits are zero is transparent
+  whatever bit 7 holds, and it is never read as a colour. `$212C`/`$212D` bit 1 show it, the windows
+  and `$212E`/`$212F` mask it and `$2131` names it as they do any BG2. Outside Mode 7 the bit changes
+  nothing that is drawn.
 
 **Direct colour** reads a 256-colour background's pixel as a colour rather than as a palette index,
 and `$2130` bit 0 turns it on. The eight-bit pixel is `BBGGGRRR` and the tile's three palette
@@ -204,9 +258,9 @@ brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 2
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
-**What is not drawn yet**, so a reader does not go looking for it: the backgrounds of modes 2, 4, 5,
-6 and 7, which show their backdrop — their sprites draw as they do in any other mode — and with
-them offset-per-tile, the hires modes' half-pixel path, Mode 7's matrix and `EXTBG`; and mosaic.
+**What is not drawn yet**, so a reader does not go looking for it: the backgrounds of modes 2, 4, 5
+and 6, which show their backdrop — their sprites draw as they do in any other mode — and with them
+offset-per-tile and the hires modes' half-pixel path; and mosaic, on Mode 7's two layers included.
 Each arrives with its own work. The windows that take layers away are drawn, and have [their own
 section](#the-masking-windows); so are the sub screen and colour math, which have
 [theirs](#the-sub-screen-and-colour-math).
@@ -454,6 +508,21 @@ and `PpuState::multiplyResult()` computes the same value. A transfer engine can 
 bytes onto the A bus like any B-bus register, which is how a program fills memory from it. At
 power-on both operands are `-1`, so the product reads `$000001`.
 
+**While a Mode 7 picture is being drawn the ports hold the chip's own multiplier instead** — in
+mode 7 with forced blank off, on every dot of every line before vertical blank begins, horizontal
+blank included. Two products a dot, each with its low three bits dropped and held to 24 bits, from
+the registers as they stand at the read, `ox`, `oy` and `sy` being [the transform's](#mode-7-the-field)
+terms and the column `(dot − 3) & $FF`, XORed with `$FF` under the horizontal flip:
+
+| dot | first half | second half |
+|---|---|---|
+| 0 | A × ox | D × oy |
+| 1 | B × oy | C × ox |
+| 2 | B × sy | D × sy |
+| 3 onward | A × column | C × column |
+
+In vertical blank, in forced blank and in every other mode the ports hold the plain product above.
+
 ## The counter latch
 
 Reading `$2137`, or the I/O port's bit 7 falling from 1 to 0 (a write to `$4201`), latches the
@@ -552,3 +621,8 @@ Each of these is a question the documentation leaves, recorded rather than decid
 - How the palette's own mid-line access window sits against the chip's fetch of the colours it is
   drawing with.
 - What the memory refresh's pause does to a counter latched inside it.
+- Whether a Mode 7 register written mid-line reaches that line's offset and line terms or only the
+  per-pixel ones. The multiplier's schedule computes the offset and line products in the line's first
+  three dots; whether the drawing unit re-reads them is not stated. Every term is read at the dot.
+- What `$2133` bit 6 shows outside Mode 7. fullsnes describes an external input shorted to half the
+  data bus and a program "will just see garbage"; no source gives a picture. Nothing drawn changes.

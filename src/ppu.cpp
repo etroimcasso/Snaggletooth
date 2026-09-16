@@ -81,6 +81,38 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
   return static_cast<std::uint16_t>(red | (green << 5) | (blue << 10));
 }
 
+// A Mode 7 register's thirteen-bit signed value: bit 12 is the sign.
+[[nodiscard]] std::int32_t signed13(std::uint16_t reg) noexcept {
+  const auto low = static_cast<std::int32_t>(reg & 0x1FFFu);
+  return (low & 0x1000) != 0 ? low - 0x2000 : low;
+}
+
+// The scroll less the centre as the matrix takes it: the difference's low ten
+// bits under the difference's own sign, so 1024 is 0 and -1025 is -1.
+[[nodiscard]] std::int32_t clippedOffset(std::int32_t difference) noexcept {
+  return (difference & 0x2000) != 0 ? (difference | ~0x3FF) : (difference & 0x3FF);
+}
+
+// A product of a matrix term with an offset or a line, with the low six bits the
+// chip drops before it sums them.
+[[nodiscard]] std::int32_t truncated(std::int32_t product) noexcept { return product & ~63; }
+
+// A Mode 7 field coordinate's integer part; the field is 1024 pixels on a side
+// and a position past it in either direction has bits above the tenth set.
+[[nodiscard]] std::int32_t fieldInteger(std::int32_t coordinate) noexcept {
+  return coordinate >> 8;
+}
+[[nodiscard]] bool outsideField(std::int32_t integer) noexcept {
+  return (integer & ~0x3FF) != 0;
+}
+
+// The chip drops the low three bits of each product it puts on the multiplier's
+// ports while Mode 7 draws, and the ports are twenty-four bits wide.
+[[nodiscard]] std::int32_t scheduled(std::int32_t product) noexcept {
+  const std::int32_t low24 = (product >> 3) & 0xFFFFFF;
+  return (low24 & 0x800000) != 0 ? low24 - 0x1000000 : low24;
+}
+
 // The row a vertical flip shows in that row's place. A flip reverses the whole
 // sprite rather than its characters — except that a rectangular sprite flips as
 // though it were two square sprites stacked, so rows "01234567" become
@@ -435,6 +467,11 @@ std::span<const Ppu::Place> Ppu::order() const noexcept {
       {kBg1, 0u}, {kBg2, 0u}, {kObj, 1u}, {kObj, 0u}, {kBg3, 0u}};
   static constexpr Place kModeThree[8] = {{kObj, 3u},  {kBg1, 1u}, {kObj, 2u}, {kBg2, 1u},
                                           {kObj, 1u},  {kBg1, 0u}, {kObj, 0u}, {kBg2, 0u}};
+  // Mode 7's field has one place and no priority bit. SETINI bit 6 adds the second
+  // layer it makes of the same pixels, whose priority is the pixel's own bit 7.
+  static constexpr Place kModeSeven[5] = {{kObj, 3u}, {kObj, 2u}, {kObj, 1u}, {kBg1, 0u}, {kObj, 0u}};
+  static constexpr Place kModeSevenExtended[7] = {{kObj, 3u}, {kObj, 2u}, {kBg2, 1u}, {kObj, 1u},
+                                                  {kBg1, 0u}, {kObj, 0u}, {kBg2, 0u}};
   // A mode this chip does not draw the backgrounds of still draws its sprites,
   // which are the same in every mode.
   static constexpr Place kSpritesAlone[4] = {{kObj, 3u}, {kObj, 2u}, {kObj, 1u}, {kObj, 0u}};
@@ -444,6 +481,8 @@ std::span<const Ppu::Place> Ppu::order() const noexcept {
     case 1u: return (s_.bgmode & 0x08u) != 0u ? std::span<const Place>(kModeOneLifted)
                                               : std::span<const Place>(kModeOne);
     case 3u: return kModeThree;
+    case 7u: return (s_.setini & 0x40u) != 0u ? std::span<const Place>(kModeSevenExtended)
+                                              : std::span<const Place>(kModeSeven);
     default: return kSpritesAlone;
   }
 }
@@ -534,6 +573,102 @@ std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_
   return Shown{.word = colourWord, .priority = priority, .direct = std::nullopt};
 }
 
+// ---- Mode 7's field ----------------------------------------------------------
+
+Ppu::FieldPoint Ppu::fieldPoint(std::uint16_t x, std::uint16_t line) const noexcept {
+  // The picture position, each axis XORed with $FF where its flip bit is set; the
+  // line is the beam's own, 1 for the first line drawn.
+  const std::int32_t sx = (s_.m7sel & 0x01u) != 0u ? (x ^ 0xFF) : x;
+  const std::int32_t sy = (s_.m7sel & 0x02u) != 0u ? (line ^ 0xFF) : line;
+
+  // The four matrix terms, 8.8 signed; the centre; and the scroll less the centre,
+  // clipped. The centre is added back whole, as pixels.
+  const std::int32_t a = static_cast<std::int16_t>(s_.m7a);
+  const std::int32_t b = static_cast<std::int16_t>(s_.m7b);
+  const std::int32_t c = static_cast<std::int16_t>(s_.m7c);
+  const std::int32_t d = static_cast<std::int16_t>(s_.m7d);
+  const std::int32_t centreX = signed13(s_.m7x);
+  const std::int32_t centreY = signed13(s_.m7y);
+  const std::int32_t ox = clippedOffset(signed13(s_.m7hofs) - centreX);
+  const std::int32_t oy = clippedOffset(signed13(s_.m7vofs) - centreY);
+
+  // Each product with the offset or the line loses its low six bits before the sum;
+  // the product with the column is added whole, which is the same number the chip
+  // reaches by stepping the matrix term along the line.
+  return FieldPoint{
+      .x = truncated(a * ox) + truncated(b * oy) + centreX * 256 + truncated(b * sy) + a * sx,
+      .y = truncated(c * ox) + truncated(d * oy) + centreY * 256 + truncated(d * sy) + c * sx};
+}
+
+std::uint8_t Ppu::fieldPixel(FieldPoint at) const noexcept {
+  // The pixel's integer position. $211A bit 7 clear wraps it into the field; set,
+  // a position outside the field shows nothing or character 0, as bit 6 says.
+  std::int32_t fieldX = fieldInteger(at.x);
+  std::int32_t fieldY = fieldInteger(at.y);
+  unsigned character = 0u;
+  const bool outside = outsideField(fieldX) || outsideField(fieldY);
+  if ((s_.m7sel & 0x80u) == 0u || !outside) {
+    fieldX &= 0x3FF;
+    fieldY &= 0x3FF;
+    // The map is the low byte of the word the tile's row and column name, 128
+    // entries a row.
+    const std::size_t entryAt =
+        static_cast<std::size_t>(((fieldY >> 3) << 7) | (fieldX >> 3)) << 1;
+    character = s_.vram[entryAt];
+  } else if ((s_.m7sel & 0x40u) == 0u) {
+    return 0u;
+  }
+  // The character's pixel is the high byte of the word its row and column name,
+  // sixty-four words a character.
+  const std::size_t pixelAt =
+      (static_cast<std::size_t>((character << 6) | ((fieldY & 7) << 3) | (fieldX & 7)) << 1) | 1u;
+  return s_.vram[pixelAt];
+}
+
+std::optional<Ppu::Shown> Ppu::sampleField(Layer layer, std::uint16_t x,
+                                           std::uint16_t line) const noexcept {
+  const std::uint8_t pixel = fieldPixel(fieldPoint(x, line));
+  if (layer == Layer::Bg2) {
+    // The second layer: bit 7 is the pixel's priority and the low seven bits its
+    // word, so it has 128 colours and never a composed one.
+    const auto word = static_cast<std::uint8_t>(pixel & 0x7Fu);
+    if (word == 0u) return std::nullopt;
+    return Shown{.word = word, .priority = (pixel & 0x80u) != 0u, .direct = std::nullopt};
+  }
+  if (pixel == 0u) return std::nullopt;
+  // The field's own layer: the byte is the word, or with $2130 bit 0 the colour
+  // itself — with no tile bits, since this map has no palette field.
+  if ((s_.cgwsel & 0x01u) != 0u) {
+    return Shown{.word = pixel, .priority = false, .direct = directColour(pixel, 0u)};
+  }
+  return Shown{.word = pixel, .priority = false, .direct = std::nullopt};
+}
+
+bool Ppu::drawingModeSeven(const PpuInputs& in) const noexcept {
+  return (s_.bgmode & 0x07u) == 7u && !s_.forcedBlank() && !in.vblank &&
+         in.vpos < s_.vblankStartLine();
+}
+
+std::int32_t Ppu::multiplierWhileDrawing(const PpuInputs& in) const noexcept {
+  const std::int32_t a = static_cast<std::int16_t>(s_.m7a);
+  const std::int32_t b = static_cast<std::int16_t>(s_.m7b);
+  const std::int32_t c = static_cast<std::int16_t>(s_.m7c);
+  const std::int32_t d = static_cast<std::int16_t>(s_.m7d);
+  const std::int32_t ox = clippedOffset(signed13(s_.m7hofs) - signed13(s_.m7x));
+  const std::int32_t oy = clippedOffset(signed13(s_.m7vofs) - signed13(s_.m7y));
+  // The line term is the line itself under the vertical flip; the column term is
+  // the dot less three, wrapped at 256, under the horizontal flip.
+  const std::int32_t sy = (s_.m7sel & 0x02u) != 0u ? (in.vpos ^ 0xFF) : in.vpos;
+  const std::int32_t column = (in.hdot - 3) & 0xFF;
+  const std::int32_t sx = (s_.m7sel & 0x01u) != 0u ? (column ^ 0xFF) : column;
+  switch (in.hdot) {
+    case 0u: return scheduled(in.lateHalf ? d * oy : a * ox);
+    case 1u: return scheduled(in.lateHalf ? c * ox : b * oy);
+    case 2u: return scheduled(in.lateHalf ? d * sy : b * sy);
+    default: return scheduled(in.lateHalf ? c * sx : a * sx);
+  }
+}
+
 bool Ppu::windowCovers(Layer layer, std::uint16_t x) const noexcept {
   // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
   // one, BG2, BG4 and the colour window in the high — and the two logic registers
@@ -595,9 +730,16 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // edge part-way along a line, and what lets a transfer shape a window down the
   // picture a line at a time.
   std::array<std::optional<Shown>, 4> backgrounds{};
+  const bool field = (s_.bgmode & 0x07u) == 7u;
   for (unsigned index = 0u; index < backgrounds.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
+    // Mode 7's layers are the field, read through the matrix; every other mode's
+    // are tilemaps of characters.
+    if (field) {
+      if (index < 2u) backgrounds[index] = sampleField(layer, x, line);
+      continue;
+    }
     if (const std::optional<Background> described = background(layer)) {
       backgrounds[index] = sample(*described, x, line);
     }
@@ -758,19 +900,25 @@ void Ppu::latchCounters(const PpuInputs& in) noexcept {
 // ---- reads -------------------------------------------------------------------
 
 std::optional<std::uint8_t> Ppu::read(std::uint16_t offset, const PpuInputs& in) {
+  // The three ports hold the plain product — matrix A times the byte last written
+  // to $211C — except while the chip is drawing a Mode 7 picture, when they hold
+  // what its own multiplier is doing at this dot.
+  const auto product = [this, &in] {
+    return drawingModeSeven(in) ? multiplierWhileDrawing(in) : s_.multiplyResult();
+  };
   switch (offset) {
     case 0x2134: {  // MPYL
-      const std::uint8_t v = static_cast<std::uint8_t>(s_.multiplyResult() & 0xFF);
+      const std::uint8_t v = static_cast<std::uint8_t>(product() & 0xFF);
       s_.ppu1Bus = v;
       return v;
     }
     case 0x2135: {  // MPYM
-      const std::uint8_t v = static_cast<std::uint8_t>((s_.multiplyResult() >> 8) & 0xFF);
+      const std::uint8_t v = static_cast<std::uint8_t>((product() >> 8) & 0xFF);
       s_.ppu1Bus = v;
       return v;
     }
     case 0x2136: {  // MPYH
-      const std::uint8_t v = static_cast<std::uint8_t>((s_.multiplyResult() >> 16) & 0xFF);
+      const std::uint8_t v = static_cast<std::uint8_t>((product() >> 16) & 0xFF);
       s_.ppu1Bus = v;
       return v;
     }

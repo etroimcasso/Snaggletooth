@@ -13,10 +13,12 @@
 //
 // A pixel is resolved from that state as it stands at the pixel's own dot, so a
 // program that writes a register mid-line changes the rest of the line. Modes 0,
-// 1 and 3 are the modes the chip draws: the backgrounds each of them has, at the
-// depths it gives them, and the sprites, in that mode's own priority order, over
-// the backdrop. Sprites are drawn in every mode, the ones whose backgrounds are
-// not built included.
+// 1, 3 and 7 are the modes the chip draws: the backgrounds each of them has, at
+// the depths it gives them, and the sprites, in that mode's own priority order,
+// over the backdrop. Mode 7's one background is a field of packed pixels read
+// through its matrix rather than a tilemap of characters, and SETINI bit 6 makes
+// a second layer of the same pixels. Sprites are drawn in every mode, the ones
+// whose backgrounds are not built included.
 //
 // Sprites are the one part of the picture not resolved at the dot that shows
 // them. A line's sprites are found and gathered during the line before it, in
@@ -99,6 +101,7 @@ struct PpuInputs {
   bool hblank = false;      // the horizontal-blank signal: raised at H=274 and lowered at H=1, on every line
   bool pal = false;         // the clock-rate pin: 50 Hz when set
   bool extLatch = true;     // the counter-latch line's level, WRIO bit 7 (high when nothing pulls it)
+  bool lateHalf = false;    // the dot's second half: the last two of a four-cycle dot's master cycles, the last three of a six-cycle dot's
 };
 
 // The PPU as a value: the register file, the latches, and the three memories.
@@ -421,8 +424,49 @@ class Ppu {
   [[nodiscard]] std::span<const Place> order() const noexcept;
 
   // How the mode reads one of the four backgrounds — its depth and its palette —
-  // or nothing where the mode does not have that background at all.
+  // or nothing where the mode does not have that background at all. Mode 7's
+  // background is not one of these: it is the field, read by sampleField.
   [[nodiscard]] std::optional<Background> background(Layer layer) const noexcept;
+
+  // A position in Mode 7's field, in 1/256 pixel: the pixel is bits 8-10 of each
+  // coordinate, the map entry bits 11-17, and anything above them is a position
+  // outside the field.
+  struct FieldPoint {
+    std::int32_t x;
+    std::int32_t y;
+  };
+
+  // The field position the matrix maps a picture position to, from the
+  // registers as they stand: the two flips applied to the picture position, the
+  // scroll less the centre clipped to ten bits with its sign, each product of a
+  // matrix term with that clipped offset or with the line truncated to a
+  // multiple of sixty-four, and the per-pixel products whole.
+  [[nodiscard]] FieldPoint fieldPoint(std::uint16_t x, std::uint16_t line) const noexcept;
+
+  // The field's pixel at a field position, by $211A's screen-over bits: the
+  // field wrapping at 1024, or outside it nothing, or outside it character 0's
+  // pixel at the position's low three bits. The pixel byte as the memory holds
+  // it, zero included.
+  [[nodiscard]] std::uint8_t fieldPixel(FieldPoint at) const noexcept;
+
+  // What Mode 7 shows at a picture position for BG1, or for the BG2 SETINI bit 6
+  // makes of the same pixel — its bit 7 the priority, its low seven bits the word,
+  // and never read as a colour. Nothing where the pixel is zero or the position
+  // is outside a field that shows nothing there. Whether BG2 exists at all is the
+  // chart's to say: without the bit, Mode 7's order has no place for it.
+  [[nodiscard]] std::optional<Shown> sampleField(Layer layer, std::uint16_t x,
+                                                 std::uint16_t line) const noexcept;
+
+  // Whether the chip is drawing a Mode 7 picture at an access: mode 7, forced
+  // blank off, and a line before vertical blank's start — every dot of such a
+  // line, horizontal blank included.
+  [[nodiscard]] bool drawingModeSeven(const PpuInputs& in) const noexcept;
+
+  // What $2134-$2136 hold at a dot of a Mode 7 picture: two products a dot on the
+  // chip's own schedule, each with its low three bits dropped — the offset and
+  // line products in the line's first three dots, then matrix A times the column
+  // in a dot's first half and matrix C times it in the second.
+  [[nodiscard]] std::int32_t multiplierWhileDrawing(const PpuInputs& in) const noexcept;
 
   // The front-most pixel of one screen, by the order its mode keeps, each layer
   // taken only where that screen enables it and the windows leave it there.
