@@ -29,6 +29,10 @@ disagree it names the disagreement and what decided it.
 - [Direct colour](#direct-colour)
   - [fullsnes's prose transposes direct colour's channels and its own table does not](#fullsness-prose-transposes-direct-colours-channels-and-its-own-table-does-not)
   - [What the regions and the fixed colour do to a composed pixel is undocumented](#what-the-regions-and-the-fixed-colour-do-to-a-composed-pixel-is-undocumented)
+- [Mode 7](#mode-7)
+  - [The multiplier's ports while Mode 7 draws: fullsnes gives a schedule in one place and garbage in another](#the-multipliers-ports-while-mode-7-draws-fullsnes-gives-a-schedule-in-one-place-and-garbage-in-another)
+  - [The transform's products are truncated before the sum, on one source's word and another's guess](#the-transforms-products-are-truncated-before-the-sum-on-one-sources-word-and-anothers-guess)
+  - [A flipped line reads row L XOR 255, which only the formula says](#a-flipped-line-reads-row-l-xor-255-which-only-the-formula-says)
 - [The windows](#the-windows)
   - [fullsnes prints the window-area field values off by one](#fullsnes-prints-the-window-area-field-values-off-by-one)
 - [Colour math](#colour-math)
@@ -337,6 +341,72 @@ identical to the grid's first row, byte for byte**; the fixed colour raises ever
 cell it is added to; and halving leaves every channel below what the same sum unhalved gave. **Three
 implementations, no silicon.**
 
+## Mode 7
+
+The four sources agree on Mode 7's layout, its register widths, both priority orders, the three
+screen-over behaviours and the flip bits, and the clip of the offset-minus-centre term is two sources
+in different notation that reduce to one function: fullsnes (1183–1184) clears bits 12–10 of the
+difference and sets them again where the difference is negative, anomie (424) keeps the low ten bits
+and fills the rest with bit 13, and both keep the low ten bits under the difference's own sign. Three
+things are weaker than that, and each has a cartridge of ours asking it.
+
+### The multiplier's ports while Mode 7 draws: fullsnes gives a schedule in one place and garbage in another
+
+fullsnes 1206–1219 states exactly what `$2134`–`$2136` hold while a Mode 7 picture is drawn: two
+products a dot, the offset and line products in the line's first three dots and then matrix A times
+the column in one half of each dot and matrix C times it in the other, each "divided by eight".
+fullsnes 3443–3446, describing the same ports, says that in mode 7 they are usable only in vertical
+and forced blank and "return garbage" while drawing. Anomie 396–398 says the product "may not be
+operative during Mode 7 rendering"; the register page says nothing.
+
+*Documented but contested, measured in part, provisional — console pending.* The schedule is built
+as fullsnes states it: a program reading the ports there gets something on hardware, and the plain
+product is the one answer every source says is wrong there. The cartridge that asks reads the
+product's middle byte thirty-two times in a tight loop in the middle of a Mode 7 picture and paints
+the samples as a bar of colours: one flat value is the plain product, a bar of small values climbing
+beside `$Fx` values is the schedule, and unrelated values are garbage. Its control takes the same
+reads in forced blank and must paint the plain product.
+
+**What settled what it has.** On an FPGA reconstruction of the console the bar is there and varies
+along its length, and the control paints one flat value — so the ports move while a Mode 7 picture
+draws and hold the plain product in forced blank, which is the categorical half of the question and
+the half the reconstruction can carry. Which values they hold at which dot is the finer half, and a
+photograph of a television does not carry it; the schedule's values stand as built. The three
+software implementations the cartridge was also run on paint no bar at all, for the image and its
+control alike, though the program runs to its end on them; that is a fact about them running this
+cartridge and not a reading of the chip, and where they and the reconstruction disagree the
+reconstruction's reading is the one taken.
+
+### The transform's products are truncated before the sum, on one source's word and another's guess
+
+fullsnes 1185–1188 drops the low six bits of each product of a matrix term with the clipped offset or
+with the line before summing them (`AND NOT 3Fh`), adds the per-pixel product whole, and at 1221–1223
+gives the "/8" of the multiplier's readout as the reason to believe it. Anomie 423–431 prints the same
+masks (`&~63`) under "the bit-accurate formula seems to be something along the lines of". Two
+readings that agree, one of them hedged, and neither a measurement.
+
+*Documented but contested, measured on three implementations, provisional — console pending.* The
+truncation is built. It moves about a quarter of the columns by one pixel at a matrix of `$013F` and
+an offset of 1, which is what the sweep cartridge's second band draws: a ruler whose colour names the
+field column, so every column says which of the two readings the chip took. **On Mesen, bsnes and
+snes9x every one of the 63 telling columns is the truncated reading**, and the two bands beside it
+settle the clip the same way on all three: an offset of 1024 draws the ruler, so it clips to 0, and
+an offset of −1025 leaves the first column to the backdrop and moves the ruler by one, so it clips to
+−1. Three implementations, no silicon.
+
+### A flipped line reads row L XOR 255, which only the formula says
+
+fullsnes 1175–1176 and 1181–1182 flip the vertical axis as `SCREEN.Y XOR FFh` over lines 1–224, so
+the first line drawn reads field row 254 and row 255 is never shown. Anomie 370–371 and the register
+page say that the screen is flipped and no more; a plain mirror of the picture would read row 255
+first, one row away.
+
+*Documented once, measured on three implementations, provisional — console pending.* The formula is
+built. The sweep cartridge's first band flips a field whose rows alternate two colours, so an even
+line reading an odd row is the formula and an even line reading an even row is the mirror, a colour
+rather than a count. **On Mesen, bsnes and snes9x every line of the band reads the other parity: the
+formula, not the mirror.** Three implementations, no silicon.
+
 ## The windows
 
 ### fullsnes prints the window-area field values off by one
@@ -516,3 +586,11 @@ own "What remains open" carries the register-file ones alongside these.
 - Direct colour's channel order and what `$2130`'s regions and the fixed colour do to a composed
   pixel, both above: measured on three implementations and open only to the console, which no
   cartridge here has been run on yet.
+- Mode 7's three, above: the truncation of the transform's products and the flipped line's row,
+  read on three implementations and open only to the console; and the values the multiplier's
+  ports hold at each dot while it draws, which a reconstruction has shown to move and nothing has
+  yet read.
+- Whether a Mode 7 register written mid-line reaches that line's offset and line terms or only the
+  per-pixel ones; every term is read at the dot until something says otherwise.
+- What `$2133` bit 6 shows outside Mode 7. fullsnes says garbage from an external input; no source
+  gives a picture, and nothing drawn changes.

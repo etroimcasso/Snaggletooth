@@ -515,6 +515,30 @@ std::uint16_t Snes::frameLines() const noexcept {
              : base;
 }
 
+namespace {
+
+// Whether a position in the line falls in its dot's second half: the last two
+// master cycles of a four-cycle dot, the last three of one of the two six-cycle
+// dots. The short line keeps 340 even dots and has no six-cycle ones.
+[[nodiscard]] bool lateHalfOf(std::uint16_t hpos, bool shortLine) noexcept {
+  if (!shortLine) {
+    if (hpos >= kFirstLongDot && hpos < kAfterFirstLongDot) {
+      return static_cast<unsigned>(hpos - kFirstLongDot) >= 3u;
+    }
+    if (hpos >= kSecondLongDot && hpos < kAfterSecondLongDot) {
+      return static_cast<unsigned>(hpos - kSecondLongDot) >= 3u;
+    }
+    if (hpos >= kAfterFirstLongDot) {
+      // Past a long dot the four-cycle grid is offset by the two cycles it added.
+      const unsigned offset = hpos >= kAfterSecondLongDot ? 4u : 2u;
+      return ((static_cast<unsigned>(hpos) - offset) & 3u) >= 2u;
+    }
+  }
+  return (hpos & 3u) >= 2u;
+}
+
+}  // namespace
+
 std::uint16_t Snes::hdot() const noexcept {
   // The dot the beam is on. Dots 323 and 327 are six master cycles wide and every
   // other dot is four, so past dot 322 the count falls behind a plain quarter of the
@@ -842,6 +866,7 @@ PpuInputs Snes::ppuInputs() const noexcept {
       .hblank = inHblank(),
       .pal = region_ == Region::Pal,
       .extLatch = (state_.wrio & 0x80u) != 0u,
+      .lateHalf = lateHalfOf(state_.hpos, lineLength() == kShortLineMaster),
   };
 }
 
