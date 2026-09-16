@@ -8,6 +8,7 @@ snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
                     [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]
 snes_player --default-config
+snes_player --user-files
 ```
 
 The window shows the picture the machine draws, frame by frame, at the rate the run is held to,
@@ -73,6 +74,20 @@ The keyboard and a pad on one port add together, so a hand on each is one player
 `--config <file>` hands the tool a mapping of your own, and `--default-config` prints the one it
 ships with so you have something to copy. The whole form is
 [pad-config.md](../../docs/pad-config.md).
+
+With no `--config`, a mapping kept at `config/input/default.snagpad` where your files go is what the
+run takes, and the built-in one when there is none. The tool says which it took. `--user-files`
+prints that directory and exits — see [user-files.md](../../docs/user-files.md).
+
+## Keeping a save
+
+A cartridge whose header declares a battery keeps what it writes, in `sram/<cartridge>.srm` beside
+your configuration: the file [bsnes, snes9x and Mesen](../../docs/user-files.md#a-cartridges-save)
+read and write for the same cartridge. It is read in before the cartridge's first instruction and
+written as the machine reports the save changed, with whatever the last moments left written as the
+run closes. A file whose size is not the one the cartridge declares is left exactly as it is and that
+run keeps nothing, so a save belonging to something else is never overwritten; the tool says so when
+it starts. A disk that refuses is reported once and the run carries on.
 
 The window asks to be raised when it opens. A window opened from a terminal does not take the
 keyboard on every platform, and a run you cannot press a button on is not a run — if the keys are
