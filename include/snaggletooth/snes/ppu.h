@@ -12,9 +12,11 @@
 // halves remember, and the windows in which each memory can be reached.
 //
 // A pixel is resolved from that state as it stands at the pixel's own dot, so a
-// program that writes a register mid-line changes the rest of the line. Mode 1
-// is the mode the chip draws: its three backgrounds and the sprites, in the
-// priority order $2105 names, over the backdrop.
+// program that writes a register mid-line changes the rest of the line. Modes 0,
+// 1 and 3 are the modes the chip draws: the backgrounds each of them has, at the
+// depths it gives them, and the sprites, in that mode's own priority order, over
+// the backdrop. Sprites are drawn in every mode, the ones whose backgrounds are
+// not built included.
 //
 // Sprites are the one part of the picture not resolved at the dot that shows
 // them. A line's sprites are found and gathered during the line before it, in
@@ -35,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace snaggletooth {
 
@@ -308,9 +311,9 @@ class Ppu {
                                                   std::uint16_t y) const noexcept;
 
  private:
-  // One background as its own registers describe it. The mode fixes the depth: a
-  // sixteen-colour background is four bitplanes and a four-colour one is two, and
-  // a character takes eight bytes for each.
+  // One background as its own registers describe it, with what the mode makes of
+  // it: its depth, and where in the palette its colours are read. A character
+  // takes eight bytes for each of its bitplanes.
   struct Background {
     std::uint8_t screen;         // its $2107-$210A: the map's base and the map's size
     std::uint8_t characterBase;  // its nibble of $210B or $210C, counting 8 KB blocks
@@ -318,14 +321,19 @@ class Ppu {
     std::uint16_t vertical;      // its vertical offset register
     bool large;                  // its bit of $2105: 16x16 blocks rather than 8x8 tiles
     unsigned planes;             // its bitplanes, and so its colours: 1 << planes
+    unsigned paletteStride;      // the words one step of its tile's palette field moves,
+                                 // or none where the mode gives it no palette field
+    unsigned wordBase;           // the first palette word its own colours begin at
   };
 
   // What a background shows at a picture position: the palette word its tile's
-  // pixel names, and the tile's own priority bit, which decides where the pixel
-  // sits in the mode's order.
+  // pixel names, the tile's own priority bit, which decides where the pixel sits
+  // in the mode's order, and — where the pixel was read as a colour rather than
+  // as an index — that colour, which no palette word names.
   struct Shown {
     std::uint8_t word;
     bool priority;
+    std::optional<std::uint16_t> direct;
   };
 
   // What a background shows at a picture position, or nothing where its tile's
@@ -395,9 +403,28 @@ class Ppu {
   struct Resolved {
     std::uint8_t word;
     Layer layer;
+    std::optional<std::uint16_t> direct;
   };
 
-  // The front-most pixel of one screen, by the order Mode 1 keeps, each layer
+  // One place in a mode's priority chart: a background's tiles at one priority,
+  // or a sprite at one of its four. The chart is read front to back, and the
+  // first place holding anything at a position is the pixel.
+  struct Place {
+    Layer layer;
+    unsigned priority;
+  };
+
+  // The chart the mode $2105 names keeps, front to back — and for Mode 1 the
+  // chart $2105 bit 3 exchanges it for, which is Mode 1's alone. A mode whose
+  // backgrounds are not built names only its four sprite places, so its
+  // backgrounds show their backdrop and its sprites draw as they do in any other.
+  [[nodiscard]] std::span<const Place> order() const noexcept;
+
+  // How the mode reads one of the four backgrounds — its depth and its palette —
+  // or nothing where the mode does not have that background at all.
+  [[nodiscard]] std::optional<Background> background(Layer layer) const noexcept;
+
+  // The front-most pixel of one screen, by the order its mode keeps, each layer
   // taken only where that screen enables it and the windows leave it there.
   [[nodiscard]] std::optional<Resolved> resolve(Screen screen, std::uint16_t x,
                                                 std::uint16_t line) const noexcept;
@@ -411,10 +438,10 @@ class Ppu {
   [[nodiscard]] std::uint16_t paletteColour(std::uint8_t word) const noexcept;
   [[nodiscard]] std::uint16_t fixedColour() const noexcept;
 
-  // The three backgrounds Mode 1 draws, each with the registers it reads.
-  [[nodiscard]] Background mode1Bg1() const noexcept;
-  [[nodiscard]] Background mode1Bg2() const noexcept;
-  [[nodiscard]] Background mode1Bg3() const noexcept;
+  // The registers one of the four backgrounds reads, whatever the mode: its
+  // screen register, its character-base nibble, its two offsets and its tile-size
+  // bit. What the mode makes of it is added by background().
+  [[nodiscard]] Background registersOf(Layer layer) const noexcept;
 
   // The converter's four bytes for one 15-bit palette word at the brightness
   // INIDISP holds.

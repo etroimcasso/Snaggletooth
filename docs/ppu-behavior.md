@@ -26,6 +26,9 @@ disagree it names the disagreement and what decided it.
 - [The priority order](#the-priority-order)
   - [Only BG3's high-priority tiles move when $2105 bit 3 is set](#only-bg3s-high-priority-tiles-move-when-2105-bit-3-is-set)
   - [Mode 1 gives no background a palette offset of its own](#mode-1-gives-no-background-a-palette-offset-of-its-own)
+- [Direct colour](#direct-colour)
+  - [fullsnes's prose transposes direct colour's channels and its own table does not](#fullsness-prose-transposes-direct-colours-channels-and-its-own-table-does-not)
+  - [What the regions and the fixed colour do to a composed pixel is undocumented](#what-the-regions-and-the-fixed-colour-do-to-a-composed-pixel-is-undocumented)
 - [The windows](#the-windows)
   - [fullsnes prints the window-area field values off by one](#fullsnes-prints-the-window-area-field-values-off-by-one)
 - [Colour math](#colour-math)
@@ -280,6 +283,60 @@ BG2–BG4 in Mode 0, which are the ones given ranges of their own.
 
 *Documented and corroborated*, by two sources that state it in opposite forms.
 
+## Direct colour
+
+### fullsnes's prose transposes direct colour's channels and its own table does not
+
+`$2130` bit 0 reads a 256-colour background's eight-bit pixel as a colour. fullsnes says in prose
+(line 1433) that the pixel's bits and the tile's three palette bits make `"BBb00:RRRr0:GGGg0"`,
+which puts red in bits 9-5 and green in bits 4-0. That is the opposite of the palette word it
+documents four lines earlier at 1406-1409, where blue is 14-10, green 9-5 and red 4-0 — and the
+opposite of its own bit table immediately below at 1438-1446, which gives red the low five bits.
+Anomie (line 1660) states it as `Red=RRRr0, Green=GGGg0, Blue=BBb00`, agreeing with the table.
+
+*Documented but contested, decided by a cartridge written to ask it.* The composition is
+
+```
+red   = RRR r 0          green = GGG g 0          blue = BB b 0 0
+```
+
+and fullsnes's prose string is a transposition. The line numbers are here so nobody re-derives the
+order from the prose.
+
+**What settled it.** A cartridge of ours draws a grid of the eight `bgr` values against a ramp of
+thirteen pixel values — every bit of the pixel byte moving on its own, each field saturating once,
+and the pair that tells red from green (`$07` against `$38`) as two of its cells — beside a control
+that clears the bit and draws the same grid through CGRAM instead. It was run on three independent
+implementations. One of them draws all 104 cells byte for byte as the composition above; the other
+two apply a colour treatment of their own, and answer every question the grid asks that a treatment
+cannot move: each cell is strongest in the channel its field names, each channel's ramp climbs at
+every step, and the tile's own bit lifts its own channel and nothing else. All three controls draw
+one flat colour, which is what says the bit is doing the work. **Three implementations, no silicon:
+the console's own reading is still owed.**
+
+### A direct-colour pixel of zero is transparent
+
+There is no black in direct colour: a pixel whose eight bits are zero is transparent as it is at
+every other depth, rather than composing to black.
+
+*Documented and measured.* Anomie states it; the sweep cartridge shows it in every row — the first
+cell of all eight rows is the backdrop, on all three implementations.
+
+### What the regions and the fixed colour do to a composed pixel is undocumented
+
+Both sources say direct colour is not colour math and that `$2130`'s other fields do not gate it.
+Neither says what the two regions and the fixed colour do to a pixel that was composed rather than
+looked up — whether `$2130` bits 7-6 blacken it like any other main-screen pixel, whether bits 5-4
+leave it as composed, and whether it is an operand like any other when `$2131` names its layer.
+
+*Undocumented, measured.* The mechanism answers it — a composed colour replaces the palette lookup
+and nothing else, so everything downstream sees a colour and cannot tell how it was made — and the
+same cartridge carries four strips that put each question to the chip. On all three implementations:
+the black region blackens a composed pixel like any other; **preventing math leaves the strip
+identical to the grid's first row, byte for byte**; the fixed colour raises every channel of every
+cell it is added to; and halving leaves every channel below what the same sum unhalved gave. **Three
+implementations, no silicon.**
+
 ## The windows
 
 ### fullsnes prints the window-area field values off by one
@@ -456,3 +513,6 @@ own "What remains open" carries the register-file ones alongside these.
 - How the palette's mid-line access window sits against the chip's own fetch of the colours it is
   drawing with.
 - The last dot of the visible span, above.
+- Direct colour's channel order and what `$2130`'s regions and the fixed colour do to a composed
+  pixel, both above: measured on three implementations and open only to the console, which no
+  cartridge here has been run on yet.

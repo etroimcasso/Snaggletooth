@@ -660,6 +660,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/ppu_beam_test.cpp
     tests/snes/ppu_backgrounds_test.cpp
     tests/snes/ppu_sprites_test.cpp
+    tests/snes/ppu_modes03_test.cpp
     tests/snes/ppu_windows_math_test.cpp
     tests/snes/dma_test.cpp
     tests/snes/ipl_stub_test.cpp
