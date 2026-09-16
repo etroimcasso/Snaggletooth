@@ -50,6 +50,18 @@ $ snes_player cartridge.sfc --config mine.snagpad
 `--default-config` prints the built-in configuration and exits, opening no window.
 What it prints is the file the tool was built from, so what you copy is what runs.
 
+To have it picked up with no flag at all, put it at `config/input/default.snagpad`
+where your files are kept — [user-files.md](user-files.md) says where that is and
+`snes_player --user-files` prints it:
+
+```
+$ mkdir -p "$(snes_player --user-files)/config/input"
+$ snes_player --default-config > "$(snes_player --user-files)/config/input/default.snagpad"
+```
+
+A `--config` on the command line still stands over it, and the tool says at the
+start which mapping it took.
+
 The twelve buttons are named as the machine names them, which is also how a
 [recorded run](input-script.md) names them:
 

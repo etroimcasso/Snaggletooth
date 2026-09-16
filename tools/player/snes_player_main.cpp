@@ -64,6 +64,7 @@
 #include "player/display.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
+#include "player/user_files.h"
 #include "rom/input_script.h"
 #include "snaggletooth/apu/dsp.h"
 #include "snaggletooth/snes/cartridge.h"
@@ -105,6 +106,27 @@ constexpr int kBytesPerSample = kChannels * static_cast<int>(sizeof(std::int16_t
   return text;
 }
 
+// Where this tool keeps a person's files. The platform is asked — the one call
+// that decides it, on every OS, with no path of ours written down anywhere — and
+// the environment replaces the answer whole for anyone who wants their files
+// somewhere else.
+[[nodiscard]] std::optional<std::filesystem::path> userFilesRoot(std::string& error) {
+  if (const char* elsewhere = std::getenv("SNAGGLETOOTH_USER_FILES");
+      elsewhere != nullptr && *elsewhere != '\0') {
+    return std::filesystem::path(elsewhere);
+  }
+  // An empty organisation puts the directory at the top of the platform's per-user
+  // data location rather than under a company of ours, which is what was asked for.
+  char* const answered = SDL_GetPrefPath("", "Snaggletooth");
+  if (answered == nullptr) {
+    error = SDL_GetError();
+    return std::nullopt;
+  }
+  std::filesystem::path root(answered);
+  SDL_free(answered);
+  return root;
+}
+
 bool readFile(const std::filesystem::path& path, std::string& out) {
   std::ifstream in(path, std::ios::binary);
   if (!in) return false;
@@ -117,7 +139,7 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
             << " <image> [--out <directory>] [--seconds N] [--scale N]"
                " [--input <script> | --input-dir <directory>] [--config <file>]"
                " [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]\n       "
-            << program << " --default-config\n";
+            << program << " --default-config\n       " << program << " --user-files\n";
   std::exit(2);
 }
 
@@ -475,7 +497,7 @@ class Player final : public snaggletooth::FrameObserver {
       // The run lost real time — the window went away, the machine was descheduled —
       // and it is not getting it back. The origin moves forward by what was lost, so
       // the frames after this one are owed from here. Without that, every deadline is
-      // still counted from an origin the run can no longer reach, every one of them
+      // still counted from an origin the run cannot reach any more, every one of them
       // has already gone by, and the machine runs flat out until it catches a schedule
       // that stopped being true — a second of lost time replayed as a second of the
       // game at several times its speed. A run that lost time stays late.
@@ -665,6 +687,17 @@ int main(int argc, char** argv) {
     if (arg == "--default-config") {
       std::cout << player::kDefaultPadConfig;
       return 0;
+    } else if (arg == "--user-files") {
+      // The one way to learn the path without knowing the platform's rule. No
+      // image, no window, nothing opened.
+      std::string error;
+      const std::optional<std::filesystem::path> root = userFilesRoot(error);
+      if (!root) {
+        std::cerr << "the platform did not say where a user's files go: " << error << "\n";
+        return 1;
+      }
+      std::cout << root->string() << "\n";
+      return 0;
     } else if (arg == "--out") {
       outDir = next("--out");
     } else if (arg == "--input") {
@@ -756,6 +789,16 @@ int main(int argc, char** argv) {
 
   // The configuration is read before the window opens, so one that does not read
   // refuses the run rather than being discovered after a device is up.
+  // Where a person's own files are kept. A platform that will not say is not fatal:
+  // the run goes ahead on the built-in configuration and keeps no save, which is
+  // said plainly rather than discovered when a save does not appear.
+  std::string filesError;
+  const std::optional<std::filesystem::path> filesRoot = userFilesRoot(filesError);
+  if (!filesRoot && !quiet) {
+    std::cerr << "no user files: " << filesError
+              << " — the run keeps nothing and takes the built-in configuration\n";
+  }
+
   player::PadConfig padConfig;
   {
     std::string defaults;
@@ -766,6 +809,12 @@ int main(int argc, char** argv) {
       std::cerr << "the built-in configuration does not read: " << error << "\n";
       return 1;
     }
+    // A mapping of a person's own, kept where their files go, is what the tool runs
+    // with when it is handed no --config: the flag first, then that file, then the
+    // one built in.
+    const std::optional<player::UserFiles> files =
+        filesRoot ? std::optional<player::UserFiles>(player::UserFiles(*filesRoot)) : std::nullopt;
+    configPath = player::chooseConfigPath(configPath, files ? &*files : nullptr);
     if (configPath.empty()) {
       padConfig = *shipped;
       if (!quiet && !scripted) std::cerr << "input: the built-in configuration\n";
@@ -854,6 +903,36 @@ int main(int argc, char** argv) {
   }
 
   Snes machine(snaggletooth::SnesConfig{.rom = rom, .region = region});
+
+  // A cartridge with a battery keeps what it writes. The file goes in with the rest
+  // of a person's files, under the name other emulators read, and it is put into the
+  // machine before the first instruction — after that the machine says when it
+  // changed and this writes it.
+  std::optional<player::CartridgeSave> save;
+  if (filesRoot && !machine.state().sram.empty()) {
+    save.emplace(player::UserFiles(*filesRoot), player::UserFiles::saveNameFor(imagePath));
+    snaggletooth::SnesState state = machine.state();
+    std::size_t found = 0;
+    std::size_t declared = 0;
+    switch (save->loadInto(state.sram, found, declared)) {
+      case player::CartridgeSave::Load::Loaded:
+        machine.restore(state);
+        if (!quiet) std::cerr << "save: " << save->name() << "\n";
+        break;
+      case player::CartridgeSave::Load::NoFile:
+        if (!quiet) std::cerr << "save: " << save->name() << ", new\n";
+        break;
+      case player::CartridgeSave::Load::WrongSize:
+        // Someone else's save, or a broken one. The cartridge boots on its own
+        // power-on RAM and this run keeps nothing, so nothing of theirs is lost.
+        std::cerr << "save: " << save->name() << " holds " << found << " bytes and this cartridge "
+                  << "keeps " << declared << "; it is left alone and this run keeps nothing\n";
+        save.reset();
+        break;
+    }
+  }
+  if (save) machine.setSaveObserver(&*save);
+
   const std::string stem = std::filesystem::path(imagePath).stem().string();
   Player player(machine, region, script, scripted, devices, scale, vsync, stem);
   if (!player.open()) return 1;
@@ -900,6 +979,20 @@ int main(int argc, char** argv) {
   }
   machine.setFrameObserver(nullptr);
   player.finish();
+
+  // Whatever the last frames left in the save window, on its way out: the machine
+  // reports at a frame's end and a window closes whenever a person closes it, so
+  // the run settles the file itself rather than losing the moments after the last
+  // report. It writes nothing when nothing moved.
+  if (save) {
+    machine.setSaveObserver(nullptr);
+    save->changed(machine.state().sram);
+    if (!save->error().empty()) {
+      std::cerr << "save: " << save->error() << "\n";
+    } else if (!quiet && save->wrote()) {
+      std::cerr << "save: kept in " << save->name() << "\n";
+    }
+  }
 
   if (recording) {
     const std::vector<std::uint8_t> wav =

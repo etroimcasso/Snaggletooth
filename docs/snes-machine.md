@@ -40,6 +40,7 @@ finishes.
   - [General-purpose DMA](#general-purpose-dma)
   - [HDMA](#hdma)
 - [The bus observer](#the-bus-observer)
+- [The save observer](#the-save-observer)
 - [Snapshot and restore](#snapshot-and-restore)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
@@ -653,6 +654,40 @@ machine.setApuObserver(nullptr);
 The [intermediate representation](ir.md#running-beside-the-machine) is the first consumer of both:
 a run replayed instruction by instruction with an interpreter beside each core, held to every access
 the two observers report.
+
+## The save observer
+
+A cartridge with a battery keeps what it writes, in a window the machine holds as state
+([snes-cartridge.md](snes-cartridge.md)). Reading that window says what it holds; the save observer
+says when it *changed*, so a program keeping the save for a person does not have to compare the whole
+window against a copy of its own to find out.
+
+```cpp
+struct Keeper final : SaveObserver {
+  void changed(std::span<const std::uint8_t> save) override {
+    // `save` is the whole window at the size the cartridge declares.
+  }
+};
+
+Keeper keeper;
+machine.setSaveObserver(&keeper);
+```
+
+It is told once at the end of a frame that changed the window, however many stores landed in it, and
+not at all in a frame where none did — and again after `restore()`, a caller replacing the window
+having changed it as surely as a store would. The span is the machine's own storage, valid for the
+call.
+
+The report is handed over between cycles, beside a finished picture, rather than from inside the line
+that ends a frame: what a program does with a save — writing a file, most plainly — may fail, and it
+is free to throw here.
+
+On the same terms as the others: the host's object, not part of the state, so a snapshot does not
+carry it and `restore()` leaves it in place; `saveObserver()` reads back what is set; the machine
+starts with none, and one that has none runs exactly as it would have.
+
+Nothing here knows where a save goes. `snes_player` keeps one as the file other emulators read —
+[user-files.md](user-files.md) — which is the whole of what a tool built on this has to decide.
 
 ## Snapshot and restore
 

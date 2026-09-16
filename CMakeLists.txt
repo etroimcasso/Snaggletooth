@@ -532,7 +532,10 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
     add_subdirectory(third_party/sdl EXCLUDE_FROM_ALL SYSTEM)
   endif()
 
-  add_executable(snes_player tools/player/snes_player_main.cpp)
+  # The store the player keeps a person's files in is the player's own code rather
+  # than a library of its own: one tool uses it, and the suite compiles the same
+  # source directly so it is tested without a window or a device anywhere near it.
+  add_executable(snes_player tools/player/snes_player_main.cpp tools/player/user_files.cpp)
   # The pad library reaches the cartridge tools publicly, which reach the .spc tooling
   # and so the WAV writer; the player takes all of it through that one link. Naming any
   # of them again is a duplicate the Apple linker reports.
@@ -689,6 +692,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/formats/reader_test.cpp
     tests/tools/avi_test.cpp
     tests/tools/player_test.cpp
+    tests/tools/user_files_test.cpp
+    tools/player/user_files.cpp
   )
   # The differential links the representation and the cartridge tools publicly,
   # which link the library and both chip backends publicly and the codecs
