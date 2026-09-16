@@ -992,9 +992,9 @@ TEST(SnesPpuPicture, ALayerEnabledOnlyOnTheSubScreenDrawsNothing) {
   EXPECT_EQ(picture.at(0u, 0u), kBackdropOut);
 }
 
-TEST(SnesPpuPicture, AModeThisBlockDoesNotDrawShowsTheBackdrop) {
+TEST(SnesPpuPicture, AModeWhoseBackgroundsAreNotBuiltShowsItsBackdrop) {
   PpuState ppu = screen();
-  ppu.bgmode = 0x03u;  // Mode 3, whose BG1 is 256 colours
+  ppu.bgmode = 0x02u;  // Mode 2, whose backgrounds offset one another per tile
   putEntry(ppu, kBg1, 0u, 0x0001u);
   putSolidTile(ppu, kBg1, 1u, 1u);
   const Picture picture = draw(ppu);

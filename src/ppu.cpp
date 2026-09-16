@@ -70,6 +70,17 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
   return x == -static_cast<int>(kPictureWidth) ? 0 : x;
 }
 
+// A 256-colour background's pixel read as a colour rather than as a palette
+// index: the pixel is BBGGGRRR and its tile's three palette bits are bgr, and
+// each channel takes its own field shifted up with the tile's own bit under it.
+// Every value it can make is even, and the low bits it cannot reach are zero.
+[[nodiscard]] std::uint16_t directColour(unsigned pixel, unsigned palette) noexcept {
+  const unsigned red = ((pixel & 0x07u) << 2) | ((palette & 0x01u) << 1);
+  const unsigned green = (((pixel >> 3) & 0x07u) << 2) | (palette & 0x02u);
+  const unsigned blue = (((pixel >> 6) & 0x03u) << 3) | (palette & 0x04u);
+  return static_cast<std::uint16_t>(red | (green << 5) | (blue << 10));
+}
+
 // The row a vertical flip shows in that row's place. A flip reverses the whole
 // sprite rather than its characters — except that a rectangular sprite flips as
 // though it were two square sprites stacked, so rows "01234567" become
@@ -333,33 +344,108 @@ std::array<std::uint8_t, 4> Ppu::convert(std::uint16_t colour) const noexcept {
           channelByte((colour >> 10) & 0x1Fu, brightness), 255u};
 }
 
-Ppu::Background Ppu::mode1Bg1() const noexcept {
-  return Background{.screen = s_.bg1sc,
-                    .characterBase = static_cast<std::uint8_t>(s_.bg12nba & 0x0Fu),
-                    .horizontal = s_.bg1hofs,
-                    .vertical = s_.bg1vofs,
-                    .large = (s_.bgmode & 0x10u) != 0u,
-                    .planes = 4u};
+Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
+  // Each background keeps a screen register, a nibble of a character-base
+  // register — BG1 and BG3 the low one, BG2 and BG4 the high one above it — a pair
+  // of offsets, and one of $2105's four size bits, from bit 4 up in the order the
+  // backgrounds are numbered.
+  const unsigned index = static_cast<unsigned>(layer);
+  static constexpr std::uint8_t PpuState::*kScreens[4] = {&PpuState::bg1sc, &PpuState::bg2sc,
+                                                          &PpuState::bg3sc, &PpuState::bg4sc};
+  static constexpr std::uint16_t PpuState::*kHorizontal[4] = {
+      &PpuState::bg1hofs, &PpuState::bg2hofs, &PpuState::bg3hofs, &PpuState::bg4hofs};
+  static constexpr std::uint16_t PpuState::*kVertical[4] = {
+      &PpuState::bg1vofs, &PpuState::bg2vofs, &PpuState::bg3vofs, &PpuState::bg4vofs};
+  const std::uint8_t bases = index < 2u ? s_.bg12nba : s_.bg34nba;
+  return Background{.screen = s_.*kScreens[index],
+                    .characterBase = static_cast<std::uint8_t>((index & 1u) ? (bases >> 4)
+                                                                            : (bases & 0x0Fu)),
+                    .horizontal = s_.*kHorizontal[index],
+                    .vertical = s_.*kVertical[index],
+                    .large = (s_.bgmode & (0x10u << index)) != 0u,
+                    .planes = 0u,
+                    .paletteStride = 0u,
+                    .wordBase = 0u};
 }
 
-Ppu::Background Ppu::mode1Bg2() const noexcept {
-  // $210B keeps BG2's character base in its high nibble, above BG1's.
-  return Background{.screen = s_.bg2sc,
-                    .characterBase = static_cast<std::uint8_t>(s_.bg12nba >> 4),
-                    .horizontal = s_.bg2hofs,
-                    .vertical = s_.bg2vofs,
-                    .large = (s_.bgmode & 0x20u) != 0u,
-                    .planes = 4u};
+std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
+  // What the mode makes of a background: how deep its characters are, and where in
+  // the palette its colours are read. A sixteen-colour background's palette field
+  // steps sixteen words and a four-colour one's steps four; Mode 0 gives each of
+  // its four thirty-two words of its own, one subset after another, which is the
+  // only mode that offsets a background at all; and a 256-colour background has no
+  // palette field, its pixel being the word itself.
+  struct Depth {
+    unsigned planes;
+    unsigned paletteStride;
+    unsigned wordBase;
+  };
+  static constexpr Depth kNone{.planes = 0u, .paletteStride = 0u, .wordBase = 0u};
+  static constexpr Depth kFour{.planes = 2u, .paletteStride = 4u, .wordBase = 0u};
+  static constexpr Depth kSixteen{.planes = 4u, .paletteStride = 16u, .wordBase = 0u};
+  static constexpr Depth kFullPalette{.planes = 8u, .paletteStride = 0u, .wordBase = 0u};
+
+  const unsigned index = static_cast<unsigned>(layer);
+  Depth depth = kNone;
+  switch (s_.bgmode & 0x07u) {
+    case 0u:
+      // Four four-colour backgrounds, each reading the thirty-two words after the
+      // last one's.
+      depth = Depth{.planes = kFour.planes,
+                    .paletteStride = kFour.paletteStride,
+                    .wordBase = index * 32u};
+      break;
+    case 1u:
+      depth = index < 2u ? kSixteen : (index == 2u ? kFour : kNone);
+      break;
+    case 3u:
+      depth = index == 0u ? kFullPalette : (index == 1u ? kSixteen : kNone);
+      break;
+    default:
+      break;  // a mode whose backgrounds are not built shows its backdrop
+  }
+  if (depth.planes == 0u) return std::nullopt;
+
+  Background described = registersOf(layer);
+  described.planes = depth.planes;
+  described.paletteStride = depth.paletteStride;
+  described.wordBase = depth.wordBase;
+  return described;
 }
 
-Ppu::Background Ppu::mode1Bg3() const noexcept {
-  // Mode 1's third background is four colours, so two bitplanes.
-  return Background{.screen = s_.bg3sc,
-                    .characterBase = static_cast<std::uint8_t>(s_.bg34nba & 0x0Fu),
-                    .horizontal = s_.bg3hofs,
-                    .vertical = s_.bg3vofs,
-                    .large = (s_.bgmode & 0x40u) != 0u,
-                    .planes = 2u};
+std::span<const Ppu::Place> Ppu::order() const noexcept {
+  // Each mode's chart, front to back, exactly as the priority table gives it. A
+  // background appears twice, once for each value of its tiles' priority bit; a
+  // sprite appears four times, once for each of its own priorities.
+  static constexpr Layer kBg1 = Layer::Bg1;
+  static constexpr Layer kBg2 = Layer::Bg2;
+  static constexpr Layer kBg3 = Layer::Bg3;
+  static constexpr Layer kBg4 = Layer::Bg4;
+  static constexpr Layer kObj = Layer::Object;
+  static constexpr Place kModeZero[12] = {
+      {kObj, 3u}, {kBg1, 1u}, {kBg2, 1u}, {kObj, 2u}, {kBg1, 0u}, {kBg2, 0u},
+      {kObj, 1u}, {kBg3, 1u}, {kBg4, 1u}, {kObj, 0u}, {kBg3, 0u}, {kBg4, 0u}};
+  static constexpr Place kModeOne[10] = {
+      {kObj, 3u}, {kBg1, 1u}, {kBg2, 1u}, {kObj, 2u},  {kBg1, 0u},
+      {kBg2, 0u}, {kObj, 1u}, {kBg3, 1u}, {kObj, 0u},  {kBg3, 0u}};
+  // $2105 bit 3 takes BG3's high tiles out of their place and puts them in front
+  // of everything. It is Mode 1's bit and names no place in any other chart.
+  static constexpr Place kModeOneLifted[10] = {
+      {kBg3, 1u}, {kObj, 3u}, {kBg1, 1u}, {kBg2, 1u}, {kObj, 2u},
+      {kBg1, 0u}, {kBg2, 0u}, {kObj, 1u}, {kObj, 0u}, {kBg3, 0u}};
+  static constexpr Place kModeThree[8] = {{kObj, 3u},  {kBg1, 1u}, {kObj, 2u}, {kBg2, 1u},
+                                          {kObj, 1u},  {kBg1, 0u}, {kObj, 0u}, {kBg2, 0u}};
+  // A mode this chip does not draw the backgrounds of still draws its sprites,
+  // which are the same in every mode.
+  static constexpr Place kSpritesAlone[4] = {{kObj, 3u}, {kObj, 2u}, {kObj, 1u}, {kObj, 0u}};
+
+  switch (s_.bgmode & 0x07u) {
+    case 0u: return kModeZero;
+    case 1u: return (s_.bgmode & 0x08u) != 0u ? std::span<const Place>(kModeOneLifted)
+                                              : std::span<const Place>(kModeOne);
+    case 3u: return kModeThree;
+    default: return kSpritesAlone;
+  }
 }
 
 std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_t x,
@@ -429,11 +515,23 @@ std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_
   }
   if (index == 0u) return std::nullopt;  // colour 0 of any palette is transparent
 
-  // A background's palette is as many words on as it has colours, and Mode 1 gives
-  // none of the three a starting palette of its own.
+  // The palette word: the first word this background's colours begin at, its
+  // tile's palette field as many words on as that field steps, and the pixel. A
+  // 256-colour background steps by none, so its pixel is the word.
   const unsigned palette = (entry >> 10) & 0x07u;
-  return Shown{.word = static_cast<std::uint8_t>(palette * (1u << background.planes) + index),
-               .priority = (entry & 0x2000u) != 0u};
+  const auto colourWord = static_cast<std::uint8_t>(
+      background.wordBase + palette * background.paletteStride + index);
+  const bool priority = (entry & 0x2000u) != 0u;
+
+  // $2130 bit 0 reads a 256-colour background's pixel as a colour instead. The
+  // condition is the depth, because the eight bits are what the composition is
+  // made of — the modes that can do it are the modes with such a background. The
+  // bit is read here, at the dot, like every other register.
+  if (background.planes == 8u && (s_.cgwsel & 0x01u) != 0u) {
+    return Shown{
+        .word = colourWord, .priority = priority, .direct = directColour(index, palette)};
+  }
+  return Shown{.word = colourWord, .priority = priority, .direct = std::nullopt};
 }
 
 bool Ppu::windowCovers(Layer layer, std::uint16_t x) const noexcept {
@@ -487,28 +585,21 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   const std::uint8_t enables = screen == Screen::Main ? s_.tm : s_.ts;
   const std::uint8_t maskRegister = screen == Screen::Main ? s_.tmw : s_.tsw;
 
-  // Mode 1 is the mode this chip draws; the others show their backdrop. Each of its
-  // three backgrounds is sampled once, and only where the screen's own register puts
-  // it there and the windows leave it: a layer this screen does not enable shows
-  // nothing here, and one the windows mask shows nothing at this dot, so the order
-  // below falls through to whatever stands behind it.
+  // The backgrounds the mode has, each sampled once and only where the screen's
+  // own register puts it there and the windows leave it: a layer this screen does
+  // not enable shows nothing here, and one the windows mask shows nothing at this
+  // dot, so the chart below falls through to whatever stands behind it.
   //
   // The window registers are read here, at the dot they shape, and nothing about
   // them is carried from one dot to the next — which is what lets a program move an
   // edge part-way along a line, and what lets a transfer shape a window down the
   // picture a line at a time.
-  std::optional<Shown> bg1;
-  std::optional<Shown> bg2;
-  std::optional<Shown> bg3;
-  if ((s_.bgmode & 0x07u) == 1u) {
-    if ((enables & 0x01u) != 0u && !masked(Layer::Bg1, maskRegister, x)) {
-      bg1 = sample(mode1Bg1(), x, line);
-    }
-    if ((enables & 0x02u) != 0u && !masked(Layer::Bg2, maskRegister, x)) {
-      bg2 = sample(mode1Bg2(), x, line);
-    }
-    if ((enables & 0x04u) != 0u && !masked(Layer::Bg3, maskRegister, x)) {
-      bg3 = sample(mode1Bg3(), x, line);
+  std::array<std::optional<Shown>, 4> backgrounds{};
+  for (unsigned index = 0u; index < backgrounds.size(); ++index) {
+    const auto layer = static_cast<Layer>(index);
+    if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
+    if (const std::optional<Background> described = background(layer)) {
+      backgrounds[index] = sample(*described, x, line);
     }
   }
 
@@ -520,36 +611,28 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // once a line, and which screen is asking changes nothing about what they found.
   std::uint8_t spriteWord = 0u;
   std::uint8_t spritePriority = kNoSprite;
-  if ((enables & 0x10u) != 0u && s_.sprites.line == line && (s_.bgmode & 0x07u) == 1u &&
+  if ((enables & 0x10u) != 0u && s_.sprites.line == line &&
       !masked(Layer::Object, maskRegister, x)) {
     spriteWord = s_.sprites.word[x];
     spritePriority = s_.sprites.priority[x];
   }
 
-  // Front to back, by the chart Mode 1 keeps: a sprite at priority 3, BG1 and BG2
-  // at tile priority 1, a sprite at 2, the same two backgrounds at tile priority 0,
-  // a sprite at 1, BG3's high-priority tiles, a sprite at 0, then BG3's low —
-  // except that $2105 bit 3 lifts BG3's high-priority tiles in front of everything,
-  // taking them out of the place they otherwise hold. The screen's backdrop is
-  // under them all, and is what nothing here stands for.
-  const auto shows = [](const std::optional<Shown>& background, bool priority) {
-    return background.has_value() && background->priority == priority;
-  };
-  const auto sprite = [spritePriority](std::uint8_t priority) {
-    return spritePriority == priority;
-  };
-  const bool bg3InFront = (s_.bgmode & 0x08u) != 0u;
-  if (bg3InFront && shows(bg3, true)) return Resolved{.word = bg3->word, .layer = Layer::Bg3};
-  if (sprite(3u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
-  if (shows(bg1, true)) return Resolved{.word = bg1->word, .layer = Layer::Bg1};
-  if (shows(bg2, true)) return Resolved{.word = bg2->word, .layer = Layer::Bg2};
-  if (sprite(2u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
-  if (shows(bg1, false)) return Resolved{.word = bg1->word, .layer = Layer::Bg1};
-  if (shows(bg2, false)) return Resolved{.word = bg2->word, .layer = Layer::Bg2};
-  if (sprite(1u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
-  if (!bg3InFront && shows(bg3, true)) return Resolved{.word = bg3->word, .layer = Layer::Bg3};
-  if (sprite(0u)) return Resolved{.word = spriteWord, .layer = Layer::Object};
-  if (shows(bg3, false)) return Resolved{.word = bg3->word, .layer = Layer::Bg3};
+  // Front to back by the mode's own chart, the first place holding anything here
+  // being the pixel. The screen's backdrop is under them all, and is what nothing
+  // here stands for.
+  for (const Place& place : order()) {
+    if (place.layer == Layer::Object) {
+      if (spritePriority == place.priority) {
+        return Resolved{
+            .word = spriteWord, .layer = Layer::Object, .direct = std::nullopt};
+      }
+      continue;
+    }
+    const std::optional<Shown>& shown = backgrounds[static_cast<unsigned>(place.layer)];
+    if (shown.has_value() && shown->priority == (place.priority != 0u)) {
+      return Resolved{.word = shown->word, .layer = place.layer, .direct = shown->direct};
+    }
+  }
   return std::nullopt;
 }
 
@@ -587,10 +670,17 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
   // $2130's upper region covers this position, which replaces that colour with
   // black before any arithmetic and is remembered, because a pixel clipped this way
   // is not halved afterwards.
+  //
+  // A pixel read as a colour rather than as an index names no palette word, so it
+  // carries its own colour and is taken in place of one — on either screen, because
+  // direct colour is how the character data was read and not a main-screen effect.
   const std::optional<Resolved> main = resolve(Screen::Main, x, line);
   const bool clipped = regionCovers((s_.cgwsel >> 6) & 0x03u, x);
-  const std::uint16_t mainColour =
-      clipped ? 0u : paletteColour(main.has_value() ? main->word : 0u);
+  const auto colourOf = [this](const std::optional<Resolved>& shown) {
+    if (!shown.has_value()) return paletteColour(0u);
+    return shown->direct.has_value() ? *shown->direct : paletteColour(shown->word);
+  };
+  const std::uint16_t mainColour = clipped ? 0u : colourOf(main);
 
   // Whether this pixel takes math: $2131 keeps a bit for each of the six things the
   // main screen can show, the backdrop included, and $2130's lower region can
@@ -615,7 +705,7 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
   if (fromSubScreen) {
     const std::optional<Resolved> sub = resolve(Screen::Sub, x, line);
     subBackdrop = !sub.has_value();
-    if (sub.has_value()) addend = paletteColour(sub->word);
+    if (sub.has_value()) addend = colourOf(sub);
   }
 
   // Five bits a channel, added or subtracted, halved where bit 6 asks and neither

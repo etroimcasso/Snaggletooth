@@ -130,48 +130,85 @@ blank leaves below it; the frame's first line draws nothing, which is why a back
 registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
 the dots after it and not the ones before.
 
-**Mode 1 is what the chip draws**: its three backgrounds, each on the main screen `$212C` enables.
-BG1 and BG2 are sixteen colours, BG3 is four.
+**Modes 0, 1 and 3 are what the chip draws**, each background on the screen its own bit of `$212C`
+or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
+are and how deep each one is:
+
+| mode | BG1 | BG2 | BG3 | BG4 |
+|---|---|---|---|---|
+| 0 | 4 colours | 4 colours | 4 colours | 4 colours |
+| 1 | 16 colours | 16 colours | 4 colours | — |
+| 3 | 256 colours | 16 colours | — | — |
+
+BG4 exists in Mode 0 alone, and reads registers of its own throughout: `$210A` for its map, the
+high nibble of `$210C` for its characters, `$2113`/`$2114` for its offsets, `$2105` bit 7 for its
+tile size, and bit 3 of both `$212C`/`$212D` and `$212E`/`$212F` to be shown and to be masked.
 
 - The tilemap entry for a position is `(Base << 10) + ((Y & 0x1F) << 5) + (X & 0x1F)` words, plus
   the terms a wide or tall map adds — `Base` being bits 2–7 of the background's own screen
-  register (`$2107`, `$2108`, `$2109`), which count whole 32×32 screens of `$400` words, and the
-  map's own size wrapping the position.
+  register (`$2107`, `$2108`, `$2109`, `$210A`), which count whole 32×32 screens of `$400` words,
+  and the map's own size wrapping the position.
 - The entry is `vhopppcc cccccccc`: both flips, the tile's priority, its palette, its number.
 - The character is `(Base << 13) + Tile × 8 × planes` bytes, `Base` being the background's nibble
-  of `$210B` (BG1 low, BG2 high) or `$210C` (BG3 low). Planes 0 and 1 are the low and high bytes of
-  eight words and each further pair is sixteen bytes on, so a four-colour character is sixteen
-  bytes and a sixteen-colour one is thirty-two. The leftmost pixel of a row is bit 7.
-- The palette a tile shows in begins `ppp` × its colours into CGRAM — sixteen words apart for BG1
-  and BG2, four for BG3 — and Mode 1 gives none of the three a starting palette of its own, so
-  BG3's palette 1 and BG1's palette 0 name the same words. Colour 0 of any palette is transparent.
-- `$2105` bits 4, 5 and 6 make each entry of BG1, BG2 or BG3 a 16×16 block of `Tile`, `Tile+1`,
-  `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a flip
-  reverses the block whole.
+  of `$210B` (BG1 low, BG2 high) or `$210C` (BG3 low, BG4 high). Planes 0 and 1 are the low and
+  high bytes of eight words and each further pair is sixteen bytes on, so a four-colour character
+  is sixteen bytes, a sixteen-colour one thirty-two and a 256-colour one sixty-four. The leftmost
+  pixel of a row is bit 7.
+- The palette a tile shows in begins `ppp` × its colours into CGRAM, and where that palette begins
+  is the mode's. Modes 1 and 3 begin every background at word 0, so BG3's palette 1 and BG1's
+  palette 0 name the same words; **Mode 0 gives each of its four backgrounds thirty-two words of
+  its own** — BG1 words 0-31, BG2 32-63, BG3 64-95, BG4 96-127 — so no two of them can name the
+  same colour. A 256-colour background has no palette field at all: its eight-bit pixel is the
+  CGRAM word, and the entry's `ppp` is ignored. Colour 0 of any palette is transparent.
+- `$2105` bits 4, 5, 6 and 7 make each entry of BG1, BG2, BG3 or BG4 a 16×16 block of `Tile`,
+  `Tile+1`, `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a
+  flip reverses the block whole.
 - Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1,
-  `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3.
+  `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3, `$2113`/`$2114` for BG4.
 
-**The order the layers are drawn in**, front to back, is the one `$2105` names. Writing `A` and `a`
-for BG1's tiles at priority 1 and 0, the same for the others, and a digit for a sprite at that
-sprite priority, it is
+**The order the layers are drawn in**, front to back, is the mode's own. Writing `A` and `a` for
+BG1's tiles at priority 1 and 0, `B`/`b`, `C`/`c`, `D`/`d` for the others, and a digit for a sprite
+at that sprite priority:
 
 ```
-3 A B 2 a b 1 C 0 c        and with $2105 bit 3 set:   C 3 A B 2 a b 1 0 c
+mode 0   3 A B 2 a b 1 C D 0 c d
+mode 1   3 A B 2 a b 1 C 0 c        and with $2105 bit 3 set:   C 3 A B 2 a b 1 0 c
+mode 3   3 A 2 B 1 a 0 b
 ```
 
-so bit 3 lifts BG3's high-priority tiles from behind a sprite at priority 1 to in front of
-everything, and leaves its low-priority tiles where they are. The first layer in that order with a
-non-transparent pixel is the one shown; where none has one, the backdrop — palette word 0 — shows.
+`$2105` bit 3 is **Mode 1's**: it lifts BG3's high-priority tiles from behind a sprite at priority 1
+to in front of everything, leaves its low-priority tiles where they are, and names no place in any
+other mode's order. The first layer in the order with a non-transparent pixel is the one shown;
+where none has one, the backdrop — palette word 0 — shows. Sprites are drawn in every mode, and
+the four places they take are the mode's as much as a background's are.
+
+**Direct colour** reads a 256-colour background's pixel as a colour rather than as a palette index,
+and `$2130` bit 0 turns it on. The eight-bit pixel is `BBGGGRRR` and the tile's three palette
+bits — which such a background otherwise ignores — are `bgr`, and each channel takes its own field
+shifted up with the tile's own bit under it:
+
+```
+red   = RRR r 0          green = GGG g 0          blue = BB b 0 0
+```
+
+So the three `bgr` bits are per tile rather than per pixel, and every channel value direct colour
+can make is even. A pixel of zero is transparent as it is at any other depth — **there is no black
+in direct colour** — and the colour is built the same way on either screen, so a background read
+this way is the same colour whether it is shown or is colour math's addend. Nothing else in `$2130`
+decides whether a pixel is read this way — but a composed colour is a main-screen pixel like any
+other once it is made, so the two regions and colour math reach it exactly as they reach a colour
+the palette named.
 
 **The converter drives eight bits a channel.** A palette word is five bits a channel, and `INIDISP`
 brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 255 / (31 × 16))` in
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
-**What is not drawn yet**, so a reader does not go looking for it: BG4, which Mode 1 does not have,
-so `$212C` bit 3 shows nothing; mosaic; and every mode but 1, which show their backdrop and their
-sprites nowhere. Each arrives with its own work. The windows that take layers away are drawn, and
-have [their own section](#the-masking-windows); so are the sub screen and colour math, which have
+**What is not drawn yet**, so a reader does not go looking for it: the backgrounds of modes 2, 4, 5,
+6 and 7, which show their backdrop — their sprites draw as they do in any other mode — and with
+them offset-per-tile, the hires modes' half-pixel path, Mode 7's matrix and `EXTBG`; and mosaic.
+Each arrives with its own work. The windows that take layers away are drawn, and have [their own
+section](#the-masking-windows); so are the sub screen and colour math, which have
 [theirs](#the-sub-screen-and-colour-math).
 
 ## The sprites
