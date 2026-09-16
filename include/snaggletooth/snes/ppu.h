@@ -12,13 +12,15 @@
 // halves remember, and the windows in which each memory can be reached.
 //
 // A pixel is resolved from that state as it stands at the pixel's own dot, so a
-// program that writes a register mid-line changes the rest of the line. Modes 0,
-// 1, 3 and 7 are the modes the chip draws: the backgrounds each of them has, at
+// program that writes a register mid-line changes the rest of the line. Modes 0
+// to 4 and 7 are the modes the chip draws: the backgrounds each of them has, at
 // the depths it gives them, and the sprites, in that mode's own priority order,
-// over the backdrop. Mode 7's one background is a field of packed pixels read
-// through its matrix rather than a tilemap of characters, and SETINI bit 6 makes
-// a second layer of the same pixels. Sprites are drawn in every mode, the ones
-// whose backgrounds are not built included.
+// over the backdrop. In modes 2 and 4 BG3's tilemap is not drawn: it is a table
+// of offsets the other backgrounds are read through, a tile column at a time.
+// Mode 7's one background is a field of packed pixels read through its matrix
+// rather than a tilemap of characters, and SETINI bit 6 makes a second layer of
+// the same pixels. Sprites are drawn in every mode, the ones whose backgrounds
+// are not built included.
 //
 // Sprites are the one part of the picture not resolved at the dot that shows
 // them. A line's sprites are found and gathered during the line before it, in
@@ -206,6 +208,14 @@ struct PpuState {
   bool opvctHigh = false;        // $213D's flip-flop
   bool countersLatched = false;  // $213F bit 6: new values have been latched since the last read of $213F
 
+  // ---- mosaic -----------------------------------------------------------------
+  // The vertical phase of the mosaic blocks: the picture line the current row of
+  // blocks began on, and the size $2106 held when it began. A line's mosaiced pixels
+  // are read from that first line; a row of blocks runs for the size it began with,
+  // and the size in the register is read again only as the next row begins.
+  std::uint16_t mosaicBlockLine = 1;  // the line the current row of blocks began on
+  std::uint8_t mosaicBlockSize = 0;   // $2106 bits 7-4 as that row began
+
   // ---- status -----------------------------------------------------------------
   // Raised by the two passes whether or not $212C shows the sprites at all, and
   // cleared as the next picture begins.
@@ -304,6 +314,12 @@ class Ppu {
   // sprite-table port's own address name between them.
   void beginRange(std::uint16_t line) noexcept;
 
+  // The beam beginning a line: the mosaic's vertical counter. The picture's first
+  // line begins a row of blocks at the size $2106 holds; each later line begins a
+  // new row when the current one has run for the size it began with, and is one
+  // more line of the current row otherwise.
+  void beginLine(std::uint16_t line) noexcept;
+
   // The four bytes the chip's converter drives at picture position (x, y): red,
   // green, blue, then 255. x runs across a line's 256 pixels and y down the
   // picture's lines from its first. The colour is the one the main screen's
@@ -327,7 +343,33 @@ class Ppu {
     unsigned paletteStride;      // the words one step of its tile's palette field moves,
                                  // or none where the mode gives it no palette field
     unsigned wordBase;           // the first palette word its own colours begin at
+    std::uint16_t offsetBit;     // the bit of a BG3 entry that applies its offset to this
+                                 // background — $2000 for BG1, $4000 for BG2 — or 0 where the
+                                 // mode gives it no offset table
   };
+
+  // The two offsets a background is read with at one picture column.
+  struct Offsets {
+    std::uint16_t horizontal;
+    std::uint16_t vertical;
+  };
+
+  // The tilemap entry a background holds at one of its own positions: the base its
+  // screen register names, the row and column within one 32x32 screen, and the
+  // terms that carry a wide or tall map into its further screens.
+  [[nodiscard]] std::uint16_t entryAt(const Background& background, unsigned bgX,
+                                      unsigned bgY) const noexcept;
+
+  // The offsets a background is read with at picture column x: its own two
+  // registers' low ten bits, or where the mode gives it an offset table, what BG3's
+  // tilemap says for the tile column x falls in. The first tile column takes the
+  // registers whatever the table holds; tile T after it reads BG3's tile T - 1 from
+  // BG3's own coarse scroll, in the row BG3's vertical offset names and the row
+  // eight lines below it, whatever the line — or in mode 4 the first of those alone,
+  // bit 15 saying which axis it is. An entry whose bit for this background is set
+  // replaces the coarse horizontal offset, keeping the register's low three bits,
+  // or the vertical offset whole.
+  [[nodiscard]] Offsets offsetsFor(const Background& background, std::uint16_t x) const noexcept;
 
   // What a background shows at a picture position: the palette word its tile's
   // pixel names, the tile's own priority bit, which decides where the pixel sits
@@ -423,8 +465,9 @@ class Ppu {
   // backgrounds show their backdrop and its sprites draw as they do in any other.
   [[nodiscard]] std::span<const Place> order() const noexcept;
 
-  // How the mode reads one of the four backgrounds — its depth and its palette —
-  // or nothing where the mode does not have that background at all. Mode 7's
+  // How the mode reads one of the four backgrounds — its depth, its palette and
+  // whether it is read through an offset table — or nothing where the mode does not
+  // have that background at all, BG3 in modes 2 and 4 among them. Mode 7's
   // background is not one of these: it is the field, read by sampleField.
   [[nodiscard]] std::optional<Background> background(Layer layer) const noexcept;
 
@@ -457,6 +500,24 @@ class Ppu {
   [[nodiscard]] std::optional<Shown> sampleField(Layer layer, std::uint16_t x,
                                                  std::uint16_t line) const noexcept;
 
+  // Where a layer is read from at a picture position under mosaic: the position
+  // itself, or the top-left corner of the block it stands in — the column taken
+  // back to a multiple of the block's width, counted from the picture's left edge
+  // at the size $2106 holds at this dot, and the line taken back to the one the
+  // current row of blocks began on. Each background has its own enable bit, except
+  // the second Mode 7 layer, which reads bit 0 as its vertical enable and bit 1 as
+  // its horizontal one. Mode 7's blocks stand in the picture, so the matrix reads
+  // their corners.
+  struct Position {
+    std::uint16_t x;
+    std::uint16_t line;
+  };
+  [[nodiscard]] Position mosaicPosition(Layer layer, std::uint16_t x,
+                                        std::uint16_t line) const noexcept;
+
+  // How far a line is into the current row of mosaic blocks: 0 on the row's first.
+  [[nodiscard]] std::uint16_t mosaicIndex(std::uint16_t line) const noexcept;
+
   // Whether the chip is drawing a Mode 7 picture at an access: mode 7, forced
   // blank off, and a line before vertical blank's start — every dot of such a
   // line, horizontal blank included.
@@ -465,7 +526,8 @@ class Ppu {
   // What $2134-$2136 hold at a dot of a Mode 7 picture: two products a dot on the
   // chip's own schedule, each with its low three bits dropped — the offset and
   // line products in the line's first three dots, then matrix A times the column
-  // in a dot's first half and matrix C times it in the second.
+  // in a dot's first half and matrix C times it in the second. The line term is
+  // the line less BG1's mosaic index where BG1 is mosaiced, flipped after.
   [[nodiscard]] std::int32_t multiplierWhileDrawing(const PpuInputs& in) const noexcept;
 
   // The front-most pixel of one screen, by the order its mode keeps, each layer

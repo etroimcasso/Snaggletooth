@@ -994,7 +994,7 @@ TEST(SnesPpuPicture, ALayerEnabledOnlyOnTheSubScreenDrawsNothing) {
 
 TEST(SnesPpuPicture, AModeWhoseBackgroundsAreNotBuiltShowsItsBackdrop) {
   PpuState ppu = screen();
-  ppu.bgmode = 0x02u;  // Mode 2, whose backgrounds offset one another per tile
+  ppu.bgmode = 0x05u;  // Mode 5, whose pictures are drawn in half-pixels
   putEntry(ppu, kBg1, 0u, 0x0001u);
   putSolidTile(ppu, kBg1, 1u, 1u);
   const Picture picture = draw(ppu);
