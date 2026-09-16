@@ -699,10 +699,11 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   // The horizontal blank the line just ended is where Time draws the sprites the
   // Range pass across that line found — for the line beginning now, which holds
   // H = 0 of it, hblank being lowered a dot later. Range then starts again, on the
-  // line after this one.
-  Ppu sprites{state_.ppu};
-  sprites.timeSprites(state_.vpos);
-  sprites.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
+  // line after this one, and the mosaic's vertical counter takes the new line.
+  Ppu ppu{state_.ppu};
+  ppu.timeSprites(state_.vpos);
+  ppu.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
+  ppu.beginLine(state_.vpos);
 
   if (state_.vpos == 0u) {
     // The picture the beam has just finished is as tall as its own vertical blank

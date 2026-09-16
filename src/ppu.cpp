@@ -268,6 +268,41 @@ void Ppu::beginRange(std::uint16_t line) noexcept {
   s_.sprites.first = firstSprite(line);
 }
 
+// ---- mosaic ------------------------------------------------------------------
+
+void Ppu::beginLine(std::uint16_t line) noexcept {
+  // The counter reloads for the picture's first line and counts every line after,
+  // and a row of blocks runs for the size it began with before the register's size
+  // is read again.
+  const unsigned current = s_.mosaicBlockLine;
+  const bool rowEnded = line < current || line - current > s_.mosaicBlockSize;
+  if (line == 1u || rowEnded) {
+    s_.mosaicBlockLine = line;
+    s_.mosaicBlockSize = static_cast<std::uint8_t>(s_.mosaic >> 4);
+  }
+}
+
+std::uint16_t Ppu::mosaicIndex(std::uint16_t line) const noexcept {
+  const unsigned current = s_.mosaicBlockLine;
+  return static_cast<std::uint16_t>(line < current ? 0u : line - current);
+}
+
+Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x,
+                                  std::uint16_t line) const noexcept {
+  const unsigned index = static_cast<unsigned>(layer);
+  bool across = ((s_.mosaic >> index) & 0x01u) != 0u;
+  bool down = across;
+  if ((s_.bgmode & 0x07u) == 7u && layer == Layer::Bg2) {
+    // The second Mode 7 layer's two axes each have a bit of their own.
+    down = (s_.mosaic & 0x01u) != 0u;
+    across = (s_.mosaic & 0x02u) != 0u;
+  }
+  const unsigned width = (s_.mosaic >> 4) + 1u;
+  return Position{
+      .x = static_cast<std::uint16_t>(across ? x - x % width : x),
+      .line = static_cast<std::uint16_t>(down ? line - mosaicIndex(line) : line)};
+}
+
 void Ppu::rangeSprite(std::uint16_t line) noexcept {
   // A chip in forced blank is rendering nothing, so it walks no further along
   // OAM and the pass stands where the blank found it.
@@ -397,7 +432,8 @@ Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
                     .large = (s_.bgmode & (0x10u << index)) != 0u,
                     .planes = 0u,
                     .paletteStride = 0u,
-                    .wordBase = 0u};
+                    .wordBase = 0u,
+                    .offsetBit = 0u};
 }
 
 std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
@@ -430,18 +466,31 @@ std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
     case 1u:
       depth = index < 2u ? kSixteen : (index == 2u ? kFour : kNone);
       break;
+    case 2u:
+      // BG3's tilemap is the offset table, so the mode draws two backgrounds.
+      depth = index < 2u ? kSixteen : kNone;
+      break;
     case 3u:
       depth = index == 0u ? kFullPalette : (index == 1u ? kSixteen : kNone);
+      break;
+    case 4u:
+      depth = index == 0u ? kFullPalette : (index == 1u ? kFour : kNone);
       break;
     default:
       break;  // a mode whose backgrounds are not built shows its backdrop
   }
   if (depth.planes == 0u) return std::nullopt;
 
+  // The two offset-per-tile modes read BG1 and BG2 through BG3's table, each
+  // background under its own bit of an entry.
+  const std::uint8_t mode = s_.bgmode & 0x07u;
+  const bool offsetTable = mode == 2u || mode == 4u;
+
   Background described = registersOf(layer);
   described.planes = depth.planes;
   described.paletteStride = depth.paletteStride;
   described.wordBase = depth.wordBase;
+  described.offsetBit = offsetTable ? static_cast<std::uint16_t>(0x2000u << index) : 0u;
   return described;
 }
 
@@ -480,40 +529,87 @@ std::span<const Ppu::Place> Ppu::order() const noexcept {
     case 0u: return kModeZero;
     case 1u: return (s_.bgmode & 0x08u) != 0u ? std::span<const Place>(kModeOneLifted)
                                               : std::span<const Place>(kModeOne);
-    case 3u: return kModeThree;
+    // Modes 2 and 4 keep mode 3's chart: two backgrounds, BG1 before BG2 at each
+    // priority, and $2105 bit 3 naming no place.
+    case 2u:
+    case 3u:
+    case 4u: return kModeThree;
     case 7u: return (s_.setini & 0x40u) != 0u ? std::span<const Place>(kModeSevenExtended)
                                               : std::span<const Place>(kModeSeven);
     default: return kSpritesAlone;
   }
 }
 
-std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_t x,
-                                      std::uint16_t line) const noexcept {
-  // Where the position falls in the background. The offsets are the low ten bits of
-  // its two scroll registers, and the display never falls outside the background:
-  // the masks below wrap it at its own size, whatever that size is.
+std::uint16_t Ppu::entryAt(const Background& background, unsigned bgX,
+                           unsigned bgY) const noexcept {
   const unsigned side = background.large ? 16u : 8u;
-  const unsigned bgX = x + (background.horizontal & 0x03FFu);
-  const unsigned bgY = line + (background.vertical & 0x03FFu);
   const unsigned tileX = bgX / side;
   const unsigned tileY = bgY / side;
 
-  // The tilemap word for that tile: the base its screen register names, the row and
-  // column within one 32x32 screen, and the terms that carry a wide or tall map into
-  // its further screens, which follow the first at $800 bytes each.
-  //
   // The base counts whole screens: a 32x32 screen is $400 words, so the six bits of
   // the register step the map in $400-word units and reach every 2 KB boundary of
-  // the memory.
+  // the memory. A wide or tall map's further screens follow the first a screen
+  // apart.
   const bool wide = (background.screen & 0x01u) != 0u;
   const bool tall = (background.screen & 0x02u) != 0u;
   unsigned word = (static_cast<unsigned>(background.screen >> 2) << 10) +
                   ((tileY & 0x1Fu) << 5) + (tileX & 0x1Fu);
   if (tall) word += (tileY & 0x20u) << (wide ? 6u : 5u);
   if (wide) word += (tileX & 0x20u) << 5;
-  const std::size_t entryAt = (static_cast<std::size_t>(word) << 1) & 0xFFFFu;
-  const std::uint16_t entry =
-      static_cast<std::uint16_t>(s_.vram[entryAt] | (s_.vram[(entryAt + 1u) & 0xFFFFu] << 8));
+  const std::size_t at = (static_cast<std::size_t>(word) << 1) & 0xFFFFu;
+  return static_cast<std::uint16_t>(s_.vram[at] | (s_.vram[(at + 1u) & 0xFFFFu] << 8));
+}
+
+Ppu::Offsets Ppu::offsetsFor(const Background& background, std::uint16_t x) const noexcept {
+  Offsets offsets{.horizontal = static_cast<std::uint16_t>(background.horizontal & 0x03FFu),
+                  .vertical = static_cast<std::uint16_t>(background.vertical & 0x03FFu)};
+  if (background.offsetBit == 0u) return offsets;
+
+  // The background's own tile column at x. Its first, however little of it is on
+  // the picture, reads the registers.
+  const unsigned fine = offsets.horizontal & 0x07u;
+  const unsigned column = x + fine;
+  if (column < 8u) return offsets;
+
+  // Tile T reads BG3's tile T - 1, counted from BG3's coarse scroll; the rows are
+  // BG3's vertical offset and the row eight lines below it, and the line plays no
+  // part. BG3's own tile size decides how many BG3 positions one entry covers.
+  const Background table = registersOf(Layer::Bg3);
+  const unsigned tableX = (column & ~7u) - 8u + (table.horizontal & 0x03F8u);
+  const unsigned tableY = table.vertical & 0x03FFu;
+  std::uint16_t horizontal = entryAt(table, tableX, tableY);
+  std::uint16_t vertical = 0u;
+  if ((s_.bgmode & 0x07u) == 4u) {
+    // Mode 4 reads one entry, and bit 15 says which axis it is.
+    if ((horizontal & 0x8000u) != 0u) {
+      vertical = horizontal;
+      horizontal = 0u;
+    }
+  } else {
+    vertical = entryAt(table, tableX, tableY + 8u);
+  }
+
+  // A horizontal entry replaces the coarse scroll and keeps the register's fine
+  // one, its own low three bits unread; a vertical entry replaces the register.
+  if ((horizontal & background.offsetBit) != 0u) {
+    offsets.horizontal = static_cast<std::uint16_t>((horizontal & 0x03F8u) | fine);
+  }
+  if ((vertical & background.offsetBit) != 0u) {
+    offsets.vertical = static_cast<std::uint16_t>(vertical & 0x03FFu);
+  }
+  return offsets;
+}
+
+std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_t x,
+                                      std::uint16_t line) const noexcept {
+  // Where the position falls in the background. The display never falls outside
+  // the background: the tilemap lookup wraps it at the map's own size, whatever
+  // that size is.
+  const unsigned side = background.large ? 16u : 8u;
+  const Offsets offsets = offsetsFor(background, x);
+  const unsigned bgX = x + offsets.horizontal;
+  const unsigned bgY = line + offsets.vertical;
+  const std::uint16_t entry = entryAt(background, bgX, bgY);
 
   // The entry is vhopppcc cccccccc: the two flips, the tile's priority, its palette
   // and its number. A flip reverses the whole tile, a 16x16 block included.
@@ -656,9 +752,11 @@ std::int32_t Ppu::multiplierWhileDrawing(const PpuInputs& in) const noexcept {
   const std::int32_t d = static_cast<std::int16_t>(s_.m7d);
   const std::int32_t ox = clippedOffset(signed13(s_.m7hofs) - signed13(s_.m7x));
   const std::int32_t oy = clippedOffset(signed13(s_.m7vofs) - signed13(s_.m7y));
-  // The line term is the line itself under the vertical flip; the column term is
-  // the dot less three, wrapped at 256, under the horizontal flip.
-  const std::int32_t sy = (s_.m7sel & 0x02u) != 0u ? (in.vpos ^ 0xFF) : in.vpos;
+  // The line term is the line less BG1's mosaic index, under the vertical flip; the
+  // column term is the dot less three, wrapped at 256, under the horizontal flip.
+  const std::int32_t line =
+      (s_.mosaic & 0x01u) != 0u ? in.vpos - mosaicIndex(in.vpos) : in.vpos;
+  const std::int32_t sy = (s_.m7sel & 0x02u) != 0u ? (line ^ 0xFF) : line;
   const std::int32_t column = (in.hdot - 3) & 0xFF;
   const std::int32_t sx = (s_.m7sel & 0x01u) != 0u ? (column ^ 0xFF) : column;
   switch (in.hdot) {
@@ -729,19 +827,23 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // them is carried from one dot to the next — which is what lets a program move an
   // edge part-way along a line, and what lets a transfer shape a window down the
   // picture a line at a time.
+  //
+  // A mosaiced layer is read at its block's corner, and only there: the windows and
+  // the screens above are taken at the dot itself, so a window can cut a block.
   std::array<std::optional<Shown>, 4> backgrounds{};
   const bool field = (s_.bgmode & 0x07u) == 7u;
   for (unsigned index = 0u; index < backgrounds.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
+    const Position read = mosaicPosition(layer, x, line);
     // Mode 7's layers are the field, read through the matrix; every other mode's
     // are tilemaps of characters.
     if (field) {
-      if (index < 2u) backgrounds[index] = sampleField(layer, x, line);
+      if (index < 2u) backgrounds[index] = sampleField(layer, read.x, read.line);
       continue;
     }
     if (const std::optional<Background> described = background(layer)) {
-      backgrounds[index] = sample(*described, x, line);
+      backgrounds[index] = sample(*described, read.x, read.line);
     }
   }
 

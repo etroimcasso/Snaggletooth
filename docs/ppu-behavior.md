@@ -33,6 +33,15 @@ disagree it names the disagreement and what decided it.
   - [The multiplier's ports while Mode 7 draws: fullsnes gives a schedule in one place and garbage in another](#the-multipliers-ports-while-mode-7-draws-fullsnes-gives-a-schedule-in-one-place-and-garbage-in-another)
   - [The transform's products are truncated before the sum, on one source's word and another's guess](#the-transforms-products-are-truncated-before-the-sum-on-one-sources-word-and-anothers-guess)
   - [A flipped line reads row L XOR 255, which only the formula says](#a-flipped-line-reads-row-l-xor-255-which-only-the-formula-says)
+- [Offset-per-tile](#offset-per-tile)
+  - [The first column is exempt and tile T reads entry T−1, on one source's word](#the-first-column-is-exempt-and-tile-t-reads-entry-t1-on-one-sources-word)
+  - [Under a fine scroll, anomie's prose and his formula name different entries](#under-a-fine-scroll-anomies-prose-and-his-formula-name-different-entries)
+  - [The two rows ignore the line, and the vertical one is eight lines below](#the-two-rows-ignore-the-line-and-the-vertical-one-is-eight-lines-below)
+  - [A 16×16 table serves two columns an entry, and can serve both axes from one word](#a-1616-table-serves-two-columns-an-entry-and-can-serve-both-axes-from-one-word)
+- [Mosaic](#mosaic)
+  - [A size written part-way down a row: fullsnes gives a counter, anomie a restart](#a-size-written-part-way-down-a-row-fullsnes-gives-a-counter-anomie-a-restart)
+  - [Mode 7's blocks stand in the picture, and EXTBG reads two bits for two axes](#mode-7s-blocks-stand-in-the-picture-and-extbg-reads-two-bits-for-two-axes)
+  - [The multiplier's line term subtracts a mosaic index nobody else defines](#the-multipliers-line-term-subtracts-a-mosaic-index-nobody-else-defines)
 - [The windows](#the-windows)
   - [fullsnes prints the window-area field values off by one](#fullsnes-prints-the-window-area-field-values-off-by-one)
 - [Colour math](#colour-math)
@@ -407,6 +416,122 @@ line reading an odd row is the formula and an even line reading an even row is t
 rather than a count. **On Mesen, bsnes and snes9x every line of the band reads the other parity: the
 formula, not the mirror.** Three implementations, no silicon.
 
+## Offset-per-tile
+
+How the chip *finds* an offset stands on one document. fullsnes's own section (1932–1934) is "under
+construction (see Anomie's docs for now)", and the two wiki pages say only that BG3 encodes the
+offsets. The sources do agree on everything else: which modes have a table (fullsnes 1043–1047, the
+register page's mode table, anomie 152–166), the entry's layout (fullsnes 1322–1329, anomie
+1750–1751 and 1818–1825), that the entry's low three bits are not read horizontally, and mode 4's
+single entry with bit 15 naming its axis. A cartridge of ours,
+`offset-per-tile/sweep.sfc`, asks each of the four questions below in a band of its own, with a
+control image that has no table anywhere.
+
+### The first column is exempt and tile T reads entry T−1, on one source's word
+
+Anomie 1746 and 1755–1762: the leftmost visible tile of BG1 or BG2 takes its registers "in all cases
+(although as little as 1 pixel may be visible)", and each later tile T reads BG3's tile T−1. Nothing
+else says either.
+
+*Documented once, provisional — console pending.* Built as stated. The cartridge's first band puts
+the table's entry for BG3's last column at a different offset from the rest, so a first column that
+read the table would show a colour the exempt one cannot.
+
+### Under a fine scroll, anomie's prose and his formula name different entries
+
+Anomie's formula (1748–1749, under "Hopefully these calculations are right") finds the entry by the
+screen's own eighths, `((X − 8) & ~7)`, and rebuilds the position from `X`'s eighth with the fine
+scroll's bits laid in. His prose (1755–1758) counts BGn's own tiles and says "it doesn't matter
+whether or not the tiles actually align in any way". With `BGnHOFS & 7 = 0` the two are one reading.
+Under a fine scroll of 3 they part: BGn's tile 1 covers columns 5–12, and the formula sends columns
+5–7 to the entry before BG3's first — the map's last column, wrapped — and draws columns 13–15 of
+every tile from the wrong position.
+
+*Documented once and self-contradictory, provisional — console pending.* The prose is built: a table
+read as each tile of the background is fetched is aligned to the background's tiles, not to the
+screen's. The cartridge's second band scrolls by 3 over a table whose last column differs from its
+first, so the two readings are a colour apart at six columns of every eight-pixel run.
+
+### The two rows ignore the line, and the vertical one is eight lines below
+
+Anomie 1748–1749 reads the horizontal entry at `BG3VOFS` and the vertical at `BG3VOFS + 8`, and
+1764–1766 says "the current Y position on the screen does not affect which row of the BG3 tilemap to
+reference, it's as if Y were always 0". Nothing else says either.
+
+*Documented once, provisional — console pending.* Built as stated. The cartridge's third band places
+the two rows away from the top of the table and fills every other row with offsets they do not hold,
+so a row read that moved with the line would draw a different picture.
+
+### A 16×16 table serves two columns an entry, and can serve both axes from one word
+
+Anomie 1768–1771: a 16×16 BG3 applies each entry to "all the corresponding 8x8 subtiles", and "we may
+end up using the same tile for Hval and Vval". That follows from reading the table through BG3's own
+tile size, and is built that way rather than as a rule of its own; a 16×16 BG1 or BG2 still takes an
+entry per 8-pixel column (1768–1769).
+
+*Documented once, provisional — console pending.* The cartridge's fourth band reads a table whose
+entries alternate by column at BG3VOFS 0: in pairs, and with the vertical offset the same word
+supplies, if the size is honoured; column by column, and with no vertical offset, if it is not.
+
+## Mosaic
+
+The sources agree on the register (fullsnes 1054–1063, anomie 178–183, the register page), on each
+block showing its upper-left pixel (fullsnes 1055–1057, anomie 184–186 and 2012–2014), on the first
+block standing at the picture's left edge (fullsnes 1065, anomie 186) and its first line (fullsnes
+1066), and on mosaic applying after the scroll and before the windows and colour math (anomie
+197–200, 2012–2013). Three things are weaker, and a cartridge of ours, `mosaic/sweep.sfc`, asks the
+first two with a control image that has mosaic off everywhere.
+
+**What has been read of it.** The cartridge was run on an FPGA reconstruction of the console and on
+Mesen, bsnes and snes9x. The reconstruction draws the sweep as this machine does, band for band; the
+three software implementations each draw something else, and where they and the reconstruction
+disagree the reconstruction's reading is the one taken. A reconstruction is not silicon, so every
+finding below stays provisional until the console runs it.
+
+### A size written part-way down a row: fullsnes gives a counter, anomie a restart
+
+fullsnes 1067–1070 says the hardware "does first finish [the] current block (using the old vertical
+size) before applying the new vertical size", and that vertical mosaic is implemented by subtracting
+the index within the current block; 27031–27032 put the counter's reload in vertical blank and its
+count on every line. Anomie 188–195 says the blocks start on "the scanline where $2106 was written",
+and marks with an XXX that writing the same value does not restart them and that he does not know
+which changes do.
+
+From a block of size 0 the two agree, since every line ends a block, which is the case a program
+turning mosaic on part-way down the picture exercises. From a block of size 3 with a new size written
+on its second line they part: fullsnes's rows run on to the old row's end, anomie's restart where the
+write landed.
+
+*Documented twice and contested, corroborated on a reconstruction, provisional — console pending.*
+fullsnes's counter is built, as the
+mechanism and as the reading that gives anomie's same-value observation for free. The cartridge's
+second band turns 4×4 blocks on and then writes 3×3 two lines later; the reader finds both lines from
+the picture itself and scores both readings, each with its first row on the line the blocks appear or
+on the line after, so a transfer landing a line later than expected does not decide the question.
+
+### Mode 7's blocks stand in the picture, and EXTBG reads two bits for two axes
+
+Anomie 207–214 and 2029–2037 say the matrix does not move the blocks, so BG1's corner is a picture
+position the matrix then reads; and that EXTBG's BG2 reads bit 0 as vertical mosaic and bit 1 as
+horizontal, so `$F1` gives 1×16 blocks, `$F2` 16×1 and `$F3` 16×16 while BG1 reads bit 0 for both.
+One source, said twice.
+
+*Documented once, corroborated on a reconstruction, provisional — console pending.* Built as stated.
+The cartridge's third band turns
+the field a quarter turn under 4×4 blocks, so blocks aligned to the picture and blocks aligned to the
+field show different rows of it; its fourth shows EXTBG's layer alone under `$F1`, `$F2` and `$F3`.
+
+### The multiplier's line term subtracts a mosaic index nobody else defines
+
+fullsnes 1215–1216 gives the schedule's line term as `(SCREEN.Y − MOSAIC.Y) XOR (yflip × FFh)` and
+defines `MOSAIC.Y` nowhere. It is read as the index the same document's 1069–1070 describes,
+subtracted before the flip as the parentheses place it, and taken as zero where BG1's bit is clear,
+since a subtraction that applied with the bit clear would mosaic a picture nobody asked to be.
+
+*Documented once, unmeasured.* The values the ports hold at each dot are the finer half of the
+multiplier question above, which no reading here has carried yet; this term is built as stated and
+recorded.
+
 ## The windows
 
 ### fullsnes prints the window-area field values off by one
@@ -594,3 +719,11 @@ own "What remains open" carries the register-file ones alongside these.
   per-pixel ones; every term is read at the dot until something says otherwise.
 - What `$2133` bit 6 shows outside Mode 7. fullsnes says garbage from an external input; no source
   gives a picture, and nothing drawn changes.
+- Offset-per-tile's four, above: each built as its one source states it or, where the source parts
+  from itself, as the reading described, with a cartridge of ours asking the question and nothing yet
+  read from it.
+- Mosaic's two, above: corroborated on a reconstruction and open to the console.
+- What a mosaic size written part-way along a line does to the rest of that line. The width is read at
+  the dot, so the rest of the line takes it.
+- Whether a mosaic block's corner is read once or re-read from the registers at each dot of the block.
+  Every dot reads the registers as they stand.

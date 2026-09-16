@@ -45,9 +45,9 @@ p.multiplyResult();  // the signed 24-bit product at $2134-$2136
 m.vram()[0x20];      // the low byte of VRAM word $0010
 ```
 
-`Ppu` is the chip's behaviour over that state: `read`, `write`, `latchCounters` and `beginVblank`.
-The machine builds one over its own state for each access and never keeps it; a host that runs the
-machine never needs to touch it.
+`Ppu` is the chip's behaviour over that state: `read`, `write`, `latchCounters`, and the verbs the
+machine calls as the beam reaches a line or a frame. The machine builds one over its own state for
+each access and never keeps it; a host that runs the machine never needs to touch it.
 
 ## What the chip is told
 
@@ -132,7 +132,7 @@ blank leaves below it; the frame's first line draws nothing, which is why a back
 registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
 the dots after it and not the ones before.
 
-**Modes 0, 1, 3 and 7 are what the chip draws**, each background on the screen its own bit of `$212C`
+**Modes 0 to 4 and 7 are what the chip draws**, each background on the screen its own bit of `$212C`
 or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
 are and how deep each one is:
 
@@ -140,11 +140,15 @@ are and how deep each one is:
 |---|---|---|---|---|
 | 0 | 4 colours | 4 colours | 4 colours | 4 colours |
 | 1 | 16 colours | 16 colours | 4 colours | — |
+| 2 | 16 colours | 16 colours | the offset table | — |
 | 3 | 256 colours | 16 colours | — | — |
+| 4 | 256 colours | 4 colours | the offset table | — |
 | 7 | 256 colours, the field | with `$2133` bit 6: the same field at 128 colours | — | — |
 
-Modes 0, 1 and 3 read tilemaps of characters, described next; Mode 7 reads a field of packed pixels
-through its matrix, described [after them](#mode-7-the-field).
+Modes 0 to 4 read tilemaps of characters, described next — in modes 2 and 4 through BG3's tilemap,
+which is [a table of offsets](#offset-per-tile) rather than a layer; Mode 7 reads a field of packed
+pixels through its matrix, described [after them](#mode-7-the-field). [Mosaic](#mosaic) applies to
+all of them.
 
 BG4 exists in Mode 0 alone, and reads registers of its own throughout: `$210A` for its map, the
 high nibble of `$210C` for its characters, `$2113`/`$2114` for its offsets, `$2105` bit 7 for its
@@ -161,7 +165,7 @@ tile size, and bit 3 of both `$212C`/`$212D` and `$212E`/`$212F` to be shown and
   is sixteen bytes, a sixteen-colour one thirty-two and a 256-colour one sixty-four. The leftmost
   pixel of a row is bit 7.
 - The palette a tile shows in begins `ppp` × its colours into CGRAM, and where that palette begins
-  is the mode's. Modes 1 and 3 begin every background at word 0, so BG3's palette 1 and BG1's
+  is the mode's. Modes 1 to 4 begin every background at word 0, so BG3's palette 1 and BG1's
   palette 0 name the same words; **Mode 0 gives each of its four backgrounds thirty-two words of
   its own** — BG1 words 0-31, BG2 32-63, BG3 64-95, BG4 96-127 — so no two of them can name the
   same colour. A 256-colour background has no palette field at all: its eight-bit pixel is the
@@ -179,7 +183,9 @@ at that sprite priority:
 ```
 mode 0   3 A B 2 a b 1 C D 0 c d
 mode 1   3 A B 2 a b 1 C 0 c        and with $2105 bit 3 set:   C 3 A B 2 a b 1 0 c
+mode 2   3 A 2 B 1 a 0 b
 mode 3   3 A 2 B 1 a 0 b
+mode 4   3 A 2 B 1 a 0 b
 mode 7   3 2 1 A 0                  and with $2133 bit 6 set:   3 2 B 1 A 0 b
 ```
 
@@ -190,6 +196,52 @@ where none has one, the backdrop — palette word 0 — shows. Sprites are drawn
 the four places they take are the mode's as much as a background's are. Mode 7's field has one
 place and no priority bit; the second layer `$2133` bit 6 makes of it takes its priority from the
 pixel itself.
+
+### Offset-per-tile
+
+In modes 2 and 4 BG3's tilemap is not drawn, whatever `$212C` and `$212D` bit 2 hold: it is a table
+the chip reads BG1 and BG2 through, a tile column at a time. `$2109` places the table and sizes it,
+`$2111`/`$2112` scroll it and `$2105` bit 6 sets its tile size, exactly as they would a layer's;
+`$210C`'s low nibble is not read, since no character of BG3's is drawn.
+
+An entry of the table is:
+
+| bits | meaning |
+|---|---|
+| 15 | mode 4 only: 1 for a vertical offset, 0 for a horizontal one |
+| 14 | apply the offset to BG2 |
+| 13 | apply the offset to BG1 |
+| 12–10 | not read |
+| 9–0 | the offset |
+
+For each picture column, a background with a table reads its offsets like this:
+
+- **The first tile column is left alone.** The pixels for which `x + (HOFS & 7) < 8` — the
+  background's first tile on the line, however little of it is showing — read the background's own
+  two offset registers.
+- **Tile `T` after it reads BG3's tile `T − 1`.** Tiles are counted in the background's own 8-pixel
+  columns, starting from its first: the entry is BG3's at horizontal position
+  `(T − 1) × 8 + (BG3HOFS & ~7)`. BG3's own low three bits of scroll are not read, and a 16×16 BG1
+  or BG2 still takes a new entry every eight pixels.
+- **The two rows are fixed.** The horizontal entry is BG3's at vertical position `BG3VOFS` and the
+  vertical entry at `BG3VOFS + 8`, on every line. In mode 4 only the first is read, and bit 15 says
+  which axis it is.
+- **A 16×16 table** covers sixteen positions with each entry, so two 8-pixel columns share one entry,
+  and where `BG3VOFS + 8` falls inside the same 16-row block as `BG3VOFS` one word is both offsets.
+- **An entry applies** to a background whose bit is set, and to that axis alone. A horizontal entry
+  replaces the coarse scroll and keeps the register's own low three bits: the column read is
+  `x + ((entry & $3F8) | (HOFS & 7))`. A vertical entry replaces the register whole: the row read is
+  `line + (entry & $3FF)`. An axis whose entry does not apply keeps its register.
+
+The position then wraps at the background's map size as any other does. The table and both scroll
+registers are read at the dot, so a write to any of them mid-line changes the columns after it.
+
+```
+mode 2, BG1HOFS 3, every entry of BG3's row 0 = $2010 (+16 to BG1), BG3VOFS 0:
+  x 0-4    BG1 at x + 3             the first tile
+  x 5-12   BG1 at x + 16 + 3        tile 1, BG3's tile 0
+  x 13-20  BG1 at x + 16 + 3        tile 2, BG3's tile 1
+```
 
 ### Mode 7: the field
 
@@ -236,6 +288,48 @@ of VRAM and 128×128 entries, and the characters are always 8×8.
   and `$212E`/`$212F` mask it and `$2131` names it as they do any BG2. Outside Mode 7 the bit changes
   nothing that is drawn.
 
+### Mosaic
+
+`$2106` shows a background in blocks, each the colour of the pixel at its top-left corner:
+
+| bits | meaning |
+|---|---|
+| 7–4 | the size `N`: blocks of `N + 1` pixels a side, 1 to 16 |
+| 3–0 | on for BG4, BG3, BG2, BG1 |
+
+Sprites have no bit and are never mosaiced.
+
+- **Across**, the blocks start at the picture's left edge on every line: column `x` shows what the
+  background shows at column `x − x mod (N + 1)`. A scroll moves the picture under the blocks and
+  never the blocks.
+- **Down**, the blocks come in rows. A row begins on the picture's first line with the size `$2106`
+  holds there, and runs for that many lines — `N + 1` — before the next begins, which reads the size
+  again. Every line of a row shows what the background shows on the row's first line. So a size
+  written part-way down a row takes effect when that row ends, and writing the size the register
+  already holds changes nothing.
+- **What the block shows** is the corner as the background resolves it: its tile's priority, its
+  palette word or its direct colour, its offset-per-tile lookup, or its transparency — a transparent
+  corner is a transparent block, and whatever is behind shows through all of it.
+- **Before the windows and colour math.** The windows, `$212E`/`$212F`, `$2130`'s two regions and
+  colour math are all taken at the dot itself, so a window can cut a block in two and a mosaiced layer
+  takes colour math like any other.
+- **Mode 7.** BG1's blocks stand in the picture, not in the field: the matrix reads each block's
+  corner. EXTBG's BG2 reads `$2106` bit 0 as mosaic down and bit 1 as mosaic across, so `$F1` makes it
+  1×16 blocks, `$F2` 16×1 and `$F3` 16×16, while BG1 reads bit 0 for both.
+
+The size is read at the dot for the width, so a size written part-way along a line changes the block
+width for the rest of that line; the rows keep the size each began with. The row state is part of
+`PpuState` (`mosaicBlockLine`, `mosaicBlockSize`), so a snapshot taken part-way down a row resumes it.
+
+```
+$2106 = $31 (4x4 blocks on BG1) from the top of the frame:
+  lines 1-4    show line 1       columns 0-3 show column 0, 4-7 show 4, ...
+  lines 5-8    show line 5
+$11 written on line 6:
+  lines 5-8    still show line 5  (the row began at size 3)
+  lines 9-10   show line 9       columns 0-1 show column 0, ...
+```
+
 **Direct colour** reads a 256-colour background's pixel as a colour rather than as a palette index,
 and `$2130` bit 0 turns it on. The eight-bit pixel is `BBGGGRRR` and the tile's three palette
 bits — which such a background otherwise ignores — are `bgr`, and each channel takes its own field
@@ -258,10 +352,10 @@ brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 2
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
-**What is not drawn yet**, so a reader does not go looking for it: the backgrounds of modes 2, 4, 5
-and 6, which show their backdrop — their sprites draw as they do in any other mode — and with them
-offset-per-tile and the hires modes' half-pixel path; and mosaic, on Mode 7's two layers included.
-Each arrives with its own work. The windows that take layers away are drawn, and have [their own
+**What is not drawn yet**, so a reader does not go looking for it: the backgrounds of modes 5 and 6,
+which show their backdrop — their sprites draw as they do in any other mode — and with them the hires
+modes' half-pixel path, mode 6's offset-per-tile, the interlaced picture, and what mosaic does under
+any of them. Each arrives with its own work. The windows that take layers away are drawn, and have [their own
 section](#the-masking-windows); so are the sub screen and colour math, which have
 [theirs](#the-sub-screen-and-colour-math).
 
@@ -521,6 +615,9 @@ terms and the column `(dot − 3) & $FF`, XORed with `$FF` under the horizontal 
 | 2 | B × sy | D × sy |
 | 3 onward | A × column | C × column |
 
+Where BG1 is mosaiced, the line in `sy` is the line its current [row of blocks](#mosaic) began on, and
+the vertical flip is applied to that line.
+
 In vertical blank, in forced blank and in every other mode the ports hold the plain product above.
 
 ## The counter latch
@@ -567,7 +664,8 @@ half, and `LDA $2104` after `LDA $2134` returns what the multiplier's low byte w
 
 Where the hardware's power-on value is documented the state starts there: `INIDISP` `$80` (forced
 blank), `BGMODE` `$0F`, `VMAIN` `$0F`, `M7A` `$FFFF`, `M7B` `$FFFF`, `SETINI` `$00`, both counters
-`$01FF` with the flag clear, the I/O port `$FF`. Everything else starts at zero. A program that
+`$01FF` with the flag clear, the I/O port `$FF`, and the mosaic rows as a row begun on line 1 at
+size 0. Everything else starts at zero. A program that
 sends to VRAM without first writing `$2115` inherits a step of 128 words through the 8-bit
 translation, which is what the console does with it.
 
@@ -624,5 +722,10 @@ Each of these is a question the documentation leaves, recorded rather than decid
 - Whether a Mode 7 register written mid-line reaches that line's offset and line terms or only the
   per-pixel ones. The multiplier's schedule computes the offset and line products in the line's first
   three dots; whether the drawing unit re-reads them is not stated. Every term is read at the dot.
+- What a size written to `$2106` part-way along a line does to the rest of that line. The width is
+  read at the dot, so the rest of the line takes the new width.
+- Whether a mosaiced block's corner is read once, at the corner's own dot, or re-read from the
+  registers at each dot of the block. Every dot reads the registers as they stand, as the Mode 7
+  mid-line question above records.
 - What `$2133` bit 6 shows outside Mode 7. fullsnes describes an external input shorted to half the
   data bus and a program "will just see garbage"; no source gives a picture. Nothing drawn changes.
