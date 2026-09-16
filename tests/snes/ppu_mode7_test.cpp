@@ -1013,8 +1013,12 @@ void modeSevenCartridge(const std::string& name, bool expectMoving, bool expectT
   EXPECT_NE(played.state.ppu.m7a, 0xFFFFu) << name << " left the matrix at power-on";
   EXPECT_GT(played.lit, 1000u) << name << " drew nothing";
   EXPECT_GT(played.colours, 4u) << name;  // a field of several colours, not one flat one
-  if (expectMoving) EXPECT_TRUE(played.matrixMoved) << name << "'s matrix never changed";
-  if (expectTransfer) EXPECT_TRUE(played.matrixByTransfer) << name << " never transferred to the matrix";
+  if (expectMoving) {
+    EXPECT_TRUE(played.matrixMoved) << name << "'s matrix never changed";
+  }
+  if (expectTransfer) {
+    EXPECT_TRUE(played.matrixByTransfer) << name << " never transferred to the matrix";
+  }
 }
 
 // What each cartridge does was learned by running it: which mode it settles in,
