@@ -111,7 +111,10 @@ constexpr int kBytesPerSample = kChannels * static_cast<int>(sizeof(std::int16_t
 // the environment replaces the answer whole for anyone who wants their files
 // somewhere else.
 [[nodiscard]] std::optional<std::filesystem::path> userFilesRoot(std::string& error) {
-  if (const char* elsewhere = std::getenv("SNAGGLETOOTH_USER_FILES");
+  // The windowing library's own reader rather than the standard one: what the C
+  // library offers here is deprecated on one of the platforms this builds for, and
+  // this is a tool that already has a portable answer linked into it.
+  if (const char* elsewhere = SDL_getenv("SNAGGLETOOTH_USER_FILES");
       elsewhere != nullptr && *elsewhere != '\0') {
     return std::filesystem::path(elsewhere);
   }
