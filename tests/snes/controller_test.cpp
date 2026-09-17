@@ -1,10 +1,14 @@
 // The controller ports: a pad presented to the machine and read by a program the
 // two ways the console offers — the auto-read into $4218-$421F once a frame, and
 // the serial ports at $4016/$4017 strobed and clocked by hand. The bit order, the
-// identity bits and the padding are the documented ones; the strobe held high and
-// the auto-read's use of the same clock lines are pinned as the documentation
-// states them. Programs run from the cartridge and store what they read into work
-// RAM; the auto-read is observed on the machine state after a run of exact length.
+// identity bits and the padding are the documented ones; where the auto-read
+// begins on vertical blank's first line, its 256-cycle grid from one frame to the
+// next, the registers shifting as each bit arrives, the strobe held high and the
+// auto-read's use of the same clock lines are pinned as the documentation states
+// them (fullsnes "AUTO JOYPAD READ", anomie's timing notes and register notes for
+// $4016 and $4218). Programs run from the cartridge and store what they read into
+// work RAM; the auto-read is observed on the machine state after a run of exact
+// length.
 
 #include <cctype>
 #include <cstddef>
@@ -22,6 +26,16 @@ namespace {
 
 constexpr std::uint32_t kLine = 1364u;
 constexpr std::uint32_t kVblankLine = 225u;
+
+// The frame's first vertical-blank line begins here, and the machine's first
+// auto-read 298 master cycles into it: H = 74.5. A stopped machine advances in
+// six-cycle steps, so a point is reached by running to the multiple of six at or
+// past it, and not yet reached by running to the one before.
+constexpr std::uint64_t kFirstVblankLine = kVblankLine * kLine;    // 306,900
+constexpr std::uint64_t kFirstStart = kFirstVblankLine + 298u;    // 307,198
+constexpr std::uint64_t kSecondVblankLine = kFirstVblankLine + 262u * kLine - 4u;  // the first frame's line 240 is short: 664,264
+
+std::uint64_t toSixes(std::uint64_t point) { return (point + 5u) / 6u * 6u; }
 
 // A machine whose CPU is halted with the counters at the frame origin, so run()
 // advances it in exact six-cycle idle steps, with the auto-read enabled or not.
@@ -136,9 +150,80 @@ TEST(SnesController, AButtonIsHeldAndReleasedByName) {
 TEST(SnesController, AnEmptyPortReadsZeroThroughTheAutoRead) {
   Snes m = stoppedMachine(true);
   m.run(2u * 262u * kLine);
+  EXPECT_NE(m.state().autoJoyStart, 0u) << "a read has run";
   for (std::size_t i = 0; i < 8; ++i) EXPECT_EQ(m.state().joy[i], 0u) << i;
   EXPECT_FALSE(m.joypad(JoypadPort::One).has_value());
   EXPECT_FALSE(m.joypad(JoypadPort::Two).has_value());
+}
+
+TEST(SnesController, TheFirstReadBeginsAtDot74AndAHalf) {
+  // fullsnes: "it begins at H=74.5 on the first frame" — 298 master cycles into
+  // vertical blank's first line, not at the line's start.
+  Snes m = stoppedMachine(true);
+  m.setJoypad(JoypadPort::One, Joypad{.b = true});
+  m.run(kFirstVblankLine + 294u);
+  EXPECT_EQ(m.state().autoJoyStart, 0u) << "not yet begun 294 cycles into the line";
+  EXPECT_EQ(m.state().joyClocks[0], 0u) << "the pads are not strobed before it begins";
+  m.run(6u);  // the step that passes cycle 298
+  EXPECT_EQ(m.state().autoJoyStart, kFirstStart);
+  EXPECT_EQ(m.state().autoJoyClocked, 0u) << "begun, nothing clocked";
+}
+
+TEST(SnesController, TheNextReadBeginsOnThe256CycleGridFromTheLast) {
+  // fullsnes: "thereafter some multiple of 256 cycles after the start of the
+  // previous read that falls within [H=32.5, H=95.5]". From 307,198 the grid's
+  // first point at or past H = 32.5 (130 cycles) of the second frame's first
+  // vertical-blank line, which begins at 664,264, is 664,574: H = 77.5.
+  Snes m = stoppedMachine(true);
+  m.run(kSecondVblankLine + 306u);  // the machine stops at 308 into the line
+  EXPECT_EQ(m.state().autoJoyStart, kFirstStart) << "the second frame's read has not begun 308 cycles in";
+  m.run(6u);  // passes 664,574
+  EXPECT_EQ(m.state().autoJoyStart, kSecondVblankLine + 310u);
+}
+
+TEST(SnesController, TheRegistersShiftAsEachBitIsClocked) {
+  // The strobe pulse takes 128 cycles and each bit 256 more, every port's register
+  // shifting up one and taking the bit at the bottom. Start is the fourth bit on
+  // the wire, so it enters at bit 0 after four clocks and reaches its resting
+  // place, bit 12, as the sixteenth lands.
+  Snes m = stoppedMachine(true);
+  m.setJoypad(JoypadPort::One, Joypad{.start = true});
+  m.run(toSixes(kFirstStart + 128u + 4u * 256u) - 6u);  // the step before the fourth clock lands
+  EXPECT_EQ(m.state().autoJoyClocked, 3u);
+  EXPECT_EQ(m.state().joy[0], 0x00u) << "B, Y and Select are up";
+  m.run(6u);
+  EXPECT_EQ(m.state().autoJoyClocked, 4u);
+  EXPECT_EQ(m.state().joy[0], 0x01u) << "Start has just entered at bit 0";
+  EXPECT_EQ(m.state().joy[1], 0x00u);
+  m.run(toSixes(kFirstStart + 128u + 8u * 256u) - toSixes(kFirstStart + 128u + 4u * 256u));
+  EXPECT_EQ(m.state().autoJoyClocked, 8u);
+  EXPECT_EQ(m.state().joy[0], 0x10u) << "four clocks later it has moved to bit 4";
+  m.run(toSixes(kFirstStart + 4224u) - 6u - toSixes(kFirstStart + 128u + 8u * 256u));
+  EXPECT_EQ(m.state().autoJoyClocked, 15u);
+  EXPECT_EQ(m.state().joy[1], 0x08u) << "one clock short, Start sits at bit 11";
+  EXPECT_EQ(m.state().joy[0], 0x00u);
+  m.run(6u);  // the sixteenth bit lands 4224 cycles after the start
+  EXPECT_EQ(m.state().autoJoyClocked, 16u);
+  EXPECT_EQ(m.state().joy[1], 0x10u) << "$4219: Start in bit 4";
+  EXPECT_EQ(m.state().joy[0], 0x00u);
+}
+
+TEST(SnesController, ThePreviousFrameShiftsOutAboveThisOneShiftingIn) {
+  // anomie: reading $4218-f while the busy bit is set "will return incorrect
+  // values". Start was read on the first frame; on the second nothing is held,
+  // and two clocks in the register shows Start's bit moved up to where Y rests.
+  Snes m = stoppedMachine(true);
+  m.setJoypad(JoypadPort::One, Joypad{.start = true});
+  m.run(kSecondVblankLine);
+  EXPECT_EQ(m.state().joy[1], 0x10u) << "the first frame's read landed Start";
+  m.setJoypad(JoypadPort::One, Joypad{});
+  const std::uint64_t secondStart = kSecondVblankLine + 310u;
+  m.run(toSixes(secondStart + 128u + 2u * 256u) - kSecondVblankLine);
+  EXPECT_EQ(m.state().autoJoyClocked, 2u);
+  EXPECT_EQ(m.state().joy[1], 0x40u) << "Start's bit stands where Y rests, though nothing is pressed";
+  m.run(toSixes(secondStart + 4224u) - toSixes(secondStart + 128u + 2u * 256u));
+  EXPECT_EQ(m.state().joy[1], 0x00u) << "and is gone once all sixteen are in";
+  EXPECT_EQ(m.state().joy[0], 0x00u);
 }
 
 TEST(SnesController, TheAutoReadLaysAPadOutAsDocumented) {
@@ -153,22 +238,11 @@ TEST(SnesController, TheAutoReadLaysAPadOutAsDocumented) {
   for (std::size_t i = 4; i < 8; ++i) EXPECT_EQ(m.state().joy[i], 0u) << "nothing on the second lines";
 }
 
-TEST(SnesController, TheResultLandsAsTheWindowEnds) {
-  Snes m = stoppedMachine(true);
-  m.setJoypad(JoypadPort::One, Joypad{.start = true});
-  m.run(kVblankLine * kLine + 1200u);  // inside the 4224-cycle window
-  EXPECT_NE(m.state().autoJoyClocks, 0u);
-  EXPECT_EQ(m.state().joy[1], 0u) << "the registers hold the previous result while the read is busy";
-  m.run(4u * kLine);
-  EXPECT_EQ(m.state().autoJoyClocks, 0u);
-  EXPECT_EQ(m.state().joy[1], 0x10u);
-}
-
 TEST(SnesController, NoAutoReadRunsWhenItIsDisabled) {
   Snes m = stoppedMachine(false);
   m.setJoypad(JoypadPort::One, Joypad{.start = true});
   m.run(2u * 262u * kLine);
-  EXPECT_EQ(m.state().autoJoyClocks, 0u);
+  EXPECT_EQ(m.state().autoJoyStart, 0u);
   for (std::size_t i = 0; i < 8; ++i) EXPECT_EQ(m.state().joy[i], 0u) << i;
 }
 
@@ -261,21 +335,22 @@ TEST(SnesController, TheStrobeHeldHighRepeatsTheFirstBit) {
 
 // ---- the two paths share the lines --------------------------------------------------
 
-// Enables the auto-read, waits for a vertical blank and for the read to finish,
-// then reads the serial port without strobing, then strobes and reads again.
+// Enables the auto-read, waits for a read to begin and then to finish, then
+// reads the serial port without strobing, then strobes and reads again.
 const std::vector<std::uint8_t> kReadAfterAutoRead = {
     0xA9u, 0x01u, 0x8Du, 0x00u, 0x42u,  // $8000 LDA #$01 / STA $4200   auto-read on
     0xADu, 0x12u, 0x42u,                // $8005 LDA $4212
-    0x10u, 0xFBu,                       // $8008 BPL $8005              until vblank
-    0xADu, 0x12u, 0x42u,                // $800A LDA $4212
-    0x29u, 0x01u,                       // $800D AND #$01
-    0xD0u, 0xF9u,                       // $800F BNE $800A              until the read is done
-    0xADu, 0x16u, 0x40u,                // $8011 LDA $4016              no strobe first
-    0x8Du, 0x10u, 0x00u,                // $8014 STA $0010
-    0xA9u, 0x01u, 0x8Du, 0x16u, 0x40u,  // $8017 LDA #$01 / STA $4016
-    0x9Cu, 0x16u, 0x40u,                // $801C STZ $4016              strobe
-    0xADu, 0x16u, 0x40u,                // $801F LDA $4016
-    0x8Du, 0x11u, 0x00u,                // $8022 STA $0011
+    0x29u, 0x01u,                       // $8008 AND #$01
+    0xF0u, 0xF9u,                       // $800A BEQ $8005              until a read has begun
+    0xADu, 0x12u, 0x42u,                // $800C LDA $4212
+    0x29u, 0x01u,                       // $800F AND #$01
+    0xD0u, 0xF9u,                       // $8011 BNE $800C              until it is done
+    0xADu, 0x16u, 0x40u,                // $8013 LDA $4016              no strobe first
+    0x8Du, 0x10u, 0x00u,                // $8016 STA $0010
+    0xA9u, 0x01u, 0x8Du, 0x16u, 0x40u,  // $8019 LDA #$01 / STA $4016
+    0x9Cu, 0x16u, 0x40u,                // $801E STZ $4016              strobe
+    0xADu, 0x16u, 0x40u,                // $8021 LDA $4016
+    0x8Du, 0x11u, 0x00u,                // $8024 STA $0011
     0xDBu};
 
 TEST(SnesController, TheAutoReadClocksTheSameRegisterTheSerialPortReads) {
@@ -289,16 +364,67 @@ TEST(SnesController, TheAutoReadClocksTheSameRegisterTheSerialPortReads) {
   EXPECT_EQ(m.state().wram[0x11u] & 1u, 0u) << "a strobe starts it over at B, which is up";
 }
 
+// Enables the auto-read, waits for the busy bit, then — with `readInside` — reads
+// the serial port once while the read is in progress, waits for the busy bit to
+// clear, and stores $4218/$4219.
+std::vector<std::uint8_t> readDuringAutoRead(bool readInside) {
+  std::vector<std::uint8_t> p = {
+      0xA9u, 0x01u, 0x8Du, 0x00u, 0x42u,  // $8000 LDA #$01 / STA $4200   auto-read on
+      0xADu, 0x12u, 0x42u,                // $8005 LDA $4212
+      0x29u, 0x01u,                       // $8008 AND #$01
+      0xF0u, 0xF9u};                      // $800A BEQ $8005              until busy
+  if (readInside) {
+    p.insert(p.end(), {0xADu, 0x16u, 0x40u});  // $800C LDA $4016          one clock, inside the window
+  } else {
+    p.insert(p.end(), {0xEAu, 0xEAu, 0xEAu});  // $800C NOP NOP NOP
+  }
+  p.insert(p.end(), {0x8Du, 0x10u, 0x00u,      // $800F STA $0010
+                     0xADu, 0x12u, 0x42u,      // $8012 LDA $4212
+                     0x29u, 0x01u,             // $8015 AND #$01
+                     0xD0u, 0xF9u,             // $8017 BNE $8012          until done
+                     0xADu, 0x18u, 0x42u, 0x8Du, 0x11u, 0x00u,  // LDA $4218 / STA $0011
+                     0xADu, 0x19u, 0x42u, 0x8Du, 0x12u, 0x00u,  // LDA $4219 / STA $0012
+                     0xDBu});
+  return p;
+}
+
+TEST(SnesController, ASerialReadInsideTheWindowTakesAClockFromTheAutoRead) {
+  // The serial port and the auto-read drive one clock line, so a program's read
+  // inside the window advances the pad past a bit the auto-read then never sees:
+  // every later bit lands one place higher and the padding, 1, enters last. The
+  // program's read lands well inside the strobe pulse and the first clock, so the
+  // bit it takes is B.
+  const Joypad all{.b = true, .y = true, .select = true, .start = true, .up = true, .down = true,
+                   .left = true, .right = true, .a = true, .x = true, .l = true, .r = true};
+  {
+    Snes m = machineWith(readDuringAutoRead(false));
+    m.setJoypad(JoypadPort::One, all);
+    runToStop(m);
+    EXPECT_EQ(m.state().wram[0x11u], 0xF0u) << "$4218 with the window left alone";
+    EXPECT_EQ(m.state().wram[0x12u], 0xFFu) << "$4219";
+  }
+  {
+    Snes m = machineWith(readDuringAutoRead(true));
+    m.setJoypad(JoypadPort::One, all);
+    runToStop(m);
+    EXPECT_EQ(m.state().wram[0x10u] & 1u, 1u) << "the program's own read took B";
+    EXPECT_EQ(m.state().wram[0x11u], 0xE1u) << "$4218: R has moved up to bit 5 and the padding sits at bit 0";
+    EXPECT_EQ(m.state().wram[0x12u], 0xFFu) << "$4219: Y through Right, then A";
+  }
+}
+
 TEST(SnesController, TheStrobeHeldHighThroughTheAutoReadRepeatsB) {
-  // Strobe high, then the auto-read enabled and waited for; both result bytes read.
+  // Strobe high, then the auto-read enabled and waited for, its beginning and its
+  // end; both result bytes read.
   const std::vector<std::uint8_t> program = {
       0xA9u, 0x01u, 0x8Du, 0x16u, 0x40u,  // LDA #$01 / STA $4016   strobe held high
       0x8Du, 0x00u, 0x42u,                // STA $4200              auto-read on
       0xADu, 0x12u, 0x42u,                // $8008 LDA $4212
-      0x10u, 0xFBu,                       // BPL $8008
-      0xADu, 0x12u, 0x42u,                // $800D LDA $4212
       0x29u, 0x01u,                       // AND #$01
-      0xD0u, 0xF9u,                       // BNE $800D
+      0xF0u, 0xF9u,                       // BEQ $8008              until a read has begun
+      0xADu, 0x12u, 0x42u,                // $800F LDA $4212
+      0x29u, 0x01u,                       // AND #$01
+      0xD0u, 0xF9u,                       // BNE $800F              until it is done
       0xADu, 0x18u, 0x42u, 0x8Du, 0x10u, 0x00u,  // LDA $4218 / STA $0010
       0xADu, 0x19u, 0x42u, 0x8Du, 0x11u, 0x00u,  // LDA $4219 / STA $0011
       0xDBu};

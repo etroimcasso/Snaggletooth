@@ -158,6 +158,40 @@ TEST(SnesTiming, EnablingVblankNmiTakesTheHandlerOncePerFrame) {
   EXPECT_EQ(m.state().wram[0x30], 1u);  // exactly one vblank NMI taken
 }
 
+TEST(SnesTiming, AReadOfRdnmiInTheCycleTheFlagSetsStillTakesTheNmi) {
+  // The CPU latches the NMI on the flag's rise (fullsnes, RDNMI: an internal flag
+  // set when "[4200h].7 AND [4210h].7" changes from 0 to 1, cleared when the NMI
+  // executes; anomie's timing notes: the CPU jumps at the end of the instruction
+  // during which /NMI transitions). A program polling $4210 with NMIs enabled
+  // reads it, some frames, in the very cycle the flag sets: the read returns the
+  // flag set and clears it, and the handler runs all the same.
+  //
+  // The poll loop is 52 master cycles long and every cycle is even, so a run of
+  // NOPs before it — 14 cycles each — steps the loop's phase against the line
+  // through every even residue; some prefix lands the read on the flag's cycle.
+  // Every prefix must see the handler run once on the first frame.
+  for (unsigned nops = 0; nops < 30u; ++nops) {
+    std::vector<std::uint8_t> rom(0x8000u, 0x00u);
+    std::size_t at = 0;
+    rom[at++] = 0xA9; rom[at++] = 0x80;                          // LDA #$80
+    rom[at++] = 0x8D; rom[at++] = 0x00; rom[at++] = 0x42;        // STA $4200 (enable vblank NMI)
+    for (unsigned i = 0; i < nops; ++i) rom[at++] = 0xEA;        // NOP × nops
+    const std::size_t loop = at;
+    rom[at++] = 0xAD; rom[at++] = 0x10; rom[at++] = 0x42;        // loop: LDA $4210
+    rom[at++] = 0x10; rom[at++] = 0xFB;                          //       BPL loop
+    rom[at++] = 0x80;                                            //       BRA loop
+    rom[at] = static_cast<std::uint8_t>(loop - (at + 1));
+    ++at;
+    rom[0x0100] = 0xE6; rom[0x0101] = 0x30;                      // $8100 INC $30
+    rom[0x0102] = 0x40;                                          //       RTI
+    rom[0x7FFC] = 0x00; rom[0x7FFD] = 0x80;                      // reset -> $8000
+    rom[0x7FFA] = 0x00; rom[0x7FFB] = 0x81;                      // NMI  -> $8100
+    Snes m(SnesConfig{.rom = rom});
+    m.run(230u * kLine);  // into frame 0's vertical blank
+    EXPECT_EQ(m.state().wram[0x30], 1u) << "with " << nops << " NOPs before the poll";
+  }
+}
+
 // ---- the H/V-timer IRQ ----------------------------------------------------
 
 TEST(SnesTiming, VerticalIrqFiresAtTheProgrammedLine) {

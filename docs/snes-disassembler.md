@@ -526,8 +526,8 @@ program.snagir: 11 nodes
 ```
 
 ```
-reached  $00:8200 loc_008200 e=1 m=8 x=8 from $00:8311
-reached  $00:8210 loc_008210 e=1 m=8 x=8 from $00:833B
+reached  $00:8200 loc_008200 e=1 m=8 x=8 from $00:8318
+reached  $00:8210 loc_008210 e=1 m=8 x=8 from $00:8342
 ```
 
 Each run's script is a person's record of what was played, and different scripts

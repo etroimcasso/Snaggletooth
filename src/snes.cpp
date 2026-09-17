@@ -90,8 +90,20 @@ constexpr std::uint32_t kRefreshStep = 6u;
 constexpr std::uint8_t kMultiplyClocks = 8u;
 constexpr std::uint8_t kDivideClocks = 16u;
 
-// The auto-joypad read holds the busy flag for a fixed window each frame.
-constexpr std::uint16_t kAutoJoyClocks = 4224u;
+// The auto-joypad read. It begins on vertical blank's first line: at H = 74.5 the
+// first time the machine performs one, and thereafter at the first point on a
+// 256-cycle grid carried from the previous read's start that lies at or past
+// H = 32.5. The strobe pulse takes 128 cycles, then each of the sixteen bits a
+// further 256, so the busy flag holds for 4224 cycles and the sixteenth bit lands
+// as it clears.
+constexpr std::uint16_t kAutoJoyFirstStart = 298u;   // H = 74.5, in master cycles into the line
+constexpr std::uint16_t kAutoJoyEarliest = 130u;     // H = 32.5
+constexpr std::uint16_t kAutoJoyGrid = 256u;
+constexpr std::uint16_t kAutoJoyStrobe = 128u;
+constexpr std::uint16_t kAutoJoyBit = 256u;
+constexpr std::uint8_t kAutoJoyBits = 16u;
+static_assert(kAutoJoyStrobe + kAutoJoyBits * kAutoJoyBit == 4224u,
+              "the auto-read's busy window is the documented 4224 master cycles");
 
 // The largest save a cartridge can address through any window.
 constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
@@ -602,8 +614,22 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
   // hands the sprite table's address back at dot 10. Neither re-fires: they are dated
   // from the line the blank began on, which comes once a frame.
   if (state_.inVblank && state_.vpos == state_.vblankBeginLine) {
-    if (passed(lineStart + kNmiFlagOffset)) state_.vblankNmi = true;
+    if (passed(lineStart + kNmiFlagOffset)) {
+      // The flag's rise is the edge the CPU latches, here and now while NMIs are
+      // enabled: a read of $4210 in this same cycle sees the flag and clears it,
+      // and the NMI is taken all the same, at the end of the instruction.
+      state_.vblankNmi = true;
+      if ((state_.nmitimen & 0x80u) != 0u) cpu_.setNmiLine(true);
+    }
     if (passed(lineStart + kOamReloadOffset)) Ppu{state_.ppu}.beginVblank();
+    // The auto-read begins at its own point on this line, once, while $4200 asks
+    // for it: the strobe pulse latches every pad and the clocks follow.
+    if ((state_.nmitimen & 1u) != 0u && state_.autoJoyStart < lineStart &&
+        passed(autoJoypadStart(lineStart))) {
+      latchJoypads();
+      state_.autoJoyStart = autoJoypadStart(lineStart);
+      state_.autoJoyClocked = 0u;
+    }
   }
 
   const std::uint64_t zeroPoint = lineStart + kTimerLineSpan - state_.previousLineMaster;
@@ -797,12 +823,6 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   state_.inVblank = true;
   state_.vblankBeginLine = state_.vpos;
   state_.hdmaActive = 0u;  // every HDMA channel deactivates for the rest of the frame
-  if ((state_.nmitimen & 1u) != 0u) {
-    // The auto-joypad read runs each frame it is enabled: it strobes the pads now,
-    // clocks their bits out over the window, and lands them as it ends.
-    latchJoypads();
-    state_.autoJoyClocks = kAutoJoyClocks;
-  }
 }
 
 void Snes::tickVideo(std::uint32_t cost) {
@@ -812,15 +832,6 @@ void Snes::tickVideo(std::uint32_t cost) {
     --state_.mathClocks;
     if (state_.mathClocks == 0u) commitMath();
   }
-  // The auto-joypad busy window is counted in master cycles; the result registers
-  // take the bits it read as it closes.
-  if (state_.autoJoyClocks != 0u) {
-    state_.autoJoyClocks = state_.autoJoyClocks > cost
-        ? static_cast<std::uint16_t>(state_.autoJoyClocks - cost)
-        : std::uint16_t{0u};
-    if (state_.autoJoyClocks == 0u) finishAutoJoypadRead();
-  }
-
   // Advance the beam by the cycle's master cost, one line's share at a time, so every
   // event the span passes is placed at its own master offset. The line's events come
   // first, then the line's end hands the beam to the next one.
@@ -851,6 +862,10 @@ void Snes::tickVideo(std::uint32_t cost) {
       advanceLine(lineStart);
     }
   }
+
+  // The auto-read's clocks that fell inside this span land their bits, a read
+  // begun inside it included.
+  clockAutoJoypad(end);
 
   // HDMA triggers, each latched so it fires once: the frame's initialisation as the
   // beam passes dot 6 of line 0, and a delivery as it passes dot 278 of every line the
@@ -939,7 +954,7 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
     case 0x4212: {  // HVBJOY: vblank (bit 7), hblank (bit 6), auto-joypad busy (bit 0), open bus between
       const std::uint8_t v = static_cast<std::uint8_t>(
           (state_.inVblank ? 0x80u : 0x00u) | (inHblank() ? 0x40u : 0x00u) |
-          (state_.mdr & 0x3Eu) | (state_.autoJoyClocks != 0u ? 0x01u : 0x00u));
+          (state_.mdr & 0x3Eu) | (autoJoypadBusy() ? 0x01u : 0x00u));
       return latch(v);
     }
     case 0x4213: return latch(state_.wrio);  // RDIO: the port's lines, which nothing on the console drives, so as written
@@ -951,7 +966,7 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
       break;
   }
   if (offset >= 0x4218 && offset <= 0x421F) {
-    return latch(state_.joy[static_cast<std::size_t>(offset - 0x4218)]);  // the auto-read result, as of the last window's end
+    return latch(state_.joy[static_cast<std::size_t>(offset - 0x4218)]);  // the auto-read's registers as they stand, part-shifted while it is busy
   }
   return state_.mdr;  // other CPU-register reads are open bus
 }
@@ -1121,18 +1136,43 @@ std::uint8_t Snes::clockJoypad(std::size_t port) noexcept {
   return bit;
 }
 
-void Snes::finishAutoJoypadRead() noexcept {
-  // Sixteen clocks per port, the first bit landing highest, into the port's pair
-  // of registers: the low byte at $4218/$421A, the high at $4219/$421B. The
-  // second data line of each port — a multitap's — carries nothing here, so
-  // $421C-$421F stay zero.
-  for (std::size_t p = 0; p < 2; ++p) {
-    std::uint16_t word = 0;
-    for (std::size_t i = 0; i < 16; ++i) {
-      word = static_cast<std::uint16_t>((word << 1) | clockJoypad(p));
+std::uint64_t Snes::autoJoypadStart(std::uint64_t lineStart) const noexcept {
+  // The machine's first read begins at H = 74.5. Every later one begins at the
+  // first point on the 256-cycle grid carried from the previous read's start that
+  // lies at or past H = 32.5 of the line.
+  if (state_.autoJoyStart == 0u) return lineStart + kAutoJoyFirstStart;
+  const std::uint64_t earliest = lineStart + kAutoJoyEarliest;
+  const std::uint64_t ahead = (earliest - state_.autoJoyStart) % kAutoJoyGrid;
+  return ahead == 0u ? earliest : earliest + (kAutoJoyGrid - ahead);
+}
+
+bool Snes::autoJoypadBusy() const noexcept {
+  return state_.autoJoyStart != 0u && state_.autoJoyClocked < kAutoJoyBits;
+}
+
+void Snes::clockAutoJoypad(std::uint64_t now) noexcept {
+  if (!autoJoypadBusy()) return;
+  // The bits whose clocks have completed by `now`: none through the strobe
+  // pulse, then one every 256 cycles.
+  const std::uint64_t elapsed = now > state_.autoJoyStart ? now - state_.autoJoyStart : 0u;
+  const std::uint64_t landed =
+      elapsed <= kAutoJoyStrobe ? 0u : (elapsed - kAutoJoyStrobe) / kAutoJoyBit;
+  const auto reached = static_cast<std::uint8_t>(landed < kAutoJoyBits ? landed : kAutoJoyBits);
+  // Each clock shifts every port's register up one and puts the bit it read at the
+  // bottom, so the first bit read — B — is at bit 15 once all sixteen are in, and a
+  // register read before then holds the previous read's bits shifted part-way out
+  // above this one's shifted part-way in. The low byte is at $4218/$421A and the
+  // high at $4219/$421B; the ports' second data lines — a multitap's — carry
+  // nothing here, so $421C-$421F stay zero.
+  while (state_.autoJoyClocked < reached) {
+    for (std::size_t p = 0; p < 2; ++p) {
+      const auto word = static_cast<std::uint16_t>(
+          state_.joy[p * 2u] | (static_cast<std::uint16_t>(state_.joy[p * 2u + 1u]) << 8));
+      const auto shifted = static_cast<std::uint16_t>((word << 1) | clockJoypad(p));
+      state_.joy[p * 2u] = static_cast<std::uint8_t>(shifted & 0xFFu);
+      state_.joy[p * 2u + 1u] = static_cast<std::uint8_t>(shifted >> 8);
     }
-    state_.joy[p * 2u] = static_cast<std::uint8_t>(word & 0xFFu);
-    state_.joy[p * 2u + 1u] = static_cast<std::uint8_t>(word >> 8);
+    ++state_.autoJoyClocked;
   }
 }
 

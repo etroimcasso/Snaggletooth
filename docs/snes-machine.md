@@ -307,9 +307,9 @@ blank has begun, it resumes nothing — but the PPU holds its video memories shu
 were still running, to line 240 ([the PPU's windows](ppu.md#the-memories-and-their-windows)).
 
 From the line the blank begins on, in order: the vertical-blank flag at the line's start, the NMI flag two
-master cycles later, the HDMA channels deactivating for the rest of the frame, the
-[auto-read](#the-controller-ports) of the controllers starting, and the sprite table's address returning
-to its reload value at dot 10. A later change to `$2133` re-fires none of them.
+master cycles later, the HDMA channels deactivating for the rest of the frame, the sprite table's address
+returning to its reload value at dot 10, and the [auto-read](#the-controller-ports) of the controllers
+beginning between H = 32.5 and H = 95.5. A later change to `$2133` re-fires none of them.
 
 ### The blank flags
 
@@ -325,7 +325,9 @@ Two interrupt sources reach the CPU, both driven from these counters:
 - **The vertical-blank NMI.** The flag at `$4210` bit 7 sets two master cycles into the blank's first
   line and clears at the start of line 0, and reading `$4210` acknowledges it. While the flag is set and
   `$4200` bit 7 enables NMIs, the NMI line is asserted; enabling NMIs mid-blank raises the line there and
-  then. Reading the flag before re-enabling avoids taking an old NMI twice.
+  then. The CPU latches the NMI on the flag's rise, so a program polling `$4210` that reads it in the
+  very cycle the flag sets gets the flag set, clears it, and takes the NMI at the end of that instruction
+  all the same. Reading the flag before re-enabling avoids taking an old NMI twice.
 - **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: a horizontal position (`$4207/$4208`), a
   vertical line (`$4209/$420A`), or both. The flag at `$4211` bit 7 is raised when the beam passes the
   point the mode names, and the IRQ line follows it; reading `$4211` or selecting no compare acknowledges
@@ -381,14 +383,19 @@ machine.setJoypad(JoypadPort::One, std::nullopt);              // unplugged
 
 The program reads a pad the two ways the console offers, and both see the same value:
 
-- **The auto-read.** With `$4200` bit 0 set, the machine reads all sixteen bits of each port at the start
-  of every vertical blank, holding `$4212` bit 0 busy for the 4224 master cycles the read takes, and
-  lands the result in `$4218-$421F` as the window closes: port 1 in `$4218/$4219`, port 2 in
-  `$421A/$421B`. The high byte carries B, Y, Select, Start, Up, Down, Left and Right from bit 7 down;
-  the low byte A, X, L and R from bit 7 to bit 4, and the pad's identity code, zero for a standard pad,
-  in bits 3-0. A program reads the registers after the busy flag clears; while the read is in progress
-  they hold the previous frame's result. `$421C-$421F`, the ports' second data lines, stay zero — nothing
-  is modelled on them.
+- **The auto-read.** With `$4200` bit 0 set, the machine reads all sixteen bits of each port once a
+  frame, on the first line of vertical blank. The machine's first read begins at H = 74.5 of that line;
+  every later one begins at the first point on a 256-master-cycle grid, carried from the previous read's
+  start, that lies at or past H = 32.5 — so the start wanders between H = 32.5 and H = 95.5 from frame
+  to frame. `$4212` bit 0 is busy for the 4224 master cycles the read takes: the strobe pulse for 128,
+  then one bit every 256. **The registers shift as each bit arrives.** Every clock moves each port's
+  register up one place and puts the bit it read at bit 0, so the sixteenth bit, 4224 cycles after the
+  start, is what leaves the result in place: port 1 in `$4218/$4219`, port 2 in `$421A/$421B`, the high
+  byte carrying B, Y, Select, Start, Up, Down, Left and Right from bit 7 down, the low byte A, X, L and R
+  from bit 7 to bit 4 and the pad's identity code, zero for a standard pad, in bits 3-0. A program that
+  reads the registers while the busy flag is set sees the previous frame's bits shifted part-way out
+  above this frame's shifted part-way in; a program reads them after the flag clears. `$421C-$421F`,
+  the ports' second data lines, stay zero — nothing is modelled on them.
 - **The serial ports.** A write of 1 then 0 to `$4016` bit 0 strobes both pads, latching their sixteen
   bits; each read of `$4016` returns port 1's next bit in bit 0, and each read of `$4017` port 2's, in
   the order above — B first, the identity bits last. Past the sixteenth bit a pad returns 1, and an
@@ -399,12 +406,14 @@ The program reads a pad the two ways the console offers, and both see the same v
 `$4218` in the low. A snapshot carries the pads with the rest of the machine, so a restore resumes with
 the same controllers plugged in.
 
-Two consequences of the hardware sharing one set of lines are modelled. The auto-read strobes and
+Three consequences of the hardware sharing one set of lines are modelled. The auto-read strobes and
 clocks the same shift register the serial ports read, so after it runs a program reading `$4016`
 without strobing first is past the sixteenth bit and sees padding; a program that uses both paths
-strobes before it reads. And while the strobe is held high the pads reload continuously, so every
-bit read — by the serial ports or by the auto-read — is the B button's state; a program that leaves
-`$4016` at 1 sees `$4218/$4219` as all ones or all zeros.
+strobes before it reads. A serial read made while the auto-read is busy takes a bit the auto-read then
+never sees: every bit after it lands one place higher in `$4218-$421B` and the padding enters last, so
+the identity code comes out as 1. And while the strobe is held high the pads reload continuously, so
+every bit read — by the serial ports or by the auto-read — is the B button's state; a program that
+leaves `$4016` at 1 sees `$4218/$4219` as all ones or all zeros.
 
 ## The multiply/divide unit
 
@@ -766,8 +775,9 @@ Questions the documentation leaves about the beam, recorded rather than decided 
   measured and modelled: the blank begins at the start of the line that follows.
 - **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length
   is decided by the state as its own line runs.
-- **The auto-read's start**, which anomie puts somewhere in dots 32.5 to 95.5 on a 256-cycle grid. It
-  begins here as vertical blank does, and its window is the documented 4224 cycles.
+- **Where inside the auto-read's window each bit lands.** The documents give the window's length and the
+  256-cycle grid its start keeps, not the point at which each of the sixteen bits is clocked. Here the
+  strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears.
 - **The PAL interlaced frame length.** The register page gives 426,936 cycles for one such frame
   (313 lines plus four), but the extra line belongs to the even field and the long line to the odd one,
   so neither frame takes both. The pair here is 425,572 and 426,932.

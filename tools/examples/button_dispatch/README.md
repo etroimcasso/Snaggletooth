@@ -1,7 +1,7 @@
 # button_dispatch
 
 One bank. Reset enables the vertical-blank NMI and the controller auto-read and
-idles. The NMI handler waits for the auto-read to finish, and if Start is down
+idles. The NMI handler waits for the auto-read to begin and then to finish, and if Start is down
 in `$4219` jumps through the pointer at `$8100` to `$8200`; otherwise it
 strobes the serial port, clocks nine bits out — the ninth is A — and if A is
 down jumps through the pointer at `$8102` to `$8210`. Neither target is named
