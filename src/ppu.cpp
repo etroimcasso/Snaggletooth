@@ -448,23 +448,47 @@ Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
   const unsigned index = static_cast<unsigned>(layer);
   static constexpr std::uint8_t PpuState::*kScreens[4] = {&PpuState::bg1sc, &PpuState::bg2sc,
                                                           &PpuState::bg3sc, &PpuState::bg4sc};
-  static constexpr std::uint16_t PpuState::*kHorizontal[4] = {
-      &PpuState::bg1hofs, &PpuState::bg2hofs, &PpuState::bg3hofs, &PpuState::bg4hofs};
-  static constexpr std::uint16_t PpuState::*kVertical[4] = {
-      &PpuState::bg1vofs, &PpuState::bg2vofs, &PpuState::bg3vofs, &PpuState::bg4vofs};
   const std::uint8_t bases = index < 2u ? s_.bg12nba : s_.bg34nba;
   const std::uint8_t mode = s_.bgmode & 0x07u;
-  return Background{.screen = s_.*kScreens[index],
+  return Background{.layer = layer,
+                    .screen = s_.*kScreens[index],
                     .characterBase = static_cast<std::uint8_t>((index & 1u) ? (bases >> 4)
                                                                             : (bases & 0x0Fu)),
-                    .horizontal = s_.*kHorizontal[index],
-                    .vertical = s_.*kVertical[index],
                     .large = (s_.bgmode & (0x10u << index)) != 0u,
                     .hires = mode == 5u || mode == 6u,
                     .planes = 0u,
                     .paletteStride = 0u,
                     .wordBase = 0u,
                     .offsetBit = 0u};
+}
+
+Ppu::Offsets Ppu::scrollOf(Layer layer) const noexcept {
+  // A background's two offset registers, read where they are asked for rather than
+  // carried in its description: a scroll written part-way along a line moves the
+  // positions after the write, which is how a transfer parallaxes a picture.
+  const unsigned index = static_cast<unsigned>(layer);
+  static constexpr std::uint16_t PpuState::*kHorizontal[4] = {
+      &PpuState::bg1hofs, &PpuState::bg2hofs, &PpuState::bg3hofs, &PpuState::bg4hofs};
+  static constexpr std::uint16_t PpuState::*kVertical[4] = {
+      &PpuState::bg1vofs, &PpuState::bg2vofs, &PpuState::bg3vofs, &PpuState::bg4vofs};
+  return Offsets{.horizontal = s_.*kHorizontal[index], .vertical = s_.*kVertical[index]};
+}
+
+const Ppu::Derived::Descriptions& Ppu::descriptions() const noexcept {
+  // The four backgrounds and the chart as $2105-$210C and $2133 stand. Every write
+  // to one of those drops this, so the first dot after such a write reads the
+  // registers again and every dot until the next one reads what it found.
+  Derived::Descriptions& kept = d_.descriptions;
+  if (kept.valid) return kept;
+  for (unsigned index = 0u; index < kept.registers.size(); ++index) {
+    const auto layer = static_cast<Layer>(index);
+    kept.registers[index] = registersOf(layer);
+    kept.described[index] = background(layer);
+  }
+  kept.chart = order();
+  kept.field = (s_.bgmode & 0x07u) == 7u;
+  kept.valid = true;
+  return kept;
 }
 
 std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
@@ -600,8 +624,9 @@ std::uint16_t Ppu::entryAt(const Background& background, unsigned bgX,
 }
 
 Ppu::Offsets Ppu::offsetsFor(const Background& background, std::uint16_t x) const noexcept {
-  Offsets offsets{.horizontal = static_cast<std::uint16_t>(background.horizontal & 0x03FFu),
-                  .vertical = static_cast<std::uint16_t>(background.vertical & 0x03FFu)};
+  const Offsets scroll = scrollOf(background.layer);
+  Offsets offsets{.horizontal = static_cast<std::uint16_t>(scroll.horizontal & 0x03FFu),
+                  .vertical = static_cast<std::uint16_t>(scroll.vertical & 0x03FFu)};
   if (background.offsetBit == 0u) return offsets;
 
   // The background's own tile column at x. Its first, however little of it is on
@@ -613,9 +638,10 @@ Ppu::Offsets Ppu::offsetsFor(const Background& background, std::uint16_t x) cons
   // Tile T reads BG3's tile T - 1, counted from BG3's coarse scroll; the rows are
   // BG3's vertical offset and the row eight lines below it, and the line plays no
   // part. BG3's own tile size decides how many BG3 positions one entry covers.
-  const Background table = registersOf(Layer::Bg3);
-  const unsigned tableX = (column & ~7u) - 8u + (table.horizontal & 0x03F8u);
-  const unsigned tableY = table.vertical & 0x03FFu;
+  const Background& table = descriptions().registers[static_cast<unsigned>(Layer::Bg3)];
+  const Offsets tableScroll = scrollOf(Layer::Bg3);
+  const unsigned tableX = (column & ~7u) - 8u + (tableScroll.horizontal & 0x03F8u);
+  const unsigned tableY = tableScroll.vertical & 0x03FFu;
   std::uint16_t horizontal = entryAt(table, tableX, tableY);
   std::uint16_t vertical = 0u;
   if ((s_.bgmode & 0x07u) == 4u) {
@@ -879,18 +905,18 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // A mosaiced layer is read at its block's corner, and only there: the windows and
   // the screens above are taken at the dot itself, so a window can cut a block.
   std::array<std::optional<Shown>, 4> backgrounds{};
-  const bool field = (s_.bgmode & 0x07u) == 7u;
+  const Derived::Descriptions& kept = descriptions();
   for (unsigned index = 0u; index < backgrounds.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
     const Position read = mosaicPosition(layer, x, in, half);
     // Mode 7's layers are the field, read through the matrix; every other mode's
     // are tilemaps of characters.
-    if (field) {
+    if (kept.field) {
       if (index < 2u) backgrounds[index] = sampleField(layer, read.x, read.line);
       continue;
     }
-    if (const std::optional<Background> described = background(layer)) {
+    if (const std::optional<Background>& described = kept.described[index]) {
       backgrounds[index] = sample(*described, read.x, read.line, read.half);
     }
   }
@@ -912,7 +938,7 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // Front to back by the mode's own chart, the first place holding anything here
   // being the pixel. The screen's backdrop is under them all, and is what nothing
   // here stands for.
-  for (const Place& place : order()) {
+  for (const Place& place : kept.chart) {
     if (place.layer == Layer::Object) {
       if (spritePriority == place.priority) {
         return Resolved{
@@ -1226,6 +1252,12 @@ std::optional<std::uint8_t> Ppu::read(std::uint16_t offset, const PpuInputs& in)
 // ---- writes ------------------------------------------------------------------
 
 std::optional<std::uint16_t> Ppu::write(std::uint16_t offset, std::uint8_t value, const PpuInputs& in) {
+  // What each background is and where it stands in the chart the chip reads out of
+  // $2105-$210C and $2133, so a write to one of those is what makes its answer
+  // stale. $2106 stands inside that span and describes nothing, and dropping on it
+  // costs one reading of eleven registers.
+  if ((offset >= 0x2105u && offset <= 0x210Cu) || offset == 0x2133u) d_.dropDescriptions();
+
   switch (offset) {
     case 0x2100: {  // INIDISP: forced blank and brightness
       const bool released = s_.forcedBlank() && (value & 0x80u) == 0u;

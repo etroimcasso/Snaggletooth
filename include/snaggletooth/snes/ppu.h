@@ -281,8 +281,21 @@ struct PpuState {
 // The chip's behaviour over one PpuState. Built by the machine over its own
 // state for one call; it holds a reference and is never kept.
 class Ppu {
+  // What the picture path works out from the registers and then reads at every dot
+  // it draws: what each of the four backgrounds is, and the chart the mode keeps.
+  // Worked out from the state and no part of it — two machines holding the same
+  // PpuState draw the same picture whatever either one has here — so the machine
+  // owns one beside the picture and hands it to every Ppu, and the chip drops
+  // whatever a write makes stale as it makes that write. Declared here and
+  // described below.
+  struct Derived;
+
  public:
-  explicit Ppu(PpuState& state) noexcept : s_(state) {}
+  // The machine builds every Ppu and owns the value the constructor's second
+  // argument names, so it is the machine, and nothing else, that reaches the type.
+  friend class Snes;
+
+  Ppu(PpuState& state, Derived& derived) noexcept : s_(state), d_(derived) {}
 
   // A read of $2100-$213F: the byte the chip drove, or nothing, which the machine
   // answers with the CPU's own open bus. A register that reads at all is read
@@ -381,14 +394,22 @@ class Ppu {
   void decide(std::uint16_t x, const PpuInputs& in) noexcept;
 
  private:
+  // The six things a window can be enabled for. Each keeps four bits of a window
+  // selector — two enables and two inversions — and two bits of a logic register,
+  // and the first five have a bit of this value in the two mask registers. The
+  // colour window has none: it feeds colour math and no layer's visibility.
+  enum class Layer : unsigned { Bg1 = 0u, Bg2 = 1u, Bg3 = 2u, Bg4 = 3u, Object = 4u, Colour = 5u };
+
   // One background as its own registers describe it, with what the mode makes of
   // it: its depth, and where in the palette its colours are read. A character
-  // takes eight bytes for each of its bitplanes.
+  // takes eight bytes for each of its bitplanes. Its two offsets are not here —
+  // they are read from the registers at the dot, so a background scrolled part-way
+  // along a line moves the positions after the write and leaves this description
+  // standing.
   struct Background {
+    Layer layer;                 // which of the four this describes, and so whose offsets it reads
     std::uint8_t screen;         // its $2107-$210A: the map's base and the map's size
     std::uint8_t characterBase;  // its nibble of $210B or $210C, counting 8 KB blocks
-    std::uint16_t horizontal;    // its horizontal offset register
-    std::uint16_t vertical;      // its vertical offset register
     bool large;                  // its bit of $2105: 16x16 blocks rather than 8x8 tiles
     bool hires;                  // its mode's tiles are two characters wide and cover eight
                                  // positions, whatever `large` says of their width — modes 5
@@ -414,6 +435,9 @@ class Ppu {
     std::uint16_t vertical;
   };
 
+  // A background's two offset registers as they stand at this dot.
+  [[nodiscard]] Offsets scrollOf(Layer layer) const noexcept;
+
   // The tilemap entry a background holds at one of its own positions: the base its
   // screen register names, the row and column within one 32x32 screen, and the
   // terms that carry a wide or tall map into its further screens. A tile is eight
@@ -421,6 +445,7 @@ class Ppu {
   // say.
   [[nodiscard]] std::uint16_t entryAt(const Background& background, unsigned bgX,
                                       unsigned bgY) const noexcept;
+
 
   // The offsets a background is read with at picture column x: its own two
   // registers' low ten bits, or where the mode gives it an offset table, what BG3's
@@ -481,12 +506,6 @@ class Ppu {
   [[nodiscard]] std::size_t spriteCharacter(const Sprite& sprite, unsigned column,
                                             unsigned row) const noexcept;
 
-  // The six things a window can be enabled for. Each keeps four bits of a window
-  // selector — two enables and two inversions — and two bits of a logic register,
-  // and the first five have a bit of this value in the two mask registers. The
-  // colour window has none: it feeds colour math and no layer's visibility.
-  enum class Layer : unsigned { Bg1 = 0u, Bg2 = 1u, Bg3 = 2u, Bg4 = 3u, Object = 4u, Colour = 5u };
-
   // Whether the windows cover a picture position for one layer. Each window is the
   // span its two edges name, both ends inclusive and empty where the left edge
   // stands past the right, taken as written or inverted as the layer's own bits
@@ -528,6 +547,29 @@ class Ppu {
   // The chart the mode $2105 names keeps, front to back — and for Mode 1 the
   // chart $2105 bit 3 exchanges it for, which is Mode 1's alone.
   [[nodiscard]] std::span<const Place> order() const noexcept;
+
+  struct Derived {
+    // What the four backgrounds are and which order they stand in — everything the
+    // chip reads out of $2105-$210C and $2133, and nothing that is read from
+    // anywhere else.
+    struct Descriptions {
+      std::array<Background, 4> registers{};  // each background as its own registers describe it
+      std::array<std::optional<Background>, 4> described{};  // with what the mode makes of it
+      std::span<const Place> chart{};  // the mode's priority order, front to back
+      bool field = false;              // the mode's one background is Mode 7's field
+      bool valid = false;              // and whether the four and the chart stand for the registers now
+    };
+    Descriptions descriptions{};
+
+    // What a write to one of the registers a group is read from makes stale, and
+    // what a restore — which replaces every register at once — makes stale.
+    void dropDescriptions() noexcept { descriptions.valid = false; }
+    void dropAll() noexcept { dropDescriptions(); }
+  };
+
+  // The descriptions as the registers stand, worked out here on the first dot after
+  // a write dropped them and read from then on.
+  [[nodiscard]] const Derived::Descriptions& descriptions() const noexcept;
 
   // How the mode reads one of the four backgrounds — its depth, its palette and
   // whether it is read through an offset table — or nothing where the mode does not
@@ -640,9 +682,9 @@ class Ppu {
   [[nodiscard]] std::uint16_t fixedColour() const noexcept;
 
   // The registers one of the four backgrounds reads, and the shape of the mode's
-  // tiles: its screen register, its character-base nibble, its two offsets, its
-  // tile-size bit, and whether the mode's tiles are two characters wide. What else
-  // the mode makes of it is added by background().
+  // tiles: its screen register, its character-base nibble, its tile-size bit, and
+  // whether the mode's tiles are two characters wide. What else the mode makes of
+  // it is added by background(); its offsets are read at the dot by scrollOf().
   [[nodiscard]] Background registersOf(Layer layer) const noexcept;
 
   // The converter's four bytes for one 15-bit palette word at the brightness
@@ -678,6 +720,7 @@ class Ppu {
   void writeMode7(std::uint16_t& reg, std::uint8_t value) noexcept;
 
   PpuState& s_;
+  Derived& d_;
 };
 
 }  // namespace snaggletooth

@@ -813,6 +813,11 @@ class Snes {
   // pixels until its first position drawn in half-pixels and 512 from then on; the
   // frame's own width and height say how much of the buffer it is.
   std::vector<std::uint8_t> raster_;
+  // What the picture path works out from the chip's registers and reads at every
+  // dot. Like the picture it is worked out from the state rather than part of it,
+  // so it lives on the machine and not in its state value; a restore drops all of
+  // it, and the chip drops whatever a write makes stale.
+  Ppu::Derived derived_;
   bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
   bool frameWide_ = false;      // the frame in progress is 512 wide
   std::uint16_t framePictureLines_ = 0;  // the lines the finished picture holds
