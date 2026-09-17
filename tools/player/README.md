@@ -69,7 +69,7 @@ A pad is read by **where its buttons sit** rather than by the letters printed on
 family plays the same way round: the button under your thumb at the south position is B, east is A,
 west is Y, north is X. The keyboard's default puts the four face buttons at the same positions —
 `Z` is B, `X` is A, `A` is Y, `S` is X, with `Q` and `W` for L and R, `Return` for Start,
-`Right Shift` for Select, and the arrows for the d-pad.
+`Backspace` for Select, and the arrows for the d-pad.
 
 The keyboard and a pad on one port add together, so a hand on each is one player.
 

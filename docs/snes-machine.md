@@ -412,7 +412,10 @@ The unsigned multiply and divide are the CPU's, not the PPU's. Set the multiplic
 the multiplier to `$4203` to start a multiply; the 16-bit product is at `$4216/$4217` eight cycles later.
 Set the 16-bit dividend at `$4204/$4205` and write the divisor to `$4206` to start a divide; the quotient
 is at `$4214/$4215` and the remainder at `$4216/$4217` sixteen cycles later. The unit is clocked by the
-CPU, so the wait is the same number of instructions regardless of the memory speed.
+CPU, so the wait is the same number of instructions regardless of the memory speed. The operation runs
+on the operands as they stand at the write that starts it: a program can load the next dividend into
+`$4204/$4205` while a division runs and still read that division's quotient, which is how a game
+pipelines the four divisions of a Mode 7 matrix.
 
 A read before the result lands returns the register's previous contents — the intermediate is not
 modelled, because it is not documented; wait the cycles the way hardware programs do. Two quirks are

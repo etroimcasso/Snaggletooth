@@ -885,19 +885,22 @@ void Snes::tickVideo(std::uint32_t cost) {
 }
 
 void Snes::commitMath() noexcept {
+  // The operands are the pair the job started with, not the registers as they
+  // stand now: a program may load the next dividend while this division runs and
+  // still read this division's quotient.
   switch (state_.mathOp) {
     case MathOp::Multiply:
       // The quotient register already took the multiplier when the multiply started;
       // now the product lands. (WRMPYA * WRMPYB fits sixteen bits.)
-      state_.rdmpy = static_cast<std::uint16_t>(state_.wrmpya * state_.wrmpyb);
+      state_.rdmpy = static_cast<std::uint16_t>(state_.mathLeft * state_.mathRight);
       break;
     case MathOp::Divide:
-      if (state_.wrdivb == 0u) {
-        state_.rddiv = 0xFFFFu;        // dividing by zero yields an all-ones quotient
-        state_.rdmpy = state_.wrdiv;   // and the dividend as the remainder
+      if (state_.mathRight == 0u) {
+        state_.rddiv = 0xFFFFu;          // dividing by zero yields an all-ones quotient
+        state_.rdmpy = state_.mathLeft;  // and the dividend as the remainder
       } else {
-        state_.rddiv = static_cast<std::uint16_t>(state_.wrdiv / state_.wrdivb);
-        state_.rdmpy = static_cast<std::uint16_t>(state_.wrdiv % state_.wrdivb);
+        state_.rddiv = static_cast<std::uint16_t>(state_.mathLeft / state_.mathRight);
+        state_.rdmpy = static_cast<std::uint16_t>(state_.mathLeft % state_.mathRight);
       }
       break;
     case MathOp::None:
@@ -966,9 +969,11 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
       return;
     }
     case 0x4202: state_.wrmpya = value; return;
-    case 0x4203:  // WRMPYB: its write starts the multiply
+    case 0x4203:  // WRMPYB: its write starts the multiply, on the operands as they stand
       state_.wrmpyb = value;
       state_.rddiv = value;  // the shared unit immediately loads the quotient register with the multiplier
+      state_.mathLeft = state_.wrmpya;
+      state_.mathRight = value;
       state_.mathOp = MathOp::Multiply;
       state_.mathClocks = kMultiplyClocks;
       return;
@@ -978,8 +983,10 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x4205:
       state_.wrdiv = static_cast<std::uint16_t>((state_.wrdiv & 0x00FFu) | (value << 8));
       return;
-    case 0x4206:  // WRDIVB: its write starts the divide
+    case 0x4206:  // WRDIVB: its write starts the divide, on the operands as they stand
       state_.wrdivb = value;
+      state_.mathLeft = state_.wrdiv;
+      state_.mathRight = value;
       state_.mathOp = MathOp::Divide;
       state_.mathClocks = kDivideClocks;
       return;
