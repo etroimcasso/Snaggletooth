@@ -992,16 +992,6 @@ TEST(SnesPpuPicture, ALayerEnabledOnlyOnTheSubScreenDrawsNothing) {
   EXPECT_EQ(picture.at(0u, 0u), kBackdropOut);
 }
 
-TEST(SnesPpuPicture, AModeWhoseBackgroundsAreNotBuiltShowsItsBackdrop) {
-  PpuState ppu = screen();
-  ppu.bgmode = 0x05u;  // Mode 5, whose pictures are drawn in half-pixels
-  putEntry(ppu, kBg1, 0u, 0x0001u);
-  putSolidTile(ppu, kBg1, 1u, 1u);
-  const Picture picture = draw(ppu);
-  ASSERT_EQ(picture.frames, 1u);
-  EXPECT_EQ(picture.at(0u, 0u), kBackdropOut);
-}
-
 // ---- the whole path ----------------------------------------------------------
 
 TEST(SnesPpuPicture, ACartridgeThatWritesTheVideoMemoriesShowsItsPicture) {

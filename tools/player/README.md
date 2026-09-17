@@ -11,7 +11,9 @@ snes_player --default-config
 snes_player --user-files
 ```
 
-The window shows the picture the machine draws, frame by frame, at the rate the run is held to,
+The window shows the picture the machine draws, frame by frame, at the rate the run is held to —
+a frame drawn in half-pixels, 512 wide, fills the same window as a 256-wide one, each half-pixel half
+a scaled pixel, and an interlaced run shows each field as it comes,
 with the rate it achieves in its title so what the run costs is visible while it runs. It closes
 when the window is closed or when `--seconds` of the master clock have been spent; nothing else
 stops it.
@@ -108,7 +110,7 @@ asked for:
 
 | File | What it holds |
 |---|---|
-| `<image>.avi` | every frame exactly as the machine drove it, uncompressed (`../video/README.md`) |
+| `<image>.avi` | every frame exactly as the machine drove it, uncompressed, at the largest shape the run produced (`../video/README.md`) |
 | `<image>.csv` | a row a frame: wall and emulation time in nanoseconds, master cycles, dots drawn, and the rate instantaneous and mean |
 | `<image>.wav` | the sound the run produced, 32 kHz stereo — the chip's own rate, whatever the panel showing it runs at |
 | `<image>.snaginput` | the buttons, as a script that replays the run |

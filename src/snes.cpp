@@ -1,5 +1,7 @@
 #include "snaggletooth/snes/snes.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <utility>
 
@@ -66,8 +68,7 @@ static_assert(kPictureWidth == kLastPictureDot - kFirstPictureDot + 1u,
               "the picture is as wide as the dots it is drawn from");
 constexpr std::uint16_t kTallestPicture = kOverscanVblankStartLine - 1u;
 constexpr std::size_t kPixelBytes = 4u;
-constexpr std::size_t kRowBytes = kPictureWidth * kPixelBytes;
-constexpr std::size_t kRasterBytes = kRowBytes * kTallestPicture;
+constexpr std::size_t kRasterBytes = kHiresWidth * kPixelBytes * kTallestPicture;
 
 // The H/V timer's trigger points. With an H position to compare against, the flag is
 // raised 14 master cycles past four times it; with none, 1374 master cycles after the
@@ -146,7 +147,9 @@ Snes::Snes(Snes&& moved) noexcept
       frameObserver_(moved.frameObserver_),
       raster_(std::move(moved.raster_)),
       frameFinished_(moved.frameFinished_),
+      frameWide_(moved.frameWide_),
       framePictureLines_(moved.framePictureLines_),
+      frameWidth_(moved.frameWidth_),
       saveObserver_(moved.saveObserver_),
       saveChanged_(moved.saveChanged_),
       saveFinished_(moved.saveFinished_) {
@@ -649,10 +652,6 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   // The first line of a frame draws nothing, and the lines from this frame's own
   // vertical blank on are past the picture.
   if (state_.vpos == 0u || state_.inVblank) return;
-  if (raster_.empty()) {
-    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
-    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
-  }
 
   // The dots the span passed, by the same reckoning the line's events use: a dot is
   // reached when the span covers the master cycle it begins on.
@@ -660,26 +659,72 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   const std::uint64_t last = (to - lineStart) / 4u;
   const std::uint64_t dot = first < kFirstPictureDot ? kFirstPictureDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
+  Ppu ppu{state_.ppu};
+  const PpuInputs in = ppuInputs();
 
-  const Ppu ppu{state_.ppu};
-  std::uint8_t* const row = raster_.data() + (state_.vpos - 1u) * kRowBytes;
+  // What the chip carries from one position to the next is decided whether or not
+  // anyone is watching, since it is part of the state a snapshot holds.
+  if (frameObserver_ == nullptr) {
+    for (std::uint64_t at = dot; at <= stop; ++at) {
+      ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
+    }
+    return;
+  }
+
+  if (raster_.empty()) {
+    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
+    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
+  }
+
+  const std::size_t line = state_.vpos - 1u;
   for (std::uint64_t at = dot; at <= stop; ++at) {
     const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
-    const std::array<std::uint8_t, 4> colour = ppu.pixel(x, state_.vpos);
-    std::uint8_t* const pixel = row + static_cast<std::size_t>(x) * kPixelBytes;
-    pixel[0] = colour[0];
-    pixel[1] = colour[1];
-    pixel[2] = colour[2];
-    pixel[3] = colour[3];
+    const Ppu::Dot out = ppu.dot(x, in);
+    if (out.hires && !frameWide_) widenFrame(line, x);
+
+    // A frame drawn in half-pixels anywhere is 512 wide throughout, and a
+    // position drawn whole fills both of its halves.
+    if (frameWide_) {
+      std::uint8_t* const pixel =
+          raster_.data() + (line * kHiresWidth + static_cast<std::size_t>(x) * 2u) * kPixelBytes;
+      std::copy(out.left.begin(), out.left.end(), pixel);
+      std::copy(out.right.begin(), out.right.end(), pixel + kPixelBytes);
+    } else {
+      std::uint8_t* const pixel =
+          raster_.data() + (line * kPictureWidth + static_cast<std::size_t>(x)) * kPixelBytes;
+      std::copy(out.right.begin(), out.right.end(), pixel);
+    }
   }
+}
+
+void Snes::widenFrame(std::size_t line, std::uint16_t x) noexcept {
+  // Every pixel already drawn this frame — the rows above `line` and the first `x`
+  // of `line` itself — moves to twice its column in a row twice as wide, written
+  // into both halves. Each row lands at or beyond where it stood, so working from
+  // the last pixel back never overwrites one not yet moved.
+  const std::uint8_t* const from = raster_.data();
+  std::uint8_t* const to = raster_.data();
+  for (std::size_t row = line + 1u; row-- > 0u;) {
+    const std::size_t count = row == line ? x : kPictureWidth;
+    for (std::size_t column = count; column-- > 0u;) {
+      const std::size_t source = (row * kPictureWidth + column) * kPixelBytes;
+      const std::size_t target = (row * kHiresWidth + column * 2u) * kPixelBytes;
+      std::array<std::uint8_t, kPixelBytes> pixel{};
+      std::copy(from + source, from + source + kPixelBytes, pixel.begin());
+      std::copy(pixel.begin(), pixel.end(), to + target);
+      std::copy(pixel.begin(), pixel.end(), to + target + kPixelBytes);
+    }
+  }
+  frameWide_ = true;
 }
 
 void Snes::deliverFrame() {
   if (frameObserver_ == nullptr || raster_.empty()) return;
-  const std::size_t bytes = static_cast<std::size_t>(framePictureLines_) * kRowBytes;
+  const std::size_t bytes =
+      static_cast<std::size_t>(framePictureLines_) * frameWidth_ * kPixelBytes;
   frameObserver_->frame(VideoFrame{
       .pixels = std::span<const std::uint8_t>(raster_.data(), bytes),
-      .width = kPictureWidth,
+      .width = frameWidth_,
       .height = framePictureLines_,
       .field = frameField_,
   });
@@ -701,7 +746,7 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   // H = 0 of it, hblank being lowered a dot later. Range then starts again, on the
   // line after this one, and the mosaic's vertical counter takes the new line.
   Ppu ppu{state_.ppu};
-  ppu.timeSprites(state_.vpos);
+  ppu.timeSprites(state_.vpos, state_.field);
   ppu.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
   ppu.beginLine(state_.vpos);
 
@@ -712,6 +757,8 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
     if (frameObserver_ != nullptr) {
       frameFinished_ = true;
       frameField_ = state_.field;
+      frameWidth_ = frameWide_ ? kHiresWidth : kPictureWidth;
+      frameWide_ = false;
       framePictureLines_ = state_.vblankBeginLine > 1u
           ? static_cast<std::uint16_t>(state_.vblankBeginLine - 1u)
           : static_cast<std::uint16_t>(state_.ppu.vblankStartLine() - 1u);
@@ -792,8 +839,9 @@ void Snes::tickVideo(std::uint32_t cost) {
     // nobody's benefit, because a program can read what the pass found.
     rangeSpan(lineStart, stop);
     // The picture is resolved a dot at a time, from the registers and the memories
-    // as they stand at each one. A machine nobody is watching resolves nothing.
-    if (frameObserver_ != nullptr) drawSpan(lineStart, at, stop);
+    // as they stand at each one. A machine nobody is watching resolves only what the
+    // chip carries from one position to the next.
+    drawSpan(lineStart, at, stop);
     at = stop;
     state_.hpos = static_cast<std::uint16_t>(at - lineStart);
     if (at == lineEnd) {

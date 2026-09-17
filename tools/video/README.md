@@ -27,8 +27,12 @@ from the bottom up, each row run out to a four-byte boundary. That is what makes
 oracle to set beside a capture from the console itself rather than an approximation of one. The
 file plays in VLC and QuickTime and converts with ffmpeg.
 
-A picture whose size is not the recording's is not written: the file holds one shape, which its
-header has already declared.
+**A recording takes the largest shape its run produced.** A run can change shape — a frame drawn in
+half-pixels is 512 wide, the taller picture 239 lines — so every picture is written at its own shape
+as it arrives, and a recording that saw more than one is laid out again as it finishes: at the widest
+and tallest it saw, each smaller picture centred in black, the odd spare column on the right and the
+odd spare line below. It is written beside the file and takes its name when complete, one picture in
+memory at a time, and a recording of one shape is left exactly as it was written.
 
 ## Why not a real encoder
 

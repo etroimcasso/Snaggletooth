@@ -8,8 +8,9 @@ Three things live in this repository:
 
 - **The library**, `snaggletooth::snaggletooth`: the audio unit (SPC700, APU machine, S-DSP)
   and the main machine (65816, cartridge, work RAM, DMA, timers, the audio handshake, and the
-  PPU), each stepped by a cycle budget the host supplies. The PPU resolves a pixel per visible
-  dot and hands each finished frame to a frame observer.
+  PPU), each stepped by a cycle budget the host supplies. The PPU resolves each visible dot
+  — one pixel, or two half-pixels on a line drawn in half-pixels — and hands each finished frame
+  to a frame observer.
 - **The tools**, under [`tools/`](tools/README.md): a player that shows a cartridge running in a
   window and records the same run, two tracing disassemblers and two assemblers, a
   whole-cartridge disassembler and its verifier, an intermediate representation with an
@@ -88,7 +89,7 @@ not do. Each row links to the page that describes the component in full.
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
 | [SNES machine](docs/snes-machine.md) | **in progress** — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake; no [coprocessor](#the-coprocessors) |
 | [Cartridge](docs/snes-cartridge.md) | **complete** — the header, LoROM, HiROM and ExHiROM, a copier's header read and dropped, where every bus address lands, the save windows |
-| [PPU](docs/ppu.md) | **in progress** — a pixel resolved at its own dot from the registers as they stand there, each frame handed to an observer; the backgrounds of modes 0 to 4 and 7 at their depths, the offset table modes 2 and 4 read their backgrounds through, Mode 7's field through its matrix with EXTBG's second layer and direct colour, mosaic on every background they draw, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; the register file complete beneath them. Modes 5 and 6 and the hires and interlaced pictures are not drawn |
+| [PPU](docs/ppu.md) | **in progress** — a pixel resolved at its own dot from the registers as they stand there, each frame handed to an observer; the backgrounds of all eight modes at their depths, the offset table modes 2, 4 and 6 read their backgrounds through, Mode 7's field through its matrix with EXTBG's second layer and direct colour, the 512-half-pixel line of modes 5 and 6 and of `$2133` bit 3 with colour math reaching both halves, the interlaced picture and sprites at half height, mosaic on every background they draw, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; frames 256 or 512 wide, one field a frame; the register file complete beneath them |
 | Public embedding API | **not started** |
 
 ### The coprocessors
@@ -246,9 +247,9 @@ Snaggletooth is built audio-first:
 2. **The full machine** — the 5A22 (the main CPU with its DMA and timing hardware), the PPU, and
    the system glue that binds them to the audio core.
 
-The PPU is the component in progress. What it draws and what it does not is in its row under
-[What is built](#the-main-machine); the two remaining modes with the hires and interlaced
-pictures follow. After the PPU, the machine is taken through the range of cartridge
+The PPU is the component in progress. What it draws is in its row under
+[What is built](#the-main-machine); what remains is taking it across the library of cartridges.
+After the PPU, the machine is taken through the range of cartridge
 types until they boot, and the DSP's three failing sub-tests are closed with the wider body of real
 software then available to exercise it.
 

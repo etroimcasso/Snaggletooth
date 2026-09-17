@@ -498,8 +498,9 @@ class Snes {
 
   // The observer told every frame the PPU finishes (FrameObserver,
   // `video_frame.h`), or none, which is how the machine starts. The machine
-  // resolves a pixel per visible dot only while one is set, so a machine nobody
-  // is watching draws nothing; what a program can observe is the same either way.
+  // draws each visible dot only while one is set, so a machine nobody is watching
+  // draws nothing; its state, and what a program can observe, are the same either
+  // way.
   // Like the bus observer it is the host's object and not part of the state: a
   // snapshot does not carry it and restore() leaves it in place.
   void setFrameObserver(FrameObserver* observer) noexcept;
@@ -605,9 +606,14 @@ class Snes {
 
   // Resolves the picture's pixels for the visible dots the master-cycle span
   // (`from`, `to`] of a line beginning at `lineStart` passed, each from the
-  // registers and memories as they stand at its own dot. Runs only while a frame
-  // observer is set.
+  // registers and memories as they stand at its own dot. With no frame observer
+  // set it draws nothing and decides, at each of those dots, only what the chip
+  // carries to the next position.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
+  // Turns the frame in progress 512 wide at its first position drawn in
+  // half-pixels, which is position `x` of picture row `line`: every pixel drawn
+  // before it is doubled into both halves of its position.
+  void widenFrame(std::size_t line, std::uint16_t x) noexcept;
 
   // Walks the PPU's Range pass as far as master cycle `to` of a line beginning at
   // `lineStart` reaches — two dots a sprite from the picture's first — finding the
@@ -789,13 +795,17 @@ class Snes {
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
   std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported
   FrameObserver* frameObserver_ = nullptr;  // told every finished frame; none by default
-  // The picture in progress, four bytes a pixel, as wide as a line and as tall as
-  // the taller picture — enough for either. It is output rather than state, so it
-  // lives on the machine and not in its state value, and it exists only while
-  // someone is watching. The frame's own height says how much of it that frame is.
+  // The picture in progress, four bytes a pixel, as wide as a line drawn in
+  // half-pixels and as tall as the taller picture — enough for any frame. It is
+  // output rather than state, so it lives on the machine and not in its state
+  // value, and it exists only while someone is watching. A frame's rows are 256
+  // pixels until its first position drawn in half-pixels and 512 from then on; the
+  // frame's own width and height say how much of the buffer it is.
   std::vector<std::uint8_t> raster_;
   bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
+  bool frameWide_ = false;      // the frame in progress is 512 wide
   std::uint16_t framePictureLines_ = 0;  // the lines the finished picture holds
+  std::uint16_t frameWidth_ = 0;         // and how wide it is
   std::uint8_t frameField_ = 0;          // the parity that picture ran under
   SaveObserver* saveObserver_ = nullptr;  // told a frame changed the save window; none by default
   // Whether anything has stored into the save window since it was last reported.

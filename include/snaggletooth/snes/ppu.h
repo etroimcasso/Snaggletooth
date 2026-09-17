@@ -12,15 +12,19 @@
 // halves remember, and the windows in which each memory can be reached.
 //
 // A pixel is resolved from that state as it stands at the pixel's own dot, so a
-// program that writes a register mid-line changes the rest of the line. Modes 0
-// to 4 and 7 are the modes the chip draws: the backgrounds each of them has, at
-// the depths it gives them, and the sprites, in that mode's own priority order,
-// over the backdrop. In modes 2 and 4 BG3's tilemap is not drawn: it is a table
-// of offsets the other backgrounds are read through, a tile column at a time.
-// Mode 7's one background is a field of packed pixels read through its matrix
-// rather than a tilemap of characters, and SETINI bit 6 makes a second layer of
-// the same pixels. Sprites are drawn in every mode, the ones whose backgrounds
-// are not built included.
+// program that writes a register mid-line changes the rest of the line. Every
+// mode draws the backgrounds it has, at the depths it gives them, and the
+// sprites, in that mode's own priority order, over the backdrop. In modes 2, 4
+// and 6 BG3's tilemap is not drawn: it is a table of offsets the other
+// backgrounds are read through, a tile column at a time. Mode 7's one background
+// is a field of packed pixels read through its matrix rather than a tilemap of
+// characters, and SETINI bit 6 makes a second layer of the same pixels.
+//
+// Modes 5 and 6 draw a line in half-pixels, two to each of its 256 positions: the
+// sub screen's pixel on the left half and the main screen's on the right. Their
+// tiles are two characters wide across eight positions, the even pixels of a
+// tile showing on the sub screen and the odd ones on the main. $2133 bit 3 draws
+// any other mode's line the same way, from tiles one character wide.
 //
 // Sprites are the one part of the picture not resolved at the dot that shows
 // them. A line's sprites are found and gathered during the line before it, in
@@ -51,9 +55,11 @@ namespace snaggletooth {
 constexpr std::uint16_t kVblankStartLine = 225u;
 constexpr std::uint16_t kOverscanVblankStartLine = 240u;
 
-// The sprites OAM describes, and the pixels a line of picture holds.
+// The sprites OAM describes, the positions a line of picture holds, and the
+// half-pixels a line drawn in half-pixels holds, two to a position.
 constexpr unsigned kSprites = 128u;
 constexpr std::uint16_t kPictureWidth = 256u;
+constexpr std::uint16_t kHiresWidth = 512u;
 
 // What the chip can afford on one line: the sprites Range keeps, and the 8x8
 // tiles Time loads from them. A sprite past the first is dropped and a tile past
@@ -216,6 +222,23 @@ struct PpuState {
   std::uint16_t mosaicBlockLine = 1;  // the line the current row of blocks began on
   std::uint8_t mosaicBlockSize = 0;   // $2106 bits 7-4 as that row began
 
+  // ---- the half-pixel line -----------------------------------------------------
+  // What the last main-screen pixel of the line decided, which the sub screen's
+  // half-pixel one position to its right is drawn under: whether $2130 blacked it,
+  // whether it took math, which way and with which addend, whether the result was
+  // halved, and its colour before the math. Carried a position at a time along
+  // every line and read by the left half of a line drawn in half-pixels alone.
+  struct MainDecision {
+    bool present = false;       // a main pixel has been drawn on this line
+    bool clipped = false;       // $2130 bits 7-6 replaced it with black
+    std::uint8_t addend = 0;    // 0 no math, 1 the fixed colour, 2 the sub screen's pixel
+    bool subtract = false;      // the math subtracted
+    bool halved = false;        // the result was halved
+    std::uint16_t colour = 0;   // its colour before the math, five bits a channel
+    [[nodiscard]] bool operator==(const MainDecision&) const noexcept = default;
+  };
+  MainDecision lastMain{};
+
   // ---- status -----------------------------------------------------------------
   // Raised by the two passes whether or not $212C shows the sprites at all, and
   // cleared as the next picture begins.
@@ -306,8 +329,9 @@ class Ppu {
   // kSpriteTilesPerLine 8x8 tiles standing on the picture and no more, counting
   // each sprite's left to right; the tile that would be one too many raises
   // $213E bit 7. Forced blank gathers nothing and leaves the buffer for a line
-  // no picture will ask about.
-  void timeSprites(std::uint16_t line) noexcept;
+  // no picture will ask about. `field` is the parity of the frame the line
+  // belongs to, which picks the rows of a sprite drawn at half height.
+  void timeSprites(std::uint16_t line, std::uint8_t field) noexcept;
 
   // The line boundary handing Range a fresh pass over OAM for `line`, and with
   // it the sprite the walk begins at: sprite 0, or the one $2103 bit 7 and the
@@ -320,14 +344,41 @@ class Ppu {
   // more line of the current row otherwise.
   void beginLine(std::uint16_t line) noexcept;
 
-  // The four bytes the chip's converter drives at picture position (x, y): red,
-  // green, blue, then 255. x runs across a line's 256 pixels and y down the
-  // picture's lines from its first. The colour is the one the main screen's
-  // enabled backgrounds and the line's sprites name at that dot, taken in the
-  // mode's priority order, or the backdrop where none of them shows, scaled by
-  // INIDISP's brightness. Forced blank and brightness zero are black.
-  [[nodiscard]] std::array<std::uint8_t, 4> pixel(std::uint16_t x,
-                                                  std::uint16_t y) const noexcept;
+  // What the chip's converter drives at picture position (x, y), four bytes a
+  // pixel — red, green, blue, then 255 — with x across a line's 256 positions and
+  // y the beam's line, 1 for the picture's first.
+  //
+  // A position is drawn in half-pixels in modes 5 and 6, and in any other mode
+  // while $2133 bit 3 is set, read at the dot like every register. Its right half
+  // is the main screen's pixel under colour math. Its left half is the sub screen's
+  // front-most pixel, or colour 0 where the sub screen shows nothing, drawn under
+  // what the main pixel one position to its left decided: black where $2130 blacked
+  // that pixel, then the same math — none, the fixed colour, or that pixel's own
+  // colour before its math where its addend was the sub screen — halved where it
+  // was halved. The left half at position 0 has no main pixel to its left and takes
+  // neither. Any other position shows one pixel, the main screen's under colour
+  // math, in both halves. Every position records its main pixel's decision in the
+  // state, so a line resumed from a snapshot draws on as the unbroken line would. The main screen's
+  // pixel is the one its enabled backgrounds and the line's sprites name at that
+  // dot, taken in the mode's priority order, or the backdrop where none of them
+  // shows. Everything is scaled by INIDISP's brightness; forced blank and
+  // brightness zero are black on both halves.
+  struct Dot {
+    std::array<std::uint8_t, 4> left;   // the sub screen's half, or the pixel itself
+    std::array<std::uint8_t, 4> right;  // the main screen's half, or the pixel itself
+    bool hires;                          // the line is drawn in half-pixels here
+  };
+  //
+  // `in` is the beam: its line is y, and its parity is the field. With $2133 bit 0
+  // set, modes 5 and 6 read their tilemaps in half-lines, line y of field F reading
+  // half-line 2y + F; with bit 1 set, in any mode, the line's sprites were gathered
+  // at half height.
+  [[nodiscard]] Dot dot(std::uint16_t x, const PpuInputs& in) noexcept;
+
+  // What dot() records at picture position x of the beam's line, and nothing else:
+  // the main pixel's decision, carried to the next position whether or not the
+  // picture is drawn.
+  void decide(std::uint16_t x, const PpuInputs& in) noexcept;
 
  private:
   // One background as its own registers describe it, with what the mode makes of
@@ -339,6 +390,9 @@ class Ppu {
     std::uint16_t horizontal;    // its horizontal offset register
     std::uint16_t vertical;      // its vertical offset register
     bool large;                  // its bit of $2105: 16x16 blocks rather than 8x8 tiles
+    bool hires;                  // its mode's tiles are two characters wide and cover eight
+                                 // positions, whatever `large` says of their width — modes 5
+                                 // and 6; `large` then chooses the height alone
     unsigned planes;             // its bitplanes, and so its colours: 1 << planes
     unsigned paletteStride;      // the words one step of its tile's palette field moves,
                                  // or none where the mode gives it no palette field
@@ -348,6 +402,12 @@ class Ppu {
                                  // mode gives it no offset table
   };
 
+  // A background's tiles in positions: eight across in modes 5 and 6 and wherever
+  // `large` is clear, sixteen otherwise; sixteen down where `large` is set and
+  // eight otherwise.
+  [[nodiscard]] static unsigned tileWidth(const Background& background) noexcept;
+  [[nodiscard]] static unsigned tileHeight(const Background& background) noexcept;
+
   // The two offsets a background is read with at one picture column.
   struct Offsets {
     std::uint16_t horizontal;
@@ -356,7 +416,9 @@ class Ppu {
 
   // The tilemap entry a background holds at one of its own positions: the base its
   // screen register names, the row and column within one 32x32 screen, and the
-  // terms that carry a wide or tall map into its further screens.
+  // terms that carry a wide or tall map into its further screens. A tile is eight
+  // or sixteen positions across and eight or sixteen down, as `hires` and `large`
+  // say.
   [[nodiscard]] std::uint16_t entryAt(const Background& background, unsigned bgX,
                                       unsigned bgY) const noexcept;
 
@@ -382,9 +444,12 @@ class Ppu {
   };
 
   // What a background shows at a picture position, or nothing where its tile's
-  // pixel is colour 0, which every palette treats as transparent.
+  // pixel is colour 0, which every palette treats as transparent. `half` is which
+  // half of the position a two-character tile is read for: the left, its even
+  // pixel, or the right, its odd one. A tile one character wide has one pixel to
+  // the position and ignores it.
   [[nodiscard]] std::optional<Shown> sample(const Background& background, std::uint16_t x,
-                                            std::uint16_t y) const noexcept;
+                                            std::uint16_t y, bool half) const noexcept;
 
   // One sprite as its OAM record describes it: its position, the first of its
   // characters, its attribute byte, and the size its own flag chose from the
@@ -443,8 +508,9 @@ class Ppu {
 
   // What a screen shows at a picture position — the palette word and the layer it
   // came from, which is what decides whether colour math reaches it. Nothing at
-  // all is that screen's backdrop: palette word 0 on the main screen, and the
-  // fixed colour on the sub screen, which has no word of its own.
+  // all is that screen's backdrop: palette word 0 on the main screen; on the sub
+  // screen, the fixed colour as colour math's addend and palette word 0 as the left
+  // half of a line drawn in half-pixels.
   struct Resolved {
     std::uint8_t word;
     Layer layer;
@@ -460,14 +526,12 @@ class Ppu {
   };
 
   // The chart the mode $2105 names keeps, front to back — and for Mode 1 the
-  // chart $2105 bit 3 exchanges it for, which is Mode 1's alone. A mode whose
-  // backgrounds are not built names only its four sprite places, so its
-  // backgrounds show their backdrop and its sprites draw as they do in any other.
+  // chart $2105 bit 3 exchanges it for, which is Mode 1's alone.
   [[nodiscard]] std::span<const Place> order() const noexcept;
 
   // How the mode reads one of the four backgrounds — its depth, its palette and
   // whether it is read through an offset table — or nothing where the mode does not
-  // have that background at all, BG3 in modes 2 and 4 among them. Mode 7's
+  // have that background at all, BG3 in modes 2, 4 and 6 among them. Mode 7's
   // background is not one of these: it is the field, read by sampleField.
   [[nodiscard]] std::optional<Background> background(Layer layer) const noexcept;
 
@@ -508,12 +572,22 @@ class Ppu {
   // the second Mode 7 layer, which reads bit 0 as its vertical enable and bit 1 as
   // its horizontal one. Mode 7's blocks stand in the picture, so the matrix reads
   // their corners.
+  //
+  // In modes 5 and 6 a block is counted in half-pixels, twice its size wide, from
+  // the line's first half-pixel, so its corner is always a left half and a size of
+  // 0 already covers a right half with its left one. Under $2133 bit 3 a block is
+  // counted in positions as on any other line.
+  //
+  // The line a tilemap is read at is the beam's, except in modes 5 and 6 with
+  // $2133 bit 0 set, where it is a half-line: 2 x line + field, or for a block
+  // 2 x its corner line in either field, which is the even field's half-line.
   struct Position {
     std::uint16_t x;
     std::uint16_t line;
+    bool half;  // which half of the position a two-character tile is read for
   };
-  [[nodiscard]] Position mosaicPosition(Layer layer, std::uint16_t x,
-                                        std::uint16_t line) const noexcept;
+  [[nodiscard]] Position mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
+                                        bool half) const noexcept;
 
   // How far a line is into the current row of mosaic blocks: 0 on the row's first.
   [[nodiscard]] std::uint16_t mosaicIndex(std::uint16_t line) const noexcept;
@@ -531,9 +605,30 @@ class Ppu {
   [[nodiscard]] std::int32_t multiplierWhileDrawing(const PpuInputs& in) const noexcept;
 
   // The front-most pixel of one screen, by the order its mode keeps, each layer
-  // taken only where that screen enables it and the windows leave it there.
+  // taken only where that screen enables it and the windows leave it there. `half`
+  // is which half of the position a two-character tile is read for; sprites and
+  // windows stand on whole positions and never read it.
   [[nodiscard]] std::optional<Resolved> resolve(Screen screen, std::uint16_t x,
-                                                std::uint16_t line) const noexcept;
+                                                const PpuInputs& in, bool half) const noexcept;
+
+  // The main screen's pixel at a picture position under colour math, the colour
+  // it had before the math, and what it decided: `half` as resolve takes it, the
+  // sub screen's addend being read for the left half.
+  struct MainPixel {
+    std::uint16_t colour;
+    PpuState::MainDecision decision;
+  };
+  [[nodiscard]] MainPixel mainPixel(std::uint16_t x, const PpuInputs& in,
+                                    bool half) const noexcept;
+
+  // A colour taken through colour math: added to or subtracted from `addend` five
+  // bits a channel, halved first where asked, and held to the range a channel has.
+  [[nodiscard]] static std::uint16_t combine(std::uint16_t colour, std::uint16_t addend,
+                                             bool subtract, bool halve) noexcept;
+
+  // Whether a picture position is drawn in half-pixels: modes 5 and 6, and any
+  // mode while $2133 bit 3 is set.
+  [[nodiscard]] bool hiresAt() const noexcept;
 
   // Whether one of $2130's two-bit regions covers a picture position: 0 nowhere,
   // 1 outside the colour window, 2 inside it, 3 everywhere. The colour window is
@@ -544,9 +639,10 @@ class Ppu {
   [[nodiscard]] std::uint16_t paletteColour(std::uint8_t word) const noexcept;
   [[nodiscard]] std::uint16_t fixedColour() const noexcept;
 
-  // The registers one of the four backgrounds reads, whatever the mode: its
-  // screen register, its character-base nibble, its two offsets and its tile-size
-  // bit. What the mode makes of it is added by background().
+  // The registers one of the four backgrounds reads, and the shape of the mode's
+  // tiles: its screen register, its character-base nibble, its two offsets, its
+  // tile-size bit, and whether the mode's tiles are two characters wide. What else
+  // the mode makes of it is added by background().
   [[nodiscard]] Background registersOf(Layer layer) const noexcept;
 
   // The converter's four bytes for one 15-bit palette word at the brightness
