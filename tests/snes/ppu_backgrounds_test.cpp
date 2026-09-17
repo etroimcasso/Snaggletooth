@@ -142,6 +142,39 @@ Picture draw(const PpuState& ppu, std::uint64_t cycles = kOneFrame) {
   return picture;
 }
 
+// A frame drawn by a machine that begins `program` with the beam at (line, hpos),
+// so the program's own writes land on the picture rather than between frames.
+// hpos counts master cycles into the line, four to a picture position, and a
+// load-and-store pair costs 46 of them.
+Picture drawWith(const PpuState& ppu, std::vector<std::uint8_t> program, std::uint16_t line,
+                 std::uint16_t hpos) {
+  program.push_back(kStp);
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = ppu;
+  state.vpos = line;
+  state.hpos = hpos;
+  machine.restore(state);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+  machine.run(kOneFrame);
+  return picture;
+}
+
+// LDA #value ; STA $21xx
+std::vector<std::uint8_t> storePort(std::uint8_t low, std::uint8_t value) {
+  return {kLdaImm, value, kStaAbs, low, 0x21u};
+}
+
+std::vector<std::uint8_t> joined(std::initializer_list<std::vector<std::uint8_t>> parts) {
+  std::vector<std::uint8_t> program;
+  for (const std::vector<std::uint8_t>& part : parts) {
+    program.insert(program.end(), part.begin(), part.end());
+  }
+  return program;
+}
+
 // A palette word as CGRAM holds it: the low byte, then the high.
 void putColour(PpuState& ppu, unsigned word, std::uint16_t colour) {
   ppu.cgram[word * 2u] = static_cast<std::uint8_t>(colour & 0xFFu);
@@ -227,6 +260,56 @@ PpuState threeBackgrounds() {
   ppu.tm = 0x07u;
   return ppu;
 }
+
+// A picture whose every position reads one character, so the entry a position holds
+// is the same wherever along the line it falls and the character's own rows are what
+// its pixels name.
+PpuState oneCharacterEverywhere() {
+  PpuState ppu = screen();
+  for (unsigned index = 0u; index < kScreenEntries; ++index) putEntry(ppu, kBg1, index, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  return ppu;
+}
+
+// The four colour indices a cycling picture steps through: red, green, blue and
+// white, which screen() puts in palette words 1, 2, 4 and 8.
+constexpr std::array<std::uint8_t, 4> kCycle{1u, 2u, 4u, 8u};
+
+// A picture whose tile columns cycle through four solid characters, so a horizontal
+// offset of one tile lands a different colour at every position. The characters run
+// past the four the cycle names, so a 16x16 block — which reads the character after
+// its own and the one sixteen on — finds one wherever it looks.
+PpuState columnCyclingPicture() {
+  PpuState ppu = screen();
+  for (unsigned index = 0u; index < kScreenEntries; ++index) {
+    putEntry(ppu, kBg1, index, static_cast<std::uint16_t>((index % 32u) % 4u + 1u));
+  }
+  for (unsigned tile = 1u; tile <= 24u; ++tile) {
+    putSolidTile(ppu, kBg1, tile, kCycle[(tile - 1u) % 4u]);
+  }
+  return ppu;
+}
+
+// A picture of one character whose eight rows cycle through the same four colours,
+// so a vertical offset that moves the row the line reads changes what it shows
+// without moving the position's tilemap entry.
+PpuState rowCyclingPicture() {
+  PpuState ppu = screen();
+  for (unsigned index = 0u; index < kScreenEntries; ++index) putEntry(ppu, kBg1, index, 0x0001u);
+  TileRows rows{};
+  for (unsigned row = 0u; row < 8u; ++row) rows[row].fill(kCycle[row % 4u]);
+  putTile(ppu, kBg1, 1u, rows);
+  return ppu;
+}
+
+// The row of character 1 that beam line 50 reads, and the word the video port
+// reaches it at. BG1's characters begin at kCharByte and a sixteen-colour character
+// is thirty-two bytes, so character 1 begins at kCharByte + $20; the -1 vertical
+// offset screen() carries puts line 50 on the character's second row, two bytes
+// further on. A solid character holds plane 0 all ones and the rest clear, which is
+// colour index 1 across; clearing plane 0 and setting plane 1 makes the row index 2.
+constexpr std::uint32_t kTileOneRowAtLineFifty = kCharByte + 0x20u + 2u;
+constexpr std::uint16_t kTileOneRowWord = kTileOneRowAtLineFifty / 2u;
 
 // Whether two machines are in the same state, piece by piece: the CPU's registers
 // and its progress through an instruction, work RAM and the save, the audio
@@ -1050,6 +1133,205 @@ TEST(SnesPpuPicture, ACartridgeThatWritesTheVideoMemoriesShowsItsPicture) {
   EXPECT_EQ(picture.at(7u, 6u), kRedOut);
   EXPECT_EQ(picture.at(0u, 7u), kBackdropOut);
   EXPECT_EQ(picture.at(8u, 0u), kBackdropOut);
+}
+
+// ---- a write landing inside a tile ---------------------------------------------
+//
+// A pixel is resolved from the registers and the memories as they stand at its own
+// dot, so a write landing between two positions of the same tile shows at the
+// second of them and not the first. Each case below begins its program at master
+// cycle 300 of line 50 — picture row 49, whose first fifty-three positions the beam
+// had already passed — and every write it makes lands inside a tile rather than on
+// a boundary: a program's first store pair lands at column 65, the third position of
+// the tile at 64, and its second at column 77, the sixth position of the tile at 72.
+// Each case compares a position drawn before the landing with the frame the same
+// picture draws with the write never made, and one drawn after it with the frame
+// that has the written value throughout.
+
+TEST(SnesPpuPicture, TheHorizontalScrollWrittenInsideATileMovesThePixelsAfterTheWrite) {
+  // BG1HOFS <- 8 in its two halves, so the positions after the second read the
+  // tile column to their right.
+  const PpuState before = columnCyclingPicture();
+  PpuState after = columnCyclingPicture();
+  after.bg1hofs = 8u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture =
+      drawWith(before, joined({storePort(0x0Du, 0x08u), storePort(0x0Du, 0x00u)}), 50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(78u, 49u), always.at(78u, 49u));
+  EXPECT_NE(never.at(90u, 49u), always.at(90u, 49u));
+  EXPECT_EQ(picture.at(90u, 49u), always.at(90u, 49u));
+  EXPECT_EQ(picture.at(10u, 49u), kBlack);
+}
+
+TEST(SnesPpuPicture, TheVerticalScrollWrittenInsideATileMovesTheRowTheRestOfTheLineReads) {
+  // BG1VOFS <- 1. The line's positions hold the same tilemap entry either way —
+  // the offset moves the row within the character, not the character.
+  const PpuState before = rowCyclingPicture();
+  PpuState after = rowCyclingPicture();
+  after.bg1vofs = 1u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture =
+      drawWith(before, joined({storePort(0x0Eu, 0x01u), storePort(0x0Eu, 0x00u)}), 50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(78u, 49u), always.at(78u, 49u));
+  EXPECT_EQ(picture.at(90u, 49u), always.at(90u, 49u));
+}
+
+TEST(SnesPpuPicture, TheCharacterBaseWrittenInsideATileMovesTheRestOfTheLineToTheOtherCharacters) {
+  // $210B <- 6: BG1's characters move from $8000 to $C000, where a second character
+  // 1 stands in another colour. Every position keeps its entry and its tile number.
+  PpuState before = oneCharacterEverywhere();
+  putTileAt(before, 0xC000u + 0x20u, 4u, [] {
+    TileRows rows{};
+    for (auto& row : rows) row.fill(2u);
+    return rows;
+  }());
+  PpuState after = before;
+  after.bg12nba = 0x06u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x0Bu, 0x06u), 50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(70u, 49u), always.at(70u, 49u));
+  EXPECT_EQ(picture.at(80u, 49u), always.at(80u, 49u));
+}
+
+TEST(SnesPpuPicture, TheScreenBaseWrittenInsideATileMovesTheRestOfTheLineToTheOtherMap) {
+  // $2107 <- 8: BG1's map moves from screen 1 to screen 2, whose entries name
+  // another character. Every position keeps the row and column it reads the map at.
+  constexpr Layout kSecondMap{.map = 0x1000u, .characters = kCharByte, .planes = 4u};
+  PpuState before = oneCharacterEverywhere();
+  putSolidTile(before, kBg1, 2u, 2u);
+  for (unsigned index = 0u; index < kScreenEntries; ++index) {
+    putEntry(before, kSecondMap, index, 0x0002u);
+  }
+  PpuState after = before;
+  after.bg1sc = 0x08u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x07u, 0x08u), 50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(70u, 49u), always.at(70u, 49u));
+  EXPECT_EQ(picture.at(80u, 49u), always.at(80u, 49u));
+}
+
+TEST(SnesPpuPicture, TheTileSizeWrittenInsideATileChangesTheTilesAfterTheWrite) {
+  // $2105 <- $11: Mode 1 with BG1 in 16x16 blocks, so the positions after the write
+  // read the map at half the row and column they read it at before.
+  const PpuState before = columnCyclingPicture();
+  PpuState after = columnCyclingPicture();
+  after.bgmode = 0x11u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x05u, 0x11u), 50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(70u, 49u), always.at(70u, 49u));
+  EXPECT_NE(never.at(80u, 49u), always.at(80u, 49u));
+  EXPECT_EQ(picture.at(80u, 49u), always.at(80u, 49u));
+}
+
+TEST(SnesPpuPicture, ABackgroundSeenThroughOneTileColumnReadsItsOwnRowOnEveryLine) {
+  // The windows leave BG1 showing at four positions of one tile column and nowhere
+  // else, and its map names a different character in every tile row. Every line
+  // reads the map at its own row, though the only positions any line reads it at
+  // are the four inside that one column — the row is as much a part of where an
+  // entry is read as the column is.
+  PpuState ppu = screen();
+  for (unsigned index = 0u; index < kScreenEntries; ++index) {
+    putEntry(ppu, kBg1, index, static_cast<std::uint16_t>((index / 32u) % 4u + 1u));
+  }
+  for (unsigned tile = 1u; tile <= 4u; ++tile) putSolidTile(ppu, kBg1, tile, kCycle[tile - 1u]);
+  ppu.w12sel = 0x03u;  // BG1: window 1 enabled and inverted, so it masks outside it
+  ppu.wh0 = 100u;
+  ppu.wh1 = 103u;
+  ppu.tmw = 0x01u;  // and the windows mask BG1 on the main screen
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(99u, 0u), kBackdropOut);
+  EXPECT_EQ(picture.at(104u, 0u), kBackdropOut);
+  // Tile rows 0, 1, 2 and 3 name the four characters, and each holds eight lines.
+  EXPECT_EQ(picture.at(100u, 0u), kRedOut);
+  EXPECT_EQ(picture.at(103u, 7u), kRedOut);
+  EXPECT_EQ(picture.at(100u, 8u), kGreenOut);
+  EXPECT_EQ(picture.at(100u, 16u), kBlueOut);
+  EXPECT_EQ(picture.at(100u, 24u), kWhiteOut);
+}
+
+TEST(SnesPpuPicture, AVideoMemoryWriteUnderForcedBlankReachesTheSameLineWhenTheBlankLifts) {
+  // Forced blank at column 65, the row line 50 reads exchanged through the video
+  // port while the memory is reachable, and the blank lifted at column 134 — all on
+  // one line. The positions the blank covered are black and the ones after it read
+  // the row the program wrote, at the same address the positions before it read.
+  const PpuState before = oneCharacterEverywhere();
+  PpuState after = before;
+  after.vram[kTileOneRowAtLineFifty] = 0x00u;
+  after.vram[kTileOneRowAtLineFifty + 1u] = 0xFFu;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before,
+                                   joined({
+                                       storePort(0x00u, 0x80u),  // forced blank
+                                       storePort(0x15u, 0x80u),  // step after the high byte
+                                       storePort(0x16u, kTileOneRowWord & 0xFFu),
+                                       storePort(0x17u, kTileOneRowWord >> 8),
+                                       storePort(0x18u, 0x00u),  // plane 0 clear
+                                       storePort(0x19u, 0xFFu),  // plane 1 set
+                                       storePort(0x00u, 0x0Fu),  // the screen on again
+                                   }),
+                                   50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(100u, 49u), kBlack);
+  EXPECT_EQ(picture.at(140u, 49u), always.at(140u, 49u));
+}
+
+TEST(SnesPpuPicture, ASnapshotRestoredInsideATileDrawsFromTheRestoredMemories) {
+  // The beam is taken to master cycle 482, inside the position at column 98 and so
+  // inside the tile the position at column 96 began; the state is taken, the row
+  // line 50 reads exchanged in the copy, and the copy restored. The rest of the
+  // line reads the copy's bytes at the address the positions before it read.
+  const PpuState before = oneCharacterEverywhere();
+  PpuState after = before;
+  after.vram[kTileOneRowAtLineFifty] = 0x00u;
+  after.vram[kTileOneRowAtLineFifty + 1u] = 0xFFu;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+
+  const std::vector<std::uint8_t> rom = haltedCartridge();
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = before;
+  state.vpos = 50u;
+  state.hpos = 300u;
+  machine.restore(state);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+  machine.run(180u);
+  ASSERT_EQ(machine.state().hpos, 482u);
+  SnesState midTile = machine.state();
+  midTile.ppu.vram[kTileOneRowAtLineFifty] = 0x00u;
+  midTile.ppu.vram[kTileOneRowAtLineFifty + 1u] = 0xFFu;
+  machine.restore(midTile);
+  machine.run(kOneFrame);
+
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_NE(never.at(60u, 49u), always.at(60u, 49u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(110u, 49u), always.at(110u, 49u));
 }
 
 }  // namespace

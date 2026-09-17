@@ -110,14 +110,19 @@ struct Picture final : FrameObserver {
 };
 
 constexpr std::uint8_t kStp = 0xDBu;
+constexpr std::uint8_t kLdaImm = 0xA9u;
+constexpr std::uint8_t kStaAbs = 0x8Du;
 
-std::vector<std::uint8_t> haltedCartridge() {
-  std::vector<std::uint8_t> program{kStp};
+// A cartridge running `program` from $8000, stopped at its end.
+std::vector<std::uint8_t> cartridge(std::vector<std::uint8_t> program) {
+  program.push_back(kStp);
   program.resize(0x8000u, 0x00u);
   program[0x7FFCu] = 0x00u;  // reset -> $8000
   program[0x7FFDu] = 0x80u;
   return program;
 }
+
+std::vector<std::uint8_t> haltedCartridge() { return cartridge({}); }
 
 // More than an NTSC frame of master cycles, so a run from power-on reaches the line
 // a finished frame is handed over on.
@@ -133,6 +138,29 @@ Picture draw(const PpuState& ppu) {
   machine.setFrameObserver(&picture);
   machine.run(kOneFrame);
   return picture;
+}
+
+// A frame drawn by a machine that begins `program` with the beam at (line, hpos),
+// so the program's own writes land on the picture. hpos counts master cycles into
+// the line, four to a picture position, and a load-and-store pair costs 46 of them.
+Picture drawWith(const PpuState& ppu, std::vector<std::uint8_t> program, std::uint16_t line,
+                 std::uint16_t hpos) {
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = ppu;
+  state.vpos = line;
+  state.hpos = hpos;
+  machine.restore(state);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+  machine.run(kOneFrame);
+  return picture;
+}
+
+// LDA #value ; STA $21xx
+std::vector<std::uint8_t> storePort(std::uint8_t low, std::uint8_t value) {
+  return {kLdaImm, value, kStaAbs, low, 0x21u};
 }
 
 void putColour(PpuState& ppu, unsigned word, std::uint16_t colour) {
@@ -723,6 +751,42 @@ TEST(SnesPpuModes, TheFixedColourHalvesAgainstADirectColourPixel) {
   ppu.fixedBlue = 8u;
   // The halving comes before the hold: 34 >> 1 is 17, 32 >> 1 is 16, 28 >> 1 is 14.
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), rgb(17u, 16u, 14u));
+}
+
+// Mode 3 with BG1 alone and one 256-colour character under palette field 5 at every
+// position, so a whole line is the same pixel value: with CGWSEL bit 0 clear it
+// reads the palette word that value names, and with the bit set it is composed.
+PpuState directAcrossTheLine() {
+  PpuState ppu = modeThree();
+  ppu.tm = 0x01u;
+  ppu.cgwsel = 0x00u;
+  putSolid(ppu, kBg1Chars, 8u, 2u, 0xB6u);
+  for (unsigned tileY = 0u; tileY < 32u; ++tileY) {
+    for (unsigned tileX = 0u; tileX < 32u; ++tileX) {
+      putEntry(ppu, kBg1Map, tileX, tileY, entry(2u, 5u, false));
+    }
+  }
+  putColour(ppu, 0xB6u, kMagenta);
+  return ppu;
+}
+
+TEST(SnesPpuModes, DirectColourSwitchedInsideATileChangesThePixelsAfterTheWrite) {
+  // CGWSEL <- 1 at picture column 65, the third position of the tile at 64, on line
+  // 50. The positions before it read the palette word $B6 names and the ones after
+  // are composed from the same pixel value and the same palette field — how a pixel
+  // is read is settled at the pixel's own dot, not once for the tile it belongs to.
+  const PpuState before = directAcrossTheLine();
+  PpuState after = before;
+  after.cgwsel = 0x01u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x30u, 0x01u), 50u, 300u);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(never.at(60u, 49u), out(kMagenta));
+  EXPECT_EQ(always.at(60u, 49u), rgb(26u, 24u, 20u));
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(70u, 49u), always.at(70u, 49u));
+  EXPECT_EQ(picture.at(80u, 49u), always.at(80u, 49u));
 }
 
 // ---- the sweep cartridge's own grid ------------------------------------------

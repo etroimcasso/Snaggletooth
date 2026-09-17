@@ -734,6 +734,37 @@ TEST(SnesPpuOffsetModes, TheTablesScrollWrittenMidLineMovesTheColumnsAfterTheWri
   EXPECT_EQ(picture.at(10u, 50u), kBlack);
 }
 
+TEST(SnesPpuOffsetModes, TheTablesEntryWrittenUnderForcedBlankReachesTheSameLineWhenTheBlankLifts) {
+  // A program beginning at master cycle 300 of line 50 forces the blank at picture
+  // column 65, writes BG3's entry for the tile column at 136 through the video port
+  // while the memory is reachable, and lifts the blank at column 134. The positions
+  // the blank covered are black; the ones after it read the offset the program wrote,
+  // on the same line it wrote it on. The table's entry for picture tile T is BG3's
+  // tile T - 1, so the tile at column 136 reads BG3's tile 16.
+  PpuState before = offsetPicture(0x02u);
+  PpuState after = before;
+  putTable(after, 16u, 0u, kToBg1 | 8u);
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before,
+                                   joined({
+                                       store(0x00u, 0x80u),  // forced blank
+                                       store(0x15u, 0x80u),  // step after the high byte
+                                       store(0x16u, 0x10u),  // word $0C10: BG3's tile 16, row 0
+                                       store(0x17u, 0x0Cu),
+                                       store(0x18u, 0x08u),  // the offset
+                                       store(0x19u, 0x20u),  // and the bit that applies it to BG1
+                                       store(0x00u, 0x0Fu),  // the screen on again
+                                   }),
+                                   50u, 300u);
+  EXPECT_EQ(picture.at(60u, 50u), never.at(60u, 50u));
+  EXPECT_EQ(picture.at(100u, 50u), kBlack);
+  EXPECT_NE(never.at(140u, 50u), always.at(140u, 50u));
+  EXPECT_EQ(picture.at(140u, 50u), always.at(140u, 50u));
+  EXPECT_EQ(picture.at(140u, 51u), always.at(140u, 51u));
+  EXPECT_EQ(picture.at(10u, 50u), kBlack);
+}
+
 TEST(SnesPpuOffsetModes, AnEntryWrittenInVerticalBlankReachesTheNextPicture) {
   // A program begun in vertical blank writes table entry (0, 0) = +16 through the
   // video port. The next picture is the first one delivered, and it carries it.
