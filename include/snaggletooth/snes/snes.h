@@ -381,14 +381,18 @@ struct SnesState {
   // strobe's fall and how many of them have been clocked out. The auto-read uses
   // the same strobe and clock lines, so its sixteen clocks leave a port's register
   // at its padding until the program strobes again. When enabled, the auto-read
-  // spends a fixed window each frame; the busy flag is raised for that window and
-  // the result registers take their new value as it ends.
+  // begins on the first line of vertical blank at a point on a 256-cycle grid
+  // carried from one read to the next, strobes the pads, and clocks one bit out
+  // of every port at a time into $4218-$421F, each register shifting as its bit
+  // arrives; the busy flag holds from the start until the sixteenth bit lands,
+  // 4224 master cycles later.
   std::array<std::optional<Joypad>, 2> pads{};  // what is plugged into each port
   bool joyStrobe = false;               // $4016 bit 0 as last written: the latch line held high
   std::array<std::uint16_t, 2> joyLatch{};  // per port: the bits latched at the strobe's fall
   std::array<std::uint8_t, 2> joyClocks{};  // per port: bits clocked out since the latch (16 = at the padding)
-  std::uint16_t autoJoyClocks = 0;      // master cycles left in the auto-read busy window (0 = idle)
-  std::array<std::uint8_t, 8> joy{};    // $4218-$421F: the four 16-bit pad reads
+  std::uint64_t autoJoyStart = 0;       // the master cycle the latest auto-read began (0 = none yet); the next begins on its 256-cycle grid
+  std::uint8_t autoJoyClocked = 0;      // bits the auto-read has clocked into the registers so far (16 = the read is done)
+  std::array<std::uint8_t, 8> joy{};    // $4218-$421F: the four 16-bit pad reads, shifting as the auto-read clocks them
   // The programmable I/O port ($4201 written, $4213 read back). Its top bit is the
   // PPU's counter-latch line: while high the software latch works, and its fall
   // latches the counters itself. Every line reads back as written, since nothing
@@ -763,11 +767,14 @@ class Snes {
   // Takes the beam to the line beginning at `lineStart`, wrapping the frame, and runs
   // the events that line's start carries: the frame's own — the overflow flags and
   // vertical blank's end — or the decision whether vertical blank begins here, with
-  // the HDMA channels and the auto-joypad read that follow from it.
+  // the HDMA channels that follow from it.
   void advanceLine(std::uint64_t lineStart) noexcept;
-  // The auto-read's end: the sixteen bits it clocked out of each port land in
-  // $4218-$421F.
-  void finishAutoJoypadRead() noexcept;
+  // The auto-read: where on vertical blank's first line, beginning at `lineStart`,
+  // the read begins; whether it is busy; and the bits it has clocked into
+  // $4218-$421F by master cycle `now`, one shift of every port's register per bit.
+  [[nodiscard]] std::uint64_t autoJoypadStart(std::uint64_t lineStart) const noexcept;
+  [[nodiscard]] bool autoJoypadBusy() const noexcept;
+  void clockAutoJoypad(std::uint64_t now) noexcept;
 
   // Records `value` as the data bus's last byte and returns it, so an unmapped read
   // that follows sees it.

@@ -26,8 +26,8 @@ using examples::put;
 
 constexpr std::uint64_t kFrame = 262u * 1364u;  // one NTSC frame of the master clock
 
-constexpr Address kAutoReadSite = 0x008311u;
-constexpr Address kSerialSite = 0x00833Bu;
+constexpr Address kAutoReadSite = 0x008318u;
+constexpr Address kSerialSite = 0x008342u;
 
 InputScript script(const std::string& text) {
   std::string error;
@@ -306,9 +306,9 @@ TEST(InputScriptReplay, TheRequestCarriesTheScriptIntoTheTree) {
   EXPECT_EQ(played.reached.size(), 2u);
   EXPECT_GT(instructions(played), instructions(unplayed)) << "both targets are code now";
   const std::string manifest = renderManifest(played);
-  EXPECT_NE(manifest.find("reached  $00:8200 loc_008200 e=1 m=8 x=8 from $00:8311\n"), std::string::npos)
+  EXPECT_NE(manifest.find("reached  $00:8200 loc_008200 e=1 m=8 x=8 from $00:8318\n"), std::string::npos)
       << manifest;
-  EXPECT_NE(manifest.find("reached  $00:8210 loc_008210 e=1 m=8 x=8 from $00:833B\n"), std::string::npos)
+  EXPECT_NE(manifest.find("reached  $00:8210 loc_008210 e=1 m=8 x=8 from $00:8342\n"), std::string::npos)
       << manifest;
 }
 

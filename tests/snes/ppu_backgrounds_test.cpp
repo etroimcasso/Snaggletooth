@@ -345,7 +345,8 @@ constexpr std::uint16_t kTileOneRowWord = kTileOneRowAtLineFifty / 2u;
   }
   if (a.mdr != b.mdr || a.memsel != b.memsel || a.wmadd != b.wmadd) return differs("the bus");
   if (a.pads != b.pads || a.joy != b.joy || a.joyLatch != b.joyLatch ||
-      a.joyClocks != b.joyClocks || a.autoJoyClocks != b.autoJoyClocks ||
+      a.joyClocks != b.joyClocks || a.autoJoyStart != b.autoJoyStart ||
+      a.autoJoyClocked != b.autoJoyClocked ||
       a.joyStrobe != b.joyStrobe || a.wrio != b.wrio) {
     return differs("the controller ports");
   }
