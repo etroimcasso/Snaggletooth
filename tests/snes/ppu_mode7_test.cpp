@@ -809,6 +809,33 @@ TEST(SnesPpuMode7, ExtbgInModeOneDrawsModeOneUnchanged) {
   EXPECT_EQ(digest(draw(ppu)), digest(plain));
 }
 
+TEST(SnesPpuMode7, ExtbgSwitchedPartWayAlongALineAddsTheSecondLayerToTheRestOfIt) {
+  // The chart the chip resolves a dot by is the one SETINI names at that dot. Every
+  // field pixel here holds $85, which the first layer shows as word $85 and the
+  // second — once bit 6 is set — as word 5 in front of it. The program begins at
+  // dot 75 of line 50, where its store pair lands at column 65: the positions of
+  // that line before the landing are drawn by Mode 7's plain chart and the ones
+  // after it by the chart EXTBG extends.
+  PpuState before = modeSeven();
+  before.tm = 0x03u;  // both layers on the main screen
+  for (unsigned p = 0u; p < 64u; ++p) {
+    putFieldPixel(before, 1u, p & 7u, p >> 3, 0x85u);
+  }
+  putColour(before, 0x85u, kMagenta);
+  PpuState after = before;
+  after.setini = 0x40u;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, store(0x33u, 0x40u), 50u, 300u);
+
+  EXPECT_NE(never.at(60u, 50u), always.at(60u, 50u));
+  EXPECT_NE(never.at(66u, 50u), always.at(66u, 50u));
+  EXPECT_NE(never.at(80u, 50u), always.at(80u, 50u));
+  EXPECT_EQ(picture.at(60u, 50u), never.at(60u, 50u));
+  EXPECT_EQ(picture.at(66u, 50u), always.at(66u, 50u));
+  EXPECT_EQ(picture.at(80u, 50u), always.at(80u, 50u));
+}
+
 // ---- the multiplier ---------------------------------------------------------------
 //
 // One byte of $2134-$2136 read by a program whose LDA resolves thirty master

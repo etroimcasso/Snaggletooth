@@ -94,14 +94,23 @@ struct Picture final : FrameObserver {
 };
 
 constexpr std::uint8_t kStp = 0xDBu;
+constexpr std::uint8_t kLdaImm = 0xA9u;
+constexpr std::uint8_t kStaAbs = 0x8Du;
 
-// A cartridge that stops at once, so the beam runs while the CPU touches nothing.
-std::vector<std::uint8_t> haltedCartridge() {
-  std::vector<std::uint8_t> program{kStp};
+// A cartridge running `program` from $8000.
+std::vector<std::uint8_t> cartridge(std::vector<std::uint8_t> program) {
   program.resize(0x8000u, 0x00u);
   program[0x7FFCu] = 0x00u;  // reset -> $8000
   program[0x7FFDu] = 0x80u;
   return program;
+}
+
+// A cartridge that stops at once, so the beam runs while the CPU touches nothing.
+std::vector<std::uint8_t> haltedCartridge() { return cartridge({kStp}); }
+
+// LDA #value ; STA $21xx
+std::vector<std::uint8_t> storePort(std::uint8_t low, std::uint8_t value) {
+  return {kLdaImm, value, kStaAbs, low, 0x21u};
 }
 
 // More than an NTSC frame of master cycles, so a run from power-on reaches the next
@@ -130,6 +139,26 @@ Snes machineWith(const PpuState& ppu) {
 // Runs such a machine and returns what it drew.
 Picture draw(const PpuState& ppu) {
   Snes machine = machineWith(ppu);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+  machine.run(kOneFrame);
+  return picture;
+}
+
+// A frame drawn by a machine that begins `program` with the beam at (line, hpos),
+// so the program's own writes land on the picture rather than between frames. hpos
+// counts master cycles into the line, four to a picture position, and a
+// load-and-store pair costs 46 of them.
+Picture drawWith(const PpuState& ppu, std::vector<std::uint8_t> program, std::uint16_t line,
+                 std::uint16_t hpos) {
+  program.push_back(kStp);
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = ppu;
+  state.vpos = line;
+  state.hpos = hpos;
+  machine.restore(state);
   Picture picture;
   machine.setFrameObserver(&picture);
   machine.run(kOneFrame);
@@ -589,6 +618,127 @@ TEST(Windows, AnEdgeWrittenPartWayAlongALineChangesTheRestOfThatLine) {
   EXPECT_EQ(picture.at(0u, row + 1u), kGreenOut);
   EXPECT_EQ(picture.at(1u, row + 1u), kRedOut);
   EXPECT_EQ(picture.at(255u, row + 1u), kRedOut);
+}
+
+// Which positions a window covers for a layer, the chip works out from the three
+// selectors, the two logic registers and the four edges at the dot it is drawing —
+// so a write to any of them divides the line it lands on. Each case below begins
+// its program at master cycle 300 of line 50, where a first store pair lands at
+// column 65, and compares a position before the landing against the frame the write
+// was never made in and two after it against the frame carrying the written value
+// throughout.
+constexpr unsigned kWrittenRow = 49u;
+
+TEST(Windows, ASelectorWrittenPartWayAlongALineMasksTheRestOfThatLine) {
+  // $2123 <- BG1's window 1 enable, over a window spanning the whole line: the
+  // positions before the landing show BG1 and the ones after it show BG2, which
+  // masking BG1 uncovers.
+  PpuState before = screen();
+  before.wh0 = 0u;
+  before.wh1 = 255u;
+  before.w12sel = 0u;  // neither window is BG1's yet
+  before.tmw = 0x01u;  // and the windows mask BG1 on the main screen
+  PpuState after = before;
+  after.w12sel = selector(true, false, false, false);
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x23u, after.w12sel), 50u, 300u);
+
+  EXPECT_NE(never.at(60u, kWrittenRow), always.at(60u, kWrittenRow));
+  EXPECT_NE(never.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_NE(never.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+  EXPECT_EQ(picture.at(60u, kWrittenRow), never.at(60u, kWrittenRow));
+  EXPECT_EQ(picture.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_EQ(picture.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+}
+
+TEST(Windows, TheLogicWrittenPartWayAlongALineRecombinesTheRestOfThatLine) {
+  // Both of BG1's windows enabled — window 1 across the whole line, window 2 over
+  // its last fifty-six positions — and $212A written from OR to AND: OR covers every
+  // position and AND only the ones both windows hold, so the positions after the
+  // landing show BG1 again where the ones before it showed BG2.
+  PpuState before = screen();
+  before.wh0 = 0u;
+  before.wh1 = 255u;
+  before.wh2 = 200u;
+  before.wh3 = 255u;
+  before.w12sel = selector(true, false, true, false);
+  before.wbglog = kOr;  // BG1's two bits are the low pair
+  before.tmw = 0x01u;
+  PpuState after = before;
+  after.wbglog = kAnd;
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x2Au, kAnd), 50u, 300u);
+
+  EXPECT_NE(never.at(60u, kWrittenRow), always.at(60u, kWrittenRow));
+  EXPECT_NE(never.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_NE(never.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+  EXPECT_EQ(picture.at(60u, kWrittenRow), never.at(60u, kWrittenRow));
+  EXPECT_EQ(picture.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_EQ(picture.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+}
+
+TEST(Windows, TheColourWindowsLogicWrittenPartWayAlongALineMovesTheBlackRegion) {
+  // $2130's top field names the colour window as where the main screen's pixel
+  // stands as black, both of the colour window's own windows are enabled the same
+  // way, and $212B is written from OR to AND — which leaves black only where both
+  // windows hold, so the positions after the landing show BG1.
+  PpuState before = screen();
+  before.cgwsel = 0x80u;  // black inside the colour window
+  before.wobjsel = highLayer(selector(true, false, true, false));
+  before.wobjlog = static_cast<std::uint8_t>(kOr << 2);  // the colour window's pair
+  before.wh0 = 0u;
+  before.wh1 = 255u;
+  before.wh2 = 200u;
+  before.wh3 = 255u;
+  PpuState after = before;
+  after.wobjlog = static_cast<std::uint8_t>(kAnd << 2);
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(0x2Bu, after.wobjlog), 50u, 300u);
+
+  EXPECT_NE(never.at(60u, kWrittenRow), always.at(60u, kWrittenRow));
+  EXPECT_NE(never.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_NE(never.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+  EXPECT_EQ(picture.at(60u, kWrittenRow), never.at(60u, kWrittenRow));
+  EXPECT_EQ(picture.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_EQ(picture.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+}
+
+TEST(Windows, ASnapshotRestoredPartWayAlongALineMasksAsTheRestoredSelectorSays) {
+  // A state taken part-way along a line, BG1's window 1 enable set in the copy, and
+  // the copy restored: the rest of that line is drawn under the copy's selector.
+  constexpr unsigned kMaskedAt = 128u;
+  PpuState ppu = screen();
+  ppu.wh0 = 0u;
+  ppu.wh1 = 255u;
+  ppu.w12sel = 0u;
+  ppu.tmw = 0x01u;
+
+  Snes machine = machineWith(ppu);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+
+  while (machine.state().vpos < 12u) {
+    machine.run(kLineMaster - machine.state().hpos);
+  }
+  ASSERT_EQ(machine.state().vpos, 12u);
+  ASSERT_LT(machine.state().hpos, dotOf(kMaskedAt));
+  machine.run(dotOf(kMaskedAt) - machine.state().hpos);
+  const unsigned row = machine.state().vpos - 1u;
+
+  SnesState state = machine.state();
+  state.ppu.w12sel = selector(true, false, false, false);
+  machine.restore(state);
+  machine.run(kOneFrame);
+
+  EXPECT_EQ(picture.at(0u, row), kRedOut);
+  EXPECT_EQ(picture.at(kMaskedAt - 1u, row), kRedOut);
+  EXPECT_EQ(picture.at(kMaskedAt + 1u, row), kGreenOut);
+  EXPECT_EQ(picture.at(255u, row), kGreenOut);
+  EXPECT_EQ(picture.at(255u, row - 1u), kRedOut);
+  EXPECT_EQ(picture.at(0u, row + 1u), kGreenOut);
 }
 
 // A machine drawing `ppu` with HDMA channel 0 armed against a table in work RAM,
