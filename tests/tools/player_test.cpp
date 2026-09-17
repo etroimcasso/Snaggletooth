@@ -51,7 +51,7 @@ PadConfig theDefault() { return parsed(kDefaultPadConfig); }
 const std::map<std::string, KeyId>& keyNumbers() {
   static const std::map<std::string, KeyId> kKeys{
       {"z", 0},   {"x", 1},    {"a", 2},          {"s", 3},   {"q", 4},    {"w", 5},
-      {"return", 6}, {"right shift", 7}, {"up", 8}, {"down", 9}, {"left", 10}, {"right", 11},
+      {"return", 6}, {"backspace", 7}, {"up", 8}, {"down", 9}, {"left", 10}, {"right", 11},
   };
   return kKeys;
 }
@@ -202,7 +202,7 @@ TEST(PlayerPads, TheKeyboardDefaultMapsTheSnesLayoutByPosition) {
   EXPECT_EQ(map.port, JoypadPort::One);
   const std::map<std::string, std::string> expected{
       {"z", "b"},   {"x", "a"},           {"a", "y"},    {"s", "x"},
-      {"q", "l"},   {"w", "r"},           {"return", "start"}, {"right shift", "select"},
+      {"q", "l"},   {"w", "r"},           {"return", "start"}, {"backspace", "select"},
       {"up", "up"}, {"down", "down"},     {"left", "left"},    {"right", "right"},
   };
   for (const auto& [name, button] : expected) {
@@ -378,7 +378,7 @@ TEST(PlayerConfig, AConfigRefusesWhatItCannotRead) {
 
   const std::string pinned =
       "[keyboard]\nport = 2\nb = z\na = x\ny = a\nx = s\nl = q\nr = w\n"
-      "start = return\nselect = right shift\nup = up\ndown = down\nleft = left\nright = right\n"
+      "start = return\nselect = backspace\nup = up\ndown = down\nleft = left\nright = right\n"
       "[gamepad sony]\nport = 2\n";
   EXPECT_NE(refusal(pinned).find("both pinned to port 2"), std::string::npos);
 }
@@ -386,7 +386,7 @@ TEST(PlayerConfig, AConfigRefusesWhatItCannotRead) {
 TEST(PlayerConfig, AKeyTheKeyboardDoesNotHaveIsRefusedWhenItIsResolved) {
   PadConfig config = parsed(
       "[keyboard]\nport = 1\nb = nonesuch\na = x\ny = a\nx = s\nl = q\nr = w\n"
-      "start = return\nselect = right shift\nup = up\ndown = down\nleft = left\nright = right\n");
+      "start = return\nselect = backspace\nup = up\ndown = down\nleft = left\nright = right\n");
   fillFrom(config, theDefault());
   std::string error;
   EXPECT_FALSE(resolveKeyboard(config, numberFor, error).has_value());

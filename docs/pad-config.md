@@ -81,7 +81,7 @@ x = s
 l = q
 r = w
 start = return
-select = right shift
+select = backspace
 up = up
 down = down
 left = left
@@ -89,7 +89,7 @@ right = right
 ```
 
 Each button names one or more keys. **Keys are named as the system names them** —
-`Z`, `Return`, `Right Shift`, `Up` — because a key's name belongs to the keyboard
+`Z`, `Return`, `Backspace`, `Up` — because a key's name belongs to the keyboard
 rather than to this tool, and one table of two hundred names is enough. A name the
 keyboard does not have refuses the run and says which one.
 
