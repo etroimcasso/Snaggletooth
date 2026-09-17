@@ -107,6 +107,34 @@ TEST(SnesMath, DivideByZeroReturnsAllOnesAndTheDividend) {
   EXPECT_EQ(m.state().rdmpy, 0x1234u);  // remainder is the dividend
 }
 
+TEST(SnesMath, ADividendWrittenWhileADivisionRunsBelongsToTheNextOne) {
+  // 1000 / 7 starts; the next dividend's low byte lands four cycles in, well inside
+  // the sixteen. The quotient and remainder are 1000's — 142 remainder 6 — not
+  // those of the dividend the register now holds ($0300 = 768: 109 remainder 5).
+  Snes m = settle({
+      0xA9, 0xE8, 0x8D, 0x04, 0x42,  // WRDIVL = $E8
+      0xA9, 0x03, 0x8D, 0x05, 0x42,  // WRDIVH = $03  (dividend 1000)
+      0xA9, 0x07, 0x8D, 0x06, 0x42,  // WRDIVB = 7 (start divide)
+      0xA9, 0x00, 0x8D, 0x04, 0x42,  // WRDIVL = $00 (the next dividend, while this one runs)
+      0xDB,
+  });
+  EXPECT_EQ(m.state().wrdiv, 0x0300u);  // the register holds the next dividend
+  EXPECT_EQ(m.state().rddiv, 142u);     // the quotient is the first's
+  EXPECT_EQ(m.state().rdmpy, 6u);       // and so is the remainder
+}
+
+TEST(SnesMath, AMultiplicandWrittenWhileAMultiplyRunsBelongsToTheNextOne) {
+  // 7 * 9 starts; the multiplicand becomes 2 two cycles in. The product is 63, not 18.
+  Snes m = settle({
+      0xA9, 0x07, 0x8D, 0x02, 0x42,  // WRMPYA = 7
+      0xA9, 0x09, 0x8D, 0x03, 0x42,  // WRMPYB = 9 (start multiply)
+      0xA9, 0x02, 0x8D, 0x02, 0x42,  // WRMPYA = 2 (the next multiplicand, while this one runs)
+      0xDB,
+  });
+  EXPECT_EQ(m.state().wrmpya, 2u);
+  EXPECT_EQ(m.state().rdmpy, 63u);
+}
+
 TEST(SnesMath, TheDivideResultIsNotReadyBeforeItsLatency) {
   // Divide takes sixteen cycles; a read four cycles in still sees the prior quotient.
   std::vector<std::uint8_t> rom(0x8000u, 0x00u);

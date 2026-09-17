@@ -356,11 +356,13 @@ struct SnesState {
   std::uint16_t vtime = 0x01FF; // $4209/$420A: the V-count IRQ position, in lines (0..261/311)
 
   // ---- the multiply/divide unit ---------------------------------------------
-  // A write to the multiplier or the divisor loads the operands and starts the
-  // unit; the result is ready a fixed number of cycles later. Until then the result
-  // registers hold their previous contents (the intermediate is not documented, so
-  // it is not invented) — except that starting a multiply immediately loads the
-  // quotient register with the multiplier, a documented quirk of the shared unit.
+  // A write to the multiplier or the divisor starts the unit on the operands as
+  // they stand at that write; the result is ready a fixed number of cycles later.
+  // Until then the result registers hold their previous contents (the intermediate
+  // is not documented, so it is not invented) — except that starting a multiply
+  // immediately loads the quotient register with the multiplier, a documented quirk
+  // of the shared unit. An operand register written while the unit runs is the next
+  // job's, not this one's: the running job keeps the pair it started with.
   std::uint8_t wrmpya = 0xFF;   // $4202: the multiplicand
   std::uint8_t wrmpyb = 0xFF;   // $4203: the multiplier (its write starts a multiply)
   std::uint16_t wrdiv = 0xFFFF; // $4204/$4205: the dividend
@@ -369,6 +371,8 @@ struct SnesState {
   std::uint16_t rdmpy = 0;      // $4216/$4217: the product, or the division remainder
   std::uint8_t mathClocks = 0;  // CPU cycles left before the result lands (0 = idle)
   MathOp mathOp = MathOp::None; // which result the pending job will commit
+  std::uint16_t mathLeft = 0;   // the running job's multiplicand or dividend, as it stood at the start
+  std::uint8_t mathRight = 0;   // the running job's multiplier or divisor, the same
 
   // ---- the controller ports -------------------------------------------------
   // The pads presented to the two ports (none by default, which reads as no
