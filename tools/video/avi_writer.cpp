@@ -1,6 +1,8 @@
 #include "avi_writer.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <system_error>
 
 namespace snaggletooth::video {
 namespace {
@@ -59,13 +61,9 @@ void write(std::ofstream& file, const std::vector<std::uint8_t>& bytes) {
   return static_cast<std::uint32_t>(rowBytes(width) * height);
 }
 
-}  // namespace
-
-AviRecording::AviRecording(const std::filesystem::path& path, unsigned width, unsigned height,
-                           FrameRate rate)
-    : file_(path, std::ios::binary | std::ios::trunc), width_(width), height_(height) {
-  if (!file_.is_open()) return;
-
+// The 224 bytes of headers for pictures `width` by `height` at `rate`, the sizes the
+// whole recording decides left as zero.
+[[nodiscard]] std::vector<std::uint8_t> headers(unsigned width, unsigned height, FrameRate rate) {
   const std::uint32_t picture = pictureBytes(width, height);
   const std::uint32_t perSecond =
       rate.scale == 0u ? 0u : static_cast<std::uint32_t>(rate.rate / rate.scale);
@@ -135,26 +133,69 @@ AviRecording::AviRecording(const std::filesystem::path& path, unsigned width, un
   putTag(out, "LIST");
   putU32(out, 0u);  // the movie list's size, patched as the file closes
   putTag(out, "movi");
-  write(file_, out);
+  return out;
+}
+
+// The index and the four values only the whole recording knows, written to a file
+// whose headers and pictures are already down.
+void close(std::ofstream& file, const std::vector<std::uint8_t>& index, std::uint32_t frames,
+           std::uint32_t movieBytes) {
+  write(file, index);
+  const std::uint32_t riff = kMovieTagAt + movieBytes + static_cast<std::uint32_t>(index.size()) - 8u;
+  std::vector<std::uint8_t> patch;
+  const auto put = [&file, &patch](std::uint32_t at, std::uint32_t value) {
+    patch.clear();
+    putU32(patch, value);
+    file.seekp(at);
+    write(file, patch);
+  };
+  put(kRiffSizeAt, riff);
+  put(kTotalFramesAt, frames);
+  put(kStreamLengthAt, frames);
+  put(kMovieSizeAt, movieBytes);
+  file.close();
+}
+
+// One index entry: where a picture begins and how many bytes it holds.
+void putEntry(std::vector<std::uint8_t>& index, std::uint32_t offset, std::uint32_t bytes) {
+  putTag(index, "00db");
+  putU32(index, kKeyFrame);  // every stored picture stands on its own
+  putU32(index, offset);
+  putU32(index, bytes);
+}
+
+}  // namespace
+
+AviRecording::AviRecording(const std::filesystem::path& path, unsigned width, unsigned height,
+                           FrameRate rate)
+    : path_(path),
+      file_(path, std::ios::binary | std::ios::trunc),
+      width_(width),
+      height_(height),
+      rate_(rate) {
+  if (!file_.is_open()) return;
+  write(file_, headers(width, height, rate));
 }
 
 AviRecording::~AviRecording() { finish(); }
 
 void AviRecording::writeChunk(const VideoFrame& picture) {
-  const std::size_t stride = rowBytes(width_);
+  const unsigned width = picture.width;
+  const unsigned height = picture.height;
+  const std::size_t stride = rowBytes(width);
   chunk_.clear();
-  chunk_.reserve(8u + stride * height_);
+  chunk_.reserve(8u + stride * height);
   putTag(chunk_, "00db");
-  putU32(chunk_, static_cast<std::uint32_t>(stride * height_));
-  for (unsigned row = height_; row-- > 0u;) {  // the bottom row of the picture first
-    const std::size_t source = static_cast<std::size_t>(row) * width_ * kSourceBytesPerPixel;
-    for (unsigned column = 0u; column < width_; ++column) {
+  putU32(chunk_, static_cast<std::uint32_t>(stride * height));
+  for (unsigned row = height; row-- > 0u;) {  // the bottom row of the picture first
+    const std::size_t source = static_cast<std::size_t>(row) * width * kSourceBytesPerPixel;
+    for (unsigned column = 0u; column < width; ++column) {
       const std::size_t pixel = source + static_cast<std::size_t>(column) * kSourceBytesPerPixel;
       chunk_.push_back(picture.pixels[pixel + 2u]);  // blue
       chunk_.push_back(picture.pixels[pixel + 1u]);  // green
       chunk_.push_back(picture.pixels[pixel]);       // red
     }
-    for (std::size_t pad = static_cast<std::size_t>(width_) * kStoredBytesPerPixel; pad < stride;
+    for (std::size_t pad = static_cast<std::size_t>(width) * kStoredBytesPerPixel; pad < stride;
          ++pad) {
       chunk_.push_back(0u);
     }
@@ -164,13 +205,13 @@ void AviRecording::writeChunk(const VideoFrame& picture) {
 
 void AviRecording::add(const VideoFrame& picture) {
   if (!file_.is_open()) return;
-  if (picture.width != width_ || picture.height != height_) return;
-  if (picture.pixels.size() < static_cast<std::size_t>(width_) * height_ * kSourceBytesPerPixel) {
+  if (picture.pixels.size() <
+      static_cast<std::size_t>(picture.width) * picture.height * kSourceBytesPerPixel) {
     return;
   }
-  offsets_.push_back(movieBytes_);  // where this picture begins, past the movie list's tag
+  written_.push_back(Written{.offset = movieBytes_, .width = picture.width, .height = picture.height});
   writeChunk(picture);
-  movieBytes_ += 8u + pictureBytes(width_, height_);
+  movieBytes_ += 8u + pictureBytes(picture.width, picture.height);
   ++frames_;
 }
 
@@ -178,33 +219,84 @@ void AviRecording::finish() {
   if (!file_.is_open()) return;
 
   // The index: where each picture is, measured from the movie list's own tag.
-  std::vector<std::uint8_t> out;
-  out.reserve(8u + offsets_.size() * kIndexEntryBytes);
-  putTag(out, "idx1");
-  putU32(out, static_cast<std::uint32_t>(offsets_.size()) * kIndexEntryBytes);
-  for (const std::uint32_t offset : offsets_) {
-    putTag(out, "00db");
-    putU32(out, kKeyFrame);  // every stored picture stands on its own
-    putU32(out, offset);
-    putU32(out, pictureBytes(width_, height_));
+  std::vector<std::uint8_t> index;
+  index.reserve(8u + written_.size() * kIndexEntryBytes);
+  putTag(index, "idx1");
+  putU32(index, static_cast<std::uint32_t>(written_.size()) * kIndexEntryBytes);
+  unsigned widest = 0u;
+  unsigned tallest = 0u;
+  bool oneShape = true;
+  for (const Written& picture : written_) {
+    putEntry(index, picture.offset, pictureBytes(picture.width, picture.height));
+    widest = std::max(widest, picture.width);
+    tallest = std::max(tallest, picture.height);
+    oneShape = oneShape && picture.width == width_ && picture.height == height_;
   }
-  write(file_, out);
+  close(file_, index, frames_, movieBytes_);
+  if (!oneShape) layOut(widest, tallest);
+}
 
-  // The three sizes and the count the whole recording decides.
-  const std::uint32_t indexBytes = 8u + static_cast<std::uint32_t>(offsets_.size()) * kIndexEntryBytes;
-  const std::uint32_t riff = kMovieTagAt + movieBytes_ + indexBytes - 8u;
-  std::vector<std::uint8_t> patch;
-  const auto put = [this, &patch](std::uint32_t at, std::uint32_t value) {
-    patch.clear();
-    putU32(patch, value);
-    file_.seekp(at);
-    write(file_, patch);
-  };
-  put(kRiffSizeAt, riff);
-  put(kTotalFramesAt, frames_);
-  put(kStreamLengthAt, frames_);
-  put(kMovieSizeAt, movieBytes_);
-  file_.close();
+void AviRecording::layOut(unsigned width, unsigned height) {
+  // The finished file is read a picture at a time and the pictures written again,
+  // at the new shape, into a file beside it; that file then takes the name. A
+  // recording that cannot be laid out is left as it was written.
+  std::filesystem::path laid = path_;
+  laid += ".laid";
+  std::ifstream in(path_, std::ios::binary);
+  std::ofstream out(laid, std::ios::binary | std::ios::trunc);
+  if (!in.is_open() || !out.is_open()) return;
+  write(out, headers(width, height, rate_));
+
+  const std::size_t stride = rowBytes(width);
+  const std::uint32_t bytes = pictureBytes(width, height);
+  std::vector<std::uint8_t> index;
+  index.reserve(8u + written_.size() * kIndexEntryBytes);
+  putTag(index, "idx1");
+  putU32(index, static_cast<std::uint32_t>(written_.size()) * kIndexEntryBytes);
+  std::vector<std::uint8_t> source;
+  std::uint32_t movieBytes = 4u;
+  bool complete = true;
+  for (const Written& picture : written_) {
+    const std::size_t sourceStride = rowBytes(picture.width);
+    source.resize(sourceStride * picture.height);
+    in.seekg(static_cast<std::streamoff>(kMovieTagAt) + picture.offset + 8);
+    in.read(reinterpret_cast<char*>(source.data()), static_cast<std::streamsize>(source.size()));
+    if (!in) {
+      complete = false;
+      break;
+    }
+
+    const unsigned left = (width - picture.width) / 2u;
+    const unsigned top = (height - picture.height) / 2u;
+    chunk_.clear();
+    putTag(chunk_, "00db");
+    putU32(chunk_, bytes);
+    chunk_.resize(8u + stride * height, 0u);  // black wherever the picture does not reach
+    // Stored rows run bottom up in both, so output row r from the bottom is picture
+    // row (height - 1 - r) - top from the top.
+    for (unsigned stored = 0u; stored < height; ++stored) {
+      const unsigned fromTop = height - 1u - stored;
+      if (fromTop < top || fromTop >= top + picture.height) continue;
+      const unsigned pictureStored = picture.height - 1u - (fromTop - top);
+      const auto from = source.begin() + static_cast<std::ptrdiff_t>(pictureStored * sourceStride);
+      std::copy(from, from + static_cast<std::ptrdiff_t>(picture.width * kStoredBytesPerPixel),
+                chunk_.begin() + static_cast<std::ptrdiff_t>(8u + stored * stride + left * kStoredBytesPerPixel));
+    }
+    write(out, chunk_);
+    putEntry(index, movieBytes, bytes);
+    movieBytes += 8u + bytes;
+  }
+  in.close();
+  if (!complete) {
+    out.close();
+    std::error_code ignored;
+    std::filesystem::remove(laid, ignored);
+    return;
+  }
+  close(out, index, frames_, movieBytes);
+  std::error_code failed;
+  std::filesystem::rename(laid, path_, failed);
+  if (failed) std::filesystem::remove(laid, failed);
 }
 
 }  // namespace snaggletooth::video

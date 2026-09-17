@@ -286,17 +286,122 @@ TEST_F(Recording, ARecordingNobodyFinishesIsFinishedWhenItGoesAway) {
   EXPECT_EQ(u32At(bytes, kRiffSize), bytes.size() - 8u);
 }
 
-TEST_F(Recording, APictureOfAnotherShapeIsNotRecorded) {
-  const Pixels other(8u, 4u);
+// Picture `n` of a finished file, read back through its header and index as the four
+// bytes a pixel the machine hands over, the top row first.
+[[nodiscard]] std::vector<std::uint8_t> pictureAt(const std::vector<std::uint8_t>& bytes,
+                                                  unsigned n) {
+  const unsigned width = u32At(bytes, kFormatWidth);
+  const unsigned height = u32At(bytes, kFormatHeight);
+  const std::size_t stride = ((static_cast<std::size_t>(width) * 3u) + 3u) & ~std::size_t{3u};
+  const std::size_t index = kMovieTag + u32At(bytes, kMovieSize);
+  const std::size_t at = kMovieTag + u32At(bytes, index + 8u + n * 16u + 8u) + 8u;
+  std::vector<std::uint8_t> out;
+  for (unsigned y = 0u; y < height; ++y) {
+    for (unsigned x = 0u; x < width; ++x) {
+      const std::size_t stored = at + (height - 1u - y) * stride + x * 3u;
+      out.push_back(bytes.at(stored + 2u));
+      out.push_back(bytes.at(stored + 1u));
+      out.push_back(bytes.at(stored));
+      out.push_back(255u);
+    }
+  }
+  return out;
+}
+
+// `picture` centred in a black picture `width` by `height`, `left` and `top` in.
+[[nodiscard]] std::vector<std::uint8_t> boxed(const Pixels& picture, unsigned width, unsigned height,
+                                              unsigned left, unsigned top) {
+  std::vector<std::uint8_t> out(static_cast<std::size_t>(width) * height * 4u, 0u);
+  for (std::size_t at = 3u; at < out.size(); at += 4u) out[at] = 255u;
+  for (unsigned y = 0u; y < picture.height; ++y) {
+    for (unsigned x = 0u; x < picture.width; ++x) {
+      const std::size_t from = (static_cast<std::size_t>(y) * picture.width + x) * 4u;
+      const std::size_t to = (static_cast<std::size_t>(y + top) * width + x + left) * 4u;
+      for (std::size_t n = 0u; n < 4u; ++n) out[to + n] = picture.bytes[from + n];
+    }
+  }
+  return out;
+}
+
+TEST_F(Recording, ARecordingThatWidensIsWrittenAtItsWidestWithTheNarrowPicturesCentred) {
+  const Pixels narrow(256u, 2u);
+  const Pixels wide(512u, 2u);
+  {
+    AviRecording recording(file(), 256u, 2u, kSixty);
+    ASSERT_TRUE(recording.open());
+    recording.add(narrow.frame());
+    recording.add(wide.frame());
+    recording.finish();
+    EXPECT_EQ(recording.frames(), 2u);
+  }
+  const std::vector<std::uint8_t> bytes = readFile(file());
+  EXPECT_EQ(u32At(bytes, kWidth), 512u);
+  EXPECT_EQ(u32At(bytes, kFormatWidth), 512u);
+  EXPECT_EQ(u32At(bytes, kHeight), 2u);
+  EXPECT_EQ(u32At(bytes, kTotalFrames), 2u);
+  EXPECT_EQ(u32At(bytes, kRiffSize), bytes.size() - 8u);
+  EXPECT_EQ(pictureAt(bytes, 0u), boxed(narrow, 512u, 2u, 128u, 0u));
+  EXPECT_EQ(pictureAt(bytes, 1u), wide.bytes);
+}
+
+TEST_F(Recording, ARecordingThatGrowsTallerHasBarsAboveAndBelow) {
+  // 239 - 224 is 15 lines: seven above and eight below.
+  const Pixels shorter(4u, 224u);
+  const Pixels taller(4u, 239u);
+  {
+    AviRecording recording(file(), 4u, 224u, kSixty);
+    ASSERT_TRUE(recording.open());
+    recording.add(shorter.frame());
+    recording.add(taller.frame());
+    recording.finish();
+  }
+  const std::vector<std::uint8_t> bytes = readFile(file());
+  EXPECT_EQ(u32At(bytes, kHeight), 239u);
+  EXPECT_EQ(u32At(bytes, kFormatHeight), 239u);
+  EXPECT_EQ(pictureAt(bytes, 0u), boxed(shorter, 4u, 239u, 0u, 7u));
+  EXPECT_EQ(pictureAt(bytes, 1u), taller.bytes);
+}
+
+TEST_F(Recording, ARecordingOfOneShapeIsTheFileItWroteAsThePicturesArrived) {
+  // Nothing is laid out again: the headers declare the shape it opened with, and the
+  // file is the headers, two chunks and the index.
+  const Pixels picture(4u, 2u);
   {
     AviRecording recording(file(), 4u, 2u, kSixty);
     ASSERT_TRUE(recording.open());
-    recording.add(other.frame());
+    recording.add(picture.frame());
+    recording.add(picture.frame());
     recording.finish();
-    EXPECT_EQ(recording.frames(), 0u);
   }
   const std::vector<std::uint8_t> bytes = readFile(file());
-  EXPECT_EQ(u32At(bytes, kTotalFrames), 0u);
+  const std::size_t stored = 4u * 3u * 2u;
+  EXPECT_EQ(bytes.size(), kHeaderBytes + 2u * (8u + stored) + 8u + 2u * 16u);
+  EXPECT_EQ(u32At(bytes, kWidth), 4u);
+  EXPECT_EQ(pictureAt(bytes, 0u), picture.bytes);
+  EXPECT_EQ(pictureAt(bytes, 1u), picture.bytes);
+  EXPECT_FALSE(std::filesystem::exists(directory_ / "capture.avi.laid"));
+}
+
+TEST_F(Recording, ASmallerPictureAfterTheLargestIsCentredToo) {
+  const Pixels large(8u, 4u);
+  const Pixels small(4u, 2u);
+  {
+    AviRecording recording(file(), 8u, 4u, kSixty);
+    ASSERT_TRUE(recording.open());
+    recording.add(large.frame());
+    recording.add(small.frame());
+    recording.add(large.frame());
+    recording.finish();
+    EXPECT_EQ(recording.frames(), 3u);
+  }
+  const std::vector<std::uint8_t> bytes = readFile(file());
+  EXPECT_EQ(u32At(bytes, kWidth), 8u);
+  EXPECT_EQ(u32At(bytes, kHeight), 4u);
+  EXPECT_EQ(pictureAt(bytes, 0u), large.bytes);
+  EXPECT_EQ(pictureAt(bytes, 1u), boxed(small, 8u, 4u, 2u, 1u));
+  EXPECT_EQ(pictureAt(bytes, 2u), large.bytes);
+  const std::size_t stored = 8u * 3u * 4u;
+  EXPECT_EQ(bytes.size(), kHeaderBytes + 3u * (8u + stored) + 8u + 3u * 16u);
 }
 
 TEST_F(Recording, ThePicturesComeBackOutAsTheyWentIn) {

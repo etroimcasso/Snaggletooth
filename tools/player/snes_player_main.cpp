@@ -409,8 +409,9 @@ class Player final : public snaggletooth::FrameObserver {
   Player& operator=(const Player&) = delete;
 
   // Opens the window at the picture's own size times the scale. The picture can be
-  // either height, so the texture is as tall as the taller one and each frame draws
-  // the rows it has.
+  // either height and either width, so the texture is as large as the largest and
+  // each frame draws the part it has, stretched to the same window: a frame drawn
+  // in half-pixels fills it with each half-pixel half a scaled pixel wide.
   [[nodiscard]] bool open() {
     if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(kWidth * scale_),
                                      static_cast<int>(kShortHeight * scale_), 0, &window_,
@@ -423,7 +424,7 @@ class Player final : public snaggletooth::FrameObserver {
     // and costs nothing where it was already focused.
     SDL_RaiseWindow(window_);
     texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
-                                 static_cast<int>(kWidth), static_cast<int>(kTallHeight));
+                                 static_cast<int>(kTextureWidth), static_cast<int>(kTallHeight));
     if (texture_ == nullptr) {
       std::cerr << "cannot make a texture: " << SDL_GetError() << "\n";
       return false;
@@ -439,9 +440,9 @@ class Player final : public snaggletooth::FrameObserver {
   }
 
   // Records what the run draws and what each frame costs, into `directory` under
-  // `stem`. Without it the run is the window alone. A file holds one shape of
-  // picture, and the picture can be either height, so the recording is opened on the
-  // first frame — the one that says which height this run is.
+  // `stem`. Without it the run is the window alone. The recording is opened on the
+  // first frame, at that frame's shape; a run whose picture changes shape is laid out
+  // at its largest as the recording closes.
   void record(const std::filesystem::path& directory, const std::string& stem) {
     recordAt_ = directory / (stem + ".avi");
     scriptAt_ = directory / (stem + ".snaginput");
@@ -555,6 +556,7 @@ class Player final : public snaggletooth::FrameObserver {
 
  private:
   static constexpr unsigned kWidth = 256u;
+  static constexpr unsigned kTextureWidth = 512u;
   static constexpr unsigned kShortHeight = 224u;
   static constexpr unsigned kTallHeight = 239u;
   static constexpr std::uint64_t kTitleFrames = 30u;

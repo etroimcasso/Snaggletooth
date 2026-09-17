@@ -85,7 +85,10 @@ lines rather than 224. The chip reads the bit from its own register, so a change
 start of the next line that asks.
 
 **Bit 0 — interlace.** The frame of even parity runs one line longer, and PAL's line 311 of an odd field
-runs four cycles long. The parity is `$213F` bit 7, which the chip answers from its field pin.
+runs four cycles long. The parity is `$213F` bit 7, which the chip answers from its field pin. Each
+frame is handed to a host as a picture of its own, carrying its parity: modes 5 and 6 draw each one
+from alternate half-lines, and every other mode draws both alike — see
+[the interlaced picture](#the-interlaced-picture).
 
 Three events belong to the chip rather than the machine:
 
@@ -109,7 +112,7 @@ reaches the next frame's first line:
 struct Watcher final : FrameObserver {
   void frame(const VideoFrame& picture) override {
     picture.pixels;  // row-major from the top, four bytes a pixel: red, green, blue, 255
-    picture.width;   // 256
+    picture.width;   // 256, or 512 when any line of the frame was drawn in half-pixels
     picture.height;  // 224, or 239 under the taller picture
     picture.field;   // the parity the frame ran under
   }
@@ -123,17 +126,19 @@ m.run(cycles);
 
 The span is the machine's own buffer and is valid for the call; a host that keeps a picture copies
 it. The observer is not part of the state — a snapshot does not carry it and `restore()` leaves it
-in place — and the chip resolves pixels only while one is set, so a machine nobody is watching
-draws nothing and a program cannot tell the difference.
+in place — and the chip draws pixels only while one is set. A machine nobody is watching still
+decides, at every visible dot, the one thing the chip carries from a position to the next
+([the main pixel's decision](#the-half-pixel-line)), so its state is exactly a watched machine's and a
+program cannot tell the difference.
 
-**One pixel per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical
-blank leaves below it; the frame's first line draws nothing, which is why a background offset of
+**One position per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical
+blank leaves below it — 256 positions, each one pixel, or two half-pixels on a line drawn
+[in half-pixels](#the-half-pixel-line); the frame's first line draws nothing, which is why a background offset of
 −1 is what puts a tilemap's first row on the picture's first line. Each pixel is resolved from the
 registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
 the dots after it and not the ones before.
 
-**Modes 0 to 4 and 7 are what the chip draws**, each background on the screen its own bit of `$212C`
-or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
+**Every mode is drawn**, each background on the screen its own bit of `$212C` or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
 are and how deep each one is:
 
 | mode | BG1 | BG2 | BG3 | BG4 |
@@ -143,12 +148,14 @@ are and how deep each one is:
 | 2 | 16 colours | 16 colours | the offset table | — |
 | 3 | 256 colours | 16 colours | — | — |
 | 4 | 256 colours | 4 colours | the offset table | — |
+| 5 | 16 colours, tiles two characters wide | 4 colours, tiles two characters wide | — | — |
+| 6 | 16 colours, tiles two characters wide | — | the offset table | — |
 | 7 | 256 colours, the field | with `$2133` bit 6: the same field at 128 colours | — | — |
 
-Modes 0 to 4 read tilemaps of characters, described next — in modes 2 and 4 through BG3's tilemap,
-which is [a table of offsets](#offset-per-tile) rather than a layer; Mode 7 reads a field of packed
-pixels through its matrix, described [after them](#mode-7-the-field). [Mosaic](#mosaic) applies to
-all of them.
+Modes 0 to 6 read tilemaps of characters, described next — in modes 2, 4 and 6 through BG3's
+tilemap, which is [a table of offsets](#offset-per-tile) rather than a layer; modes 5 and 6 draw
+every line [in half-pixels](#the-half-pixel-line); Mode 7 reads a field of packed pixels through its
+matrix, described [after them](#mode-7-the-field). [Mosaic](#mosaic) applies to all of them.
 
 BG4 exists in Mode 0 alone, and reads registers of its own throughout: `$210A` for its map, the
 high nibble of `$210C` for its characters, `$2113`/`$2114` for its offsets, `$2105` bit 7 for its
@@ -165,7 +172,7 @@ tile size, and bit 3 of both `$212C`/`$212D` and `$212E`/`$212F` to be shown and
   is sixteen bytes, a sixteen-colour one thirty-two and a 256-colour one sixty-four. The leftmost
   pixel of a row is bit 7.
 - The palette a tile shows in begins `ppp` × its colours into CGRAM, and where that palette begins
-  is the mode's. Modes 1 to 4 begin every background at word 0, so BG3's palette 1 and BG1's
+  is the mode's. Modes 1 to 6 begin every background at word 0, so BG3's palette 1 and BG1's
   palette 0 name the same words; **Mode 0 gives each of its four backgrounds thirty-two words of
   its own** — BG1 words 0-31, BG2 32-63, BG3 64-95, BG4 96-127 — so no two of them can name the
   same colour. A 256-colour background has no palette field at all: its eight-bit pixel is the
@@ -173,6 +180,10 @@ tile size, and bit 3 of both `$212C`/`$212D` and `$212E`/`$212F` to be shown and
 - `$2105` bits 4, 5, 6 and 7 make each entry of BG1, BG2, BG3 or BG4 a 16×16 block of `Tile`,
   `Tile+1`, `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a
   flip reverses the block whole.
+- In modes 5 and 6 every tile is **two characters wide**, `Tile` and `Tile+1`, sixteen pixels across
+  eight positions, whatever the size bit says; the size bit chooses the height alone, so a tile is
+  16×8 pixels or the 16×16 block of four. BG3's tiles in mode 6, which make the offset table, have the
+  same width.
 - Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1,
   `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3, `$2113`/`$2114` for BG4.
 
@@ -186,6 +197,8 @@ mode 1   3 A B 2 a b 1 C 0 c        and with $2105 bit 3 set:   C 3 A B 2 a b 1 
 mode 2   3 A 2 B 1 a 0 b
 mode 3   3 A 2 B 1 a 0 b
 mode 4   3 A 2 B 1 a 0 b
+mode 5   3 A 2 B 1 a 0 b
+mode 6   3 A 2 1 a 0
 mode 7   3 2 1 A 0                  and with $2133 bit 6 set:   3 2 B 1 A 0 b
 ```
 
@@ -199,8 +212,9 @@ pixel itself.
 
 ### Offset-per-tile
 
-In modes 2 and 4 BG3's tilemap is not drawn, whatever `$212C` and `$212D` bit 2 hold: it is a table
-the chip reads BG1 and BG2 through, a tile column at a time. `$2109` places the table and sizes it,
+In modes 2, 4 and 6 BG3's tilemap is not drawn, whatever `$212C` and `$212D` bit 2 hold: it is a
+table the chip reads the mode's backgrounds through, a tile column at a time — BG1 and BG2 in modes 2
+and 4, BG1 alone in mode 6. `$2109` places the table and sizes it,
 `$2111`/`$2112` scroll it and `$2105` bit 6 sets its tile size, exactly as they would a layer's;
 `$210C`'s low nibble is not read, since no character of BG3's is drawn.
 
@@ -235,6 +249,11 @@ For each picture column, a background with a table reads its offsets like this:
 
 The position then wraps at the background's map size as any other does. The table and both scroll
 registers are read at the dot, so a write to any of them mid-line changes the columns after it.
+
+**Mode 6** reads its table exactly as mode 2 does, BG1 under bit 13, in columns of eight positions —
+which is a mode 6 tile's width. BG3's tile there is eight positions wide too, so its size bit changes
+only how tall a table entry is: a 16×16 table gives every column an entry of its own, and where
+`BG3VOFS + 8` falls inside the same sixteen lines one word is both offsets.
 
 ```
 mode 2, BG1HOFS 3, every entry of BG3's row 0 = $2010 (+16 to BG1), BG3VOFS 0:
@@ -316,6 +335,13 @@ Sprites have no bit and are never mosaiced.
 - **Mode 7.** BG1's blocks stand in the picture, not in the field: the matrix reads each block's
   corner. EXTBG's BG2 reads `$2106` bit 0 as mosaic down and bit 1 as mosaic across, so `$F1` makes it
   1×16 blocks, `$F2` 16×1 and `$F3` 16×16, while BG1 reads bit 0 for both.
+- **Modes 5 and 6** count a block across in half-pixels: it is `2(N + 1)` half-pixels wide from each
+  line's first, so its corner is always a left half, and every half-pixel of the block shows the
+  tile's pixel there — even a size of 0 makes the right half of a position show the left half's
+  pixel. Interlaced, a block is `2(N + 1)` half-lines tall and both fields read its corner's half-line,
+  which is the even field's.
+- **Under `$2133` bit 3** in any other mode, each screen's layers are mosaiced in positions exactly
+  as on a line that is not split, and the split comes after.
 
 The size is read at the dot for the width, so a size written part-way along a line changes the block
 width for the rest of that line; the rows keep the size each began with. The row state is part of
@@ -352,12 +378,63 @@ brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 2
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
-**What is not drawn yet**, so a reader does not go looking for it: the backgrounds of modes 5 and 6,
-which show their backdrop — their sprites draw as they do in any other mode — and with them the hires
-modes' half-pixel path, mode 6's offset-per-tile, the interlaced picture, and what mosaic does under
-any of them. Each arrives with its own work. The windows that take layers away are drawn, and have [their own
-section](#the-masking-windows); so are the sub screen and colour math, which have
-[theirs](#the-sub-screen-and-colour-math).
+### The half-pixel line
+
+In modes 5 and 6 every line is 512 half-pixels, two to each position, and in any other mode —
+Mode 7 included — a line is drawn the same way while `$2133` bit 3 is set. The bit is read at the
+dot, so a write part-way along a line splits the rest of it. In modes 5 and 6 the bit changes
+nothing.
+
+- **The left half is the sub screen's, the right half the main screen's.** Each is that screen's
+  front-most pixel by the mode's order. A two-character tile gives its even pixels to the left half
+  and its odd pixels to the right, so a background on both screens shows all sixteen, and one on a
+  single screen shows half of them.
+- **Where the sub screen shows nothing, its half is colour 0** — palette word 0, as the main screen's
+  backdrop is — not the fixed colour.
+- **Scrolling and sprites count positions.** A horizontal offset of 1 moves the picture two
+  half-pixels; a sprite covers both halves of every position it claims, on whichever screen shows it;
+  a window masks both halves of a position.
+- **Colour math reaches both halves.** The right half is the main screen's pixel under colour math
+  exactly as on any line, its addend where the sub screen is empty being the fixed colour, unhalved.
+  The left half is drawn under what the **main pixel one position to its left** decided: black where
+  `$2130` blacked that pixel, then its operation — nothing, the fixed colour added or subtracted, or
+  that pixel's own colour before its math where its addend was the sub screen — halved where it was
+  halved. The left half at position 0 has nothing to its left and takes neither black nor math.
+  Subtracting a magenta sub screen from a cyan main one makes green right halves and red left halves.
+- **The main pixel's decision is part of `PpuState`** (`lastMain`), made at every visible dot whether
+  or not the picture is drawn, so a snapshot taken part-way along a line resumes it.
+
+**The frame's width.** A frame is 256 wide until its first position drawn in half-pixels and 512 from
+then on, every position drawn before it doubled into both halves, so the width a host is handed is 512
+whenever any line of the frame was split. A frame that never splits is 256 wide, pixel for pixel what
+it would be with none of this built.
+
+```
+mode 5, BG1 on both screens, tile pixels p0 p1 ... p15, no offset:
+  half-pixels 0 1 2 3 ... 15   show  p0 p1 p2 p3 ... p15
+BG1 on the main screen alone:
+  half-pixels 0 1 2 3          show  backdrop p1 backdrop p3
+```
+
+### The interlaced picture
+
+With `$2133` bit 0 set, the frame's parity toggles every frame and each frame is handed over as a
+picture of its own, with its parity in `field`. A host that weaves two of them may; one that does not
+shows each as it comes.
+
+- **Modes 5 and 6 read their tilemaps in half-lines.** Line `L` of the frame of parity `F` reads
+  half-line `2L + F + BGnVOFS`, so a tile's eight rows are four lines of each field, the even field
+  showing the even rows and the odd field the odd ones, and a vertical offset of `−2` puts row 0 on
+  the even field's first line where a picture that is not interlaced wants `−1`. A 32-row map of
+  16×8 tiles is 256 half-lines, so it repeats after 128 lines of a field.
+- **Every other mode reads the same lines in both fields**, the bit changing nothing drawn —
+  `$2133` bit 3 included.
+- **`$2133` bit 1 draws every sprite at half height**, in any mode and whether or not bit 0 is set.
+  A line `n` lines into a sprite shows its row `2n + F`, `n` being the eight-bit count that finds a
+  sprite's rows; a 16-row sprite stands on eight lines, and Range and Time count it on those lines
+  alone. A vertical flip reverses the row a field picks.
+
+The taller picture is 239 lines a field under interlace as it is without.
 
 ## The sprites
 
@@ -449,6 +526,9 @@ Time's count, while it draws where its own X puts it, which is nowhere on the pi
 as the next picture begins — except after a frame the chip spent in forced blank, where it drew
 nothing and they stand.
 
+**At half height** (`$2133` bit 1) a sprite stands on half as many lines and each line shows one of
+its rows, picked by the frame's parity — see [the interlaced picture](#the-interlaced-picture).
+
 ## The masking windows
 
 Two horizontal windows take layers away. Each is a span of picture positions, and where a layer's
@@ -524,7 +604,9 @@ palette address (`$2121`) behave as described under the machine's
 masks them with the windows exactly as `$212E` does. **The sub screen is never shown by itself.** A
 layer enabled only there draws nowhere; it exists so that colour math has something to reach for.
 Its front-most pixel is found by the same order the main screen uses, sprites included — and where
-it shows nothing, **its backdrop is the fixed colour `$2132` holds**, not palette word 0.
+it shows nothing, **its backdrop as an addend is the fixed colour `$2132` holds**, not palette word 0.
+On a line drawn in half-pixels the sub screen is shown, in the left halves, and what it shows there is
+described under [the half-pixel line](#the-half-pixel-line).
 
 Colour math takes the main screen's pixel and one addend, a channel at a time, five bits each.
 
@@ -729,3 +811,10 @@ Each of these is a question the documentation leaves, recorded rather than decid
   mid-line question above records.
 - What `$2133` bit 6 shows outside Mode 7. fullsnes describes an external input shorted to half the
   data bus and a program "will just see garbage"; no source gives a picture. Nothing drawn changes.
+- What the left half at position 0 takes on a line drawn in half-pixels. No main pixel stands to its
+  left, and no source says; it takes neither black nor math.
+- Whether a main pixel's math, on a line drawn in half-pixels, takes the fixed colour or colour 0 as
+  its addend where the sub screen is empty. The fixed colour, unhalved, is what any other line takes,
+  and it is built.
+- Whether a left half's layer masks are its own position's, as built, or the position to its left's,
+  as its colour-window effects are.

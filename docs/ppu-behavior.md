@@ -48,6 +48,19 @@ disagree it names the disagreement and what decided it.
   - [Colour math does not consult the sub screen pixel's priority](#colour-math-does-not-consult-the-sub-screen-pixels-priority)
   - [The halving happens before the range is held, and the sub-screen backdrop is exempt](#the-halving-happens-before-the-range-is-held-and-the-sub-screen-backdrop-is-exempt)
   - [A force-blacked main pixel is not also halved](#a-force-blacked-main-pixel-is-not-also-halved)
+- [Hires](#hires)
+  - [The sub screen is on the left half, three sources to one](#the-sub-screen-is-on-the-left-half-three-sources-to-one)
+  - [Which of a tile's sixteen pixels go to which screen is one source's](#which-of-a-tiles-sixteen-pixels-go-to-which-screen-is-one-sources)
+  - [An empty sub screen's half is colour 0](#an-empty-sub-screens-half-is-colour-0)
+  - [A left half takes the math and the colour window of the main pixel to its left](#a-left-half-takes-the-math-and-the-colour-window-of-the-main-pixel-to-its-left)
+  - [Position 0's left half has nothing to its left, and no source says what it takes](#position-0s-left-half-has-nothing-to-its-left-and-no-source-says-what-it-takes)
+  - [Mode 6's offset columns are eight positions wide whatever BG3's size bit says](#mode-6s-offset-columns-are-eight-positions-wide-whatever-bg3s-size-bit-says)
+  - [Mosaic is counted in half-pixels in modes 5 and 6 and in positions under $2133 bit 3](#mosaic-is-counted-in-half-pixels-in-modes-5-and-6-and-in-positions-under-2133-bit-3)
+- [Interlace](#interlace)
+  - [The even field shows the even half-lines](#the-even-field-shows-the-even-half-lines)
+  - [Sprites at half height answer to bit 1 alone](#sprites-at-half-height-answer-to-bit-1-alone)
+  - [Mosaic under interlace reads the block's even half-line in both fields](#mosaic-under-interlace-reads-the-blocks-even-half-line-in-both-fields)
+  - [Where a television puts the taller picture is not the raster's](#where-a-television-puts-the-taller-picture-is-not-the-rasters)
 - [The picture's edges](#the-pictures-edges)
   - [The console outputs no scanline 0](#the-console-outputs-no-scanline-0)
   - [Where the visible span ends is not settled by the documents](#where-the-visible-span-ends-is-not-settled-by-the-documents)
@@ -644,6 +657,139 @@ the silicon they wrote for. Failing that, the console running a cartridge writte
 Neither implementation is silicon, so that observation would still outrank this — but bsnes and
 snes9x agree with the reading here, and only Mesen does not.
 
+## Hires
+
+**fullsnes's own high-resolution section (1835–1848) is four headings over four `...` stubs**, so its
+whole account of a line drawn in half-pixels is the `$2133` bit table (1005–1019), the two tile-size
+notes (1032–1033), the three-layer-math paragraph (1625–1632) and eleven lines of "Hires Notes"
+(1850–1866). The one description of how colour math and the colour window reach the sub screen's
+half-pixel is anomie's. The two wiki pages and all three sources agree on the modes' depths and
+orders, on the tile being two characters wide with the size bit choosing its height, on horizontal
+scrolling counting positions (fullsnes 1851–1854, anomie 297–298), and on the half-pixel line being
+forced in modes 5 and 6 and asked for by `$2133` bit 3 in the others. The rest is weaker, and a
+cartridge of ours asks each question with a control image in which no line is split.
+
+**What has been read of it.** The cartridge was run on an FPGA reconstruction of the console and on
+bsnes, and our machine's frame of it fits both. Neither is silicon, so every finding below stays
+provisional until the console runs it.
+
+### The sub screen is on the left half, three sources to one
+
+fullsnes 1012–1013 ("shift subscreen half dot to the left"), the register page p.10 ("the sub screen
+to render pixels on even columns … and the main screen to render on odd columns") and anomie 612–615
+put the sub screen's pixel on the even half-pixel. The Backgrounds page p.2 says the reverse. The three
+are built.
+
+*Documented three times against one, corroborated on a reconstruction and bsnes, provisional —
+console pending.*
+
+### Which of a tile's sixteen pixels go to which screen is one source's
+
+Anomie 1845–1848 alone: a mode 5 tile's even pixels are what it shows on the sub screen and its odd
+pixels what it shows on the main. Both wiki pages say only that the layers are interleaved. Built as
+stated.
+
+*Documented once, corroborated on a reconstruction and bsnes, provisional — console pending.*
+
+### An empty sub screen's half is colour 0
+
+fullsnes 1861–1863 alone: on a line drawn in half-pixels both screens' backdrops are colour 0, rather
+than the fixed colour the sub screen otherwise stands for. It speaks of the pixel shown, and says
+nothing of the addend a main pixel's math takes where the sub screen is empty; that addend keeps the
+fixed colour, unhalved, as on any other line.
+
+*Documented once, corroborated on a reconstruction and bsnes for both the shown pixel and the addend,
+provisional — console pending.*
+
+### A left half takes the math and the colour window of the main pixel to its left
+
+Anomie 2064–2081 alone: the sub screen's half-pixel is mathed by the operation the main pixel to its
+left took — none, the fixed colour, or that main pixel's own colour before its math where its addend
+was the sub screen — and halved where it was halved. His example: a cyan block on the main screen over
+a magenta one on the sub screen, subtracted, is green and red half-pixels. Anomie 617–620 and
+2001–2002 say the colour window's two effects reach the sub half-pixel the same way, from the main
+pixel to its left; fullsnes 1864–1865 calls it "an odd glitch in hires mode?" without saying what.
+fullsnes 1625–1632 describes the effect without the rule, and at 1051 says modes 5 and 6 "don't
+support screen addition/subtraction" — which its own 1625–1632, both wiki pages and anomie
+contradict. The sub half-pixel's layer masks are no source's: they are built at its own position.
+
+*Documented once, contradicted by one line of another, corroborated on a reconstruction and bsnes for
+the math, the halving, the colour window and the masks, provisional — console pending.*
+
+### Position 0's left half has nothing to its left, and no source says what it takes
+
+Anomie 620, 1963 and 2072 say so outright. It is built as taking neither black nor math.
+
+*Undocumented, read on a reconstruction and bsnes as built, provisional — console pending.*
+
+### Mode 6's offset columns are eight positions wide whatever BG3's size bit says
+
+Anomie 1873–1877 alone ("this applies to BG3 as well as BG1"), with the register page's footnote
+("OPT entries are always 16 pixels wide", counting half-pixels) beside it. Built as stated: BG3's
+size bit changes only how tall an entry is.
+
+*Documented once, corroborated on a reconstruction and bsnes, provisional — console pending.*
+
+### Mosaic is counted in half-pixels in modes 5 and 6 and in positions under $2133 bit 3
+
+fullsnes 1857–1858 and anomie 2019–2026 agree on the first: a block is `2(N + 1)` half-pixels, so a
+size of 0 already shows. The second is anomie 616–617 alone ("Mosaic operates as normal"); fullsnes
+1859–1860 hedges a different case with "presumably?". On a layer drawn in positions, blocks of
+`2(N + 1)` half-pixels whose corner is a left half are the same blocks as `N + 1` positions, so what
+the cartridge separates is "as normal" from a mosaic taken on the combined 512-half-pixel line.
+
+*The first documented twice, the second once; both corroborated on a reconstruction and bsnes,
+provisional — console pending.*
+
+## Interlace
+
+The sources agree on the field toggling every frame and the even field running one line longer
+(fullsnes 1691 and 26996, the register page p.9, anomie 637–645), and on modes 5 and 6 reading their
+tilemaps in half-lines with the vertical offset counted in half-lines (fullsnes 1855–1856, the
+Backgrounds page p.3 and p.5, anomie 299–300 and 1649–1650). A cartridge of ours asks the three
+weaker questions below, read as a television shows it — two fields woven, the even field's line above
+the odd one's — with a control image in which nothing is interlaced.
+
+**What has been read of it.** The cartridge was run on software implementations, and our machine's
+fields match theirs in every band. None of them is silicon, so every finding below stays provisional
+until the console runs it.
+
+### The even field shows the even half-lines
+
+The Backgrounds page p.3 and the register page p.9 say the odd field is lowered half a line; anomie
+1851–1852 says the field decides which half-lines are drawn without saying which is which. Built as
+the two have it: line `L` of parity `F` reads half-line `2L + F`.
+
+*Documented twice, corroborated in software, provisional — console pending.*
+
+### Sprites at half height answer to bit 1 alone
+
+Anomie 630–635 says `$2133` bit 1 halves the sprites "regardless of BG mode" and that bit 0 controls
+only the signal sent to the television; fullsnes 1015–1018 and the register page p.10 describe bit 1
+under interlace and say nothing of the other case. Anomie's is the only statement about that case and
+is built. Which of a sprite's rows each field shows no source says; the pairing above is taken, with
+the rows counted after the eight-bit subtraction that finds them.
+
+*Documented once for the gating, undocumented for the rows, both corroborated in software,
+provisional — console pending.*
+
+### Mosaic under interlace reads the block's even half-line in both fields
+
+Anomie 2020 states a `2X × 2X` block of half-pixels under interlaced modes 5 and 6; fullsnes 1858–1859
+says "reportedly?". Built as stated: both fields read the half-line of the block's corner, which is
+the even field's, so a size of 0 already moves the odd field.
+
+*Documented once and hedged by another, corroborated in software, provisional — console pending.*
+
+### Where a television puts the taller picture is not the raster's
+
+The register page p.10 says the taller picture "shifts everything up 8 lines"; anomie 649–672 gives
+his own television's behaviour line by line, down to a lost vertical sync. Both are statements about
+a display. The raster is the lines the chip drew, 239 of them, in the chip's own coordinates, and
+where a display places them is the display's.
+
+*Documented, and not modelled.*
+
 ## The picture's edges
 
 ### The console outputs no scanline 0
@@ -727,3 +873,7 @@ own "What remains open" carries the register-file ones alongside these.
   the dot, so the rest of the line takes it.
 - Whether a mosaic block's corner is read once or re-read from the registers at each dot of the block.
   Every dot reads the registers as they stand.
+- Hires's seven, above: corroborated on a reconstruction and bsnes and open to the console — among
+  them what position 0's left half takes, which no source knows, and the addend a main pixel's math
+  takes where the sub screen is empty on a line drawn in half-pixels.
+- Interlace's three, above: corroborated in software and open to the console.

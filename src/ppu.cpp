@@ -54,10 +54,14 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
 // Which of a sprite's own rows a picture line crosses, or nothing where it
 // misses. A sprite whose Y is N first draws on line N + 1, because the console
 // renders a line it does not output; the subtraction is eight bits wide, which
-// is what brings a tall sprite hung above the picture back in at the top.
-[[nodiscard]] std::optional<unsigned> rowCrossed(unsigned y, unsigned height,
-                                                 std::uint16_t line) noexcept {
-  const unsigned row = (line - 1u - y) & 0xFFu;
+// is what brings a tall sprite hung above the picture back in at the top. At
+// half height the lines in are doubled after that subtraction and the field
+// added, so each line shows one row of the pair it covers. A sprite's height is
+// always even, so the field never changes which lines it stands on.
+[[nodiscard]] std::optional<unsigned> rowCrossed(unsigned y, unsigned height, std::uint16_t line,
+                                                 bool halfHeight, std::uint8_t field) noexcept {
+  const unsigned into = (line - 1u - y) & 0xFFu;
+  const unsigned row = halfHeight ? 2u * into + (field & 1u) : into;
   if (row >= height) return std::nullopt;
   return row;
 }
@@ -122,6 +126,14 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
 }
 
 }  // namespace
+
+unsigned Ppu::tileWidth(const Background& background) noexcept {
+  return background.hires || !background.large ? 8u : 16u;
+}
+
+unsigned Ppu::tileHeight(const Background& background) noexcept {
+  return background.large ? 16u : 8u;
+}
 
 std::int32_t PpuState::multiplyResult() const noexcept {
   const std::int32_t a = static_cast<std::int16_t>(m7a);
@@ -287,20 +299,33 @@ std::uint16_t Ppu::mosaicIndex(std::uint16_t line) const noexcept {
   return static_cast<std::uint16_t>(line < current ? 0u : line - current);
 }
 
-Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x,
-                                  std::uint16_t line) const noexcept {
+Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
+                                  bool half) const noexcept {
   const unsigned index = static_cast<unsigned>(layer);
+  const std::uint8_t mode = s_.bgmode & 0x07u;
+  const std::uint16_t line = in.vpos;
   bool across = ((s_.mosaic >> index) & 0x01u) != 0u;
   bool down = across;
-  if ((s_.bgmode & 0x07u) == 7u && layer == Layer::Bg2) {
+  if (mode == 7u && layer == Layer::Bg2) {
     // The second Mode 7 layer's two axes each have a bit of their own.
     down = (s_.mosaic & 0x01u) != 0u;
     across = (s_.mosaic & 0x02u) != 0u;
   }
   const unsigned width = (s_.mosaic >> 4) + 1u;
-  return Position{
-      .x = static_cast<std::uint16_t>(across ? x - x % width : x),
-      .line = static_cast<std::uint16_t>(down ? line - mosaicIndex(line) : line)};
+  const bool halfLines = (mode == 5u || mode == 6u) && s_.interlace();
+  const unsigned corner = down ? static_cast<unsigned>(line) - mosaicIndex(line) : line;
+  unsigned readLine = corner;
+  if (halfLines) readLine = down ? 2u * corner : 2u * static_cast<unsigned>(line) + (in.field & 1u);
+  const auto read = static_cast<std::uint16_t>(readLine);
+  if (!across) return Position{.x = x, .line = read, .half = half};
+  if (mode == 5u || mode == 6u) {
+    // Counted in half-pixels: the corner is a multiple of twice the size, which is
+    // always a left half.
+    const unsigned halfPixel = 2u * x + (half ? 1u : 0u);
+    const unsigned blockCorner = halfPixel - halfPixel % (2u * width);
+    return Position{.x = static_cast<std::uint16_t>(blockCorner / 2u), .line = read, .half = false};
+  }
+  return Position{.x = static_cast<std::uint16_t>(x - x % width), .line = read, .half = half};
 }
 
 void Ppu::rangeSprite(std::uint16_t line) noexcept {
@@ -316,7 +341,8 @@ void Ppu::rangeSprite(std::uint16_t line) noexcept {
   ++s_.sprites.scanned;
   const Sprite sprite = spriteAt(index);
 
-  if (!rowCrossed(sprite.y, sprite.height, line).has_value()) return;
+  const bool halfHeight = (s_.setini & 0x02u) != 0u;
+  if (!rowCrossed(sprite.y, sprite.height, line, halfHeight, 0u).has_value()) return;
   if (countedX(sprite.x) <= -static_cast<int>(sprite.width)) {
     return;  // nothing of it stands on the picture
   }
@@ -331,8 +357,9 @@ void Ppu::rangeSprite(std::uint16_t line) noexcept {
   ++s_.sprites.found;
 }
 
-void Ppu::timeSprites(std::uint16_t line) noexcept {
+void Ppu::timeSprites(std::uint16_t line, std::uint8_t field) noexcept {
   if (s_.forcedBlank()) return;
+  const bool halfHeight = (s_.setini & 0x02u) != 0u;
 
   s_.sprites.line = line;
   s_.sprites.word.fill(0u);
@@ -345,7 +372,8 @@ void Ppu::timeSprites(std::uint16_t line) noexcept {
   unsigned tiles = 0u;
   for (unsigned nth = s_.sprites.found; nth-- > 0u;) {
     const Sprite sprite = spriteAt(s_.sprites.inRange[nth]);
-    const std::optional<unsigned> crossed = rowCrossed(sprite.y, sprite.height, line);
+    const std::optional<unsigned> crossed =
+        rowCrossed(sprite.y, sprite.height, line, halfHeight, field);
     if (!crossed.has_value()) continue;
 
     const bool flipVertical = (sprite.attributes & 0x80u) != 0u;
@@ -415,7 +443,8 @@ Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
   // Each background keeps a screen register, a nibble of a character-base
   // register — BG1 and BG3 the low one, BG2 and BG4 the high one above it — a pair
   // of offsets, and one of $2105's four size bits, from bit 4 up in the order the
-  // backgrounds are numbered.
+  // backgrounds are numbered. Modes 5 and 6 make every tilemap's tiles two
+  // characters wide, BG3's offset table included.
   const unsigned index = static_cast<unsigned>(layer);
   static constexpr std::uint8_t PpuState::*kScreens[4] = {&PpuState::bg1sc, &PpuState::bg2sc,
                                                           &PpuState::bg3sc, &PpuState::bg4sc};
@@ -424,12 +453,14 @@ Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
   static constexpr std::uint16_t PpuState::*kVertical[4] = {
       &PpuState::bg1vofs, &PpuState::bg2vofs, &PpuState::bg3vofs, &PpuState::bg4vofs};
   const std::uint8_t bases = index < 2u ? s_.bg12nba : s_.bg34nba;
+  const std::uint8_t mode = s_.bgmode & 0x07u;
   return Background{.screen = s_.*kScreens[index],
                     .characterBase = static_cast<std::uint8_t>((index & 1u) ? (bases >> 4)
                                                                             : (bases & 0x0Fu)),
                     .horizontal = s_.*kHorizontal[index],
                     .vertical = s_.*kVertical[index],
                     .large = (s_.bgmode & (0x10u << index)) != 0u,
+                    .hires = mode == 5u || mode == 6u,
                     .planes = 0u,
                     .paletteStride = 0u,
                     .wordBase = 0u,
@@ -476,15 +507,22 @@ std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
     case 4u:
       depth = index == 0u ? kFullPalette : (index == 1u ? kFour : kNone);
       break;
-    default:
-      break;  // a mode whose backgrounds are not built shows its backdrop
+    case 5u:
+      depth = index == 0u ? kSixteen : (index == 1u ? kFour : kNone);
+      break;
+    case 6u:
+      // BG3's tilemap is the offset table, so the mode draws one background.
+      depth = index == 0u ? kSixteen : kNone;
+      break;
+    case 7u:
+      break;  // the field, which sampleField reads
   }
   if (depth.planes == 0u) return std::nullopt;
 
-  // The two offset-per-tile modes read BG1 and BG2 through BG3's table, each
-  // background under its own bit of an entry.
+  // The three offset-per-tile modes read their backgrounds through BG3's table,
+  // each background under its own bit of an entry.
   const std::uint8_t mode = s_.bgmode & 0x07u;
-  const bool offsetTable = mode == 2u || mode == 4u;
+  const bool offsetTable = mode == 2u || mode == 4u || mode == 6u;
 
   Background described = registersOf(layer);
   described.planes = depth.planes;
@@ -521,30 +559,31 @@ std::span<const Ppu::Place> Ppu::order() const noexcept {
   static constexpr Place kModeSeven[5] = {{kObj, 3u}, {kObj, 2u}, {kObj, 1u}, {kBg1, 0u}, {kObj, 0u}};
   static constexpr Place kModeSevenExtended[7] = {{kObj, 3u}, {kObj, 2u}, {kBg2, 1u}, {kObj, 1u},
                                                   {kBg1, 0u}, {kObj, 0u}, {kBg2, 0u}};
-  // A mode this chip does not draw the backgrounds of still draws its sprites,
-  // which are the same in every mode.
-  static constexpr Place kSpritesAlone[4] = {{kObj, 3u}, {kObj, 2u}, {kObj, 1u}, {kObj, 0u}};
+  // Mode 6 is mode 3's chart with BG2's two places taken out.
+  static constexpr Place kModeSix[6] = {{kObj, 3u}, {kBg1, 1u}, {kObj, 2u},
+                                        {kObj, 1u}, {kBg1, 0u}, {kObj, 0u}};
 
   switch (s_.bgmode & 0x07u) {
     case 0u: return kModeZero;
     case 1u: return (s_.bgmode & 0x08u) != 0u ? std::span<const Place>(kModeOneLifted)
                                               : std::span<const Place>(kModeOne);
-    // Modes 2 and 4 keep mode 3's chart: two backgrounds, BG1 before BG2 at each
-    // priority, and $2105 bit 3 naming no place.
+    // Modes 2, 4 and 5 keep mode 3's chart: two backgrounds, BG1 before BG2 at
+    // each priority, and $2105 bit 3 naming no place.
     case 2u:
     case 3u:
-    case 4u: return kModeThree;
-    case 7u: return (s_.setini & 0x40u) != 0u ? std::span<const Place>(kModeSevenExtended)
-                                              : std::span<const Place>(kModeSeven);
-    default: return kSpritesAlone;
+    case 4u:
+    case 5u: return kModeThree;
+    case 6u: return kModeSix;
+    default: break;
   }
+  return (s_.setini & 0x40u) != 0u ? std::span<const Place>(kModeSevenExtended)
+                                   : std::span<const Place>(kModeSeven);
 }
 
 std::uint16_t Ppu::entryAt(const Background& background, unsigned bgX,
                            unsigned bgY) const noexcept {
-  const unsigned side = background.large ? 16u : 8u;
-  const unsigned tileX = bgX / side;
-  const unsigned tileY = bgY / side;
+  const unsigned tileX = bgX / tileWidth(background);
+  const unsigned tileY = bgY / tileHeight(background);
 
   // The base counts whole screens: a 32x32 screen is $400 words, so the six bits of
   // the register step the map in $400-word units and reach every 2 KB boundary of
@@ -601,25 +640,33 @@ Ppu::Offsets Ppu::offsetsFor(const Background& background, std::uint16_t x) cons
 }
 
 std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_t x,
-                                      std::uint16_t line) const noexcept {
+                                      std::uint16_t line, bool half) const noexcept {
   // Where the position falls in the background. The display never falls outside
   // the background: the tilemap lookup wraps it at the map's own size, whatever
   // that size is.
-  const unsigned side = background.large ? 16u : 8u;
   const Offsets offsets = offsetsFor(background, x);
   const unsigned bgX = x + offsets.horizontal;
   const unsigned bgY = line + offsets.vertical;
   const std::uint16_t entry = entryAt(background, bgX, bgY);
 
-  // The entry is vhopppcc cccccccc: the two flips, the tile's priority, its palette
-  // and its number. A flip reverses the whole tile, a 16x16 block included.
-  unsigned inX = bgX % side;
-  unsigned inY = bgY % side;
-  if ((entry & 0x4000u) != 0u) inX = side - 1u - inX;
-  if ((entry & 0x8000u) != 0u) inY = side - 1u - inY;
+  // The pixel within the tile. A two-character tile has sixteen pixels across its
+  // eight positions: the position's left half reads the even one and its right
+  // half the odd one.
+  const unsigned width = tileWidth(background);
+  const unsigned height = tileHeight(background);
+  const unsigned across = background.hires ? 2u * width : width;
+  unsigned inX = background.hires ? 2u * (bgX % width) + (half ? 1u : 0u) : bgX % width;
+  unsigned inY = bgY % height;
 
-  // A 16x16 block is Tile, Tile + 1, Tile + 16 and Tile + 17. The numbers run on
-  // rather than wrapping within the block; only the ten-bit number itself wraps.
+  // The entry is vhopppcc cccccccc: the two flips, the tile's priority, its palette
+  // and its number. A flip reverses the whole tile, a 16x16 block and a
+  // two-character tile included.
+  if ((entry & 0x4000u) != 0u) inX = across - 1u - inX;
+  if ((entry & 0x8000u) != 0u) inY = height - 1u - inY;
+
+  // A 16x16 block is Tile, Tile + 1, Tile + 16 and Tile + 17, and a two-character
+  // tile is Tile and Tile + 1. The numbers run on rather than wrapping within the
+  // block; only the ten-bit number itself wraps.
   unsigned tile = entry & 0x03FFu;
   if (inX >= 8u) {
     ++tile;
@@ -812,7 +859,8 @@ bool Ppu::masked(Layer layer, std::uint8_t maskRegister, std::uint16_t x) const 
 }
 
 std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
-                                          std::uint16_t line) const noexcept {
+                                          const PpuInputs& in, bool half) const noexcept {
+  const std::uint16_t line = in.vpos;
   // The two screens differ in which register puts layers on them and which one
   // masks those layers. Everything below is the same for both.
   const std::uint8_t enables = screen == Screen::Main ? s_.tm : s_.ts;
@@ -835,7 +883,7 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   for (unsigned index = 0u; index < backgrounds.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
-    const Position read = mosaicPosition(layer, x, line);
+    const Position read = mosaicPosition(layer, x, in, half);
     // Mode 7's layers are the field, read through the matrix; every other mode's
     // are tilemaps of characters.
     if (field) {
@@ -843,7 +891,7 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
       continue;
     }
     if (const std::optional<Background> described = background(layer)) {
-      backgrounds[index] = sample(*described, read.x, read.line);
+      backgrounds[index] = sample(*described, read.x, read.line, read.half);
     }
   }
 
@@ -906,10 +954,70 @@ std::uint16_t Ppu::fixedColour() const noexcept {
                                     (s_.fixedBlue << 10));
 }
 
-std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) const noexcept {
-  // Forced blank drives black, whatever the memories hold.
-  if (s_.forcedBlank()) return {0u, 0u, 0u, 255u};
+bool Ppu::hiresAt() const noexcept {
+  const std::uint8_t mode = s_.bgmode & 0x07u;
+  return mode == 5u || mode == 6u || (s_.setini & 0x08u) != 0u;
+}
 
+std::uint16_t Ppu::combine(std::uint16_t colour, std::uint16_t addend, bool subtract,
+                           bool halve) noexcept {
+  // The halving comes before the hold and is observable there: two full channels
+  // added and halved are full, not half.
+  const auto channel = [&](unsigned shift) {
+    const unsigned above = (colour >> shift) & 0x1Fu;
+    const unsigned below = (addend >> shift) & 0x1Fu;
+    unsigned value = subtract ? (above > below ? above - below : 0u) : above + below;
+    if (halve) value >>= 1;
+    return static_cast<std::uint16_t>(value > 31u ? 31u : value);
+  };
+  return static_cast<std::uint16_t>(channel(0u) | (channel(5u) << 5) | (channel(10u) << 10));
+}
+
+void Ppu::decide(std::uint16_t x, const PpuInputs& in) noexcept {
+  if (s_.forcedBlank()) {
+    s_.lastMain.present = false;
+    return;
+  }
+  s_.lastMain = mainPixel(x, in, hiresAt()).decision;
+}
+
+Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
+  const bool hires = hiresAt();
+  if (x == 0u) s_.lastMain.present = false;
+
+  // Forced blank drives black, whatever the memories hold, and draws no main pixel.
+  if (s_.forcedBlank()) {
+    static constexpr std::array<std::uint8_t, 4> kBlack{0u, 0u, 0u, 255u};
+    s_.lastMain.present = false;
+    return Dot{.left = kBlack, .right = kBlack, .hires = hires};
+  }
+
+  const MainPixel main = mainPixel(x, in, hires);
+  if (!hires) {
+    s_.lastMain = main.decision;
+    const std::array<std::uint8_t, 4> colour = convert(main.colour);
+    return Dot{.left = colour, .right = colour, .hires = false};
+  }
+
+  // The left half: the sub screen's own front-most pixel, or colour 0 where it shows
+  // nothing, drawn under the decision the main pixel to its left made.
+  const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
+  std::uint16_t left = paletteColour(0u);
+  if (sub.has_value()) left = sub->direct.has_value() ? *sub->direct : paletteColour(sub->word);
+  const PpuState::MainDecision& before = s_.lastMain;
+  if (before.present) {
+    if (before.clipped) left = 0u;
+    if (before.addend != 0u) {
+      const std::uint16_t addend = before.addend == 1u ? fixedColour() : before.colour;
+      left = combine(left, addend, before.subtract, before.halved);
+    }
+  }
+  const std::array<std::uint8_t, 4> leftBytes = convert(left);
+  s_.lastMain = main.decision;
+  return Dot{.left = leftBytes, .right = convert(main.colour), .hires = true};
+}
+
+Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half) const noexcept {
   // The front-most pixel of the main screen, and the colour it stands for — unless
   // $2130's upper region covers this position, which replaces that colour with
   // black before any arithmetic and is remembered, because a pixel clipped this way
@@ -918,13 +1026,19 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
   // A pixel read as a colour rather than as an index names no palette word, so it
   // carries its own colour and is taken in place of one — on either screen, because
   // direct colour is how the character data was read and not a main-screen effect.
-  const std::optional<Resolved> main = resolve(Screen::Main, x, line);
+  const std::optional<Resolved> main = resolve(Screen::Main, x, in, half);
   const bool clipped = regionCovers((s_.cgwsel >> 6) & 0x03u, x);
   const auto colourOf = [this](const std::optional<Resolved>& shown) {
     if (!shown.has_value()) return paletteColour(0u);
     return shown->direct.has_value() ? *shown->direct : paletteColour(shown->word);
   };
   const std::uint16_t mainColour = clipped ? 0u : colourOf(main);
+  PpuState::MainDecision decision{.present = true,
+                                  .clipped = clipped,
+                                  .addend = 0u,
+                                  .subtract = false,
+                                  .halved = false,
+                                  .colour = mainColour};
 
   // Whether this pixel takes math: $2131 keeps a bit for each of the six things the
   // main screen can show, the backdrop included, and $2130's lower region can
@@ -936,7 +1050,7 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
       main.has_value() && main->layer == Layer::Object && main->word < 192u;
   const bool maths = (s_.cgadsub & (1u << layerBit)) != 0u && !spriteRefuses &&
                      !regionCovers((s_.cgwsel >> 4) & 0x03u, x);
-  if (!maths) return convert(mainColour);
+  if (!maths) return MainPixel{.colour = mainColour, .decision = decision};
 
   // The addend. $2130 bit 1 clear names the fixed colour, and half applies to it as
   // bit 6 asks; set, it names the front-most pixel of the sub screen — and where
@@ -947,28 +1061,18 @@ std::array<std::uint8_t, 4> Ppu::pixel(std::uint16_t x, std::uint16_t line) cons
   std::uint16_t addend = fixedColour();
   bool subBackdrop = true;
   if (fromSubScreen) {
-    const std::optional<Resolved> sub = resolve(Screen::Sub, x, line);
+    const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
     subBackdrop = !sub.has_value();
     if (sub.has_value()) addend = colourOf(sub);
   }
 
-  // Five bits a channel, added or subtracted, halved where bit 6 asks and neither
-  // exception forbids it, then held to the range a channel has. The halving comes
-  // before that hold and is observable there: two full channels added and halved
-  // are full, not half.
   const bool subtract = (s_.cgadsub & 0x80u) != 0u;
   const bool halve =
       (s_.cgadsub & 0x40u) != 0u && !clipped && !(fromSubScreen && subBackdrop);
-  const auto channel = [&](unsigned shift) {
-    const unsigned above = (mainColour >> shift) & 0x1Fu;
-    const unsigned below = (addend >> shift) & 0x1Fu;
-    unsigned value = subtract ? (above > below ? above - below : 0u) : above + below;
-    if (halve) value >>= 1;
-    return static_cast<std::uint16_t>(value > 31u ? 31u : value);
-  };
-  const auto mathed = static_cast<std::uint16_t>(channel(0u) | (channel(5u) << 5) |
-                                                 (channel(10u) << 10));
-  return convert(mathed);
+  decision.addend = fromSubScreen && !subBackdrop ? 2u : 1u;
+  decision.subtract = subtract;
+  decision.halved = halve;
+  return MainPixel{.colour = combine(mainColour, addend, subtract, halve), .decision = decision};
 }
 
 // ---- the write-twice latches -------------------------------------------------
