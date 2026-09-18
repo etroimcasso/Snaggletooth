@@ -158,6 +158,7 @@ Snes::Snes(Snes&& moved) noexcept
       portLanding_(moved.portLanding_),
       frameObserver_(moved.frameObserver_),
       raster_(std::move(moved.raster_)),
+      derived_(std::move(moved.derived_)),
       frameFinished_(moved.frameFinished_),
       frameWide_(moved.frameWide_),
       framePictureLines_(moved.framePictureLines_),
@@ -184,6 +185,10 @@ void Snes::restore(const SnesState& state) {
 }
 
 void Snes::load() {
+  // Every register the picture path works its answers out from has just been
+  // replaced, so none of those answers stands: the first dot drawn after this works
+  // them out from what the caller supplied.
+  derived_.dropAll();
   cpu_.restore(state_.cpu);
   apu_.reload();  // its state is state_.apu, written in place by the restore or the seeding above
   // The NMI pin's remembered level is not part of the snapshot, so re-derive it from
@@ -400,7 +405,7 @@ std::uint8_t Snes::routeRead(std::uint32_t address) {
     if (offset >= 0x2100 && offset <= 0x213F) {
       // A byte the PPU drove goes onto the data bus; a register with nothing to
       // say leaves the bus as it was, which is what the read returns.
-      const std::optional<std::uint8_t> v = Ppu{state_.ppu}.read(offset, ppuInputs());
+      const std::optional<std::uint8_t> v = Ppu{state_.ppu, derived_}.read(offset, ppuInputs());
       return v.has_value() ? latch(*v) : state_.mdr;
     }
     if (offset >= 0x2140 && offset <= 0x217F) {
@@ -434,7 +439,7 @@ void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
       return;
     }
     if (offset >= 0x2100 && offset <= 0x213F) {
-      portLanding_ = Ppu{state_.ppu}.write(offset, value, ppuInputs());
+      portLanding_ = Ppu{state_.ppu, derived_}.write(offset, value, ppuInputs());
       return;
     }
     if (offset >= 0x2140 && offset <= 0x217F) {
@@ -621,7 +626,7 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
       state_.vblankNmi = true;
       if ((state_.nmitimen & 0x80u) != 0u) cpu_.setNmiLine(true);
     }
-    if (passed(lineStart + kOamReloadOffset)) Ppu{state_.ppu}.beginVblank();
+    if (passed(lineStart + kOamReloadOffset)) Ppu{state_.ppu, derived_}.beginVblank();
     // The auto-read begins at its own point on this line, once, while $4200 asks
     // for it: the strobe pulse latches every pad and the clocks follow.
     if ((state_.nmitimen & 1u) != 0u && state_.autoJoyStart < lineStart &&
@@ -664,7 +669,7 @@ void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
   if (last < kFirstPictureDot) return;
   const std::uint64_t reached = (last - kFirstPictureDot) / 2u + 1u;
 
-  Ppu ppu{state_.ppu};
+  Ppu ppu{state_.ppu, derived_};
   const std::uint16_t line = static_cast<std::uint16_t>(state_.vpos + 1u);
   while (static_cast<std::uint64_t>(state_.ppu.sprites.scanned) < reached &&
          static_cast<unsigned>(state_.ppu.sprites.scanned) < kSprites) {
@@ -685,7 +690,7 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   const std::uint64_t last = (to - lineStart) / 4u;
   const std::uint64_t dot = first < kFirstPictureDot ? kFirstPictureDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
-  Ppu ppu{state_.ppu};
+  Ppu ppu{state_.ppu, derived_};
   const PpuInputs in = ppuInputs();
 
   // What the chip carries from one position to the next is decided whether or not
@@ -771,7 +776,7 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   // Range pass across that line found — for the line beginning now, which holds
   // H = 0 of it, hblank being lowered a dot later. Range then starts again, on the
   // line after this one, and the mosaic's vertical counter takes the new line.
-  Ppu ppu{state_.ppu};
+  Ppu ppu{state_.ppu, derived_};
   ppu.timeSprites(state_.vpos, state_.field);
   ppu.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
   ppu.beginLine(state_.vpos);
@@ -809,7 +814,7 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
     state_.hdmaActive = 0u;
     state_.hdmaEnded = 0u;
     state_.hdmaDoWrite = 0u;
-    Ppu{state_.ppu}.beginFrame();  // the overflow flags belong to the picture just drawn
+    Ppu{state_.ppu, derived_}.beginFrame();  // the overflow flags belong to the picture just drawn
     return;
   }
   if (state_.inVblank) return;  // begun is begun; a later SETINI change re-fires nothing
@@ -980,7 +985,7 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x4201: {  // WRIO: the I/O port; its top bit falling latches the PPU's counters
       const bool fell = (state_.wrio & 0x80u) != 0u && (value & 0x80u) == 0u;
       state_.wrio = value;
-      if (fell) Ppu{state_.ppu}.latchCounters(ppuInputs());
+      if (fell) Ppu{state_.ppu, derived_}.latchCounters(ppuInputs());
       return;
     }
     case 0x4202: state_.wrmpya = value; return;
