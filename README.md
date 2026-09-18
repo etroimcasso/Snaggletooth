@@ -29,6 +29,9 @@ Three things live in this repository:
   - [The coprocessors](#the-coprocessors)
   - [The toolkit](#the-toolkit)
   - [Validation](#validation)
+- [Media](#media)
+  - [Screenshots](#screenshots)
+  - [Videos](#videos)
 - [Getting started](#getting-started)
   - [Building](#building)
   - [Embedding the library](#embedding-the-library)
@@ -143,6 +146,16 @@ does not reach, so a rendered comparison cannot arbitrate them either.
 
 The suite is built and run on macOS, Linux and Windows, on x64 and ARM64, before any change
 reaches `main`.
+
+## Media
+
+The machine running, as the player shows it. Every capture is the emulator's own output — the
+frames the PPU hands to its observer and the audio the S-DSP mixes — with nothing composited or
+retouched.
+
+### Screenshots
+
+### Videos
 
 ## Getting started
 
