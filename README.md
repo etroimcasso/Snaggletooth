@@ -155,6 +155,18 @@ retouched.
 
 ### Screenshots
 
+<p align="center">
+  <img src="media/SMW-Title.png" width="400" alt="Super Mario World's title screen in the player window">
+  <img src="media/Chrono-Trigger-Title.png" width="400" alt="Chrono Trigger's title screen in the player window">
+  <img src="media/Illusion-of-Gaia-Title.png" width="400" alt="Illusion of Gaia's title screen in the player window">
+  <img src="media/Actraiser-Title.png" width="400" alt="ActRaiser's title screen in the player window">
+  <img src="media/DKC-Title.png" width="400" alt="Donkey Kong Country's title screen in the player window">
+  <img src="media/Mega-Man-X-Title.png" width="400" alt="Mega Man X's title screen in the player window">
+  <img src="media/Super-Mario-All-Stars-Title.png" width="400" alt="Super Mario All-Stars' title screen in the player window">
+  <img src="media/Secret-of-Mana-Forest.png" width="400" alt="Secret of Mana in the forest, in the player window">
+  <img src="media/Tales-of-Phantasia-Epilogue-Battle.png" width="400" alt="Tales of Phantasia's epilogue battle in the player window">
+</p>
+
 ### Videos
 
 
