@@ -294,6 +294,10 @@ first frame it runs is the pair's second.
 Two frames together are a whole number of colour clocks, which is what the irregular lines are for:
 714,732 master cycles on NTSC and 716,100 interlaced; 851,136 on PAL and 852,504 interlaced.
 
+fullsnes's 426,936 for a PAL interlaced frame sums the extra line and the long line into one frame. They
+fall in different fields — the long line is the odd field's and the extra line the even field's — so it is
+a figure for neither frame of the pair, whose two lengths are 425,572 and 426,932.
+
 ### Vertical blank
 
 `$2133` bit 2 chooses the line vertical blank begins on, 225 or 240. Beginning is a latched fact rather
@@ -343,6 +347,10 @@ Two interrupt sources reach the CPU, both driven from these counters:
   cycle leaves behind, so a write to `$4200` that arms the timer in the very cycle its point is crossed
   is in time, and one that disarms it in that cycle keeps the flag down.
 
+  **HTIME = 153 raises no flag on the short line, nor on a frame's last line** — anomie's measurement,
+  with no mechanism documented. The exception is that dot on those lines; every other HTIME raises its
+  flag there, and the V-only point keeps its own place.
+
 ```cpp
 // A minimal vblank-NMI loop: enable the NMI, then let the machine run into vblank.
 // LDA #$80 ; STA $4200 ; ...   the handler at the $FFFA vector runs once per frame.
@@ -350,11 +358,15 @@ Two interrupt sources reach the CPU, both driven from these counters:
 
 ### The memory refresh
 
-Once a line the CPU is held off the bus for **40 master cycles** while memory refreshes. The point walks
+Once a line the CPU is paused for **40 master cycles** while memory refreshes. The point walks
 an eight-cycle grid near the middle of the line — 538 cycles into line 0 of the first frame, then the
 point on that grid nearest 536 into each line after it, so consecutive ordinary lines come up 538 and 534
 and a line of another length re-phases the pair. `SnesState::refreshAt` names the next one and
 `refreshLeft` the cycles left in one under way.
+
+fullsnes's latch histogram — dot 133 three times, 134 once, 135 to 142 never, 143 once, 144 three times —
+is this alternation seen without its grid: averaged over the two parities, the dots a pause covers are the
+dots no read ever latches.
 
 What it means for a caller:
 
@@ -362,8 +374,9 @@ What it means for a caller:
   about 3 % slower against the beam, the APU and every HDMA and IRQ event, which is the console.
 - **`run()` may stop inside a pause** and carries the rest of it, so its overshoot stays within one
   access and `run(a)` then `run(b)` still advances the machine exactly as `run(a + b)`.
-- **A halted core is not paused.** It makes no bus cycle to hold off the bus, so a machine stopped on STP
-  or waiting on WAI keeps its exact six-cycle idle grid.
+- **A halted core is paused as well.** A machine waiting on WAI whose interrupt arrives inside a pause
+  wakes when the pause ends; a machine stopped on STP keeps its place and spends the pause as any core
+  does.
 - **The observer is told nothing.** A pause is neither an access nor a CPU cycle, any more than a
   transfer's overhead cycles are, so cycle counts taken through the observer are unchanged.
 - **A snapshot taken inside a pause restores into the rest of it.**
@@ -745,6 +758,9 @@ moved, never copied; a moved machine carries its audio machine after its state.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.
+- A WAI whose interrupt lands inside a pause returns from `step()` after the pause, not before it. A
+  program that wakes once a line and writes a PPU register straight away lands that write up to 40
+  cycles further along the line than the interrupt itself arrived.
 - The frame parity a machine runs its first frame at is 1, not 0: the console leaves reset with the flag
   clear and the toggle at H = 1 of line 0 is four cycles away. A program reading `$213F` bit 7 to pick a
   field sees the pair's second frame first.
@@ -755,32 +771,31 @@ moved, never copied; a moved machine carries its audio machine after its state.
 
 Questions the documentation leaves about the beam, recorded rather than decided by invention:
 
-- **Where the refresh sits.** anomie measures it about 536 cycles into the line on an eight-cycle grid,
-  which is what the machine does; the register page puts it at H = 133.5 with a half-dot stutter between
-  frames, which is what its own latch quantities need. The two differ by a few cycles.
+- **Whether a cycle in progress when the pause begins is stretched by it or completes first.** Here it
+  completes; fullsnes's latch histogram reads either way.
 - **Whether the refresh grid and a transfer's alignment grid are one.** A transfer aligns to a multiple
-  of eight master cycles since power-on and the refresh's grid is offset two from it.
+  of eight master cycles since power-on and the refresh's grid is offset two from it. A cartridge of ours
+  asks it.
 - **Whether a transfer in flight is cut by the refresh.** Here a DMA byte or an HDMA event completes and
-  the pause follows it.
-- **A wait released inside a pause.** A halted core is not paused, so a WAI whose interrupt arrives
-  inside one wakes up to 40 cycles earlier than a console's would.
-- **The timer's measured exceptions.** anomie reports no IRQ for dot 153 on the short line, and none on
-  a frame's last line — measurements without a mechanism, so neither is modelled.
+  the pause follows it. A cartridge of ours asks it.
 - **What `$4212` bit 7 shows** when the taller picture is asked for after vertical blank has begun. The
-  memories shut; the flag here stays the latched fact.
+  memories shut; the flag here stays the latched fact. A cartridge of ours asks it.
 - **Asking for the taller picture at the very start of line 225.** anomie measures the NMI one line
   later, at 226, with the last HDMA still on line 224 — the two effects skewed against each other — and
   reports that asking for it at any later line does nothing at all. No mechanism is given for either,
   and the machine here holds vertical blank to line 240 instead. Clearing the bit in that window is
-  measured and modelled: the blank begins at the start of the line that follows.
+  measured and modelled: the blank begins at the start of the line that follows. A cartridge of ours
+  asks it.
 - **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length
-  is decided by the state as its own line runs.
+  is decided by the state as its own line runs. A cartridge of ours asks it.
 - **Where inside the auto-read's window each bit lands.** The documents give the window's length and the
   256-cycle grid its start keeps, not the point at which each of the sixteen bits is clocked. Here the
-  strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears.
-- **The PAL interlaced frame length.** The register page gives 426,936 cycles for one such frame
-  (313 lines plus four), but the extra line belongs to the even field and the long line to the odd one,
-  so neither frame takes both. The pair here is 425,572 and 426,932.
+  strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears. A
+  cartridge of ours asks it.
+- **The arithmetic unit's result ports during the countdown.** The ports here hold the previous value
+  until the whole result lands. A cartridge of ours asks it.
+- **Reading or writing `$4016` inside the auto-read's window.** One clock line is shared, so a read there
+  takes a clock the auto-read then never sees. A cartridge of ours asks it.
 
 ## See also
 

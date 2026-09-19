@@ -850,6 +850,9 @@ own "What remains open" carries the register-file ones alongside these.
 - How far ahead of a dot the chip fetches that dot's map entry and character. Pixels are resolved
   from the registers as they stand at their own dot, which is where a mid-picture write lands; the
   distance itself wants a test ROM that exercises it.
+- How the Time pass's tile loads are spread across horizontal blank. anomie's step 2 says what is
+  loaded and not when, and fullsnes calls the access time of steps 2 and 3 unknown. Here the pass runs
+  whole as the line begins, while the Range pass before it runs progressively at two dots a sprite.
 - What a write to a scroll register mid-line does to a tile whose entry has already been fetched.
 - How the palette's mid-line access window sits against the chip's own fetch of the colours it is
   drawing with.
