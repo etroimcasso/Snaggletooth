@@ -649,9 +649,10 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
   if (onTimerLine && passed(zeroPoint)) timerZeroOnVLine_ = true;
 
   // The refresh: the cycle whose tick reaches the point finishes on its own time, and
-  // the pause runs before the next one. A halted core makes no bus cycle to hold off
-  // the bus, so nothing pauses it.
-  if (passed(state_.refreshAt) && cpu_.state().run == CpuRunState::Running) {
+  // the pause runs before the next one. The pause holds the core whatever it is doing,
+  // so a core waiting on WAI samples the interrupt line it wakes on at the first idle
+  // cycle past the pause rather than inside it.
+  if (passed(state_.refreshAt)) {
     state_.refreshLeft = static_cast<std::uint8_t>(kRefreshMaster);
   }
 }

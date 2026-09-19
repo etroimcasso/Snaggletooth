@@ -60,7 +60,10 @@ TEST(SnesTiming, HorizontalPositionIsTheMasterCycleWithinTheLine) {
   Snes m = stoppedMachine();
   m.run(3u * kLine + 600u);  // three lines and 600 master cycles in
   EXPECT_EQ(m.state().vpos, 3u);
-  EXPECT_EQ(m.state().hpos, 600u);
+  // Four refresh points lie behind that budget, and a pause is forty cycles — four
+  // past a multiple of six — so the idle grid past them stands four cycles on from
+  // the budget's own and the first cycle at or past 600 ends at 604.
+  EXPECT_EQ(m.state().hpos, 604u);
 }
 
 // ---- vblank ---------------------------------------------------------------
@@ -111,12 +114,13 @@ TEST(SnesTiming, ReadingRdnmiReturnsAndAcknowledgesTheVblankFlag) {
 TEST(SnesTiming, OddFramesShortenLine240ToKeepColourSync) {
   // An even frame is 262*1364 master cycles; an odd frame drops four (line 240 runs
   // 1360 instead of 1364). Two frames therefore total 262*1364 + (262*1364 - 4) =
-  // 714732, which is a whole multiple of the six-cycle idle step, so the machine
-  // lands exactly back at the frame origin only if the short line was applied.
+  // 714732, and the frame origin falls there only if the short line was applied.
   Snes m = stoppedMachine();
   m.run(714732u);
   EXPECT_EQ(m.state().vpos, 0u);
-  EXPECT_EQ(m.state().hpos, 0u);
+  // 524 lines are 524 pauses of forty; 524 * 40 is two past a multiple of six, so the
+  // origin at 714732 sits two cycles behind where the run stops.
+  EXPECT_EQ(m.state().hpos, 2u);
   EXPECT_EQ(m.state().field, 0u);  // two frames -> parity back to even
 }
 

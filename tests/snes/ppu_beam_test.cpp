@@ -2,9 +2,9 @@
 // flag's edges, the frame's shape under SETINI's interlace and overscan bits, the
 // exact master offset of every per-line event — vertical blank, the NMI flag, the
 // frame parity, the sprite table's reload, the overflow flags' clear and the H/V
-// timer — and the memory refresh that holds the CPU off the bus once a line.
-// Nothing here draws. Every expectation is computed by hand from the timing pages;
-// the cartridges are assembled inline.
+// timer — and the memory refresh that pauses the CPU once a line.
+// Nothing here draws. Every expectation is computed from the timing pages; the
+// cartridges are assembled inline.
 
 #include <cstdint>
 #include <memory>
@@ -23,6 +23,10 @@ constexpr std::uint8_t kLdaAbs = 0xADu;
 constexpr std::uint8_t kStaAbs = 0x8Du;
 constexpr std::uint8_t kNop = 0xEAu;
 constexpr std::uint8_t kStp = 0xDBu;
+constexpr std::uint8_t kWai = 0xCBu;
+constexpr std::uint8_t kCli = 0x58u;
+
+constexpr std::uint8_t kRefreshMaster = 40u;  // the pause's length
 
 constexpr std::uint32_t kLine = 1364u;       // a normal scanline
 constexpr std::uint32_t kShortLine = 1360u;  // NTSC's line 240 on an odd field
@@ -93,13 +97,32 @@ Snes placed(std::vector<std::uint8_t> program, const Placement& at,
   return m;
 }
 
-// A machine whose core is halted at the frame origin, so run() advances it in exact
-// six-cycle idle steps and a budget that is a multiple of six lands on an exact
-// master total. A halted core makes no bus cycle, so the refresh never pauses it and
-// the beam's position stays a pure function of the budget.
+// A machine whose core is halted at the frame origin, so run() advances it in
+// six-cycle idle steps from the placement. The line's pause holds a halted core as it
+// holds any other, and it is forty cycles — four past a multiple of six — so the idle
+// grid past N pauses sits 4N cycles on from the budget's own.
 Snes haltedAt(const Placement& at) {
   Snes m(SnesConfig{.rom = cartridge({kStp}), .region = at.region});
   m.step();  // execute the STP so the core is halted
+  SnesState s = m.state();
+  s.master = 0; s.consumed = 0; s.apuPhase = 0;
+  apply(s, at);
+  s.refreshAt = kFirstRefresh;
+  m.restore(s);
+  return m;
+}
+
+// A machine whose core is waiting on WAI at the frame origin, with an IRQ handler at
+// $8100 that marks $0050 and stops. The wait begins before the rebase, so every cycle
+// the placement runs is an idle one on its own six-cycle grid.
+Snes waitingAt(const Placement& at) {
+  std::vector<std::uint8_t> rom = cartridge({kCli, kWai});
+  rom[0x7FFEu] = 0x00u;  // the emulation IRQ vector -> $8100
+  rom[0x7FFFu] = 0x81u;
+  const std::uint8_t handler[] = {kLdaImm, 0x5Au, kStaAbs, 0x50u, 0x00u, kStp};
+  for (std::size_t i = 0; i < sizeof handler; ++i) rom[0x0100u + i] = handler[i];
+  Snes m(SnesConfig{.rom = rom, .region = at.region});
+  while (m.state().cpu.run == CpuRunState::Running) m.step();  // through CLI, into the wait
   SnesState s = m.state();
   s.master = 0; s.consumed = 0; s.apuPhase = 0;
   apply(s, at);
@@ -435,7 +458,10 @@ TEST(SnesPpuBeam, AnInterlacedPalFramePairTakesBothIrregularLines) {
   Snes m = haltedAt(Placement{.region = Region::Pal, .setini = 0x01u});
   m.run(311ull * kLine + kLongLine + 313ull * kLine);
   EXPECT_EQ(m.state().vpos, 0u);
-  EXPECT_EQ(m.state().hpos, 0u);
+  // 625 lines are 625 pauses of forty; 625 * 40 is four past a multiple of six, so the
+  // grid past them stands four cycles on from the budget's and the pair's own last
+  // cycle is 852504, four behind where the run stops.
+  EXPECT_EQ(m.state().hpos, 4u);
 }
 
 TEST(SnesPpuBeam, AnInterlacedPalEvenFrameReachesLineThreeHundredTwelve) {
@@ -450,7 +476,9 @@ TEST(SnesPpuBeam, WithoutInterlaceTheFramePairKeepsItsShortLine) {
   Snes m = haltedAt(Placement{});
   m.run(261ull * kLine + kShortLine + 262ull * kLine);
   EXPECT_EQ(m.state().vpos, 0u);
-  EXPECT_EQ(m.state().hpos, 0u);
+  // 524 lines are 524 pauses; 524 * 40 is two past a multiple of six, so the pair's
+  // own last cycle is 714732, two behind where the run stops.
+  EXPECT_EQ(m.state().hpos, 2u);
 }
 
 // ---- the sprite table's reload --------------------------------------------------
@@ -524,7 +552,7 @@ TEST(SnesPpuBeam, TheVerticalTimerFiresTenCyclesIntoItsLine) {
   m.run(kPictureLine * kLine + 4u);
   EXPECT_EQ(m.state().vpos, kPictureLine);
   EXPECT_FALSE(m.state().timeup);
-  m.run(6u);  // master 10
+  m.run(6u);  // master 14, the first cycle to reach the point at 10
   EXPECT_TRUE(m.state().timeup);
 }
 
@@ -643,19 +671,68 @@ TEST(SnesPpuBeam, TheShortLineRePhasesTheRefreshPoint) {
   EXPECT_EQ(m.state().refreshAt, 240ull * kLine + kShortLine + 538u);
 }
 
-TEST(SnesPpuBeam, AHaltedCoreIsNotPaused) {
-  // A stopped core makes no bus cycle to hold off the bus, so the line's point passes
-  // without starting a pause and the machine's positions stay exactly the budget it was
-  // given. Reading `refreshLeft` right after the point is what says no pause began:
-  // a pause cycle costs the same six as an idle one, so the position alone would not.
+TEST(SnesPpuBeam, AHaltedCoreIsPausedToo) {
+  // The pause holds the core whatever it is doing — anomie-timing.txt 68 and
+  // fullsnes.txt 27047 describe the CPU paused, and neither exempts a halted one.
+  // Reading `refreshLeft` right after the point is what says the pause began: a pause
+  // cycle costs the same six as an idle one, so the position alone would not.
   Snes m = haltedAt(Placement{});
   m.run(540u);  // past the first line's point at 538
-  EXPECT_EQ(m.state().refreshLeft, 0u);
+  EXPECT_EQ(m.state().refreshLeft, kRefreshMaster);
   m.run(9u * kLine - 540u);
   EXPECT_EQ(m.state().vpos, 9u);
+  // Nine lines are nine pauses of forty, and forty is four past a multiple of six, so
+  // the grid past them stands 9 * 4 = 36 cycles on from the budget's — itself a
+  // multiple of six, which is why this budget still lands on the line's first cycle.
   EXPECT_EQ(m.state().hpos, 0u);
   EXPECT_EQ(m.state().refreshLeft, 0u);
   EXPECT_EQ(m.state().refreshAt, 9ull * kLine + 534u);
+}
+
+TEST(SnesPpuBeam, AStoppedCoreSpendsThePauseLikeAnyOther) {
+  // The pause is spent a fast cycle at a time for a stopped core as for a running one,
+  // so a run still stops within one cycle of its budget and carries the rest as state.
+  Snes m = haltedAt(Placement{});
+  m.run(540u);
+  EXPECT_NE(m.state().refreshLeft, 0u);
+  EXPECT_GE(m.state().master, m.state().consumed);
+  EXPECT_LT(m.state().master, m.state().consumed + 12u);
+  m.run(20u);  // inside the pause: four of its six-cycle steps are spent, sixteen owed
+  EXPECT_EQ(m.state().master, 564u);
+  EXPECT_EQ(m.state().refreshLeft, 16u);
+  m.run(3u * kLine - 560u);
+  // Three pauses are 120 cycles, a whole multiple of six, so the grid returns to the
+  // budget's and the total is exact.
+  EXPECT_EQ(m.state().master, 3ull * kLine);
+  EXPECT_EQ(m.state().vpos, 3u);
+  EXPECT_EQ(m.state().hpos, 0u);
+}
+
+TEST(SnesPpuBeam, AWaitReleasedInsideAPauseWakesWhenThePauseEnds) {
+  // A wait is released by the interrupt line the core samples at each idle cycle, and
+  // a paused core makes none. With the H timer's point at 542 — fourteen past four
+  // times 132 — the flag rises inside line 0's pause, which runs from the cycle
+  // boundary at 540 to 580, and the core sees it at the first cycle after that.
+  Snes m = waitingAt(Placement{.nmitimen = 0x10u, .htime = 132u});
+  ASSERT_EQ(m.state().cpu.run, CpuRunState::Waiting);
+
+  m.run(560u);  // master 564, sixteen cycles of the pause still owed
+  EXPECT_NE(m.state().refreshLeft, 0u);
+  EXPECT_TRUE(m.state().timeup) << "the point at 542 is passed inside the pause";
+  EXPECT_EQ(m.state().cpu.run, CpuRunState::Waiting) << "the pause holds the wait";
+
+  m.run(40u);  // master 604, past the pause's end at 580
+  EXPECT_EQ(m.state().refreshLeft, 0u);
+  EXPECT_NE(m.state().cpu.run, CpuRunState::Waiting);
+  while (m.state().cpu.run != CpuRunState::Stopped) m.step();
+  EXPECT_EQ(m.state().wram[0x50], 0x5Au) << "the wait vectors to its handler";
+
+  // The control: the same machine with its point at 414, which no pause covers, wakes
+  // on the cycle after the flag rises.
+  Snes clear = waitingAt(Placement{.nmitimen = 0x10u, .htime = 100u});
+  clear.run(480u);
+  EXPECT_TRUE(clear.state().timeup);
+  EXPECT_NE(clear.state().cpu.run, CpuRunState::Waiting);
 }
 
 TEST(SnesPpuBeam, RunMayStopInsideARefreshAndKeepsItsOvershootBound) {
