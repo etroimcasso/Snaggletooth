@@ -76,6 +76,9 @@ constexpr std::size_t kRasterBytes = kHiresWidth * kPixelBytes * kTallestPicture
 // after the short one and six after the long one.
 constexpr std::uint16_t kTimerHOrigin = 14u;
 constexpr std::uint16_t kTimerLineSpan = 1374u;
+// The dot the timer raises nothing on, on the short line and on a frame's last line:
+// anomie-timing.txt 121-123 measures both, and documents no mechanism for either.
+constexpr std::uint16_t kTimerQuietDot = 153u;
 
 // The memory refresh: the CPU is held off the bus for forty master cycles once a
 // line, at the point on an eight-cycle grid nearest 536 into the line, spent a fast
@@ -642,7 +645,12 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
       ? lineStart + kTimerHOrigin + 4ull * state_.htime
       : zeroPoint;
   const bool onTimerLine = state_.vpos == state_.vtime;
-  if (passed(hPoint)) {
+  // Dot 153 raises nothing on the short scanline, nor on the last scanline of a frame.
+  // The V-only point is a line's own and keeps its place: the exception is a dot.
+  const bool quietDot = state_.htime == kTimerQuietDot &&
+                        (lineLength() == kShortLineMaster ||
+                         state_.vpos == static_cast<std::uint16_t>(frameLines() - 1u));
+  if (!quietDot && passed(hPoint)) {
     timerHPoint_ = true;
     if (onTimerLine) timerHPointOnVLine_ = true;
   }

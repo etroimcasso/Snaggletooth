@@ -610,6 +610,74 @@ TEST(SnesPpuBeam, ATimerCrossingDisarmedInItsOwnCycleDoesNotFireLater) {
   EXPECT_FALSE(m.state().timeup);
 }
 
+// Whether the timer's flag stands after a run past the point 4 * htime + 14 into the
+// placement's line.
+bool firedAtItsPoint(const Placement& at) {
+  Snes m = haltedAt(at);
+  m.run(630u);  // past 14 + 4 * 153, the latest point these cases place
+  return m.state().timeup;
+}
+
+TEST(SnesPpuBeam, HtimeOneFiftyThreeRaisesNothingOnTheShortLine) {
+  // anomie-timing.txt 121-123: no IRQ triggers for dot 153 on the short scanline in
+  // non-interlace mode. It is a measurement and no mechanism for it is documented, so
+  // the machine carries it as measured. The short line is NTSC's 240 on an odd field
+  // with interlace off, the same line lineLength() shortens.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 240u, .field = 1u, .nmitimen = 0x30u,
+                                         .htime = 153u, .vtime = 240u}));
+  // The dots either side of it, on that same line, are raised.
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 152u, .vtime = 240u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 154u, .vtime = 240u}));
+  // And line 240 is short only on an odd field with interlace off.
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .field = 0u, .nmitimen = 0x30u,
+                                        .htime = 153u, .vtime = 240u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .setini = 0x01u, .field = 1u,
+                                        .nmitimen = 0x30u, .htime = 153u, .vtime = 240u}));
+}
+
+TEST(SnesPpuBeam, HtimeOneFiftyThreeRaisesNothingOnTheFramesLastLine) {
+  // anomie-timing.txt 121-123: no IRQ triggers for dot 153 on the last scanline of any
+  // frame. The last line is frameLines() - 1, which the interlaced even frame's extra
+  // line moves and PAL's own count moves again.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 261u, .field = 1u, .nmitimen = 0x30u,
+                                         .htime = 153u, .vtime = 261u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 260u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 153u, .vtime = 260u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 261u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 152u, .vtime = 261u}));
+  // An interlaced even frame runs 263 lines, so 262 is its last and 261 is not.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 262u, .setini = 0x01u, .field = 0u,
+                                         .nmitimen = 0x30u, .htime = 153u, .vtime = 262u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 261u, .setini = 0x01u, .field = 0u,
+                                        .nmitimen = 0x30u, .htime = 153u, .vtime = 261u}));
+  // PAL's frame ends at 311.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 311u, .region = Region::Pal, .field = 1u,
+                                         .nmitimen = 0x30u, .htime = 153u, .vtime = 311u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 310u, .region = Region::Pal, .field = 1u,
+                                        .nmitimen = 0x30u, .htime = 153u, .vtime = 310u}));
+}
+
+TEST(SnesPpuBeam, HtimeOneFiftyThreeFiresOnEveryOtherLine) {
+  // The two exceptions against the whole frame they sit in: on an odd NTSC field the
+  // flag is raised at dot 153 on every line but the short one and the frame's last,
+  // so 260 of 262. The placement's parity toggles as line 0 begins, which is what
+  // makes the field odd.
+  Snes m = haltedAt(Placement{.nmitimen = 0x10u, .htime = 153u});
+  int raised = 0;
+  for (int line = 0; line < 262; ++line) {
+    m.run(m.state().vpos == 240u ? kShortLine : kLine);
+    if (m.state().timeup) {
+      ++raised;
+      SnesState s = m.state();
+      s.timeup = false;  // the acknowledgement a handler makes
+      m.restore(s);
+    }
+  }
+  EXPECT_EQ(raised, 260);
+}
+
 // ---- the memory refresh --------------------------------------------------------
 
 TEST(SnesPpuBeam, TheRefreshHoldsTheCpuOffTheBusForFortyMasterCyclesALine) {
