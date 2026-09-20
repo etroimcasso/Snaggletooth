@@ -20,6 +20,7 @@ disagree it names the disagreement and what decided it.
 - [The sprites](#the-sprites)
   - [A sprite's numbers wrap inside its table, which is the opposite of a block's](#a-sprites-numbers-wrap-inside-its-table-which-is-the-opposite-of-a-blocks)
   - [Sizes 6 and 7 are undocumented and both sources print them anyway](#sizes-6-and-7-are-undocumented-and-both-sources-print-them-anyway)
+  - [Under object interlace a 16×32 sprite is a 16×16 one](#under-object-interlace-a-1632-sprite-is-a-1616-one)
   - [The two passes' schedule: the documents give it from opposite ends and reconcile exactly](#the-two-passes-schedule-the-documents-give-it-from-opposite-ends-and-reconcile-exactly)
   - [The two counts run in opposite directions along the same sprites](#the-two-counts-run-in-opposite-directions-along-the-same-sprites)
   - [The front-sprite oddity is stated three ways and two of them agree](#the-front-sprite-oddity-is-stated-three-ways-and-two-of-them-agree)
@@ -205,6 +206,16 @@ discovered.
 
 *Documented but contested* only in the sense that the hardware's own documentation never named them;
 the two secondary sources agree exactly.
+
+### Under object interlace a 16×32 sprite is a 16×16 one
+
+When `$2133` bit 1 sets object interlace, a 16×32 sprite — the small size of pairs 6 and 7 — is
+drawn as though it were 16×16: its lower half is never read and its upper half is shown at half
+height, standing on eight lines rather than sixteen. The larger sizes of the pair, and every square
+size, are untouched. The SNESdev errata gives the effect with no mechanism, so it is modelled as the
+sentence reads.
+
+*Documented and uncorroborated.* One source states it, and no reading has confirmed it.
 
 ### The two passes' schedule: the documents give it from opposite ends and reconcile exactly
 

@@ -398,6 +398,11 @@ struct SnesState {
   // latches the counters itself. Every line reads back as written, since nothing
   // on the console drives one.
   std::uint8_t wrio = 0xFF;
+  // The counter latch owed by a fall of the I/O port's top bit: the master cycle
+  // the beam passes for it, one dot past where a $2137 read of the write's cycle
+  // would land. The latch is captured there rather than at the write, so this
+  // holds the debt between the two; zero when none is owed.
+  std::uint64_t counterLatchAt = 0;
 
   // ---- the PPU ------------------------------------------------------------
   // The picture processor's whole state — its register file, the latches, and the
@@ -622,6 +627,13 @@ class Snes {
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn
   // before it is doubled into both halves of its position.
   void widenFrame(std::size_t line, std::uint16_t x) noexcept;
+  // A write to INIDISP outside vertical blank: the PPU reads the new value one dot
+  // early, off the data bus before the CPU has driven it, so the last dot the
+  // write's own cycle covered is drawn under the byte the bus held before the
+  // write — the whole byte, forced blank and brightness both. Redraws that one dot
+  // under `busBefore` after the cycle has drawn it under the old register, then the
+  // written value stands for every dot after. A no-op for any other write.
+  void redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore);
 
   // Walks the PPU's Range pass as far as master cycle `to` of a line beginning at
   // `lineStart` reaches — two dots a sprite from the picture's first — finding the
@@ -658,6 +670,10 @@ class Snes {
   // The beam's dot, by a map whose dots 323 and 327 are six master cycles wide, and
   // whether the horizontal-blank flag stands. Both are what the PPU is told.
   [[nodiscard]] std::uint16_t hdot() const noexcept;
+  // The dot for an arbitrary master offset into the current line, by that same map —
+  // hdot() is this at the beam's own position. It reads the current line's length,
+  // so it answers for the line the caller is on.
+  [[nodiscard]] std::uint16_t hdotAt(std::uint16_t hpos) const noexcept;
   [[nodiscard]] bool inHblank() const noexcept;
 
   // The master cycle the refresh pauses on for a line beginning at `lineStart`: the

@@ -541,6 +541,26 @@ TEST(Sprites, ARectangularSpriteFlipsVerticallyAsTwoSquaresStacked) {
   EXPECT_EQ(picture.at(40u, 64u), kWhiteOut);  // character row 2
 }
 
+TEST(Sprites, ObjectInterlaceMakesA16By32SpriteA16By16One) {
+  // Under object interlace ($2133 bit 1) a 16x32 sprite is a 16x16 one: its lower
+  // half is not read and its upper half is shown at half height, so it stands on
+  // eight lines rather than sixteen (Errata, PPU p.2). The larger sizes of the
+  // pair are untouched.
+  PpuState ppu = screen();
+  ppu.setini = 0x02u;  // object interlace
+  ppu.objsel = static_cast<std::uint8_t>(kSpriteBase | (6u << 5));  // small 16x32, large 32x64
+  putSpriteBlock(ppu, 0u, 32u, 64u, 1u);  // every character either size reads
+
+  putSprite(ppu, 0u, 8, 8u, 0u, attributes(false, false, 3u, 0u, false), false);  // the 16x32
+  const Picture small = draw(ppu);
+  EXPECT_EQ(small.at(8u, 15u), kRedOut);       // its last of eight lines
+  EXPECT_EQ(small.at(8u, 16u), kBackdropOut);  // the ninth line, and the lower half, are gone
+
+  putSprite(ppu, 0u, 8, 8u, 0u, attributes(false, false, 3u, 0u, false), true);  // the 32x64
+  const Picture large = draw(ppu);
+  EXPECT_EQ(large.at(8u, 16u), kRedOut);  // the larger size keeps its full interlaced height
+}
+
 // ---- the palettes ------------------------------------------------------------
 
 TEST(Sprites, SpritePalettesBeginAtCgramWordOneHundredAndTwentyEight) {

@@ -58,8 +58,13 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
 // half height the lines in are doubled after that subtraction and the field
 // added, so each line shows one row of the pair it covers. A sprite's height is
 // always even, so the field never changes which lines it stands on.
-[[nodiscard]] std::optional<unsigned> rowCrossed(unsigned y, unsigned height, std::uint16_t line,
-                                                 bool halfHeight, std::uint8_t field) noexcept {
+//
+// Object interlace makes a 16x32 sprite a 16x16 one: its lower half is not read
+// and its upper half is shown at half height. The larger sizes are left whole.
+[[nodiscard]] std::optional<unsigned> rowCrossed(unsigned y, unsigned width, unsigned height,
+                                                 std::uint16_t line, bool halfHeight,
+                                                 std::uint8_t field) noexcept {
+  if (halfHeight && width == 16u && height == 32u) height = 16u;
   const unsigned into = (line - 1u - y) & 0xFFu;
   const unsigned row = halfHeight ? 2u * into + (field & 1u) : into;
   if (row >= height) return std::nullopt;
@@ -342,7 +347,7 @@ void Ppu::rangeSprite(std::uint16_t line) noexcept {
   const Sprite sprite = spriteAt(index);
 
   const bool halfHeight = (s_.setini & 0x02u) != 0u;
-  if (!rowCrossed(sprite.y, sprite.height, line, halfHeight, 0u).has_value()) return;
+  if (!rowCrossed(sprite.y, sprite.width, sprite.height, line, halfHeight, 0u).has_value()) return;
   if (countedX(sprite.x) <= -static_cast<int>(sprite.width)) {
     return;  // nothing of it stands on the picture
   }
@@ -373,7 +378,7 @@ void Ppu::timeSprites(std::uint16_t line, std::uint8_t field) noexcept {
   for (unsigned nth = s_.sprites.found; nth-- > 0u;) {
     const Sprite sprite = spriteAt(s_.sprites.inRange[nth]);
     const std::optional<unsigned> crossed =
-        rowCrossed(sprite.y, sprite.height, line, halfHeight, field);
+        rowCrossed(sprite.y, sprite.width, sprite.height, line, halfHeight, field);
     if (!crossed.has_value()) continue;
 
     const bool flipVertical = (sprite.attributes & 0x80u) != 0u;

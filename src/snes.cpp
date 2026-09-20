@@ -390,9 +390,11 @@ void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
     lastCost_ += resumePad(cost);
     state_.dmaResumePad = false;
   }
+  const std::uint8_t busBefore = state_.mdr;  // the byte the bus held before this write
   tickVideo(lastCost_);  // tick-first, so a write lands after the event it shares the cycle with
   videoAdvanced_ = true;
   routeWrite(address, value);
+  redrawInidispEarly(address, busBefore);
 }
 
 std::uint8_t Snes::routeRead(std::uint32_t address) {
@@ -562,12 +564,13 @@ namespace {
 
 }  // namespace
 
-std::uint16_t Snes::hdot() const noexcept {
-  // The dot the beam is on. Dots 323 and 327 are six master cycles wide and every
+std::uint16_t Snes::hdot() const noexcept { return hdotAt(state_.hpos); }
+
+std::uint16_t Snes::hdotAt(std::uint16_t h) const noexcept {
+  // The dot the position is on. Dots 323 and 327 are six master cycles wide and every
   // other dot is four, so past dot 322 the count falls behind a plain quarter of the
   // position and dot 340 is reached only on a line that runs 1368. The short line
   // keeps 340 even dots and none of this applies to it.
-  const std::uint16_t h = state_.hpos;
   if (lineLength() == kShortLineMaster || h < kFirstLongDot) {
     return static_cast<std::uint16_t>(h >> 2);
   }
@@ -663,6 +666,16 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
   if (passed(state_.refreshAt)) {
     state_.refreshLeft = static_cast<std::uint8_t>(kRefreshMaster);
   }
+
+  // A latch owed by a fall of the I/O port's top bit lands as the beam reaches its
+  // point, capturing the dot and line there rather than at the write. The line is
+  // this span's, and the dot is the point's own offset into it.
+  if (state_.counterLatchAt != 0u && passed(state_.counterLatchAt)) {
+    PpuInputs in = ppuInputs();
+    in.hdot = hdotAt(static_cast<std::uint16_t>(state_.counterLatchAt - lineStart));
+    Ppu{state_.ppu, derived_}.latchCounters(in);
+    state_.counterLatchAt = 0u;
+  }
 }
 
 void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
@@ -756,6 +769,28 @@ void Snes::widenFrame(std::size_t line, std::uint16_t x) noexcept {
     }
   }
   frameWide_ = true;
+}
+
+void Snes::redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore) {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
+  if (!systemBank || offset != 0x2100u || state_.inVblank) return;
+  // The cycle drew its dots under the register as it stood; redraw only the last of
+  // them, under the byte the bus held before the write. Master is still the cycle's
+  // start here — closeCycle advances it — so the end is start + this cycle's cost.
+  const std::uint16_t endHpos = state_.hpos;
+  if (endHpos < lastCost_) return;  // the cycle crossed a line; its last dot is off the picture
+  const std::uint64_t beamEnd = state_.master + lastCost_;
+  const std::uint64_t lineStart = beamEnd - endHpos;
+  const std::uint8_t written = state_.ppu.inidisp;  // the value the write applied, restored after
+  // The dot resolves under the same beam position the cycle drew it from, which is
+  // the span's start, so the register is the only thing that differs.
+  state_.hpos = static_cast<std::uint16_t>(endHpos - lastCost_);
+  state_.ppu.inidisp = busBefore;
+  drawSpan(lineStart, beamEnd - 4u, beamEnd);
+  state_.ppu.inidisp = written;
+  state_.hpos = endHpos;
 }
 
 void Snes::deliverFrame() {
@@ -994,7 +1029,11 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x4201: {  // WRIO: the I/O port; its top bit falling latches the PPU's counters
       const bool fell = (state_.wrio & 0x80u) != 0u && (value & 0x80u) == 0u;
       state_.wrio = value;
-      if (fell) Ppu{state_.ppu, derived_}.latchCounters(ppuInputs());
+      // The latch through this line lands one dot after the point a $2137 read of
+      // the same cycle would (fullsnes.txt 27073-27075). It is owed and
+      // captured as the beam passes that point, so it lands from the next cycle's
+      // tick, and a snapshot taken between the write and the landing carries it.
+      if (fell) state_.counterLatchAt = state_.master + lastCost_ + 4u;
       return;
     }
     case 0x4202: state_.wrmpya = value; return;

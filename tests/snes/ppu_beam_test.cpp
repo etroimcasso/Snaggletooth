@@ -185,6 +185,16 @@ std::uint16_t latchedDot(const Placement& line, std::uint16_t master) {
   return placed({kLdaAbs, 0x37u, 0x21u, kStp}, at).state().ppu.ophct;
 }
 
+// The dot OPHCT latches when the I/O port's top bit falls at the same point instead:
+// WRIO is high at power-on, and the store's write cycle resolves the same distance in
+// as the read above, so the fall lands at `master`. STP fetches long enough past it
+// for the owed latch to land before the machine settles.
+std::uint16_t latchedDotViaWrio(const Placement& line, std::uint16_t master) {
+  Placement at = line;
+  at.hpos = static_cast<std::uint16_t>(master - (kImmediateLoad + kAbsoluteAccess));
+  return placed({kLdaImm, 0x00u, kStaAbs, 0x01u, 0x42u, kStp}, at).state().ppu.ophct;
+}
+
 // Where every write to `port` landed, in order.
 struct Landings final : BusObserver {
   explicit Landings(std::uint16_t port) : port_(port) {}
@@ -248,6 +258,17 @@ TEST(SnesPpuBeam, TheLongLineIsWhereDot340Exists) {
   EXPECT_EQ(latchedDot(line, 1363u), 339u);
   EXPECT_EQ(latchedDot(line, 1364u), 340u);
   EXPECT_EQ(latchedDot(line, 1367u), 340u);
+}
+
+TEST(SnesPpuBeam, TheIoPortLatchLandsOneDotAfterTheSoftwareLatch) {
+  // A fall of the I/O port's top bit latches the counters one dot later than a read
+  // of $2137 at the same point: every category of the software-latch dot map moves
+  // one dot on (fullsnes.txt 27073-27075).
+  const Placement line{.vpos = kPictureLine};
+  for (const unsigned master : {400u, 500u, 808u, 1000u, 1200u}) {
+    const auto at = static_cast<std::uint16_t>(master);
+    EXPECT_EQ(latchedDotViaWrio(line, at), latchedDot(line, at) + 1u) << "master " << master;
+  }
 }
 
 // ---- the horizontal-blank flag -------------------------------------------------

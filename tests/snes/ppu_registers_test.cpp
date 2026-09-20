@@ -20,6 +20,7 @@ namespace {
 constexpr std::uint8_t kLdaImm = 0xA9u;
 constexpr std::uint8_t kLdaAbs = 0xADu;
 constexpr std::uint8_t kStaAbs = 0x8Du;
+constexpr std::uint8_t kStaLong = 0x8Fu;
 constexpr std::uint8_t kStzAbs = 0x9Cu;
 constexpr std::uint8_t kNop = 0xEAu;
 constexpr std::uint8_t kStp = 0xDBu;
@@ -86,6 +87,52 @@ std::vector<std::uint8_t> join(std::initializer_list<std::vector<std::uint8_t>> 
   for (const std::vector<std::uint8_t>& p : parts) out.insert(out.end(), p.begin(), p.end());
   out.push_back(kStp);
   return out;
+}
+
+// The frame a machine draws, kept for inspection: row-major RGBA, `width` across.
+// Only the first frame is kept, so a run that spans more than one leaves the frame
+// that carried the write in place.
+struct Frame final : FrameObserver {
+  std::vector<std::uint8_t> pixels;
+  unsigned width = 0;
+  bool got = false;
+  void frame(const VideoFrame& f) override {
+    if (got) return;
+    pixels.assign(f.pixels.begin(), f.pixels.end());
+    width = f.width;
+    got = true;
+  }
+  [[nodiscard]] bool black(unsigned x, unsigned y) const {
+    const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 4u;
+    return at + 2u < pixels.size() && pixels[at] == 0u && pixels[at + 1u] == 0u &&
+           pixels[at + 2u] == 0u;
+  }
+};
+
+// Draws with the backdrop lit and no layers, `program` running from the start of
+// picture line 100, and hands back the frame that line belongs to. `program` does
+// not stop — the run spans the line and on past the frame's end to deliver it.
+Frame renderFromPictureLine(std::vector<std::uint8_t> program) {
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes m(SnesConfig{.rom = rom});
+  SnesState s = m.state();
+  s.vpos = 100u;
+  s.hpos = 0u;
+  s.ppu.inidisp = 0x0Fu;    // the screen on at full brightness
+  s.ppu.cgram[0] = 0x1Fu;   // the backdrop a bright red, so a lit dot is not black
+  s.ppu.cgram[1] = 0x00u;
+  m.restore(s);
+  Frame frame;
+  m.setFrameObserver(&frame);
+  m.run(230000u);  // from line 100 past the frame's end, delivering it once
+  return frame;
+}
+
+// How many dots of picture row `row` came out forced-black.
+unsigned blackDots(const Frame& frame, unsigned row) {
+  unsigned count = 0u;
+  for (unsigned x = 0u; x < 256u; ++x) count += frame.black(x, row) ? 1u : 0u;
+  return count;
 }
 
 constexpr std::uint16_t kPictureLine = 100u;
@@ -220,11 +267,13 @@ TEST(SnesPpuRegisters, TheSoftwareLatchDoesNothingWhileTheLatchLineIsLow) {
   EXPECT_EQ(m.state().wram[0x52] & 0x40u, 0u);
 }
 
-TEST(SnesPpuRegisters, TheLatchLineFallingCapturesTheBeam) {
+TEST(SnesPpuRegisters, TheLatchLineFallingCapturesTheBeamOneDotLaterThanASoftwareLatch) {
   // STZ $4201 takes bit 7 from 1 to 0 at its write cycle, placed like the read above.
+  // The latch through the line lands one dot after the point a $2137 read of the same
+  // cycle would, so the dot is one past the software latch's (fullsnes.txt 27073-27075).
   Snes m = runAt(join({{kStzAbs, 0x01u, 0x42u}, load(0x3Cu, 0x50u), load(0x3Du, 0x51u), load(0x3Fu, 0x52u)}),
                  kPictureLine, kLatchPlacement);
-  EXPECT_EQ(m.state().wram[0x50], kLatchedDot);
+  EXPECT_EQ(m.state().wram[0x50], kLatchedDot + 1u);
   EXPECT_EQ(m.state().wram[0x51], kPictureLine);
   EXPECT_NE(m.state().wram[0x52] & 0x40u, 0u);
 }
@@ -257,8 +306,10 @@ TEST(SnesPpuRegisters, ReadingStat78ResetsBothCountersHalvesWhateverTheLatchLine
   Snes m = runAt(join({{kStzAbs, 0x01u, 0x42u}, load(0x3Cu, 0x50u), load(0x3Fu, 0x51u),
                        load(0x3Cu, 0x52u)}),
                  kPictureLine, kLatchPlacement);
-  EXPECT_EQ(m.state().wram[0x50], kLatchedDot);
-  EXPECT_EQ(m.state().wram[0x52], kLatchedDot);
+  // The latch through the line lands one dot on from a $2137 read's (fullsnes.txt
+  // 27073-27075); the selector reset is what this case pins, and both reads answer it.
+  EXPECT_EQ(m.state().wram[0x50], kLatchedDot + 1u);
+  EXPECT_EQ(m.state().wram[0x52], kLatchedDot + 1u);
 }
 
 TEST(SnesPpuRegisters, TheIoPortReadsBackAsWritten) {
@@ -435,6 +486,31 @@ TEST(SnesPpuRegisters, APaletteReadInsideThePictureAnswersWithTheSecondHalfsOpen
   EXPECT_EQ(m.cgram()[0], 0x34u);
   EXPECT_EQ(m.state().wram[0x50], 0x03u);
   EXPECT_TRUE(m.state().ppu.cgLatchHigh);
+}
+
+// ---- INIDISP's early read --------------------------------------------------------
+
+TEST(SnesPpuRegisters, AnInidispWriteInThePictureDrawsOneDotUnderTheBusByteBeforeIt) {
+  // STA $8F2100 with A = $0F: long addressing leaves the bank byte $8F on the bus
+  // before the value, and the PPU reads INIDISP a dot early — off the bus before the
+  // CPU has driven the value — so one dot is drawn forced-black (bit 7 of $8F) while
+  // the rest of the line stays lit (register page 298-305).
+  const Frame frame = renderFromPictureLine(
+      {kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop,
+       kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop,
+       kLdaImm, 0x0Fu, kStaLong, 0x00u, 0x21u, 0x8Fu, 0x80u, 0xFEu});
+  EXPECT_EQ(blackDots(frame, 99u), 1u);
+}
+
+TEST(SnesPpuRegisters, AnInidispWriteWhoseBusByteIsTheValueDrawsNoOddDot) {
+  // STA $0F2100 with A = $0F: the byte on the bus before the write is the value
+  // itself, so the early read draws nothing out of place. This is the documented
+  // workaround — put the same byte on the bus first (register page 303-305).
+  const Frame frame = renderFromPictureLine(
+      {kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop,
+       kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop, kNop,
+       kLdaImm, 0x0Fu, kStaLong, 0x00u, 0x21u, 0x0Fu, 0x80u, 0xFEu});
+  EXPECT_EQ(blackDots(frame, 99u), 0u);
 }
 
 // ---- the fixed colour and the plain registers ------------------------------------------
