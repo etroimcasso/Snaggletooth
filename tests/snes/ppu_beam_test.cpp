@@ -631,6 +631,47 @@ TEST(SnesPpuBeam, ATimerCrossingDisarmedInItsOwnCycleDoesNotFireLater) {
   EXPECT_FALSE(m.state().timeup);
 }
 
+TEST(SnesPpuBeam, ReadingTheTimerFlagInTheCycleItRisesReturnsItSetAndLeavesItSet) {
+  // fullsnes.txt 1781-1784: a read acknowledges the flag, except a read at the very
+  // time the condition comes true, which receives bit 7 set and clears nothing. The
+  // point is at 414; a read whose cycle ends at 416 spans it.
+  Placement at{.nmitimen = 0x10u, .htime = 100u};
+  at.hpos = static_cast<std::uint16_t>(416u - kAbsoluteAccess);
+  Snes rising = placed(readProgram(0x4211u), at);
+  EXPECT_EQ(rising.state().wram[0x50] & 0x80u, 0x80u);
+  EXPECT_TRUE(rising.state().timeup);
+
+  // A read whose cycle begins on the point finds the flag standing, and acknowledges it.
+  at.hpos = static_cast<std::uint16_t>(420u - kAbsoluteAccess);
+  Snes after = placed(readProgram(0x4211u), at);
+  EXPECT_EQ(after.state().wram[0x50] & 0x80u, 0x80u);
+  EXPECT_FALSE(after.state().timeup);
+
+  // And one whose cycle ends short of the point reads it clear, the flag rising after.
+  at.hpos = static_cast<std::uint16_t>(410u - kAbsoluteAccess);
+  Snes before = placed(readProgram(0x4211u), at);
+  EXPECT_EQ(before.state().wram[0x50] & 0x80u, 0x00u);
+  EXPECT_TRUE(before.state().timeup);
+}
+
+TEST(SnesPpuBeam, WritingTheTimerFlagsRegisterClearsTheFlag) {
+  // anomie's register document, 1091-1093: the flag is cleared on read or write. The
+  // timer stays armed at a point no line reaches, so nothing raises the flag again, and
+  // a store to the register beside it leaves the flag standing.
+  const auto flagAfterStoreTo = [](std::uint16_t port) {
+    const std::vector<std::uint8_t> rom = cartridge(writeProgram(port, 0x00u));
+    Snes m(SnesConfig{.rom = rom});
+    SnesState s = m.state();
+    apply(s, Placement{.nmitimen = 0x10u});
+    s.timeup = true;
+    m.restore(s);
+    while (m.state().cpu.run == CpuRunState::Running) m.step();
+    return m.state().timeup;
+  };
+  EXPECT_FALSE(flagAfterStoreTo(0x4211u));
+  EXPECT_TRUE(flagAfterStoreTo(0x4210u));
+}
+
 // Whether the timer's flag stands after a run past the point 4 * htime + 14 into the
 // placement's line.
 bool firedAtItsPoint(const Placement& at) {

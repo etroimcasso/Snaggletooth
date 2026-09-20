@@ -59,6 +59,14 @@ bool Snes::aBusExcluded(std::uint32_t address) noexcept {
          (offset >= 0x4300u && offset <= 0x437Fu);
 }
 
+bool Snes::aBusIsWorkRam(std::uint32_t address) noexcept {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  if (bank == 0x7Eu || bank == 0x7Fu) return true;
+  const bool systemBank = bank <= 0x3Fu || (bank >= 0x80u && bank <= 0xBFu);
+  return systemBank && offset <= 0x1FFFu;
+}
+
 std::uint8_t Snes::dmaReadA(std::uint32_t address) {
   if (aBusExcluded(address)) return state_.mdr;  // an excluded region reads back as open bus
   return routeRead(address);
@@ -71,9 +79,9 @@ void Snes::dmaWriteA(std::uint32_t address, std::uint8_t value) {
 }
 
 std::uint8_t Snes::engineRead(std::uint32_t address, bool aBus, AccessSource source,
-                              std::uint8_t channel, bool table) {
+                              std::uint8_t channel, bool table, bool pastTableEnd) {
   const std::uint8_t value = aBus ? dmaReadA(address) : routeRead(address);
-  observe(address, value, false, CycleKind::DataRead, source, channel, table);
+  observe(address, value, false, CycleKind::DataRead, source, channel, table, pastTableEnd);
   return value;
 }
 
@@ -85,6 +93,34 @@ void Snes::engineWrite(std::uint32_t address, std::uint8_t value, bool aBus,
     routeWrite(address, value);
   }
   observe(address, value, true, CycleKind::DataWrite, source, channel);
+}
+
+void Snes::engineByte(std::uint32_t aAddr, std::uint32_t bAddr, bool toA, AccessSource source,
+                      std::uint8_t channel, bool table) {
+  // Work RAM is one chip on both buses, and a byte that names it on both — a work-RAM
+  // address on the A bus and $2180-$2183 on the B bus — is not copied. The port's side
+  // is open bus: a write through it lands nowhere, a read through it returns the byte
+  // the data bus already holds, and the port's address does not step either way. The
+  // engine still drives both accesses, so both are reported; the port, which moved
+  // nothing, reports none of its own.
+  const std::uint16_t bOffset = static_cast<std::uint16_t>(bAddr & 0xFFFFu);
+  const bool portRefuses = aBusIsWorkRam(aAddr) && bOffset >= 0x2180u && bOffset <= 0x2183u;
+  if (!toA) {
+    const std::uint8_t byte = engineRead(aAddr, /*aBus=*/true, source, channel, table);
+    if (portRefuses) {
+      observe(bAddr, byte, true, CycleKind::DataWrite, source, channel);
+    } else {
+      engineWrite(bAddr, byte, /*aBus=*/false, source, channel);
+    }
+    return;
+  }
+  std::uint8_t byte = state_.mdr;
+  if (portRefuses) {
+    observe(bAddr, byte, false, CycleKind::DataRead, source, channel);
+  } else {
+    byte = engineRead(bAddr, /*aBus=*/false, source, channel);
+  }
+  engineWrite(aAddr, byte, /*aBus=*/true, source, channel);
 }
 
 std::uint32_t Snes::resumePad(std::uint32_t cpuCycle) const noexcept {
@@ -138,13 +174,8 @@ void Snes::dmaCycle() {
   const std::uint32_t bAddr =
       0x2100u | ((ch.bbad + pattern.offset[state_.dmaUnit]) & 0xFFu);
   const std::uint32_t aAddr = (static_cast<std::uint32_t>(ch.a1b) << 16) | ch.a1t;
-  if ((ch.dmap & 0x80u) == 0u) {  // A -> B
-    const std::uint8_t byte = engineRead(aAddr, /*aBus=*/true, AccessSource::Dma, channel);
-    engineWrite(bAddr, byte, /*aBus=*/false, AccessSource::Dma, channel);
-  } else {                         // B -> A
-    const std::uint8_t byte = engineRead(bAddr, /*aBus=*/false, AccessSource::Dma, channel);
-    engineWrite(aAddr, byte, /*aBus=*/true, AccessSource::Dma, channel);
-  }
+  engineByte(aAddr, bAddr, /*toA=*/(ch.dmap & 0x80u) != 0u, AccessSource::Dma, channel,
+             /*table=*/false);
 
   // Step the A-bus address by the adjust mode: increment, decrement, or fixed.
   const std::uint8_t adjust = (ch.dmap >> 3) & 3u;
@@ -171,24 +202,49 @@ void Snes::dmaCycle() {
 
 // ---- the HDMA engine ------------------------------------------------------
 
-void Snes::hdmaLoadEntry(std::uint8_t index, bool indirect) {
-  // Read the next line-count byte from the table, advancing the table pointer. A
-  // $00 terminates the channel — the caller deactivates it. An indirect entry then
-  // carries a two-byte pointer, loaded into the channel's indirect address. Every
-  // byte read here is the table's, and is reported as such.
+void Snes::hdmaLoadCount(std::uint8_t index) {
+  // The next line-count byte, read from the table as the cursor steps past it. A $00
+  // ends the channel for the frame, which is the caller's to act on. Every byte the
+  // engine reads from a table is reported as the table's.
   DmaChannel& channel = state_.dma[index];
   channel.nltr = engineRead((static_cast<std::uint32_t>(channel.a1b) << 16) | channel.a2a,
                             /*aBus=*/true, AccessSource::Hdma, index, /*table=*/true);
   channel.a2a = static_cast<std::uint16_t>(channel.a2a + 1u);
-  if (channel.nltr == 0u) return;
-  if (indirect) {
-    const std::uint32_t bank = static_cast<std::uint32_t>(channel.a1b) << 16;
-    const std::uint8_t lo = engineRead(bank | channel.a2a, /*aBus=*/true, AccessSource::Hdma, index,
-                                       /*table=*/true);
-    const std::uint8_t hi = engineRead(bank | static_cast<std::uint16_t>(channel.a2a + 1u),
-                                       /*aBus=*/true, AccessSource::Hdma, index, /*table=*/true);
-    channel.das = static_cast<std::uint16_t>(lo | (hi << 8));
-    channel.a2a = static_cast<std::uint16_t>(channel.a2a + 2u);
+}
+
+void Snes::hdmaLoadPointer(std::uint8_t index, bool highByteOnly, bool pastTableEnd) {
+  // An indirect entry's pointer, read from the table into the channel's indirect
+  // address. The whole load is two bytes, low then high. The short one reads a single
+  // byte into the high half and leaves the low half $00, the cursor stepping one.
+  DmaChannel& channel = state_.dma[index];
+  const std::uint32_t bank = static_cast<std::uint32_t>(channel.a1b) << 16;
+  std::uint8_t lo = 0x00u;
+  if (!highByteOnly) {
+    lo = engineRead(bank | channel.a2a, /*aBus=*/true, AccessSource::Hdma, index, /*table=*/true,
+                    pastTableEnd);
+    channel.a2a = static_cast<std::uint16_t>(channel.a2a + 1u);
+  }
+  const std::uint8_t hi = engineRead(bank | channel.a2a, /*aBus=*/true, AccessSource::Hdma, index,
+                                     /*table=*/true, pastTableEnd);
+  channel.a2a = static_cast<std::uint16_t>(channel.a2a + 1u);
+  channel.das = static_cast<std::uint16_t>(lo | (hi << 8));
+}
+
+void Snes::endDmaOnChannels(std::uint8_t channels) noexcept {
+  // HDMA outranks a general-purpose DMA. An event on other channels only holds the
+  // transfer for as long as it takes; one that involves the channel the transfer is on
+  // ends that channel's transfer where it stands — its $420B bit clears and its count
+  // keeps what was left — and the next selected channel, if there is one, runs from
+  // its own overhead cycle.
+  if (!state_.dmaRunning) return;
+  const std::uint8_t current =
+      static_cast<std::uint8_t>(1u << std::countr_zero(state_.mdmaen));
+  if ((channels & current) == 0u) return;
+  state_.mdmaen = static_cast<std::uint8_t>(state_.mdmaen & ~current);
+  state_.dmaChannelOpened = false;
+  if (state_.mdmaen == 0u) {
+    state_.dmaRunning = false;
+    state_.dmaResumePad = true;
   }
 }
 
@@ -224,7 +280,8 @@ void Snes::hdmaCycle() {
   if (state_.hdmaIniting) {
     // Start of frame: point each enabled channel's table cursor at its table start
     // and load its first entry. A channel whose first byte is $00 is done for the
-    // frame before it delivers anything.
+    // frame before it delivers anything, and its pointer is not read.
+    endDmaOnChannels(state_.hdmaen);
     state_.hdmaActive = 0u;
     state_.hdmaEnded = 0u;
     state_.hdmaDoWrite = 0u;
@@ -234,7 +291,10 @@ void Snes::hdmaCycle() {
       const bool indirect = (ch.dmap & 0x40u) != 0u;
       cost += indirect ? kHdmaIndirectInit : kHdmaChannel;
       ch.a2a = ch.a1t;
-      hdmaLoadEntry(c, indirect);
+      hdmaLoadCount(c);
+      if (indirect && ch.nltr != 0u) {
+        hdmaLoadPointer(c, /*highByteOnly=*/false, /*pastTableEnd=*/false);
+      }
       if (ch.nltr != 0u) {
         state_.hdmaActive |= static_cast<std::uint8_t>(1u << c);
         state_.hdmaDoWrite |= static_cast<std::uint8_t>(1u << c);
@@ -251,6 +311,10 @@ void Snes::hdmaCycle() {
   // A visible scanline's delivery, for every channel whose table is still running and
   // whose bit $420C still holds.
   const std::uint8_t delivering = static_cast<std::uint8_t>(state_.hdmaActive & state_.hdmaen);
+  endDmaOnChannels(delivering);
+  // The highest channel delivering is the line's last, which matters to one load below.
+  // With none delivering the count is eight and this names no channel.
+  const std::uint8_t lastChannel = static_cast<std::uint8_t>(7 - std::countl_zero(delivering));
   for (std::uint8_t c = 0; c < 8; ++c) {
     if (((delivering >> c) & 1u) == 0u) continue;
     DmaChannel& ch = state_.dma[c];
@@ -270,15 +334,10 @@ void Snes::hdmaCycle() {
           ch.a2a = static_cast<std::uint16_t>(ch.a2a + 1u);
         }
         // A direct table's value is read from the table itself; an indirect
-        // entry's is read from where its pointer says.
-        if ((ch.dmap & 0x80u) == 0u) {  // A -> B, HDMA's usual direction
-          const std::uint8_t byte =
-              engineRead(aAddr, /*aBus=*/true, AccessSource::Hdma, c, /*table=*/!indirect);
-          engineWrite(bAddr, byte, /*aBus=*/false, AccessSource::Hdma, c);
-        } else {                         // B -> A
-          const std::uint8_t byte = engineRead(bAddr, /*aBus=*/false, AccessSource::Hdma, c);
-          engineWrite(aAddr, byte, /*aBus=*/true, AccessSource::Hdma, c);
-        }
+        // entry's is read from where its pointer says. A -> B is HDMA's usual
+        // direction, and the other is honoured.
+        engineByte(aAddr, bAddr, /*toA=*/(ch.dmap & 0x80u) != 0u, AccessSource::Hdma, c,
+                   /*table=*/!indirect);
         cost += kDmaByte;
       }
     }
@@ -298,8 +357,16 @@ void Snes::hdmaCycle() {
       state_.hdmaDoWrite = static_cast<std::uint8_t>(state_.hdmaDoWrite & ~bit);
     }
     if ((ch.nltr & 0x7Fu) == 0u) {
-      if (indirect) cost += kHdmaIndirectLoad;
-      hdmaLoadEntry(c, indirect);
+      hdmaLoadCount(c);
+      if (indirect) {
+        // The pointer is read whatever the count was, so a table's end still loads the
+        // two bytes that follow its $00. The line's last channel is the exception: on a
+        // $00 it reads one byte, and the load takes one eight-cycle read fewer.
+        const bool ended = ch.nltr == 0u;
+        const bool shortLoad = ended && c == lastChannel;
+        hdmaLoadPointer(c, shortLoad, /*pastTableEnd=*/ended);
+        cost += shortLoad ? kHdmaIndirectLoad - kDmaByte : kHdmaIndirectLoad;
+      }
       if (ch.nltr == 0u) {  // a terminator ends the channel for the frame
         state_.hdmaActive = static_cast<std::uint8_t>(state_.hdmaActive & ~bit);
         state_.hdmaDoWrite = static_cast<std::uint8_t>(state_.hdmaDoWrite & ~bit);

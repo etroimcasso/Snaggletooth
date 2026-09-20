@@ -137,6 +137,13 @@ the low-page mirror of any system bank, and through the data port. The data port
 in `$2181` (low), `$2182` (middle), and `$2183` (bit 16); each read or write of `$2180` moves a byte at
 that address and steps it, so a block of work RAM streams through one register.
 
+Work RAM is one chip on both buses, and a DMA or HDMA byte that names it on both — a work-RAM address
+on the A bus and `$2180-$2183` on the B bus — is not copied. The port's side of the byte is open bus:
+from work RAM into `$2180` nothing is written, from `$2180` into work RAM the byte written is the one
+the data bus already held, and the port's address steps in neither case. From work RAM into
+`$2181-$2183` the address registers keep what they had. A transfer into the port from the cartridge, or
+out of it into save RAM, copies as any other does.
+
 ```cpp
 // Point the port at $00100 and stream two bytes into work RAM.
 // (From CPU code: STA $2181/$2182/$2183 to set the address, then STA $2180 twice.)
@@ -334,8 +341,13 @@ Two interrupt sources reach the CPU, both driven from these counters:
   all the same. Reading the flag before re-enabling avoids taking an old NMI twice.
 - **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: a horizontal position (`$4207/$4208`), a
   vertical line (`$4209/$420A`), or both. The flag at `$4211` bit 7 is raised when the beam passes the
-  point the mode names, and the IRQ line follows it; reading `$4211` or selecting no compare acknowledges
-  it. A handler that does neither runs again.
+  point the mode names, and the IRQ line follows it; reading `$4211`, writing it, or selecting no compare
+  acknowledges it. A handler that does none of them runs again. A read in the very cycle the flag rises
+  is the exception: it receives bit 7 set and acknowledges nothing, so the flag still stands after it
+  and the IRQ is taken.
+
+  *The write is documented and uncorroborated.* anomie's register document states it, and no reading
+  has confirmed it.
 
   | Mode | The point |
   |---|---|
@@ -526,7 +538,14 @@ selected channel is done, lowest channel number first. The address step (bits 4-
 A-bus address after each byte: increment (0), decrement (2), or hold it fixed (1 or 3) to fill from one
 source byte. A byte count of zero means the whole 65536; when the transfer finishes, `das` is zero and the
 channel's `$420B` bit clears. DMA cannot reach the memory-mapped registers on the A bus
-(`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus.
+(`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus. Nor can it
+copy work RAM through the work-RAM port, in either direction; see [the memory map](#the-memory-map).
+
+HDMA outranks a DMA in progress. An HDMA event on other channels holds the transfer for as long as the
+event takes and the transfer then goes on. An event that involves the channel the transfer is on —
+the frame's initialisation of it, or a line's delivery from it — ends that channel's transfer where it
+stands: its `$420B` bit clears, `das` keeps the count that was left, the HDMA runs on the channel's
+registers as the transfer left them, and any other selected channel runs after it as it would have.
 
 ```cpp
 // A ROM->VRAM copy: channel 0, pattern 1, source $7E:0010, 8 bytes to $2118.
@@ -553,6 +572,16 @@ A table entry is a line-count byte followed by data. The line-count byte is `$00
 the frame, `$01-$80` to write one unit and then wait that many scanlines, or `$81-$FF` (the repeat flag)
 to write a unit on each of the next `count` lines. A direct table holds the data inline; an indirect table
 (bit 6 of `dmap`) holds a 16-bit pointer per entry, and the data is read from `dasb:das`.
+
+When an indirect channel's count runs out part-way down the picture, the engine reads the next count and
+then the pointer after it, whatever the count was. A `$00` therefore ends the channel with `das` loaded
+from the two bytes that follow it and `a2a` three bytes on. The last channel delivering on the line is
+the exception: on a `$00` it reads one byte, into the high half of `das` over a low half of `$00`, which
+leaves `a2a` two bytes on and takes eight master cycles fewer. At the frame's initialisation a `$00`
+first count ends the channel with no pointer read.
+
+*The pointer read after a `$00` is documented and uncorroborated.* anomie's register document states
+it, and no reading has confirmed it.
 
 `$420C` is read on every line, not only at the frame's start, so a program can take a channel out of the
 picture part-way down and put it back. A channel taken out delivers nothing while its bit is clear and
@@ -612,8 +641,9 @@ A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what th
 read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an
 opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and
 write-back, a vector pull — who made it, for an engine's access, which of the eight channels it
-served (`channel`) and whether the HDMA engine was reading its own table (`table`), and, for a write
-through a video data port, where the port put the byte (`landed`):
+served (`channel`), whether the HDMA engine was reading its own table (`table`) and whether that read
+lay past the table's end (`pastTableEnd`), and, for a write through a video data port, where the port
+put the byte (`landed`):
 
 | `AccessSource` | Who |
 |---|---|
@@ -629,6 +659,10 @@ points at is read from where the pointer says and is not the table's, and a writ
 together let a host follow every byte an engine moves back to the channel and the table it came from,
 which is how the [cartridge disassembler](snes-disassembler.md#what-a-run-moved) records what a run
 moved.
+
+`pastTableEnd` is true on the one or two `table` reads an indirect channel makes after a `$00` count:
+the engine reads where an entry's pointer would be, and those bytes belong to whatever follows the
+table. A host collecting a table's bytes leaves them out; see [HDMA](#hdma).
 
 `landed` is set on a write through a video data port, whoever made it, and says where the port put
 the byte: the VRAM word address for a write to `$2118` or `$2119`, after any address translation; the
@@ -749,6 +783,10 @@ moved, never copied; a moved machine carries its audio machine after its state.
   then run the frame. An empty port and a pad with nothing pressed differ past the sixteenth serial
   bit, which is how a program tells a controller from no controller.
 - A DMA byte count of zero (`das`) transfers the whole 65536 bytes, not none.
+- A DMA from work RAM into `$2180` moves nothing, and one from `$2180` into work RAM fills its target
+  with the last byte on the bus. Work RAM is copied to work RAM by the CPU.
+- A DMA on a channel HDMA is using stops at the next HDMA event with bytes left in `das`. Keep the two
+  on different channels.
 - A transfer's A-bus bank is fixed: the address wraps within its bank and never crosses into the next.
 - HDMA re-initialises every frame and delivers only on the visible lines; arm `$420C` and set the table
   before line 0, and it stops on its own at vblank.
@@ -792,6 +830,12 @@ Questions the documentation leaves about the beam, recorded rather than decided 
   256-cycle grid its start keeps, not the point at which each of the sixteen bits is clocked. Here the
   strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears. A
   cartridge of ours asks it.
+- **How long the timer's condition holds for a read of `$4211` to catch it.** fullsnes gives four to
+  eight master cycles. Here it is the one CPU cycle the flag rises in, whatever that cycle's length. A
+  cartridge of ours asks it, and whether a write clears the flag with it.
+- **Whether the frame's HDMA initialisation reads an indirect pointer after a `$00` first count.**
+  anomie's register document ends the channel "immediately" and hedges it. Here no pointer is read.
+  A cartridge of ours asks it.
 - **The arithmetic unit's result ports during the countdown.** The ports here hold the previous value
   until the whole result lands. A cartridge of ours asks it.
 - **Reading or writing `$4016` inside the auto-read's window.** One clock line is shared, so a read there

@@ -226,6 +226,10 @@ struct BusAccess {
   AccessSource source = AccessSource::Cpu;
   std::uint8_t channel = 0;  // the channel an engine's access served, 0-7; 0 for the CPU's and the port's
   bool table = false;        // the HDMA engine reading its table — a line count, a direct table's inline value, an indirect entry's pointer — rather than a byte an indirect entry points at, or any write
+  // A `table` read that lies past the table's end. An indirect channel whose count
+  // comes up $00 still reads the one or two bytes after it, where an entry's pointer
+  // would be; they belong to whatever follows the table, and the read says so here.
+  bool pastTableEnd = false;
   // Where a write to a video data port landed: the VRAM word address for a
   // write to $2118 or $2119, after any address translation; the palette word
   // for a write to $2122, on both halves; the OAM byte for a write to $2104,
@@ -351,7 +355,7 @@ struct SnesState {
   // ---- the interrupt registers ----------------------------------------------
   std::uint8_t nmitimen = 0;    // $4200: bit7 NMI enable, bits5-4 H/V IRQ mode, bit0 auto-joypad enable
   bool vblankNmi = false;       // $4210 bit7: set at the start of vblank, cleared on read and at vblank's end
-  bool timeup = false;          // $4211 bit7: set when the H/V counter reaches its timer, cleared on read
+  bool timeup = false;          // $4211 bit7: set when the H/V counter reaches its timer, cleared on read or write
   std::uint16_t htime = 0x01FF; // $4207/$4208: the H-count IRQ position, in dots (0..339)
   std::uint16_t vtime = 0x01FF; // $4209/$420A: the V-count IRQ position, in lines (0..261/311)
 
@@ -575,7 +579,8 @@ class Snes {
   // Where a video data port put the byte is what the port recorded as the
   // access routed through it, taken here so the next access starts clear.
   void observe(std::uint32_t address, std::uint8_t value, bool write, CycleKind kind,
-               AccessSource source, std::uint8_t channel = 0, bool table = false) {
+               AccessSource source, std::uint8_t channel = 0, bool table = false,
+               bool pastTableEnd = false) {
     const std::optional<std::uint16_t> landed = portLanding_;
     portLanding_.reset();
     if (observer_ == nullptr) return;
@@ -587,17 +592,25 @@ class Snes {
     access.source = source;
     access.channel = channel;
     access.table = table;
+    access.pastTableEnd = pastTableEnd;
     access.landed = landed;
     observer_->access(access);
   }
 
   // A transfer engine's two sides of one byte, reported as its accesses: the
   // read on one bus and the write on the other, in that order, each naming the
-  // channel it served. A read of an HDMA table says so with `table`.
+  // channel it served. A read of an HDMA table says so with `table`, and one past
+  // the table's end with `pastTableEnd` as well.
   std::uint8_t engineRead(std::uint32_t address, bool aBus, AccessSource source,
-                          std::uint8_t channel, bool table = false);
+                          std::uint8_t channel, bool table = false, bool pastTableEnd = false);
   void engineWrite(std::uint32_t address, std::uint8_t value, bool aBus, AccessSource source,
                    std::uint8_t channel);
+  // One byte of a transfer between A-bus address `aAddr` and B-bus address `bAddr`,
+  // into the A bus when `toA`. Work RAM named on both sides — a work-RAM address on
+  // the A bus and $2180-$2183 on the B bus — is not copied: the port's side is open
+  // bus, its address does not step, and the port reports no access of its own.
+  void engineByte(std::uint32_t aAddr, std::uint32_t bAddr, bool toA, AccessSource source,
+                  std::uint8_t channel, bool table);
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
@@ -657,8 +670,10 @@ class Snes {
   // sprite table's reload, the H/V timer's points, and the refresh.
   void crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
 
-  // Raises the timer flag when the crossing this cycle noted is the one the mode now
-  // selects. Part of closing a cycle.
+  // Whether the crossing this cycle's tick noted is the one the mode now selects, and
+  // the raising of the timer flag when it is, which is part of closing a cycle. A read
+  // of $4211 asks the first on its own, to learn that the flag rises in its cycle.
+  [[nodiscard]] bool timerCrossed() const noexcept;
   void settleTimer() noexcept;
 
   // The master-cycle length of the current scanline and the number of lines in the
@@ -719,17 +734,28 @@ class Snes {
   std::uint8_t dmaReadA(std::uint32_t address);
   void dmaWriteA(std::uint32_t address, std::uint8_t value);
   [[nodiscard]] static bool aBusExcluded(std::uint32_t address) noexcept;
+  // Whether an A-bus address is work RAM: banks $7E-$7F, or the first $2000 of a
+  // system bank.
+  [[nodiscard]] static bool aBusIsWorkRam(std::uint32_t address) noexcept;
   // The resume-rounding pad added to the first CPU cycle after a transfer, so the
   // machine resumes on a whole CPU-clock boundary since the pause.
   [[nodiscard]] std::uint32_t resumePad(std::uint32_t cpuCycle) const noexcept;
 
   // The HDMA engine: one whole event — the start-of-frame initialisation, or a
-  // single visible scanline's delivery for every active channel — the helper that
-  // loads the next table entry into a channel, and the $420C write, which takes a
-  // channel out of the picture's remaining lines or brings one into them.
+  // single visible scanline's delivery for every active channel — and the $420C
+  // write, which takes a channel out of the picture's remaining lines or brings one
+  // into them.
   void hdmaCycle();
-  void hdmaLoadEntry(std::uint8_t index, bool indirect);
   void enableHdma(std::uint8_t channels);
+  // The two reads that load a table entry into a channel: the line count, and an
+  // indirect entry's pointer — both of its bytes, or with `highByteOnly` a single byte
+  // into the high half over a low half of $00. `pastTableEnd` is what the pointer's
+  // reads report: set when the count before them ended the table.
+  void hdmaLoadCount(std::uint8_t index);
+  void hdmaLoadPointer(std::uint8_t index, bool highByteOnly, bool pastTableEnd);
+  // Ends the running DMA's current channel when an HDMA event involves it: `channels`
+  // is the event's set. The channel's $420B bit clears and its count stands.
+  void endDmaOnChannels(std::uint8_t channels) noexcept;
 
   // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
   // register files, read and written by their documented layout.

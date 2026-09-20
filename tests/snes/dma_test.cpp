@@ -17,21 +17,36 @@
 namespace snaggletooth {
 namespace {
 
-// A machine that runs `program` from $8000, to trigger a transfer from CPU code.
-// The DMA channel registers are set up separately, in the state.
-Snes programMachine(std::initializer_list<std::uint8_t> program) {
+// Where a case's own bytes sit in the cartridge: $00:9000, clear of any program. A
+// transfer into the work-RAM port takes its bytes from here, because the console does
+// not copy work RAM through that port (anomie's register document, 835-838).
+constexpr std::uint16_t kCartridgeData = 0x9000u;
+
+// A cartridge that runs `program` from $8000, with `data` at kCartridgeData.
+std::vector<std::uint8_t> cartridgeImage(std::initializer_list<std::uint8_t> program,
+                                         std::initializer_list<std::uint8_t> data = {}) {
   std::vector<std::uint8_t> rom(program.begin(), program.end());
   rom.resize(0x8000u, 0x00u);
+  std::size_t at = kCartridgeData - 0x8000u;
+  for (const std::uint8_t byte : data) rom[at++] = byte;
   rom[0x7FFCu] = 0x00u;   // reset -> $8000
   rom[0x7FFDu] = 0x80u;
+  return rom;
+}
+
+// A machine that runs that cartridge, to trigger a transfer from CPU code. The DMA
+// channel registers are set up separately, in the state.
+Snes programMachine(std::initializer_list<std::uint8_t> program,
+                    std::initializer_list<std::uint8_t> data = {}) {
+  const std::vector<std::uint8_t> rom = cartridgeImage(program, data);
   return Snes(SnesConfig{.rom = rom});
 }
 
 // A machine halted at the frame origin, its counters zeroed, so running it advances
 // only the beam (and any HDMA the state arms). Used to drive HDMA and to place the
 // DMA engine at a chosen master position for the timing cases.
-Snes haltedMachine() {
-  Snes m = programMachine({0xDBu});  // STP
+Snes haltedMachine(std::initializer_list<std::uint8_t> data = {}) {
+  Snes m = programMachine({0xDBu}, data);  // STP
   m.step();                          // halt the core
   SnesState s = m.state();
   s.master = 0; s.consumed = 0; s.apuPhase = 0;
@@ -103,8 +118,9 @@ TEST(SnesDma, MiddleRegistersReadOpenBus) {
 // Arms channel 0 in `s` for an A->B transfer and returns a machine whose program
 // triggers it, then runs to completion. The channel is configured by the caller.
 Snes runDma(const DmaChannel& channel, std::uint8_t enable,
-            void (*seed)(SnesState&) = nullptr) {
-  Snes m = programMachine({kLdaImm, enable, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
+            void (*seed)(SnesState&) = nullptr,
+            std::initializer_list<std::uint8_t> data = {}) {
+  Snes m = programMachine({kLdaImm, enable, kStaAbs, 0x0Bu, 0x42u, kNop, kStp}, data);
   SnesState s = m.state();
   s.dma[0] = channel;
   if (seed != nullptr) seed(s);
@@ -161,49 +177,52 @@ TEST(SnesDma, DecrementWalksTheSourceBackward) {
   const DmaChannel ch{
       .dmap = 0x10u,   // A->B, decrement (bits4-3 = 10), pattern 0
       .bbad = 0x80u,   // $2180 (WRAM data port)
-      .a1t = 0x0042u,
-      .a1b = 0x7Eu,
+      .a1t = static_cast<std::uint16_t>(kCartridgeData + 2u),
+      .a1b = 0x00u,
       .das = 0x0003u,
   };
-  Snes m = runDma(ch, 0x01u, [](SnesState& s) {
-    s.wram[0x42u] = 0x11u;
-    s.wram[0x41u] = 0x22u;
-    s.wram[0x40u] = 0x33u;
-    s.wmadd = 0x00100u;  // write the three bytes to $100..$102
-  });
+  Snes m = runDma(
+      ch, 0x01u,
+      [](SnesState& s) { s.wmadd = 0x00100u; },  // write the three bytes to $100..$102
+      {0x33u, 0x22u, 0x11u});
   EXPECT_EQ(m.state().wram[0x100], 0x11u);
   EXPECT_EQ(m.state().wram[0x101], 0x22u);
   EXPECT_EQ(m.state().wram[0x102], 0x33u);
-  EXPECT_EQ(m.state().dma[0].a1t, 0x003Fu);  // stepped down three
+  EXPECT_EQ(m.state().dma[0].a1t, kCartridgeData - 1u);  // stepped down three
 }
 
 TEST(SnesDma, DirectionBtoAReadsTheRegisterIntoMemory) {
-  // Direction 1 copies from the B bus to the A bus: read a PPU-status style register
-  // and store it into work RAM. $4212 with no controller and outside blanking reads
-  // its open-bus middle bits as zero and the flags as their state.
-  const DmaChannel ch{
+  // Direction 1 copies from the B bus to the A bus: the work-RAM port streams two
+  // bytes of work RAM into the cartridge's save RAM, whose window opens at $70:0000.
+  const std::vector<std::uint8_t> rom =
+      cartridgeImage({kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
+  Snes m(SnesConfig{.rom = rom, .saveRamBytes = std::size_t{0x2000u}});
+  SnesState s = m.state();
+  s.dma[0] = DmaChannel{
       .dmap = 0x80u,   // B->A, increment, pattern 0
       .bbad = 0x80u,   // $2180 -> reads work RAM at the port
       .a1t = 0x0200u,
-      .a1b = 0x7Eu,
+      .a1b = 0x70u,
       .das = 0x0002u,
   };
-  Snes m = runDma(ch, 0x01u, [](SnesState& s) {
-    s.wmadd = 0x00050u;
-    s.wram[0x50u] = 0xABu;
-    s.wram[0x51u] = 0xCDu;
-  });
-  EXPECT_EQ(m.state().wram[0x200], 0xABu);  // the port streamed WRAM[$50], WRAM[$51]
-  EXPECT_EQ(m.state().wram[0x201], 0xCDu);
+  s.wmadd = 0x00050u;
+  s.wram[0x50u] = 0xABu;
+  s.wram[0x51u] = 0xCDu;
+  m.restore(s);
+  m.run(20000u);
+  EXPECT_EQ(m.state().sram[0x200], 0xABu);  // the port streamed WRAM[$50], WRAM[$51]
+  EXPECT_EQ(m.state().sram[0x201], 0xCDu);
+  EXPECT_EQ(m.state().wmadd, 0x00052u);
 }
 
 TEST(SnesDma, TwoChannelsRunLowestFirst) {
-  Snes m = programMachine({kLdaImm, 0x05u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});  // channels 0 and 2
+  Snes m = programMachine({kLdaImm, 0x05u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp},  // channels 0 and 2
+                          {0x01u, 0x02u, 0x03u, 0x04u});
   SnesState s = m.state();
-  s.dma[0] = DmaChannel{.dmap = 0x00u, .bbad = 0x80u, .a1t = 0x0010u, .a1b = 0x7Eu, .das = 0x0002u};
-  s.dma[2] = DmaChannel{.dmap = 0x00u, .bbad = 0x80u, .a1t = 0x0020u, .a1b = 0x7Eu, .das = 0x0002u};
-  s.wram[0x10u] = 0x01u; s.wram[0x11u] = 0x02u;
-  s.wram[0x20u] = 0x03u; s.wram[0x21u] = 0x04u;
+  s.dma[0] = DmaChannel{.dmap = 0x00u, .bbad = 0x80u, .a1t = kCartridgeData, .a1b = 0x00u,
+                        .das = 0x0002u};
+  s.dma[2] = DmaChannel{.dmap = 0x00u, .bbad = 0x80u, .a1t = static_cast<std::uint16_t>(kCartridgeData + 2u), .a1b = 0x00u,
+                        .das = 0x0002u};
   s.wmadd = 0x00100u;
   m.restore(s);
   m.run(20000u);
@@ -230,6 +249,82 @@ TEST(SnesDma, ReadingTheRegisterRegionReturnsOpenBus) {
   // The channel's own DMAP register at $4300 is $00, but the excluded read does not
   // return it; it returns the open-bus value the transfer itself last drove.
   EXPECT_EQ(m.state().dma[0].a1t, 0x4301u);  // the transfer still ran and stepped
+}
+
+// ---- work RAM on both buses -----------------------------------------------
+//
+// Work RAM is one chip reached two ways: over the A bus at $7E-$7F and the first $2000
+// of every system bank, and over the B bus through the port at $2180-$2183. A transfer
+// that names it on both sides does not copy (anomie's register document, 835-838,
+// 854-855 and 2403-2404): the port's side of the byte is open bus, and the port's
+// address does not step.
+
+// What runDma's program leaves on the data bus as the transfer engages: the opcode of
+// the NOP after the store to $420B, fetched in the one CPU cycle the engine waits.
+constexpr std::uint8_t kBusAtEngage = kNop;
+
+TEST(SnesDma, ATransferFromWorkRamIntoTheWorkRamPortWritesNothing) {
+  for (const std::uint8_t bank : {std::uint8_t{0x7Eu}, std::uint8_t{0x00u}}) {
+    SCOPED_TRACE(int{bank});
+    DmaChannel ch;
+    ch.dmap = 0x00u;   // A->B, increment, pattern 0
+    ch.bbad = 0x80u;   // $2180
+    ch.a1t = 0x0010u;  // work RAM, in its own bank and through a system bank's mirror
+    ch.a1b = bank;
+    ch.das = 0x0003u;
+    Snes m = runDma(ch, 0x01u, [](SnesState& s) {
+      s.wram[0x10u] = 0xA0u; s.wram[0x11u] = 0xA1u; s.wram[0x12u] = 0xA2u;
+      s.wram[0x100u] = 0x55u; s.wram[0x101u] = 0x55u; s.wram[0x102u] = 0x55u;
+      s.wmadd = 0x00100u;
+    });
+    EXPECT_EQ(m.state().wram[0x100], 0x55u);
+    EXPECT_EQ(m.state().wram[0x101], 0x55u);
+    EXPECT_EQ(m.state().wram[0x102], 0x55u);
+    EXPECT_EQ(m.state().wmadd, 0x00100u) << "the port's address does not step";
+    EXPECT_EQ(m.state().dma[0].a1t, 0x0013u);  // the transfer itself ran to its end
+    EXPECT_EQ(m.state().dma[0].das, 0x0000u);
+  }
+}
+
+TEST(SnesDma, ATransferFromTheWorkRamPortIntoWorkRamWritesTheOpenBusValue) {
+  DmaChannel ch;
+  ch.dmap = 0x80u;   // B->A, increment, pattern 0
+  ch.bbad = 0x80u;   // $2180
+  ch.a1t = 0x0200u;
+  ch.a1b = 0x7Eu;
+  ch.das = 0x0002u;
+  Snes m = runDma(ch, 0x01u, [](SnesState& s) {
+    s.wmadd = 0x00050u;
+    s.wram[0x50u] = 0xABu;
+    s.wram[0x51u] = 0xCDu;
+  });
+  EXPECT_EQ(m.state().wram[0x200], kBusAtEngage);  // not the $AB the port points at
+  EXPECT_EQ(m.state().wram[0x201], kBusAtEngage);
+  EXPECT_EQ(m.state().wmadd, 0x00050u) << "the port's address does not step";
+}
+
+TEST(SnesDma, ATransferFromWorkRamIntoThePortsAddressRegistersHasNoEffect) {
+  // Pattern 1 from $2181 reaches WMADDL then WMADDM. From the cartridge the two bytes
+  // set the port's address; from work RAM they change nothing.
+  DmaChannel ch;
+  ch.dmap = 0x01u;
+  ch.bbad = 0x81u;
+  ch.das = 0x0002u;
+
+  ch.a1t = kCartridgeData;
+  ch.a1b = 0x00u;
+  Snes fromCartridge =
+      runDma(ch, 0x01u, [](SnesState& s) { s.wmadd = 0x00100u; }, {0x34u, 0x12u});
+  EXPECT_EQ(fromCartridge.state().wmadd, 0x01234u);
+
+  ch.a1t = 0x0010u;
+  ch.a1b = 0x7Eu;
+  Snes fromWorkRam = runDma(ch, 0x01u, [](SnesState& s) {
+    s.wram[0x10u] = 0x34u;
+    s.wram[0x11u] = 0x12u;
+    s.wmadd = 0x00100u;
+  });
+  EXPECT_EQ(fromWorkRam.state().wmadd, 0x00100u);
 }
 
 // ---- DMA timing: the four worked examples ---------------------------------
@@ -289,20 +384,21 @@ TEST(SnesDma, TimingSixPastBoundary) {
 TEST(SnesDma, SnapshotMidTransferResumesExactly) {
   // Run a long transfer part-way, snapshot, and finish on a fresh machine; the two
   // must land on identical destination memory and identical channel state.
-  const DmaChannel ch{.dmap = 0x00u, .bbad = 0x80u, .a1t = 0x0000u, .a1b = 0x7Eu, .das = 0x0040u};
+  // The source is the program's own bytes at $00:8000, which are not all alike.
+  const DmaChannel ch{.dmap = 0x00u, .bbad = 0x80u, .a1t = 0x8000u, .a1b = 0x00u, .das = 0x0040u};
 
   Snes reference = programMachine({kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
   SnesState rs = reference.state();
   rs.dma[0] = ch;
-  for (std::uint16_t i = 0; i < 0x40u; ++i) rs.wram[i] = static_cast<std::uint8_t>(i);
   rs.wmadd = 0x00800u;
   reference.restore(rs);
   reference.run(20000u);  // the whole transfer
+  ASSERT_EQ(reference.state().wram[0x800u], kLdaImm);  // the transfer copied
+  ASSERT_EQ(reference.state().wram[0x802u], kStaAbs);
 
   Snes split = programMachine({kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
   SnesState ss = split.state();
   ss.dma[0] = ch;
-  for (std::uint16_t i = 0; i < 0x40u; ++i) ss.wram[i] = static_cast<std::uint8_t>(i);
   ss.wmadd = 0x00800u;
   split.restore(ss);
   split.run(400u);            // stop somewhere inside the transfer
@@ -316,6 +412,98 @@ TEST(SnesDma, SnapshotMidTransferResumesExactly) {
     EXPECT_EQ(resumed.state().wram[0x800u + i], reference.state().wram[0x800u + i]) << "byte " << int(i);
   }
   EXPECT_EQ(resumed.state().dma[0].das, reference.state().dma[0].das);
+}
+
+// ---- an HDMA on the channel a DMA is running ------------------------------
+//
+// HDMA outranks DMA. An HDMA event on another channel holds a running DMA for as long
+// as it takes; one that involves the DMA's own channel ends that channel's DMA where it
+// stands, its count left as it was, and any other selected channel goes on (anomie's
+// register document, 1017-1021 and 2365-2366; 2415-2416 for the count).
+
+// A halted machine on line 10 with a DMA of 256 bytes from the cartridge into the
+// work-RAM port already holding the bus on `dmaChannels`, begun 1000 master cycles into
+// the line, and the channels of `hdmaChannels` active with one line left in an entry
+// whose table then ends. The engine opens in sixteen cycles and the channel in eight,
+// so byte n lands 1024 + 8n cycles in: the eleventh is the one whose cycle reaches the
+// delivery point at 1112, and the HDMA runs in the cycle after it.
+constexpr std::uint16_t kBytesBeforeTheDelivery = 11u;
+Snes dmaAcrossADelivery(std::uint8_t dmaChannels, std::uint8_t hdmaChannels) {
+  Snes m = haltedMachine();
+  SnesState s = m.state();
+  s.vpos = 10u;
+  s.hpos = 1000u;
+  s.master = 10ull * kLine + 1000ull;
+  s.consumed = s.master;
+  s.dmaPauseMaster = s.master;
+  s.dmaRunning = true; s.dmaOpened = false; s.dmaChannelOpened = false; s.dmaUnit = 0;
+  s.mdmaen = dmaChannels;
+  s.hdmaen = hdmaChannels;
+  s.hdmaActive = hdmaChannels;
+  s.hdmaInited = true;
+  for (std::uint8_t c = 0; c < 8; ++c) {
+    DmaChannel& ch = s.dma[c];
+    ch.dmap = 0x00u;
+    ch.bbad = 0x80u;   // the DMA's target: $2180
+    ch.a1t = kCartridgeData;
+    ch.a1b = 0x00u;
+    ch.das = 0x0100u;
+    ch.a2a = 0xA000u;  // the HDMA's table: a $00, so the entry that follows ends it
+    ch.nltr = 0x01u;
+  }
+  s.wmadd = 0x00100u;
+  m.restore(s);
+  return m;
+}
+
+TEST(SnesDma, AnHdmaOnTheRunningDmasChannelEndsThatDmaWithItsCountStanding) {
+  Snes m = dmaAcrossADelivery(0x01u, 0x01u);
+  m.run(4u * kLine);
+  EXPECT_FALSE(m.state().dmaRunning);
+  EXPECT_EQ(m.state().mdmaen, 0u);
+  EXPECT_EQ(m.state().dma[0].das, 0x0100u - kBytesBeforeTheDelivery);
+  EXPECT_EQ(m.state().wmadd, 0x00100u + kBytesBeforeTheDelivery) << "and no byte moved after it";
+}
+
+TEST(SnesDma, AnHdmaOnAnotherChannelHoldsTheDmaAndLetsItFinish) {
+  Snes m = dmaAcrossADelivery(0x01u, 0x02u);
+  m.run(4u * kLine);
+  EXPECT_FALSE(m.state().dmaRunning);
+  EXPECT_EQ(m.state().dma[0].das, 0x0000u);
+  EXPECT_EQ(m.state().wmadd, 0x00200u);
+}
+
+TEST(SnesDma, AnHdmaEndingOneChannelsDmaLeavesTheOtherSelectedChannelsToRun) {
+  Snes m = dmaAcrossADelivery(0x05u, 0x01u);
+  m.run(4u * kLine);
+  EXPECT_FALSE(m.state().dmaRunning);
+  EXPECT_EQ(m.state().mdmaen, 0u);
+  EXPECT_EQ(m.state().dma[0].das, 0x0100u - kBytesBeforeTheDelivery);
+  EXPECT_EQ(m.state().dma[2].das, 0x0000u);
+  EXPECT_EQ(m.state().wmadd, 0x00200u + kBytesBeforeTheDelivery);
+}
+
+TEST(SnesDma, TheFramesHdmaInitialisationEndsADmaOnAChannelItInitialises) {
+  // The initialisation comes due 24 master cycles into line 0, which is where a DMA
+  // begun at the frame's origin has opened the engine and its channel and moved nothing.
+  Snes m = haltedMachine();
+  SnesState s = m.state();
+  s.dmaRunning = true; s.dmaOpened = false; s.dmaChannelOpened = false; s.dmaUnit = 0;
+  s.mdmaen = 0x01u;
+  s.hdmaen = 0x01u;
+  DmaChannel& ch = s.dma[0];
+  ch.dmap = 0x00u;
+  ch.bbad = 0x80u;
+  ch.a1t = kCartridgeData;  // the DMA's source and the HDMA's table: a $00 first
+  ch.a1b = 0x00u;
+  ch.das = 0x0100u;
+  s.wmadd = 0x00100u;
+  m.restore(s);
+  m.run(2u * kLine);
+  EXPECT_FALSE(m.state().dmaRunning);
+  EXPECT_EQ(m.state().mdmaen, 0u);
+  EXPECT_EQ(m.state().dma[0].das, 0x0100u);
+  EXPECT_EQ(m.state().wmadd, 0x00100u);
 }
 
 // ---- HDMA -----------------------------------------------------------------
@@ -732,6 +920,122 @@ TEST(SnesDma, HdmaDeactivatesAtVblank) {
   m.restore(s2);
   m.run(4u * kLine);
   EXPECT_EQ(m.state().ppu.inidisp, 0x33u);         // untouched through vblank
+}
+
+// ---- work RAM on both buses, under HDMA -----------------------------------
+
+TEST(SnesDma, HdmaFromWorkRamIntoTheWorkRamPortWritesNothing) {
+  // The rule a DMA obeys holds for HDMA as well (anomie's register document, 2477).
+  // One table — write $AA once, then stop — delivered to $2180 from the cartridge and
+  // from work RAM.
+  const auto deliver = [](std::uint8_t bank, std::uint16_t table) {
+    Snes m = haltedMachine({0x01u, 0xAAu, 0x00u});
+    SnesState s = m.state();
+    s.wram[0x300u] = 0x01u; s.wram[0x301u] = 0xAAu; s.wram[0x302u] = 0x00u;
+    s.dma[0].dmap = 0x00u;
+    s.dma[0].bbad = 0x80u;
+    s.dma[0].a1t = table;
+    s.dma[0].a1b = bank;
+    s.hdmaen = 0x01u;
+    s.wmadd = 0x00100u;
+    s.wram[0x100u] = 0x55u;
+    m.restore(s);
+    m.run(1200u);  // past line 0's delivery
+    return m;
+  };
+  Snes fromCartridge = deliver(0x00u, kCartridgeData);
+  EXPECT_EQ(fromCartridge.state().wram[0x100], 0xAAu);
+  EXPECT_EQ(fromCartridge.state().wmadd, 0x00101u);
+
+  Snes fromWorkRam = deliver(0x7Eu, 0x0300u);
+  EXPECT_EQ(fromWorkRam.state().wram[0x100], 0x55u);
+  EXPECT_EQ(fromWorkRam.state().wmadd, 0x00100u);
+  EXPECT_EQ(fromWorkRam.state().dma[0].a2a, 0x0303u);  // the table was walked all the same
+}
+
+// ---- an indirect table's end ----------------------------------------------
+//
+// When an indirect channel's count runs out the engine reads the next count and then
+// the pointer after it, whatever the count was: a $00 ends the channel with its
+// pointer loaded and the cursor three bytes on. The line's last active channel is the
+// exception — on a $00 it reads one byte, into the pointer's high half over a low half
+// of $00, leaving the cursor two bytes on and spending eight master cycles fewer
+// (anomie's register document, 2481-2493).
+
+// An indirect channel to `bbad` whose table sits at `table` in work RAM: one line from
+// $7E:0400, then a $00 followed by $34 $12.
+void armIndirect(SnesState& s, std::uint8_t channel, std::uint8_t bbad, std::uint16_t table) {
+  DmaChannel& ch = s.dma[channel];
+  ch.dmap = 0x40u;  // A->B, indirect, pattern 0
+  ch.bbad = bbad;
+  ch.a1t = table;
+  ch.a1b = 0x7Eu;
+  ch.dasb = 0x7Eu;
+  const std::uint8_t bytes[] = {0x01u, 0x00u, 0x04u, 0x00u, 0x34u, 0x12u};
+  for (std::size_t i = 0; i < sizeof bytes; ++i) s.wram[table + i] = bytes[i];
+  s.hdmaen = static_cast<std::uint8_t>(s.hdmaen | (1u << channel));
+}
+
+// The master cycles line 0's delivery takes: the machine is run past the frame's
+// initialisation, then to the cycle the delivery is owed in, and that cycle is timed.
+std::uint32_t deliveryCost(Snes& m) {
+  m.run(600u);
+  while (!m.state().hdmaRunPending) m.step();
+  return m.step();
+}
+
+TEST(SnesDma, AnIndirectChannelWhoseTableEndsStillReadsThePointerAfterTheEnd) {
+  Snes m = haltedMachine();
+  SnesState s = m.state();
+  armIndirect(s, 0, 0x00u, 0x0300u);
+  armIndirect(s, 1, 0x06u, 0x0320u);
+  m.restore(s);
+  // The overhead, then each channel's own eight, its one byte, and its pointer load:
+  // sixteen for channel 0 and eight for channel 1, the last one active.
+  EXPECT_EQ(deliveryCost(m), 18u + (8u + 8u + 16u) + (8u + 8u + 8u));
+  EXPECT_EQ(m.state().hdmaActive, 0u);  // both tables ended
+  EXPECT_EQ(m.state().dma[0].das, 0x1234u);
+  EXPECT_EQ(m.state().dma[0].a2a, 0x0306u);
+  EXPECT_EQ(m.state().dma[1].das, 0x3400u);  // one byte, over a low half of $00
+  EXPECT_EQ(m.state().dma[1].a2a, 0x0325u);
+}
+
+TEST(SnesDma, AnIndirectChannelEndedByItsFirstCountReadsNoPointer) {
+  // The frame's initialisation is the other place a count is read, and there a $00
+  // ends the channel with the cursor one byte on and the indirect address untouched.
+  Snes m = haltedMachine();
+  SnesState s = m.state();
+  armIndirect(s, 0, 0x00u, 0x0300u);
+  s.wram[0x300u] = 0x00u;  // the table's first count
+  s.dma[0].das = 0x5555u;
+  m.restore(s);
+  while (!m.state().hdmaRunPending) m.step();
+  EXPECT_EQ(m.step(), 18u + 24u);  // the overhead and an indirect channel's share of it
+  EXPECT_EQ(m.state().dma[0].a2a, 0x0301u);
+  EXPECT_EQ(m.state().dma[0].das, 0x5555u);
+  EXPECT_EQ(m.state().hdmaActive, 0u);
+}
+
+TEST(SnesDma, TheShortPointerLoadIsForATableThatEndsAndNoOther) {
+  // A lone channel is its line's last. Its table going on to another entry loads a
+  // whole pointer at the whole sixteen cycles; the $00 is what shortens it.
+  Snes m = haltedMachine();
+  SnesState s = m.state();
+  armIndirect(s, 0, 0x00u, 0x0300u);
+  s.wram[0x303u] = 0x01u;  // in place of the $00: one more line, from $7E:1234
+  m.restore(s);
+  EXPECT_EQ(deliveryCost(m), 18u + 8u + 8u + 16u);
+  EXPECT_EQ(m.state().dma[0].das, 0x1234u);
+  EXPECT_EQ(m.state().dma[0].a2a, 0x0306u);
+  EXPECT_EQ(m.state().hdmaActive, 0x01u);
+
+  Snes ended = haltedMachine();
+  SnesState e = ended.state();
+  armIndirect(e, 0, 0x00u, 0x0300u);
+  ended.restore(e);
+  EXPECT_EQ(deliveryCost(ended), 18u + 8u + 8u + 8u);
+  EXPECT_EQ(ended.state().dma[0].das, 0x3400u);
+  EXPECT_EQ(ended.state().dma[0].a2a, 0x0305u);
 }
 
 }  // namespace

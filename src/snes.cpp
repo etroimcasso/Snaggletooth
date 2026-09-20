@@ -596,16 +596,20 @@ std::uint64_t Snes::nextRefresh(std::uint64_t lineStart) const noexcept {
   return ahead <= 4u ? target - ahead : target + (8u - ahead);
 }
 
+bool Snes::timerCrossed() const noexcept {
+  switch (static_cast<std::uint8_t>((state_.nmitimen >> 4) & 3u)) {
+    case 1: return timerHPoint_;         // H = H on every line
+    case 2: return timerZeroOnVLine_;    // V = V, with no H to compare
+    case 3: return timerHPointOnVLine_;  // H = H and V = V
+    default: return false;               // the timer is off
+  }
+}
+
 void Snes::settleTimer() noexcept {
   // A crossing is noted as the cycle ticks and the flag is raised at the cycle's end
   // under the mode the cycle leaves behind, so a write that arms the timer in the very
   // cycle its point is crossed is in time and one that disarms it is too.
-  switch (static_cast<std::uint8_t>((state_.nmitimen >> 4) & 3u)) {
-    case 1: if (timerHPoint_) state_.timeup = true; return;        // H = H on every line
-    case 2: if (timerZeroOnVLine_) state_.timeup = true; return;   // V = V, with no H to compare
-    case 3: if (timerHPointOnVLine_) state_.timeup = true; return; // H = H and V = V
-    default: return;                                               // the timer is off
-  }
+  if (timerCrossed()) state_.timeup = true;
 }
 
 void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
@@ -995,8 +999,11 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
       return latch(v);
     }
     case 0x4211: {  // TIMEUP: the H/V-timer IRQ flag (bit 7), open bus below
+      // A read in the very cycle the flag rises receives it set and acknowledges
+      // nothing (fullsnes.txt 1781-1784): the cycle has ticked, so the crossing is
+      // known here, and the cycle's end raises the flag over this read's clear.
       const std::uint8_t v = static_cast<std::uint8_t>(
-          (state_.timeup ? 0x80u : 0x00u) | (state_.mdr & 0x7Fu));
+          ((state_.timeup || timerCrossed()) ? 0x80u : 0x00u) | (state_.mdr & 0x7Fu));
       state_.timeup = false;  // reading acknowledges the flag
       return latch(v);
     }
@@ -1065,7 +1072,8 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x420B: triggerDma(value); return;             // start a general-purpose DMA on each selected channel
     case 0x420C: enableHdma(value); return;             // enable HDMA on the selected channels
     case 0x420D: state_.memsel = static_cast<std::uint8_t>(value & 1u); return;
-    default: return;  // the read-only ports ignore writes
+    case 0x4211: state_.timeup = false; return;  // TIMEUP: a write acknowledges the flag as a read does
+    default: return;  // the other read-only ports ignore writes
   }
 }
 
