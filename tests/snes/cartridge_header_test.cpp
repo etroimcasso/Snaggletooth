@@ -434,8 +434,12 @@ TEST(CartridgeHeader, LoRomLaysUpperHalvesEndToEnd) {
   EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x018000u, size), 0x008000u);
   EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x808000u, size), 0x000000u);  // the high bit only picks the speed
   EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0xFF8000u, size), 0x3F8000u);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x400000u, size), std::nullopt);  // a lower half reaches nothing
+  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x400000u, size), 0x200000u);  // a cartridge bank's lower half repeats its upper
+  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x401234u, size), romOffset(CartridgeMap::LoRom, 0x409234u, size));
+  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0xEF7FFFu, size), 0x37FFFFu);
+  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x001234u, size), std::nullopt);  // a system bank's lower half does not
   EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x700000u, size), std::nullopt);  // the save window
+  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0xFF7FFFu, size), std::nullopt);  // which runs through bank $FF
   EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x7E8000u, size), std::nullopt);  // work RAM
 }
 
@@ -508,10 +512,14 @@ TEST(CartridgeHeader, RegionsUnderEachMap) {
     EXPECT_EQ(cartridgeRegion(map, 0xBFFFFFu), R::Rom);
     EXPECT_EQ(cartridgeRegion(map, 0xC08000u), R::Rom);
   }
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xC00000u), R::Unmapped);
+  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xC00000u), R::Rom);
   EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0xC00000u), R::Rom);
   EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0xC00000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x400000u), R::Unmapped);
+  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x400000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x6F7FFFu), R::Rom);
+  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xFE0000u), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xFF7FFFu), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xFF8000u), R::Rom);
   EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x700000u), R::SaveRam);
   EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x708000u), R::Rom);
   EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x206000u), R::System);
@@ -532,6 +540,9 @@ TEST(CartridgeHeader, SaveWindowsUnderEachMap) {
   EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x711234u), 0x9234u);
   EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xF00000u), 0x0000u);
   EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x7D7FFFu), (std::size_t{0x0D} << 15) | 0x7FFFu);
+  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xFE0010u), (std::size_t{0x0E} << 15) | 0x0010u);
+  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xFF7FFFu), (std::size_t{0x0F} << 15) | 0x7FFFu);
+  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xEF0000u), std::nullopt);
   EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x708000u), std::nullopt);
   EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x7E0000u), std::nullopt);
   EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x6F0000u), std::nullopt);

@@ -131,6 +131,30 @@ struct Cpu65816State {
   CpuRunState run = CpuRunState::Running;
 };
 
+// The registers a reset leaves, from the registers it found and the word at $00FFFC.
+// The chip takes the direct register, both bank registers and the high bytes of X
+// and Y to zero and the stack pointer's high byte to $01, enters emulation mode with
+// the decimal flag clear and interrupts disabled, and ends a wait or a stop. The
+// accumulator, the low bytes of X, Y and the stack pointer, and the N, V, Z and C
+// flags are not initialised and keep what they held. Reset then runs the hardware
+// interrupt sequence with the write line held high: its three stack cycles read
+// where an interrupt would push, the stack pointer ends three lower within page
+// one, and the program counter is loaded from the vector. No instruction is in
+// progress afterwards and no interrupt is pending.
+[[nodiscard]] constexpr Cpu65816State afterReset(const Cpu65816State& before,
+                                                 std::uint16_t vector) noexcept {
+  Cpu65816State after;
+  after.pc = vector;
+  after.s = static_cast<std::uint16_t>(0x0100u | ((before.s - 3u) & 0xFFu));
+  after.a = before.a;
+  after.x = static_cast<std::uint16_t>(before.x & 0xFFu);
+  after.y = static_cast<std::uint16_t>(before.y & 0xFFu);
+  after.p = static_cast<std::uint8_t>((before.p | kCpuFlagM | kCpuFlagX | kCpuFlagI) &
+                                      static_cast<std::uint8_t>(~kCpuFlagD));
+  after.e = true;
+  return after;
+}
+
 class Cpu65816 {
  public:
   Cpu65816() = default;

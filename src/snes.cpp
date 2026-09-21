@@ -85,6 +85,7 @@ constexpr std::uint16_t kTimerQuietDot = 153u;
 // cycle at a time so a run can stop inside one.
 constexpr std::uint16_t kRefreshMaster = 40u;
 constexpr std::uint16_t kRefreshTarget = 536u;
+constexpr std::uint64_t kFirstRefresh = 538u;  // the first line's pause, which SnesState starts `refreshAt` at
 constexpr std::uint32_t kRefreshStep = 6u;
 
 // The multiply/divide unit is clocked by the CPU, so its documented latencies are
@@ -118,6 +119,8 @@ Snes::Snes(SnesConfig config)
       rom_(config.rom.begin(), config.rom.end()),
       region_(config.region) {
   map_ = config.map.value_or(detectCartridgeMap(rom_));
+  const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom_);
+  plainBoard_ = !header.has_value() || header->coprocessor == Coprocessor::None;
   const std::size_t save = config.saveRamBytes.value_or(declaredSaveRamBytes(rom_));
   state_.sram.assign(save > kMaxSaveRamBytes ? kMaxSaveRamBytes : save, 0u);
   const ApuRatio ratio = region_ == Region::Pal ? kPalApu : kNtscApu;
@@ -133,6 +136,7 @@ Snes::Snes(SnesConfig config)
         config.bootRom.has_value() ? std::span<const std::uint8_t, kIplWindowBytes>(*config.bootRom)
                                    : std::span<const std::uint8_t, kIplWindowBytes>(iplStubImage());
     seedIplStub(state_.apu, image);
+    bootsAudio_ = true;
     // Map the same image over the $FFC0 window. The upload shell scratch-writes
     // that range in RAM and re-enters it expecting the boot code to read back
     // unchanged; the mapping serves the image to the CPU while CONTROL bit 7 is set,
@@ -150,6 +154,8 @@ Snes::Snes(Snes&& moved) noexcept
       rom_(std::move(moved.rom_)),
       region_(moved.region_),
       map_(moved.map_),
+      plainBoard_(moved.plainBoard_),
+      bootsAudio_(moved.bootsAudio_),
       apuNum_(moved.apuNum_),
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
@@ -209,12 +215,85 @@ void Snes::sync() {
   state_.cpu = cpu_.state();
 }
 
-Cpu65816State Snes::powerOnCpu() const {
-  const std::uint16_t reset = static_cast<std::uint16_t>(
+std::uint16_t Snes::resetVector() const noexcept {
+  return static_cast<std::uint16_t>(
       romByte(0x00, 0xFFFC) |
       (static_cast<std::uint16_t>(romByte(0x00, 0xFFFD)) << 8));
+}
+
+void Snes::reset() {
+  // The CPU: the registers its reset leaves, at the cartridge's vector.
+  state_.cpu = afterReset(state_.cpu, resetVector());
+
+  // The 5A22's registers a reset initialises. The operands of the arithmetic unit,
+  // its results, HTIME, VTIME and the eight channels' register files are not among
+  // them and keep what they held.
+  state_.nmitimen = 0u;
+  state_.vblankNmi = false;
+  state_.timeup = false;
+  state_.wrio = 0xFFu;
+  state_.memsel = 0u;
+  state_.mdmaen = 0u;
+  state_.hdmaen = 0u;
+  state_.joyStrobe = false;
+  state_.joy = {};
+  state_.wmadd = 0u;  // the work-RAM chip's port address; its contents stand
+
+  // Nothing the chip was part-way through survives it: a transfer, the HDMA frame,
+  // an arithmetic job, an auto-read, a counter latch still owed.
+  state_.dmaArm = 0u;
+  state_.dmaRunning = false;
+  state_.dmaOpened = false;
+  state_.dmaChannelOpened = false;
+  state_.dmaUnit = 0u;
+  state_.dmaPauseMaster = 0u;
+  state_.dmaResumePad = false;
+  state_.hdmaActive = 0u;
+  state_.hdmaEnded = 0u;
+  state_.hdmaDoWrite = 0u;
+  state_.hdmaInited = false;
+  state_.hdmaLineFired = false;
+  state_.hdmaRunPending = false;
+  state_.hdmaIniting = false;
+  state_.mathClocks = 0u;
+  state_.mathOp = MathOp::None;
+  state_.autoJoyStart = 0u;
+  state_.autoJoyClocked = 0u;
+  state_.counterLatchAt = 0u;
+
+  // The machine starts again at H = 0, V = 0 with the parity clear, which is where
+  // construction starts it, so the master counter — what every "since reset" grid
+  // counts — begins again too, and the audio clock's share with it.
+  state_.master = 0u;
+  state_.consumed = 0u;
+  state_.apuPhase = 0u;
+  state_.hpos = 0u;
+  state_.vpos = 0u;
+  state_.field = 0u;
+  state_.inVblank = false;
+  state_.vblankBeginLine = 0u;
+  state_.previousLineMaster = kLineMaster;
+  state_.refreshAt = kFirstRefresh;
+  state_.refreshLeft = 0u;
+
+  // The PPU: the screen forced blank at the brightness it had, and the line begun
+  // the way the machine begins any first line. Every other register and the three
+  // memories keep what they held.
+  state_.ppu.inidisp |= 0x80u;
+  Ppu ppu{state_.ppu, derived_};
+  ppu.beginRange(1u);
+  ppu.beginLine(0u);
+  frameWide_ = false;  // the picture the beam was part-way down is not finished
+
+  // The audio machine, and the boot program again when the machine runs one.
+  apu_.reset();
+  if (bootsAudio_) enterIplStub(state_.apu);
+  load();
+}
+
+Cpu65816State Snes::powerOnCpu() const {
   return Cpu65816State{
-      .pc = reset,
+      .pc = resetVector(),
       .s = 0x01FF,
       .p = static_cast<std::uint8_t>(kCpuFlagM | kCpuFlagX | kCpuFlagI),
       .e = true,
@@ -352,13 +431,28 @@ namespace {
 
 }  // namespace
 
+std::uint32_t Snes::romView(std::uint8_t bank, std::uint16_t offset) const noexcept {
+  // LoROM's save window sits in cartridge banks, and a board with no save RAM decodes
+  // nothing there: the window's lower halves repeat their upper halves, as every other
+  // cartridge bank's lower half does. The bus asks the save first, so an address in
+  // the window arrives here only on a cartridge that has none.
+  const std::uint32_t address = busAddress(bank, offset);
+  const bool bareWindow = map_ == CartridgeMap::LoRom && saveRamOffset(map_, address).has_value();
+  return bareWindow ? address | 0x8000u : address;
+}
+
 std::uint8_t Snes::romByte(std::uint8_t bank, std::uint16_t offset) const noexcept {
-  const std::optional<std::size_t> index = romOffset(map_, busAddress(bank, offset), rom_.size());
+  const std::optional<std::size_t> index = romOffset(map_, romView(bank, offset), rom_.size());
   return index.has_value() ? rom_[*index] : std::uint8_t{0};
 }
 
 bool Snes::addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept {
-  return cartridgeRegion(map_, busAddress(bank, offset)) == CartridgeRegion::Rom;
+  // A coprocessor's board is not one of the plain ones: it gives lower halves of its
+  // cartridge banks to the chip — $60-$6F to a DSP or an ST010 — and the machine carries
+  // no such chip, so those halves answer as any absent chip's ports do, with open bus.
+  const bool cartridgeBank = (bank >= 0x40 && bank <= 0x7D) || bank >= 0xC0;
+  if (!plainBoard_ && map_ == CartridgeMap::LoRom && cartridgeBank && offset < 0x8000u) return false;
+  return cartridgeRegion(map_, romView(bank, offset)) == CartridgeRegion::Rom;
 }
 
 std::optional<std::size_t> Snes::saveRamIndex(std::uint8_t bank,

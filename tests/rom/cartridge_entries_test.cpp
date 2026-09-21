@@ -91,8 +91,9 @@ TEST(CartridgeEntries, CodeOwnerFollowsTheRegion) {
     EXPECT_EQ(codeOwner(map, 0x7E0000u), CodeOwner::None);  // work RAM
     EXPECT_EQ(codeOwner(map, 0x002140u), CodeOwner::None);  // a register
   }
-  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x400000u), CodeOwner::None);      // nothing there
-  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0xC00000u), CodeOwner::None);      // a lower half
+  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x400000u), CodeOwner::Cpu65816);  // a lower half repeats its upper
+  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0xC00000u), CodeOwner::Cpu65816);
+  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x001000u), CodeOwner::None);      // a system bank's does not
   EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x700000u), CodeOwner::None);      // the save
   EXPECT_EQ(codeOwner(CartridgeMap::HiRom, 0x400000u), CodeOwner::Cpu65816);  // a whole bank
   EXPECT_EQ(codeOwner(CartridgeMap::HiRom, 0x206000u), CodeOwner::None);      // the save

@@ -41,7 +41,7 @@ Everything lives in `snaggletooth`.
 | `kCopierHeaderBytes` | 512 — every copier's header is this long. |
 | `readCopierHeader(file)` | The copier's header a file carries ahead of its image, or nothing when the file begins with the image. |
 | `describeCopierHeader(header, imageBytes)` | One line saying what the header declares, and how the image that follows differs from it. |
-| `CartridgeRegion` | `System`, `WorkRam`, `Rom`, `SaveRam` or `Unmapped` — what a bus address reaches. |
+| `CartridgeRegion` | `System`, `WorkRam`, `Rom` or `SaveRam` — what a bus address reaches. |
 | `cartridgeRegion(map, address)` | The region an address lands in under a map. |
 | `romOffset(map, address, imageBytes)` | The image byte a ROM address reads, mirrored across the image. |
 | `romAddress(map, offset)` | The bus address that reads an image offset whole. |
@@ -171,8 +171,11 @@ powers on in emulation mode, so `emulation.reset` is where every cartridge start
 
 **LoROM** gives each bank its upper 32 KB and lays those windows end to end: `$00:8000-$00:FFFF` is
 the first 32 KB of the image, `$01:8000-$01:FFFF` the next, up to 4 MB. A bank's high bit only selects
-the memory speed, so `$80:8000` reads the same byte as `$00:8000`. The lower halves of the cartridge
-banks `$40-$7D` and `$C0-$FF` reach nothing.
+the memory speed, so `$80:8000` reads the same byte as `$00:8000`. A LoROM board leaves the
+cartridge's A15 unconnected, so the lower half of a cartridge bank — `$40-$7D` and `$C0-$FF` below
+`$8000` — reads the bytes its upper half reads: `$40:1234` is the byte at `$40:9234`. The save window
+is the exception, and takes the lower halves of its own banks (see [Save RAM](#save-ram)). A system
+bank's lower half is the console's and reaches no cartridge.
 
 **HiROM** gives each of the cartridge banks `$40-$7D` and `$C0-$FF` the whole 64 KB and lays those end
 to end, up to 4 MB, and a system bank's upper half reaches the same bytes as the matching cartridge
@@ -198,7 +201,8 @@ romOffset(CartridgeMap::HiRom, 0xC11234, size);   // 0x011234
 romOffset(CartridgeMap::HiRom, 0x008000, size);   // 0x008000 — the system bank's upper half
 romOffset(CartridgeMap::HiRom, 0x001000, size);   // nothing: that is the system area
 romOffset(CartridgeMap::LoRom, 0x018000, size);   // 0x008000
-romOffset(CartridgeMap::LoRom, 0x400000, size);   // nothing: a LoROM lower half
+romOffset(CartridgeMap::LoRom, 0x401234, size);   // 0x201234 — a lower half, as $40:9234
+romOffset(CartridgeMap::LoRom, 0x701234, size);   // nothing: the save window
 romOffset(CartridgeMap::ExHiRom, 0x401000, size); // 0x401000 — the second 4 MB
 
 romAddress(CartridgeMap::HiRom, 0x123456);        // $D2:3456
@@ -219,16 +223,23 @@ ExHiROM, or under ExHiROM the lower halves of the two banks work RAM hides.
 |---|---|
 | `WorkRam` | banks `$7E-$7F` |
 | `System` | the lower half of a system bank (`$00-$3F`, `$80-$BF`): the work-RAM mirror, the registers, the expansion area |
-| `Rom` | the upper half of every bank; the whole of a cartridge bank under HiROM and ExHiROM |
+| `Rom` | the upper half of every bank; the whole of a cartridge bank under HiROM and ExHiROM, and under LoROM outside the save window |
 | `SaveRam` | the save window, whether or not the cartridge declares a save |
-| `Unmapped` | a LoROM cartridge bank's lower half outside the save window |
 
 ## Save RAM
 
 Each map keeps the save in its own window. LoROM banks it above the cartridge banks, in the lower
-halves of `$70-$7D` and `$F0-$FD`, 32 KB per bank. HiROM fits it into the system banks' expansion
+halves of `$70-$7D` and `$F0-$FF`, 32 KB per bank. HiROM fits it into the system banks' expansion
 window, `$20-$3F` and `$A0-$BF` at `$6000-$7FFF`, 8 KB per bank. ExHiROM keeps it in `$80-$BF` at
 `$6000-$7FFF`.
+
+What a cartridge with no save RAM answers in the window is the board's. HiROM's and ExHiROM's
+windows sit in the expansion area, where nothing else is, and read open bus. LoROM's sits in
+cartridge banks, and a board with no save RAM decodes nothing there: the window's lower halves repeat
+their upper halves as every other cartridge bank's does. The map alone cannot say which cartridge it
+is asked about, so `cartridgeRegion` answers `SaveRam` and `romOffset` answers nothing for the window
+under every map, and `Snes` — which knows whether it holds a save — reads the image there for a
+LoROM cartridge that has none.
 
 `saveRamOffset` gives the linear offset into the save an address reaches, before the save's own size
 folds it — `$71:1234` under LoROM is offset `$9234`, `$21:6000` under HiROM is `$2000`. A save
@@ -254,7 +265,14 @@ saveRamOffset(CartridgeMap::HiRom, 0x205FFF);   // nothing: below the window
 - A vector of `$0000` points at work RAM and one of `$FFFF` at the last ROM byte; neither is a
   handler. A cartridge leaves a vector it does not use at either.
 - `cartridgeRegion` reports the save window for every map whether or not the cartridge declares a
-  save; the machine leaves an undeclared save reading open bus.
+  save. A caller that knows the cartridge has none reads a LoROM window through its upper half —
+  `address | $8000` — which is what the machine does; under HiROM and ExHiROM it is open bus.
+- The map is a plain board's. A coprocessor's board gives lower halves of its LoROM cartridge banks to
+  the chip, and these functions still answer `Rom` there; `Snes` reads the header's `coprocessor` and
+  answers open bus for them, carrying no such chip.
+- The boards differ in ways the image does not say, and the map takes none of them: the older LoROM
+  boards give the save the whole 64 KB of its banks, one HiROM family keeps the save in `$10-$1F` as
+  well as `$30-$3F`, and one leaves a quarter of its ROM banks empty. The header names no board.
 - `chipsetSubtype` is read from `$FFBF` on every cartridge, because a custom coprocessor needs it,
   but it means something only under a chipset high nibble of `$F` or an extended header. On a
   cartridge with neither it is whatever byte the bank holds there, often `$FF` or `$00`.

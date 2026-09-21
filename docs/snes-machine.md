@@ -23,6 +23,7 @@ finishes.
   - [How a cartridge lays across the bus](#how-a-cartridge-lays-across-the-bus)
   - [Save RAM](#save-ram)
 - [Stepping and running](#stepping-and-running)
+- [The reset line](#the-reset-line)
 - [Memory speed](#memory-speed)
 - [The APU clock](#the-apu-clock)
 - [The audio upload stub](#the-audio-upload-stub)
@@ -84,7 +85,8 @@ The bus maps a 24-bit address the way the console does:
 | `$00-$3F` / `$80-$BF:$420D` | MEMSEL, the second region's speed select |
 | `$8000-$FFFF` (any bank) | the cartridge |
 | `$40-$7D` / `$C0-$FF:$0000-$FFFF` | the cartridge across the whole bank, under HiROM and ExHiROM |
-| `$70-$7D` / `$F0-$FD:$0000-$7FFF` | save RAM, under LoROM |
+| `$40-$7D` / `$C0-$FF:$0000-$7FFF` | under LoROM, the bytes the same bank's upper half reads |
+| `$70-$7D` / `$F0-$FF:$0000-$7FFF` | save RAM, under LoROM, on a cartridge that has any |
 | `$20-$3F` / `$A0-$BF:$6000-$7FFF` | save RAM, under HiROM |
 | `$80-$BF:$6000-$7FFF` | save RAM, under ExHiROM |
 
@@ -94,7 +96,9 @@ behavior real hardware shows. The cartridge is read-only: a write to a ROM addre
 ### How a cartridge lays across the bus
 
 The three layouts differ in how much of a bank the cartridge gets and how much image the bus can
-reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end. **HiROM** gives
+reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end; the board leaves
+the cartridge's A15 unconnected, so a cartridge bank's lower half reads what its upper half reads.
+**HiROM** gives
 each of `$40-$7D` and `$C0-$FF` a whole 64 KB and lays those end to end, reaching the same bytes
 through the matching system bank's upper half. **ExHiROM** is HiROM with a second 4 MB: banks
 `$80-$FF` serve the first 4 MB as HiROM does and banks `$00-$7D` serve the second. The bus reads the
@@ -128,9 +132,20 @@ it back, so a game persists one by reading it out.
 The size comes from the header, and it matters that it is exact — an address past the end of the save
 repeats it from the start, and a game that writes twice and reads back once is measuring how much save
 RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `declaredSaveRamBytes`
-answers what an image asks for without building a machine. A cartridge declaring none leaves those
-addresses reading open bus. Each map keeps the save in its own window, listed in the table above and
-described in [the cartridge page](snes-cartridge.md#save-ram).
+answers what an image asks for without building a machine. Each map keeps the save in its own window,
+listed in the table above and described in [the cartridge page](snes-cartridge.md#save-ram).
+
+A LoROM cartridge whose header declares a coprocessor is on that chip's board, which gives lower
+halves of its cartridge banks to the chip — `$60-$6F` to a DSP on the 2 MB boards, and to an ST010's
+ports and RAM. The machine carries no coprocessor, so on such a cartridge every cartridge bank's lower
+half reads open bus, as an absent chip's ports do, and the image is read through the upper halves
+alone.
+
+A cartridge with no save answers in the window as its board does. HiROM's and ExHiROM's windows sit in
+the expansion area and read open bus. LoROM's sits in cartridge banks, where a board with no save RAM
+decodes nothing, so the window's lower halves repeat their upper halves like every other cartridge
+bank's: on a LoROM cartridge with no save, `$70:1234` reads the byte at `$70:9234`, and a store there
+changes nothing.
 
 Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
 the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address
@@ -169,6 +184,46 @@ part-way through a cycle, the machine finishes that cycle and carries the small 
 next call — so `run(a)` followed by `run(b)` advances the machine exactly as `run(a + b)` would,
 and `run(0)` does nothing. `step()` always finishes on an instruction boundary; called after a `run()`
 stopped mid-instruction, it completes the instruction in progress rather than starting a new one.
+
+## The reset line
+
+`reset()` is the button on the console: the reset line pulled and let go.
+
+```cpp
+machine.reset();
+```
+
+The machine starts again where construction starts it in time — the CPU about to fetch the first opcode
+at the cartridge's reset vector, the beam at H = 0, V = 0 with the frame parity clear, which is where
+the console starts after the line is released, and the master counter at zero, since every grid the
+console counts "since reset" counts from there. What a reset initialises takes its value, and
+everything else keeps what it held:
+
+| | After `reset()` |
+|---|---|
+| the CPU | the direct register, both bank registers and the high bytes of X and Y zero; the stack pointer's high byte `$01`; emulation mode; the m, x and i flags set and the decimal flag clear; a wait or a stop ended; the program counter at the vector. The accumulator, the low bytes of X and Y, and the N, V, Z and C flags keep what they held. The stack pointer's low byte ends three lower: the reset sequence runs an interrupt's three stack cycles as reads. |
+| `$4200`, `$420B`, `$420C`, `$420D` | `$00` |
+| `$4201` | `$FF` |
+| the NMI and IRQ flags, the joypad strobe, `$4218-$421F`, the work-RAM port's address | clear |
+| `$4202-$420A`, `$4214-$4217`, every `$43xx` register | what they held |
+| work RAM, the save, the pads in the ports | what they held |
+| the PPU | forced blank, at the brightness it had; every other register and the three video memories as they were |
+| the audio machine | `Apu::reset()` ([apu-machine.md](apu-machine.md)): the timer outputs clear, the targets, the divider and RAM above zero page kept — then the boot program again, when the machine was built to run one. The program is fetched from the image mapped over `$FFC0-$FFFF`; the RAM beneath the window is not rewritten. |
+
+A transfer, a multiplication or division, an auto-read or a counter latch in progress is abandoned, and
+the picture the beam was part-way down is never delivered: the next frame the frame observer is handed
+is the first whole one drawn afterwards, black until the program lifts the forced blank. The observers
+stay set.
+
+The reset sequence's seven cycles are not spent and its five reads — three of the stack, two of the
+vector — are not made or reported, as construction does not make them: both leave the machine at the
+instant the sequence ends.
+
+Call it between `step()` and `run()` calls, never from inside an observer's call, which arrives
+part-way through a cycle. A budget `run()` was still owed is dropped with the counter.
+
+A cartridge that pulls the slot's reset pin itself resets the CPU, the APU and the work-RAM chip and
+leaves the PPU alone. Nothing the machine carries does that, and `reset()` is not it.
 
 ## Memory speed
 
@@ -804,6 +859,11 @@ moved, never copied; a moved machine carries its audio machine after its state.
   field sees the pair's second frame first.
 - `hpos` is master cycles, not dots, and past dot 322 the two stop being a factor of four apart. Read
   the dot through `$213C` or the PPU's own input rather than dividing.
+- `reset()` starts `SnesState::master` again at zero. A host timing a run across one adds what ran
+  before it, and calls it between two `run()` calls — an observer is called from inside one.
+- A LoROM program that reads below `$8000` in a cartridge bank is reading the image, not open bus.
+  Whether `$70-$7D` and `$F0-$FF` answer with the save or the image there depends on whether the
+  cartridge has a save, which `SnesConfig::saveRamBytes` decides when it is set.
 
 ## What remains open
 
@@ -840,6 +900,13 @@ Questions the documentation leaves about the beam, recorded rather than decided 
   until the whole result lands. A cartridge of ours asks it.
 - **Reading or writing `$4016` inside the auto-read's window.** One clock line is shared, so a read there
   takes a clock the auto-read then never sees. A cartridge of ours asks it.
+- **`$4201` across a reset.** fullsnes's I/O map gives `$FF`; anomie's register document says
+  "unchanged on reset" with a question mark. Here it is `$FF`. A cartridge of ours asks it.
+- **`SETINI` across a reset.** fullsnes gives "00h?" and no other document gives anything. Here the
+  register keeps what it held, as every PPU register but `INIDISP`'s top bit does. A cartridge of
+  ours asks it.
+- **An arithmetic job in progress at a reset.** No document says. Here it is abandoned and the result
+  registers keep what they held. A cartridge of ours asks it.
 
 ## See also
 

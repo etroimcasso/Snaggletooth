@@ -467,6 +467,30 @@ class Snes {
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
   void restore(const SnesState& state);
 
+  // The console's reset line, pulled and let go: what the button on the console
+  // does. The machine starts again where construction starts it in time — the CPU
+  // about to fetch the first opcode at the cartridge's reset vector, the beam at
+  // H = 0, V = 0 with the frame parity clear, the master counter at zero — and
+  // keeps everything a reset does not initialise.
+  //
+  // The CPU takes the registers `afterReset` gives (`cpu/cpu65816.h`). $4200,
+  // $420B, $420C and $420D go to $00 and $4201 to $FF; the NMI and IRQ flags, the
+  // joypad strobe, $4218-$421F and the work-RAM port's address clear. $4202-$420A,
+  // the arithmetic unit's results and every $43xx register keep what they held,
+  // and so do work RAM, the save, and the pads in the ports. The PPU is forced
+  // blank at the brightness it had; its other registers and its three memories
+  // stand. The audio machine goes through Apu::reset(), and runs its boot program
+  // again when the machine was built to run one. A transfer, an arithmetic job or
+  // an auto-read in progress is abandoned, and the picture the beam was part-way
+  // down is never delivered.
+  //
+  // The sequence's seven cycles are not spent and its five reads are not made,
+  // as construction does not make them: both leave the machine at the instant the
+  // sequence ends. Call it between step() and run() calls, never from inside an
+  // observer's call; a budget run() was still owed is dropped with the counter.
+  // The observers stay set.
+  void reset();
+
   // The clock rate the machine was built at. Fixed for its life, like the
   // cartridge.
   [[nodiscard]] Region region() const noexcept { return region_; }
@@ -766,6 +790,11 @@ class Snes {
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
+  // The address the cartridge's ROM sees for a bus address the save did not answer:
+  // the address itself, except in LoROM's save window, where a lower half is
+  // answered by its bank's upper half.
+  [[nodiscard]] std::uint32_t romView(std::uint8_t bank, std::uint16_t offset) const noexcept;
+
   // The cartridge byte an address reaches under the machine's map, mirrored across
   // the image; zero for an address that reaches no cartridge. Pure — it neither
   // prices the cycle nor touches the data bus.
@@ -773,7 +802,10 @@ class Snes {
 
   // Whether an address lands on the cartridge under the machine's map, and whether
   // it lands on save RAM. Both answer through the cartridge functions, so the
-  // machine reads an image exactly where the header says it is. saveRamIndex
+  // machine reads an image exactly where the header says it is — except that a
+  // LoROM cartridge declaring a coprocessor keeps its cartridge banks' lower halves
+  // for the chip, which the machine does not carry, and reads open bus there.
+  // saveRamIndex
   // answers the offset into the save, already reduced to its size, for an address
   // that reaches it — nothing when the cartridge has no save.
   [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
@@ -825,6 +857,9 @@ class Snes {
     return value;
   }
 
+  // The word at $00FFFC, where the CPU starts.
+  [[nodiscard]] std::uint16_t resetVector() const noexcept;
+
   // The CPU's power-on state: emulation mode, the interrupt disable set, and the
   // program counter at the cartridge's reset vector.
   [[nodiscard]] Cpu65816State powerOnCpu() const;
@@ -835,6 +870,8 @@ class Snes {
   std::vector<std::uint8_t> rom_;    // the cartridge image, fixed for the machine's life
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
   CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it
+  bool plainBoard_ = true;           // the header declares no coprocessor, so LoROM's lower halves repeat the image
+  bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress

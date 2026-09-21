@@ -73,6 +73,10 @@ west is Y, north is X. The keyboard's default puts the four face buttons at the 
 
 The keyboard and a pad on one port add together, so a hand on each is one player.
 
+Command and `R` on a Mac, Control and `R` everywhere else, is the console's reset button. The cartridge starts again from its reset vector with work RAM
+and its save as they were, the way it does on the console. A run replayed from a script or recorded
+to one leaves the button alone, since a script has no word for it.
+
 `--config <file>` hands the tool a mapping of your own, and `--default-config` prints the one it
 ships with so you have something to copy. The whole form is
 [pad-config.md](../../docs/pad-config.md).

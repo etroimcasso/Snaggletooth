@@ -45,6 +45,7 @@
 // console's own, and --vsync names either arrangement outright. Which one a run took is
 // the first thing it says.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -239,18 +240,32 @@ class Devices {
   // thing about a keyboard the mapping cannot know, so they are looked up here.
   [[nodiscard]] bool configure(player::PadConfig config, bool quiet, std::string& error) {
     config_ = std::move(config);
-    const std::optional<player::KeyboardMap> keys = player::resolveKeyboard(
-        config_,
-        [](std::string_view name) -> std::optional<player::KeyId> {
-          const SDL_Scancode code = SDL_GetScancodeFromName(std::string(name).c_str());
-          if (code == SDL_SCANCODE_UNKNOWN) return std::nullopt;
-          return static_cast<player::KeyId>(code);
-        },
-        error);
+    const auto idFor = [](std::string_view name) -> std::optional<player::KeyId> {
+      const SDL_Scancode code = SDL_GetScancodeFromName(std::string(name).c_str());
+      if (code == SDL_SCANCODE_UNKNOWN) return std::nullopt;
+      return static_cast<player::KeyId>(code);
+    };
+    const std::optional<player::KeyboardMap> keys = player::resolveKeyboard(config_, idFor, error);
     if (!keys) return false;
+    const std::optional<player::HotkeyMap> hotkeys =
+        player::resolveHotkeys(config_, *keys, player::thisKeyboard(), idFor, error);
+    if (!hotkeys) return false;
     keyboard_ = *keys;
+    hotkeys_ = *hotkeys;
     quiet_ = quiet;
     return true;
+  }
+
+  // Whether `key`, pressed with `held`, is a chord the configuration gives to the
+  // console's reset button. Left and right of a modifier are one, and the locks are
+  // no part of a chord.
+  [[nodiscard]] bool isReset(player::KeyId key, SDL_Keymod held) const {
+    unsigned modifiers = 0;
+    if ((held & SDL_KMOD_GUI) != 0) modifiers |= player::kModifierCmd;
+    if ((held & SDL_KMOD_CTRL) != 0) modifiers |= player::kModifierCtrl;
+    if ((held & SDL_KMOD_ALT) != 0) modifiers |= player::kModifierAlt;
+    if ((held & SDL_KMOD_SHIFT) != 0) modifiers |= player::kModifierShift;
+    return player::pressed(hotkeys_.reset, key, static_cast<std::uint8_t>(modifiers));
   }
 
   void opened(SDL_JoystickID id) {
@@ -328,6 +343,7 @@ class Devices {
 
   player::PadConfig config_;
   player::KeyboardMap keyboard_;
+  player::HotkeyMap hotkeys_;
   player::PortAssignment ports_;
   std::vector<Pad> pads_;
   bool quiet_ = false;
@@ -458,6 +474,9 @@ class Player final : public snaggletooth::FrameObserver {
   [[nodiscard]] player::Pacing pacing() const noexcept { return pacing_; }
 
   [[nodiscard]] bool closed() const noexcept { return closed_; }
+
+  // Whether the reset button was pressed since this last said so.
+  [[nodiscard]] bool takeReset() noexcept { return std::exchange(resetAsked_, false); }
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
   // The rate the run actually held, measured from the end of the first frame: that
   // first one carries opening a window, a device and a cartridge, and a mean that
@@ -632,8 +651,25 @@ class Player final : public snaggletooth::FrameObserver {
         devices_.opened(event.gdevice.which);
       } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED) {
         devices_.closed(event.gdevice.which);
+      } else if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+                 devices_.isReset(static_cast<player::KeyId>(event.key.scancode), event.key.mod)) {
+        pressReset();
       }
     }
+  }
+
+  // The reset button. A run that is read from a script or written to one has no
+  // word for it — a script is pads and frames — so there the button is left alone,
+  // and the run says so the first time it is pressed.
+  void pressReset() {
+    if (!scripted_ && scriptAt_.empty()) {
+      resetAsked_ = true;
+      return;
+    }
+    if (!resetRefused_) {
+      std::cerr << "reset: a recorded run has no word for the reset button; it is left alone\n";
+    }
+    resetRefused_ = true;
   }
 
   Snes& machine_;
@@ -662,6 +698,8 @@ class Player final : public snaggletooth::FrameObserver {
   std::uint64_t firstFrameEnd_ = 0;  // where the run proper begins, past the startup frame
   std::uint64_t titleAt_ = 0;        // when the title last took a rate
   std::uint64_t titleFrames_ = 0;    // and how many frames had run by then
+  bool resetAsked_ = false;    // the reset button was pressed since the machine last took it
+  bool resetRefused_ = false;  // and a recorded run has already said it leaves it alone
   bool closed_ = false;
 };
 
@@ -976,11 +1014,20 @@ int main(int argc, char** argv) {
   const bool recording = !outDir.empty();
   const std::uint64_t bound = seconds * masterPerSecond;
   std::vector<snaggletooth::StereoFrame> sound;
-  while (!player.closed() && (bound == 0u || machine.state().master < bound)) {
+  // A reset starts the machine's master counter again, so what ran before each one
+  // is kept here and the run's length is the two together.
+  std::uint64_t beforeResets = 0;
+  while (!player.closed() && (bound == 0u || beforeResets + machine.state().master < bound)) {
     machine.run(chunk);
     const std::vector<snaggletooth::StereoFrame> produced = machine.takeFrames();
     speakers.put(produced);
     if (recording) sound.insert(sound.end(), produced.begin(), produced.end());
+    // The button is taken here, between two runs of the machine: the events are
+    // pumped from inside one, where the machine is part-way through a cycle.
+    if (player.takeReset()) {
+      beforeResets += machine.state().master;
+      machine.reset();
+    }
   }
   machine.setFrameObserver(nullptr);
   player.finish();

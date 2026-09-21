@@ -65,6 +65,17 @@ std::optional<Address> canonical(CartridgeMap map, std::size_t imageBytes, Addre
   return *home;
 }
 
+// Whether `address` names the image through a LoROM cartridge bank's lower half,
+// which repeats the bank's upper half. The trace goes there when a run took the CPU
+// there or a person's entry names it, and not on the word of the bytes alone: a jump
+// or a derived pointer into a repeated half is left as a stop, which an entry lifts.
+bool repeatedHalf(CartridgeMap map, Address address) {
+  // Below $8000 under LoROM only a cartridge bank is the image: a system bank's lower
+  // half is the console's, and the save window its own.
+  return map == CartridgeMap::LoRom && (address & 0xFFFFu) < 0x8000u &&
+         cartridgeRegion(map, address) == CartridgeRegion::Rom;
+}
+
 bool within(const SourceRegion& region, Address address) {
   return address >= region.first && address <= region.last;
 }
@@ -114,6 +125,11 @@ std::optional<std::string> stopReason(const Instruction& instruction, CartridgeM
   }
   const Address target = *instruction.target;
   if (within(region, target)) return std::nullopt;
+  if (repeatedHalf(map, target)) {
+    return "`" + instruction.text + "`: the target " + address24(target) +
+           " is a LoROM bank's lower half, which repeats " + address24(target | 0x8000u) +
+           "; add an entry for it if the program runs there";
+  }
   if (canonical(map, imageBytes, target)) return std::nullopt;
   std::string where;
   switch (cartridgeRegion(map, target)) {
@@ -121,7 +137,6 @@ std::optional<std::string> stopReason(const Instruction& instruction, CartridgeM
     case CartridgeRegion::System: where = "a system register or a work-RAM mirror"; break;
     case CartridgeRegion::SaveRam: where = "save RAM"; break;
     case CartridgeRegion::Rom: where = "the cartridge, beyond the image"; break;
-    case CartridgeRegion::Unmapped: where = "nothing the bus maps"; break;
   }
   return "`" + instruction.text + "`: the target " + address24(target) + " is " + where +
          ", not in the image";
@@ -1905,6 +1920,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
           const Instruction& instruction = line.instruction;
           const bool leaves = instruction.flow == Flow::Jump || instruction.flow == Flow::Call;
           if (!leaves || !instruction.target || within(region, *instruction.target)) continue;
+          if (repeatedHalf(map, *instruction.target)) continue;  // a stop, not an entry
           const std::optional<Address> home = canonical(map, imageBytes, *instruction.target);
           if (!home) continue;
           const std::optional<Decoded> again =
@@ -1959,6 +1975,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
         return sameDerivation(d, derived);
       });
       if (known) continue;
+      if (repeatedHalf(map, derived.target)) {
+        out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
+                            " is a LoROM bank's lower half; not traced");
+        continue;
+      }
       const std::optional<Address> home = canonical(map, imageBytes, derived.target);
       if (!home) {
         out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +

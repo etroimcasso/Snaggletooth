@@ -175,6 +175,57 @@ TEST(RomDisasm, TheStopsNameWhereTheBytesRunOut) {
   EXPECT_EQ(codeLineAt(regionNamed(d, "bank_02.asm").listing, 0x028100u), nullptr);
 }
 
+// A LoROM cartridge bank's lower half repeats its upper half, so a jump there names
+// image bytes. The trace does not follow it on the bytes' word: it stops, saying where
+// the half repeats, and a person's entry at the same address is traced at its home.
+TEST(RomDisasm, AJumpIntoARepeatedLowerHalfIsAStopThatAnEntryLifts) {
+  std::vector<std::uint8_t> rom = loRomImage(128);  // 4 MB, so bank $40 is its own bytes
+  put(rom, 0x0000u, {0x22u, 0x34u, 0x12u, 0x40u,   // JSL $40:1234
+                     0xDBu});                       // STP
+  put(rom, 0x201234u, {0xEAu, 0x6Bu});             // $40:9234: NOP, RTL
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  ASSERT_EQ(d.stops.size(), 1u);
+  EXPECT_EQ(d.stops[0].address, 0x008000u);
+  EXPECT_NE(d.stops[0].reason.find("JSL $40:1234"), std::string::npos);
+  EXPECT_NE(d.stops[0].reason.find("lower half, which repeats $40:9234"), std::string::npos);
+  EXPECT_EQ(codeLineAt(regionNamed(d, "bank_40.asm").listing, 0x409234u), nullptr);
+
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.entries.push_back(
+      TraceEntry{.address = 0x401234u, .mode = Cpu65816Mode::reset(), .name = "through_the_half"});
+  const CartridgeDisassembly named = disassembleCartridge(request);
+  const Line* nop = codeLineAt(regionNamed(named, "bank_40.asm").listing, 0x409234u);
+  ASSERT_NE(nop, nullptr);
+  EXPECT_EQ(nop->instruction.text, "NOP");
+}
+
+// A table the bytes bound is held to the same rule: the destination in the image's
+// own half is traced, and the one in a repeated half is a note.
+TEST(RomDisasm, ADerivedDestinationInARepeatedLowerHalfIsANote) {
+  std::vector<std::uint8_t> rom = loRomImage(128);
+  put(rom, 0x0000u, {0x5Cu, 0x00u, 0x80u, 0x40u});  // JML $40:8000
+  put(rom, 0x200000u, {0xA5u, 0x10u,                // $40:8000: LDA $10
+                       0x29u, 0x01u,                //           AND #$01
+                       0x0Au,                       //           ASL
+                       0xAAu,                       //           TAX
+                       0x7Cu, 0x00u, 0x81u});       //           JMP (!$8100,X)
+  put(rom, 0x200100u, {0x00u, 0x90u,                // the table: $9000
+                       0x34u, 0x12u});              //            $1234, in the repeated half
+  put(rom, 0x201000u, {0xDBu});                     // $40:9000: STP
+  put(rom, 0x201234u, {0xDBu});                     // $40:9234, which $40:1234 repeats
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const Listing& bank40 = regionNamed(d, "bank_40.asm").listing;
+  EXPECT_NE(codeLineAt(bank40, 0x409000u), nullptr);
+  EXPECT_EQ(codeLineAt(bank40, 0x409234u), nullptr);
+  const bool noted = std::any_of(d.notes.begin(), d.notes.end(), [](const std::string& note) {
+    return note.find("derived $40:1234") != std::string::npos &&
+           note.find("lower half; not traced") != std::string::npos;
+  });
+  EXPECT_TRUE(noted);
+}
+
 TEST(RomDisasm, AnEntryAPersonAddsIsTracedUnderItsMode) {
   const std::vector<std::uint8_t> rom = threeBankImage();
   CartridgeRequest request;
