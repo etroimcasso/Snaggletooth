@@ -275,7 +275,7 @@ class Provenance final : public Shadow {
   void exchange() override;
 
  private:
-  static constexpr std::size_t kPlaces = 24;
+  static constexpr std::size_t kPlaces = static_cast<std::size_t>(Place::FlagH) + 1;  // a row per Place, tied to the last enumerator so every place has one
   static constexpr std::size_t kBytes = 4;
 
   static constexpr std::uint32_t kNotLoaded = 0xFFFFFFFFu;
