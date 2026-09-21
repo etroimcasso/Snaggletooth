@@ -161,12 +161,32 @@ TEST(CartridgeMap, HiRomCarriesRomBelowEightThousand) {
   EXPECT_EQ(got[1], patternAt(0x020100u));
 }
 
-TEST(CartridgeMap, LoRomCarriesNoCartridgeBelowEightThousand) {
-  // The same addresses under LoROM reach no cartridge, so they answer the last
-  // value the data bus carried rather than an image byte.
-  const std::vector<std::uint8_t> rom = authoredCartridge(1024u * 1024u, false, 0x20u, 0u);
-  const std::vector<std::uint8_t> got = readThroughBus(rom, false, {0x401000u});
-  EXPECT_NE(got[0], patternAt(0x001000u));
+// A LoROM board leaves the cartridge's A15 unconnected, so a cartridge bank's lower
+// half reads the bytes its upper half reads (fullsnes, the plain LoROM boards: "ROM
+// Mirrors 40-7D,C0-FF:0000-7FFF"; the memory map page, on the same banks).
+TEST(CartridgeMap, ALoRomCartridgeBanksLowerHalfRepeatsItsUpperHalf) {
+  const std::vector<std::uint8_t> rom = authoredCartridge(4u * 1024u * 1024u, false, 0x20u, 0u);
+  const std::vector<std::uint8_t> got = readThroughBus(
+      rom, false, {0x401234u, 0x409234u, 0xC50777u, 0xC58777u, 0x6F7FFFu, 0x6FFFFFu});
+  EXPECT_EQ(got[0], patternAt(0x201234u));  // bank $40 is 2 MB in, whichever half names it
+  EXPECT_EQ(got[1], patternAt(0x201234u));
+  EXPECT_EQ(got[2], patternAt(0x228777u));  // and the second region's banks the same
+  EXPECT_EQ(got[3], patternAt(0x228777u));
+  EXPECT_EQ(got[4], patternAt(0x37FFFFu));  // the last bank below the save window
+  EXPECT_EQ(got[5], patternAt(0x37FFFFu));
+}
+
+// The save window's lower halves are the save only on a board that carries one. A
+// cartridge with no save RAM has nothing to decode there, and those halves repeat
+// their upper halves as every other cartridge bank's does.
+TEST(CartridgeMap, WithNoSaveRamTheSaveWindowsLowerHalvesRepeatTheirUpperHalves) {
+  const std::vector<std::uint8_t> rom = authoredCartridge(4u * 1024u * 1024u, false, 0x20u, 0u);
+  const std::vector<std::uint8_t> got =
+      readThroughBus(rom, false, {0x701234u, 0x709234u, 0xFF0100u, 0xFF8100u});
+  EXPECT_EQ(got[0], patternAt(0x381234u));
+  EXPECT_EQ(got[1], patternAt(0x381234u));
+  EXPECT_EQ(got[2], patternAt(0x3F8100u));
+  EXPECT_EQ(got[3], patternAt(0x3F8100u));
 }
 
 // ---- an image repeating across its window ---------------------------------
@@ -230,6 +250,62 @@ TEST(CartridgeMap, LoRomKeepsItsSaveAboveTheCartridgeBanks) {
   EXPECT_EQ(m.state().sram[0x1FFFu], 0x5Au);
 }
 
+// A cartridge whose header declares a coprocessor is on that chip's board, which
+// gives lower halves of its cartridge banks to the chip: fullsnes's memory map puts a
+// DSP at 600000h-6F7FFFh on the 2 MB LoROM boards and the ST010's ports and RAM at
+// 600000h-6FFFFFh. The machine carries no such chip, so the image is not read there
+// and the read answers the last byte the bus carried — the operand's bank.
+TEST(CartridgeMap, ACoprocessorsBoardKeepsItsLowerHalvesForTheChip) {
+  std::vector<std::uint8_t> rom = authoredCartridge(4u * 1024u * 1024u, false, 0x20u, 0u);
+  rom[kLoRomHeaderBase + 0x16] = 0x05u;  // ROM, a coprocessor, RAM and a battery: a DSP
+  const std::vector<std::uint8_t> got =
+      readThroughBus(rom, false, {0xE00000u, 0x681234u, 0x401234u, 0x701234u, 0x409234u});
+  EXPECT_EQ(got[0], 0xE0u);
+  EXPECT_EQ(got[1], 0x68u);
+  EXPECT_EQ(got[2], 0x40u);
+  EXPECT_EQ(got[3], 0x70u);
+  EXPECT_EQ(got[4], patternAt(0x201234u));  // the upper halves are the image, as on any board
+
+  // The board is the cartridge's, so a machine moved to a new place still knows it.
+  placeProgram(rom, false, copyProgram({0xE00000u}));
+  Snes built(SnesConfig{.rom = rom, .iplStub = false});
+  Snes moved(std::move(built));
+  runToStop(moved);
+  EXPECT_EQ(moved.state().wram[0], 0xE0u);
+}
+
+// With save RAM on the board the window's lower half is the save and the image is
+// not read there; the upper half of the same bank is the image still.
+TEST(CartridgeMap, WithSaveRamTheWindowsLowerHalfIsTheSaveAndItsUpperHalfTheImage) {
+  const std::vector<std::uint8_t> rom =
+      authoredCartridge(4u * 1024u * 1024u, false, 0x20u, /*8 KB*/ 3u);
+  const std::vector<std::uint8_t> got = readThroughBus(rom, false, {0x701234u, 0x709234u});
+  EXPECT_EQ(got[0], 0x00u);                 // the save, which nothing has written
+  EXPECT_NE(patternAt(0x381234u), 0x00u);   // and which the image byte would not read as
+  EXPECT_EQ(got[1], patternAt(0x381234u));
+}
+
+// The window runs through bank $FF (fullsnes: "SRAM at 70h-7Dh,F0h-FFh:0000h-7FFFh",
+// and every LoROM board with save RAM in its table). A store through $FE or $FF
+// lands in the save and reads back through $70.
+TEST(CartridgeMap, LoRomsSaveWindowRunsThroughBankFF) {
+  const std::vector<std::uint8_t> rom = authoredCartridge(512u * 1024u, false, 0x20u, /*8 KB*/ 3u);
+  const Snes viaFE = runStoreThenLoad(rom, false, 0xFE0010u, 0xA5u, 0x700010u);
+  EXPECT_EQ(viaFE.state().wram[0], 0xA5u);
+  EXPECT_EQ(viaFE.state().sram[0x0010u], 0xA5u);
+  const Snes viaFF = runStoreThenLoad(rom, false, 0xFF1FFFu, 0x3Cu, 0x701FFFu);
+  EXPECT_EQ(viaFF.state().wram[0], 0x3Cu);
+  EXPECT_EQ(viaFF.state().sram[0x1FFFu], 0x3Cu);
+}
+
+// A store into a lower half that repeats the image changes nothing: it is ROM.
+TEST(CartridgeMap, AStoreIntoARepeatedLowerHalfChangesNothing) {
+  const std::vector<std::uint8_t> rom = authoredCartridge(4u * 1024u * 1024u, false, 0x20u, 0u);
+  const Snes m = runStoreThenLoad(rom, false, 0x701234u, 0xEEu, 0x701234u);
+  EXPECT_TRUE(m.state().sram.empty());
+  EXPECT_EQ(m.state().wram[0], patternAt(0x381234u));
+}
+
 TEST(CartridgeMap, HiRomKeepsItsSaveInTheExpansionWindow) {
   const std::vector<std::uint8_t> rom = authoredCartridge(1024u * 1024u, true, 0x31u, /*2 KB*/ 1u);
   const Snes m = runStoreThenLoad(rom, true, 0x2067FFu, 0x22u, 0x2067FFu);
@@ -258,6 +334,9 @@ TEST(CartridgeMap, ACartridgeWithNoSaveReachesNothingThere) {
   const Snes m = runStoreThenLoad(rom, true, 0x206000u, 0xEEu, 0x206000u);
   EXPECT_TRUE(m.state().sram.empty());
   EXPECT_NE(m.state().wram[0], 0xEEu);
+  // HiROM's window is in the expansion area, where a board with no save has nothing
+  // at all: the read answers the last byte the bus carried, the operand's bank.
+  EXPECT_EQ(m.state().wram[0], 0x20u);
 }
 
 TEST(CartridgeMap, AnExplicitSaveSizeOverridesTheHeader) {

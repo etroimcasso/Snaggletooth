@@ -51,6 +51,7 @@ y = y
 l = left trigger
 r = right trigger
 
-# Where later functions will bind. This release defines none, and a key here is
-# refused rather than quietly ignored.
+# The chords that work the console itself. `reset` is the button on its front.
+# `cmdorctrl` is Command on a Mac and Control everywhere else, never both.
 [hotkeys]
+reset = cmdorctrl+r

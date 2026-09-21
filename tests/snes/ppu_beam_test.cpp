@@ -2,9 +2,9 @@
 // flag's edges, the frame's shape under SETINI's interlace and overscan bits, the
 // exact master offset of every per-line event — vertical blank, the NMI flag, the
 // frame parity, the sprite table's reload, the overflow flags' clear and the H/V
-// timer — and the memory refresh that holds the CPU off the bus once a line.
-// Nothing here draws. Every expectation is computed by hand from the timing pages;
-// the cartridges are assembled inline.
+// timer — and the memory refresh that pauses the CPU once a line.
+// Nothing here draws. Every expectation is computed from the timing pages; the
+// cartridges are assembled inline.
 
 #include <cstdint>
 #include <memory>
@@ -23,6 +23,10 @@ constexpr std::uint8_t kLdaAbs = 0xADu;
 constexpr std::uint8_t kStaAbs = 0x8Du;
 constexpr std::uint8_t kNop = 0xEAu;
 constexpr std::uint8_t kStp = 0xDBu;
+constexpr std::uint8_t kWai = 0xCBu;
+constexpr std::uint8_t kCli = 0x58u;
+
+constexpr std::uint8_t kRefreshMaster = 40u;  // the pause's length
 
 constexpr std::uint32_t kLine = 1364u;       // a normal scanline
 constexpr std::uint32_t kShortLine = 1360u;  // NTSC's line 240 on an odd field
@@ -93,13 +97,32 @@ Snes placed(std::vector<std::uint8_t> program, const Placement& at,
   return m;
 }
 
-// A machine whose core is halted at the frame origin, so run() advances it in exact
-// six-cycle idle steps and a budget that is a multiple of six lands on an exact
-// master total. A halted core makes no bus cycle, so the refresh never pauses it and
-// the beam's position stays a pure function of the budget.
+// A machine whose core is halted at the frame origin, so run() advances it in
+// six-cycle idle steps from the placement. The line's pause holds a halted core as it
+// holds any other, and it is forty cycles — four past a multiple of six — so the idle
+// grid past N pauses sits 4N cycles on from the budget's own.
 Snes haltedAt(const Placement& at) {
   Snes m(SnesConfig{.rom = cartridge({kStp}), .region = at.region});
   m.step();  // execute the STP so the core is halted
+  SnesState s = m.state();
+  s.master = 0; s.consumed = 0; s.apuPhase = 0;
+  apply(s, at);
+  s.refreshAt = kFirstRefresh;
+  m.restore(s);
+  return m;
+}
+
+// A machine whose core is waiting on WAI at the frame origin, with an IRQ handler at
+// $8100 that marks $0050 and stops. The wait begins before the rebase, so every cycle
+// the placement runs is an idle one on its own six-cycle grid.
+Snes waitingAt(const Placement& at) {
+  std::vector<std::uint8_t> rom = cartridge({kCli, kWai});
+  rom[0x7FFEu] = 0x00u;  // the emulation IRQ vector -> $8100
+  rom[0x7FFFu] = 0x81u;
+  const std::uint8_t handler[] = {kLdaImm, 0x5Au, kStaAbs, 0x50u, 0x00u, kStp};
+  for (std::size_t i = 0; i < sizeof handler; ++i) rom[0x0100u + i] = handler[i];
+  Snes m(SnesConfig{.rom = rom, .region = at.region});
+  while (m.state().cpu.run == CpuRunState::Running) m.step();  // through CLI, into the wait
   SnesState s = m.state();
   s.master = 0; s.consumed = 0; s.apuPhase = 0;
   apply(s, at);
@@ -160,6 +183,16 @@ std::uint16_t latchedDot(const Placement& line, std::uint16_t master) {
   Placement at = line;
   at.hpos = static_cast<std::uint16_t>(master - kAbsoluteAccess);
   return placed({kLdaAbs, 0x37u, 0x21u, kStp}, at).state().ppu.ophct;
+}
+
+// The dot OPHCT latches when the I/O port's top bit falls at the same point instead:
+// WRIO is high at power-on, and the store's write cycle resolves the same distance in
+// as the read above, so the fall lands at `master`. STP fetches long enough past it
+// for the owed latch to land before the machine settles.
+std::uint16_t latchedDotViaWrio(const Placement& line, std::uint16_t master) {
+  Placement at = line;
+  at.hpos = static_cast<std::uint16_t>(master - (kImmediateLoad + kAbsoluteAccess));
+  return placed({kLdaImm, 0x00u, kStaAbs, 0x01u, 0x42u, kStp}, at).state().ppu.ophct;
 }
 
 // Where every write to `port` landed, in order.
@@ -225,6 +258,17 @@ TEST(SnesPpuBeam, TheLongLineIsWhereDot340Exists) {
   EXPECT_EQ(latchedDot(line, 1363u), 339u);
   EXPECT_EQ(latchedDot(line, 1364u), 340u);
   EXPECT_EQ(latchedDot(line, 1367u), 340u);
+}
+
+TEST(SnesPpuBeam, TheIoPortLatchLandsOneDotAfterTheSoftwareLatch) {
+  // A fall of the I/O port's top bit latches the counters one dot later than a read
+  // of $2137 at the same point: every category of the software-latch dot map moves
+  // one dot on (fullsnes.txt 27073-27075).
+  const Placement line{.vpos = kPictureLine};
+  for (const unsigned master : {400u, 500u, 808u, 1000u, 1200u}) {
+    const auto at = static_cast<std::uint16_t>(master);
+    EXPECT_EQ(latchedDotViaWrio(line, at), latchedDot(line, at) + 1u) << "master " << master;
+  }
 }
 
 // ---- the horizontal-blank flag -------------------------------------------------
@@ -435,7 +479,10 @@ TEST(SnesPpuBeam, AnInterlacedPalFramePairTakesBothIrregularLines) {
   Snes m = haltedAt(Placement{.region = Region::Pal, .setini = 0x01u});
   m.run(311ull * kLine + kLongLine + 313ull * kLine);
   EXPECT_EQ(m.state().vpos, 0u);
-  EXPECT_EQ(m.state().hpos, 0u);
+  // 625 lines are 625 pauses of forty; 625 * 40 is four past a multiple of six, so the
+  // grid past them stands four cycles on from the budget's and the pair's own last
+  // cycle is 852504, four behind where the run stops.
+  EXPECT_EQ(m.state().hpos, 4u);
 }
 
 TEST(SnesPpuBeam, AnInterlacedPalEvenFrameReachesLineThreeHundredTwelve) {
@@ -450,7 +497,9 @@ TEST(SnesPpuBeam, WithoutInterlaceTheFramePairKeepsItsShortLine) {
   Snes m = haltedAt(Placement{});
   m.run(261ull * kLine + kShortLine + 262ull * kLine);
   EXPECT_EQ(m.state().vpos, 0u);
-  EXPECT_EQ(m.state().hpos, 0u);
+  // 524 lines are 524 pauses; 524 * 40 is two past a multiple of six, so the pair's
+  // own last cycle is 714732, two behind where the run stops.
+  EXPECT_EQ(m.state().hpos, 2u);
 }
 
 // ---- the sprite table's reload --------------------------------------------------
@@ -524,7 +573,7 @@ TEST(SnesPpuBeam, TheVerticalTimerFiresTenCyclesIntoItsLine) {
   m.run(kPictureLine * kLine + 4u);
   EXPECT_EQ(m.state().vpos, kPictureLine);
   EXPECT_FALSE(m.state().timeup);
-  m.run(6u);  // master 10
+  m.run(6u);  // master 14, the first cycle to reach the point at 10
   EXPECT_TRUE(m.state().timeup);
 }
 
@@ -580,6 +629,115 @@ TEST(SnesPpuBeam, ATimerCrossingDisarmedInItsOwnCycleDoesNotFireLater) {
   program.insert(program.end(), rearm.begin(), rearm.end());
   Snes m = placed(std::move(program), at);
   EXPECT_FALSE(m.state().timeup);
+}
+
+TEST(SnesPpuBeam, ReadingTheTimerFlagInTheCycleItRisesReturnsItSetAndLeavesItSet) {
+  // fullsnes.txt 1781-1784: a read acknowledges the flag, except a read at the very
+  // time the condition comes true, which receives bit 7 set and clears nothing. The
+  // point is at 414; a read whose cycle ends at 416 spans it.
+  Placement at{.nmitimen = 0x10u, .htime = 100u};
+  at.hpos = static_cast<std::uint16_t>(416u - kAbsoluteAccess);
+  Snes rising = placed(readProgram(0x4211u), at);
+  EXPECT_EQ(rising.state().wram[0x50] & 0x80u, 0x80u);
+  EXPECT_TRUE(rising.state().timeup);
+
+  // A read whose cycle begins on the point finds the flag standing, and acknowledges it.
+  at.hpos = static_cast<std::uint16_t>(420u - kAbsoluteAccess);
+  Snes after = placed(readProgram(0x4211u), at);
+  EXPECT_EQ(after.state().wram[0x50] & 0x80u, 0x80u);
+  EXPECT_FALSE(after.state().timeup);
+
+  // And one whose cycle ends short of the point reads it clear, the flag rising after.
+  at.hpos = static_cast<std::uint16_t>(410u - kAbsoluteAccess);
+  Snes before = placed(readProgram(0x4211u), at);
+  EXPECT_EQ(before.state().wram[0x50] & 0x80u, 0x00u);
+  EXPECT_TRUE(before.state().timeup);
+}
+
+TEST(SnesPpuBeam, WritingTheTimerFlagsRegisterClearsTheFlag) {
+  // anomie's register document, 1091-1093: the flag is cleared on read or write. The
+  // timer stays armed at a point no line reaches, so nothing raises the flag again, and
+  // a store to the register beside it leaves the flag standing.
+  const auto flagAfterStoreTo = [](std::uint16_t port) {
+    const std::vector<std::uint8_t> rom = cartridge(writeProgram(port, 0x00u));
+    Snes m(SnesConfig{.rom = rom});
+    SnesState s = m.state();
+    apply(s, Placement{.nmitimen = 0x10u});
+    s.timeup = true;
+    m.restore(s);
+    while (m.state().cpu.run == CpuRunState::Running) m.step();
+    return m.state().timeup;
+  };
+  EXPECT_FALSE(flagAfterStoreTo(0x4211u));
+  EXPECT_TRUE(flagAfterStoreTo(0x4210u));
+}
+
+// Whether the timer's flag stands after a run past the point 4 * htime + 14 into the
+// placement's line.
+bool firedAtItsPoint(const Placement& at) {
+  Snes m = haltedAt(at);
+  m.run(630u);  // past 14 + 4 * 153, the latest point these cases place
+  return m.state().timeup;
+}
+
+TEST(SnesPpuBeam, HtimeOneFiftyThreeRaisesNothingOnTheShortLine) {
+  // anomie-timing.txt 121-123: no IRQ triggers for dot 153 on the short scanline in
+  // non-interlace mode. It is a measurement and no mechanism for it is documented, so
+  // the machine carries it as measured. The short line is NTSC's 240 on an odd field
+  // with interlace off, the same line lineLength() shortens.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 240u, .field = 1u, .nmitimen = 0x30u,
+                                         .htime = 153u, .vtime = 240u}));
+  // The dots either side of it, on that same line, are raised.
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 152u, .vtime = 240u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 154u, .vtime = 240u}));
+  // And line 240 is short only on an odd field with interlace off.
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .field = 0u, .nmitimen = 0x30u,
+                                        .htime = 153u, .vtime = 240u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 240u, .setini = 0x01u, .field = 1u,
+                                        .nmitimen = 0x30u, .htime = 153u, .vtime = 240u}));
+}
+
+TEST(SnesPpuBeam, HtimeOneFiftyThreeRaisesNothingOnTheFramesLastLine) {
+  // anomie-timing.txt 121-123: no IRQ triggers for dot 153 on the last scanline of any
+  // frame. The last line is frameLines() - 1, which the interlaced even frame's extra
+  // line moves and PAL's own count moves again.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 261u, .field = 1u, .nmitimen = 0x30u,
+                                         .htime = 153u, .vtime = 261u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 260u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 153u, .vtime = 260u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 261u, .field = 1u, .nmitimen = 0x30u,
+                                        .htime = 152u, .vtime = 261u}));
+  // An interlaced even frame runs 263 lines, so 262 is its last and 261 is not.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 262u, .setini = 0x01u, .field = 0u,
+                                         .nmitimen = 0x30u, .htime = 153u, .vtime = 262u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 261u, .setini = 0x01u, .field = 0u,
+                                        .nmitimen = 0x30u, .htime = 153u, .vtime = 261u}));
+  // PAL's frame ends at 311.
+  EXPECT_FALSE(firedAtItsPoint(Placement{.vpos = 311u, .region = Region::Pal, .field = 1u,
+                                         .nmitimen = 0x30u, .htime = 153u, .vtime = 311u}));
+  EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 310u, .region = Region::Pal, .field = 1u,
+                                        .nmitimen = 0x30u, .htime = 153u, .vtime = 310u}));
+}
+
+TEST(SnesPpuBeam, HtimeOneFiftyThreeFiresOnEveryOtherLine) {
+  // The two exceptions against the whole frame they sit in: on an odd NTSC field the
+  // flag is raised at dot 153 on every line but the short one and the frame's last,
+  // so 260 of 262. The placement's parity toggles as line 0 begins, which is what
+  // makes the field odd.
+  Snes m = haltedAt(Placement{.nmitimen = 0x10u, .htime = 153u});
+  int raised = 0;
+  for (int line = 0; line < 262; ++line) {
+    m.run(m.state().vpos == 240u ? kShortLine : kLine);
+    if (m.state().timeup) {
+      ++raised;
+      SnesState s = m.state();
+      s.timeup = false;  // the acknowledgement a handler makes
+      m.restore(s);
+    }
+  }
+  EXPECT_EQ(raised, 260);
 }
 
 // ---- the memory refresh --------------------------------------------------------
@@ -643,19 +801,68 @@ TEST(SnesPpuBeam, TheShortLineRePhasesTheRefreshPoint) {
   EXPECT_EQ(m.state().refreshAt, 240ull * kLine + kShortLine + 538u);
 }
 
-TEST(SnesPpuBeam, AHaltedCoreIsNotPaused) {
-  // A stopped core makes no bus cycle to hold off the bus, so the line's point passes
-  // without starting a pause and the machine's positions stay exactly the budget it was
-  // given. Reading `refreshLeft` right after the point is what says no pause began:
-  // a pause cycle costs the same six as an idle one, so the position alone would not.
+TEST(SnesPpuBeam, AHaltedCoreIsPausedToo) {
+  // The pause holds the core whatever it is doing — anomie-timing.txt 68 and
+  // fullsnes.txt 27047 describe the CPU paused, and neither exempts a halted one.
+  // Reading `refreshLeft` right after the point is what says the pause began: a pause
+  // cycle costs the same six as an idle one, so the position alone would not.
   Snes m = haltedAt(Placement{});
   m.run(540u);  // past the first line's point at 538
-  EXPECT_EQ(m.state().refreshLeft, 0u);
+  EXPECT_EQ(m.state().refreshLeft, kRefreshMaster);
   m.run(9u * kLine - 540u);
   EXPECT_EQ(m.state().vpos, 9u);
+  // Nine lines are nine pauses of forty, and forty is four past a multiple of six, so
+  // the grid past them stands 9 * 4 = 36 cycles on from the budget's — itself a
+  // multiple of six, which is why this budget still lands on the line's first cycle.
   EXPECT_EQ(m.state().hpos, 0u);
   EXPECT_EQ(m.state().refreshLeft, 0u);
   EXPECT_EQ(m.state().refreshAt, 9ull * kLine + 534u);
+}
+
+TEST(SnesPpuBeam, AStoppedCoreSpendsThePauseLikeAnyOther) {
+  // The pause is spent a fast cycle at a time for a stopped core as for a running one,
+  // so a run still stops within one cycle of its budget and carries the rest as state.
+  Snes m = haltedAt(Placement{});
+  m.run(540u);
+  EXPECT_NE(m.state().refreshLeft, 0u);
+  EXPECT_GE(m.state().master, m.state().consumed);
+  EXPECT_LT(m.state().master, m.state().consumed + 12u);
+  m.run(20u);  // inside the pause: four of its six-cycle steps are spent, sixteen owed
+  EXPECT_EQ(m.state().master, 564u);
+  EXPECT_EQ(m.state().refreshLeft, 16u);
+  m.run(3u * kLine - 560u);
+  // Three pauses are 120 cycles, a whole multiple of six, so the grid returns to the
+  // budget's and the total is exact.
+  EXPECT_EQ(m.state().master, 3ull * kLine);
+  EXPECT_EQ(m.state().vpos, 3u);
+  EXPECT_EQ(m.state().hpos, 0u);
+}
+
+TEST(SnesPpuBeam, AWaitReleasedInsideAPauseWakesWhenThePauseEnds) {
+  // A wait is released by the interrupt line the core samples at each idle cycle, and
+  // a paused core makes none. With the H timer's point at 542 — fourteen past four
+  // times 132 — the flag rises inside line 0's pause, which runs from the cycle
+  // boundary at 540 to 580, and the core sees it at the first cycle after that.
+  Snes m = waitingAt(Placement{.nmitimen = 0x10u, .htime = 132u});
+  ASSERT_EQ(m.state().cpu.run, CpuRunState::Waiting);
+
+  m.run(560u);  // master 564, sixteen cycles of the pause still owed
+  EXPECT_NE(m.state().refreshLeft, 0u);
+  EXPECT_TRUE(m.state().timeup) << "the point at 542 is passed inside the pause";
+  EXPECT_EQ(m.state().cpu.run, CpuRunState::Waiting) << "the pause holds the wait";
+
+  m.run(40u);  // master 604, past the pause's end at 580
+  EXPECT_EQ(m.state().refreshLeft, 0u);
+  EXPECT_NE(m.state().cpu.run, CpuRunState::Waiting);
+  while (m.state().cpu.run != CpuRunState::Stopped) m.step();
+  EXPECT_EQ(m.state().wram[0x50], 0x5Au) << "the wait vectors to its handler";
+
+  // The control: the same machine with its point at 414, which no pause covers, wakes
+  // on the cycle after the flag rises.
+  Snes clear = waitingAt(Placement{.nmitimen = 0x10u, .htime = 100u});
+  clear.run(480u);
+  EXPECT_TRUE(clear.state().timeup);
+  EXPECT_NE(clear.state().cpu.run, CpuRunState::Waiting);
 }
 
 TEST(SnesPpuBeam, RunMayStopInsideARefreshAndKeepsItsOvershootBound) {

@@ -23,6 +23,7 @@ finishes.
   - [How a cartridge lays across the bus](#how-a-cartridge-lays-across-the-bus)
   - [Save RAM](#save-ram)
 - [Stepping and running](#stepping-and-running)
+- [The reset line](#the-reset-line)
 - [Memory speed](#memory-speed)
 - [The APU clock](#the-apu-clock)
 - [The audio upload stub](#the-audio-upload-stub)
@@ -84,7 +85,8 @@ The bus maps a 24-bit address the way the console does:
 | `$00-$3F` / `$80-$BF:$420D` | MEMSEL, the second region's speed select |
 | `$8000-$FFFF` (any bank) | the cartridge |
 | `$40-$7D` / `$C0-$FF:$0000-$FFFF` | the cartridge across the whole bank, under HiROM and ExHiROM |
-| `$70-$7D` / `$F0-$FD:$0000-$7FFF` | save RAM, under LoROM |
+| `$40-$7D` / `$C0-$FF:$0000-$7FFF` | under LoROM, the bytes the same bank's upper half reads |
+| `$70-$7D` / `$F0-$FF:$0000-$7FFF` | save RAM, under LoROM, on a cartridge that has any |
 | `$20-$3F` / `$A0-$BF:$6000-$7FFF` | save RAM, under HiROM |
 | `$80-$BF:$6000-$7FFF` | save RAM, under ExHiROM |
 
@@ -94,7 +96,9 @@ behavior real hardware shows. The cartridge is read-only: a write to a ROM addre
 ### How a cartridge lays across the bus
 
 The three layouts differ in how much of a bank the cartridge gets and how much image the bus can
-reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end. **HiROM** gives
+reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end; the board leaves
+the cartridge's A15 unconnected, so a cartridge bank's lower half reads what its upper half reads.
+**HiROM** gives
 each of `$40-$7D` and `$C0-$FF` a whole 64 KB and lays those end to end, reaching the same bytes
 through the matching system bank's upper half. **ExHiROM** is HiROM with a second 4 MB: banks
 `$80-$FF` serve the first 4 MB as HiROM does and banks `$00-$7D` serve the second. The bus reads the
@@ -128,14 +132,32 @@ it back, so a game persists one by reading it out.
 The size comes from the header, and it matters that it is exact — an address past the end of the save
 repeats it from the start, and a game that writes twice and reads back once is measuring how much save
 RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `declaredSaveRamBytes`
-answers what an image asks for without building a machine. A cartridge declaring none leaves those
-addresses reading open bus. Each map keeps the save in its own window, listed in the table above and
-described in [the cartridge page](snes-cartridge.md#save-ram).
+answers what an image asks for without building a machine. Each map keeps the save in its own window,
+listed in the table above and described in [the cartridge page](snes-cartridge.md#save-ram).
+
+A LoROM cartridge whose header declares a coprocessor is on that chip's board, which gives lower
+halves of its cartridge banks to the chip — `$60-$6F` to a DSP on the 2 MB boards, and to an ST010's
+ports and RAM. The machine carries no coprocessor, so on such a cartridge every cartridge bank's lower
+half reads open bus, as an absent chip's ports do, and the image is read through the upper halves
+alone.
+
+A cartridge with no save answers in the window as its board does. HiROM's and ExHiROM's windows sit in
+the expansion area and read open bus. LoROM's sits in cartridge banks, where a board with no save RAM
+decodes nothing, so the window's lower halves repeat their upper halves like every other cartridge
+bank's: on a LoROM cartridge with no save, `$70:1234` reads the byte at `$70:9234`, and a store there
+changes nothing.
 
 Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
 the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address
 in `$2181` (low), `$2182` (middle), and `$2183` (bit 16); each read or write of `$2180` moves a byte at
 that address and steps it, so a block of work RAM streams through one register.
+
+Work RAM is one chip on both buses, and a DMA or HDMA byte that names it on both — a work-RAM address
+on the A bus and `$2180-$2183` on the B bus — is not copied. The port's side of the byte is open bus:
+from work RAM into `$2180` nothing is written, from `$2180` into work RAM the byte written is the one
+the data bus already held, and the port's address steps in neither case. From work RAM into
+`$2181-$2183` the address registers keep what they had. A transfer into the port from the cartridge, or
+out of it into save RAM, copies as any other does.
 
 ```cpp
 // Point the port at $00100 and stream two bytes into work RAM.
@@ -162,6 +184,46 @@ part-way through a cycle, the machine finishes that cycle and carries the small 
 next call — so `run(a)` followed by `run(b)` advances the machine exactly as `run(a + b)` would,
 and `run(0)` does nothing. `step()` always finishes on an instruction boundary; called after a `run()`
 stopped mid-instruction, it completes the instruction in progress rather than starting a new one.
+
+## The reset line
+
+`reset()` is the button on the console: the reset line pulled and let go.
+
+```cpp
+machine.reset();
+```
+
+The machine starts again where construction starts it in time — the CPU about to fetch the first opcode
+at the cartridge's reset vector, the beam at H = 0, V = 0 with the frame parity clear, which is where
+the console starts after the line is released, and the master counter at zero, since every grid the
+console counts "since reset" counts from there. What a reset initialises takes its value, and
+everything else keeps what it held:
+
+| | After `reset()` |
+|---|---|
+| the CPU | the direct register, both bank registers and the high bytes of X and Y zero; the stack pointer's high byte `$01`; emulation mode; the m, x and i flags set and the decimal flag clear; a wait or a stop ended; the program counter at the vector. The accumulator, the low bytes of X and Y, and the N, V, Z and C flags keep what they held. The stack pointer's low byte ends three lower: the reset sequence runs an interrupt's three stack cycles as reads. |
+| `$4200`, `$420B`, `$420C`, `$420D` | `$00` |
+| `$4201` | `$FF` |
+| the NMI and IRQ flags, the joypad strobe, `$4218-$421F`, the work-RAM port's address | clear |
+| `$4202-$420A`, `$4214-$4217`, every `$43xx` register | what they held |
+| work RAM, the save, the pads in the ports | what they held |
+| the PPU | forced blank, at the brightness it had; every other register and the three video memories as they were |
+| the audio machine | `Apu::reset()` ([apu-machine.md](apu-machine.md)): the timer outputs clear, the targets, the divider and RAM above zero page kept — then the boot program again, when the machine was built to run one. The program is fetched from the image mapped over `$FFC0-$FFFF`; the RAM beneath the window is not rewritten. |
+
+A transfer, a multiplication or division, an auto-read or a counter latch in progress is abandoned, and
+the picture the beam was part-way down is never delivered: the next frame the frame observer is handed
+is the first whole one drawn afterwards, black until the program lifts the forced blank. The observers
+stay set.
+
+The reset sequence's seven cycles are not spent and its five reads — three of the stack, two of the
+vector — are not made or reported, as construction does not make them: both leave the machine at the
+instant the sequence ends.
+
+Call it between `step()` and `run()` calls, never from inside an observer's call, which arrives
+part-way through a cycle. A budget `run()` was still owed is dropped with the counter.
+
+A cartridge that pulls the slot's reset pin itself resets the CPU, the APU and the work-RAM chip and
+leaves the PPU alone. Nothing the machine carries does that, and `reset()` is not it.
 
 ## Memory speed
 
@@ -294,6 +356,10 @@ first frame it runs is the pair's second.
 Two frames together are a whole number of colour clocks, which is what the irregular lines are for:
 714,732 master cycles on NTSC and 716,100 interlaced; 851,136 on PAL and 852,504 interlaced.
 
+fullsnes's 426,936 for a PAL interlaced frame sums the extra line and the long line into one frame. They
+fall in different fields — the long line is the odd field's and the extra line the even field's — so it is
+a figure for neither frame of the pair, whose two lengths are 425,572 and 426,932.
+
 ### Vertical blank
 
 `$2133` bit 2 chooses the line vertical blank begins on, 225 or 240. Beginning is a latched fact rather
@@ -330,8 +396,13 @@ Two interrupt sources reach the CPU, both driven from these counters:
   all the same. Reading the flag before re-enabling avoids taking an old NMI twice.
 - **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: a horizontal position (`$4207/$4208`), a
   vertical line (`$4209/$420A`), or both. The flag at `$4211` bit 7 is raised when the beam passes the
-  point the mode names, and the IRQ line follows it; reading `$4211` or selecting no compare acknowledges
-  it. A handler that does neither runs again.
+  point the mode names, and the IRQ line follows it; reading `$4211`, writing it, or selecting no compare
+  acknowledges it. A handler that does none of them runs again. A read in the very cycle the flag rises
+  is the exception: it receives bit 7 set and acknowledges nothing, so the flag still stands after it
+  and the IRQ is taken.
+
+  *The write is documented and uncorroborated.* anomie's register document states it, and no reading
+  has confirmed it.
 
   | Mode | The point |
   |---|---|
@@ -343,6 +414,10 @@ Two interrupt sources reach the CPU, both driven from these counters:
   cycle leaves behind, so a write to `$4200` that arms the timer in the very cycle its point is crossed
   is in time, and one that disarms it in that cycle keeps the flag down.
 
+  **HTIME = 153 raises no flag on the short line, nor on a frame's last line** — anomie's measurement,
+  with no mechanism documented. The exception is that dot on those lines; every other HTIME raises its
+  flag there, and the V-only point keeps its own place.
+
 ```cpp
 // A minimal vblank-NMI loop: enable the NMI, then let the machine run into vblank.
 // LDA #$80 ; STA $4200 ; ...   the handler at the $FFFA vector runs once per frame.
@@ -350,11 +425,15 @@ Two interrupt sources reach the CPU, both driven from these counters:
 
 ### The memory refresh
 
-Once a line the CPU is held off the bus for **40 master cycles** while memory refreshes. The point walks
+Once a line the CPU is paused for **40 master cycles** while memory refreshes. The point walks
 an eight-cycle grid near the middle of the line — 538 cycles into line 0 of the first frame, then the
 point on that grid nearest 536 into each line after it, so consecutive ordinary lines come up 538 and 534
 and a line of another length re-phases the pair. `SnesState::refreshAt` names the next one and
 `refreshLeft` the cycles left in one under way.
+
+fullsnes's latch histogram — dot 133 three times, 134 once, 135 to 142 never, 143 once, 144 three times —
+is this alternation seen without its grid: averaged over the two parities, the dots a pause covers are the
+dots no read ever latches.
 
 What it means for a caller:
 
@@ -362,8 +441,9 @@ What it means for a caller:
   about 3 % slower against the beam, the APU and every HDMA and IRQ event, which is the console.
 - **`run()` may stop inside a pause** and carries the rest of it, so its overshoot stays within one
   access and `run(a)` then `run(b)` still advances the machine exactly as `run(a + b)`.
-- **A halted core is not paused.** It makes no bus cycle to hold off the bus, so a machine stopped on STP
-  or waiting on WAI keeps its exact six-cycle idle grid.
+- **A halted core is paused as well.** A machine waiting on WAI whose interrupt arrives inside a pause
+  wakes when the pause ends; a machine stopped on STP keeps its place and spends the pause as any core
+  does.
 - **The observer is told nothing.** A pause is neither an access nor a CPU cycle, any more than a
   transfer's overhead cycles are, so cycle counts taken through the observer are unchanged.
 - **A snapshot taken inside a pause restores into the rest of it.**
@@ -513,7 +593,14 @@ selected channel is done, lowest channel number first. The address step (bits 4-
 A-bus address after each byte: increment (0), decrement (2), or hold it fixed (1 or 3) to fill from one
 source byte. A byte count of zero means the whole 65536; when the transfer finishes, `das` is zero and the
 channel's `$420B` bit clears. DMA cannot reach the memory-mapped registers on the A bus
-(`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus.
+(`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus. Nor can it
+copy work RAM through the work-RAM port, in either direction; see [the memory map](#the-memory-map).
+
+HDMA outranks a DMA in progress. An HDMA event on other channels holds the transfer for as long as the
+event takes and the transfer then goes on. An event that involves the channel the transfer is on —
+the frame's initialisation of it, or a line's delivery from it — ends that channel's transfer where it
+stands: its `$420B` bit clears, `das` keeps the count that was left, the HDMA runs on the channel's
+registers as the transfer left them, and any other selected channel runs after it as it would have.
 
 ```cpp
 // A ROM->VRAM copy: channel 0, pattern 1, source $7E:0010, 8 bytes to $2118.
@@ -540,6 +627,16 @@ A table entry is a line-count byte followed by data. The line-count byte is `$00
 the frame, `$01-$80` to write one unit and then wait that many scanlines, or `$81-$FF` (the repeat flag)
 to write a unit on each of the next `count` lines. A direct table holds the data inline; an indirect table
 (bit 6 of `dmap`) holds a 16-bit pointer per entry, and the data is read from `dasb:das`.
+
+When an indirect channel's count runs out part-way down the picture, the engine reads the next count and
+then the pointer after it, whatever the count was. A `$00` therefore ends the channel with `das` loaded
+from the two bytes that follow it and `a2a` three bytes on. The last channel delivering on the line is
+the exception: on a `$00` it reads one byte, into the high half of `das` over a low half of `$00`, which
+leaves `a2a` two bytes on and takes eight master cycles fewer. At the frame's initialisation a `$00`
+first count ends the channel with no pointer read.
+
+*The pointer read after a `$00` is documented and uncorroborated.* anomie's register document states
+it, and no reading has confirmed it.
 
 `$420C` is read on every line, not only at the frame's start, so a program can take a channel out of the
 picture part-way down and put it back. A channel taken out delivers nothing while its bit is clear and
@@ -599,8 +696,9 @@ A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what th
 read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an
 opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and
 write-back, a vector pull — who made it, for an engine's access, which of the eight channels it
-served (`channel`) and whether the HDMA engine was reading its own table (`table`), and, for a write
-through a video data port, where the port put the byte (`landed`):
+served (`channel`), whether the HDMA engine was reading its own table (`table`) and whether that read
+lay past the table's end (`pastTableEnd`), and, for a write through a video data port, where the port
+put the byte (`landed`):
 
 | `AccessSource` | Who |
 |---|---|
@@ -616,6 +714,10 @@ points at is read from where the pointer says and is not the table's, and a writ
 together let a host follow every byte an engine moves back to the channel and the table it came from,
 which is how the [cartridge disassembler](snes-disassembler.md#what-a-run-moved) records what a run
 moved.
+
+`pastTableEnd` is true on the one or two `table` reads an indirect channel makes after a `$00` count:
+the engine reads where an entry's pointer would be, and those bytes belong to whatever follows the
+table. A host collecting a table's bytes leaves them out; see [HDMA](#hdma).
 
 `landed` is set on a write through a video data port, whoever made it, and says where the port put
 the byte: the VRAM word address for a write to `$2118` or `$2119`, after any address translation; the
@@ -736,6 +838,10 @@ moved, never copied; a moved machine carries its audio machine after its state.
   then run the frame. An empty port and a pad with nothing pressed differ past the sixteenth serial
   bit, which is how a program tells a controller from no controller.
 - A DMA byte count of zero (`das`) transfers the whole 65536 bytes, not none.
+- A DMA from work RAM into `$2180` moves nothing, and one from `$2180` into work RAM fills its target
+  with the last byte on the bus. Work RAM is copied to work RAM by the CPU.
+- A DMA on a channel HDMA is using stops at the next HDMA event with bytes left in `das`. Keep the two
+  on different channels.
 - A transfer's A-bus bank is fixed: the address wraps within its bank and never crosses into the next.
 - HDMA re-initialises every frame and delivers only on the visible lines; arm `$420C` and set the table
   before line 0, and it stops on its own at vblank.
@@ -745,42 +851,62 @@ moved, never copied; a moved machine carries its audio machine after its state.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.
+- A WAI whose interrupt lands inside a pause returns from `step()` after the pause, not before it. A
+  program that wakes once a line and writes a PPU register straight away lands that write up to 40
+  cycles further along the line than the interrupt itself arrived.
 - The frame parity a machine runs its first frame at is 1, not 0: the console leaves reset with the flag
   clear and the toggle at H = 1 of line 0 is four cycles away. A program reading `$213F` bit 7 to pick a
   field sees the pair's second frame first.
 - `hpos` is master cycles, not dots, and past dot 322 the two stop being a factor of four apart. Read
   the dot through `$213C` or the PPU's own input rather than dividing.
+- `reset()` starts `SnesState::master` again at zero. A host timing a run across one adds what ran
+  before it, and calls it between two `run()` calls — an observer is called from inside one.
+- A LoROM program that reads below `$8000` in a cartridge bank is reading the image, not open bus.
+  Whether `$70-$7D` and `$F0-$FF` answer with the save or the image there depends on whether the
+  cartridge has a save, which `SnesConfig::saveRamBytes` decides when it is set.
 
 ## What remains open
 
 Questions the documentation leaves about the beam, recorded rather than decided by invention:
 
-- **Where the refresh sits.** anomie measures it about 536 cycles into the line on an eight-cycle grid,
-  which is what the machine does; the register page puts it at H = 133.5 with a half-dot stutter between
-  frames, which is what its own latch quantities need. The two differ by a few cycles.
+- **Whether a cycle in progress when the pause begins is stretched by it or completes first.** Here it
+  completes; fullsnes's latch histogram reads either way.
 - **Whether the refresh grid and a transfer's alignment grid are one.** A transfer aligns to a multiple
-  of eight master cycles since power-on and the refresh's grid is offset two from it.
+  of eight master cycles since power-on and the refresh's grid is offset two from it. A cartridge of ours
+  asks it.
 - **Whether a transfer in flight is cut by the refresh.** Here a DMA byte or an HDMA event completes and
-  the pause follows it.
-- **A wait released inside a pause.** A halted core is not paused, so a WAI whose interrupt arrives
-  inside one wakes up to 40 cycles earlier than a console's would.
-- **The timer's measured exceptions.** anomie reports no IRQ for dot 153 on the short line, and none on
-  a frame's last line — measurements without a mechanism, so neither is modelled.
+  the pause follows it. A cartridge of ours asks it.
 - **What `$4212` bit 7 shows** when the taller picture is asked for after vertical blank has begun. The
-  memories shut; the flag here stays the latched fact.
+  memories shut; the flag here stays the latched fact. A cartridge of ours asks it.
 - **Asking for the taller picture at the very start of line 225.** anomie measures the NMI one line
   later, at 226, with the last HDMA still on line 224 — the two effects skewed against each other — and
   reports that asking for it at any later line does nothing at all. No mechanism is given for either,
   and the machine here holds vertical blank to line 240 instead. Clearing the bit in that window is
-  measured and modelled: the blank begins at the start of the line that follows.
+  measured and modelled: the blank begins at the start of the line that follows. A cartridge of ours
+  asks it.
 - **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length
-  is decided by the state as its own line runs.
+  is decided by the state as its own line runs. A cartridge of ours asks it.
 - **Where inside the auto-read's window each bit lands.** The documents give the window's length and the
   256-cycle grid its start keeps, not the point at which each of the sixteen bits is clocked. Here the
-  strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears.
-- **The PAL interlaced frame length.** The register page gives 426,936 cycles for one such frame
-  (313 lines plus four), but the extra line belongs to the even field and the long line to the odd one,
-  so neither frame takes both. The pair here is 425,572 and 426,932.
+  strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears. A
+  cartridge of ours asks it.
+- **How long the timer's condition holds for a read of `$4211` to catch it.** fullsnes gives four to
+  eight master cycles. Here it is the one CPU cycle the flag rises in, whatever that cycle's length. A
+  cartridge of ours asks it, and whether a write clears the flag with it.
+- **Whether the frame's HDMA initialisation reads an indirect pointer after a `$00` first count.**
+  anomie's register document ends the channel "immediately" and hedges it. Here no pointer is read.
+  A cartridge of ours asks it.
+- **The arithmetic unit's result ports during the countdown.** The ports here hold the previous value
+  until the whole result lands. A cartridge of ours asks it.
+- **Reading or writing `$4016` inside the auto-read's window.** One clock line is shared, so a read there
+  takes a clock the auto-read then never sees. A cartridge of ours asks it.
+- **`$4201` across a reset.** fullsnes's I/O map gives `$FF`; anomie's register document says
+  "unchanged on reset" with a question mark. Here it is `$FF`. A cartridge of ours asks it.
+- **`SETINI` across a reset.** fullsnes gives "00h?" and no other document gives anything. Here the
+  register keeps what it held, as every PPU register but `INIDISP`'s top bit does. A cartridge of
+  ours asks it.
+- **An arithmetic job in progress at a reset.** No document says. Here it is abandoned and the result
+  registers keep what they held. A cartridge of ours asks it.
 
 ## See also
 

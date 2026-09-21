@@ -929,6 +929,9 @@ struct Recorder final : BusObserver, ir::CarrySink {
       return;
     }
     if (a.source != AccessSource::Dma && a.source != AccessSource::Hdma) return;
+    // What the engine reads past a table's `$00` is not the table's, and belongs
+    // to whatever the image holds there.
+    if (a.pastTableEnd) return;
     // The A-bus side of a byte is the read when the byte goes to the register
     // and the write when it comes back from one; the other side is the register.
     const bool toRegister = (machine.state().dma[a.channel].dmap & 0x80u) == 0u;

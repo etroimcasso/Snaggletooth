@@ -111,6 +111,10 @@ void seedIplStub(ApuState& apu, std::span<const std::uint8_t, kIplStubSize> imag
   for (std::size_t i = 0; i < kIplStubSize; ++i) {
     apu.ram[kIplStubBase + i] = image[i];
   }
+  enterIplStub(apu);
+}
+
+void enterIplStub(ApuState& apu) noexcept {
   apu.inputPorts = {};   // the stub posts its own ready bytes; start the ports clear
   apu.outputPorts = {};
   apu.cpu.pc = kIplStubBase;

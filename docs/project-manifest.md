@@ -501,7 +501,9 @@ at, and how the address stepped from one byte to the next — `increment`,
 after `bytes`, how many; after `as`, what the range was to the engine — `dma`, a
 general-purpose transfer; `table`, an HDMA channel's table as one frame walked
 it, its line counts, a direct table's inline values and an indirect table's
-pointers, from the table's start to where the walk stopped; `indirect`, the
+pointers, from the table's start to where the walk stopped — the `$00` that ends
+it, and not the byte or two the engine reads after an indirect table's `$00`,
+which are whatever the image holds next; `indirect`, the
 block one indirect entry pointed at — and after `times`, how many sightings of
 exactly this range the run made.
 

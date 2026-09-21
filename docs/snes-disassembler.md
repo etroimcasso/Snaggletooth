@@ -433,6 +433,18 @@ image, work RAM for instance, where the program copied a routine before running
 it. `BRK` and `COP` are not stops: they continue at their vectors' handlers, which
 are entries already.
 
+A call or jump into the lower half of a LoROM cartridge bank is a stop too. The
+half repeats the bank's upper half, so the target names image bytes — and the stop
+says which:
+
+```
+stop     $00:8000 `JSL $40:1234`: the target $40:1234 is a LoROM bank's lower half, which repeats $40:9234; add an entry for it if the program runs there
+```
+
+The trace follows such a target when a run took the CPU there or an entry names
+it, and not on the word of the bytes alone. A table the bytes derive is held to
+the same rule: a destination in a repeated half is a note, not an entry.
+
 A stop is answered with an entry. Add a line to the manifest naming the address
 the trace should continue from, a label for it, and the mode execution arrives in:
 

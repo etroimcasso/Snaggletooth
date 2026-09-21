@@ -210,7 +210,8 @@ void readChipset(CartridgeHeader& header) noexcept {
   switch (map) {
     case CartridgeMap::LoRom:
       // A bank's high bit only selects the waitstate region, so it is masked off.
-      // Each bank's upper half follows the last one's.
+      // Each bank's upper half follows the last one's, and a cartridge bank's lower
+      // half reaches the same bytes: the offset's top bit never reaches the ROM.
       return ((bank & 0x7Fu) << 15) | (offset & 0x7FFFu);
     case CartridgeMap::HiRom:
       // Whole banks end to end; a system bank's upper half reaches the same
@@ -459,10 +460,12 @@ CartridgeRegion cartridgeRegion(CartridgeMap map, std::uint32_t address) noexcep
     return saveRamOffset(map, address).has_value() ? CartridgeRegion::SaveRam
                                                    : CartridgeRegion::System;
   }
-  // A cartridge bank: whole under HiROM and ExHiROM, the upper half under LoROM.
+  // A cartridge bank is the image whole. A LoROM board leaves the cartridge's A15
+  // unconnected, so there a bank's lower half repeats its upper half — outside the
+  // save window, which takes the lower halves of its own banks.
   if (map != CartridgeMap::LoRom || offset >= 0x8000u) return CartridgeRegion::Rom;
   return saveRamOffset(map, address).has_value() ? CartridgeRegion::SaveRam
-                                                 : CartridgeRegion::Unmapped;
+                                                 : CartridgeRegion::Rom;
 }
 
 std::optional<std::size_t> romOffset(CartridgeMap map, std::uint32_t address,
@@ -506,7 +509,7 @@ std::optional<std::size_t> saveRamOffset(CartridgeMap map, std::uint32_t address
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
   switch (map) {
     case CartridgeMap::LoRom: {
-      const bool window = (bank >= 0x70 && bank <= 0x7D) || (bank >= 0xF0 && bank <= 0xFD);
+      const bool window = (bank >= 0x70 && bank <= 0x7D) || bank >= 0xF0;
       if (!window || offset > 0x7FFFu) return std::nullopt;
       return (static_cast<std::size_t>(bank & 0x0Fu) << 15) | static_cast<std::size_t>(offset);
     }

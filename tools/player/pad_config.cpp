@@ -43,6 +43,29 @@ std::optional<PortChoice> portFromName(std::string_view name) {
   return std::nullopt;
 }
 
+// One chord of a hotkey's line: the modifier words at its front, each closed by a
+// `+`, and the key's name after them. A word that is not a modifier begins the
+// name, so a key whose own name carries a `+` still reads.
+ChordName chordFromText(std::string_view text) {
+  ChordName chord;
+  while (true) {
+    const std::size_t plus = text.find('+');
+    if (plus == std::string_view::npos) break;
+    const std::string word = lowered(trimmed(text.substr(0, plus)));
+    std::uint8_t bit = 0;
+    if (word == "cmd") bit = kModifierCmd;
+    if (word == "ctrl") bit = kModifierCtrl;
+    if (word == "alt") bit = kModifierAlt;
+    if (word == "shift") bit = kModifierShift;
+    if (word == "cmdorctrl") bit = kModifierCmdOrCtrl;
+    if (bit == 0) break;
+    chord.modifiers = static_cast<std::uint8_t>(chord.modifiers | bit);
+    text = trimmed(text.substr(plus + 1));
+  }
+  chord.key = std::string(text);
+  return chord;
+}
+
 // Which section a header names. A header this does not know refuses the file.
 enum class SectionKind : std::uint8_t { None, Keyboard, Gamepad, Family, Hotkeys };
 
@@ -111,10 +134,19 @@ std::optional<PadConfig> parsePadConfig(std::string_view text, std::string& erro
     const std::string_view value = trimmed(line.substr(equals + 1));
 
     if (kind == SectionKind::None) return fail("`" + key + "` is before any section");
-    if (kind == SectionKind::Hotkeys) {
-      return fail("no hotkey is defined in this release, so `" + key + "` names nothing");
-    }
     if (value.empty()) return fail("`" + key + "` is given nothing to be held by");
+
+    if (kind == SectionKind::Hotkeys) {
+      if (key != "reset") return fail("`" + key + "` is not a hotkey; the one there is is `reset`");
+      if (config.hotkeys.resetGiven) return fail("`" + key + "` is given twice");
+      config.hotkeys.resetGiven = true;
+      for (const std::string_view piece : pieces(value)) {
+        const ChordName chord = chordFromText(piece);
+        if (chord.key.empty()) return fail("`" + key + "` names an empty key");
+        config.hotkeys.reset.push_back(chord);
+      }
+      continue;
+    }
 
     GamepadSection* pad = kind == SectionKind::Gamepad    ? &config.gamepad
                           : kind == SectionKind::Family   ? &config.families[family]
@@ -211,6 +243,7 @@ void fillFrom(PadConfig& config, const PadConfig& defaults) {
     config.gamepad = defaults.gamepad;
     config.hasGamepad = defaults.hasGamepad;
   }
+  if (!config.hotkeys.resetGiven) config.hotkeys = defaults.hotkeys;
 }
 
 GamepadMap resolve(const PadConfig& config, PadFamily family, const FaceLabels& labels) {
@@ -264,6 +297,44 @@ std::optional<KeyboardMap> resolveKeyboard(
     }
   }
   return map;
+}
+
+std::optional<HotkeyMap> resolveHotkeys(
+    const PadConfig& config, const KeyboardMap& keyboard, KeyboardKind kind,
+    const std::function<std::optional<KeyId>(std::string_view)>& idFor, std::string& error) {
+  HotkeyMap map;
+  for (const ChordName& chord : config.hotkeys.reset) {
+    const std::optional<KeyId> id = idFor(chord.key);
+    if (!id) {
+      error = "`" + chord.key + "` is not a key this keyboard has";
+      return std::nullopt;
+    }
+    for (const Button button : buttons()) {
+      if (chord.modifiers != 0) break;
+      for (const KeyId held : keyboard.keysFor(button)) {
+        if (held != *id) continue;
+        error = "`" + chord.key + "` is the reset hotkey and holds " +
+                std::string(buttonName(button)) +
+                " as well; give `reset` a chord or another key under `[hotkeys]`";
+        return std::nullopt;
+      }
+    }
+    // `cmdorctrl` becomes the one modifier this keyboard uses for its shortcuts.
+    std::uint8_t modifiers = static_cast<std::uint8_t>(chord.modifiers & ~kModifierCmdOrCtrl);
+    if ((chord.modifiers & kModifierCmdOrCtrl) != 0) {
+      modifiers = static_cast<std::uint8_t>(
+          modifiers | (kind == KeyboardKind::Mac ? kModifierCmd : kModifierCtrl));
+    }
+    map.reset.push_back(Chord{.modifiers = modifiers, .key = *id});
+  }
+  return map;
+}
+
+bool pressed(std::span<const Chord> chords, KeyId key, std::uint8_t modifiers) noexcept {
+  for (const Chord& chord : chords) {
+    if (chord.key == key && chord.modifiers == modifiers) return true;
+  }
+  return false;
 }
 
 }  // namespace snaggletooth::player

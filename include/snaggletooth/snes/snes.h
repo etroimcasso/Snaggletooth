@@ -226,6 +226,10 @@ struct BusAccess {
   AccessSource source = AccessSource::Cpu;
   std::uint8_t channel = 0;  // the channel an engine's access served, 0-7; 0 for the CPU's and the port's
   bool table = false;        // the HDMA engine reading its table — a line count, a direct table's inline value, an indirect entry's pointer — rather than a byte an indirect entry points at, or any write
+  // A `table` read that lies past the table's end. An indirect channel whose count
+  // comes up $00 still reads the one or two bytes after it, where an entry's pointer
+  // would be; they belong to whatever follows the table, and the read says so here.
+  bool pastTableEnd = false;
   // Where a write to a video data port landed: the VRAM word address for a
   // write to $2118 or $2119, after any address translation; the palette word
   // for a write to $2122, on both halves; the OAM byte for a write to $2104,
@@ -351,7 +355,7 @@ struct SnesState {
   // ---- the interrupt registers ----------------------------------------------
   std::uint8_t nmitimen = 0;    // $4200: bit7 NMI enable, bits5-4 H/V IRQ mode, bit0 auto-joypad enable
   bool vblankNmi = false;       // $4210 bit7: set at the start of vblank, cleared on read and at vblank's end
-  bool timeup = false;          // $4211 bit7: set when the H/V counter reaches its timer, cleared on read
+  bool timeup = false;          // $4211 bit7: set when the H/V counter reaches its timer, cleared on read or write
   std::uint16_t htime = 0x01FF; // $4207/$4208: the H-count IRQ position, in dots (0..339)
   std::uint16_t vtime = 0x01FF; // $4209/$420A: the V-count IRQ position, in lines (0..261/311)
 
@@ -398,6 +402,11 @@ struct SnesState {
   // latches the counters itself. Every line reads back as written, since nothing
   // on the console drives one.
   std::uint8_t wrio = 0xFF;
+  // The counter latch owed by a fall of the I/O port's top bit: the master cycle
+  // the beam passes for it, one dot past where a $2137 read of the write's cycle
+  // would land. The latch is captured there rather than at the write, so this
+  // holds the debt between the two; zero when none is owed.
+  std::uint64_t counterLatchAt = 0;
 
   // ---- the PPU ------------------------------------------------------------
   // The picture processor's whole state — its register file, the latches, and the
@@ -457,6 +466,30 @@ class Snes {
   // Takes the state by const reference rather than by value: a SnesState is a quarter
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
   void restore(const SnesState& state);
+
+  // The console's reset line, pulled and let go: what the button on the console
+  // does. The machine starts again where construction starts it in time — the CPU
+  // about to fetch the first opcode at the cartridge's reset vector, the beam at
+  // H = 0, V = 0 with the frame parity clear, the master counter at zero — and
+  // keeps everything a reset does not initialise.
+  //
+  // The CPU takes the registers `afterReset` gives (`cpu/cpu65816.h`). $4200,
+  // $420B, $420C and $420D go to $00 and $4201 to $FF; the NMI and IRQ flags, the
+  // joypad strobe, $4218-$421F and the work-RAM port's address clear. $4202-$420A,
+  // the arithmetic unit's results and every $43xx register keep what they held,
+  // and so do work RAM, the save, and the pads in the ports. The PPU is forced
+  // blank at the brightness it had; its other registers and its three memories
+  // stand. The audio machine goes through Apu::reset(), and runs its boot program
+  // again when the machine was built to run one. A transfer, an arithmetic job or
+  // an auto-read in progress is abandoned, and the picture the beam was part-way
+  // down is never delivered.
+  //
+  // The sequence's seven cycles are not spent and its five reads are not made,
+  // as construction does not make them: both leave the machine at the instant the
+  // sequence ends. Call it between step() and run() calls, never from inside an
+  // observer's call; a budget run() was still owed is dropped with the counter.
+  // The observers stay set.
+  void reset();
 
   // The clock rate the machine was built at. Fixed for its life, like the
   // cartridge.
@@ -570,7 +603,8 @@ class Snes {
   // Where a video data port put the byte is what the port recorded as the
   // access routed through it, taken here so the next access starts clear.
   void observe(std::uint32_t address, std::uint8_t value, bool write, CycleKind kind,
-               AccessSource source, std::uint8_t channel = 0, bool table = false) {
+               AccessSource source, std::uint8_t channel = 0, bool table = false,
+               bool pastTableEnd = false) {
     const std::optional<std::uint16_t> landed = portLanding_;
     portLanding_.reset();
     if (observer_ == nullptr) return;
@@ -582,17 +616,25 @@ class Snes {
     access.source = source;
     access.channel = channel;
     access.table = table;
+    access.pastTableEnd = pastTableEnd;
     access.landed = landed;
     observer_->access(access);
   }
 
   // A transfer engine's two sides of one byte, reported as its accesses: the
   // read on one bus and the write on the other, in that order, each naming the
-  // channel it served. A read of an HDMA table says so with `table`.
+  // channel it served. A read of an HDMA table says so with `table`, and one past
+  // the table's end with `pastTableEnd` as well.
   std::uint8_t engineRead(std::uint32_t address, bool aBus, AccessSource source,
-                          std::uint8_t channel, bool table = false);
+                          std::uint8_t channel, bool table = false, bool pastTableEnd = false);
   void engineWrite(std::uint32_t address, std::uint8_t value, bool aBus, AccessSource source,
                    std::uint8_t channel);
+  // One byte of a transfer between A-bus address `aAddr` and B-bus address `bAddr`,
+  // into the A bus when `toA`. Work RAM named on both sides — a work-RAM address on
+  // the A bus and $2180-$2183 on the B bus — is not copied: the port's side is open
+  // bus, its address does not step, and the port reports no access of its own.
+  void engineByte(std::uint32_t aAddr, std::uint32_t bAddr, bool toA, AccessSource source,
+                  std::uint8_t channel, bool table);
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
@@ -622,6 +664,13 @@ class Snes {
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn
   // before it is doubled into both halves of its position.
   void widenFrame(std::size_t line, std::uint16_t x) noexcept;
+  // A write to INIDISP outside vertical blank: the PPU reads the new value one dot
+  // early, off the data bus before the CPU has driven it, so the last dot the
+  // write's own cycle covered is drawn under the byte the bus held before the
+  // write — the whole byte, forced blank and brightness both. Redraws that one dot
+  // under `busBefore` after the cycle has drawn it under the old register, then the
+  // written value stands for every dot after. A no-op for any other write.
+  void redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore);
 
   // Walks the PPU's Range pass as far as master cycle `to` of a line beginning at
   // `lineStart` reaches — two dots a sprite from the picture's first — finding the
@@ -645,8 +694,10 @@ class Snes {
   // sprite table's reload, the H/V timer's points, and the refresh.
   void crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
 
-  // Raises the timer flag when the crossing this cycle noted is the one the mode now
-  // selects. Part of closing a cycle.
+  // Whether the crossing this cycle's tick noted is the one the mode now selects, and
+  // the raising of the timer flag when it is, which is part of closing a cycle. A read
+  // of $4211 asks the first on its own, to learn that the flag rises in its cycle.
+  [[nodiscard]] bool timerCrossed() const noexcept;
   void settleTimer() noexcept;
 
   // The master-cycle length of the current scanline and the number of lines in the
@@ -658,6 +709,10 @@ class Snes {
   // The beam's dot, by a map whose dots 323 and 327 are six master cycles wide, and
   // whether the horizontal-blank flag stands. Both are what the PPU is told.
   [[nodiscard]] std::uint16_t hdot() const noexcept;
+  // The dot for an arbitrary master offset into the current line, by that same map —
+  // hdot() is this at the beam's own position. It reads the current line's length,
+  // so it answers for the line the caller is on.
+  [[nodiscard]] std::uint16_t hdotAt(std::uint16_t hpos) const noexcept;
   [[nodiscard]] bool inHblank() const noexcept;
 
   // The master cycle the refresh pauses on for a line beginning at `lineStart`: the
@@ -703,17 +758,28 @@ class Snes {
   std::uint8_t dmaReadA(std::uint32_t address);
   void dmaWriteA(std::uint32_t address, std::uint8_t value);
   [[nodiscard]] static bool aBusExcluded(std::uint32_t address) noexcept;
+  // Whether an A-bus address is work RAM: banks $7E-$7F, or the first $2000 of a
+  // system bank.
+  [[nodiscard]] static bool aBusIsWorkRam(std::uint32_t address) noexcept;
   // The resume-rounding pad added to the first CPU cycle after a transfer, so the
   // machine resumes on a whole CPU-clock boundary since the pause.
   [[nodiscard]] std::uint32_t resumePad(std::uint32_t cpuCycle) const noexcept;
 
   // The HDMA engine: one whole event — the start-of-frame initialisation, or a
-  // single visible scanline's delivery for every active channel — the helper that
-  // loads the next table entry into a channel, and the $420C write, which takes a
-  // channel out of the picture's remaining lines or brings one into them.
+  // single visible scanline's delivery for every active channel — and the $420C
+  // write, which takes a channel out of the picture's remaining lines or brings one
+  // into them.
   void hdmaCycle();
-  void hdmaLoadEntry(std::uint8_t index, bool indirect);
   void enableHdma(std::uint8_t channels);
+  // The two reads that load a table entry into a channel: the line count, and an
+  // indirect entry's pointer — both of its bytes, or with `highByteOnly` a single byte
+  // into the high half over a low half of $00. `pastTableEnd` is what the pointer's
+  // reads report: set when the count before them ended the table.
+  void hdmaLoadCount(std::uint8_t index);
+  void hdmaLoadPointer(std::uint8_t index, bool highByteOnly, bool pastTableEnd);
+  // Ends the running DMA's current channel when an HDMA event involves it: `channels`
+  // is the event's set. The channel's $420B bit clears and its count stands.
+  void endDmaOnChannels(std::uint8_t channels) noexcept;
 
   // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
   // register files, read and written by their documented layout.
@@ -724,6 +790,11 @@ class Snes {
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
+  // The address the cartridge's ROM sees for a bus address the save did not answer:
+  // the address itself, except in LoROM's save window, where a lower half is
+  // answered by its bank's upper half.
+  [[nodiscard]] std::uint32_t romView(std::uint8_t bank, std::uint16_t offset) const noexcept;
+
   // The cartridge byte an address reaches under the machine's map, mirrored across
   // the image; zero for an address that reaches no cartridge. Pure — it neither
   // prices the cycle nor touches the data bus.
@@ -731,7 +802,10 @@ class Snes {
 
   // Whether an address lands on the cartridge under the machine's map, and whether
   // it lands on save RAM. Both answer through the cartridge functions, so the
-  // machine reads an image exactly where the header says it is. saveRamIndex
+  // machine reads an image exactly where the header says it is — except that a
+  // LoROM cartridge declaring a coprocessor keeps its cartridge banks' lower halves
+  // for the chip, which the machine does not carry, and reads open bus there.
+  // saveRamIndex
   // answers the offset into the save, already reduced to its size, for an address
   // that reaches it — nothing when the cartridge has no save.
   [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
@@ -783,6 +857,9 @@ class Snes {
     return value;
   }
 
+  // The word at $00FFFC, where the CPU starts.
+  [[nodiscard]] std::uint16_t resetVector() const noexcept;
+
   // The CPU's power-on state: emulation mode, the interrupt disable set, and the
   // program counter at the cartridge's reset vector.
   [[nodiscard]] Cpu65816State powerOnCpu() const;
@@ -793,6 +870,8 @@ class Snes {
   std::vector<std::uint8_t> rom_;    // the cartridge image, fixed for the machine's life
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
   CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it
+  bool plainBoard_ = true;           // the header declares no coprocessor, so LoROM's lower halves repeat the image
+  bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress

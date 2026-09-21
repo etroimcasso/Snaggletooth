@@ -20,6 +20,7 @@ disagree it names the disagreement and what decided it.
 - [The sprites](#the-sprites)
   - [A sprite's numbers wrap inside its table, which is the opposite of a block's](#a-sprites-numbers-wrap-inside-its-table-which-is-the-opposite-of-a-blocks)
   - [Sizes 6 and 7 are undocumented and both sources print them anyway](#sizes-6-and-7-are-undocumented-and-both-sources-print-them-anyway)
+  - [Under object interlace a 16×32 sprite is a 16×16 one](#under-object-interlace-a-1632-sprite-is-a-1616-one)
   - [The two passes' schedule: the documents give it from opposite ends and reconcile exactly](#the-two-passes-schedule-the-documents-give-it-from-opposite-ends-and-reconcile-exactly)
   - [The two counts run in opposite directions along the same sprites](#the-two-counts-run-in-opposite-directions-along-the-same-sprites)
   - [The front-sprite oddity is stated three ways and two of them agree](#the-front-sprite-oddity-is-stated-three-ways-and-two-of-them-agree)
@@ -205,6 +206,16 @@ discovered.
 
 *Documented but contested* only in the sense that the hardware's own documentation never named them;
 the two secondary sources agree exactly.
+
+### Under object interlace a 16×32 sprite is a 16×16 one
+
+When `$2133` bit 1 sets object interlace, a 16×32 sprite — the small size of pairs 6 and 7 — is
+drawn as though it were 16×16: its lower half is never read and its upper half is shown at half
+height, standing on eight lines rather than sixteen. The larger sizes of the pair, and every square
+size, are untouched. The SNESdev errata gives the effect with no mechanism, so it is modelled as the
+sentence reads.
+
+*Documented and uncorroborated.* One source states it, and no reading has confirmed it.
 
 ### The two passes' schedule: the documents give it from opposite ends and reconcile exactly
 
@@ -850,6 +861,9 @@ own "What remains open" carries the register-file ones alongside these.
 - How far ahead of a dot the chip fetches that dot's map entry and character. Pixels are resolved
   from the registers as they stand at their own dot, which is where a mid-picture write lands; the
   distance itself wants a test ROM that exercises it.
+- How the Time pass's tile loads are spread across horizontal blank. anomie's step 2 says what is
+  loaded and not when, and fullsnes calls the access time of steps 2 and 3 unknown. Here the pass runs
+  whole as the line begins, while the Range pass before it runs progressively at two dots a sprite.
 - What a write to a scroll register mid-line does to a tile whose entry has already been fetched.
 - How the palette's mid-line access window sits against the chip's own fetch of the colours it is
   drawing with.

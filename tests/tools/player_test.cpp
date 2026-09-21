@@ -45,13 +45,15 @@ std::string refusal(std::string_view text) {
 
 PadConfig theDefault() { return parsed(kDefaultPadConfig); }
 
-// The twelve key names the shipped configuration uses, numbered as an application
-// that owns a keyboard would number them. The names themselves are whoever owns the
-// keyboard's business; what this pins is that each one reaches exactly one button.
+// The twelve key names the shipped configuration gives to buttons and the three
+// the hotkey cases use, numbered as an application that owns a keyboard would
+// number them. The names themselves are whoever owns the keyboard's business; what
+// this pins is that each of the twelve reaches exactly one button.
 const std::map<std::string, KeyId>& keyNumbers() {
   static const std::map<std::string, KeyId> kKeys{
       {"z", 0},   {"x", 1},    {"a", 2},          {"s", 3},   {"q", 4},    {"w", 5},
       {"return", 6}, {"backspace", 7}, {"up", 8}, {"down", 9}, {"left", 10}, {"right", 11},
+      {"r", 12}, {"f9", 13}, {"f10", 14},
   };
   return kKeys;
 }
@@ -367,7 +369,10 @@ TEST(PlayerConfig, AConfigRefusesWhatItCannotRead) {
   EXPECT_NE(refusal("[gamepad]\nb = elbow\n").find("not a place on a pad"), std::string::npos);
   EXPECT_NE(refusal("[gamepad]\nport = 3\n").find("not a port"), std::string::npos);
   EXPECT_NE(refusal("[keyboard]\nport = auto\n").find("never auto"), std::string::npos);
-  EXPECT_NE(refusal("[hotkeys]\nquit = escape\n").find("no hotkey is defined"), std::string::npos);
+  EXPECT_NE(refusal("[hotkeys]\nquit = escape\n").find("not a hotkey"), std::string::npos);
+  EXPECT_NE(refusal("[hotkeys]\nreset =\n").find("given nothing"), std::string::npos);
+  EXPECT_NE(refusal("[hotkeys]\nreset = f5\nreset = f6\n").find("given twice"), std::string::npos);
+  EXPECT_NE(refusal("[hotkeys]\nreset = f5,\n").find("empty key"), std::string::npos);
   EXPECT_NE(refusal("[gamepad]\nb = south\n").find("does not say what holds"), std::string::npos)
       << "a plain section is the whole mapping, not a patch";
   EXPECT_NE(refusal(whole + whole).find("given twice"), std::string::npos);
@@ -391,6 +396,112 @@ TEST(PlayerConfig, AKeyTheKeyboardDoesNotHaveIsRefusedWhenItIsResolved) {
   std::string error;
   EXPECT_FALSE(resolveKeyboard(config, numberFor, error).has_value());
   EXPECT_NE(error.find("nonesuch"), std::string::npos) << error;
+}
+
+// ---- the hotkeys -------------------------------------------------------------------
+
+TEST(PlayerConfig, TheShippedResetChordIsCommandOnAMacAndControlElsewhereAndNeverBoth) {
+  std::string error;
+  const std::optional<KeyboardMap> keys = resolveKeyboard(theDefault(), numberFor, error);
+  ASSERT_TRUE(keys.has_value()) << error;
+  const KeyId r = keyNumbers().at("r");
+
+  const std::optional<HotkeyMap> mac =
+      resolveHotkeys(theDefault(), *keys, KeyboardKind::Mac, numberFor, error);
+  ASSERT_TRUE(mac.has_value()) << error;
+  const std::vector<Chord> command = {Chord{.modifiers = kModifierCmd, .key = r}};
+  EXPECT_EQ(mac->reset, command);
+  EXPECT_TRUE(pressed(mac->reset, r, kModifierCmd));
+  EXPECT_FALSE(pressed(mac->reset, r, kModifierCtrl)) << "Control and R is not a Mac's reset";
+
+  const std::optional<HotkeyMap> other =
+      resolveHotkeys(theDefault(), *keys, KeyboardKind::Other, numberFor, error);
+  ASSERT_TRUE(other.has_value()) << error;
+  const std::vector<Chord> control = {Chord{.modifiers = kModifierCtrl, .key = r}};
+  EXPECT_EQ(other->reset, control);
+  EXPECT_TRUE(pressed(other->reset, r, kModifierCtrl));
+  EXPECT_FALSE(pressed(other->reset, r, kModifierCmd)) << "nor the Windows key and R anyone else's";
+}
+
+TEST(PlayerConfig, CmdOrCtrlKeepsTheModifiersWrittenBesideIt) {
+  PadConfig config = parsed("[hotkeys]\nreset = shift+CmdOrCtrl+r, cmd+f9\n");
+  fillFrom(config, theDefault());
+  std::string error;
+  const std::optional<KeyboardMap> keys = resolveKeyboard(config, numberFor, error);
+  ASSERT_TRUE(keys.has_value()) << error;
+  const std::optional<HotkeyMap> other =
+      resolveHotkeys(config, *keys, KeyboardKind::Other, numberFor, error);
+  ASSERT_TRUE(other.has_value()) << error;
+  const std::vector<Chord> resolved = {
+      Chord{.modifiers = static_cast<std::uint8_t>(kModifierShift | kModifierCtrl),
+            .key = keyNumbers().at("r")},
+      Chord{.modifiers = kModifierCmd, .key = keyNumbers().at("f9")}};  // a plain `cmd` stays Command
+  EXPECT_EQ(other->reset, resolved);
+}
+
+TEST(PlayerConfig, AChordIsPressedByExactlyItsModifiers) {
+  const KeyId r = keyNumbers().at("r");
+  const std::vector<Chord> chords = {Chord{.modifiers = kModifierCmd, .key = r},
+                                     Chord{.modifiers = kModifierCtrl, .key = r}};
+  EXPECT_TRUE(pressed(chords, r, kModifierCmd));
+  EXPECT_TRUE(pressed(chords, r, kModifierCtrl));
+  EXPECT_FALSE(pressed(chords, r, 0u)) << "the key alone is not the chord";
+  EXPECT_FALSE(pressed(chords, r, static_cast<std::uint8_t>(kModifierCmd | kModifierShift)))
+      << "nor is the chord with another modifier held";
+  EXPECT_FALSE(pressed(chords, keyNumbers().at("z"), kModifierCmd)) << "nor another key";
+}
+
+TEST(PlayerConfig, AChordReadsItsModifiersInAnyCaseAndOrder) {
+  const PadConfig config = parsed("[hotkeys]\nreset = Shift + CTRL+f9, f10, alt+cmd+r\n");
+  const std::vector<ChordName> read = {
+      ChordName{.modifiers = static_cast<std::uint8_t>(kModifierShift | kModifierCtrl), .key = "f9"},
+      ChordName{.modifiers = 0u, .key = "f10"},
+      ChordName{.modifiers = static_cast<std::uint8_t>(kModifierAlt | kModifierCmd), .key = "r"}};
+  EXPECT_EQ(config.hotkeys.reset, read);
+
+  // A word that is not a modifier begins the key's name, so a key named with a `+`
+  // of its own still reads, and a modifier nobody has is a key nobody has.
+  const PadConfig keypad = parsed("[hotkeys]\nreset = ctrl+keypad +\n");
+  const std::vector<ChordName> plus = {ChordName{.modifiers = kModifierCtrl, .key = "keypad +"}};
+  EXPECT_EQ(keypad.hotkeys.reset, plus);
+  EXPECT_EQ(parsed("[hotkeys]\nreset = hyper+r\n").hotkeys.reset[0].key, "hyper+r");
+}
+
+TEST(PlayerConfig, AHotkeyAFileDoesNotNameComesFromTheDefault) {
+  // A file written before the section had a key carries it empty, and still has a
+  // reset button; one that names the key has its own, and as many as it lists.
+  PadConfig silent = parsed("[hotkeys]\n");
+  EXPECT_TRUE(silent.hotkeys.reset.empty());
+  fillFrom(silent, theDefault());
+  EXPECT_EQ(silent.hotkeys.reset, theDefault().hotkeys.reset);
+  EXPECT_EQ(silent.hotkeys.reset.size(), 1u);
+
+  PadConfig named = parsed("[HotKeys]\nReset = f9\n");
+  fillFrom(named, theDefault());
+  const std::vector<ChordName> own = {ChordName{.modifiers = 0u, .key = "f9"}};
+  EXPECT_EQ(named.hotkeys.reset, own);
+}
+
+TEST(PlayerConfig, AHotkeyIsRefusedWhenTheKeyboardDoesNotHaveItOrAButtonAlreadyDoes) {
+  PadConfig unknown = parsed("[hotkeys]\nreset = cmd+nonesuch\n");
+  fillFrom(unknown, theDefault());
+  std::string error;
+  const std::optional<KeyboardMap> keys = resolveKeyboard(unknown, numberFor, error);
+  ASSERT_TRUE(keys.has_value()) << error;
+  EXPECT_FALSE(resolveHotkeys(unknown, *keys, KeyboardKind::Mac, numberFor, error).has_value());
+  EXPECT_NE(error.find("nonesuch"), std::string::npos) << error;
+
+  // `z` holds B in the shipped keyboard section; alone, one press would do both.
+  // Inside a chord it is a different press, and stands.
+  PadConfig shared = parsed("[hotkeys]\nreset = z\n");
+  fillFrom(shared, theDefault());
+  error.clear();
+  EXPECT_FALSE(resolveHotkeys(shared, *keys, KeyboardKind::Mac, numberFor, error).has_value());
+  EXPECT_NE(error.find("`z` is the reset hotkey and holds b"), std::string::npos) << error;
+
+  PadConfig chorded = parsed("[hotkeys]\nreset = ctrl+z\n");
+  fillFrom(chorded, theDefault());
+  EXPECT_TRUE(resolveHotkeys(chorded, *keys, KeyboardKind::Mac, numberFor, error).has_value()) << error;
 }
 
 // ---- the recording -----------------------------------------------------------------

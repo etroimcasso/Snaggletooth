@@ -188,16 +188,24 @@ enum class CartridgeRegion : std::uint8_t {
   WorkRam,  // banks $7E-$7F
   Rom,      // the cartridge image
   SaveRam,  // the cartridge's save window
-  Unmapped, // nothing: a read answers open bus
 };
 
-// The region a 24-bit bus address lands in under `map`. The save window is
-// reported whether or not the cartridge declares any save RAM; a cartridge that
-// declares none leaves the window reading open bus.
+// The region a 24-bit bus address lands in under `map`. Under LoROM the lower half
+// of a cartridge bank — $40-$7D and $C0-$FF below $8000 — is the image, reaching the
+// bytes the bank's upper half reaches, because the board leaves the cartridge's A15
+// unconnected.
+//
+// The save window is reported whether or not the cartridge carries any save RAM,
+// since the map alone cannot say. What a cartridge with none answers there is the
+// board's: HiROM's and ExHiROM's windows sit in the expansion area and read open
+// bus, and LoROM's sits in cartridge banks and repeats the image as every other
+// lower half does. `Snes` reads it that way; `romOffset` gives no offset inside
+// the window.
 [[nodiscard]] CartridgeRegion cartridgeRegion(CartridgeMap map, std::uint32_t address) noexcept;
 
 // The image byte a ROM address reads, for an image of `imageBytes`. Nothing when
-// the address is not ROM under the map or the image is empty. An address past the
+// the address is not ROM under the map — the save window included — or the image
+// is empty. An address past the
 // image repeats it the way the board does: a cartridge carries one chip per power
 // of two in its size, wired one after another, and an address past a chip reads
 // that chip again rather than running into the next one.
@@ -214,7 +222,7 @@ enum class CartridgeRegion : std::uint8_t {
 
 // The offset into the save an address reaches, before it is reduced to the save's
 // size; nothing when the address is outside the save window. LoROM keeps the save
-// in the lower halves of banks $70-$7D and $F0-$FD; HiROM in $20-$3F and $A0-$BF
+// in the lower halves of banks $70-$7D and $F0-$FF; HiROM in $20-$3F and $A0-$BF
 // at $6000-$7FFF; ExHiROM in $80-$BF at $6000-$7FFF.
 [[nodiscard]] std::optional<std::size_t> saveRamOffset(CartridgeMap map,
                                                        std::uint32_t address) noexcept;

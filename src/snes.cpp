@@ -76,12 +76,16 @@ constexpr std::size_t kRasterBytes = kHiresWidth * kPixelBytes * kTallestPicture
 // after the short one and six after the long one.
 constexpr std::uint16_t kTimerHOrigin = 14u;
 constexpr std::uint16_t kTimerLineSpan = 1374u;
+// The dot the timer raises nothing on, on the short line and on a frame's last line:
+// anomie-timing.txt 121-123 measures both, and documents no mechanism for either.
+constexpr std::uint16_t kTimerQuietDot = 153u;
 
 // The memory refresh: the CPU is held off the bus for forty master cycles once a
 // line, at the point on an eight-cycle grid nearest 536 into the line, spent a fast
 // cycle at a time so a run can stop inside one.
 constexpr std::uint16_t kRefreshMaster = 40u;
 constexpr std::uint16_t kRefreshTarget = 536u;
+constexpr std::uint64_t kFirstRefresh = 538u;  // the first line's pause, which SnesState starts `refreshAt` at
 constexpr std::uint32_t kRefreshStep = 6u;
 
 // The multiply/divide unit is clocked by the CPU, so its documented latencies are
@@ -115,6 +119,8 @@ Snes::Snes(SnesConfig config)
       rom_(config.rom.begin(), config.rom.end()),
       region_(config.region) {
   map_ = config.map.value_or(detectCartridgeMap(rom_));
+  const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom_);
+  plainBoard_ = !header.has_value() || header->coprocessor == Coprocessor::None;
   const std::size_t save = config.saveRamBytes.value_or(declaredSaveRamBytes(rom_));
   state_.sram.assign(save > kMaxSaveRamBytes ? kMaxSaveRamBytes : save, 0u);
   const ApuRatio ratio = region_ == Region::Pal ? kPalApu : kNtscApu;
@@ -130,6 +136,7 @@ Snes::Snes(SnesConfig config)
         config.bootRom.has_value() ? std::span<const std::uint8_t, kIplWindowBytes>(*config.bootRom)
                                    : std::span<const std::uint8_t, kIplWindowBytes>(iplStubImage());
     seedIplStub(state_.apu, image);
+    bootsAudio_ = true;
     // Map the same image over the $FFC0 window. The upload shell scratch-writes
     // that range in RAM and re-enters it expecting the boot code to read back
     // unchanged; the mapping serves the image to the CPU while CONTROL bit 7 is set,
@@ -147,6 +154,8 @@ Snes::Snes(Snes&& moved) noexcept
       rom_(std::move(moved.rom_)),
       region_(moved.region_),
       map_(moved.map_),
+      plainBoard_(moved.plainBoard_),
+      bootsAudio_(moved.bootsAudio_),
       apuNum_(moved.apuNum_),
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
@@ -206,12 +215,85 @@ void Snes::sync() {
   state_.cpu = cpu_.state();
 }
 
-Cpu65816State Snes::powerOnCpu() const {
-  const std::uint16_t reset = static_cast<std::uint16_t>(
+std::uint16_t Snes::resetVector() const noexcept {
+  return static_cast<std::uint16_t>(
       romByte(0x00, 0xFFFC) |
       (static_cast<std::uint16_t>(romByte(0x00, 0xFFFD)) << 8));
+}
+
+void Snes::reset() {
+  // The CPU: the registers its reset leaves, at the cartridge's vector.
+  state_.cpu = afterReset(state_.cpu, resetVector());
+
+  // The 5A22's registers a reset initialises. The operands of the arithmetic unit,
+  // its results, HTIME, VTIME and the eight channels' register files are not among
+  // them and keep what they held.
+  state_.nmitimen = 0u;
+  state_.vblankNmi = false;
+  state_.timeup = false;
+  state_.wrio = 0xFFu;
+  state_.memsel = 0u;
+  state_.mdmaen = 0u;
+  state_.hdmaen = 0u;
+  state_.joyStrobe = false;
+  state_.joy = {};
+  state_.wmadd = 0u;  // the work-RAM chip's port address; its contents stand
+
+  // Nothing the chip was part-way through survives it: a transfer, the HDMA frame,
+  // an arithmetic job, an auto-read, a counter latch still owed.
+  state_.dmaArm = 0u;
+  state_.dmaRunning = false;
+  state_.dmaOpened = false;
+  state_.dmaChannelOpened = false;
+  state_.dmaUnit = 0u;
+  state_.dmaPauseMaster = 0u;
+  state_.dmaResumePad = false;
+  state_.hdmaActive = 0u;
+  state_.hdmaEnded = 0u;
+  state_.hdmaDoWrite = 0u;
+  state_.hdmaInited = false;
+  state_.hdmaLineFired = false;
+  state_.hdmaRunPending = false;
+  state_.hdmaIniting = false;
+  state_.mathClocks = 0u;
+  state_.mathOp = MathOp::None;
+  state_.autoJoyStart = 0u;
+  state_.autoJoyClocked = 0u;
+  state_.counterLatchAt = 0u;
+
+  // The machine starts again at H = 0, V = 0 with the parity clear, which is where
+  // construction starts it, so the master counter — what every "since reset" grid
+  // counts — begins again too, and the audio clock's share with it.
+  state_.master = 0u;
+  state_.consumed = 0u;
+  state_.apuPhase = 0u;
+  state_.hpos = 0u;
+  state_.vpos = 0u;
+  state_.field = 0u;
+  state_.inVblank = false;
+  state_.vblankBeginLine = 0u;
+  state_.previousLineMaster = kLineMaster;
+  state_.refreshAt = kFirstRefresh;
+  state_.refreshLeft = 0u;
+
+  // The PPU: the screen forced blank at the brightness it had, and the line begun
+  // the way the machine begins any first line. Every other register and the three
+  // memories keep what they held.
+  state_.ppu.inidisp |= 0x80u;
+  Ppu ppu{state_.ppu, derived_};
+  ppu.beginRange(1u);
+  ppu.beginLine(0u);
+  frameWide_ = false;  // the picture the beam was part-way down is not finished
+
+  // The audio machine, and the boot program again when the machine runs one.
+  apu_.reset();
+  if (bootsAudio_) enterIplStub(state_.apu);
+  load();
+}
+
+Cpu65816State Snes::powerOnCpu() const {
   return Cpu65816State{
-      .pc = reset,
+      .pc = resetVector(),
       .s = 0x01FF,
       .p = static_cast<std::uint8_t>(kCpuFlagM | kCpuFlagX | kCpuFlagI),
       .e = true,
@@ -349,13 +431,28 @@ namespace {
 
 }  // namespace
 
+std::uint32_t Snes::romView(std::uint8_t bank, std::uint16_t offset) const noexcept {
+  // LoROM's save window sits in cartridge banks, and a board with no save RAM decodes
+  // nothing there: the window's lower halves repeat their upper halves, as every other
+  // cartridge bank's lower half does. The bus asks the save first, so an address in
+  // the window arrives here only on a cartridge that has none.
+  const std::uint32_t address = busAddress(bank, offset);
+  const bool bareWindow = map_ == CartridgeMap::LoRom && saveRamOffset(map_, address).has_value();
+  return bareWindow ? address | 0x8000u : address;
+}
+
 std::uint8_t Snes::romByte(std::uint8_t bank, std::uint16_t offset) const noexcept {
-  const std::optional<std::size_t> index = romOffset(map_, busAddress(bank, offset), rom_.size());
+  const std::optional<std::size_t> index = romOffset(map_, romView(bank, offset), rom_.size());
   return index.has_value() ? rom_[*index] : std::uint8_t{0};
 }
 
 bool Snes::addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept {
-  return cartridgeRegion(map_, busAddress(bank, offset)) == CartridgeRegion::Rom;
+  // A coprocessor's board is not one of the plain ones: it gives lower halves of its
+  // cartridge banks to the chip — $60-$6F to a DSP or an ST010 — and the machine carries
+  // no such chip, so those halves answer as any absent chip's ports do, with open bus.
+  const bool cartridgeBank = (bank >= 0x40 && bank <= 0x7D) || bank >= 0xC0;
+  if (!plainBoard_ && map_ == CartridgeMap::LoRom && cartridgeBank && offset < 0x8000u) return false;
+  return cartridgeRegion(map_, romView(bank, offset)) == CartridgeRegion::Rom;
 }
 
 std::optional<std::size_t> Snes::saveRamIndex(std::uint8_t bank,
@@ -387,9 +484,11 @@ void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
     lastCost_ += resumePad(cost);
     state_.dmaResumePad = false;
   }
+  const std::uint8_t busBefore = state_.mdr;  // the byte the bus held before this write
   tickVideo(lastCost_);  // tick-first, so a write lands after the event it shares the cycle with
   videoAdvanced_ = true;
   routeWrite(address, value);
+  redrawInidispEarly(address, busBefore);
 }
 
 std::uint8_t Snes::routeRead(std::uint32_t address) {
@@ -559,12 +658,13 @@ namespace {
 
 }  // namespace
 
-std::uint16_t Snes::hdot() const noexcept {
-  // The dot the beam is on. Dots 323 and 327 are six master cycles wide and every
+std::uint16_t Snes::hdot() const noexcept { return hdotAt(state_.hpos); }
+
+std::uint16_t Snes::hdotAt(std::uint16_t h) const noexcept {
+  // The dot the position is on. Dots 323 and 327 are six master cycles wide and every
   // other dot is four, so past dot 322 the count falls behind a plain quarter of the
   // position and dot 340 is reached only on a line that runs 1368. The short line
   // keeps 340 even dots and none of this applies to it.
-  const std::uint16_t h = state_.hpos;
   if (lineLength() == kShortLineMaster || h < kFirstLongDot) {
     return static_cast<std::uint16_t>(h >> 2);
   }
@@ -590,16 +690,20 @@ std::uint64_t Snes::nextRefresh(std::uint64_t lineStart) const noexcept {
   return ahead <= 4u ? target - ahead : target + (8u - ahead);
 }
 
+bool Snes::timerCrossed() const noexcept {
+  switch (static_cast<std::uint8_t>((state_.nmitimen >> 4) & 3u)) {
+    case 1: return timerHPoint_;         // H = H on every line
+    case 2: return timerZeroOnVLine_;    // V = V, with no H to compare
+    case 3: return timerHPointOnVLine_;  // H = H and V = V
+    default: return false;               // the timer is off
+  }
+}
+
 void Snes::settleTimer() noexcept {
   // A crossing is noted as the cycle ticks and the flag is raised at the cycle's end
   // under the mode the cycle leaves behind, so a write that arms the timer in the very
   // cycle its point is crossed is in time and one that disarms it is too.
-  switch (static_cast<std::uint8_t>((state_.nmitimen >> 4) & 3u)) {
-    case 1: if (timerHPoint_) state_.timeup = true; return;        // H = H on every line
-    case 2: if (timerZeroOnVLine_) state_.timeup = true; return;   // V = V, with no H to compare
-    case 3: if (timerHPointOnVLine_) state_.timeup = true; return; // H = H and V = V
-    default: return;                                               // the timer is off
-  }
+  if (timerCrossed()) state_.timeup = true;
 }
 
 void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
@@ -642,17 +746,33 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
       ? lineStart + kTimerHOrigin + 4ull * state_.htime
       : zeroPoint;
   const bool onTimerLine = state_.vpos == state_.vtime;
-  if (passed(hPoint)) {
+  // Dot 153 raises nothing on the short scanline, nor on the last scanline of a frame.
+  // The V-only point is a line's own and keeps its place: the exception is a dot.
+  const bool quietDot = state_.htime == kTimerQuietDot &&
+                        (lineLength() == kShortLineMaster ||
+                         state_.vpos == static_cast<std::uint16_t>(frameLines() - 1u));
+  if (!quietDot && passed(hPoint)) {
     timerHPoint_ = true;
     if (onTimerLine) timerHPointOnVLine_ = true;
   }
   if (onTimerLine && passed(zeroPoint)) timerZeroOnVLine_ = true;
 
   // The refresh: the cycle whose tick reaches the point finishes on its own time, and
-  // the pause runs before the next one. A halted core makes no bus cycle to hold off
-  // the bus, so nothing pauses it.
-  if (passed(state_.refreshAt) && cpu_.state().run == CpuRunState::Running) {
+  // the pause runs before the next one. The pause holds the core whatever it is doing,
+  // so a core waiting on WAI samples the interrupt line it wakes on at the first idle
+  // cycle past the pause rather than inside it.
+  if (passed(state_.refreshAt)) {
     state_.refreshLeft = static_cast<std::uint8_t>(kRefreshMaster);
+  }
+
+  // A latch owed by a fall of the I/O port's top bit lands as the beam reaches its
+  // point, capturing the dot and line there rather than at the write. The line is
+  // this span's, and the dot is the point's own offset into it.
+  if (state_.counterLatchAt != 0u && passed(state_.counterLatchAt)) {
+    PpuInputs in = ppuInputs();
+    in.hdot = hdotAt(static_cast<std::uint16_t>(state_.counterLatchAt - lineStart));
+    Ppu{state_.ppu, derived_}.latchCounters(in);
+    state_.counterLatchAt = 0u;
   }
 }
 
@@ -747,6 +867,28 @@ void Snes::widenFrame(std::size_t line, std::uint16_t x) noexcept {
     }
   }
   frameWide_ = true;
+}
+
+void Snes::redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore) {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
+  if (!systemBank || offset != 0x2100u || state_.inVblank) return;
+  // The cycle drew its dots under the register as it stood; redraw only the last of
+  // them, under the byte the bus held before the write. Master is still the cycle's
+  // start here — closeCycle advances it — so the end is start + this cycle's cost.
+  const std::uint16_t endHpos = state_.hpos;
+  if (endHpos < lastCost_) return;  // the cycle crossed a line; its last dot is off the picture
+  const std::uint64_t beamEnd = state_.master + lastCost_;
+  const std::uint64_t lineStart = beamEnd - endHpos;
+  const std::uint8_t written = state_.ppu.inidisp;  // the value the write applied, restored after
+  // The dot resolves under the same beam position the cycle drew it from, which is
+  // the span's start, so the register is the only thing that differs.
+  state_.hpos = static_cast<std::uint16_t>(endHpos - lastCost_);
+  state_.ppu.inidisp = busBefore;
+  drawSpan(lineStart, beamEnd - 4u, beamEnd);
+  state_.ppu.inidisp = written;
+  state_.hpos = endHpos;
 }
 
 void Snes::deliverFrame() {
@@ -951,8 +1093,11 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
       return latch(v);
     }
     case 0x4211: {  // TIMEUP: the H/V-timer IRQ flag (bit 7), open bus below
+      // A read in the very cycle the flag rises receives it set and acknowledges
+      // nothing (fullsnes.txt 1781-1784): the cycle has ticked, so the crossing is
+      // known here, and the cycle's end raises the flag over this read's clear.
       const std::uint8_t v = static_cast<std::uint8_t>(
-          (state_.timeup ? 0x80u : 0x00u) | (state_.mdr & 0x7Fu));
+          ((state_.timeup || timerCrossed()) ? 0x80u : 0x00u) | (state_.mdr & 0x7Fu));
       state_.timeup = false;  // reading acknowledges the flag
       return latch(v);
     }
@@ -985,7 +1130,11 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x4201: {  // WRIO: the I/O port; its top bit falling latches the PPU's counters
       const bool fell = (state_.wrio & 0x80u) != 0u && (value & 0x80u) == 0u;
       state_.wrio = value;
-      if (fell) Ppu{state_.ppu, derived_}.latchCounters(ppuInputs());
+      // The latch through this line lands one dot after the point a $2137 read of
+      // the same cycle would (fullsnes.txt 27073-27075). It is owed and
+      // captured as the beam passes that point, so it lands from the next cycle's
+      // tick, and a snapshot taken between the write and the landing carries it.
+      if (fell) state_.counterLatchAt = state_.master + lastCost_ + 4u;
       return;
     }
     case 0x4202: state_.wrmpya = value; return;
@@ -1017,7 +1166,8 @@ void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
     case 0x420B: triggerDma(value); return;             // start a general-purpose DMA on each selected channel
     case 0x420C: enableHdma(value); return;             // enable HDMA on the selected channels
     case 0x420D: state_.memsel = static_cast<std::uint8_t>(value & 1u); return;
-    default: return;  // the read-only ports ignore writes
+    case 0x4211: state_.timeup = false; return;  // TIMEUP: a write acknowledges the flag as a read does
+    default: return;  // the other read-only ports ignore writes
   }
 }
 

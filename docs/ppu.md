@@ -378,6 +378,16 @@ brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 2
 integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
 frame rather than no frame.
 
+**A write to `INIDISP` outside vertical blank is read a dot early.** The chip reads the register
+before the value reaches the data bus, so the last dot the write's own cycle covers is drawn under
+the byte the bus held before it — the whole byte, forced blank and brightness both — and every dot
+after it under the written value. For a store that byte is the instruction's last, which is why a
+write through long addressing (`STA $8F2100`) draws the odd dot under `$8F`, and why putting the
+value on the bus first (`STA $0F2100` for a value of `$0F`) draws no odd dot at all; for a transfer
+it is the byte on the bus before the transfer's own read. One dot is drawn this way; how many the
+early value lasts is a measurement no reading yet gives. Inside vertical blank the write changes
+nothing on the picture.
+
 ### The half-pixel line
 
 In modes 5 and 6 every line is 512 half-pixels, two to each position, and in any other mode —
@@ -580,7 +590,10 @@ Most registers store the byte written and nothing more. Three groups do not.
 **The scroll registers** (`$210D`–`$2114`) are written twice, low byte then high, through one
 latch all eight share. A vertical offset takes `(value << 8) | latch`. A horizontal offset takes
 `(value << 8) | (latch & ~7) | (its own previous value >> 8 & 7)`: the low three bits come from
-the register's own high byte, not the latch. After either, the latch is the byte just written. The
+the register's own high byte. anomie reads them there; the register page reads them from a second
+latch every horizontal-offset write loads. The two agree unless another background's horizontal
+offset is written between a register's two bytes, and no reading yet settles that case — anomie's
+form is built. After either, the latch is the byte just written. The
 value is kept as the two writes assembled it; the offset the renderer uses is its low ten bits.
 Because the latch is shared, writing the registers in a mixed order gives a mixed result — the
 register page's own caution.
@@ -759,13 +772,10 @@ Each of these is a question the documentation leaves, recorded rather than decid
   the chip is fetching the first line's sprites. It is treated as not blank.
 - What the VRAM prefetch register holds after a read outside its window. The documentation says
   invalid data; here the register keeps what it had.
-- Where a CGRAM write inside the picture lands. The documentation says the wrong address, which is
-  the address the chip's own palette fetch was at; until the fetch is built there is no honest
-  address, so the write does not land.
+- Where a CGRAM write inside the picture lands. The register page says only that it goes to the
+  wrong CGRAM address and names none; until a reading gives one, the write does not land.
 - Whether reading `$213F` clears the latch flag while a condition that sets it is still active.
 - Whether the software latch works when the port's bit 7 was high and has since fallen.
-- The pixel or so the chip draws from the old value when `INIDISP` is written (the register page's
-  early-read note); a drawing-side matter.
 - Bit 7 of `VMAIN` at power-on, which the documentation marks unknown and this state leaves clear.
 - How to count the line's long dots. The register page states the dot clock as four five-cycle dots and
   its own measured latch quantities as two six-cycle ones; the latch is what a program can read, so the

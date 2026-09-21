@@ -274,18 +274,23 @@ TEST(SnesObserver, TheCpuCycleCountFallsOutOfTheReport) {
 
 // ---- the engines and the port -------------------------------------------------------
 
-// Arms channel 0 for an A->B transfer of `bytes` from $7E:0010 to the WRAM data
-// port, so the bytes land at the port address, and triggers it from CPU code.
+// Arms channel 0 for an A->B transfer of `bytes` from the cartridge at $00:9000 to
+// the WRAM data port, so the bytes land at the port address, and triggers it from CPU
+// code. The source is the cartridge because the port copies nothing out of work RAM.
 Snes dmaMachine(std::uint16_t bytes, std::uint8_t pattern = 0x00u) {
-  Snes m = programMachine({kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
+  std::vector<std::uint8_t> rom{kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp};
+  rom.resize(0x8000u, 0x00u);
+  for (std::uint16_t i = 0; i < bytes; ++i) rom[0x1000u + i] = static_cast<std::uint8_t>(0xA0u + i);
+  rom[0x7FFCu] = 0x00u;  // reset -> $8000
+  rom[0x7FFDu] = 0x80u;
+  Snes m(SnesConfig{.rom = rom});
   SnesState s = m.state();
   s.dma[0].dmap = pattern;  // A->B, increment
   s.dma[0].bbad = 0x80u;    // $2180
-  s.dma[0].a1t = 0x0010u;
-  s.dma[0].a1b = 0x7Eu;
+  s.dma[0].a1t = 0x9000u;
+  s.dma[0].a1b = 0x00u;
   s.dma[0].das = bytes;
   s.wmadd = 0x001000u;
-  for (std::uint16_t i = 0; i < bytes; ++i) s.wram[0x10u + i] = static_cast<std::uint8_t>(0xA0u + i);
   m.restore(s);
   return m;
 }
@@ -301,7 +306,7 @@ TEST(SnesObserver, ATransfersBytesAreReportedInTheEnginesNameReadThenWrite) {
     const BusAccess& read = dma[2 * i];
     const BusAccess& write = dma[2 * i + 1];
     EXPECT_FALSE(read.write);
-    EXPECT_EQ(read.address, 0x7E0010u + i);
+    EXPECT_EQ(read.address, 0x009000u + i);
     EXPECT_EQ(int{read.value}, 0xA0 + static_cast<int>(i));
     EXPECT_EQ(read.kind, CycleKind::DataRead);
     EXPECT_TRUE(write.write);
@@ -311,7 +316,7 @@ TEST(SnesObserver, ATransfersBytesAreReportedInTheEnginesNameReadThenWrite) {
   }
   // None of it is the CPU's: the CPU's accesses are its own instructions' only.
   for (const BusAccess& a : r.accessesFrom(AccessSource::Cpu)) {
-    EXPECT_NE(a.address, 0x7E0010u);
+    EXPECT_NE(a.address, 0x009000u);
   }
 }
 
@@ -337,6 +342,26 @@ TEST(SnesObserver, ThePortsOwnAccessIsReportedBeforeTheAccessThatMovedTheByte) {
   EXPECT_EQ(engine.source, AccessSource::Dma);
   EXPECT_EQ(engine.address, 0x002180u);
   EXPECT_EQ(m.state().wram[0x1000], 0xA0u);
+}
+
+TEST(SnesObserver, ATransferThePortRefusesReportsTheEnginesAccessesAndNoneOfThePorts) {
+  // Work RAM named on both buses is not copied: the engine still drives both of its
+  // accesses, and the port, which moved nothing, reports nothing.
+  Snes m = dmaMachine(2);
+  SnesState s = m.state();
+  s.dma[0].a1t = 0x0010u;
+  s.dma[0].a1b = 0x7Eu;
+  m.restore(s);
+  Recorder r;
+  m.setObserver(&r);
+  m.run(20000u);
+  const std::vector<BusAccess> dma = r.accessesFrom(AccessSource::Dma);
+  ASSERT_EQ(dma.size(), 4u);
+  EXPECT_EQ(dma[0].address, 0x7E0010u);
+  EXPECT_FALSE(dma[0].write);
+  EXPECT_EQ(dma[1].address, 0x002180u);
+  EXPECT_TRUE(dma[1].write);
+  EXPECT_TRUE(r.accessesFrom(AccessSource::WramPort).empty());
 }
 
 TEST(SnesObserver, ACpuReadThroughThePortReportsThePortsRead) {
@@ -532,8 +557,8 @@ TEST(SnesObserver, ATransfersAccessesNameTheChannelThatMovedThem) {
   SnesState s = m.state();
   s.dma[3].dmap = 0x00u;
   s.dma[3].bbad = 0x80u;
-  s.dma[3].a1t = 0x0010u;
-  s.dma[3].a1b = 0x7Eu;
+  s.dma[3].a1t = 0x9000u;  // the cartridge: the port copies nothing out of work RAM
+  s.dma[3].a1b = 0x00u;
   s.dma[3].das = 4;
   s.wmadd = 0x001000u;
   m.restore(s);
@@ -612,6 +637,41 @@ TEST(SnesObserver, AnIndirectEntrysPointerIsTheTablesAndItsDataIsNot) {
   EXPECT_FALSE(hdma[4].table);
   for (const BusAccess& a : hdma) EXPECT_EQ(int{a.channel}, 1);
   EXPECT_EQ(m.state().ppu.inidisp, 0x0Fu);
+}
+
+TEST(SnesObserver, WhatAnIndirectChannelReadsPastItsTablesEndSaysSo) {
+  // Channels 1 and 2, indirect, each two one-line entries and then a $00. The engine
+  // reads the pointer that would follow the $00 — both bytes on channel 1, one on
+  // channel 2, the line's last — and those reads are at the table's cursor and past the
+  // table's end. The second entry's pointer is loaded part-way down the picture as they
+  // are, and is the table's own.
+  Snes m = programMachine({kNop, 0x80u, 0xFDu});
+  SnesState s = m.state();
+  s.hdmaen = 0x06u;
+  for (const std::uint8_t c : {std::uint8_t{1u}, std::uint8_t{2u}}) {
+    const std::uint16_t table = static_cast<std::uint16_t>(0x0100u + 0x20u * c);
+    s.dma[c].dmap = 0x40u;  // indirect, pattern 0
+    s.dma[c].bbad = 0x00u;
+    s.dma[c].a1t = table;
+    s.dma[c].a1b = 0x7Eu;
+    s.dma[c].dasb = 0x7Eu;
+    const std::uint8_t bytes[] = {0x01u, 0x10u, 0x01u,   // one line from $7E:0110
+                                  0x01u, 0x10u, 0x01u,   // and one more
+                                  0x00u};                // stop
+    for (std::size_t i = 0; i < sizeof bytes; ++i) s.wram[table + i] = bytes[i];
+  }
+  m.restore(s);
+  Recorder r;
+  m.setObserver(&r);
+  m.run(3u * 1364u);
+  std::vector<std::uint32_t> past;
+  for (const BusAccess& a : r.accessesFrom(AccessSource::Hdma)) {
+    if (!a.pastTableEnd) continue;
+    EXPECT_TRUE(a.table);
+    EXPECT_FALSE(a.write);
+    past.push_back(a.address);
+  }
+  EXPECT_EQ(past, (std::vector<std::uint32_t>{0x7E0127u, 0x7E0128u, 0x7E0147u}));
 }
 
 // ---- the machine with and without one --------------------------------------------

@@ -201,11 +201,41 @@ and a pad with its own idle word.
 
 ```
 [hotkeys]
+reset = cmdorctrl+r
 ```
 
-The section where later functions bind. **This release defines no key in it.** The
-empty section is accepted so the shipped file can show where they go; a key in it
-is refused rather than quietly ignored.
+The chords that work the console itself rather than a pad in one of its ports.
+
+| Key | What it is |
+|---|---|
+| `reset` | the reset button on the console's front: `Snes::reset()` ([snes-machine.md §The reset line](snes-machine.md#the-reset-line)) |
+
+A hotkey takes chords, as many as the line lists. A chord is a key, named as
+`[keyboard]` names it, with any of four modifiers joined to its front by `+`:
+
+| Modifier | The key |
+|---|---|
+| `cmdorctrl` | the key a platform's own shortcuts use: Command on a Mac, Control everywhere else — one of the two on any machine, never both |
+| `cmd` | Command on a Mac; the Windows or Super key elsewhere |
+| `ctrl` | Control |
+| `alt` | Alt; Option on a Mac |
+| `shift` | Shift |
+
+Left and right of a modifier are one key. A chord is pressed by exactly its
+modifiers: `cmd+r` is not pressed by `r` alone, nor by `cmd+shift+r`. A press is one
+reset; holding the chord down does not repeat it. A key may stand with no modifier,
+unless `[keyboard]` gives it to a button.
+
+The shipped file says `cmdorctrl+r`, so the reset button is Command and R on a Mac,
+where Control and R does nothing, and Control and R everywhere else.
+
+A hotkey the file does not name comes from the shipped default, so a file with an
+empty `[hotkeys]` section, or with none, still has its reset button.
+
+A run that is read from an input script, or written to one, leaves the button
+alone and says so the first time it is pressed: a script is pads and frames and
+has no word for the reset line, so a run reset part-way through could not be
+played back.
 
 ## 7. Refusals
 
@@ -218,8 +248,10 @@ read refuses it, naming the line:
 - a phrase that names no place on a pad;
 - a `port` that is not `auto`, `1` or `2` — or `auto` under `[keyboard]`;
 - two sections pinned to the same port;
-- any key under `[hotkeys]`;
-- a key name the keyboard does not have.
+- a key under `[hotkeys]` that is not `reset`, or `reset` given twice;
+- a key name the keyboard does not have;
+- a key with no modifier that `reset` and one of the twelve buttons both name — one press
+  would do both.
 
 A present `[keyboard]` or `[gamepad]` section says what holds **every one of the
 twelve**. Those two sections are the whole mapping rather than a patch, so nothing
@@ -233,7 +265,8 @@ mine.snagpad: line 4: `elbow` is not a place on a pad
 
 A file that leaves out `[keyboard]` or `[gamepad]` entirely takes that section from
 the shipped default, so a file that changes one thing can be four lines long. That
-is the one place the default reaches into a configuration of your own.
+and an unnamed hotkey are the places the default reaches into a configuration of
+your own.
 
 ## 8. Library
 

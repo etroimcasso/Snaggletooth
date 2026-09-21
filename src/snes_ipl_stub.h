@@ -41,4 +41,10 @@ inline constexpr std::size_t kIplStubSize = 64u;
 void seedIplStub(ApuState& apu) noexcept;
 void seedIplStub(ApuState& apu, std::span<const std::uint8_t, kIplStubSize> image) noexcept;
 
+// Sends the audio CPU back into the boot image: the ports cleared and the CPU at
+// the entry, as seedIplStub leaves them, with audio RAM untouched. It is what a
+// reset does to a machine whose image is mapped over the window (Apu::mapIplRom),
+// where the CPU fetches the image whatever the RAM beneath it holds.
+void enterIplStub(ApuState& apu) noexcept;
+
 }  // namespace snaggletooth

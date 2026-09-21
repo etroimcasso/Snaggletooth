@@ -28,17 +28,16 @@ constexpr std::uint32_t kLine = 1364u;
 constexpr std::uint32_t kVblankLine = 225u;
 
 // The frame's first vertical-blank line begins here, and the machine's first
-// auto-read 298 master cycles into it: H = 74.5. A stopped machine advances in
-// six-cycle steps, so a point is reached by running to the multiple of six at or
-// past it, and not yet reached by running to the one before.
+// auto-read 298 master cycles into it: H = 74.5. A run stops at the first cycle at
+// or past its budget, and consecutive cycles are never more than six apart, so a
+// point is reached by running to it and not yet reached by running to six short.
 constexpr std::uint64_t kFirstVblankLine = kVblankLine * kLine;    // 306,900
 constexpr std::uint64_t kFirstStart = kFirstVblankLine + 298u;    // 307,198
 constexpr std::uint64_t kSecondVblankLine = kFirstVblankLine + 262u * kLine - 4u;  // the first frame's line 240 is short: 664,264
 
-std::uint64_t toSixes(std::uint64_t point) { return (point + 5u) / 6u * 6u; }
-
 // A machine whose CPU is halted with the counters at the frame origin, so run()
-// advances it in exact six-cycle idle steps, with the auto-read enabled or not.
+// advances it in idle cycles the line's pause steps aside, with the auto-read
+// enabled or not.
 Snes stoppedMachine(bool autoRead) {
   std::vector<std::uint8_t> rom(0x8000u, 0x00u);
   rom[0] = 0xDBu;         // STP
@@ -186,19 +185,26 @@ TEST(SnesController, TheRegistersShiftAsEachBitIsClocked) {
   // shifting up one and taking the bit at the bottom. Start is the fourth bit on
   // the wire, so it enters at bit 0 after four clocks and reaches its resting
   // place, bit 12, as the sixteenth lands.
+  // Each budget names its clock: a run stops at the first cycle at or past what it is
+  // given, and consecutive cycles are never more than six apart, so a budget six short
+  // of a clock stops before it and the next six reach it — whatever grid the line's
+  // pause leaves the machine standing on.
+  constexpr std::uint64_t kFourthBit = kFirstStart + 128u + 4u * 256u;
+  constexpr std::uint64_t kEighthBit = kFirstStart + 128u + 8u * 256u;
+  constexpr std::uint64_t kSixteenthBit = kFirstStart + 4224u;
   Snes m = stoppedMachine(true);
   m.setJoypad(JoypadPort::One, Joypad{.start = true});
-  m.run(toSixes(kFirstStart + 128u + 4u * 256u) - 6u);  // the step before the fourth clock lands
+  m.run(kFourthBit - 6u);  // the step before the fourth clock lands
   EXPECT_EQ(m.state().autoJoyClocked, 3u);
   EXPECT_EQ(m.state().joy[0], 0x00u) << "B, Y and Select are up";
   m.run(6u);
   EXPECT_EQ(m.state().autoJoyClocked, 4u);
   EXPECT_EQ(m.state().joy[0], 0x01u) << "Start has just entered at bit 0";
   EXPECT_EQ(m.state().joy[1], 0x00u);
-  m.run(toSixes(kFirstStart + 128u + 8u * 256u) - toSixes(kFirstStart + 128u + 4u * 256u));
+  m.run(kEighthBit - kFourthBit);
   EXPECT_EQ(m.state().autoJoyClocked, 8u);
   EXPECT_EQ(m.state().joy[0], 0x10u) << "four clocks later it has moved to bit 4";
-  m.run(toSixes(kFirstStart + 4224u) - 6u - toSixes(kFirstStart + 128u + 8u * 256u));
+  m.run(kSixteenthBit - 6u - kEighthBit);
   EXPECT_EQ(m.state().autoJoyClocked, 15u);
   EXPECT_EQ(m.state().joy[1], 0x08u) << "one clock short, Start sits at bit 11";
   EXPECT_EQ(m.state().joy[0], 0x00u);
@@ -218,10 +224,11 @@ TEST(SnesController, ThePreviousFrameShiftsOutAboveThisOneShiftingIn) {
   EXPECT_EQ(m.state().joy[1], 0x10u) << "the first frame's read landed Start";
   m.setJoypad(JoypadPort::One, Joypad{});
   const std::uint64_t secondStart = kSecondVblankLine + 310u;
-  m.run(toSixes(secondStart + 128u + 2u * 256u) - kSecondVblankLine);
+  const std::uint64_t secondBit = secondStart + 128u + 2u * 256u;
+  m.run(secondBit - kSecondVblankLine);
   EXPECT_EQ(m.state().autoJoyClocked, 2u);
   EXPECT_EQ(m.state().joy[1], 0x40u) << "Start's bit stands where Y rests, though nothing is pressed";
-  m.run(toSixes(secondStart + 4224u) - toSixes(secondStart + 128u + 2u * 256u));
+  m.run(secondStart + 4224u - secondBit);
   EXPECT_EQ(m.state().joy[1], 0x00u) << "and is gone once all sixteen are in";
   EXPECT_EQ(m.state().joy[0], 0x00u);
 }
