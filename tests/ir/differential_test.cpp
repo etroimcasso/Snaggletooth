@@ -524,6 +524,49 @@ TEST(Differential, AWrongAccessKindIsNamed) {
   EXPECT_EQ(d.expected, static_cast<std::uint32_t>(CycleKind::RmwRead));
 }
 
+// The whole reason for placing cycles: a cycle moved across an access shows on
+// the order while the count stays right.
+TEST(Differential, AnIdleMovedAcrossAnAccessReportsCycleOrderNotCycles) {
+  const std::vector<std::uint8_t> rom = mixedImage();
+  Program program = programOf(rom);
+  Node* inc = nodeAt(program, 0x00800Du);  // a 16-bit read-modify-write, its middle cycle an idle
+  ASSERT_NE(inc, nullptr);
+  const auto it = std::find_if(inc->effects.begin(), inc->effects.end(),
+                               [](const Effect& e) { return e.op == Op::Idle; });
+  ASSERT_NE(it, inc->effects.end());
+  const Effect idle = *it;
+  inc->effects.erase(it);
+  inc->effects.push_back(idle);  // after the write-back the machine spent it before
+  const DifferentialReport report = replay(rom, program);
+  bool order = false;
+  bool cycles = false;
+  for (const Divergence& d : report.divergences) {
+    if (d.site != 0x00800Du) continue;
+    if (d.what == "cycle order") order = true;
+    if (d.what == "cycles") cycles = true;
+  }
+  EXPECT_TRUE(order);
+  EXPECT_FALSE(cycles);
+}
+
+// A cycle dropped leaves fewer placed than the node cost.
+TEST(Differential, AnIdleDroppedReportsCyclesPlaced) {
+  const std::vector<std::uint8_t> rom = mixedImage();
+  Program program = programOf(rom);
+  Node* inc = nodeAt(program, 0x00800Du);
+  ASSERT_NE(inc, nullptr);
+  const auto it = std::find_if(inc->effects.begin(), inc->effects.end(),
+                               [](const Effect& e) { return e.op == Op::Idle; });
+  ASSERT_NE(it, inc->effects.end());
+  inc->effects.erase(it);
+  const DifferentialReport report = replay(rom, program);
+  bool placed = false;
+  for (const Divergence& d : report.divergences) {
+    if (d.site == 0x00800Du && d.what == "cycles placed") placed = true;
+  }
+  EXPECT_TRUE(placed);
+}
+
 TEST(Differential, ABreakInTheInterruptSequenceIsNamedAsTheSequence) {
   const std::vector<std::uint8_t> rom = mixedImage();
   Program program = programOf(rom);

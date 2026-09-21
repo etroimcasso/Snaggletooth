@@ -135,6 +135,15 @@ struct Builder {
     e.a = imm(count);
     e.when = cond;
   }
+  void fetch(std::uint32_t count) {
+    Effect& e = emit(Op::Fetch);
+    e.a = imm(count);
+  }
+  void idle(std::uint32_t count, Cond cond = always()) {
+    Effect& e = emit(Op::Idle);
+    e.a = imm(count);
+    e.when = cond;
+  }
   void flag(Place flag, bool value) { set(flag, imm(value ? 1u : 0u), Width::Byte); }
 };
 
@@ -265,18 +274,45 @@ bool isDirectForm(Cpu65816Addressing mode) {
 // next bank, a long index likewise, and the stack's within bank zero. A direct
 // form costs a cycle more with a low byte in the direct register; an indexed read
 // with eight-bit index registers costs one more when the addition carries.
-Step effectiveAddress(Builder& b, Cpu65816Addressing mode, std::uint32_t operand, bool read) {
+Step effectiveAddress(Builder& b, Cpu65816Addressing mode, std::uint32_t operand, bool read,
+                      const Cpu65816Mode& cpuMode) {
   using M = Cpu65816Addressing;
-  if (isDirectForm(mode)) b.cycles(1, when(When::DirectLowByte));
+  // The index cycle of an indexed form, after the last pointer or operand byte and
+  // before the data access. A read spends it as the core does: only on a page cross
+  // with eight-bit index registers, always with sixteen-bit ones, and both
+  // placements where the width is the live flag's to decide — the two never hold at
+  // once. A write or a modify always spends it. The cost that pays for it is
+  // unchanged.
+  auto indexCycle = [&](bool isRead) {
+    if (!isRead) {
+      b.idle(1);
+      return;
+    }
+    b.cycles(1, when(When::IndexCrossed));
+    if (!cpuMode.indexKnown) {
+      b.idle(1, when(When::IndexCrossed));
+      b.idle(1, flagClear(Place::FlagX));
+    } else if (cpuMode.index8) {
+      b.idle(1, when(When::IndexCrossed));
+    } else {
+      b.idle(1);
+    }
+  };
+  if (isDirectForm(mode)) {
+    b.cycles(1, when(When::DirectLowByte));
+    b.idle(1, when(When::DirectLowByte));
+  }
   switch (mode) {
     case M::Direct:
       b.address(Op::DirectAddress, Place::T0, imm(operand));
       return Step::Direct;
     case M::DirectX:
       b.address(Op::DirectAddress, Place::T0, imm(operand), Place::X);
+      b.idle(1);  // the index-add internal cycle
       return Step::Direct;
     case M::DirectY:
       b.address(Op::DirectAddress, Place::T0, imm(operand), Place::Y);
+      b.idle(1);  // the index-add internal cycle
       return Step::Direct;
     case M::DirectIndirect:
       b.address(Op::DirectAddress, Place::T1, imm(operand));
@@ -285,6 +321,7 @@ Step effectiveAddress(Builder& b, Cpu65816Addressing mode, std::uint32_t operand
       return Step::Flat;
     case M::DirectIndirectX:
       b.address(Op::DirectAddress, Place::T1, imm(operand), Place::X);
+      b.idle(1);  // the index-add internal cycle, before the pointer is read
       b.load(Place::T2, Place::T1, Width::Word, Step::DirectPointer);
       b.address(Op::BankAddress, Place::T0, at(Place::T2));
       return Step::Flat;
@@ -292,7 +329,7 @@ Step effectiveAddress(Builder& b, Cpu65816Addressing mode, std::uint32_t operand
       b.address(Op::DirectAddress, Place::T1, imm(operand));
       b.load(Place::T2, Place::T1, Width::Word, Step::DirectPointer);
       b.address(Op::BankAddress, Place::T0, at(Place::T2), Place::Y);
-      if (read) b.cycles(1, when(When::IndexCrossed));
+      indexCycle(read);
       return Step::Flat;
     case M::DirectIndirectLong:
       b.address(Op::DirectAddress, Place::T1, imm(operand));
@@ -306,22 +343,25 @@ Step effectiveAddress(Builder& b, Cpu65816Addressing mode, std::uint32_t operand
       return Step::Flat;
     case M::StackRelative:
       b.address(Op::StackAddress, Place::T0, imm(operand));
+      b.idle(1);  // the stack-relative internal cycle
       return Step::Bank0;
     case M::StackRelativeY:
       b.address(Op::StackAddress, Place::T1, imm(operand));
+      b.idle(1);  // the stack-relative internal cycle, before the pointer is read
       b.load(Place::T2, Place::T1, Width::Word, Step::Bank0);
       b.address(Op::BankAddress, Place::T0, at(Place::T2), Place::Y);
+      b.idle(1);  // the index cycle; this form always spends it
       return Step::Flat;
     case M::Absolute:
       b.address(Op::BankAddress, Place::T0, imm(operand));
       return Step::Flat;
     case M::AbsoluteX:
       b.address(Op::BankAddress, Place::T0, imm(operand), Place::X);
-      if (read) b.cycles(1, when(When::IndexCrossed));
+      indexCycle(read);
       return Step::Flat;
     case M::AbsoluteY:
       b.address(Op::BankAddress, Place::T0, imm(operand), Place::Y);
-      if (read) b.cycles(1, when(When::IndexCrossed));
+      indexCycle(read);
       return Step::Flat;
     case M::AbsoluteLong:
       b.address(Op::LongAddress, Place::T0, imm(operand));
@@ -413,7 +453,7 @@ void liftMemory(Builder& b, std::string_view mnemonic, Cpu65816Addressing mode,
   const Width wM = widthM(cpuMode);
   const Width wX = widthX(cpuMode);
   const bool read = kind == Kind::ReadM || kind == Kind::ReadX;
-  const Step step = effectiveAddress(b, mode, operand, read);
+  const Step step = effectiveAddress(b, mode, operand, read, cpuMode);
   switch (kind) {
     case Kind::ReadM:
       b.load(Place::T1, Place::T0, wM, step);
@@ -436,6 +476,9 @@ void liftMemory(Builder& b, std::string_view mnemonic, Cpu65816Addressing mode,
       if (wM != Width::Word) {
         b.store(Place::T0, at(Place::T1), Width::Byte, step, Access::RmwUnmodified,
                 when(When::Emulation));
+        b.idle(1, when(When::Native));  // native mode spends this cycle with no access
+      } else {
+        b.idle(1);  // sixteen bits: the middle cycle is always spent with no access
       }
       if (mnemonic == "TSB" || mnemonic == "TRB") {
         b.alu(modifyOp(mnemonic), Place::T1, at(Place::T1), at(Place::A), wM);
@@ -502,19 +545,24 @@ void liftImplied(Builder& b, std::uint8_t opcode, const Cpu65816Mode& cpuMode) {
     case 0xF8: b.flag(Place::FlagD, true); break;   // SED
     case 0xB8: b.flag(Place::FlagV, false); break;  // CLV
 
-    case 0xEB: b.emit(Op::Xba); break;  // XBA
+    case 0xEB: b.emit(Op::Xba); b.idle(2); break;  // XBA: two internal cycles
     case 0xFB: b.emit(Op::Xce); break;  // XCE
     case 0xEA: break;                   // NOP
-    case 0x42: break;                   // WDM: the program counter steps over its second byte, and nothing else happens
+    case 0x42: break;                   // WDM: the program counter steps over its second byte with an internal cycle, and nothing else happens
     case 0xCB:                          // WAI
+      b.idle(2);
       b.unary(Op::Halt, Place::None, imm(0), Width::Byte);
       break;
     case 0xDB:                          // STP
+      b.idle(2);
       b.unary(Op::Halt, Place::None, imm(1), Width::Byte);
       break;
     default:
       throw std::logic_error("liftImplied: not an implied instruction");
   }
+  // The one internal cycle every other implied form spends with no access; XBA,
+  // WAI and STP place their own above.
+  if (opcode != 0xEB && opcode != 0xCB && opcode != 0xDB) b.idle(1);
 }
 
 void liftStack(Builder& b, std::uint8_t opcode, std::uint32_t operand,
@@ -524,46 +572,55 @@ void liftStack(Builder& b, std::uint8_t opcode, std::uint32_t operand,
   switch (opcode) {
     // The registers the 6502 pushed and pulled keep the stack in page one under
     // emulation; everything the 65816 added steps out and settles after.
-    case 0x48: b.push(at(Place::A), wM, true); break;            // PHA
-    case 0xDA: b.push(at(Place::X), wX, true); break;            // PHX
-    case 0x5A: b.push(at(Place::Y), wX, true); break;            // PHY
-    case 0x08: b.push(at(Place::P), Width::Byte, true); break;   // PHP
-    case 0x8B: b.push(at(Place::DBR), Width::Byte, false); b.settle(); break;  // PHB
-    case 0x4B: b.push(at(Place::PBR), Width::Byte, false); b.settle(); break;  // PHK
-    case 0x0B: b.push(at(Place::D), Width::Word, false); b.settle(); break;    // PHD
-    case 0xF4: b.push(imm(operand & 0xFFFFu), Width::Word, false); b.settle(); break;  // PEA
-    case 0x62: b.push(imm(operand & 0xFFFFu), Width::Word, false); b.settle(); break;  // PER
+    // A register push spends one internal cycle before it writes.
+    case 0x48: b.idle(1); b.push(at(Place::A), wM, true); break;            // PHA
+    case 0xDA: b.idle(1); b.push(at(Place::X), wX, true); break;            // PHX
+    case 0x5A: b.idle(1); b.push(at(Place::Y), wX, true); break;            // PHY
+    case 0x08: b.idle(1); b.push(at(Place::P), Width::Byte, true); break;   // PHP
+    case 0x8B: b.idle(1); b.push(at(Place::DBR), Width::Byte, false); b.settle(); break;  // PHB
+    case 0x4B: b.idle(1); b.push(at(Place::PBR), Width::Byte, false); b.settle(); break;  // PHK
+    case 0x0B: b.idle(1); b.push(at(Place::D), Width::Word, false); b.settle(); break;    // PHD
+    case 0xF4: b.push(imm(operand & 0xFFFFu), Width::Word, false); b.settle(); break;  // PEA: the two bytes are the operand, and nothing is internal
+    case 0x62: b.idle(1); b.push(imm(operand & 0xFFFFu), Width::Word, false); b.settle(); break;  // PER
     case 0xD4:                                                                          // PEI
       // The pointer's second byte steps out of the direct page whatever the mode.
       b.cycles(1, when(When::DirectLowByte));
+      b.idle(1, when(When::DirectLowByte));
       b.address(Op::DirectAddress, Place::T0, imm(operand));
       b.load(Place::T1, Place::T0, Width::Word, Step::Bank0);
       b.push(at(Place::T1), Width::Word, false);
       b.settle();
       break;
 
+    // A register pull spends two internal cycles before it reads.
     case 0x68:  // PLA
+      b.idle(2);
       b.pull(Place::T0, wM, true);
       b.setNZ(Place::A, at(Place::T0), wM);
       break;
     case 0xFA:  // PLX
+      b.idle(2);
       b.pull(Place::T0, wX, true);
       b.setNZ(Place::X, at(Place::T0), wX);
       break;
     case 0x7A:  // PLY
+      b.idle(2);
       b.pull(Place::T0, wX, true);
       b.setNZ(Place::Y, at(Place::T0), wX);
       break;
     case 0x28:  // PLP
+      b.idle(2);
       b.pull(Place::T0, Width::Byte, true);
       b.unary(Op::WriteP, Place::None, at(Place::T0), Width::Byte);
       break;
     case 0xAB:  // PLB
+      b.idle(2);
       b.pull(Place::T0, Width::Byte, false);
       b.setNZ(Place::DBR, at(Place::T0), Width::Byte);
       b.settle();
       break;
     case 0x2B:  // PLD
+      b.idle(2);
       b.pull(Place::T0, Width::Word, false);
       b.setNZ(Place::D, at(Place::T0), Width::Word);
       b.settle();
@@ -584,21 +641,28 @@ void liftControl(Builder& b, std::uint8_t opcode, Cpu65816Addressing mode, std::
       const bool crosses = (operand & 0xFF00u) != (next & 0xFF00u);
       if (test.flag == Place::None) {
         b.set(Place::PC, imm(operand & 0xFFFFu), Width::Word);
-        if (crosses) b.cycles(1, when(When::Emulation));
+        b.idle(1);  // BRA is always taken and always spends the branch's internal cycle
+        if (crosses) {
+          b.cycles(1, when(When::Emulation));
+          b.idle(1, when(When::Emulation));
+        }
         break;
       }
       const Cond taken = test.whenSet ? flagSet(test.flag) : flagClear(test.flag);
       b.set(Place::PC, imm(operand & 0xFFFFu), Width::Word, taken);
       b.cycles(1, taken);
+      b.idle(1, taken);  // the branch's internal cycle, spent only when it is taken
       if (crosses) {
         Cond both = taken;
         both.andEmulation = true;
         b.cycles(1, both);
+        b.idle(1, both);
       }
       break;
     }
     case M::RelativeLong:  // BRL
       b.set(Place::PC, imm(operand & 0xFFFFu), Width::Word);
+      b.idle(1);  // the internal cycle
       break;
 
     case M::Absolute:
@@ -606,6 +670,7 @@ void liftControl(Builder& b, std::uint8_t opcode, Cpu65816Addressing mode, std::
         b.set(Place::PC, imm(operand), Width::Word);
       } else {  // JSR abs: the return address is the instruction's last byte
         b.alu(Op::Sub, Place::T0, at(Place::PC), imm(1), Width::Word);
+        b.idle(1);  // the internal cycle before the return address is pushed
         b.push(at(Place::T0), Width::Word, true);
         b.set(Place::PC, imm(operand), Width::Word);
       }
@@ -614,8 +679,10 @@ void liftControl(Builder& b, std::uint8_t opcode, Cpu65816Addressing mode, std::
       if (opcode == 0x5C) {  // JML long
         b.set(Place::PBR, imm(operand >> 16), Width::Byte);
         b.set(Place::PC, imm(operand & 0xFFFFu), Width::Word);
-      } else {  // JSL: the program bank first, then the return address, then settle
+      } else {  // JSL: the program bank first, then the target bank byte, then the return address, then settle
         b.push(at(Place::PBR), Width::Byte, false);
+        b.idle(1);   // the internal cycle after the old program bank is pushed
+        b.fetch(1);  // the target's bank byte, read once the old bank is on the stack
         b.alu(Op::Sub, Place::T0, at(Place::PC), imm(1), Width::Word);
         b.push(at(Place::T0), Width::Word, false);
         b.settle();
@@ -642,9 +709,11 @@ void liftControl(Builder& b, std::uint8_t opcode, Cpu65816Addressing mode, std::
       if (opcode == 0xFC) {
         b.alu(Op::Sub, Place::T3, at(Place::PC), imm(1), Width::Word);
         b.push(at(Place::T3), Width::Word, true);
+        b.fetch(1);  // the operand's high byte, read once the return address is pushed
       }
       b.alu(Op::Add, Place::T0, imm(operand & 0xFFFFu), at(Place::X), Width::Word);
       b.address(Op::ProgramAddress, Place::T1, at(Place::T0));
+      b.idle(1);  // the index-add internal cycle, before the pointer is read
       b.load(Place::T2, Place::T1, Width::Word, Step::Bank);
       b.set(Place::PC, at(Place::T2), Width::Word);
       break;
@@ -652,11 +721,14 @@ void liftControl(Builder& b, std::uint8_t opcode, Cpu65816Addressing mode, std::
     case M::Implied:
       switch (opcode) {
         case 0x60:  // RTS: pull the address and step past the call's last byte
+          b.idle(2);
           b.pull(Place::T0, Width::Word, true);
+          b.idle(1);  // the internal cycle after the address is pulled
           b.alu(Op::Add, Place::T1, at(Place::T0), imm(1), Width::Word);
           b.set(Place::PC, at(Place::T1), Width::Word);
           break;
         case 0x6B:  // RTL: the same, with the bank after it
+          b.idle(2);
           b.pull(Place::T0, Width::Word, false);
           b.pull(Place::T1, Width::Byte, false);
           b.settle();
@@ -665,6 +737,7 @@ void liftControl(Builder& b, std::uint8_t opcode, Cpu65816Addressing mode, std::
           b.set(Place::PC, at(Place::T2), Width::Word);
           break;
         case 0x40:  // RTI: the status byte, the address as pushed, and in native mode the bank
+          b.idle(2);
           b.pull(Place::T0, Width::Byte, true);
           b.pull(Place::T1, Width::Word, true);
           b.pull(Place::T2, Width::Byte, true, when(When::Native));
@@ -716,6 +789,7 @@ void liftBlockMove(Builder& b, std::uint8_t opcode, std::uint8_t sourceBank,
   b.load(Place::T1, Place::T0, Width::Byte, Step::Flat);
   b.address(Op::BankAddress, Place::T2, imm(0), Place::Y);
   b.store(Place::T2, at(Place::T1), Width::Byte, Step::Flat);
+  b.idle(2);  // the two internal cycles of each byte moved
   b.alu(step, Place::X, at(Place::X), imm(1), wX);
   b.alu(step, Place::Y, at(Place::Y), imm(1), wX);
   b.alu(Op::Sub, Place::A, at(Place::A), imm(1), Width::Word);
@@ -736,6 +810,7 @@ void liftMask(Builder& b, std::uint8_t opcode, std::uint8_t mask) {
     b.alu(Op::Or, Place::T0, at(Place::T0), imm(mask), Width::Byte);
   }
   b.unary(Op::WriteP, Place::None, at(Place::T0), Width::Byte);
+  b.idle(1);  // the one internal cycle
 }
 
 // ---- the cost ------------------------------------------------------------------
@@ -904,8 +979,20 @@ Node liftInstruction(const disasm::Instruction& instruction, const Cpu65816Mode&
   node.instruction.operand = operand;
 
   Builder b;
-  // Every node begins by stepping the program counter past the instruction; what
+  // Every node begins by reading its own bytes at the program counter — the k-th
+  // byte fetched is the k-th byte of the instruction. Most read all their bytes
+  // first; three read some later, after a push or an internal cycle, and take the
+  // rest here. Then the program counter steps past the instruction, and what
   // follows may move it again.
+  std::uint32_t firstFetch = instruction.length;
+  if (opcode == 0x42) {
+    firstFetch = 1;  // WDM reads one byte and steps over its second with an internal cycle
+  } else if (opcode == 0x22) {
+    firstFetch = 3;  // JSL reads its bank byte after pushing the old program bank
+  } else if (opcode == 0xFC) {
+    firstFetch = 2;  // JSR (a,x) reads its operand's high byte after pushing the return address
+  }
+  b.fetch(firstFetch);
   b.set(Place::PC, imm(next & 0xFFFFu), Width::Word);
 
   const Kind kind = kindOf(row.mnemonic);
@@ -921,6 +1008,7 @@ Node liftInstruction(const disasm::Instruction& instruction, const Cpu65816Mode&
     liftMemory(b, row.mnemonic, row.mode, operand, kind, mode);
   } else if (row.mode == M::Accumulator) {
     b.unary(modifyOp(row.mnemonic), Place::A, at(Place::A), widthM(mode));
+    b.idle(1);  // the one internal cycle
   } else if (row.mode == M::Relative || row.mode == M::RelativeLong ||
              row.mode == M::AbsoluteIndirect || row.mode == M::AbsoluteIndirectLong ||
              row.mode == M::AbsoluteIndexedIndirect ||
@@ -945,8 +1033,10 @@ std::vector<Effect> interruptSequence(Interrupt interrupt) {
   const std::uint32_t nativeVector = interrupt == Interrupt::Nmi ? 0xFFEAu : 0xFFEEu;
   const std::uint32_t emulationVector = interrupt == Interrupt::Nmi ? 0xFFFAu : 0xFFFEu;
   Builder b;
-  // The instruction interrupted is read and thrown away, and the program counter
-  // stays on it, so the address saved is where execution resumes.
+  // The interrupted opcode is read on opcode-fetch pins without moving the program
+  // counter, then read again and thrown away; the counter stays on it, so the
+  // address saved is where execution resumes.
+  b.fetch(1);
   b.address(Op::ProgramAddress, Place::T2, at(Place::PC));
   b.load(Place::T3, Place::T2, Width::Byte, Step::Bank);
   b.push(at(Place::PBR), Width::Byte, true, when(When::Native));

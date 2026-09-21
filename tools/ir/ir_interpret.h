@@ -75,6 +75,28 @@ class Shadow {
   virtual void exchange() = 0;
 };
 
+// What travels beside the cycles. The interpreter places every cycle a node
+// spends that is not already a bus access: a program fetch of the instruction's
+// own bytes at the program counter, and a cycle that makes no access at all. A
+// host that wants to follow where the chip spends its time supplies a clock, and
+// the interpreter tells it each fetch and each idle in the order they fall.
+// Every bus access is already reported in order through `Bus`, so a host given
+// both sees the whole instruction cycle by cycle, in the order the chip spends
+// them. The interpreter never reads a clock back, so a clock cannot change a
+// value or a count, and a run with none costs one null check per `Fetch` or
+// `Idle`.
+class Clock {
+ public:
+  virtual ~Clock() = default;
+
+  // `cycles` program accesses read the instruction's own bytes at the program
+  // counter here.
+  virtual void fetch(unsigned cycles) = 0;
+
+  // `cycles` pass here with no access.
+  virtual void idle(unsigned cycles) = 0;
+};
+
 enum class Run : std::uint8_t { Running, Waiting, Stopped };
 
 // The CPU's state as the effects name it.
@@ -108,6 +130,10 @@ class Interpreter {
 
   // The shadow told about every move a value makes, or none.
   Shadow* shadow = nullptr;
+
+  // The clock told about every cycle the node places — each program fetch, each
+  // idle — or none.
+  Clock* clock = nullptr;
 
   // Runs one node: re-establishes the invariants the chip holds between
   // instructions — the index high bytes zero while the index registers are eight
@@ -156,6 +182,10 @@ class Spc700Interpreter {
   // The index, in the node being run, of the effect whose accesses the bus is
   // answering.
   std::size_t effectIndex = 0;
+
+  // The clock told about every cycle the node places — each program fetch, each
+  // idle — or none.
+  Clock* clock = nullptr;
 
   // Runs one node: every effect whose condition holds, in order. Returns the
   // cycles the node cost: its measured base plus every `Cycles` effect that

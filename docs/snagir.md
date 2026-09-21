@@ -233,7 +233,7 @@ sequence's:
 ```
 
 `<op>` is the operation's name — `Set`, `SetNZ`, `Load`, `Store`, `Adc`,
-`WriteP`, `PageAddress`, `Div`, every name in
+`WriteP`, `PageAddress`, `Div`, `Fetch`, `Idle`, every name in
 [ir.md §Operations](ir.md#operations). `<dst> <-` follows where the operation
 has a destination; `<a>` and `<b>` are the operands it has, the first followed
 by a comma when there are two. A place is written by name — `A`, `X`, `Y`,
@@ -264,6 +264,8 @@ Store T0, A [16 flat];
 Load T1 <- T0 [8 direct rmw];
 Push PC [16 pinned];
 Cycles $1 [8] if D.lo;
+Fetch $3 [8];
+Idle $1 [8] if D.lo;
 Set PC <- $8023 [16] if clear P.Z;
 ```
 
@@ -300,40 +302,51 @@ image 32768 LoROM;
 region bank_00.asm $00:8000-$00:FFFF {
   label $00:8000 reset;
   $00:8000 CLC operand $0 length 1 flow continue e=1 base 2/2/2/2 {
+    Fetch $1 [8];
     Set PC <- $8001 [16];
     Set P.C <- $0 [8];
+    Idle $1 [8];
   }
   $00:8001 XCE operand $0 length 1 flow continue e=1 base 2/2/2/2 {
+    Fetch $1 [8];
     Set PC <- $8002 [16];
     Xce [8];
+    Idle $1 [8];
   }
   $00:8002 REP #byte operand $30 length 2 flow continue e=0 m=8 x=8 base 3/3/3/3 {
+    Fetch $2 [8];
     Set PC <- $8004 [16];
     Set T0 <- P [8];
     And T0 <- T0, $CF [8];
     WriteP T0 [8];
+    Idle $1 [8];
   }
   $00:8004 LDX #imm(X) operand $2 length 3 flow continue e=0 m=16 x=16 base 2/3/2/3 {
+    Fetch $3 [8];
     Set PC <- $8007 [16];
     SetNZ X <- $2 [16];
   }
   $00:8007 LDA #imm(M) operand $1234 length 3 flow continue e=0 m=16 x=16 base 2/2/3/3 {
+    Fetch $3 [8];
     Set PC <- $800A [16];
     SetNZ A <- $1234 [16];
   }
   $00:800A STA abs operand $100 length 3 flow continue e=0 m=16 x=16 base 4/4/5/5 {
+    Fetch $3 [8];
     Set PC <- $800D [16];
     BankAddress T0 <- $100 [24];
     Store T0, A [16 flat];
   }
 ```
 
-One bank, the reset handler's label before its first node, and no data before
-the first instruction. The file goes on through every node of the region — the
-block move at `$00:804B` with both its banks, the four labels the trace gave
-the loop, the routine and the two interrupt handlers — with a `data` record for
-each run of bytes between them, closes the region, and ends with the two
-interrupt sequences:
+Every node opens with a `Fetch` of its own bytes; an implied instruction such as
+`CLC` or `XCE` ends with the `Idle` of its internal cycle. One bank, the reset
+handler's label before its first node, and no data before the first instruction.
+The file goes on through every node of the region — the block move at `$00:804B`
+with both its banks, the four labels the trace gave the loop, the routine and the
+two interrupt handlers — with a `data` record for each run of bytes between them,
+closes the region, and ends with the two interrupt sequences, each opening with
+the one `Fetch` of the interrupted opcode:
 
 ```
   Set PBR <- $0 [8];

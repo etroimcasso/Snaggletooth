@@ -10,7 +10,10 @@
 // operand with its width names the operand bytes, so a renderer reproduces the
 // bytes without ever holding them. The effect layer says what the instruction
 // does: a sequence of typed operations over the CPU's named state, a few
-// temporaries, and a bus. An interpreter runs the effect layer and nothing else;
+// temporaries, and a bus. The operations, in order, also account for every cycle
+// the instruction spends — each program fetch of its own bytes and each cycle
+// with no access, beside each byte of each access — so a host that follows them
+// sees where the chip spends its time. An interpreter runs the effect layer and nothing else;
 // a renderer reads the instruction layer and nothing else. Neither sees a byte,
 // and nothing in this directory holds one — the lift from a listing is the one
 // place bytes enter, and it is where they stop.
@@ -284,6 +287,9 @@ enum class Op : std::uint8_t {
   Das,          // dst ← a adjusted after a decimal subtract; N Z C (the sound CPU)
   Mul,          // dst ← a × b at sixteen bits; N Z from the high byte (the sound CPU)
   Div,          // dst ← a ÷ b, the quotient below and the remainder above; N V H Z by the chip's algorithm (the sound CPU)
+
+  Fetch,  // a bytes of the program are read at the program counter here — a cycles, each a program access; costs nothing
+  Idle,   // a cycles pass here with no access; costs nothing
 };
 
 struct Effect {

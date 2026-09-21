@@ -18,6 +18,7 @@ constexpr std::string_view kOps[] = {
     "Adc", "Sbc", "Cmp", "Bit", "BitImm", "Asl", "Lsr", "Rol", "Ror", "Inc", "Dec",
     "Tsb", "Trb", "WriteP", "Xba", "Xce", "Halt", "Cycles",
     "Shl", "PageAddress", "Daa", "Das", "Mul", "Div",
+    "Fetch", "Idle",
 };
 
 constexpr std::string_view kPlaces[] = {

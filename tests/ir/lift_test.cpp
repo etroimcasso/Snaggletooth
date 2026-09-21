@@ -1000,7 +1000,8 @@ TEST(Lift, AnImmediateUnderAnUnknownWidthHasNoNode) {
 
 TEST(Lift, EveryOpcodeLiftsUnderEveryMode) {
   // Every opcode under every setting of the flags produces a node whose first
-  // effect steps the program counter and whose cost is the measured table's.
+  // effect reads the instruction's bytes, whose second steps the program
+  // counter, and whose cost is the measured table's.
   const std::vector<Cpu65816Mode> modes = {
       Cpu65816Mode::reset(), Cpu65816Mode::native(true, true), Cpu65816Mode::native(true, false),
       Cpu65816Mode::native(false, true), Cpu65816Mode::native(false, false),
@@ -1013,9 +1014,10 @@ TEST(Lift, EveryOpcodeLiftsUnderEveryMode) {
           disasm::decodeAt(image, 0x008000, 0x008000, mode);
       if (!decoded) continue;  // an immediate under an unknown width
       const Node node = liftInstruction(*decoded, mode);
-      ASSERT_FALSE(node.effects.empty()) << "opcode " << opcode;
-      EXPECT_EQ(static_cast<int>(node.effects.front().op), static_cast<int>(Op::Set));
-      EXPECT_EQ(static_cast<int>(node.effects.front().dst.place), static_cast<int>(Place::PC));
+      ASSERT_GE(node.effects.size(), 2u) << "opcode " << opcode;
+      EXPECT_EQ(static_cast<int>(node.effects.front().op), static_cast<int>(Op::Fetch));
+      EXPECT_EQ(static_cast<int>(node.effects[1].op), static_cast<int>(Op::Set));
+      EXPECT_EQ(static_cast<int>(node.effects[1].dst.place), static_cast<int>(Place::PC));
       const disasm::CycleCost measured =
           disasm::cpu65816CycleTable(mode.emulation, true, true)[opcode];
       EXPECT_EQ(int{node.cost.base[costIndex(true, true)]}, int{measured.base});

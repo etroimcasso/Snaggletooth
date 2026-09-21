@@ -212,6 +212,8 @@ an index register clears its own, and the rest take the value as it is.
 | `Xce` | Exchange C and E; entering emulation forces both widths, clears the index high bytes and pins S |
 | `Halt` | Stop running: `a` is 0 for a wait an interrupt ends, 1 for a stop only a reset ends — on the sound CPU, a sleep and a stop, which only a reset ends |
 | `Cycles` | The instruction costs `a` more cycles |
+| `Fetch` | `a` bytes of the program read at the program counter here — `a` cycles, each a program access; costs nothing |
+| `Idle` | `a` cycles pass here with no access; costs nothing |
 | `Daa`, `Das` | `dst ← a` adjusted after a decimal add or subtract, the sound CPU's way: sixty added or taken past ninety-nine or on the carry, six on the half carry or a low nibble past nine; N Z C, H read and left |
 | `Mul` | `dst ← a × b` at sixteen bits; N Z from the high byte — the sound CPU's `MUL YA` |
 | `Div` | `dst ← a ÷ b`, the quotient below and the remainder above, by the sound CPU's nine-step restoring division over seventeen bits, so a quotient past 511 is what the chip leaves; N Z from the quotient, V from the seventeenth bit, H from the low nibbles of the divisor and the dividend's high byte |
@@ -291,6 +293,19 @@ lift is held to.
   classifies the address.
 - **Reads.** A read's value is the bus's to answer. The effects assert the address
   and the width, never the value.
+- **Cycle placement.** A node's effects account for every cycle the instruction
+  spends, in the chip's order. It opens with a `Fetch` of its own bytes — most read
+  all of them first, while `JSL`, `JSR (abs,X)` and `WDM` read some later, after a
+  push or an internal cycle — and an `Idle` stands for every cycle the chip spends
+  with no access: an implied instruction's internal cycle, the index cycle of an
+  indexed form (only on a page cross under an eight-bit index, always under a
+  sixteen-bit one, always for a write or a modify), a read-modify-write's middle
+  cycle (a dummy write under emulation, an idle otherwise), and the internal cycles
+  of the stack forms, the branches, the block moves and the returns. `Fetch` and
+  `Idle` place cycles and cost nothing, so a run's `Fetch`, `Idle` and access
+  cycles together number the cycles the node cost; `Cycles` costs and places
+  nothing (see [Cost](#cost)). A hardware interrupt sequence opens with one
+  `Fetch`, the interrupted opcode read on opcode-fetch pins, and spends no idle.
 - **Immediates under an unknown width.** No node: the trace stops there, and the
   bytes have no length to lift.
 
@@ -388,6 +403,13 @@ more under native mode.
 On the sound CPU the one increment is a taken branch: the difference between
 the taken and untaken costs the SPC700 disassembler measured, under the
 branch's own condition.
+
+Cost and placement are kept apart. `Cycles` is the only operation that adds to
+the count; `Fetch` and `Idle` are the only ones that say where the cycles fall,
+and they add nothing. So the base and the increments are what they were, and a
+node's placed cycles — every `Fetch`, every `Idle` and every access — number the
+cycles `execute` returns. Where an increment fires, an `Idle` under the same
+condition stands where that cycle falls.
 
 ## Lifting a listing
 
@@ -554,6 +576,33 @@ at, which the sink answers for each store from what the machine reported and
 is told of each stream as it closes. What the disassembler does with all of it is
 [snes-disassembler.md §Where the bytes came from](snes-disassembler.md#where-the-bytes-came-from);
 the rules are held by `tests/ir/provenance_test.cpp`, one case each.
+
+## The clock
+
+The interpreter places every cycle a node spends. A host that wants to follow
+where the chip spends its time sets a `Clock`, and the interpreter tells it each
+program fetch (`fetch`) and each cycle with no access (`idle`), in the order they
+fall. Every access is already reported in order through the `Bus`, so a host given
+both sees the whole instruction cycle by cycle, in the order the chip spends
+them. The interpreter never reads a clock back, so a clock cannot change a value
+or a count, and a run with none costs one null check per `Fetch` or `Idle`.
+
+```cpp
+struct CountingClock final : snaggletooth::ir::Clock {
+  unsigned program = 0;
+  unsigned idleCycles = 0;
+  void fetch(unsigned cycles) override { program += cycles; }
+  void idle(unsigned cycles) override { idleCycles += cycles; }
+};
+
+CountingClock clock;
+interpreter.clock = &clock;
+const std::uint32_t cycles = interpreter.execute(*node, bus);
+// program + idleCycles + the bus's accesses == cycles
+```
+
+`Spc700Interpreter` carries a `clock` too; the sound program places no `Fetch` or
+`Idle` yet, so on the sound CPU a clock is told nothing.
 
 ## Reading a program
 
@@ -774,7 +823,11 @@ and checks each write's address and value — in the order the machine made them
 one access to one. After the instruction the registers, the flags, the emulation
 bit and the run state are checked, and the cycles the interpreter reports are
 checked against the CPU cycles the observer counted. The access kind is checked
-too: a read-modify-write's write-back must be what the chip drove as one.
+too: a read-modify-write's write-back must be what the chip drove as one. So is
+the cycle order: a `Clock` beside the bus builds the node's cycles — its program
+fetches, its idle cycles and its accesses — in the order the effects place them,
+held against the order the observer saw the chip spend them; and the node must
+place exactly as many cycles as it cost.
 
 The interpreter cannot copy a write through, because it never sees one; it has
 to compute every value from the effects. A run with no divergence says the
@@ -1050,7 +1103,9 @@ cases the [core](65816-cpu.md#testing-against-the-vectors) is proven by — thro
 interpreter: each case's instruction is decoded from the bytes at its program
 counter, lifted under the case's mode, and run from its registers over its sparse
 memory, then held to the recorded final registers, writes, data-read addresses,
-memory and cycle count. A native case whose instruction has no immediate runs a
+memory and cycle count — and, cycle by cycle, the order of its program fetches,
+idle cycles and accesses against the recording, and the count of cycles it placed
+against the count it cost. A native case whose instruction has no immediate runs a
 second time lifted with both widths unknown, so the width selected by the live
 flag is proven on the same cases as the typed one. The runner registers one case
 per opcode per mode and skips visibly without the vectors, exactly as the core's
@@ -1062,9 +1117,16 @@ interrupt, a transfer holding the CPU, an HDMA event holding it for a whole
 step, a routine run from work RAM — and then breaks one effect at a time in a
 lifted program to see each break named: a wrong stored value, a wrong read
 address, a dropped flag write, a dropped cycle, a missing access, an extra one,
-a wrong access kind, a break in the interrupt sequence. `tests/snes/observer_test.cpp`
+a wrong access kind, a cycle moved across an access, a cycle dropped from a
+node's placement, a break in the interrupt sequence. `tests/snes/observer_test.cpp`
 holds the machine's observer, which the replay rests on, to what the core and
 the engines drive.
+
+`tests/ir/placement_test.cpp` proves the placement itself: a split fetch told to
+a clock in order, the index cycle under each width and both live-flag settings, a
+read-modify-write's middle cycle under native and emulation, `WDM`, the interrupt
+sequences' opening fetch and invariant, that a node's first effect is its fetch,
+and that a null clock changes nothing.
 
 `tests/ir/render_test.cpp` holds the renderer to the listing over every example
 cartridge: the bytes `encode` writes back from a node are the bytes the node was
@@ -1103,6 +1165,7 @@ would mean the layers leak into each other.
 | `Interpreter::effectIndex` | The index of the effect whose accesses the bus is answering, so a bus can name where an access came from. |
 | `Spc700Registers`, `Spc700Interpreter::execute(node, bus)`, `effectIndex` | The sound CPU's state the effects name, and the interpreter that runs a sound-CPU node over the bus and returns its cycles. |
 | `Shadow`, `Interpreter::shadow` | What travels beside a value: told every move the interpreter makes — `copy`, `combine`, `load`, `store`, `exchange` — and never read back. |
+| `Clock`, `Interpreter::clock`, `Spc700Interpreter::clock` | What travels beside the cycles: told each program fetch and each idle, in order, and never read back. |
 | `Origins`, `Origin`, `OriginSet`, `OriginInterval` | The interned table of origins: an image byte, a hardware register, the save, the union of two; a set's intervals, marks and approximate flag. |
 | `Provenance`, `Writer`, `Stream` | The shadow of a run: work RAM's origin, writer and invocation byte by byte, `originOf`, `writerOf`, `sourcesOf`; `called`, `returned`; the streams the CPU carried. |
 | `differential(program, replay)` | Replay a run on the machine beside the interpreter, held to every access, register and cycle. |

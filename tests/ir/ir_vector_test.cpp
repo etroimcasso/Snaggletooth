@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -90,20 +91,47 @@ struct AccessRecord {
   bool write;
 };
 
-// Sparse memory the interpreter reads through, recording every access in order.
+// One cycle, by what the chip drove: a program access reading the instruction's
+// own bytes, a cycle with no access, or a data access with its address and
+// direction.
+enum class CycleKind { Program, Idle, Data };
+struct CycleEntry {
+  CycleKind kind;
+  Address address = 0;  // for Data
+  std::uint8_t value = 0;
+  bool write = false;
+};
+
+// Sparse memory the interpreter reads through, recording every access — as an
+// access, and as one cycle in the shared ordered log a Clock also writes to.
 struct SparseBus final : snaggletooth::ir::Bus {
   std::unordered_map<std::uint32_t, std::uint8_t> mem;
   std::vector<AccessRecord> log;
+  std::vector<CycleEntry>* order = nullptr;
 
   std::uint8_t read(Address address, Access) override {
     const auto it = mem.find(address & 0xFFFFFFu);
     const std::uint8_t value = it == mem.end() ? std::uint8_t{0} : it->second;
     log.push_back({address & 0xFFFFFFu, value, false});
+    if (order != nullptr) order->push_back({CycleKind::Data, address & 0xFFFFFFu, value, false});
     return value;
   }
   void write(Address address, std::uint8_t value, Access) override {
     mem[address & 0xFFFFFFu] = value;
     log.push_back({address & 0xFFFFFFu, value, true});
+    if (order != nullptr) order->push_back({CycleKind::Data, address & 0xFFFFFFu, value, true});
+  }
+};
+
+// The Clock beside the bus: a fetch appends that many program cycles to the same
+// ordered log, an idle that many no-access cycles.
+struct RecordingClock final : snaggletooth::ir::Clock {
+  std::vector<CycleEntry>* order = nullptr;
+  void fetch(unsigned cycles) override {
+    for (unsigned i = 0; i < cycles; ++i) order->push_back({CycleKind::Program});
+  }
+  void idle(unsigned cycles) override {
+    for (unsigned i = 0; i < cycles; ++i) order->push_back({CycleKind::Idle});
   }
 };
 
@@ -141,6 +169,37 @@ std::vector<AccessRecord> recordedAccesses(const VectorCase& c) {
   return out;
 }
 
+// Every cycle the recording holds, in order, by kind: a valid program address is
+// a program cycle; otherwise a write, or a valid data address with a value, is a
+// data cycle; otherwise the chip drove no access and the cycle is idle.
+std::vector<CycleEntry> recordedCycles(const VectorCase& c) {
+  std::vector<CycleEntry> out;
+  for (const CycleTrace& cycle : c.cycles) {
+    if (cycle.signals[kSignalVpa] == 'p') {
+      out.push_back({CycleKind::Program});
+      continue;
+    }
+    const bool write = cycle.signals[kSignalRw] == 'w';
+    const bool hasData = cycle.address.has_value() && cycle.value.has_value();
+    const bool dataRead = cycle.signals[kSignalVda] == 'd';
+    if (hasData && (write || dataRead)) {
+      out.push_back({CycleKind::Data, *cycle.address, *cycle.value, write});
+    } else {
+      out.push_back({CycleKind::Idle});
+    }
+  }
+  return out;
+}
+
+std::string_view kindName(CycleKind kind) {
+  switch (kind) {
+    case CycleKind::Program: return "program";
+    case CycleKind::Idle: return "idle";
+    case CycleKind::Data: return "data";
+  }
+  return "?";
+}
+
 class IrVectors : public ::testing::TestWithParam<VectorParam> {};
 
 // Runs one case through the interpreter under one lift mode and holds it to the
@@ -165,8 +224,14 @@ void runCase(const VectorCase& c, const Cpu65816Mode& liftMode, std::uint8_t opc
   ASSERT_TRUE(decoded.has_value()) << name << " (the instruction did not decode)";
   const Node node = snaggletooth::ir::liftInstruction(*decoded, liftMode);
 
+  std::vector<CycleEntry> order;
+  bus.order = &order;
+  RecordingClock clock;
+  clock.order = &order;
+
   Interpreter interpreter;
   interpreter.registers = registersOf(c.initial);
+  interpreter.clock = &clock;
   std::uint32_t cycles = interpreter.execute(node, bus);
 
   // A block move runs its node once per byte; a case the recorder stopped
@@ -214,6 +279,27 @@ void runCase(const VectorCase& c, const Cpu65816Mode& liftMode, std::uint8_t opc
           << name << " (access " << i << " value)";
     }
   }
+
+  // Every cycle in order: its kind, and for a data cycle its address and
+  // direction. A halt's recording carries one halted cycle past the run's own; a
+  // capped block move is compared through its last whole byte.
+  const std::vector<CycleEntry> wantCycles = recordedCycles(c);
+  const std::size_t compareCount = (blockMove(opcode) && capped)
+                                       ? (c.cycles.size() / 7) * 7
+                                       : wantCycles.size() - (halts(opcode) ? 1u : 0u);
+  ASSERT_EQ(order.size(), compareCount) << name << " (cycle order length)";
+  for (std::size_t i = 0; i < compareCount; ++i) {
+    EXPECT_EQ(kindName(order[i].kind), kindName(wantCycles[i].kind))
+        << name << " (cycle " << i << " kind)";
+    if (wantCycles[i].kind == CycleKind::Data && order[i].kind == CycleKind::Data) {
+      EXPECT_EQ(order[i].address, wantCycles[i].address) << name << " (cycle " << i << " address)";
+      EXPECT_EQ(order[i].write, wantCycles[i].write) << name << " (cycle " << i << " direction)";
+    }
+  }
+
+  // The invariant: every cycle the node cost is placed — as a program, an idle or
+  // a data cycle — and no more.
+  EXPECT_EQ(order.size(), std::size_t{cycles}) << name << " (cycles placed)";
 
   // The final memory: every cell the case accounts for, and no stray write.
   std::unordered_set<std::uint32_t> accounted;

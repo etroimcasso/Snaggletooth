@@ -656,6 +656,20 @@ TEST(Dataflow, TheIndexHighBytesAreHeldZeroUnderEightBitIndexRegisters) {
   EXPECT_FALSE(wide.after.registers.xHigh.known);
 }
 
+// A program fetch and an idle move no value, so a node's derived state is the
+// same whether or not it carries them.
+TEST(Dataflow, FetchAndIdleLeaveTheDerivedStateUnchanged) {
+  State before;
+  before.registers.aHigh = Values::one(0x12u);
+  const Node node = nodeOf({0xBDu, 0x00u, 0x20u}, 0x008000u,
+                           Cpu65816Mode::native(true, true));  // LDA $2000,X
+  Node stripped = node;
+  std::erase_if(stripped.effects,
+                [](const Effect& e) { return e.op == Op::Fetch || e.op == Op::Idle; });
+  ASSERT_LT(stripped.effects.size(), node.effects.size());
+  EXPECT_EQ(evaluate(node, before, kNoImage).after, evaluate(stripped, before, kNoImage).after);
+}
+
 TEST(Dataflow, AMaskOverAValueNotKnownBoundsItToTheMasksSubsets) {
   const Evaluation ev = evaluate(nodeOf({0x29u, 0x05u}, 0x008000u, Cpu65816Mode::native(true, true)), State{}, kNoImage);
   EXPECT_EQ(ev.after.registers.aLow, (Values{true, {0u, 1u, 4u, 5u}, std::nullopt, 0}));
