@@ -145,6 +145,8 @@ struct DmaChannel {
   std::uint16_t a2a = 0xFFFF;  // $43n8/$43n9: the HDMA table's current address, low 16 bits
   std::uint8_t nltr = 0xFF;    // $43nA: the HDMA line counter (bits6-0) and the repeat flag (bit7)
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
+
+  [[nodiscard]] bool operator==(const DmaChannel&) const noexcept = default;
 };
 
 // A standard controller's twelve buttons, in the order the pad shifts them out —
@@ -439,6 +441,8 @@ struct SnesState {
   bool hdmaLineFired = false;    // this scanline's delivery has been triggered
   bool hdmaRunPending = false;   // an HDMA event is due on the next machine cycle
   bool hdmaIniting = false;      // that pending event is the start-of-frame init (rather than a delivery)
+
+  [[nodiscard]] bool operator==(const SnesState&) const noexcept = default;
 };
 
 class Snes {

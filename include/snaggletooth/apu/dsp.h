@@ -59,6 +59,8 @@ struct SampleWindow {
   std::int16_t old = 0;
   std::int16_t older = 0;
   std::int16_t oldest = 0;
+
+  [[nodiscard]] bool operator==(const SampleWindow&) const noexcept = default;
 };
 
 // The volume envelope's phase. Even in a GAIN mode the hardware tracks an
@@ -174,6 +176,8 @@ struct VoiceState {
     // Set when the header was read at the group's scheduling itself (the
     // trigger-2 form): the load slot then supplies only the first data byte.
     bool headerCaptured = false;
+
+    [[nodiscard]] bool operator==(const GroupDecode&) const noexcept = default;
   };
   std::array<GroupDecode, 3> scheduledDecodes{};
   std::uint8_t scheduledDecodeCount = 0;
@@ -259,6 +263,8 @@ struct VoiceState {
   // level zero (`Misc/brr addr wrap-around`).
   bool startupWalks = false;
   std::uint16_t bentGainRef = 0;
+
+  [[nodiscard]] bool operator==(const VoiceState&) const noexcept = default;
 };
 
 // One 32 kHz stereo output sample: the eight-voice mix through the master volume,
@@ -537,6 +543,8 @@ struct DspState {
   }
   [[nodiscard]] auto begin() const noexcept { return regs.begin(); }
   [[nodiscard]] auto end() const noexcept { return regs.end(); }
+
+  [[nodiscard]] bool operator==(const DspState&) const noexcept = default;
 };
 
 // A voice's BRR source, read from the sample directory: the start address used

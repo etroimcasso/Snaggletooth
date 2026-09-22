@@ -129,6 +129,8 @@ struct Cpu65816State {
   InterruptRequest servicing = InterruptRequest::None;
 
   CpuRunState run = CpuRunState::Running;
+
+  [[nodiscard]] bool operator==(const Cpu65816State&) const noexcept = default;
 };
 
 // The registers a reset leaves, from the registers it found and the word at $00FFFC.

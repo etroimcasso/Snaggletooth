@@ -61,6 +61,8 @@ struct TimerState {
   std::uint8_t stage2 = 0;  // 0-255 counter compared against the target
   std::uint8_t stage3 = 0;  // 4-bit output counter; an overlay read of TnOUT clears it
   std::uint8_t target = 0;  // TnTARGET; a target of 0 divides by 256
+
+  [[nodiscard]] bool operator==(const TimerState&) const noexcept = default;
 };
 
 // The whole machine as a value: snapshot by copy, restore by assignment.
@@ -81,6 +83,8 @@ struct ApuState {
   std::array<std::uint8_t, 2> auxPorts{0xFF, 0xFF};
   std::uint16_t divider = 0;                  // the master cycle counter: timer ticks and sample boundaries
   std::array<TimerState, 3> timers{};
+
+  [[nodiscard]] bool operator==(const ApuState&) const noexcept = default;
 };
 
 // What the audio machine tells about the sound CPU: every access it makes and
