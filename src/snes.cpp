@@ -465,6 +465,83 @@ std::optional<std::size_t> Snes::saveRamIndex(std::uint8_t bank,
   return *linear % state_.sram.size();
 }
 
+std::optional<std::uint8_t> Snes::peek(std::uint32_t address) const noexcept {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  // Work RAM answers first, as it does on the bus: banks $7E-$7F whole, and the
+  // first $2000 of a system bank. The order past it does not overlap, so a
+  // register offset falls through every test below and answers nothing.
+  if (bank >= 0x7E && bank <= 0x7F) {
+    return state_.wram[(static_cast<std::size_t>(bank - 0x7E) << 16) | offset];
+  }
+  const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
+  if (systemBank && offset <= 0x1FFFu) return state_.wram[offset];
+  if (const std::optional<std::size_t> save = saveRamIndex(bank, offset)) {
+    return state_.sram[*save];
+  }
+  if (addressIsRom(bank, offset)) return romByte(bank, offset);
+  return std::nullopt;  // a register or an address the cartridge leaves open
+}
+
+bool Snes::poke(std::uint32_t address, std::uint8_t value) noexcept {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  if (bank >= 0x7E && bank <= 0x7F) {
+    state_.wram[(static_cast<std::size_t>(bank - 0x7E) << 16) | offset] = value;
+    return true;
+  }
+  const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
+  if (systemBank && offset <= 0x1FFFu) {
+    state_.wram[offset] = value;
+    return true;
+  }
+  if (const std::optional<std::size_t> save = saveRamIndex(bank, offset)) {
+    state_.sram[*save] = value;  // the host's own write to the save; not a program store, so it is not reported
+    return true;
+  }
+  // A write to ROM changes the machine's copy of the image, mirrored the way a
+  // read finds it, and never a file.
+  if (addressIsRom(bank, offset)) {
+    if (const std::optional<std::size_t> index = romOffset(map_, romView(bank, offset), rom_.size())) {
+      rom_[*index] = value;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Snes::addressable(std::uint32_t address, std::size_t bytes) const noexcept {
+  for (std::size_t i = 0; i < bytes; ++i) {
+    if (!peek((address + static_cast<std::uint32_t>(i)) & 0xFFFFFFu).has_value()) return false;
+  }
+  return true;
+}
+
+void Snes::writeVram(std::uint16_t address, std::uint8_t value) noexcept {
+  state_.ppu.vram[address] = value;  // 64 KB: every 16-bit address is in range
+}
+
+void Snes::writeCgram(std::uint16_t address, std::uint8_t value) noexcept {
+  if (address < state_.ppu.cgram.size()) state_.ppu.cgram[address] = value;
+}
+
+void Snes::writeOam(std::uint16_t address, std::uint8_t value) noexcept {
+  if (address < state_.ppu.oam.size()) state_.ppu.oam[address] = value;
+}
+
+void Snes::writeApuRam(std::uint16_t address, std::uint8_t value) noexcept {
+  apu_.writeRam(address, value);
+}
+
+void Snes::setCpuState(const Cpu65816State& state) {
+  state_.cpu = state;
+  load();  // reloads the live core from state_.cpu, as restore() does
+}
+
+std::size_t Snes::takeFrames(std::span<StereoFrame> into) noexcept {
+  return apu_.takeFrames(into);
+}
+
 std::uint8_t Snes::busRead(std::uint32_t address) {
   const std::uint32_t cost = accessCost(address);
   lastCost_ = cost;

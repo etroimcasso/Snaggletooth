@@ -575,6 +575,46 @@ class Snes {
     return apu_.peek(address);
   }
 
+  // A host reaching into the machine's memory by 24-bit bus address, without
+  // spending a cycle and without a register's side effect. peek answers the
+  // byte the address holds — work RAM, the cartridge's ROM, or its save — and
+  // std::nullopt for anything this face does not reach as memory: a register,
+  // or an address the cartridge leaves open. poke writes that byte and returns
+  // whether it landed; a poke to ROM changes the machine's own copy of the
+  // image, never a file, and no snapshot carries it. addressable answers, for
+  // `bytes` bytes from `address`, whether every one is memory this face reaches;
+  // it is peek's own answer, so no two callers are told different things about
+  // one address, and a zero-length span is addressable.
+  [[nodiscard]] std::optional<std::uint8_t> peek(std::uint32_t address) const noexcept;
+  bool poke(std::uint32_t address, std::uint8_t value) noexcept;
+  [[nodiscard]] bool addressable(std::uint32_t address, std::size_t bytes) const noexcept;
+
+  // The four memories the bus cannot name, each written the way the chip reads
+  // it: no port address steps, no latch moves, no increment happens. VRAM is
+  // 64 KB, CGRAM 512 bytes, OAM 544 bytes, and an address past a memory's end
+  // is ignored. writeApuRam writes the audio machine's RAM (Apu::writeRam). The
+  // picture path reads these memories at every dot, so a write shows at the next
+  // one; none of the four is a register write, so none drives a side effect.
+  void writeVram(std::uint16_t address, std::uint8_t value) noexcept;
+  void writeCgram(std::uint16_t address, std::uint8_t value) noexcept;
+  void writeOam(std::uint16_t address, std::uint8_t value) noexcept;
+  void writeApuRam(std::uint16_t address, std::uint8_t value) noexcept;
+
+  // The CPU's register file, read and written whole on a stopped machine.
+  // cpuState() answers the registers as they stand; setCpuState() reloads the
+  // live core from `state`, the way restore() does, so the written set is live
+  // for the next cycle. Instruction progress is part of the value: a machine
+  // written mid-instruction resumes exactly where the value says.
+  [[nodiscard]] const Cpu65816State& cpuState() const noexcept { return state_.cpu; }
+  void setCpuState(const Cpu65816State& state);
+
+  // The 32 kHz stereo frames produced since the last drain, into the caller's
+  // own storage, returning how many were written. Frames past the end of `into`
+  // stay queued for the next drain, and nothing is allocated — a host producing
+  // sound on a callback that must not allocate drains here. takeFrames() with no
+  // buffer is the drain that allocates a fresh vector.
+  [[nodiscard]] std::size_t takeFrames(std::span<StereoFrame> into) noexcept;
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an

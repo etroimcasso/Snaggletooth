@@ -43,6 +43,11 @@ finishes.
 - [The bus observer](#the-bus-observer)
 - [The save observer](#the-save-observer)
 - [Snapshot and restore](#snapshot-and-restore)
+- [Reaching into the machine](#reaching-into-the-machine)
+  - [Memory by bus address](#memory-by-bus-address)
+  - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
+  - [The CPU register file](#the-cpu-register-file)
+  - [Draining audio without allocating](#draining-audio-without-allocating)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
 - [See also](#see-also)
@@ -820,6 +825,71 @@ machine.restore(saved);   // back to the saved cycle, exactly
 `state().apu` (the [APU machine](apu-machine.md#running-in-storage-you-hold) built over that
 object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
 moved, never copied; a moved machine carries its audio machine after its state.
+
+## Reaching into the machine
+
+Beside the whole-state snapshot, a host reaches into individual places the machine holds, reading and
+writing them without spending a cycle and without a register's side effect. This is for a host that
+edits memory, seeds a value, or reads one out between runs — not for the program the machine runs.
+
+### Memory by bus address
+
+`peek` answers the byte a 24-bit bus address holds, `poke` writes it, and `addressable` says whether a
+span is memory the face reaches. The three agree, because `addressable` is `peek`'s own answer.
+
+```cpp
+std::optional<std::uint8_t> byte = machine.peek(0x7E0000);  // a work-RAM byte
+machine.poke(0x008000, 0x42);                               // a byte of the cartridge image
+bool ok = machine.addressable(0x008000, 2);                 // two ROM bytes: true
+```
+
+`peek` reaches work RAM, the cartridge's ROM and its save, and answers `std::nullopt` for anything the
+face does not reach as memory — a register, or an address the cartridge leaves open. `poke` returns
+whether the byte landed. A `poke` to ROM changes the machine's own copy of the image, not a file, and no
+snapshot carries it; a `poke` to the save writes the save without reporting it to the save observer,
+which reports the program's stores rather than the host's own edits. A register address is refused by
+both: reading a register on the console would change it, and the register file is already in the state a
+host holds.
+
+### The memories the bus cannot name
+
+Video RAM, the palette, the sprite table and the audio machine's RAM are written by name, each the way
+the chip reads it: no port address steps, no latch moves, no increment happens. The picture path reads
+these at every dot, so a write shows at the next one.
+
+```cpp
+machine.writeVram(0x1234, 0xAB);    // 64 KB
+machine.writeCgram(0x00, 0x1F);     // 512 bytes
+machine.writeOam(0x00, 0x80);       // 544 bytes
+machine.writeApuRam(0x0200, 0x5C);  // the audio machine's RAM
+```
+
+An address past a memory's end is ignored. The read-only spans `vram()`, `cgram()`, `oam()` and
+`peekApu()` hand the same bytes back.
+
+### The CPU register file
+
+`cpuState()` reads the 65816's registers whole, and `setCpuState()` writes them, reloading the live core
+so the written set is live on the next cycle. Instruction progress is part of the value, so a machine
+written mid-instruction resumes exactly where the value says.
+
+```cpp
+Cpu65816State regs = machine.cpuState();
+regs.pc = 0x8000;
+machine.setCpuState(regs);  // the next step runs from $8000
+```
+
+### Draining audio without allocating
+
+`takeFrames()` returns the stereo frames produced since the last drain in a fresh vector.
+`takeFrames(std::span<StereoFrame>)` drains into the caller's own storage instead and returns how many
+it wrote; frames past the end of the span stay queued for the next drain, and nothing is allocated — a
+host producing sound on a callback that must not allocate drains through this form.
+
+```cpp
+std::array<StereoFrame, 512> buffer;
+std::size_t written = machine.takeFrames(buffer);
+```
 
 ## Gotchas
 

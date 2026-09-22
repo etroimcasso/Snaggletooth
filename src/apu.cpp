@@ -200,10 +200,36 @@ std::vector<StereoFrame> Apu::takeFrames() {
   return drained;
 }
 
-void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
-  // The DSP owns the write's semantics — ENDX's acknowledge, KON's arming, the
-  // stamp a DSP-written register carries (see cpuWriteDspRegister).
-  cpuWriteDspRegister(state_->dsp, reg, value);
+std::size_t Apu::takeFrames(std::span<StereoFrame> into) noexcept {
+  const std::size_t taken = std::min(into.size(), frames_.size());
+  std::copy_n(frames_.begin(), taken, into.begin());
+  // Keep what did not fit for the next drain. A StereoFrame is trivially
+  // copyable, so the shift moves bytes and allocates nothing.
+  frames_.erase(frames_.begin(), frames_.begin() + static_cast<std::ptrdiff_t>(taken));
+  return taken;
+}
+
+void Apu::writeDspRegister(std::uint8_t index, std::uint8_t value) {
+  // cpuWriteDspRegister owns the write's semantics and ignores an index past
+  // $7F, the way a DSPDATA write does.
+  cpuWriteDspRegister(state_->dsp, index, value);
+}
+
+std::uint8_t Apu::readDspRegister(std::uint8_t index) const noexcept {
+  return state_->dsp[index & 0x7Fu];  // DSPDATA masks the index with $7F
+}
+
+void Apu::writeOverlayRegister(std::uint8_t index, std::uint8_t value) {
+  writeRegister(static_cast<std::uint8_t>(0xF0u + (index & 0x0Fu)), value);
+}
+
+std::uint8_t Apu::readOverlayRegister(std::uint8_t index) {
+  return readRegister(static_cast<std::uint8_t>(0xF0u + (index & 0x0Fu)));
+}
+
+void Apu::setCpuState(const Spc700State& state) {
+  state_->cpu = state;
+  syncCpuAndSlot();  // reloads the live core and re-locks the sample slot; pending output stands
 }
 
 void Apu::reset() {

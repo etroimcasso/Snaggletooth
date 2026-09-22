@@ -32,6 +32,8 @@ boot-ROM window*).
 - [Boot and reset](#boot-and-reset)
 - [Snapshot and restore](#snapshot-and-restore)
 - [Host RAM access](#host-ram-access)
+  - [The CPU register file](#the-cpu-register-file)
+- [Audio output](#audio-output)
 - [The observer](#the-observer)
 - [Gotchas](#gotchas)
 - [Where to look](#where-to-look)
@@ -144,6 +146,16 @@ The registers:
 | `$FA`–`$FC` | T0–T2 TARGET | Write-only timer targets. |
 | `$FD`–`$FF` | T0–T2 OUT | Read-only 4-bit timer outputs; a read clears the value. |
 
+A host reaches these sixteen registers by index (0–15 for `$F0`–`$FF`) without running the CPU, on the
+sound CPU's own paths: `writeOverlayRegister` applies the write and its effect and lands the byte in the
+RAM beneath, and `readOverlayRegister` returns what the CPU would read — so reading a timer output
+(`$FD`–`$FF`) through it clears that output, which is why it is not a `const` read.
+
+```cpp
+apu.writeOverlayRegister(1, 0x01);               // CONTROL ($F1): enable timer 0
+std::uint8_t out = apu.readOverlayRegister(13);  // T0OUT ($FD): the count, then cleared
+```
+
 ### DSP register file
 
 DSPADDR (`$F2`) selects one of 128 DSP registers; DSPDATA (`$F3`) reads or writes the selected one.
@@ -160,6 +172,16 @@ apu.loadRam(0x0200, select_and_write);
 apu.setPc(0x0200);
 apu.run(10);
 // apu.state().dsp[0x10] == 0x7F
+```
+
+A host reaches the file directly, without going through DSPADDR/DSPDATA: `writeDspRegister(index, value)`
+writes it the way a DSPDATA write does — the same ENDX acknowledge, the same KON arming, the same cycle
+stamp — and `readDspRegister(index)` returns the stored byte, masking the index with `$7F`. A host write
+and the program's own DSPDATA write are one thing; a write with the index above `$7F` is ignored.
+
+```cpp
+apu.writeDspRegister(0x10, 0x7F);            // the same write the program above makes
+std::uint8_t v = apu.readDspRegister(0x10);  // 0x7F
 ```
 
 ## The boot-ROM window
@@ -310,6 +332,11 @@ apu.setPc(0x0200);                          // point the CPU at a loaded image
 These bypass the overlay — RAM is RAM from the host side, so `readRam($00F2)` returns the byte beneath
 DSPADDR, not the register the CPU would see there.
 
+`poke` and `addressable` name the same reach in the console's vocabulary: `poke(address, value)` writes
+the RAM beneath the overlay and always lands, because the whole 64 KB is RAM, and `addressable(address,
+bytes)` answers whether a span fits without running past the end. The registers at `$F0`–`$FF` are
+reached by name (see [The register overlay](#the-register-overlay)), not through these.
+
 `peek` is the other reading: what a fetch by the CPU at an address returns, without making one. It
 answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — the
 sixteen register bytes included, from the RAM beneath them, since no program is fetched from the
@@ -318,6 +345,37 @@ overlay — and changes nothing, so a host can decode the instruction the CPU is
 ```cpp
 apu.mapIplRom(boot);
 std::uint8_t opcode = apu.peek(0xFFC0);  // boot[0] while the window is mapped; the RAM byte once it is not
+```
+
+### The CPU register file
+
+`cpuState()` reads the SPC700's registers whole, and `setCpuState()` writes them, reloading the live core
+and re-locking the sample slot so the written set is live on the next cycle — without discarding pending
+output, unlike `restore()`. Instruction progress is part of the value, so a machine written
+mid-instruction resumes where the value says.
+
+```cpp
+Spc700State regs = apu.cpuState();
+regs.pc = 0x0200;
+apu.setCpuState(regs);  // the next step runs from $0200
+```
+
+## Audio output
+
+The DSP delivers one 32 kHz stereo frame every 32 machine cycles. Frames accumulate as the machine runs
+and a host drains them; they are output, not machine state, so a snapshot does not carry pending frames
+and `restore()` and `reset()` discard them.
+
+`takeFrames()` returns the frames produced since the last drain in a fresh vector.
+`takeFrames(std::span<StereoFrame>)` drains into the caller's own storage instead and returns how many it
+wrote; frames past the end of the span stay queued for the next drain, and nothing is allocated — a host
+producing sound on a callback that must not allocate drains through this form.
+
+```cpp
+std::vector<StereoFrame> frames = apu.takeFrames();  // a fresh vector
+
+std::array<StereoFrame, 512> buffer;
+std::size_t written = apu.takeFrames(buffer);        // no allocation; any beyond 512 stay queued
 ```
 
 ## The observer

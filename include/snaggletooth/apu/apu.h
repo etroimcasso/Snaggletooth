@@ -233,6 +233,56 @@ class Apu {
   // snapshot, and restore() and reset() discard any that are pending.
   [[nodiscard]] std::vector<StereoFrame> takeFrames();
 
+  // The frames produced since the last drain, into the caller's own storage, and
+  // how many were written. Frames past the end of `into` stay queued for the
+  // next drain, and nothing is allocated — a host draining on a callback that
+  // must not allocate uses this form. takeFrames() with no buffer is the drain
+  // that allocates a fresh vector.
+  [[nodiscard]] std::size_t takeFrames(std::span<StereoFrame> into) noexcept;
+
+  // A host reaching into the machine's RAM by 16-bit address, beside readRam /
+  // writeRam and in the console's vocabulary. peek answers the byte the sound
+  // CPU would fetch (above); poke writes the RAM beneath the register overlay,
+  // and always lands, because the whole 64 KB is RAM. addressable answers
+  // whether `bytes` from `address` are RAM this face reaches — every address is,
+  // so it answers whether the range fits without running past the end. The
+  // sixteen registers at $00F0-$00FF are reached by name below, not here, and a
+  // read of $00F0-$00FF through peek returns the RAM beneath, not the register.
+  bool poke(std::uint16_t address, std::uint8_t value) noexcept {
+    state_->ram[address] = value;
+    return true;
+  }
+  [[nodiscard]] bool addressable(std::uint16_t address, std::size_t bytes) const noexcept {
+    return static_cast<std::size_t>(address) + bytes <= 0x10000u;
+  }
+
+  // A DSP register, written as a write through DSPDATA writes it — the same
+  // acknowledge for ENDX, the same arming for KON, the same cycle stamp a
+  // register the chip wrote carries — so a host write and a program write are
+  // one thing. An index above $7F is ignored, as DSPDATA ignores it. Writing one
+  // spends no cycle and does not advance or re-lock the sample slot.
+  // readDspRegister answers the register's stored byte, masking the index with
+  // $7F as a DSPDATA read does, without a side effect.
+  void writeDspRegister(std::uint8_t index, std::uint8_t value);
+  [[nodiscard]] std::uint8_t readDspRegister(std::uint8_t index) const noexcept;
+
+  // One of the sixteen registers the sound CPU reaches at $00F0-$00FF (index
+  // 0-15): TEST, CONTROL, the DSP address and data, the four port latches, the
+  // two AUXIO bytes and the three timers. Written and read as the sound CPU's
+  // own access does, side effects and all — a write lands in the RAM beneath and
+  // applies the register's effect, and reading a timer's output clears it, so
+  // readOverlayRegister is not const.
+  void writeOverlayRegister(std::uint8_t index, std::uint8_t value);
+  [[nodiscard]] std::uint8_t readOverlayRegister(std::uint8_t index);
+
+  // The sound CPU's register file, read and written whole on a stopped machine.
+  // cpuState() answers the registers as they stand; setCpuState() reloads the
+  // live core from `state` and re-locks the DSP's sample slot, so the written
+  // set is live for the next cycle. Instruction progress is part of the value: a
+  // machine written mid-instruction resumes exactly where the value says.
+  [[nodiscard]] const Spc700State& cpuState() const noexcept { return state_->cpu; }
+  void setCpuState(const Spc700State& state);
+
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
   // is RAM. Both the CPU and its dummy reads pass through here, and every call
@@ -266,11 +316,6 @@ class Apu {
   void busWrite(std::uint16_t address, std::uint8_t value);
   std::uint8_t readRegister(std::uint8_t reg);
   void writeRegister(std::uint8_t reg, std::uint8_t value);
-
-  // Writes a DSP register through DSPDATA: cpuWriteDspRegister, which owns the
-  // write's semantics (ENDX's acknowledge, KON's arming, the stamp a
-  // DSP-written register carries).
-  void writeDspRegister(std::uint8_t reg, std::uint8_t value);
 
   // One machine cycle. The master counter advances, the timer ticks and the DSP
   // sample boundary that land on the new count are taken, and then the CPU makes
