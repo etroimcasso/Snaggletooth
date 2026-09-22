@@ -8,7 +8,10 @@
 // order the effects reported them. The string is the whole instruction cycle by
 // cycle, so a fetch that reads its bytes late, an index cycle a page cross adds,
 // a read-modify-write's middle cycle and an interrupt's opening fetch each show
-// where they fall.
+// where they fall. The sound CPU's cases read the same way: the cycle between
+// the two bytes of a direct-page word read, the displacement a byte-testing
+// branch fetches after its read, the cycles a taken branch spends, and the
+// cycles a multiply computes for.
 
 #include <gtest/gtest.h>
 
@@ -23,6 +26,8 @@
 #include "ir/cpu65816_lift.h"
 #include "ir/ir.h"
 #include "ir/ir_interpret.h"
+#include "ir/spc700_lift.h"
+#include "spc700_disasm.h"
 
 namespace snaggletooth::ir {
 namespace {
@@ -281,6 +286,150 @@ TEST(Placement, AFetchIsTheFirstEffect) {
   };
   for (const std::vector<std::uint8_t>& bytes : programs) {
     const Traced r = runInstr(bytes, reg(false, true, true), Cpu65816Mode::native(true, true));
+    ASSERT_FALSE(r.node.effects.empty());
+    EXPECT_EQ(r.node.effects.front().op, Op::Fetch);
+  }
+}
+
+// ---- the sound CPU --------------------------------------------------------------
+
+struct SoundTraced {
+  std::vector<Entry> order;
+  std::vector<Entry> data;
+  Spc700Registers regs;
+  std::uint32_t cycles = 0;
+  Node node;
+};
+
+// One sound instruction at $0400 over memory that holds `bytes` there and
+// `memory` besides, run from `initial` with a clock beside the bus.
+SoundTraced runSound(const std::vector<std::uint8_t>& bytes, Spc700Registers initial,
+                     const std::map<std::uint32_t, std::uint8_t>& memory = {},
+                     bool withClock = true) {
+  RecordBus bus;
+  bus.mem = memory;
+  initial.pc = 0x0400;
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    bus.mem[static_cast<std::uint32_t>(0x0400u + i)] = bytes[i];
+  }
+  std::vector<std::uint8_t> window;
+  for (std::uint32_t i = 0; i < 3; ++i) {
+    const auto it = bus.mem.find(0x0400u + i);
+    window.push_back(it == bus.mem.end() ? std::uint8_t{0} : it->second);
+  }
+  SoundTraced r;
+  const std::optional<disasm::Instruction> decoded = disasm::decodeAt(window, 0x0400, 0x0400);
+  if (!decoded) {
+    ADD_FAILURE() << "the instruction did not decode";
+    return r;
+  }
+  r.node = liftSpc700Instruction(*decoded);
+  Spc700Interpreter interpreter;
+  interpreter.registers = initial;
+  RecordClock clock;
+  if (withClock) {
+    clock.order = &r.order;
+    bus.order = &r.order;
+    interpreter.clock = &clock;
+  }
+  r.cycles = interpreter.execute(r.node, bus);
+  r.regs = interpreter.registers;
+  r.data = std::move(bus.data);
+  return r;
+}
+
+TEST(Placement, ASoundWordReadSpendsItsCycleBetweenTheTwoBytes) {
+  // MOVW YA,$55: the low byte at $55, a cycle inside the chip, the high byte at
+  // $56, the word joined in YA.
+  const SoundTraced r = runSound({0xBA, 0x55}, Spc700Registers{}, {{0x55, 0x34}, {0x56, 0x12}});
+  EXPECT_EQ(trace(r.order), "PPrIr");
+  ASSERT_EQ(r.data.size(), 2u);
+  EXPECT_EQ(r.data[0].address, 0x55u);
+  EXPECT_EQ(r.data[1].address, 0x56u);
+  EXPECT_EQ(int{r.regs.a}, 0x34);
+  EXPECT_EQ(int{r.regs.y}, 0x12);
+  EXPECT_EQ(r.order.size(), std::size_t{r.cycles});  // the invariant
+}
+
+TEST(Placement, ASoundWordCompareReadsItsTwoBytesBackToBack) {
+  const SoundTraced r = runSound({0x5A, 0x55}, Spc700Registers{});  // CMPW YA,$55
+  EXPECT_EQ(trace(r.order), "PPrr");
+  EXPECT_EQ(r.order.size(), std::size_t{r.cycles});
+}
+
+TEST(Placement, AByteTestingBranchFetchesItsDisplacementAfterTheRead) {
+  // BBS $20.0,+$10: the offset, the byte, a cycle inside the chip, then the
+  // displacement; taken, two more cycles inside the chip.
+  const SoundTraced notTaken = runSound({0x03, 0x20, 0x10}, Spc700Registers{}, {{0x20, 0x00}});
+  EXPECT_EQ(trace(notTaken.order), "PPrIP");
+  EXPECT_EQ(notTaken.order.size(), std::size_t{notTaken.cycles});
+  const SoundTraced taken = runSound({0x03, 0x20, 0x10}, Spc700Registers{}, {{0x20, 0x01}});
+  EXPECT_EQ(trace(taken.order), "PPrIPII");
+  EXPECT_EQ(taken.order.size(), std::size_t{taken.cycles});
+}
+
+TEST(Placement, DbnzYSpendsItsDecrementBeforeTheSecondRead) {
+  Spc700Registers twice;
+  twice.y = 2;  // decremented to 1: taken
+  const SoundTraced taken = runSound({0xFE, 0x10}, twice);
+  EXPECT_EQ(trace(taken.order), "PPIrII");
+  EXPECT_EQ(taken.order.size(), std::size_t{taken.cycles});
+  Spc700Registers once;
+  once.y = 1;  // decremented to 0: falls through
+  const SoundTraced through = runSound({0xFE, 0x10}, once);
+  EXPECT_EQ(trace(through.order), "PPIr");
+  EXPECT_EQ(through.order.size(), std::size_t{through.cycles});
+}
+
+TEST(Placement, ADirectPageMoveFetchesItsDestinationAfterTheSourceByte) {
+  const SoundTraced r = runSound({0xFA, 0x20, 0x30}, Spc700Registers{});  // MOV $30,$20
+  EXPECT_EQ(trace(r.order), "PPrPw");
+  EXPECT_EQ(r.order.size(), std::size_t{r.cycles});
+}
+
+TEST(Placement, AMultiplyComputesForSevenCyclesAfterItsDiscardedRead) {
+  const SoundTraced r = runSound({0xCF}, Spc700Registers{});  // MUL YA
+  EXPECT_EQ(trace(r.order), "PrIIIIIII");
+  EXPECT_EQ(r.order.size(), std::size_t{r.cycles});
+}
+
+TEST(Placement, AnIndirectIndexedReadWaitsBeforeItsPointerAndTheStoreAfter) {
+  const SoundTraced read = runSound({0xF7, 0x20}, Spc700Registers{});  // MOV A,[$20]+Y
+  EXPECT_EQ(trace(read.order), "PPIrrr");
+  const SoundTraced store = runSound({0xD7, 0x20}, Spc700Registers{});  // MOV [$20]+Y,A
+  EXPECT_EQ(trace(store.order), "PPrrIrw");
+  EXPECT_EQ(store.order.size(), std::size_t{store.cycles});
+}
+
+TEST(Placement, ASoundCallSpendsACycleBeforeItsPushesAndTwoAfter) {
+  Spc700Registers state;
+  state.sp = 0xEF;
+  const SoundTraced r = runSound({0x3F, 0x00, 0x12}, state);  // CALL !$1200
+  EXPECT_EQ(trace(r.order), "PPPIwwII");
+  EXPECT_EQ(r.order.size(), std::size_t{r.cycles});
+}
+
+TEST(Placement, ANullClockChangesNothingOnTheSoundCpu) {
+  const std::vector<std::uint8_t> bytes = {0xBA, 0x55};
+  const std::map<std::uint32_t, std::uint8_t> memory = {{0x55, 0x34}, {0x56, 0x12}};
+  const SoundTraced with = runSound(bytes, Spc700Registers{}, memory, true);
+  const SoundTraced without = runSound(bytes, Spc700Registers{}, memory, false);
+  EXPECT_TRUE(without.order.empty());
+  EXPECT_EQ(without.cycles, with.cycles);
+  EXPECT_TRUE(without.regs == with.regs);
+  EXPECT_EQ(without.data, with.data);
+}
+
+TEST(Placement, ASoundFetchIsTheFirstEffect) {
+  const std::vector<std::vector<std::uint8_t>> programs = {
+      {0x00},              // NOP
+      {0xE8, 0x12},        // MOV A,#imm
+      {0x03, 0x20, 0x10},  // BBS, whose last byte is fetched late
+      {0xFA, 0x20, 0x30},  // MOV dp,dp, likewise
+      {0x0F},              // BRK
+  };
+  for (const std::vector<std::uint8_t>& bytes : programs) {
+    const SoundTraced r = runSound(bytes, Spc700Registers{});
     ASSERT_FALSE(r.node.effects.empty());
     EXPECT_EQ(r.node.effects.front().op, Op::Fetch);
   }

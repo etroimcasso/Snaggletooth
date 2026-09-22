@@ -876,7 +876,8 @@ TEST(Text, ASoundProgramFileRoundTripsUnderItsOwnHeaderWithItsOwnAddresses) {
   EXPECT_NE(text.find("  $0503 OR1 C,abs.bit operand $1234 operand2 $7 length 3 flow continue base 5 {\n"), std::string::npos) << text;
   EXPECT_NE(text.find("  $0506 TCALL 0 operand $0 length 1 flow call base 8 {\n"), std::string::npos) << text;
   EXPECT_NE(text.find("  $0507 BNE rel operand $500 length 2 flow branch target $0500 base 2 {\n"
-                      "    Set PC <- $509 [16];\n    Set PC <- $500 [16] if clear P.Z;\n    Cycles $2 [8] if clear P.Z;\n  }\n"),
+                      "    Fetch $2 [8];\n    Set PC <- $509 [16];\n    Set PC <- $500 [16] if clear P.Z;\n"
+                      "    Cycles $2 [8] if clear P.Z;\n    Idle $2 [8] if clear P.Z;\n  }\n"),
             std::string::npos)
       << text;
   EXPECT_NE(text.find("  $0509 RET operand $0 length 1 flow return base 5 {\n"), std::string::npos) << text;

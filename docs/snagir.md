@@ -366,28 +366,33 @@ image 32768 LoROM;
 region apu/driver.asm $0200-$022B {
   label $0200 entry;
   $0200 MOV A,#imm operand $5A length 2 flow continue base 2 {
+    Fetch $2 [8];
     Set PC <- $202 [16];
     SetNZ A <- $5A [8];
   }
   $0202 MOV abs,A operand $250 length 3 flow continue base 5 {
+    Fetch $3 [8];
     Set PC <- $205 [16];
     Set T0 <- $250 [16];
     Load T3 <- T0 [8 flat];
     Store T0, A [8 flat];
   }
   $0205 MOV A,#imm operand $0 length 2 flow continue base 2 {
+    Fetch $2 [8];
     Set PC <- $207 [16];
     SetNZ A <- $0 [8];
   }
   $0207 NOP operand $0 length 1 flow continue base 2 {
+    Fetch $1 [8];
     Set PC <- $208 [16];
     Load T3 <- $208 [8 flat];
   }
 ```
 
 The two blocks the boot sent landed end to end, so the file has one region;
-the entry's label heads it, the store reads its destination before writing it
-as the chip does, and `NOP` reads the byte after itself and throws it away.
+the entry's label heads it, each node opens with the `Fetch` of its own bytes,
+the store reads its destination before writing it as the chip does, and `NOP`
+reads the byte after itself and throws it away.
 The file goes on through the sixteen `NOP`s and the `STOP`, then the table the
 trace never reached as one `data` record, and ends with the region's `}`.
 

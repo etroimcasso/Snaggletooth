@@ -129,8 +129,11 @@ struct Spc700StepAccesses {
 [[nodiscard]] Spc700Registers registersOf(const Spc700State& state) noexcept;
 
 // Runs `node` on the sound interpreter over the step's data accesses, then
-// checks the registers after against `after` and the cycles against `cycles`,
-// the audio machine's count for the step. Every disagreement lands in `out`
+// checks the registers after against `after`, the cycles against `cycles` —
+// the audio machine's count for the step — and that the node places exactly as
+// many cycles as it costs (`"cycles placed"`). The audio machine reports no
+// cycle the sound CPU spends with no access, so the order of those cycles is
+// held by the sound CPU's vectors rather than here. Every disagreement lands in `out`
 // carrying `prototype`'s step and site, with the node's name filled in and the
 // processor the sound CPU. When anything diverged the interpreter is realigned
 // to `after`. Returns the cycles the node cost the interpreter.

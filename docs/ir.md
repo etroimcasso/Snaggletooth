@@ -350,8 +350,11 @@ lift is held to.
   `MOV1` — shift the byte down by the bit and mask it, invert it for the `/`
   forms, and apply the operation to `P.C`; `TSET1` and `TCLR1` compute the
   flags into a temporary and the new byte into another.
-- **The word instructions.** `MOVW`, `ADDW`, `SUBW` and `CMPW` load the word
-  low byte first with the `Page` step; `ADDW` clears C and adds, `SUBW` sets C
+- **The word instructions.** `MOVW YA,dp`, `ADDW` and `SUBW` read the low byte,
+  spend a cycle inside the chip, and read the high byte one past it inside the
+  page — two byte `Load`s, joined into the word with `Shl` and `Or`; `CMPW`
+  reads both bytes with no cycle between, one word `Load` with the `Page` step.
+  `ADDW` clears C and adds, `SUBW` sets C
   and subtracts, so the sixteen-bit `Adc` and `Sbc` take no carry in and set
   H from the high byte's nibble. `INCW` and `DECW` read and write the low byte,
   then read and write the high byte, which moves only when the low byte wrapped,
@@ -362,7 +365,8 @@ lift is held to.
   or not; `CBNE` subtracts A from the byte into the temporary and branches on
   it being non-zero; `DBNZ` decrements the byte or Y without touching a flag
   and branches on the result. A taken branch's `Cycles` effect carries the
-  difference between the measured taken and untaken costs.
+  difference between the measured taken and untaken costs, and an `Idle` of two
+  under the same condition places those cycles after the displacement.
 - **The stack.** Page one, addressed by the eight-bit stack pointer, which
   wraps inside the page: every `Push` and `Pull` is `pinned`. `CALL`,
   `PCALL` and `TCALL` push the address after the instruction, high byte first,
@@ -373,6 +377,24 @@ lift is held to.
   plus its byte.
 - **The halts.** `SLEEP` is a `Halt` with 0 and `STOP` with 1; the sound CPU
   takes no interrupt, so only a reset ends either.
+- **Cycle placement.** A node's effects account for every cycle the instruction
+  spends, in the chip's order, as a main-CPU node's do. It opens with a `Fetch`
+  of the opcode and the operand bytes that follow it; `MOV dp,dp` fetches its
+  destination offset after reading its source byte, and `BBS`, `BBC`, `CBNE`
+  and `DBNZ dp` fetch their displacement after the byte they test. An `Idle`
+  stands for every cycle the chip spends with no bus access: the indexing cycle
+  of `dp+X`, `dp+Y`, `!abs+X`, `!abs+Y`, `[dp+X]`, `CBNE dp+X` and
+  `JMP [!abs+X]`; the internal cycle of `[dp]+Y`, before the pointer for a read
+  and after it for `MOV [dp]+Y,A`; the cycle `MOV A,(X)+` spends stepping X and
+  the one `MOV (X)+,A` spends before its write; the cycle `MOV1 m.b,C` spends
+  between its read and its write; the last cycle of `CMP (X),(Y)`, `CMP dp,dp`,
+  `CMP dp,#imm`, `OR1` and `EOR1`; the cycles an implied instruction computes
+  for after its discarded read — three for `XCN`, seven for `MUL`, ten for
+  `DIV`, one for `DAA`, `DAS`, `NOTC`, `EI` and `DI`; the cycle between the two
+  bytes of `MOVW YA,dp`, `ADDW` and `SUBW`; the cycle `BBS`, `BBC` and `CBNE`
+  spend between their byte and their displacement, and the one `DBNZ Y` spends
+  on its decrement; a taken branch's two; and the internal cycles of `CALL`,
+  `PCALL`, `TCALL`, `BRK`, `RET`, `RETI`, `PUSH`, `POP`, `SLEEP` and `STOP`.
 - **Hardware interrupts.** None: the sound program has no `nmi` or `irq`.
 - **A register-named operand.** `Node::registerName` is set where the
   operand's address is one of the audio unit's registers at `$00F0`–`$00FF`,
@@ -402,7 +424,7 @@ more under native mode.
 
 On the sound CPU the one increment is a taken branch: the difference between
 the taken and untaken costs the SPC700 disassembler measured, under the
-branch's own condition.
+branch's own condition, with an `Idle` under the same condition beside it.
 
 Cost and placement are kept apart. `Cycles` is the only operation that adds to
 the count; `Fetch` and `Idle` are the only ones that say where the cycles fall,
@@ -601,8 +623,8 @@ const std::uint32_t cycles = interpreter.execute(*node, bus);
 // program + idleCycles + the bus's accesses == cycles
 ```
 
-`Spc700Interpreter` carries a `clock` too; the sound program places no `Fetch` or
-`Idle` yet, so on the sound CPU a clock is told nothing.
+`Spc700Interpreter` carries a `clock` too, and tells it the sound CPU's program
+fetches and idle cycles the same way.
 
 ## Reading a program
 
@@ -705,6 +727,7 @@ addressing mode, no mode and one cost:
 
 ```
   $0202 MOV abs,A operand $250 length 3 flow continue base 5 {
+    Fetch $3 [8];
     Set PC <- $205 [16];
     Set T0 <- $250 [16];
     Load T3 <- T0 [8 flat];
@@ -843,9 +866,12 @@ before — the first read at each of its addresses in order, which is how the
 core fetches them — and the sound interpreter runs the node through a bus that
 answers each read with what the machine read and checks every access's
 address, direction and written value in order. After it the registers, the
-status word and the run state are checked, and the cycles against the
-boundary's count. The audio bus has no cycle kinds, so an access's declared
-purpose is not checked there. The node's bytes are held to the bytes the
+status word and the run state are checked, the cycles against the boundary's
+count, and that the node places exactly as many cycles as it cost. The audio
+machine's observer reports no cycle the sound CPU spends with no access, so the
+order of the sound CPU's cycles is held by its vectors (see
+[How it is checked](#how-it-is-checked)) rather than here. The audio bus has no
+cycle kinds, so an access's declared purpose is not checked there. The node's bytes are held to the bytes the
 machine fetched too: a node of other bytes than the machine ran is another
 program than the file's, and is counted rather than checked against the
 wrong node.
@@ -1111,6 +1137,17 @@ flag is proven on the same cases as the typed one. The runner registers one case
 per opcode per mode and skips visibly without the vectors, exactly as the core's
 does; `SNAGGLETOOTH_REQUIRE_65816_VECTORS` turns the skip into a failure.
 
+`tests/ir/spc700_vector_test.cpp` replays the SingleStepTests SPC700 vectors
+through the sound interpreter the same way: each case's instruction is decoded,
+lifted and run, then held to the recorded registers, writes, data-read
+addresses, memory and cycle count, to the count of cycles it placed against
+the count it cost, and cycle by cycle to the recording's order — a wait is an
+idle cycle, a read the core makes as a fetch is a program cycle, and every
+other read or write is a data cycle. The recording does not mark its fetches,
+so the core runs each case beside it to tell them. The runner registers one
+case per opcode and skips visibly without the vectors;
+`SNAGGLETOOTH_REQUIRE_VECTORS` turns the skip into a failure.
+
 `tests/ir/differential_test.cpp` replays the example cartridges on the machine
 through `differential` — a clean run with its counts, a wait released by an
 interrupt, a transfer holding the CPU, an HDMA event holding it for a whole
@@ -1118,7 +1155,9 @@ step, a routine run from work RAM — and then breaks one effect at a time in a
 lifted program to see each break named: a wrong stored value, a wrong read
 address, a dropped flag write, a dropped cycle, a missing access, an extra one,
 a wrong access kind, a cycle moved across an access, a cycle dropped from a
-node's placement, a break in the interrupt sequence. `tests/snes/observer_test.cpp`
+node's placement, a break in the interrupt sequence — and, in the sound program,
+a wrong stored value, a wrong register write, a dropped cycle and a node that
+places fewer cycles than it costs. `tests/snes/observer_test.cpp`
 holds the machine's observer, which the replay rests on, to what the core and
 the engines drive.
 
@@ -1126,7 +1165,12 @@ the engines drive.
 a clock in order, the index cycle under each width and both live-flag settings, a
 read-modify-write's middle cycle under native and emulation, `WDM`, the interrupt
 sequences' opening fetch and invariant, that a node's first effect is its fetch,
-and that a null clock changes nothing.
+and that a null clock changes nothing. On the sound CPU it proves the cycle
+between a word read's two bytes and none in `CMPW`, the displacement `BBS`
+fetches after its read taken and not, `DBNZ Y` taken and not, the destination
+offset `MOV dp,dp` fetches after its source byte, `MUL`'s seven cycles, the
+internal cycle of `[dp]+Y` on either side of its pointer, `CALL`, that a
+node's first effect is its fetch, and that a null clock changes nothing.
 
 `tests/ir/render_test.cpp` holds the renderer to the listing over every example
 cartridge: the bytes `encode` writes back from a node are the bytes the node was
@@ -1172,7 +1216,7 @@ would mean the layers leak into each other.
 | `Replay` | The cartridge, the master-cycle budget, the recorded run, the divergence limit, and the progress sink. |
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped, on both CPUs; each disagreement with its step, processor, node, effect and the two values; the form and construct histograms, and the sound CPU's form histogram. |
 | `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the main CPU collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; a core state as the interpreter's registers. |
-| `Spc700Access`, `Spc700StepAccesses`, `splitSpc700Step(step, pc, length)`, `checkSpc700Node(…)` | One sound-CPU access as the audio machine reports it; a step's accesses with the instruction's own fetches set apart from its data; the sound interpreter run over the data and checked against the registers after and the cycles. |
+| `Spc700Access`, `Spc700StepAccesses`, `splitSpc700Step(step, pc, length)`, `checkSpc700Node(…)` | One sound-CPU access as the audio machine reports it; a step's accesses with the instruction's own fetches set apart from its data; the sound interpreter run over the data and checked against the registers after, the cycles, and the count of cycles the node places. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
 | `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed`, `Processor` | One chip's program file written from a program and what it does not carry — the chip among them — and read back to both; the grammar is [snagir.md](snagir.md). |
 | `renderEffect(effect)`, `renderNode(node, processor)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the files carry them, both node lists. |

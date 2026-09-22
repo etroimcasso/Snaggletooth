@@ -6,7 +6,9 @@
 // lifted, and run by the interpreter from the case's initial registers over its
 // sparse memory. The final registers, every write (address, value and order),
 // every data read's address in order, the final memory and the cycle count are
-// then held to what the vectors record.
+// then held to what the vectors record, and so is every cycle in order: each
+// fetch the node places, each cycle it places with no access, and each access,
+// with the node placing exactly as many cycles as it costs.
 //
 // The recording does not say which of its reads are the instruction's own
 // fetches, so the core tells: the case is run on the core a cycle at a time
@@ -25,6 +27,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -73,22 +76,57 @@ struct AccessRecord {
   bool write;
 };
 
-// Sparse memory the interpreter reads through, recording every access in order.
+// One cycle, by what the chip did on it: a program fetch of the instruction's
+// own bytes, a cycle with no access, or a data access with its address and
+// direction.
+enum class CycleKind { Program, Idle, Data };
+struct CycleEntry {
+  CycleKind kind;
+  std::uint16_t address = 0;  // for Data
+  bool write = false;
+};
+
+std::string_view kindName(CycleKind kind) {
+  switch (kind) {
+    case CycleKind::Program: return "program";
+    case CycleKind::Idle: return "idle";
+    case CycleKind::Data: return "data";
+  }
+  return "?";
+}
+
+// Sparse memory the interpreter reads through, recording every access — as an
+// access, and as one cycle in the shared ordered log a Clock also writes to.
 struct SparseBus final : snaggletooth::ir::Bus {
   std::unordered_map<std::uint16_t, std::uint8_t> mem;
   std::vector<AccessRecord> log;
+  std::vector<CycleEntry>* order = nullptr;
 
   std::uint8_t read(Address address, Access) override {
     const auto at = static_cast<std::uint16_t>(address & 0xFFFFu);
     const auto it = mem.find(at);
     const std::uint8_t value = it == mem.end() ? std::uint8_t{0} : it->second;
     log.push_back({at, value, false});
+    if (order != nullptr) order->push_back({CycleKind::Data, at, false});
     return value;
   }
   void write(Address address, std::uint8_t value, Access) override {
     const auto at = static_cast<std::uint16_t>(address & 0xFFFFu);
     mem[at] = value;
     log.push_back({at, value, true});
+    if (order != nullptr) order->push_back({CycleKind::Data, at, true});
+  }
+};
+
+// The Clock beside the bus: a fetch appends that many program cycles to the same
+// ordered log, an idle that many no-access cycles.
+struct RecordingClock final : snaggletooth::ir::Clock {
+  std::vector<CycleEntry>* order = nullptr;
+  void fetch(unsigned cycles) override {
+    for (unsigned i = 0; i < cycles; ++i) order->push_back({CycleKind::Program});
+  }
+  void idle(unsigned cycles) override {
+    for (unsigned i = 0; i < cycles; ++i) order->push_back({CycleKind::Idle});
   }
 };
 
@@ -126,12 +164,11 @@ Spc700Registers registersOf(const RegState& r) {
   return out;
 }
 
-// The data accesses the recording holds, in order: every write, and every read
-// that is not an opcode or operand fetch. Which reads are fetches is what the
-// core says when it runs the same case. A read the chip makes at the counter
-// and throws away is of the byte after the instruction's `length` bytes, and
-// stays.
-std::vector<AccessRecord> recordedAccesses(const VectorCase& c, std::uint8_t length) {
+// Which of the recording's accesses are opcode or operand fetches, one flag per
+// access in order. Which reads are fetches is what the core says when it runs
+// the same case. A read the chip makes at the counter and throws away is of the
+// byte after the instruction's `length` bytes, and is not one.
+std::vector<bool> fetchFlags(const VectorCase& c, std::uint8_t length) {
   ClassifyingBus bus;
   for (const auto& [address, value] : c.initial.ram) bus.ram[address] = value;
   Spc700 cpu(Spc700State{.pc = c.initial.pc,
@@ -155,7 +192,13 @@ std::vector<AccessRecord> recordedAccesses(const VectorCase& c, std::uint8_t len
     const bool fetch = !bus.lastWrite && bus.lastAddress == before && (stepped || lastByte);
     fetchByAccess.push_back(fetch);
   }
+  return fetchByAccess;
+}
 
+// The data accesses the recording holds, in order: every write, and every read
+// that is not a fetch.
+std::vector<AccessRecord> recordedAccesses(const VectorCase& c,
+                                           const std::vector<bool>& fetchByAccess) {
   std::vector<AccessRecord> out;
   std::size_t access = 0;
   for (const CycleEvent& cycle : c.cycles) {
@@ -165,6 +208,27 @@ std::vector<AccessRecord> recordedAccesses(const VectorCase& c, std::uint8_t len
     if (fetch) continue;
     if (!cycle.address.has_value()) continue;
     out.push_back({*cycle.address, cycle.value.value_or(0), cycle.kind == CycleEvent::Kind::Write});
+  }
+  return out;
+}
+
+// Every cycle the recording holds, in order, by kind: a wait is idle, a fetch is
+// a program cycle, and every other read or write is a data cycle.
+std::vector<CycleEntry> recordedCycles(const VectorCase& c, const std::vector<bool>& fetchByAccess) {
+  std::vector<CycleEntry> out;
+  std::size_t access = 0;
+  for (const CycleEvent& cycle : c.cycles) {
+    if (cycle.kind == CycleEvent::Kind::Wait) {
+      out.push_back({CycleKind::Idle});
+      continue;
+    }
+    const bool fetch = access < fetchByAccess.size() && fetchByAccess[access];
+    ++access;
+    if (fetch) {
+      out.push_back({CycleKind::Program});
+      continue;
+    }
+    out.push_back({CycleKind::Data, cycle.address.value_or(0), cycle.kind == CycleEvent::Kind::Write});
   }
   return out;
 }
@@ -189,8 +253,14 @@ void runCase(const VectorCase& c, std::uint8_t opcode) {
   ASSERT_TRUE(decoded.has_value()) << name << " (the instruction did not decode)";
   const Node node = snaggletooth::ir::liftSpc700Instruction(*decoded);
 
+  std::vector<CycleEntry> order;
+  bus.order = &order;
+  RecordingClock clock;
+  clock.order = &order;
+
   Spc700Interpreter interpreter;
   interpreter.registers = registersOf(c.initial);
+  interpreter.clock = &clock;
   const std::uint32_t cycles = interpreter.execute(node, bus);
 
   const Spc700Registers& r = interpreter.registers;
@@ -206,13 +276,32 @@ void runCase(const VectorCase& c, std::uint8_t opcode) {
   EXPECT_EQ(std::size_t{cycles}, c.cycles.size()) << name << " (cycles)";
 
   // Every data access in order: address, direction, and a write's value.
-  const std::vector<AccessRecord> want = recordedAccesses(c, decoded->length);
+  const std::vector<bool> fetchByAccess = fetchFlags(c, decoded->length);
+  const std::vector<AccessRecord> want = recordedAccesses(c, fetchByAccess);
   ASSERT_EQ(bus.log.size(), want.size()) << name << " (data accesses)";
   for (std::size_t i = 0; i < want.size(); ++i) {
     EXPECT_EQ(int{bus.log[i].address}, int{want[i].address}) << name << " (access " << i << " address)";
     EXPECT_EQ(bus.log[i].write, want[i].write) << name << " (access " << i << " direction)";
     if (want[i].write) {
       EXPECT_EQ(int{bus.log[i].value}, int{want[i].value}) << name << " (access " << i << " value)";
+    }
+  }
+
+  // The invariant: every cycle the node cost is placed — as a program, an idle or
+  // a data cycle — and no more.
+  EXPECT_EQ(order.size(), std::size_t{cycles}) << name << " (cycles placed)";
+
+  // Every cycle in order: its kind, and for a data cycle its address and
+  // direction.
+  const std::vector<CycleEntry> wantCycles = recordedCycles(c, fetchByAccess);
+  ASSERT_EQ(order.size(), wantCycles.size()) << name << " (cycle order length)";
+  for (std::size_t i = 0; i < wantCycles.size(); ++i) {
+    EXPECT_EQ(kindName(order[i].kind), kindName(wantCycles[i].kind))
+        << name << " (cycle " << i << " kind)";
+    if (wantCycles[i].kind == CycleKind::Data && order[i].kind == CycleKind::Data) {
+      EXPECT_EQ(int{order[i].address}, int{wantCycles[i].address})
+          << name << " (cycle " << i << " address)";
+      EXPECT_EQ(order[i].write, wantCycles[i].write) << name << " (cycle " << i << " direction)";
     }
   }
 

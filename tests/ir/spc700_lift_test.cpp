@@ -1198,7 +1198,8 @@ TEST(Spc700Lift, SleepAndStopHaltTheInterpreterAsTheyHaltTheCore) {
 
 // ---- every opcode -----------------------------------------------------------------------
 // One state, one operand pair, all 256 opcodes: each decodes, lifts, and runs to
-// the same registers, accesses, memory and cycles as the core.
+// the same registers, accesses, memory and cycles as the core, and each node
+// opens with its fetch, then the program counter set past the instruction.
 TEST(Spc700Lift, EveryOpcodeLiftsAndRunsBesideTheCore) {
   for (unsigned opcode = 0; opcode < 256; ++opcode) {
     SCOPED_TRACE("opcode " + std::to_string(opcode));
@@ -1214,9 +1215,10 @@ TEST(Spc700Lift, EveryOpcodeLiftsAndRunsBesideTheCore) {
     sc.memory[0x0640] = 0x33;
     const Outcome out = runSame(sc);
     EXPECT_FALSE(out.node.instruction.mnemonic.empty());
-    ASSERT_FALSE(out.node.effects.empty());
-    EXPECT_EQ(out.node.effects.front().op, Op::Set);
-    EXPECT_EQ(out.node.effects.front().dst.place, Place::PC);
+    ASSERT_GE(out.node.effects.size(), 2u);
+    EXPECT_EQ(out.node.effects[0].op, Op::Fetch);
+    EXPECT_EQ(out.node.effects[1].op, Op::Set);
+    EXPECT_EQ(out.node.effects[1].dst.place, Place::PC);
   }
 }
 

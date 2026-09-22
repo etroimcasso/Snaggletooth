@@ -243,6 +243,7 @@ struct Spc700CheckingBus final : Bus {
   std::size_t cursor = 0;
   std::vector<Divergence>& out;
   Divergence prototype;
+  std::vector<StepCycle>* order = nullptr;  // the node's cycle kinds, in order
 
   Spc700CheckingBus(std::span<const Spc700Access> expected, const Spc700Interpreter& interpreter,
                     std::vector<Divergence>& out, Divergence prototype)
@@ -258,6 +259,7 @@ struct Spc700CheckingBus final : Bus {
   }
 
   std::uint8_t read(Address address, Access) override {
+    if (order != nullptr) order->push_back(StepCycle::Data);
     address &= 0xFFFFu;
     if (cursor >= expected.size()) {
       diverge("a read the machine did not make", 0, address);
@@ -270,6 +272,7 @@ struct Spc700CheckingBus final : Bus {
   }
 
   void write(Address address, std::uint8_t value, Access) override {
+    if (order != nullptr) order->push_back(StepCycle::Data);
     address &= 0xFFFFu;
     if (cursor >= expected.size()) {
       diverge("a write the machine did not make", 0, address);
@@ -322,7 +325,13 @@ std::uint32_t checkSpc700Node(Spc700Interpreter& interpreter, const Node& node,
   prototype.processor = Processor::Spc700;
   const std::size_t before = out.size();
   Spc700CheckingBus bus(data, interpreter, out, std::move(prototype));
+  std::vector<StepCycle> nodeOrder;
+  bus.order = &nodeOrder;
+  LockstepClock clock;
+  clock.order = &nodeOrder;
+  interpreter.clock = &clock;
   const std::uint32_t cost = interpreter.execute(node, bus);
+  interpreter.clock = nullptr;
 
   if (bus.cursor < data.size()) {
     bus.diverge("accesses the machine made that the node did not", data[bus.cursor].address,
@@ -347,6 +356,10 @@ std::uint32_t checkSpc700Node(Spc700Interpreter& interpreter, const Node& node,
   check("run state", static_cast<std::uint32_t>(machineAfter.run),
         static_cast<std::uint32_t>(irAfter.run));
   check("cycles", cycles, cost);
+  // The invariant: the node places exactly as many cycles as it cost. The audio
+  // machine reports no cycle it spends with no access, so the order itself is
+  // held by the sound CPU's vectors, not here.
+  check("cycles placed", cost, static_cast<std::uint32_t>(nodeOrder.size()));
   if (out.size() != before) interpreter.registers = machineAfter;
   return cost;
 }
