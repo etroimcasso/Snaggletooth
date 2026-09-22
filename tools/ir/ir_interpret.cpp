@@ -35,6 +35,7 @@ struct Run65816 {
   Registers& r;
   Bus& bus;
   Shadow* shadow;  // told every move a value makes, or null
+  Clock* clock;    // told every cycle the node places, or null
   std::array<std::uint32_t, 4> temps{};
   bool crossed = false;  // the last bank-relative address's low-byte addition carried
   std::uint32_t cycles = 0;
@@ -482,6 +483,8 @@ struct Run65816 {
       }
       case Op::Halt: r.run = raw(e.a) == 0 ? Run::Waiting : Run::Stopped; break;
       case Op::Cycles: cycles += raw(e.a); break;
+      case Op::Fetch: if (clock != nullptr) clock->fetch(raw(e.a)); break;
+      case Op::Idle: if (clock != nullptr) clock->idle(raw(e.a)); break;
 
       case Op::Shl:
         put(e.dst.place, raw(e.a) << raw(e.b), w);
@@ -500,7 +503,7 @@ struct Run65816 {
 }  // namespace
 
 std::uint32_t Interpreter::execute(const Node& node, Bus& bus) {
-  Run65816 run{registers, bus, shadow};
+  Run65816 run{registers, bus, shadow, clock};
   run.normalize();
   run.cycles = node.cost.base[costIndex(registers.accumulator8(), registers.index8())];
   for (effectIndex = 0; effectIndex < node.effects.size(); ++effectIndex) {
@@ -511,7 +514,7 @@ std::uint32_t Interpreter::execute(const Node& node, Bus& bus) {
 
 std::uint32_t Interpreter::interrupt(const std::vector<Effect>& sequence, Bus& bus) {
   release();
-  Run65816 run{registers, bus, shadow};
+  Run65816 run{registers, bus, shadow, clock};
   run.normalize();
   for (effectIndex = 0; effectIndex < sequence.size(); ++effectIndex) {
     run.apply(sequence[effectIndex]);

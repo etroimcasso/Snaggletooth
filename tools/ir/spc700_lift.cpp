@@ -116,6 +116,17 @@ struct Builder {
     e.a = imm(count);
     e.when = cond;
   }
+  // `count` program bytes read at the counter, each a cycle.
+  void fetch(std::uint32_t count) {
+    Effect& e = emit(Op::Fetch);
+    e.a = imm(count);
+  }
+  // `count` cycles the chip spends with no bus access.
+  void idle(std::uint32_t count, Cond cond = always()) {
+    Effect& e = emit(Op::Idle);
+    e.a = imm(count);
+    e.when = cond;
+  }
   void flag(Place flag, bool value) { set(flag, imm(value ? 1u : 0u), Width::Byte); }
   // The read of the byte after the opcode that the chip makes and throws away.
   void discard(std::uint32_t address) { load(Place::T3, imm(address), Width::Byte); }
@@ -170,12 +181,20 @@ struct MemForm {
   AddrMode mode = AddrMode::Implied;
   MemAccess access = MemAccess::Read;
   Destination destination = Destination::Read;
+  std::uint8_t internals = 0;  // the cycles an implied form computes for, after its discarded read
 };
 
 bool memoryForm(std::uint8_t opcode, MemForm& form) {
   auto is = [&](AddrMode mode, MemAccess access = MemAccess::Read,
                 Destination destination = Destination::Read) {
-    form = MemForm{.mode = mode, .access = access, .destination = destination};
+    form = MemForm{.mode = mode, .access = access, .destination = destination, .internals = 0};
+    return true;
+  };
+  auto computes = [&](std::uint8_t internals) {
+    form = MemForm{.mode = AddrMode::Implied,
+                   .access = MemAccess::Read,
+                   .destination = Destination::Read,
+                   .internals = internals};
     return true;
   };
   switch (opcode) {
@@ -225,8 +244,8 @@ bool memoryForm(std::uint8_t opcode, MemForm& form) {
 
     // ---- 8-bit increment, decrement, shift and rotation of a register ----
     case 0xBC: case 0x3D: case 0xFC: case 0x9C: case 0x1D: case 0xDC:
-    case 0x1C: case 0x5C: case 0x3C: case 0x7C:
-    case 0x9F: return is(AddrMode::Implied);
+    case 0x1C: case 0x5C: case 0x3C: case 0x7C: return is(AddrMode::Implied);
+    case 0x9F: return computes(3);  // XCN A
 
     // ---- 8-bit increment, decrement, shift and rotation of a byte in memory ----
     case 0xAB: case 0x8B: case 0x0B: case 0x4B: case 0x2B: case 0x6B: return is(AddrMode::Dp, MemAccess::Modify);
@@ -242,9 +261,11 @@ bool memoryForm(std::uint8_t opcode, MemForm& form) {
     case 0x78: return is(AddrMode::ImmediateToDp, MemAccess::Internal);
 
     // ---- multiply, divide, decimal adjust, the flags and NOP ----
-    case 0xCF: case 0x9E: case 0xDF: case 0xBE:
-    case 0x00: case 0x20: case 0x40: case 0x60: case 0x80: case 0xE0:
-    case 0xED: case 0xA0: case 0xC0: return is(AddrMode::Implied);
+    case 0xCF: return computes(7);                        // MUL YA
+    case 0x9E: return computes(10);                       // DIV YA,X
+    case 0xDF: case 0xBE: return computes(1);             // DAA / DAS A
+    case 0x00: case 0x20: case 0x40: case 0x60: case 0x80: case 0xE0: return is(AddrMode::Implied);
+    case 0xED: case 0xA0: case 0xC0: return computes(1);  // NOTC / EI / DI
 
     // ---- one bit of a direct-page byte, set or cleared ----
     case 0x02: case 0x22: case 0x42: case 0x62: case 0x82: case 0xA2: case 0xC2: case 0xE2:
@@ -539,7 +560,9 @@ struct Bytes {
 };
 
 // A memory instruction: the address settled in T0 with every access the chip
-// makes on the way, then the read, the store, the modify or the comparison.
+// makes on the way, then the read, the store, the modify or the comparison. The
+// opcode and the operand bytes that follow it are already fetched; the indexing
+// and pointer cycles the chip spends with no access stand where it spends them.
 void liftMemory(Builder& b, std::uint8_t opcode, const MemForm& form, const Bytes& bytes,
                 std::uint32_t next) {
   const Place t0 = Place::T0;
@@ -549,18 +572,33 @@ void liftMemory(Builder& b, std::uint8_t opcode, const MemForm& form, const Byte
   std::uint32_t bit = 0;
   switch (form.mode) {
     case AddrMode::Implied:
+      // The byte after the opcode is read and thrown away; whatever the
+      // instruction computes takes the cycles after it.
       b.discard(next);
+      if (form.internals != 0) b.idle(form.internals);
       applyImplied(b, opcode);
       return;
     case AddrMode::Immediate:
       applyRead(b, opcode, imm(bytes.first), 0);
       return;
     case AddrMode::Dp: b.page(t0, imm(bytes.first)); break;
-    case AddrMode::DpX: b.page(t0, imm(bytes.first), Place::X); break;
-    case AddrMode::DpY: b.page(t0, imm(bytes.first), Place::Y); break;
+    case AddrMode::DpX:
+      b.page(t0, imm(bytes.first), Place::X);
+      b.idle(1);  // the indexing cycle
+      break;
+    case AddrMode::DpY:
+      b.page(t0, imm(bytes.first), Place::Y);
+      b.idle(1);
+      break;
     case AddrMode::Abs: b.set(t0, imm(bytes.word()), Width::Word); break;
-    case AddrMode::AbsX: b.alu(Op::Add, t0, imm(bytes.word()), at(Place::X), Width::Word); break;
-    case AddrMode::AbsY: b.alu(Op::Add, t0, imm(bytes.word()), at(Place::Y), Width::Word); break;
+    case AddrMode::AbsX:
+      b.alu(Op::Add, t0, imm(bytes.word()), at(Place::X), Width::Word);
+      b.idle(1);  // the indexing cycle
+      break;
+    case AddrMode::AbsY:
+      b.alu(Op::Add, t0, imm(bytes.word()), at(Place::Y), Width::Word);
+      b.idle(1);
+      break;
     case AddrMode::AbsBit:
       b.set(t0, imm(bytes.word() & 0x1FFFu), Width::Word);
       bit = bytes.word() >> 13;
@@ -572,12 +610,16 @@ void liftMemory(Builder& b, std::uint8_t opcode, const MemForm& form, const Byte
       break;
     case AddrMode::IndexedIndirect:
       b.page(t1, imm(bytes.first), Place::X);
+      b.idle(1);  // the indexing cycle, before the pointer
       b.load(t0, at(t1), Width::Word, Step::Page);
       break;
     case AddrMode::IndirectIndexed:
+      // A read spends its internal cycle before the pointer, the store after it.
       b.page(t1, imm(bytes.first));
+      if (form.access == MemAccess::Read) b.idle(1);
       b.load(t2, at(t1), Width::Word, Step::Page);
       b.alu(Op::Add, t0, at(t2), at(Place::Y), Width::Word);
+      if (form.access != MemAccess::Read) b.idle(1);
       break;
     case AddrMode::IndirectToIndirect:
       b.discard(next);
@@ -587,8 +629,10 @@ void liftMemory(Builder& b, std::uint8_t opcode, const MemForm& form, const Byte
       source = at(t2);
       break;
     case AddrMode::DpToDp:
+      // The destination offset is fetched after the source byte is read.
       b.page(t1, imm(bytes.first));
       b.load(t2, at(t1), Width::Byte);
+      b.fetch(1);
       b.page(t0, imm(bytes.second));
       source = at(t2);
       break;
@@ -603,11 +647,13 @@ void liftMemory(Builder& b, std::uint8_t opcode, const MemForm& form, const Byte
       b.load(t1, at(t0), Width::Byte);
       applyRead(b, opcode, at(t1), bit);
       if (form.mode == AddrMode::IndirectIncrement) {
+        b.idle(1);  // the cycle that steps X
         b.alu(Op::Add, Place::X, at(Place::X), imm(1), Width::Byte);
       }
       break;
     case MemAccess::Write:
       if (form.destination == Destination::Read) b.load(Place::T3, at(t0), Width::Byte);
+      if (form.destination == Destination::Internal) b.idle(1);
       b.store(at(t0), form.mode == AddrMode::DpToDp || form.mode == AddrMode::ImmediateToDp
                           ? source
                           : storeValue(opcode),
@@ -619,18 +665,21 @@ void liftMemory(Builder& b, std::uint8_t opcode, const MemForm& form, const Byte
     case MemAccess::Modify:
       b.load(t1, at(t0), Width::Byte);
       if (form.destination == Destination::ReadThenRead) b.load(Place::T3, at(t0), Width::Byte);
+      if (form.destination == Destination::ReadThenWait) b.idle(1);
       applyModify(b, opcode, source, bit);
       b.store(at(t0), at(t1), Width::Byte);
       break;
     case MemAccess::Internal:
       b.load(t1, at(t0), Width::Byte);
+      b.idle(1);  // the result settles inside the chip
       applyInternal(b, opcode, source, bit);
       break;
   }
 }
 
 // A direct-page word instruction: the low byte's address in T0, the high byte's
-// — one past it, inside the page — in T2.
+// — one past it, inside the page — in T2. The opcode and the offset are already
+// fetched.
 void liftWord(Builder& b, std::uint8_t opcode, WordForm form, const Bytes& bytes) {
   const Place t0 = Place::T0;
   const Place t1 = Place::T1;
@@ -640,7 +689,13 @@ void liftWord(Builder& b, std::uint8_t opcode, WordForm form, const Bytes& bytes
   b.page(t2, imm(static_cast<std::uint8_t>(bytes.first + 1u)));
   switch (form) {
     case WordForm::Read:
-      b.load(t1, at(t0), Width::Word, Step::Page);
+      // The low byte, a cycle inside the chip, then the high byte: two reads, the
+      // word joined in T1.
+      b.load(t1, at(t0), Width::Byte);
+      b.idle(1);
+      b.load(t3, at(t2), Width::Byte);
+      b.alu(Op::Shl, t3, at(t3), imm(8), Width::Word);
+      b.alu(Op::Or, t1, at(t3), at(t1), Width::Word);
       if (opcode == 0xBA) {  // MOVW YA,dp
         b.setNZ(Place::YA, at(t1), Width::Word);
       } else if (opcode == 0x7A) {  // ADDW YA,dp: no carry in
@@ -701,11 +756,13 @@ BranchTest branchTest(std::uint8_t opcode) {
   }
 }
 
-// A branch taken under `cond`: the program counter to the target and the
-// cycles the taken branch costs beyond the base.
+// A branch taken under `cond`: the program counter to the target, the cycles the
+// taken branch costs beyond the base, and the two cycles inside the chip where it
+// spends them, after the displacement.
 void takeBranch(Builder& b, Address target, std::uint32_t extra, Cond cond) {
   b.set(Place::PC, imm(target), Width::Word, cond);
   b.cycles(extra, cond);
+  b.idle(2, cond);
 }
 
 // A control-flow instruction. `extra` is the cycles a taken branch costs beyond
@@ -721,6 +778,7 @@ void liftControl(Builder& b, std::uint8_t opcode, Control form, const Bytes& byt
       const BranchTest test = branchTest(opcode);
       if (test.flag == Place::None) {
         b.set(Place::PC, imm(target), Width::Word);
+        b.idle(2);
       } else {
         takeBranch(b, target, extra,
                    flagTest(test.whenSet ? When::FlagSet : When::FlagClear, test.flag));
@@ -731,10 +789,14 @@ void liftControl(Builder& b, std::uint8_t opcode, Control form, const Bytes& byt
     case Control::CompareIndexed:
       if (form == Control::CompareIndexed) {
         b.page(t0, imm(bytes.first), Place::X);
+        b.idle(1);  // the indexing cycle
       } else {
         b.page(t0, imm(bytes.first));
       }
       b.load(t1, at(t0), Width::Byte);
+      // A cycle inside the chip, then the displacement.
+      b.idle(1);
+      b.fetch(1);
       if (opcode == 0x2E || opcode == 0xDE) {  // CBNE: branch when A differs
         b.alu(Op::Sub, t1, at(t1), at(Place::A), Width::Byte);
         takeBranch(b, target, extra, placeTest(When::PlaceIsNot, t1, 0));
@@ -751,9 +813,12 @@ void liftControl(Builder& b, std::uint8_t opcode, Control form, const Bytes& byt
       b.load(t1, at(t0), Width::Byte);
       b.alu(Op::Sub, t1, at(t1), imm(1), Width::Byte);
       b.store(at(t0), at(t1), Width::Byte);
+      b.fetch(1);  // the displacement, after the byte goes back
       takeBranch(b, target, extra, placeTest(When::PlaceIsNot, t1, 0));
       break;
     case Control::DecrementY:
+      // A cycle on the decrement, then the displacement's address read again.
+      b.idle(1);
       b.discard(next);
       b.alu(Op::Sub, Place::Y, at(Place::Y), imm(1), Width::Byte);
       takeBranch(b, target, extra, placeTest(When::PlaceIsNot, Place::Y, 0));
@@ -763,55 +828,74 @@ void liftControl(Builder& b, std::uint8_t opcode, Control form, const Bytes& byt
       break;
     case Control::JumpIndexed:
       b.alu(Op::Add, t0, imm(bytes.word()), at(Place::X), Width::Word);
+      b.idle(1);  // the indexing cycle
       b.load(t1, at(t0), Width::Word);
       b.set(Place::PC, at(t1), Width::Word);
       break;
     case Control::Call:
+      // A cycle inside the chip before the pushes, two after.
+      b.idle(1);
       b.push(at(Place::PC), Width::Word);
+      b.idle(2);
       b.set(Place::PC, imm(bytes.word()), Width::Word);
       break;
     case Control::CallPage:
+      b.idle(1);
       b.push(at(Place::PC), Width::Word);
+      b.idle(1);
       b.set(Place::PC, imm(0xFF00u | bytes.first), Width::Word);
       break;
     case Control::CallVector:
       b.discard(next);
+      b.idle(1);
       b.push(at(Place::PC), Width::Word);
+      b.idle(1);
       b.load(Place::PC, imm(0xFFDEu - 2u * (opcode >> 4)), Width::Word);
       break;
     case Control::Break:
       b.discard(next);
       b.push(at(Place::PC), Width::Word);
       b.push(at(Place::P), Width::Byte);
+      b.idle(1);
       b.load(Place::PC, imm(0xFFDEu), Width::Word);
       b.flag(Place::FlagB, true);
       b.flag(Place::FlagI, false);
       break;
     case Control::Return:
       b.discard(next);
+      b.idle(1);
       b.pull(Place::PC, Width::Word);
       break;
     case Control::ReturnInterrupt:
       b.discard(next);
+      b.idle(1);
       b.pull(Place::P, Width::Byte);
       b.pull(Place::PC, Width::Word);
       break;
     case Control::Push: {
+      // The write, then a cycle inside the chip; a pop is the mirror image.
       b.discard(next);
       const Place source = opcode == 0x2D ? Place::A : opcode == 0x4D ? Place::X
                          : opcode == 0x6D ? Place::Y : Place::P;
       b.push(at(source), Width::Byte);
+      b.idle(1);
       break;
     }
     case Control::Pop: {
       b.discard(next);
+      b.idle(1);
       const Place dst = opcode == 0xAE ? Place::A : opcode == 0xCE ? Place::X
                       : opcode == 0xEE ? Place::Y : Place::P;
       b.pull(dst, Width::Byte);
       break;
     }
     case Control::Halt: {
-      for (int i = 0; i < 3; ++i) b.discard(next);
+      // The byte after the opcode read three times, each read followed by a
+      // cycle inside the chip.
+      for (int i = 0; i < 3; ++i) {
+        b.discard(next);
+        b.idle(1);
+      }
       Effect& e = b.emit(Op::Halt);
       e.a = imm(opcode == 0xEF ? 0u : 1u);
       e.width = Width::Byte;
@@ -820,6 +904,20 @@ void liftControl(Builder& b, std::uint8_t opcode, Control form, const Bytes& byt
     case Control::None:
       throw std::logic_error("liftControl: not a control-flow instruction");
   }
+}
+
+// The program bytes an instruction reads before anything else: the opcode and the
+// operand bytes that follow it at once. The two-offset moves and the branches that
+// read a byte of memory first fetch their last byte later, after that access, and
+// the lift places that fetch there.
+std::uint32_t openingFetches(std::uint8_t opcode, std::uint32_t length) {
+  MemForm form;
+  const Control control = controlForm(opcode);
+  const bool lastByteLate = (wordForm(opcode) == WordForm::None && memoryForm(opcode, form) &&
+                             form.mode == AddrMode::DpToDp) ||
+                            control == Control::BitBranch || control == Control::CompareIndexed ||
+                            control == Control::DecrementDp;
+  return lastByteLate ? length - 1u : length;
 }
 
 // The instruction layer's operands, by the shape of the operand bytes: the first
@@ -887,6 +985,7 @@ Node liftSpc700Instruction(const disasm::Instruction& instruction, bool patched)
           : 0u;
 
   Builder b;
+  b.fetch(openingFetches(opcode, i.length));
   b.set(Place::PC, imm((i.address + i.length) & 0xFFFFu), Width::Word);
   if (const WordForm word = wordForm(opcode); word != WordForm::None) {
     liftWord(b, opcode, word, bytes);

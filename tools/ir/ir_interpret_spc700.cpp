@@ -44,6 +44,7 @@ std::uint8_t flagMask(Place flag) {
 struct RunSpc700 {
   Spc700Registers& r;
   Bus& bus;
+  Clock* clock;  // told every cycle the node places, or null
   std::array<std::uint32_t, 4> temps{};
   std::uint32_t cycles = 0;
 
@@ -405,6 +406,8 @@ struct RunSpc700 {
 
       case Op::Halt: r.run = raw(e.a) == 0 ? Run::Waiting : Run::Stopped; break;
       case Op::Cycles: cycles += raw(e.a); break;
+      case Op::Fetch: if (clock != nullptr) clock->fetch(raw(e.a)); break;
+      case Op::Idle: if (clock != nullptr) clock->idle(raw(e.a)); break;
 
       case Op::DirectAddress:
       case Op::BankAddress:
@@ -428,7 +431,7 @@ struct RunSpc700 {
 }  // namespace
 
 std::uint32_t Spc700Interpreter::execute(const Node& node, Bus& bus) {
-  RunSpc700 run{registers, bus};
+  RunSpc700 run{registers, bus, clock};
   run.cycles = node.cost.base[0];
   for (effectIndex = 0; effectIndex < node.effects.size(); ++effectIndex) {
     run.apply(node.effects[effectIndex]);

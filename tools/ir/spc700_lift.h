@@ -12,8 +12,10 @@
 // its destination before writing it, and the read of the byte after the opcode
 // that a one-byte instruction makes and throws away — the register writes, the
 // flags each operation moves, and the cycles a taken branch costs beyond its
-// measured base. Every rule is the core's, and the core over a flat bus is what
-// the lift is proven against.
+// measured base. The effects account for every cycle in the chip's order: a
+// `Fetch` for each program byte read where the chip reads it, an `Idle` for
+// each cycle it spends with no bus access. Every rule is the core's, and the
+// core over a flat bus is what the lift is proven against.
 //
 // A sound-CPU node carries no mode: the chip's instructions always read the
 // same way, and the page a direct operand lives in is the P flag's choice at

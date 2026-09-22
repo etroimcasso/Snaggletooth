@@ -58,13 +58,18 @@ struct Divergence {
   std::uint32_t actual = 0;
 };
 
+// One cycle by what the chip drove: a program access reading the instruction's
+// own bytes, a cycle with no access, or a data access.
+enum class StepCycle : std::uint8_t { Program, Idle, Data };
+
 // The observer that collects one step's report: the bytes the CPU fetched, in
 // order — the instruction's own bytes, wherever they lay — its data accesses,
-// and its cycles, counted. A transfer engine's accesses and the work-RAM port's
-// are not the CPU's and are left out.
+// its cycles counted, and every cycle's kind in order. A transfer engine's
+// accesses and the work-RAM port's are not the CPU's and are left out.
 struct StepObserver final : BusObserver {
   std::vector<BusAccess> fetches;  // the opcode fetch and every operand fetch
   std::vector<BusAccess> data;     // the CPU's data accesses, fetches left out
+  std::vector<StepCycle> order;    // every cycle's kind, in the order the chip spent it
   std::uint32_t cpuCycles = 0;
   bool cpuRan = false;
 
@@ -124,8 +129,11 @@ struct Spc700StepAccesses {
 [[nodiscard]] Spc700Registers registersOf(const Spc700State& state) noexcept;
 
 // Runs `node` on the sound interpreter over the step's data accesses, then
-// checks the registers after against `after` and the cycles against `cycles`,
-// the audio machine's count for the step. Every disagreement lands in `out`
+// checks the registers after against `after`, the cycles against `cycles` —
+// the audio machine's count for the step — and that the node places exactly as
+// many cycles as it costs (`"cycles placed"`). The audio machine reports no
+// cycle the sound CPU spends with no access, so the order of those cycles is
+// held by the sound CPU's vectors rather than here. Every disagreement lands in `out`
 // carrying `prototype`'s step and site, with the node's name filled in and the
 // processor the sound CPU. When anything diverged the interpreter is realigned
 // to `after`. Returns the cycles the node cost the interpreter.

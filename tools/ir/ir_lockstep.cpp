@@ -1,5 +1,6 @@
 #include "ir/ir_lockstep.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace snaggletooth::ir {
@@ -25,6 +26,7 @@ struct CheckingBus final : Bus {
   std::size_t cursor = 0;
   std::vector<Divergence>& out;
   Divergence prototype;  // the step's identity, copied into every divergence
+  std::vector<StepCycle>* order = nullptr;  // the node's cycle kinds, in order
 
   CheckingBus(const std::vector<BusAccess>& expected, const Interpreter& interpreter,
               std::vector<Divergence>& out, Divergence prototype)
@@ -40,6 +42,7 @@ struct CheckingBus final : Bus {
   }
 
   std::uint8_t read(Address address, Access access) override {
+    if (order != nullptr) order->push_back(StepCycle::Data);
     address &= 0xFFFFFFu;
     if (cursor >= expected.size()) {
       diverge("a read the machine did not make", 0, address);
@@ -55,6 +58,7 @@ struct CheckingBus final : Bus {
   }
 
   void write(Address address, std::uint8_t value, Access access) override {
+    if (order != nullptr) order->push_back(StepCycle::Data);
     address &= 0xFFFFFFu;
     if (cursor >= expected.size()) {
       diverge("a write the machine did not make", 0, address);
@@ -70,12 +74,25 @@ struct CheckingBus final : Bus {
   }
 };
 
+// The clock beside the checking bus: a fetch places that many program cycles in
+// the node's ordered kinds, an idle that many no-access cycles.
+struct LockstepClock final : Clock {
+  std::vector<StepCycle>* order = nullptr;
+  void fetch(unsigned cycles) override {
+    for (unsigned i = 0; i < cycles; ++i) order->push_back(StepCycle::Program);
+  }
+  void idle(unsigned cycles) override {
+    for (unsigned i = 0; i < cycles; ++i) order->push_back(StepCycle::Idle);
+  }
+};
+
 // After the effects: the accesses the machine made that the node did not, the
 // registers, the run state and the cycles. Realigns the interpreter when
 // anything disagreed.
 void checkAfter(Interpreter& interpreter, CheckingBus& bus, const StepObserver& step,
                 const Cpu65816State& after, std::uint32_t cycles, const char* unmatched,
-                std::size_t divergencesBefore, std::vector<Divergence>& out) {
+                std::size_t divergencesBefore, const std::vector<StepCycle>& nodeOrder,
+                std::vector<Divergence>& out) {
   if (bus.cursor < step.data.size()) {
     bus.diverge(unmatched, step.data[bus.cursor].address,
                 static_cast<std::uint32_t>(step.data.size() - bus.cursor));
@@ -103,6 +120,25 @@ void checkAfter(Interpreter& interpreter, CheckingBus& bus, const StepObserver& 
   check("run state", static_cast<std::uint32_t>(machineAfter.run),
         static_cast<std::uint32_t>(irAfter.run));
   check("cycles", step.cpuCycles, cycles);
+
+  // The cycle order: the machine's kinds against the node's, in order. The first
+  // that differs is one divergence; a difference in how many were placed is
+  // another.
+  const std::size_t common = std::min(step.order.size(), nodeOrder.size());
+  for (std::size_t i = 0; i < common; ++i) {
+    if (step.order[i] != nodeOrder[i]) {
+      check("cycle order", static_cast<std::uint32_t>(step.order[i]),
+            static_cast<std::uint32_t>(nodeOrder[i]));
+      break;
+    }
+  }
+  if (step.order.size() != nodeOrder.size()) {
+    check("cycle order", static_cast<std::uint32_t>(step.order.size()),
+          static_cast<std::uint32_t>(nodeOrder.size()));
+  }
+  // The invariant: the node places exactly as many cycles as it cost.
+  check("cycles placed", cycles, static_cast<std::uint32_t>(nodeOrder.size()));
+
   if (out.size() != divergencesBefore) interpreter.registers = machineAfter;
 }
 
@@ -114,19 +150,23 @@ void StepObserver::access(const BusAccess& a) {
   ++cpuCycles;
   if (a.kind == CycleKind::OpcodeFetch || a.kind == CycleKind::OperandFetch) {
     fetches.push_back(a);
+    order.push_back(StepCycle::Program);
     return;
   }
   data.push_back(a);
+  order.push_back(StepCycle::Data);
 }
 
 void StepObserver::internal(std::uint32_t, std::optional<CycleKind>) {
   cpuRan = true;
   ++cpuCycles;
+  order.push_back(StepCycle::Idle);
 }
 
 void StepObserver::clear() {
   fetches.clear();
   data.clear();
+  order.clear();
   cpuCycles = 0;
   cpuRan = false;
 }
@@ -156,9 +196,15 @@ std::uint32_t checkNode(Interpreter& interpreter, const Node& node, const StepOb
   prototype.mode = node.mode;
   const std::size_t before = out.size();
   CheckingBus bus(step.data, interpreter, out, std::move(prototype));
+  std::vector<StepCycle> nodeOrder;
+  bus.order = &nodeOrder;
+  LockstepClock clock;
+  clock.order = &nodeOrder;
+  interpreter.clock = &clock;
   const std::uint32_t cycles = interpreter.execute(node, bus);
+  interpreter.clock = nullptr;
   checkAfter(interpreter, bus, step, after, cycles, "accesses the machine made that the node did not",
-             before, out);
+             before, nodeOrder, out);
   return cycles;
 }
 
@@ -171,9 +217,15 @@ std::uint32_t checkInterrupt(Interpreter& interpreter, const std::vector<Effect>
   prototype.mode.index8 = r.index8();
   const std::size_t before = out.size();
   CheckingBus bus(step.data, interpreter, out, std::move(prototype));
+  std::vector<StepCycle> nodeOrder;
+  bus.order = &nodeOrder;
+  LockstepClock clock;
+  clock.order = &nodeOrder;
+  interpreter.clock = &clock;
   const std::uint32_t cycles = interpreter.interrupt(sequence, bus);
+  interpreter.clock = nullptr;
   checkAfter(interpreter, bus, step, after, cycles,
-             "accesses the machine made that the sequence did not", before, out);
+             "accesses the machine made that the sequence did not", before, nodeOrder, out);
   return cycles;
 }
 
@@ -191,6 +243,7 @@ struct Spc700CheckingBus final : Bus {
   std::size_t cursor = 0;
   std::vector<Divergence>& out;
   Divergence prototype;
+  std::vector<StepCycle>* order = nullptr;  // the node's cycle kinds, in order
 
   Spc700CheckingBus(std::span<const Spc700Access> expected, const Spc700Interpreter& interpreter,
                     std::vector<Divergence>& out, Divergence prototype)
@@ -206,6 +259,7 @@ struct Spc700CheckingBus final : Bus {
   }
 
   std::uint8_t read(Address address, Access) override {
+    if (order != nullptr) order->push_back(StepCycle::Data);
     address &= 0xFFFFu;
     if (cursor >= expected.size()) {
       diverge("a read the machine did not make", 0, address);
@@ -218,6 +272,7 @@ struct Spc700CheckingBus final : Bus {
   }
 
   void write(Address address, std::uint8_t value, Access) override {
+    if (order != nullptr) order->push_back(StepCycle::Data);
     address &= 0xFFFFu;
     if (cursor >= expected.size()) {
       diverge("a write the machine did not make", 0, address);
@@ -270,7 +325,13 @@ std::uint32_t checkSpc700Node(Spc700Interpreter& interpreter, const Node& node,
   prototype.processor = Processor::Spc700;
   const std::size_t before = out.size();
   Spc700CheckingBus bus(data, interpreter, out, std::move(prototype));
+  std::vector<StepCycle> nodeOrder;
+  bus.order = &nodeOrder;
+  LockstepClock clock;
+  clock.order = &nodeOrder;
+  interpreter.clock = &clock;
   const std::uint32_t cost = interpreter.execute(node, bus);
+  interpreter.clock = nullptr;
 
   if (bus.cursor < data.size()) {
     bus.diverge("accesses the machine made that the node did not", data[bus.cursor].address,
@@ -295,6 +356,10 @@ std::uint32_t checkSpc700Node(Spc700Interpreter& interpreter, const Node& node,
   check("run state", static_cast<std::uint32_t>(machineAfter.run),
         static_cast<std::uint32_t>(irAfter.run));
   check("cycles", cycles, cost);
+  // The invariant: the node places exactly as many cycles as it cost. The audio
+  // machine reports no cycle it spends with no access, so the order itself is
+  // held by the sound CPU's vectors, not here.
+  check("cycles placed", cost, static_cast<std::uint32_t>(nodeOrder.size()));
   if (out.size() != before) interpreter.registers = machineAfter;
   return cost;
 }

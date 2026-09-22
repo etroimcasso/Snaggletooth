@@ -173,7 +173,7 @@ TEST(Text, TheImageLineCarriesTheSizeAndTheMap) {
 
 TEST(Text, EveryOperationRoundTrips) {
   std::vector<Effect> effects;
-  for (std::size_t i = 0; i <= static_cast<std::size_t>(Op::Div); ++i) {
+  for (std::size_t i = 0; i <= static_cast<std::size_t>(Op::Idle); ++i) {
     const Op op = static_cast<Op>(i);
     Effect e = effect(op, at(Place::T0), at(Place::A), imm(0x1234u), Width::Word);
     if (op == Op::Load || op == Op::Store || op == Op::StoreRmw) e.step = Step::Bank;
@@ -183,13 +183,32 @@ TEST(Text, EveryOperationRoundTrips) {
   Node node = nodeOf({0xEAu}, 0x008000u, Cpu65816Mode::reset());
   node.effects = effects;
   roundTrip(programOf({node}), bankZero(), "every operation");
-  EXPECT_EQ(effects.size(), 43u);
+  EXPECT_EQ(effects.size(), 45u);
   EXPECT_EQ(renderEffect(effect(Op::Shl, at(Place::T3), at(Place::FlagC), imm(3u), Width::Byte)),
             "Shl T3 <- P.C, $3 [8];");
   EXPECT_EQ(renderEffect(effect(Op::PageAddress, at(Place::T0), imm(0x40u), at(Place::X), Width::Word)),
             "PageAddress T0 <- $40, X [16];");
   EXPECT_EQ(renderEffect(effect(Op::Div, at(Place::YA), at(Place::YA), at(Place::X), Width::Word)),
             "Div YA <- YA, X [16];");
+  // A fetch of the instruction's bytes and a cycle with no access carry only a
+  // count and, for an idle, a condition — the shape a cost carries.
+  EXPECT_EQ(renderEffect(effect(Op::Fetch, {}, imm(3u), {}, Width::Byte)), "Fetch $3 [8];");
+  EXPECT_EQ(renderEffect(effect(Op::Idle, {}, imm(1u), {}, Width::Byte)), "Idle $1 [8];");
+  Effect conditionalIdle = effect(Op::Idle, {}, imm(1u), {}, Width::Byte);
+  conditionalIdle.when.when = When::DirectLowByte;
+  EXPECT_EQ(renderEffect(conditionalIdle), "Idle $1 [8] if D.lo;");
+}
+
+// Neither new name carries a step or a pin, so the parser refuses one.
+TEST(Text, FetchAndIdleRefuseAStepOrAPin) {
+  const std::string head =
+      "snagir 1;\nimage 32768 LoROM;\n\nregion bank_00.asm $00:8000-$00:FFFF {\n\n";
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Fetch $1 [8 flat];\n  }\n}\n"),
+            "line 7: a step on an operation that carries none");
+  EXPECT_EQ(refusal(head + "  $00:8000 NOP operand $0 length 1 flow continue e=1 base 2/2/2/2 {\n"
+                           "    Idle $1 [8 pinned];\n  }\n}\n"),
+            "line 7: a pin on an operation that carries none");
 }
 
 TEST(Text, EveryPlaceRoundTripsAndAFlagIsWrittenQualified) {
@@ -857,7 +876,8 @@ TEST(Text, ASoundProgramFileRoundTripsUnderItsOwnHeaderWithItsOwnAddresses) {
   EXPECT_NE(text.find("  $0503 OR1 C,abs.bit operand $1234 operand2 $7 length 3 flow continue base 5 {\n"), std::string::npos) << text;
   EXPECT_NE(text.find("  $0506 TCALL 0 operand $0 length 1 flow call base 8 {\n"), std::string::npos) << text;
   EXPECT_NE(text.find("  $0507 BNE rel operand $500 length 2 flow branch target $0500 base 2 {\n"
-                      "    Set PC <- $509 [16];\n    Set PC <- $500 [16] if clear P.Z;\n    Cycles $2 [8] if clear P.Z;\n  }\n"),
+                      "    Fetch $2 [8];\n    Set PC <- $509 [16];\n    Set PC <- $500 [16] if clear P.Z;\n"
+                      "    Cycles $2 [8] if clear P.Z;\n    Idle $2 [8] if clear P.Z;\n  }\n"),
             std::string::npos)
       << text;
   EXPECT_NE(text.find("  $0509 RET operand $0 length 1 flow return base 5 {\n"), std::string::npos) << text;

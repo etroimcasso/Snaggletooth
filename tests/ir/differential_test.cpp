@@ -8,7 +8,8 @@
 // with the node, the effect and the two values. The sound program is replayed
 // beside the same run: the cases pin what a clean replay of an uploaded program
 // reports, that a break in one of its effects is named with the audio site,
-// and what an audio address with no node, or with a node of other bytes, does.
+// that a node placing fewer cycles than it costs is named, and what an audio
+// address with no node, or with a node of other bytes, does.
 
 #include <algorithm>
 #include <cstdint>
@@ -316,6 +317,35 @@ TEST(Differential, ADroppedSoundCycleIsACycleDivergence) {
   EXPECT_EQ(d.what, "cycles");
   EXPECT_EQ(d.expected, 5u);
   EXPECT_EQ(d.actual, 4u);
+  // The node places all five cycles the chip spends, one more than the four it costs.
+  ASSERT_EQ(report.divergences.size(), 2u);
+  const Divergence& placed = report.divergences[1];
+  EXPECT_EQ(placed.site, 0x0202u);
+  EXPECT_EQ(placed.what, "cycles placed");
+  EXPECT_EQ(placed.expected, 4u);
+  EXPECT_EQ(placed.actual, 5u);
+}
+
+TEST(Differential, ASoundNodeThatPlacesTooFewCyclesIsACyclesPlacedDivergence) {
+  const std::vector<std::uint8_t> rom = uploadingImage();
+  Program program = programOf(rom, 0, true);
+  const auto stop = std::find_if(program.spc700.begin(), program.spc700.end(),
+                                 [](const Node& n) { return n.instruction.mnemonic == "STOP"; });
+  ASSERT_NE(stop, program.spc700.end());
+  const auto idle = std::find_if(stop->effects.begin(), stop->effects.end(),
+                                 [](const Effect& e) { return e.op == Op::Idle; });
+  ASSERT_NE(idle, stop->effects.end()) << "STOP spends a cycle inside the chip after each read";
+  stop->effects.erase(idle);
+  const DifferentialReport report = replay(rom, program);
+  ASSERT_FALSE(report.divergences.empty());
+  const Divergence& d = report.divergences.front();
+  EXPECT_EQ(d.processor, Processor::Spc700);
+  EXPECT_EQ(d.site, stop->instruction.address);
+  EXPECT_EQ(d.name, "STOP");
+  EXPECT_FALSE(d.effect.has_value());
+  EXPECT_EQ(d.what, "cycles placed");
+  EXPECT_EQ(d.expected, 7u) << "the cycles STOP costs";
+  EXPECT_EQ(d.actual, 6u) << "one idle dropped";
   EXPECT_EQ(report.divergences.size(), 1u);
 }
 
@@ -522,6 +552,49 @@ TEST(Differential, AWrongAccessKindIsNamed) {
   EXPECT_EQ(d.site, 0x00800Du);
   EXPECT_EQ(d.what, "read kind");
   EXPECT_EQ(d.expected, static_cast<std::uint32_t>(CycleKind::RmwRead));
+}
+
+// The whole reason for placing cycles: a cycle moved across an access shows on
+// the order while the count stays right.
+TEST(Differential, AnIdleMovedAcrossAnAccessReportsCycleOrderNotCycles) {
+  const std::vector<std::uint8_t> rom = mixedImage();
+  Program program = programOf(rom);
+  Node* inc = nodeAt(program, 0x00800Du);  // a 16-bit read-modify-write, its middle cycle an idle
+  ASSERT_NE(inc, nullptr);
+  const auto it = std::find_if(inc->effects.begin(), inc->effects.end(),
+                               [](const Effect& e) { return e.op == Op::Idle; });
+  ASSERT_NE(it, inc->effects.end());
+  const Effect idle = *it;
+  inc->effects.erase(it);
+  inc->effects.push_back(idle);  // after the write-back the machine spent it before
+  const DifferentialReport report = replay(rom, program);
+  bool order = false;
+  bool cycles = false;
+  for (const Divergence& d : report.divergences) {
+    if (d.site != 0x00800Du) continue;
+    if (d.what == "cycle order") order = true;
+    if (d.what == "cycles") cycles = true;
+  }
+  EXPECT_TRUE(order);
+  EXPECT_FALSE(cycles);
+}
+
+// A cycle dropped leaves fewer placed than the node cost.
+TEST(Differential, AnIdleDroppedReportsCyclesPlaced) {
+  const std::vector<std::uint8_t> rom = mixedImage();
+  Program program = programOf(rom);
+  Node* inc = nodeAt(program, 0x00800Du);
+  ASSERT_NE(inc, nullptr);
+  const auto it = std::find_if(inc->effects.begin(), inc->effects.end(),
+                               [](const Effect& e) { return e.op == Op::Idle; });
+  ASSERT_NE(it, inc->effects.end());
+  inc->effects.erase(it);
+  const DifferentialReport report = replay(rom, program);
+  bool placed = false;
+  for (const Divergence& d : report.divergences) {
+    if (d.site == 0x00800Du && d.what == "cycles placed") placed = true;
+  }
+  EXPECT_TRUE(placed);
 }
 
 TEST(Differential, ABreakInTheInterruptSequenceIsNamedAsTheSequence) {

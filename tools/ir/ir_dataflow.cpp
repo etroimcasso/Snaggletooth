@@ -464,7 +464,7 @@ struct Abstract {
   }
 
   void apply(const Effect& e, std::size_t index) {
-    if (e.op == Op::Cycles || !holds(e.when)) return;
+    if (e.op == Op::Cycles || e.op == Op::Fetch || e.op == Op::Idle || !holds(e.when)) return;
     const std::optional<unsigned> width = bits(e.width);
 
     switch (e.op) {
@@ -675,6 +675,8 @@ struct Abstract {
         break;
       case Op::Halt:
       case Op::Cycles:
+      case Op::Fetch:
+      case Op::Idle:
         break;
       case Op::Shl:
       case Op::PageAddress:
