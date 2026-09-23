@@ -57,9 +57,12 @@ Apu::Apu(Apu&& moved, ApuState* storage) noexcept
       iplImage_(std::move(moved.iplImage_)),
       observer_(moved.observer_),
       boundaryState_(moved.boundaryState_),
-      sinceBoundary_(moved.sinceBoundary_) {
+      sinceBoundary_(moved.sinceBoundary_),
+      accessWatcher_(moved.accessWatcher_),
+      armed_(std::move(moved.armed_)) {
   moved.state_ = nullptr;
   moved.observer_ = nullptr;
+  moved.accessWatcher_ = nullptr;
 }
 
 void Apu::restore(ApuState state) {
@@ -251,23 +254,82 @@ void Apu::reset() {
 }
 
 std::uint8_t Apu::busRead(std::uint16_t address) {
-  if (address >= 0x00F0u && address <= 0x00FFu)
-    return readRegister(static_cast<std::uint8_t>(address));
-  // The boot-ROM window: with an image mapped and CONTROL bit 7 set, an SPC700 read
-  // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
-  // (busWrite always hits RAM), so a driver can scratch the window and still read the
-  // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
-  if (iplImage_ && address >= kIplWindowBase && (state_->control & kControlIplRom) != 0u)
-    return (*iplImage_)[address - kIplWindowBase];
-  return state_->ram[address];
+  std::uint8_t value;
+  if (address >= 0x00F0u && address <= 0x00FFu) {
+    value = readRegister(static_cast<std::uint8_t>(address));
+  } else if (iplImage_ && address >= kIplWindowBase && (state_->control & kControlIplRom) != 0u) {
+    // The boot-ROM window: with an image mapped and CONTROL bit 7 set, an SPC700 read
+    // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
+    // (busWrite always hits RAM), so a driver can scratch the window and still read the
+    // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
+    value = (*iplImage_)[address - kIplWindowBase];
+  } else {
+    value = state_->ram[address];
+  }
+  return watchRead(address, value);
 }
 
 void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
+  const std::optional<std::uint8_t> stored = watchWrite(address, value);
+  if (!stored.has_value()) return;  // a vetoed write stores nothing
+  const std::uint8_t v = *stored;
   if (address >= 0x00F0u && address <= 0x00FFu) {
-    writeRegister(static_cast<std::uint8_t>(address), value);
+    writeRegister(static_cast<std::uint8_t>(address), v);
     return;
   }
-  state_->ram[address] = value;
+  state_->ram[address] = v;
+}
+
+std::uint8_t Apu::watchRead(std::uint16_t address, std::uint8_t value) {
+  // The table pointer is the "is anything armed" test: null means nothing is
+  // watched, whether or not a sink is set, and the access pays this one test.
+  if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
+  if ((armed_->read[address >> 3] & (1u << (address & 7u))) == 0u) return value;
+  return accessWatcher_->read(address, value).applyToRead(value);
+}
+
+std::optional<std::uint8_t> Apu::watchWrite(std::uint16_t address, std::uint8_t value) {
+  if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
+  if ((armed_->write[address >> 3] & (1u << (address & 7u))) == 0u) return value;
+  const AccessAnswer answer = accessWatcher_->write(address, value);
+  if (!answer.storesWrite()) return std::nullopt;  // veto
+  return answer.applyToWrite(value);
+}
+
+void Apu::setArmed(std::uint16_t address, bool onRead, bool onWrite, bool arm) {
+  const std::uint16_t byteIndex = static_cast<std::uint16_t>(address >> 3);
+  const std::uint8_t mask = static_cast<std::uint8_t>(1u << (address & 7u));
+  const auto touch = [&](std::array<std::uint8_t, 8192>& bits) {
+    if (arm) {
+      if ((bits[byteIndex] & mask) == 0u) {  // idempotent: count only a newly-set bit
+        bits[byteIndex] |= mask;
+        ++armed_->armed;
+      }
+    } else if ((bits[byteIndex] & mask) != 0u) {
+      bits[byteIndex] &= static_cast<std::uint8_t>(~mask);
+      --armed_->armed;
+    }
+  };
+  if (onRead) touch(armed_->read);
+  if (onWrite) touch(armed_->write);
+}
+
+void Apu::watchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite) {
+  if (bytes == 0 || (!onRead && !onWrite)) return;
+  if (!armed_) armed_ = std::make_unique<AccessArmedSet>();
+  for (std::size_t i = 0; i < bytes; ++i) {
+    setArmed(static_cast<std::uint16_t>((static_cast<std::size_t>(address) + i) & 0xFFFFu),
+             onRead, onWrite, true);
+  }
+}
+
+void Apu::unwatchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite) {
+  if (!armed_ || bytes == 0 || (!onRead && !onWrite)) return;
+  for (std::size_t i = 0; i < bytes; ++i) {
+    setArmed(static_cast<std::uint16_t>((static_cast<std::size_t>(address) + i) & 0xFFFFu),
+             onRead, onWrite, false);
+  }
+  if (armed_->armed == 0u) armed_.reset();  // the last place disarmed: back to one null pointer
 }
 
 std::uint8_t Apu::readRegister(std::uint8_t reg) {

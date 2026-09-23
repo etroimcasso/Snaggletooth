@@ -35,6 +35,7 @@ boot-ROM window*).
   - [The CPU register file](#the-cpu-register-file)
 - [Audio output](#audio-output)
 - [The observer](#the-observer)
+- [Answering an access](#answering-an-access)
 - [Gotchas](#gotchas)
 - [Where to look](#where-to-look)
 
@@ -433,6 +434,39 @@ own steps, since the audio machine runs inside the CPU's cycles.
 The [intermediate representation](ir.md#running-beside-the-machine) is its first consumer: the sound
 program replayed instruction by instruction with an interpreter beside the core, held to every
 access, every register and every cycle the observer reports.
+
+## Answering an access
+
+Beside the observer, which reports every settled access and cannot change it, a host answers accesses
+before they take effect. It sets an `AccessWatcher` and arms the places it cares about; each access to
+an armed place asks the watcher what happens. The sound CPU is the only thing on this bus, so the
+watcher is told a 16-bit address and no source; the DSP's own sample and echo fetches are not the CPU's
+and are not watched, the same reads the observer leaves out.
+
+```cpp
+struct Guard final : Apu::AccessWatcher {
+  Apu::AccessAnswer read(std::uint16_t address, std::uint8_t value) override {
+    return Apu::AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
+  }
+  Apu::AccessAnswer write(std::uint16_t address, std::uint8_t value) override {
+    return Apu::AccessAnswer::veto();          // drop the program's writes here
+  }
+};
+
+Guard guard;
+apu.setAccessWatcher(&guard);
+apu.watchAccess(0x0250, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 bytes, both directions
+```
+
+An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
+and leaves a read as it stands, since nothing can stop the CPU receiving a byte; `instead(byte)` puts
+`byte` in the access's place — the read delivers it, the write stores it.
+
+`watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
+them. The two directions are independent, arming a place already armed does nothing, and a machine that
+has never armed a place holds no table at all. The watcher is the host's object, not part of the state:
+a snapshot does not carry it and `restore()` leaves it in place. With none set, or nothing armed, an
+access pays a single test.
 
 ## Gotchas
 

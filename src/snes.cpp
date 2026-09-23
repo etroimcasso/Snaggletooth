@@ -174,10 +174,13 @@ Snes::Snes(Snes&& moved) noexcept
       frameWidth_(moved.frameWidth_),
       saveObserver_(moved.saveObserver_),
       saveChanged_(moved.saveChanged_),
-      saveFinished_(moved.saveFinished_) {
+      saveFinished_(moved.saveFinished_),
+      accessWatcher_(moved.accessWatcher_),
+      armed_(std::move(moved.armed_)) {
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.saveObserver_ = nullptr;
+  moved.accessWatcher_ = nullptr;
 }
 
 void Snes::setFrameObserver(FrameObserver* observer) noexcept {
@@ -551,7 +554,7 @@ std::uint8_t Snes::busRead(std::uint32_t address) {
   }
   tickVideo(lastCost_);  // tick-first: the read sees the event it shares the cycle with
   videoAdvanced_ = true;
-  return routeRead(address);
+  return routeRead(address, AccessSource::Cpu);
 }
 
 void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
@@ -564,11 +567,20 @@ void Snes::busWrite(std::uint32_t address, std::uint8_t value) {
   const std::uint8_t busBefore = state_.mdr;  // the byte the bus held before this write
   tickVideo(lastCost_);  // tick-first, so a write lands after the event it shares the cycle with
   videoAdvanced_ = true;
-  routeWrite(address, value);
+  routeWrite(address, value, AccessSource::Cpu);
   redrawInidispEarly(address, busBefore);
 }
 
-std::uint8_t Snes::routeRead(std::uint32_t address) {
+std::uint8_t Snes::routeRead(std::uint32_t address, AccessSource source) {
+  return watchRead(address, routeReadRaw(address), source);
+}
+
+void Snes::routeWrite(std::uint32_t address, std::uint8_t value, AccessSource source) {
+  const std::optional<std::uint8_t> stored = watchWrite(address, value, source);
+  if (stored.has_value()) routeWriteRaw(address, *stored);  // a vetoed write stores nothing
+}
+
+std::uint8_t Snes::routeReadRaw(std::uint32_t address) {
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
 
@@ -599,7 +611,7 @@ std::uint8_t Snes::routeRead(std::uint32_t address) {
   return state_.mdr;  // an unmapped read returns the last value the data bus carried
 }
 
-void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
+void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value) {
   state_.mdr = value;  // a write drives the data bus
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
@@ -649,13 +661,81 @@ void Snes::routeWrite(std::uint32_t address, std::uint8_t value) {
   // A write to ROM or to an unmapped address changes nothing beyond the data bus.
 }
 
+std::uint8_t Snes::watchRead(std::uint32_t address, std::uint8_t value, AccessSource source) {
+  // The table pointer is the "is anything armed" test: null means nothing is
+  // watched, whether or not a sink is set, and the access pays this one test.
+  if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const AccessArmedSet::Bank* b = armed_->read[bank].get();
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  if (b == nullptr || (b->bits[offset >> 3] & (1u << (offset & 7u))) == 0u) return value;
+  return accessWatcher_->read(address, value, source).applyToRead(value);
+}
+
+std::optional<std::uint8_t> Snes::watchWrite(std::uint32_t address, std::uint8_t value,
+                                             AccessSource source) {
+  if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const AccessArmedSet::Bank* b = armed_->write[bank].get();
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  if (b == nullptr || (b->bits[offset >> 3] & (1u << (offset & 7u))) == 0u) return value;
+  const AccessAnswer answer = accessWatcher_->write(address, value, source);
+  if (!answer.storesWrite()) return std::nullopt;  // veto
+  return answer.applyToWrite(value);
+}
+
+void Snes::setArmed(std::uint8_t bank, std::uint16_t offset, bool onRead, bool onWrite, bool arm) {
+  const std::uint16_t byteIndex = static_cast<std::uint16_t>(offset >> 3);
+  const std::uint8_t mask = static_cast<std::uint8_t>(1u << (offset & 7u));
+  const auto touch = [&](std::array<std::unique_ptr<AccessArmedSet::Bank>, 256>& banks) {
+    std::unique_ptr<AccessArmedSet::Bank>& slot = banks[bank];
+    if (arm) {
+      if (!slot) slot = std::make_unique<AccessArmedSet::Bank>();
+      if ((slot->bits[byteIndex] & mask) == 0u) {  // idempotent: count only a newly-set bit
+        slot->bits[byteIndex] |= mask;
+        ++slot->armed;
+        ++armed_->armed;
+      }
+    } else if (slot && (slot->bits[byteIndex] & mask) != 0u) {
+      slot->bits[byteIndex] &= static_cast<std::uint8_t>(~mask);
+      --slot->armed;
+      --armed_->armed;
+      if (slot->armed == 0u) slot.reset();  // free the bank's 8 KB when its last bit clears
+    }
+  };
+  if (onRead) touch(armed_->read);
+  if (onWrite) touch(armed_->write);
+}
+
+void Snes::watchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite) {
+  if (bytes == 0 || (!onRead && !onWrite)) return;
+  if (!armed_) armed_ = std::make_unique<AccessArmedSet>();
+  for (std::size_t i = 0; i < bytes; ++i) {
+    const std::uint32_t a = (address + static_cast<std::uint32_t>(i)) & 0xFFFFFFu;
+    setArmed(static_cast<std::uint8_t>((a >> 16) & 0xFFu),
+             static_cast<std::uint16_t>(a & 0xFFFFu), onRead, onWrite, true);
+  }
+}
+
+void Snes::unwatchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite) {
+  if (!armed_ || bytes == 0 || (!onRead && !onWrite)) return;
+  for (std::size_t i = 0; i < bytes; ++i) {
+    const std::uint32_t a = (address + static_cast<std::uint32_t>(i)) & 0xFFFFFFu;
+    setArmed(static_cast<std::uint8_t>((a >> 16) & 0xFFu),
+             static_cast<std::uint16_t>(a & 0xFFFFu), onRead, onWrite, false);
+  }
+  if (armed_->armed == 0u) armed_.reset();  // the last place disarmed: back to one null pointer
+}
+
 std::uint8_t Snes::readWramPort(std::uint16_t offset) {
   if (offset == 0x2180) {
     const std::uint32_t at = state_.wmadd & 0x1FFFFu;
-    const std::uint8_t v = state_.wram[at];
+    std::uint8_t v = state_.wram[at];
     state_.wmadd = (at + 1u) & 0x1FFFFu;
-    // The port's own read of work RAM, at the bank-$7E address it reached; the
-    // access to $2180 that asked for it is reported by whoever made it.
+    // The port's own read of work RAM, at the bank-$7E address it reached, is an
+    // access a host can watch (source WramPort); the access to $2180 that asked
+    // for it is reported by whoever made it.
+    v = watchRead(0x7E0000u | at, v, AccessSource::WramPort);
     observe(0x7E0000u | at, v, false, CycleKind::DataRead, AccessSource::WramPort);
     return latch(v);
   }
@@ -666,7 +746,12 @@ void Snes::writeWramPort(std::uint16_t offset, std::uint8_t value) {
   switch (offset) {
     case 0x2180: {
       const std::uint32_t at = state_.wmadd & 0x1FFFFu;
-      state_.wram[at] = value;
+      // The port's own write of work RAM is a watchable access (source
+      // WramPort); a vetoed write stores nothing, and the port's address steps
+      // regardless, as the hardware steps it on every $2180 access.
+      const std::optional<std::uint8_t> stored =
+          watchWrite(0x7E0000u | at, value, AccessSource::WramPort);
+      if (stored.has_value()) state_.wram[at] = *stored;
       state_.wmadd = (at + 1u) & 0x1FFFFu;
       observe(0x7E0000u | at, value, true, CycleKind::DataWrite, AccessSource::WramPort);
       break;

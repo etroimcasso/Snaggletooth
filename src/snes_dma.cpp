@@ -67,20 +67,20 @@ bool Snes::aBusIsWorkRam(std::uint32_t address) noexcept {
   return systemBank && offset <= 0x1FFFu;
 }
 
-std::uint8_t Snes::dmaReadA(std::uint32_t address) {
+std::uint8_t Snes::dmaReadA(std::uint32_t address, AccessSource source) {
   if (aBusExcluded(address)) return state_.mdr;  // an excluded region reads back as open bus
-  return routeRead(address);
+  return routeRead(address, source);
 }
 
-void Snes::dmaWriteA(std::uint32_t address, std::uint8_t value) {
+void Snes::dmaWriteA(std::uint32_t address, std::uint8_t value, AccessSource source) {
   state_.mdr = value;                 // the write drives the data bus either way
   if (aBusExcluded(address)) return;  // but lands nowhere in an excluded region
-  routeWrite(address, value);
+  routeWrite(address, value, source);
 }
 
 std::uint8_t Snes::engineRead(std::uint32_t address, bool aBus, AccessSource source,
                               std::uint8_t channel, bool table, bool pastTableEnd) {
-  const std::uint8_t value = aBus ? dmaReadA(address) : routeRead(address);
+  const std::uint8_t value = aBus ? dmaReadA(address, source) : routeRead(address, source);
   observe(address, value, false, CycleKind::DataRead, source, channel, table, pastTableEnd);
   return value;
 }
@@ -88,9 +88,9 @@ std::uint8_t Snes::engineRead(std::uint32_t address, bool aBus, AccessSource sou
 void Snes::engineWrite(std::uint32_t address, std::uint8_t value, bool aBus,
                        AccessSource source, std::uint8_t channel) {
   if (aBus) {
-    dmaWriteA(address, value);
+    dmaWriteA(address, value, source);
   } else {
-    routeWrite(address, value);
+    routeWrite(address, value, source);
   }
   observe(address, value, true, CycleKind::DataWrite, source, channel);
 }

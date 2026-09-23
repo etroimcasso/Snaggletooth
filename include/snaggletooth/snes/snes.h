@@ -36,6 +36,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -615,6 +616,72 @@ class Snes {
   // buffer is the drain that allocates a fresh vector.
   [[nodiscard]] std::size_t takeFrames(std::span<StereoFrame> into) noexcept;
 
+  // What a host answers a watched access with (AccessWatcher, below). A read
+  // cannot be prevented — nothing stops the chip receiving a byte — so a vetoed
+  // read delivers the byte the access would have answered; only a substitute
+  // changes what a read delivers. A vetoed write stores nothing.
+  class AccessAnswer {
+   public:
+    // The access happens as it would: a read delivers its own byte, a write
+    // stores the value the source drove.
+    [[nodiscard]] static AccessAnswer proceed() noexcept { return {Kind::Proceed, 0}; }
+    // A write stores nothing; a read still delivers its own byte.
+    [[nodiscard]] static AccessAnswer veto() noexcept { return {Kind::Veto, 0}; }
+    // `byte` takes the access's place: a read delivers it, a write stores it.
+    [[nodiscard]] static AccessAnswer instead(std::uint8_t byte) noexcept {
+      return {Kind::Instead, byte};
+    }
+
+    // The byte a read delivers, given the byte the access would have answered.
+    [[nodiscard]] std::uint8_t applyToRead(std::uint8_t answered) const noexcept {
+      return kind_ == Kind::Instead ? byte_ : answered;
+    }
+    // Whether a write stores at all — false only for a veto.
+    [[nodiscard]] bool storesWrite() const noexcept { return kind_ != Kind::Veto; }
+    // The byte a stored write lands, given the value the source drove.
+    [[nodiscard]] std::uint8_t applyToWrite(std::uint8_t driven) const noexcept {
+      return kind_ == Kind::Instead ? byte_ : driven;
+    }
+
+   private:
+    enum class Kind : std::uint8_t { Proceed, Veto, Instead };
+    constexpr AccessAnswer(Kind kind, std::uint8_t byte) noexcept : kind_(kind), byte_(byte) {}
+    Kind kind_;
+    std::uint8_t byte_;
+  };
+
+  // A host told, before a watched access takes effect, that the program is
+  // reading or writing a place it armed (watchAccess), and answering what
+  // happens. It is a mechanism beside BusObserver, which still reports every
+  // settled access after the fact and cannot answer. Set by pointer like the
+  // observers: the host's object outlives every step it is set for, and it is
+  // not part of the state, so a snapshot does not carry it and restore() leaves
+  // it in place.
+  class AccessWatcher {
+   public:
+    virtual ~AccessWatcher() = default;
+    // The program is about to read `address`, where the machine would answer
+    // `value`; `source` is which part of the machine made the access.
+    virtual AccessAnswer read(std::uint32_t address, std::uint8_t value, AccessSource source) = 0;
+    // The program is about to write `value` to `address`.
+    virtual AccessAnswer write(std::uint32_t address, std::uint8_t value, AccessSource source) = 0;
+  };
+
+  // The watcher told every armed access, or none, which is how the machine
+  // starts. With none set, or nothing armed, an access pays one test.
+  void setAccessWatcher(AccessWatcher* watcher) noexcept { accessWatcher_ = watcher; }
+  [[nodiscard]] AccessWatcher* accessWatcher() const noexcept { return accessWatcher_; }
+
+  // Arms or disarms a watch on `bytes` bytes from `address`, for reads, writes,
+  // or both. Arming a place already armed does nothing and disarming one not
+  // armed does nothing; the two directions are independent, so a host that wants
+  // writes does not make the machine pay for reads. A machine that has never
+  // armed a place holds no table at all, and disarming the last place frees it
+  // again. A watch sees every access to the place — the CPU's, either transfer
+  // engine's, and the work-RAM port's — and tells the watcher which made it.
+  void watchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite);
+  void unwatchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite);
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
@@ -789,8 +856,28 @@ class Snes {
   // register's read or write side effect), and nothing about the cycle's cost or
   // its tick. busRead/busWrite price and tick a CPU access and then route through
   // these; the DMA engine routes two accesses through them under one priced cycle.
-  std::uint8_t routeRead(std::uint32_t address);
-  void routeWrite(std::uint32_t address, std::uint8_t value);
+  // The access watch is applied here, told `source`, so the one site covers the
+  // CPU's and both engines' accesses (the work-RAM port's own access is watched
+  // at readWramPort/writeWramPort, which reach work RAM without passing here).
+  std::uint8_t routeRead(std::uint32_t address, AccessSource source);
+  void routeWrite(std::uint32_t address, std::uint8_t value, AccessSource source);
+  // The mapped bus itself, without the watch: which byte an address answers and
+  // where a write lands. routeRead/routeWrite wrap these with the watch.
+  std::uint8_t routeReadRaw(std::uint32_t address);
+  void routeWriteRaw(std::uint32_t address, std::uint8_t value);
+
+  // Applies the access watch to one access, when the watcher is set and the
+  // place is armed. watchRead answers the byte to deliver; watchWrite answers
+  // the byte to store, or nothing when a write is vetoed. With nothing armed each
+  // is a single test of the table pointer.
+  [[nodiscard]] std::uint8_t watchRead(std::uint32_t address, std::uint8_t value,
+                                       AccessSource source);
+  [[nodiscard]] std::optional<std::uint8_t> watchWrite(std::uint32_t address, std::uint8_t value,
+                                                       AccessSource source);
+  // Sets or clears the armed bit for `offset` in `bank`, in either direction,
+  // allocating a bank's bitmap on its first arm and freeing it when its last bit
+  // clears.
+  void setArmed(std::uint8_t bank, std::uint16_t offset, bool onRead, bool onWrite, bool arm);
 
   // The general-purpose DMA engine ($420B): trigger, and one machine cycle of a
   // running transfer (an overhead cycle or a single byte, priced at eight master
@@ -798,9 +885,10 @@ class Snes {
   void triggerDma(std::uint8_t channels);
   void dmaCycle();
   // The A-bus side of a DMA byte: a read of a memory-mapped region returns open
-  // bus and a write to one is inert, the way the console forbids DMA there.
-  std::uint8_t dmaReadA(std::uint32_t address);
-  void dmaWriteA(std::uint32_t address, std::uint8_t value);
+  // bus and a write to one is inert, the way the console forbids DMA there. A
+  // reachable address routes through routeRead/routeWrite, carrying `source`.
+  std::uint8_t dmaReadA(std::uint32_t address, AccessSource source);
+  void dmaWriteA(std::uint32_t address, std::uint8_t value, AccessSource source);
   [[nodiscard]] static bool aBusExcluded(std::uint32_t address) noexcept;
   // Whether an A-bus address is work RAM: banks $7E-$7F, or the first $2000 of a
   // system bank.
@@ -953,6 +1041,24 @@ class Snes {
   // the console, so a snapshot does not carry it.
   bool saveChanged_ = false;
   bool saveFinished_ = false;  // a frame that changed the window ended this cycle
+  // The addresses a host has armed for a watch, one bit per address per
+  // direction, behind one owning pointer held null until the first arm — which
+  // is also the access path's "is anything armed" test. Each direction is 256
+  // bank slots; a bank's 64 KB of bits (8 KB) is allocated only when it has an
+  // armed address and freed when its last one is disarmed, so an unused machine
+  // carries one null pointer and allocates nothing. A lookup is one load of the
+  // bank slot, a null test and one bit test.
+  struct AccessArmedSet {
+    struct Bank {
+      std::array<std::uint8_t, 8192> bits{};  // one bit per 16-bit offset in this bank
+      std::uint32_t armed = 0;                 // bits set here, to free the bank at zero
+    };
+    std::array<std::unique_ptr<Bank>, 256> read;   // by bank byte
+    std::array<std::unique_ptr<Bank>, 256> write;
+    std::size_t armed = 0;  // set (address, direction) bits, to free the set at zero
+  };
+  AccessWatcher* accessWatcher_ = nullptr;  // told every armed access; none by default
+  std::unique_ptr<AccessArmedSet> armed_;   // the armed table; null until the first arm
 };
 
 }  // namespace snaggletooth

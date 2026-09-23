@@ -283,6 +283,69 @@ class Apu {
   [[nodiscard]] const Spc700State& cpuState() const noexcept { return state_->cpu; }
   void setCpuState(const Spc700State& state);
 
+  // What a host answers a watched access with (AccessWatcher, below). A read
+  // cannot be prevented — nothing stops the CPU receiving a byte — so a vetoed
+  // read delivers the byte the access would have answered; only a substitute
+  // changes it. A vetoed write stores nothing.
+  class AccessAnswer {
+   public:
+    // The access happens as it would: a read delivers its own byte, a write
+    // stores the value the CPU drove.
+    [[nodiscard]] static AccessAnswer proceed() noexcept { return {Kind::Proceed, 0}; }
+    // A write stores nothing; a read still delivers its own byte.
+    [[nodiscard]] static AccessAnswer veto() noexcept { return {Kind::Veto, 0}; }
+    // `byte` takes the access's place: a read delivers it, a write stores it.
+    [[nodiscard]] static AccessAnswer instead(std::uint8_t byte) noexcept {
+      return {Kind::Instead, byte};
+    }
+
+    // The byte a read delivers, given the byte the access would have answered.
+    [[nodiscard]] std::uint8_t applyToRead(std::uint8_t answered) const noexcept {
+      return kind_ == Kind::Instead ? byte_ : answered;
+    }
+    // Whether a write stores at all — false only for a veto.
+    [[nodiscard]] bool storesWrite() const noexcept { return kind_ != Kind::Veto; }
+    // The byte a stored write lands, given the value the CPU drove.
+    [[nodiscard]] std::uint8_t applyToWrite(std::uint8_t driven) const noexcept {
+      return kind_ == Kind::Instead ? byte_ : driven;
+    }
+
+   private:
+    enum class Kind : std::uint8_t { Proceed, Veto, Instead };
+    constexpr AccessAnswer(Kind kind, std::uint8_t byte) noexcept : kind_(kind), byte_(byte) {}
+    Kind kind_;
+    std::uint8_t byte_;
+  };
+
+  // A host told, before a watched access takes effect, that the sound CPU is
+  // reading or writing a place it armed (watchAccess), and answering what
+  // happens. The sound CPU is the only thing on this bus, so the watcher is told
+  // a 16-bit address and no source; the DSP's own sample and echo fetches are
+  // not the CPU's and are not watched, the same reads ApuObserver leaves out.
+  // A mechanism beside ApuObserver, which still reports every settled access and
+  // cannot answer. Set by pointer: the host's object, not part of the state, so
+  // a snapshot does not carry it and restore() leaves it in place.
+  class AccessWatcher {
+   public:
+    virtual ~AccessWatcher() = default;
+    // The CPU is about to read `address`, where the machine would answer `value`.
+    virtual AccessAnswer read(std::uint16_t address, std::uint8_t value) = 0;
+    // The CPU is about to write `value` to `address`.
+    virtual AccessAnswer write(std::uint16_t address, std::uint8_t value) = 0;
+  };
+
+  // The watcher told every armed access, or none, which is how the machine
+  // starts. With none set, or nothing armed, an access pays one test.
+  void setAccessWatcher(AccessWatcher* watcher) noexcept { accessWatcher_ = watcher; }
+  [[nodiscard]] AccessWatcher* accessWatcher() const noexcept { return accessWatcher_; }
+
+  // Arms or disarms a watch on `bytes` bytes from `address`, for reads, writes,
+  // or both. Arming a place already armed does nothing and disarming one not
+  // armed does nothing; the directions are independent. A machine that has never
+  // armed a place holds no table, and disarming the last place frees it again.
+  void watchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite);
+  void unwatchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite);
+
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
   // is RAM. Both the CPU and its dummy reads pass through here, and every call
@@ -317,6 +380,15 @@ class Apu {
   std::uint8_t readRegister(std::uint8_t reg);
   void writeRegister(std::uint8_t reg, std::uint8_t value);
 
+  // Applies the access watch to one CPU access, when the watcher is set and the
+  // place is armed. watchRead answers the byte to deliver; watchWrite answers
+  // the byte to store, or nothing when a write is vetoed. With nothing armed each
+  // is a single test of the table pointer.
+  [[nodiscard]] std::uint8_t watchRead(std::uint16_t address, std::uint8_t value);
+  [[nodiscard]] std::optional<std::uint8_t> watchWrite(std::uint16_t address, std::uint8_t value);
+  // Sets or clears the armed bit for `address`, in either direction.
+  void setArmed(std::uint16_t address, bool onRead, bool onWrite, bool arm);
+
   // One machine cycle. The master counter advances, the timer ticks and the DSP
   // sample boundary that land on the new count are taken, and then the CPU makes
   // its one bus access — the order the chips share their multiplexed bus in, and
@@ -344,6 +416,19 @@ class Apu {
   ApuObserver* observer_ = nullptr;  // told every access and every boundary; none by default
   Spc700State boundaryState_{};      // the CPU at the last boundary reported, the `before` of the next
   std::uint32_t sinceBoundary_ = 0;  // cycles run since it
+  // The addresses a host has armed for a watch, one bit per 16-bit address per
+  // direction, behind one owning pointer held null until the first arm. The
+  // sound CPU's space is 64 KB, so each direction is a single 8 KB bitmap; the
+  // structure is freed and the pointer restored to null when the last place is
+  // disarmed, so an unused machine carries one null pointer and allocates
+  // nothing. A lookup is one null test and one bit test.
+  struct AccessArmedSet {
+    std::array<std::uint8_t, 8192> read{};   // one bit per 16-bit address
+    std::array<std::uint8_t, 8192> write{};
+    std::size_t armed = 0;  // set (address, direction) bits, to free the set at zero
+  };
+  AccessWatcher* accessWatcher_ = nullptr;  // told every armed access; none by default
+  std::unique_ptr<AccessArmedSet> armed_;   // the armed table; null until the first arm
 };
 
 }  // namespace snaggletooth

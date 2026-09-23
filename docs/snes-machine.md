@@ -891,6 +891,40 @@ std::array<StereoFrame, 512> buffer;
 std::size_t written = machine.takeFrames(buffer);
 ```
 
+## Answering an access
+
+Beside the observer, which reports every settled access and cannot change it, a host answers accesses
+before they take effect. It sets an `AccessWatcher` and arms the places it cares about; each access to
+an armed place asks the watcher what happens — let it through, prevent it, or stand a byte in its place.
+
+```cpp
+struct Guard final : Snes::AccessWatcher {
+  Snes::AccessAnswer read(std::uint32_t address, std::uint8_t value, AccessSource source) override {
+    return Snes::AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
+  }
+  Snes::AccessAnswer write(std::uint32_t address, std::uint8_t value, AccessSource source) override {
+    return Snes::AccessAnswer::veto();          // drop the program's writes here
+  }
+};
+
+Guard guard;
+machine.setAccessWatcher(&guard);
+machine.watchAccess(0x7E0100, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 bytes, both directions
+```
+
+An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
+and leaves a read as it stands, since nothing can stop the chip receiving a byte; `instead(byte)` puts
+`byte` in the access's place — the read delivers it, the write stores it.
+
+`watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
+them. The two directions are independent, arming a place already armed does nothing, and a machine that
+has never armed a place holds no table at all — so a watch nobody arms costs nothing. A watch sees every
+access to an armed place — the CPU's, either transfer engine's, and the work-RAM port's — and `source`
+tells the watcher which made it.
+
+The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
+leaves it in place. With none set, or nothing armed, an access pays a single test.
+
 ## Gotchas
 
 - The reset vector is read from the cartridge at construction. An image with a zero vector starts the
@@ -918,6 +952,11 @@ std::size_t written = machine.takeFrames(buffer);
 - An observer sees fetches too: to count only the data an instruction touched, drop `OpcodeFetch` and
   `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle
   the CPU spent, count its accesses and the internal cycles together.
+- An opcode fetch is a read like any other: arming a code address for reads has the watcher answer the
+  CPU's fetches of it, so `instead(byte)` there feeds the core a different opcode.
+- The access watch and the bus observer are separate mechanisms. A read the watch substitutes is what
+  the observer reports, because the machine answered that byte; a write the watch vetoes or substitutes
+  the observer still reports as the source drove it — the watch changed the effect, not the drive.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.
