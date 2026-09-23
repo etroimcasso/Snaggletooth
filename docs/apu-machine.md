@@ -438,18 +438,18 @@ access, every register and every cycle the observer reports.
 ## Answering an access
 
 Beside the observer, which reports every settled access and cannot change it, a host answers accesses
-before they take effect. It sets an `AccessWatcher` and arms the places it cares about; each access to
-an armed place asks the watcher what happens. The sound CPU is the only thing on this bus, so the
+before they take effect. It sets an `ApuAccessWatcher` and arms the places it cares about; each access
+to an armed place asks the watcher what happens. The sound CPU is the only thing on this bus, so the
 watcher is told a 16-bit address and no source; the DSP's own sample and echo fetches are not the CPU's
 and are not watched, the same reads the observer leaves out.
 
 ```cpp
-struct Guard final : Apu::AccessWatcher {
-  Apu::AccessAnswer read(std::uint16_t address, std::uint8_t value) override {
-    return Apu::AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
+struct Guard final : ApuAccessWatcher {
+  AccessAnswer read(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) override {
+    return AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
   }
-  Apu::AccessAnswer write(std::uint16_t address, std::uint8_t value) override {
-    return Apu::AccessAnswer::veto();          // drop the program's writes here
+  AccessAnswer write(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) override {
+    return AccessAnswer::veto();          // drop the program's writes here
   }
 };
 
@@ -460,13 +460,29 @@ apu.watchAccess(0x0250, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 bytes, bo
 
 An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
 and leaves a read as it stands, since nothing can stop the CPU receiving a byte; `instead(byte)` puts
-`byte` in the access's place — the read delivers it, the write stores it.
+`byte` in the access's place — the read delivers it, the write stores it. `AccessAnswer` is one class
+for both machines; the console's watcher is `AccessWatcher`
+([snes-machine.md §Answering an access](snes-machine.md#answering-an-access)).
+
+`cycle` is which cycle of the instruction the access is, counted as the chip spends them: 0 is the
+opcode fetch, an operand fetch follows at 1, and every cycle counts whether or not it reaches the
+bus. `MOV A,!abs` reads its byte at 3; `MOV !abs,A` reads its destination at 3 and writes it at 4,
+the read being the one most store opcodes make before they write; `MOVW YA,dp` reads the low byte
+at 2 and, after a cycle inside the chip, the high byte at 4. This bus carries no kind, so an opcode
+fetch and a data read of one address are told apart by the cycle alone: a fetch is cycle 0, or the
+operand cycles that follow it at the program counter. A host answering one byte of a word access is
+answering that byte alone.
+
+A register read is told after the register's own effect. A read of a timer output (`$FD`–`$FF`) has
+already cleared it when the watcher is told; `instead` changes what the program receives, and a
+veto cannot put the count back, because a read cannot be prevented.
 
 `watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
 them. The two directions are independent, arming a place already armed does nothing, and a machine that
-has never armed a place holds no table at all. The watcher is the host's object, not part of the state:
-a snapshot does not carry it and `restore()` leaves it in place. With none set, or nothing armed, an
-access pays a single test.
+has never armed a place holds no table at all. The register overlay and the boot-ROM window sit on the
+same addresses as the RAM beneath them, so this bus has no aliases: an address is a byte. The watcher
+is the host's object, not part of the state: a snapshot does not carry it and `restore()` leaves it in
+place. With none set, or nothing armed, an access pays a single test.
 
 ## Gotchas
 
@@ -493,6 +509,12 @@ access pays a single test.
   read at each of its addresses from its program counter on, in order — the core fetches them in that
   order — and keep every other access: the byte after a one-byte instruction that the core reads
   and throws away is data, not a fetch.
+- **A watch sees fetches too, and a store's read of its destination.** The watcher is told cycle 0
+  for the opcode fetch and the operand cycles after it; most store opcodes read the byte they are
+  about to write one cycle before writing it, so arming an address for reads hears a `MOV !abs,A`
+  there as a read at cycle 3 before its write at cycle 4.
+- **A watched timer read has already cleared the output.** Arming `$FD`–`$FF` tells the watcher the
+  count the read returned; the output is 0 by then whatever the answer.
 
 ## Where to look
 

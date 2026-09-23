@@ -266,11 +266,13 @@ std::uint8_t Apu::busRead(std::uint16_t address) {
   } else {
     value = state_->ram[address];
   }
-  return watchRead(address, value);
+  // The live core's cycle index is the access's cycle: the fetch runs at 0 and
+  // each later cycle at its own index, the index moving on after the cycle.
+  return watchRead(address, value, cpu_.state().tcu);
 }
 
 void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
-  const std::optional<std::uint8_t> stored = watchWrite(address, value);
+  const std::optional<std::uint8_t> stored = watchWrite(address, value, cpu_.state().tcu);
   if (!stored.has_value()) return;  // a vetoed write stores nothing
   const std::uint8_t v = *stored;
   if (address >= 0x00F0u && address <= 0x00FFu) {
@@ -280,18 +282,19 @@ void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
   state_->ram[address] = v;
 }
 
-std::uint8_t Apu::watchRead(std::uint16_t address, std::uint8_t value) {
+std::uint8_t Apu::watchRead(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) {
   // The table pointer is the "is anything armed" test: null means nothing is
   // watched, whether or not a sink is set, and the access pays this one test.
   if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
   if ((armed_->read[address >> 3] & (1u << (address & 7u))) == 0u) return value;
-  return accessWatcher_->read(address, value).applyToRead(value);
+  return accessWatcher_->read(address, value, cycle).applyToRead(value);
 }
 
-std::optional<std::uint8_t> Apu::watchWrite(std::uint16_t address, std::uint8_t value) {
+std::optional<std::uint8_t> Apu::watchWrite(std::uint16_t address, std::uint8_t value,
+                                            std::uint8_t cycle) {
   if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
   if ((armed_->write[address >> 3] & (1u << (address & 7u))) == 0u) return value;
-  const AccessAnswer answer = accessWatcher_->write(address, value);
+  const AccessAnswer answer = accessWatcher_->write(address, value, cycle);
   if (!answer.storesWrite()) return std::nullopt;  // veto
   return answer.applyToWrite(value);
 }

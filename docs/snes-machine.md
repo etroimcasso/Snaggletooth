@@ -48,6 +48,9 @@ finishes.
   - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
   - [The CPU register file](#the-cpu-register-file)
   - [Draining audio without allocating](#draining-audio-without-allocating)
+- [Answering an access](#answering-an-access)
+  - [A watch is on the byte](#a-watch-is-on-the-byte)
+  - [What the watcher is told](#what-the-watcher-is-told)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
 - [See also](#see-also)
@@ -898,12 +901,14 @@ before they take effect. It sets an `AccessWatcher` and arms the places it cares
 an armed place asks the watcher what happens — let it through, prevent it, or stand a byte in its place.
 
 ```cpp
-struct Guard final : Snes::AccessWatcher {
-  Snes::AccessAnswer read(std::uint32_t address, std::uint8_t value, AccessSource source) override {
-    return Snes::AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
+struct Guard final : AccessWatcher {
+  AccessAnswer read(std::uint32_t address, std::uint8_t value, AccessSource source,
+                    CycleKind kind, std::uint8_t cycle) override {
+    return AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
   }
-  Snes::AccessAnswer write(std::uint32_t address, std::uint8_t value, AccessSource source) override {
-    return Snes::AccessAnswer::veto();          // drop the program's writes here
+  AccessAnswer write(std::uint32_t address, std::uint8_t value, AccessSource source,
+                     CycleKind kind, std::uint8_t cycle) override {
+    return AccessAnswer::veto();          // drop the program's writes here
   }
 };
 
@@ -914,7 +919,9 @@ machine.watchAccess(0x7E0100, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 byt
 
 An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
 and leaves a read as it stands, since nothing can stop the chip receiving a byte; `instead(byte)` puts
-`byte` in the access's place — the read delivers it, the write stores it.
+`byte` in the access's place — the read delivers it, the write stores it. `AccessAnswer` is one class
+for both machines, declared in `apu/apu.h`; the console's watcher is `AccessWatcher` and the audio
+machine's `ApuAccessWatcher` ([apu-machine.md §Answering an access](apu-machine.md#answering-an-access)).
 
 `watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
 them. The two directions are independent, arming a place already armed does nothing, and a machine that
@@ -923,7 +930,76 @@ access to an armed place — the CPU's, either transfer engine's, and the work-R
 tells the watcher which made it.
 
 The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
-leaves it in place. With none set, or nothing armed, an access pays a single test.
+leaves it in place. With none set, or nothing armed, an access pays a single test. With something
+armed, an access is classified into the byte it reaches, and only as far as the spaces holding an
+armed byte require: a host watching work RAM alone costs a fetch from the image the work-RAM and
+register-window range tests and nothing more.
+
+### A watch is on the byte
+
+A place is a byte, not a bus address. The console reaches most bytes through several addresses: the
+low 8 KB of work RAM answers at `$7E:0000`–`$1FFF` and at `$0000`–`$1FFF` of every system bank (129
+addresses for one byte), every register answers at its offset in all 128 system banks, the image
+repeats across the banks the map gives it, and a save smaller than its window repeats across the
+window. Arming any one of a byte's addresses arms the byte, so the watcher hears every access to it
+through every alias, and disarming through another alias disarms it. The watcher is told the 24-bit
+address the access drove, whichever alias that was.
+
+`physical` answers which byte an address reaches, as the machine reads it — the space and the index
+within it — and is what the watch keys on:
+
+```cpp
+Snes::Physical p = machine.physical(0x000010);   // {Space::WorkRam, 0x10}
+Snes::Physical q = machine.physical(0x7E0010);   // the same: {Space::WorkRam, 0x10}
+Snes::Physical r = machine.physical(0x808100);   // {Space::CartridgeRom, image offset}
+Snes::Physical s = machine.physical(0x802140);   // {Space::Register, 0x2140}
+```
+
+`WorkRam`'s index is the offset into the 128 KB; `Register`'s the 16-bit offset; `SaveRam`'s the
+offset into the save, reduced to its size; `CartridgeRom`'s the offset into the image after the map's
+mirroring; `OpenBus` — an address that reaches no byte — is a place of its own, keyed by the address
+itself. `physical` spends no cycle and touches no register.
+
+### What the watcher is told
+
+`source` is which part of the machine made the access: the CPU, either transfer engine, or the
+work-RAM port reaching work RAM on its own behalf through `$2180`.
+
+`kind` is what the cycle was for, as the CPU core drives it (`CycleKind`, `cpu/cpu65816.h`): an
+opcode fetch, an operand fetch, a data read or write, the read half or the write half of a
+read-modify-write, an interrupt's vector read. So a host tells a program reading a byte from the
+core fetching an instruction at the same address, and a load from the read that begins an `INC`. A
+transfer engine's and the port's accesses are plain data reads and writes.
+
+`cycle` is which cycle of the instruction the access is, counted as the chip spends them: 0 is the
+opcode fetch, and every cycle counts whether or not it reaches the bus — an internal cycle moves the
+count on. The order is the chip's own:
+
+| Access | Cycles |
+|---|---|
+| A 16-bit load (`LDA !abs`, M = 0) | low byte at 3, high byte at 4 |
+| A 16-bit push (`PHA`, M = 0) | high byte at 2, low byte at 3 |
+| A native 16-bit read-modify-write (`INC !abs`, M = 0) | reads low at 3 and high at 4, writes back high at 6 and low at 7 |
+| An emulation-mode read-modify-write (`INC !abs`) | reads at 3, writes the byte it read at 4 (`RmwModifyWrite`), then the new byte at 5 (`RmwWrite`) |
+| A hardware interrupt's vector, emulation mode | low byte at 5, high byte at 6 (one later each in native mode) |
+
+Width is not told: the chip does not know it at the bus. A host answering one byte of a two-byte
+access is answering that byte alone, and a veto on the high byte of a 16-bit store tears it — the low
+byte lands, the high byte stands as it was. A host that needs the width decodes the instruction at
+`cpuState().pc` through `peek`, or runs the [intermediate representation](ir.md) beside the machine.
+
+For a transfer engine, `cycle` is the byte's position in the channel's transfer pattern, 0 to 3, the
+read and the write of one byte carrying the same one — so the second byte of a two-register pattern
+is told as 1 on both sides. A table read carries 0 for a line count or a pointer's low byte and 1 for
+its high byte. The work-RAM port's own access carries the cycle of the access to `$2180` that drove
+it: 3 for a `LDA !$2180`.
+
+A register with a read side effect has already had it when its read is told. A read of `$4210` has
+cleared the NMI flag, a read of `$2140`–`$2143` has taken the port's byte, a read of `$4211` has
+acknowledged the timer. The answer changes only what the program receives — `instead` hands it
+another byte — and a veto cannot undo the effect, because a read cannot be prevented. A host that
+wants a program not to acknowledge an interrupt cannot do it here; `peek` refuses registers for the
+same reason.
 
 ## Gotchas
 
@@ -953,7 +1029,19 @@ leaves it in place. With none set, or nothing armed, an access pays a single tes
   `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle
   the CPU spent, count its accesses and the internal cycles together.
 - An opcode fetch is a read like any other: arming a code address for reads has the watcher answer the
-  CPU's fetches of it, so `instead(byte)` there feeds the core a different opcode.
+  CPU's fetches of it, so `instead(byte)` there feeds the core a different opcode. `kind` says which
+  accesses are fetches; a host that wants the program's reads alone answers `OpcodeFetch` and
+  `OperandFetch` with `proceed()`.
+- A watch is on the byte, not the address: arming `$7E0010` hears a `LDA $10` in bank `$00`, a
+  `LDA >$BF0010`, and the work-RAM port reading `$7E:0010` — and the watcher is told the address each
+  one drove. Arming a register at `$2140` hears it from every system bank. Counting accesses to "the
+  bank-$7E address" counts every alias.
+- The high byte of a 16-bit access is its own access, told one cycle after the low byte. A host that
+  substitutes or vetoes one of the two tears the pair; answer both, on their two cycles, to answer the
+  word.
+- A read of `$4210`, `$4211`, `$2140`–`$2143` or any other register with a read side effect is told
+  after the effect: the watcher sees the byte the register answered, `instead` changes what the program
+  receives, and neither `veto` nor anything else puts the flag back.
 - The access watch and the bus observer are separate mechanisms. A read the watch substitutes is what
   the observer reports, because the machine answered that byte; a write the watch vetoes or substitutes
   the observer still reports as the source drove it — the watch changed the effect, not the drive.
