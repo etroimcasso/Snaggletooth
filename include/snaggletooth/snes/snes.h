@@ -762,6 +762,52 @@ class Snes {
   void watchInstruction(std::uint32_t address, Standin standin = Standin::Near);
   void unwatchInstruction(std::uint32_t address);
 
+  // Runs the routine at `entry` and returns when it returns: true when it did,
+  // false when the guard tripped or the call was refused. The routine is the
+  // machine running — its cycles are real and priced by region, the beam moves,
+  // the audio machine is paced, a transfer the routine arms runs and a hardware
+  // interrupt due is taken — and they are spent from the budget the host runs,
+  // so state().master moves and the next run() runs that much less.
+  //
+  // callInContext runs the routine in the guest's own context: the registers and
+  // the stack pointer as they stand, the landing pushed where the guest's own
+  // call would push it, and the whole register file put back afterwards, so the
+  // interrupted program carries on unaware. What the routine changed in memory
+  // stands. A host that wants the routine's registers reads them live inside
+  // an instruction watch on the routine's return (Standin::None), before the
+  // file goes back.
+  //
+  // callOnStack runs it in a frame of the host's own: the register file is
+  // whatever the host wrote with setCpuState, the stack pointer starts at
+  // `stackTop`, and nothing is put back — cpuState() afterwards is the file the
+  // routine left, or where it was abandoned, for the host to read and, if it
+  // wants the guest's file back, to restore itself.
+  //
+  // `returns` names the return the routine ends with: Near pushes two bytes for
+  // a routine an RTS leaves, Long three for one an RTL leaves. The landing is
+  // the program counter as it stands, in the entry's bank for Near and the
+  // current bank for Long; nothing there is executed. The call ends at the first
+  // instruction boundary where the stack pointer is back at its value before the
+  // push and the program counter is at the landing — both, so a routine that
+  // branches through the landing without returning does not end it, and an
+  // interrupt taken inside the routine returns into it, not out of it. The
+  // landing's bytes are pushed through poke, spending no cycle.
+  //
+  // `guard` bounds a routine that never returns, in instructions the routine may
+  // run; an idle cycle of a halted core counts as one, so a wait for an
+  // interrupt that never comes trips it too. On overrun the routine is
+  // abandoned at its boundary and the call returns false. Zero runs nothing.
+  //
+  // The call is refused, returning false with nothing done, when `returns` is
+  // Standin::None, when the machine is not between instructions (inside an
+  // access watcher's call, or after a run() that stopped mid-instruction),
+  // when the entry's own bank does not map it (addressable(entry, 1)), or
+  // when the stack the landing would land on is not memory this face reaches.
+  // A call made from inside a watcher's call, at any depth, is the same call.
+  bool callInContext(std::uint32_t entry, Standin returns, std::size_t guard);
+  bool callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
+                   std::size_t guard);
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
@@ -996,6 +1042,14 @@ class Snes {
   // What stands at the byte `address` reaches: 0 for a byte not armed, else
   // 1 + the Standin.
   [[nodiscard]] std::uint8_t standinAt(std::uint32_t address) const noexcept;
+
+  // The call both forms share, from `file` — the register file the routine
+  // starts under, at a boundary, its stack pointer the stack to push on: the
+  // landing pushed, the core pointed at `entry`, and the machine run to the
+  // boundary where the routine has returned or the guard has tripped. Answers
+  // whether it returned; false with nothing done when a push would not land.
+  // The core is left where the loop ended.
+  bool runCall(std::uint32_t entry, Cpu65816State file, Standin returns, std::size_t guard);
 
   // The general-purpose DMA engine ($420B): trigger, and one machine cycle of a
   // running transfer (an overhead cycle or a single byte, priced at eight master

@@ -54,6 +54,10 @@ finishes.
 - [Standing in for a routine](#standing-in-for-a-routine)
   - [Where the watch fires](#where-the-watch-fires)
   - [Inside the call](#inside-the-call)
+- [Calling into the guest](#calling-into-the-guest)
+  - [In the guest's own context](#in-the-guests-own-context)
+  - [In a frame of the host's own](#in-a-frame-of-the-hosts-own)
+  - [The guard, and what is refused](#the-guard-and-what-is-refused)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
 - [See also](#see-also)
@@ -1083,6 +1087,96 @@ stand. A host that moves the program counter inside the call sends the CPU elsew
 queued for the watched address is not applied to the fetch there: the instruction at the new address
 runs as it stands. A host that disarms the address inside the call lets the routine run.
 
+## Calling into the guest
+
+A host runs a routine the machine already holds and gets control back when it returns. There are two
+forms, one verb each:
+
+```cpp
+// In the guest's own context: its registers and its stack, put back afterwards.
+bool returned = machine.callInContext(0x008100, Standin::Near, 10000);
+
+// In a frame of the host's own: the host's presets, a stack the host names.
+Cpu65816State presets = machine.cpuState();
+presets.a = 0x0005;
+machine.setCpuState(presets);
+bool ok = machine.callOnStack(0x008300, 0x01F0, Standin::Near, 10000);
+std::uint16_t result = machine.cpuState().a;   // what the routine left
+```
+
+Both return whether the routine returned; `false` means the guard tripped or the call was refused.
+`Standin::Near` names a routine that ends in `RTS` and `Standin::Long` one that ends in `RTL`; the
+call pushes the landing the way `JSR` or `JSL` would push theirs — two bytes within page one for a
+near return in emulation mode, three that may leave it for a long one — through `poke`, spending no
+cycle, and points the CPU at the entry. The landing is the program counter as it stands, in the entry's
+bank for a near return and the current bank for a long one, and nothing there is executed.
+
+The routine is the machine running. Its cycles are real and priced by region, the beam moves, the
+audio machine is paced, a transfer it arms runs, and a hardware interrupt due is taken inside it and is
+not pending again afterwards. `state().master` moves by what the routine spent, and those cycles come
+out of the budget the host runs next: a call between two `run()` calls shortens the second by the
+routine's cycles, and a call made inside a watcher's call during `run()` ends that `run()` that much
+sooner. A refresh pause or a transfer the routine crosses is spent as it always is.
+
+The call ends at the first instruction boundary where the stack pointer is back at its value before
+the push **and** the program counter is at the landing. Both are required: a routine that branches
+through the landing without returning does not end the call, nor does one that pops its own frame
+while still inside itself, and an interrupt taken inside the routine returns into it, not out of it.
+
+### In the guest's own context
+
+`callInContext` saves the register file, runs the routine on the guest's own stack, and puts the whole
+file back — the program counter, the stack pointer, the halt state, all of it — so the interrupted
+program carries on unaware. What the routine changed in memory stands. A host that wants the routine's
+registers reads them live inside an instruction watch on the routine's return:
+
+```cpp
+struct Result final : InstructionWatcher {
+  Snes& machine;
+  std::uint16_t a = 0;
+  explicit Result(Snes& m) : machine(m) {}
+  void reached(std::uint32_t) override { a = machine.cpuState().a; }   // at the RTS: the routine's A
+};
+
+Result result(machine);
+machine.setInstructionWatcher(&result);
+machine.watchInstruction(0x008102, Standin::None);  // the routine's RTS
+machine.callInContext(0x008100, Standin::Near, 10000);
+```
+
+A waiting or stopped core is called like any other: the routine runs, and the file put back leaves the
+core waiting or stopped as it was.
+
+### In a frame of the host's own
+
+`callOnStack` runs the routine under the register file as the host wrote it with `setCpuState`, with
+the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file
+the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at
+the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the
+machine from its own code reads what it wants there; a host that interrupted a program and wants its
+file back saves it with `cpuState()` before the call and restores it with `setCpuState` after.
+
+### The guard, and what is refused
+
+`guard` is the number of instructions the routine may run, the return among them; an idle cycle of a
+halted core counts as one, so a routine that waits for an interrupt that never comes trips it too. On
+overrun the routine is abandoned at its boundary and the call returns `false` — the file put back for
+`callInContext`, left where it stopped for `callOnStack`. A guard of zero runs nothing.
+
+A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
+touched — when:
+
+- `returns` is `Standin::None`: a call needs a return to end it.
+- The machine is not between instructions: inside an access watcher's call, or after a `run()` that
+  stopped mid-instruction. Between `step()` calls and inside an instruction watcher's call it is.
+- The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's
+  own act, and the call never does it on the guest's behalf.
+- The landing would land where the memory face does not reach — a stack pointer in the register file,
+  for instance.
+
+A call made from inside a watcher's call is the same call, at any depth: a watcher told inside one call
+may make another.
+
 ## Gotchas
 
 - The reset vector is read from the cartridge at construction. An image with a zero vector starts the
@@ -1139,6 +1233,15 @@ runs as it stands. A host that disarms the address inside the call lets the rout
   an access watch on any read but that fetch all see the cartridge's own byte.
 - `watchInstruction` with one argument arms `Standin::Near`. A host that wants to be told and nothing
   more says `Standin::None`.
+- A call's `returns` must match the routine's return instruction. `Near` for one that ends in `RTS`,
+  `Long` for one that ends in `RTL`; the wrong one leaves the stack pointer a byte off, the call never
+  ends, and the guard trips. A routine that ends in `RTI` returns through neither and is not callable.
+- A call spends the machine's time. `state().master` moves by the routine's cycles, and the next
+  `run()` runs that much less of its budget — a long routine called between two `run()` calls can leave
+  the next one with nothing to run. `step()` is unaffected: it runs its instruction regardless.
+- `callInContext` puts the register file back, so `cpuState()` after it is the guest's file, not the
+  routine's. Read a routine's registers inside an instruction watch on its return, or call with
+  `callOnStack`, which leaves them.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.

@@ -960,6 +960,107 @@ void Snes::unwatchInstruction(std::uint32_t address) {
   if (standins_->armed == 0u) standins_.reset();  // the last place disarmed: back to one null pointer
 }
 
+bool Snes::runCall(std::uint32_t entry, Cpu65816State file, Standin returns, std::size_t guard) {
+  const std::uint8_t entryBank = static_cast<std::uint8_t>((entry >> 16) & 0xFFu);
+  const std::uint16_t entryPc = static_cast<std::uint16_t>(entry & 0xFFFFu);
+  // The landing: the program counter as it stands, in the entry's bank for a
+  // near return — RTS keeps the bank — and the current bank for a long one,
+  // which RTL takes off the stack. A return pulls the address and steps past
+  // it, as JSR and JSL push the address of their own last byte.
+  const std::uint16_t landingPc = file.pc;
+  const std::uint8_t landingBank = returns == Standin::Long ? file.pbr : entryBank;
+  const std::uint16_t stackBefore = file.s;
+  const std::uint16_t back = static_cast<std::uint16_t>(landingPc - 1u);
+
+  // The push, as the call instruction's own would move the stack pointer: a
+  // near push stays inside page one in emulation mode, a long one may leave it
+  // and settles back afterwards. Every byte lands at the pointer's address in
+  // bank $00 before the pointer moves; each address is checked before any byte
+  // is written, so a refused call has written nothing.
+  std::array<std::uint8_t, 3> bytes{};
+  std::array<std::uint16_t, 3> at{};
+  std::size_t count = 0;
+  std::uint16_t s = file.s;
+  const auto push = [&](std::uint8_t value, bool leavesPage) {
+    at[count] = s;
+    bytes[count] = value;
+    ++count;
+    s = (file.e && !leavesPage) ? static_cast<std::uint16_t>(0x0100u | ((s - 1u) & 0xFFu))
+                                : static_cast<std::uint16_t>(s - 1u);
+  };
+  if (returns == Standin::Long) {
+    push(file.pbr, true);
+    push(static_cast<std::uint8_t>(back >> 8), true);
+    push(static_cast<std::uint8_t>(back), true);
+    if (file.e) s = static_cast<std::uint16_t>(0x0100u | (s & 0xFFu));
+  } else {
+    push(static_cast<std::uint8_t>(back >> 8), false);
+    push(static_cast<std::uint8_t>(back), false);
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (!addressable(at[i], 1)) return false;
+  }
+  for (std::size_t i = 0; i < count; ++i) poke(at[i], bytes[i]);
+
+  file.s = s;
+  file.pc = entryPc;
+  file.pbr = entryBank;
+  file.run = CpuRunState::Running;
+  setCpuState(file);
+
+  // The machine runs as it runs from step(): every cycle its own, the engines
+  // and the refresh taking the bus when they hold it. An instruction ends at a
+  // boundary a CPU cycle lands on — an idle cycle of a halted core lands on one
+  // too — and the guard counts those.
+  std::size_t left = guard;
+  for (;;) {
+    if (left == 0u) {
+      sync();
+      return false;
+    }
+    const bool cpuCycle =
+        state_.refreshLeft == 0u && !state_.hdmaRunPending && !state_.dmaRunning;
+    machineCycle();
+    if (!cpuCycle || !cpu_.atInstructionBoundary()) continue;
+    --left;
+    const Cpu65816State& cpu = cpu_.state();
+    if (cpu.s == stackBefore && cpu.pc == landingPc && cpu.pbr == landingBank) {
+      sync();
+      return true;
+    }
+  }
+}
+
+bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard) {
+  sync();
+  const Cpu65816State before = state_.cpu;
+  if (returns == Standin::None || before.tcu != 0u || before.servicing != InterruptRequest::None ||
+      !addressable(entry & 0xFFFFFFu, 1)) {
+    return false;
+  }
+  const bool returned = runCall(entry, before, returns, guard);
+  // The guest's file, back as it was — but the interrupt lines as they now
+  // stand: an edge the routine's run took is not taken twice, and one that
+  // arrived during it stays pending for the guest.
+  Cpu65816State after = before;
+  after.nmiPending = cpu_.state().nmiPending;
+  after.irqLine = cpu_.state().irqLine;
+  setCpuState(after);
+  return returned;
+}
+
+bool Snes::callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
+                       std::size_t guard) {
+  sync();
+  Cpu65816State file = state_.cpu;
+  if (returns == Standin::None || file.tcu != 0u || file.servicing != InterruptRequest::None ||
+      !addressable(entry & 0xFFFFFFu, 1)) {
+    return false;
+  }
+  file.s = stackTop;
+  return runCall(entry, file, returns, guard);
+}
+
 std::uint8_t Snes::readWramPort(std::uint16_t offset, std::uint8_t cycle) {
   if (offset == 0x2180) {
     const std::uint32_t at = state_.wmadd & 0x1FFFFu;

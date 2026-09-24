@@ -386,6 +386,58 @@ void Apu::unwatchInstruction(std::uint16_t address) {
   if (standins_->armed == 0u) standins_.reset();  // the last place disarmed: back to one null pointer
 }
 
+bool Apu::runCall(std::uint16_t entry, Spc700State file, std::size_t guard) {
+  // The landing: the program counter as it stands, pushed as CALL pushes it —
+  // the high byte at the pointer's address in page one, the low byte one
+  // below, the pointer wrapping inside the page — and pulled by RET as it
+  // stands, with no step past it.
+  const std::uint16_t landing = file.pc;
+  const std::uint8_t stackBefore = file.sp;
+  state_->ram[0x0100u + file.sp] = static_cast<std::uint8_t>(landing >> 8);
+  state_->ram[0x0100u + ((file.sp - 1u) & 0xFFu)] = static_cast<std::uint8_t>(landing);
+  file.sp = static_cast<std::uint8_t>(file.sp - 2u);
+  file.pc = entry;
+  file.run = RunState::Running;
+  setCpuState(file);
+
+  // The machine runs as it runs from step(): every cycle its own. An
+  // instruction ends at a boundary — an idle cycle of a halted core lands on
+  // one too — and the guard counts those.
+  std::size_t left = guard;
+  for (;;) {
+    if (left == 0u) {
+      state_->cpu = cpu_.state();
+      return false;
+    }
+    machineCycle();
+    if (!cpu_.atInstructionBoundary()) continue;
+    --left;
+    const Spc700State& cpu = cpu_.state();
+    if (cpu.sp == stackBefore && cpu.pc == landing) {
+      state_->cpu = cpu;
+      return true;
+    }
+  }
+}
+
+bool Apu::callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard) {
+  state_->cpu = cpu_.state();
+  const Spc700State before = state_->cpu;
+  if (returns == ApuStandin::None || before.tcu != 0u) return false;
+  const bool returned = runCall(entry, before, guard);
+  setCpuState(before);  // the program's file, back as it was
+  return returned;
+}
+
+bool Apu::callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
+                      std::size_t guard) {
+  state_->cpu = cpu_.state();
+  Spc700State file = state_->cpu;
+  if (returns == ApuStandin::None || file.tcu != 0u) return false;
+  file.sp = stackTop;
+  return runCall(entry, file, guard);
+}
+
 std::uint8_t Apu::readRegister(std::uint8_t reg) {
   switch (reg) {
     case 0xF2: return state_->dspAddr;                       // DSPADDR reads back the latched address

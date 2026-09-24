@@ -37,6 +37,7 @@ boot-ROM window*).
 - [The observer](#the-observer)
 - [Answering an access](#answering-an-access)
 - [Standing in for a routine](#standing-in-for-a-routine)
+- [Calling into the sound program](#calling-into-the-sound-program)
 - [Gotchas](#gotchas)
 - [Where to look](#where-to-look)
 
@@ -540,6 +541,65 @@ A host that moves the program counter inside the call sends the CPU elsewhere, a
 for the watched address is not applied to the fetch there: the instruction at the new address runs as
 it stands. A host that disarms the address inside the call lets the routine run.
 
+## Calling into the sound program
+
+A host runs a routine the machine already holds and gets control back when it returns. There are two
+forms, one verb each:
+
+```cpp
+// In the program's own context: its registers and its stack, put back afterwards.
+bool returned = apu.callInContext(0x0400, ApuStandin::Return, 10000);
+
+// In a frame of the host's own: the host's presets, a stack the host names.
+Spc700State presets = apu.cpuState();
+presets.a = 0x05;
+apu.setCpuState(presets);
+bool ok = apu.callOnStack(0x0500, 0xD0, ApuStandin::Return, 10000);
+std::uint8_t result = apu.cpuState().a;   // what the routine left
+```
+
+Both return whether the routine returned; `false` means the guard tripped or the call was refused.
+`returns` is `ApuStandin::Return`, the one return the sound CPU has: the call pushes the landing the
+way `CALL` pushes its own — the high byte at the stack pointer's page-one address, the low byte one
+below, the pointer wrapping inside the page — through the RAM, spending no cycle, and points the CPU at
+the entry. The landing is the program counter as it stands, and nothing there is executed.
+
+The routine is the machine running: its cycles are real, the timers tick and the DSP produces its
+samples through them, and `state().divider` moves by what the routine spent. `run()` afterwards runs
+its whole budget on top — the counter is the host's measure of what a call cost.
+
+The call ends at the first instruction boundary where the stack pointer is back at its value before
+the push **and** the program counter is at the landing. Both are required: a routine that jumps to the
+landing without returning does not end the call, nor does one that pops its own frame while still
+inside itself.
+
+`callInContext` saves the register file, runs the routine on the program's own stack, and puts the
+whole file back — the program counter, the stack pointer, the halt state, all of it — so the
+interrupted program carries on unaware. What the routine changed in RAM and in the registers it wrote
+stands. A host that wants the routine's registers reads them live inside an instruction watch on the
+routine's `RET`, before the file goes back, exactly as the console's guide shows for the 65816. A
+sleeping or stopped core is called like any other, and the file put back leaves it sleeping or stopped
+as it was.
+
+`callOnStack` runs the routine under the register file as the host wrote it with `setCpuState`, with
+the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file
+the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at
+the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the
+machine from its own code, a driver's main-CPU half standing in the host, reads what it wants there;
+a host that interrupted a program and wants its file back saves it with `cpuState()` before the call
+and restores it with `setCpuState` after.
+
+`guard` is the number of instructions the routine may run, the `RET` among them; an idle cycle of a
+sleeping or stopped core counts as one. On overrun the routine is abandoned at its boundary and the
+call returns `false` — the file put back for `callInContext`, left where it stopped for `callOnStack`.
+A guard of zero runs nothing.
+
+A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
+touched — when `returns` is `ApuStandin::None`, or when the machine is not between instructions:
+inside an access watcher's call, or after a `run()` that stopped mid-instruction. Between `step()`
+calls and inside an instruction watcher's call it is. Every 16-bit entry is RAM, so none is refused
+for its address. A call made from inside a watcher's call is the same call, at any depth.
+
 ## Gotchas
 
 - **The CPU's access is the last thing in its cycle.** Everything the machine clocks — the counter,
@@ -580,13 +640,20 @@ it stands. A host that disarms the address inside the call lets the routine run.
   read but that fetch all see RAM's own byte.
 - **`watchInstruction` with one argument arms `ApuStandin::Return`.** A host that wants to be told and
   nothing more says `ApuStandin::None`.
+- **A called routine must end in `RET`.** One that ends in `RETI` pops a status byte the call never
+  pushed: the stack pointer is never back, the call never ends, and the guard trips.
+- **`callInContext` puts the register file back.** `cpuState()` after it is the program's file, not the
+  routine's. Read a routine's registers inside an instruction watch on its `RET`, or call with
+  `callOnStack`, which leaves them.
+- **A call moves the counter, and `run()` does not know it.** `run(n)` after a call runs `n` cycles on
+  top of the routine's; a host pacing the machine by cycles adds what `state().divider` moved.
 
 ## Where to look
 
 - `include/snaggletooth/apu/apu.h` — the `ApuState`/`TimerState` value structs, the `Apu` class and
   the `ApuObserver`, `ApuAccessWatcher` and `ApuInstructionWatcher` interfaces.
 - `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, `reset()`,
-  `reload()`, `peek()`, the observer's boundary report and the two watches.
+  `reload()`, `peek()`, the observer's boundary report, the two watches and the two calls.
 - `tests/apu/` — the overlay, port, timer, cycle-timing and observer suites, each derived from the
   register and low-level-timing documentation.
 - [docs/spc700-cpu.md](spc700-cpu.md) — the CPU core the machine wraps.

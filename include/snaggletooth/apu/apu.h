@@ -410,6 +410,47 @@ class Apu {
   void watchInstruction(std::uint16_t address, ApuStandin standin = ApuStandin::Return);
   void unwatchInstruction(std::uint16_t address);
 
+  // Runs the routine at `entry` and returns when it returns: true when it did,
+  // false when the guard tripped or the call was refused. The routine is the
+  // machine running — its cycles are real, the timers tick and the DSP
+  // produces its samples through them — and state().divider moves by them;
+  // run() afterwards runs its whole budget on top.
+  //
+  // callInContext runs the routine in the sound program's own context: the
+  // registers and the stack pointer as they stand, the landing pushed where a
+  // CALL would push it, and the whole register file put back afterwards, so
+  // the interrupted program carries on unaware. What the routine changed in
+  // RAM and in the registers it wrote stands. A host that wants the routine's
+  // registers reads them live inside an instruction watch on the routine's RET
+  // (ApuStandin::None), before the file goes back.
+  //
+  // callOnStack runs it in a frame of the host's own: the register file is
+  // whatever the host wrote with setCpuState, the stack pointer starts at
+  // `stackTop`, and nothing is put back — cpuState() afterwards is the file the
+  // routine left, or where it was abandoned, for the host to read and, if it
+  // wants the program's file back, to restore itself.
+  //
+  // `returns` is Return, the one return the sound CPU has: the landing is the
+  // program counter as it stands, pushed as two bytes in page one, and nothing
+  // there is executed. The call ends at the first instruction boundary where
+  // the stack pointer is back at its value before the push and the program
+  // counter is at the landing — both, so a routine that branches through the
+  // landing without returning does not end it. The landing's bytes are pushed
+  // through poke, spending no cycle.
+  //
+  // `guard` bounds a routine that never returns, in instructions the routine may
+  // run; an idle cycle of a sleeping or stopped core counts as one. On overrun
+  // the routine is abandoned at its boundary and the call returns false. Zero
+  // runs nothing.
+  //
+  // The call is refused, returning false with nothing done, when `returns` is
+  // ApuStandin::None or when the machine is not between instructions (inside
+  // an access watcher's call, or after a run() that stopped mid-instruction).
+  // A call made from inside a watcher's call, at any depth, is the same call.
+  bool callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard);
+  bool callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
+                   std::size_t guard);
+
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
   // is RAM. Both the CPU and its dummy reads pass through here, and every call
@@ -461,6 +502,13 @@ class Apu {
   // live, and what stands there once the call returns is queued for the fetch
   // that follows. Called once per cycle while an instruction is armed.
   void tellInstruction();
+
+  // The call both forms share, from `file` — the register file the routine
+  // starts under, at a boundary, its stack pointer the stack to push on: the
+  // landing pushed, the core pointed at `entry`, and the machine run to the
+  // boundary where the routine has returned or the guard has tripped. Answers
+  // whether it returned. The core is left where the loop ended.
+  bool runCall(std::uint16_t entry, Spc700State file, std::size_t guard);
 
   // One machine cycle. The master counter advances, the timer ticks and the DSP
   // sample boundary that land on the new count are taken, and then the CPU makes
