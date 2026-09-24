@@ -11,7 +11,9 @@
 // from bank $00 and bank $80; an image byte from every bank the map repeats it
 // in; a save byte across its window. The classification walk holds the
 // machine's own physical() to the read path over every one of the 16,777,216
-// bus addresses on three cartridge maps. The source cases hold that the watcher
+// bus addresses on three cartridge maps, and to the cartridge functions the
+// bus's page table is built from, on images of two chips, of a size no page
+// divides, and with no save. The source cases hold that the watcher
 // is told which part of the machine made the access; the kind cases that it is
 // told what the cycle was for; the cycle cases that it is told which cycle of
 // the instruction the access is, in the order the chip spends them — pinned on
@@ -605,6 +607,72 @@ TEST(SnesAccessWatch, TwoAddressesThatReadOneByteClassifyTheSame) {
   EXPECT_EQ(apart, 0u);
 }
 
+// The table against the functions it is built from. For every address
+// physical() puts on the image, the index is the one romOffset answers — the
+// upper half's, in LoROM's save window on a cartridge with no save, where the
+// board reads what the upper half reads — and for every address it puts on the
+// save, the offset saveRamOffset answers reduced to the save's size. The walk
+// above holds the table to the read path, which reads the same table; this
+// holds it to its source at every address.
+std::optional<std::string> walkAgainstTheCartridgeFunctions(const WalkMachine& w,
+                                                            CartridgeMap map) {
+  const Snes& m = w.machine;
+  for (std::uint64_t a = 0; a < 0x1000000u; ++a) {
+    const std::uint32_t address = static_cast<std::uint32_t>(a);
+    const Snes::Physical p = m.physical(address);
+    char why[96];
+    if (p.space == Snes::Space::CartridgeRom) {
+      std::optional<std::size_t> expected = romOffset(map, address, w.image.size());
+      if (!expected.has_value() && map == CartridgeMap::LoRom &&
+          saveRamOffset(map, address).has_value()) {
+        expected = romOffset(map, address | 0x8000u, w.image.size());
+      }
+      if (!expected.has_value() || *expected != p.index) {
+        std::snprintf(why, sizeof why, "$%06X: image index %u is not romOffset's", address, p.index);
+        return std::string(why);
+      }
+    } else if (p.space == Snes::Space::SaveRam) {
+      const std::optional<std::size_t> linear = saveRamOffset(map, address);
+      if (!linear.has_value() || w.saveBytes == 0 || *linear % w.saveBytes != p.index) {
+        std::snprintf(why, sizeof why, "$%06X: save index %u is not saveRamOffset's", address, p.index);
+        return std::string(why);
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// Both walks on one machine: the read path, then the cartridge functions.
+void walkBothWays(const WalkMachine& w, CartridgeMap map) {
+  const std::optional<std::string> miss = walk(w);
+  EXPECT_FALSE(miss.has_value()) << *miss;
+  const std::optional<std::string> apart = walkAgainstTheCartridgeFunctions(w, map);
+  EXPECT_FALSE(apart.has_value()) << *apart;
+}
+
+TEST(SnesAccessWatch, TheWalkHoldsOnAThreeMegabyteImage) {
+  // A 3 MB image is a 2 MB chip and a 1 MB chip: the megabyte above it repeats
+  // the second chip, so the fold lands on every page above 3 MB of the map's
+  // layout and crosses pages as it goes.
+  walkBothWays(walkMachine(CartridgeMap::LoRom, 3u * 1024u * 1024u, 0x2000u), CartridgeMap::LoRom);
+}
+
+TEST(SnesAccessWatch, TheWalkHoldsOnAnImageThatIsNotAMultipleOfEightKilobytes) {
+  // 11 KB is chips of 8 KB, 2 KB and 1 KB: the two small chips repeat inside a
+  // page, so every image page is found through romOffset at each access.
+  walkBothWays(walkMachine(CartridgeMap::LoRom, 0x2C00u, 0x2000u), CartridgeMap::LoRom);
+  walkBothWays(walkMachine(CartridgeMap::HiRom, 0x2C00u, 0x2000u), CartridgeMap::HiRom);
+}
+
+TEST(SnesAccessWatch, TheWalkHoldsWithNoSaveAndWithASaveSmallerThanAPage) {
+  // With no save, LoROM's window reads the image its upper halves read and
+  // HiROM's reads open bus; a 2 KB save repeats four times inside each page of
+  // its window.
+  walkBothWays(walkMachine(CartridgeMap::LoRom, 0x10000u, 0u), CartridgeMap::LoRom);
+  walkBothWays(walkMachine(CartridgeMap::LoRom, 0x10000u, 0x800u), CartridgeMap::LoRom);
+  walkBothWays(walkMachine(CartridgeMap::HiRom, 0x10000u, 0u), CartridgeMap::HiRom);
+}
+
 // ---- the watcher is told what the cycle was for ------------------------------
 
 TEST(SnesAccessWatch, AnOpcodeFetchAndADataReadOfOneAddressAreToldApart) {
@@ -1028,6 +1096,24 @@ TEST(SnesAccessWatch, AWatchedRunSpendsTheSameCyclesAsAPlainRun) {
   a.run(200000u);
   b.run(200000u);
   EXPECT_GT(w.told.size(), 0u);
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
+TEST(SnesAccessWatch, APlaceAndAnInstructionArmedButNeverReachedRunByteIdenticalToNothingArmed) {
+  // One work-RAM byte and one image instruction armed, neither of which the
+  // loop reaches: the machine classifies every access through the same table
+  // as the plain machine reads its bus through, and lands on the same state and
+  // the same audio to the same budget.
+  Snes a = programMachine({kLdaImm, 0x77u, kStaAbs, 0x20u, 0x00u, kNop, kBra, 0xF8u});  // store, then loop
+  Snes b = programMachine({kLdaImm, 0x77u, kStaAbs, 0x20u, 0x00u, kNop, kBra, 0xF8u});
+  Watcher w;
+  a.setAccessWatcher(&w);
+  a.watchAccess(0x7E1F00u, 1, true, true);
+  a.watchInstruction(0x00FF00u, Standin::None);
+  a.run(200000u);
+  b.run(200000u);
+  EXPECT_EQ(w.told.size(), 0u);
   EXPECT_TRUE(a.state() == b.state());
   EXPECT_EQ(a.takeFrames(), b.takeFrames());
 }

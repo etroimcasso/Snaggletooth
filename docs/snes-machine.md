@@ -108,6 +108,15 @@ The bus maps a 24-bit address the way the console does:
 A read of an address the machine does not map returns the last value the data bus carried — the open-bus
 behavior real hardware shows. The cartridge is read-only: a write to a ROM address changes nothing.
 
+The machine reads the bus through a table of its 2048 pages, one entry per 8 KB, built once from the
+[cartridge functions](snes-cartridge.md) when the machine is constructed. Every window in the table
+above is whole pages, so an entry says which memory a page's bytes are in and where its first byte
+lands, and an access finds its byte with one load of the entry and an add. `peek`, `poke`, `physical`
+and the access watch read the same table, so every path agrees on what an address reaches. An image
+whose size is not a multiple of 8 KB carries a chip smaller than a page, whose repeat can begin inside
+one; its pages are found through `romOffset` at each access instead, so every image reads exactly. The
+save's size is not in the table, since a restore can change it, and is applied at each access.
+
 ### How a cartridge lays across the bus
 
 The three layouts differ in how much of a bank the cartridge gets and how much image the bus can
@@ -952,10 +961,12 @@ tells the watcher which made it.
 The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
 leaves it in place. With nothing armed — no place for a watch and no instruction for a
 [stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test. With something
-armed, an access is
-classified into the byte it reaches, and only as far as the spaces holding an armed byte require: with
-work RAM alone armed, a fetch from the image is settled by the bank tests and one test of the armed
-spaces, and reaches none of the cartridge's lookups.
+armed, an access pays one load more: the armed set holds, for each page of the bus and each direction,
+the run of armed bits that page reaches, or nothing, so an access to a page holding nothing armed
+costs the bus and two tests, and one to a page that does finds its bit with an add, through whichever
+alias it drove. A page the machine cannot read as one run — an image found through `romOffset`, a save
+that folds inside the page, a system page with an open-bus byte armed between its registers — is
+classified per access instead.
 
 ### A watch is on the byte
 
@@ -1062,7 +1073,8 @@ fetch, since that is the byte the machine answers.
 
 `watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
 what stands there, disarming one not armed does nothing, and a machine that has never armed an
-instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle.
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle, and
+with one armed, an instruction on a page holding no armed instruction costs one load more.
 A watched place is a byte, as an access watch's is
 ([physical](#a-watch-is-on-the-byte)): a routine in the low 8 KB of work RAM armed through `$7E:0100`
 is heard entered by a `JSR $0100` in bank `$00`, and a routine in the image armed through bank `$00`

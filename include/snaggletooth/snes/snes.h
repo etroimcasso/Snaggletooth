@@ -1001,25 +1001,82 @@ class Snes {
   void routeWrite(std::uint32_t address, std::uint8_t value, AccessSource source, CycleKind kind,
                   std::uint8_t cycle);
   // The mapped bus itself, without the watch: which byte an address answers and
-  // where a write lands. routeRead/routeWrite wrap these with the watch; `cycle`
-  // passes through to the work-RAM port for its own access's report.
+  // where a write lands, read through the page table (pages_, below).
+  // routeRead/routeWrite wrap these with the watch; `cycle` passes through to
+  // the work-RAM port for its own access's report.
   std::uint8_t routeReadRaw(std::uint32_t address, std::uint8_t cycle);
   void routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t cycle);
+
+  // What each 8 KB page of the bus reaches. The bus is 2048 pages, eight to a
+  // bank, and every window it dispatches on is whole pages — work RAM's mirror
+  // in a system bank's first page, the register pages, each map's save window,
+  // the cartridge above $8000 and whole cartridge banks — so one entry per page
+  // says which memory the page's bytes are in and where its first byte lands,
+  // and an access finds its byte with one load of the entry and an add. The
+  // table is built once from the cartridge functions (`cartridge.h`) at
+  // construction, from the map, the image's size and the board, and is fixed
+  // with them; the router, peek and poke, the classification and the watch all
+  // read it, so one map answers every path. What can change afterwards is not
+  // in it: the save's size, which a restore replaces, is read at each access,
+  // and the image's bytes, which poke writes in place.
+  enum class PageKind : std::uint8_t {
+    WorkRam,     // base is the offset into the 128 KB
+    System,      // a system bank's $2000-$5FFF: the register windows at their offsets, open bus between them
+    SaveWindow,  // base is the offset into the save before it is reduced to the save's size; with no save the page is its fallback
+    Rom,         // base is the image offset of the page's first byte, and the page is linear from it
+    RomSlow,     // the image, when its size is not a multiple of 8 KB: a chip smaller than a page can repeat inside one, so the byte is found through romOffset at each access
+    RomEmpty,    // the image, when there is none: reads zero and classifies to offset 0
+    OpenBus,     // nothing decodes the page: a read answers the data bus's last byte, a write changes nothing
+  };
+  struct Page {
+    PageKind kind;
+    PageKind fallback;           // a save window on a cartridge with no save: what the page is then (Rom, RomSlow, RomEmpty or OpenBus)
+    std::uint32_t base;          // where the page's first byte lands in its space, as kind says
+    std::uint32_t fallbackBase;  // the fallback's base, for Rom
+  };
+  static constexpr std::size_t kPageBytes = 8192u;
+  static constexpr std::size_t kPages = 2048u;
+  // Fills pages_ from the cartridge functions, one page at a time: the region of
+  // the page's first address, its save offset and its image offset, and the
+  // board rule that keeps a coprocessor's lower halves for the chip.
+  void buildPages();
+  // The image page beginning at a ROM address: linear when the image is a
+  // multiple of 8 KB, found through romOffset at each access when it is not,
+  // and empty when there is no image.
+  [[nodiscard]] Page imagePage(std::uint32_t address) const noexcept;
+
+  // The page an address reads once the save has answered: the page itself, or,
+  // in a save window on a cartridge with no save, what the board reads there.
+  // Under LoROM that is what the bank's upper half reads, so the address
+  // carried is the upper half's; under HiROM and ExHiROM it is open bus, and
+  // the address is not asked for.
+  struct Resolved {
+    PageKind kind;
+    std::uint32_t base;
+    std::uint32_t address;
+  };
+  [[nodiscard]] Resolved resolve(std::uint32_t address) const noexcept {
+    const Page& page = pages_[(address >> 13) & (kPages - 1u)];
+    if (page.kind != PageKind::SaveWindow || !state_.sram.empty()) {
+      return Resolved{page.kind, page.base, address};
+    }
+    return Resolved{page.fallback, page.fallbackBase, address | 0x8000u};
+  }
 
   // Applies the access watch to one access, when the watcher is set and the
   // byte the address reaches is armed. watchRead answers the byte to deliver;
   // watchWrite answers the byte to store, or nothing when a write is vetoed.
   // With nothing armed each is a single test of the table pointer; with
-  // something armed, the address is classified only as far as the spaces that
-  // hold an armed byte require.
+  // something armed, one load of the page's pointer in the armed set, null
+  // unless a byte the page reaches is armed, then the bit at the address's
+  // offset in the run; a page that points at kSlowRun is classified instead.
   [[nodiscard]] std::uint8_t watchRead(std::uint32_t address, std::uint8_t value,
                                        AccessSource source, CycleKind kind, std::uint8_t cycle);
   [[nodiscard]] std::optional<std::uint8_t> watchWrite(std::uint32_t address, std::uint8_t value,
                                                        AccessSource source, CycleKind kind,
                                                        std::uint8_t cycle);
-  // physical(), stopping early: the byte `address` reaches when its space is in
-  // `spaces` (one bit per Space), and nothing once the classification has
-  // passed every space the mask holds. With every bit set it is physical().
+  // physical(), answered only when the byte's space is in `spaces` (one bit per
+  // Space) and nothing otherwise. With every bit set it is physical().
   [[nodiscard]] std::optional<Physical> classify(std::uint32_t address,
                                                  std::uint8_t spaces) const noexcept;
   // The armed table's slot for the chunk holding the byte `place`, or nothing
@@ -1101,27 +1158,6 @@ class Snes {
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
-  // The address the cartridge's ROM sees for a bus address the save did not answer:
-  // the address itself, except in LoROM's save window, where a lower half is
-  // answered by its bank's upper half.
-  [[nodiscard]] std::uint32_t romView(std::uint8_t bank, std::uint16_t offset) const noexcept;
-
-  // The cartridge byte an address reaches under the machine's map, mirrored across
-  // the image; zero for an address that reaches no cartridge. Pure — it neither
-  // prices the cycle nor touches the data bus.
-  [[nodiscard]] std::uint8_t romByte(std::uint8_t bank, std::uint16_t offset) const noexcept;
-
-  // Whether an address lands on the cartridge under the machine's map, and whether
-  // it lands on save RAM. Both answer through the cartridge functions, so the
-  // machine reads an image exactly where the header says it is — except that a
-  // LoROM cartridge declaring a coprocessor keeps its cartridge banks' lower halves
-  // for the chip, which the machine does not carry, and reads open bus there.
-  // saveRamIndex answers the offset into the save, already reduced to its size,
-  // for an address that reaches it — nothing when the cartridge has no save.
-  [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
-  [[nodiscard]] std::optional<std::size_t> saveRamIndex(std::uint8_t bank,
-                                                        std::uint16_t offset) const noexcept;
-
   // The work-RAM data port: $2180 reads or writes work RAM at the port address and
   // steps it; $2181-$2183 set the address and read back as open bus. `cycle` is
   // the driving access's, which the port's own access is watched with.
@@ -1168,7 +1204,8 @@ class Snes {
     return value;
   }
 
-  // The word at $00FFFC, where the CPU starts.
+  // The word at $00FFFC, where the CPU starts, read from the cartridge as the
+  // bus reads it.
   [[nodiscard]] std::uint16_t resetVector() const noexcept;
 
   // The CPU's power-on state: emulation mode, the interrupt disable set, and the
@@ -1182,6 +1219,7 @@ class Snes {
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
   CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it
   bool plainBoard_ = true;           // the header declares no coprocessor, so LoROM's lower halves repeat the image
+  std::array<Page, kPages> pages_{}; // what each page of the bus reaches, built from the three above and fixed with them
   bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
@@ -1229,12 +1267,21 @@ class Snes {
   // chunk's 8 KB of bits is allocated only when a byte in it is armed and freed
   // when its last one is disarmed, so an unused machine carries one null pointer
   // and allocates nothing, and arming a byte allocates one chunk however many
-  // addresses reach it. A lookup is the classification, one load of the chunk
-  // slot, a null test and one bit test; the mask of spaces holding an armed byte
-  // lets the classification stop as soon as it has passed every space that
-  // could match.
+  // addresses reach it.
+  //
+  // An access finds its bit through the page it drives: the set holds, per page
+  // of the bus and per direction, a pointer to the 1 KB of bits for the 8 KB run
+  // of the space that page reaches, null when no byte of that run is armed, so
+  // every alias of a run shares one pointer and an access to a page holding
+  // nothing armed pays one load and one test. A page whose bytes the page
+  // table does not reach linearly — an image found through romOffset, a save
+  // wrapped or reduced unevenly inside the page, a system page with an open-bus
+  // byte armed between its registers — points at kSlowRun instead, and each
+  // access there is classified and looked up in its chunk. The pointers are
+  // rebuilt from the chunks after every arm, every disarm and every restore.
   struct ArmedChunk {
     std::array<std::uint8_t, 8192> bits{};  // one bit per byte of the chunk
+    std::array<std::uint16_t, 8> runs{};    // bits set in each 8 KB run of the chunk
     std::uint32_t armed = 0;                 // bits set here, to free the chunk at zero
     // Whether the byte at `index` within its space is armed here.
     [[nodiscard]] bool has(std::uint32_t index) const noexcept {
@@ -1249,7 +1296,10 @@ class Snes {
     std::array<std::uint32_t, 5> perSpace{};  // set bits in each space, both directions
     std::uint8_t spaces = 0;                  // one bit per Space with anything armed
     std::size_t armed = 0;  // set (byte, direction) bits, to free the set at zero
+    std::array<const std::uint8_t*, kPages> pageRead{};   // per page: the run's bits, kSlowRun, or null
+    std::array<const std::uint8_t*, kPages> pageWrite{};
   };
+  static constexpr std::uint8_t kSlowRun = 0u;  // the page pointer that says: classify this access
   AccessWatcher* accessWatcher_ = nullptr;  // told every armed access; none by default
   std::unique_ptr<AccessArmedSet> armed_;   // the armed table; null until the first arm
   // The bytes a host has armed for an instruction watch and what stands at each,
@@ -1257,12 +1307,16 @@ class Snes {
   // address reaches (physical) in the same chunk layout as the access table,
   // and held behind one owning pointer null until the first arm, which is also
   // the cycle's "is anything armed" test. A chunk's 16 KB is allocated only when
-  // a byte in it is armed and freed when its last one is disarmed. The set also
-  // carries the return queued for the fetch that begins the instruction the
-  // watcher was last told about: the opcode to answer and the address it is
+  // a byte in it is armed and freed when its last one is disarmed. An
+  // instruction finds its code as an access finds its bit: through a per-page
+  // pointer to the 2 KB of codes for the run the page reaches, null when none
+  // of the run is armed and kSlowRun where the page needs classifying. The set
+  // also carries the return queued for the fetch that begins the instruction
+  // the watcher was last told about: the opcode to answer and the address it is
   // for, cleared by the next opcode fetch whichever address that fetches.
   struct StandinChunk {
     std::array<std::uint8_t, 16384> codes{};  // two bits per byte of the chunk
+    std::array<std::uint16_t, 8> runs{};      // bytes armed in each 8 KB run of the chunk
     std::uint32_t armed = 0;                   // bytes armed here, to free the chunk at zero
     // The code for the byte at `index` within its space.
     [[nodiscard]] std::uint8_t code(std::uint32_t index) const noexcept {
@@ -1283,9 +1337,29 @@ class Snes {
     std::size_t armed = 0;                    // bytes armed, to free the set at zero
     std::uint8_t pendingOpcode = 0;           // the return the next opcode fetch answers, or 0
     std::uint32_t pendingAddress = 0;         // the address that fetch must drive
+    std::array<const std::uint8_t*, kPages> page{};  // per page: the run's codes, kSlowRun, or null
   };
   InstructionWatcher* instructionWatcher_ = nullptr;  // told each armed instruction reached; none by default
   std::unique_ptr<StandinSet> standins_;              // the armed instructions; null until the first arm
+
+  // What a page reaches, for the watch: one 8 KB run of one space — the space
+  // and the index of the run's first byte — no byte at all, or bytes the page
+  // does not reach linearly, which the classification settles per access. A
+  // save window is read as the save now stands, so a restore can change the
+  // answer. For Slow, `run.space` names the space whose armed bytes matter.
+  struct PageRun {
+    Space space;
+    std::uint32_t start;
+  };
+  enum class PageReach : std::uint8_t { None, Run, Slow };
+  [[nodiscard]] PageReach pageRun(std::size_t page, PageRun& run) const noexcept;
+  // Rebuilds every per-page pointer of the armed set and the stand-in set from
+  // their chunks and the page table.
+  void refreshWatchPages();
+  // Whether the byte `address` reaches is armed in `table`, by classification:
+  // the lookup for a page that points at kSlowRun.
+  [[nodiscard]] bool armedThrough(std::uint32_t address,
+                                  const std::vector<std::unique_ptr<ArmedChunk>>& table) const noexcept;
 };
 
 }  // namespace snaggletooth

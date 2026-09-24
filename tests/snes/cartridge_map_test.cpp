@@ -7,6 +7,7 @@
 // left in work RAM.
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -343,6 +344,69 @@ TEST(CartridgeMap, AnExplicitSaveSizeOverridesTheHeader) {
   const std::vector<std::uint8_t> rom = authoredCartridge(1024u * 1024u, true, 0x31u, /*8 KB*/ 3u);
   Snes m(SnesConfig{.rom = rom, .iplStub = false, .saveRamBytes = std::size_t{0}});
   EXPECT_TRUE(m.state().sram.empty());
+}
+
+// The save's size is the size it has now. A restore replaces the save whole and
+// can make it larger, smaller or empty; the window reduces every access to the
+// size that stands, and with none reads the image there.
+TEST(CartridgeMap, TheWindowReducesToTheSaveARestoreNowHolds) {
+  std::vector<std::uint8_t> rom = authoredCartridge(512u * 1024u, false, 0x20u, /*8 KB*/ 3u);
+  // Stores $77 at $70:2100 — 8 KB and a bit into the window — and reads it back
+  // into work RAM.
+  std::vector<std::uint8_t> p = {0xA9u, 0x77u, 0x8Fu, 0u, 0u, 0u};
+  put24(p, 3, 0x702100u);
+  p.push_back(0xAFu);
+  p.insert(p.end(), 3, 0u);
+  put24(p, p.size() - 3, 0x702100u);
+  p.push_back(0x8Fu);
+  p.insert(p.end(), 3, 0u);
+  put24(p, p.size() - 3, 0x7E0000u);
+  p.push_back(0xDBu);
+  placeProgram(rom, false, p);
+  Snes m(SnesConfig{.rom = rom, .iplStub = false});
+  const SnesState fresh = m.state();  // at power-on, the program not yet run
+
+  runToStop(m);
+  ASSERT_EQ(m.state().sram.size(), 8192u);
+  EXPECT_EQ(m.state().sram[0x100u], 0x77u);  // reduced to the 8 KB
+  EXPECT_EQ(m.state().wram[0], 0x77u);
+
+  SnesState larger = fresh;
+  larger.sram.assign(32768u, 0u);
+  m.restore(larger);
+  runToStop(m);
+  ASSERT_EQ(m.state().sram.size(), 32768u);
+  EXPECT_EQ(m.state().sram[0x2100u], 0x77u);  // no longer folded
+  EXPECT_EQ(m.state().sram[0x100u], 0x00u);
+  EXPECT_EQ(m.state().wram[0], 0x77u);
+  EXPECT_EQ(m.peek(0x702100u), std::optional<std::uint8_t>{0x77u});
+  EXPECT_TRUE(m.poke(0x70A100u, 0x11u));  // the bank's upper half is the image still
+  EXPECT_EQ(m.peek(0x702100u), std::optional<std::uint8_t>{0x77u});  // and the save answers below it
+
+  SnesState none = fresh;
+  none.sram.clear();
+  m.restore(none);
+  runToStop(m);
+  EXPECT_TRUE(m.state().sram.empty());
+  EXPECT_EQ(m.state().wram[0], 0x11u);  // the image, which the store left alone and the poke above changed
+  EXPECT_EQ(m.peek(0x702100u), std::optional<std::uint8_t>{0x11u});
+}
+
+// The table holds no bytes: a byte poked into the image is read back through
+// every address the map gives it — both halves of a cartridge bank, the system
+// banks' upper halves, and the banks a whole image later where the chip repeats.
+TEST(CartridgeMap, APokedImageByteIsReadThroughEveryAlias) {
+  std::vector<std::uint8_t> rom = authoredCartridge(512u * 1024u, false, 0x20u, 0u);
+  placeProgram(rom, false, copyProgram({0x410123u}));  // a lower half, read on the bus
+  Snes m(SnesConfig{.rom = rom, .iplStub = false});
+  ASSERT_TRUE(m.poke(0x018123u, 0xEEu));  // image offset $8123
+  for (const std::uint32_t alias : {0x018123u, 0x818123u, 0x418123u, 0x410123u, 0xC18123u,
+                                    0xC10123u, 0x118123u}) {
+    EXPECT_EQ(m.peek(alias), std::optional<std::uint8_t>{0xEEu}) << alias;
+    EXPECT_TRUE(m.physical(alias) == (Snes::Physical{Snes::Space::CartridgeRom, 0x8123u})) << alias;
+  }
+  runToStop(m);
+  EXPECT_EQ(m.state().wram[0], 0xEEu);
 }
 
 // The save is machine state, so a snapshot carries it and a restore puts it back.
