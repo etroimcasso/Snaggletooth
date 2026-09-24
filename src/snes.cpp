@@ -568,6 +568,13 @@ std::uint8_t Snes::busRead(std::uint32_t address, CycleKind kind) {
   // The live core's cycle index is the access's cycle: the fetch runs at 0 and
   // each later cycle at its own index, the index moving on after the cycle.
   const std::uint8_t cycle = cpu_.state().tcu;
+  // With nothing armed the access is the bus alone, and this test is all it
+  // pays; the two pointers are the "is anything armed" tests.
+  if (armed_ == nullptr && standins_ == nullptr) return routeReadRaw(address, cycle);
+  return readWithHost(address, kind, cycle);
+}
+
+std::uint8_t Snes::readWithHost(std::uint32_t address, CycleKind kind, std::uint8_t cycle) {
   std::uint8_t value = routeReadRaw(address, cycle);
   // The return standing in for the instruction the watcher was told about
   // answers the fetch that begins it, on the data bus like any fetched byte;
@@ -589,7 +596,13 @@ void Snes::busWrite(std::uint32_t address, std::uint8_t value, CycleKind kind) {
   const std::uint8_t busBefore = state_.mdr;  // the byte the bus held before this write
   tickVideo(lastCost_);  // tick-first, so a write lands after the event it shares the cycle with
   videoAdvanced_ = true;
-  routeWrite(address, value, AccessSource::Cpu, kind, cpu_.state().tcu);
+  const std::uint8_t cycle = cpu_.state().tcu;
+  // With nothing armed the access is the bus alone, and this test is all it pays.
+  if (armed_ == nullptr) {
+    routeWriteRaw(address, value, cycle);
+  } else {
+    routeWrite(address, value, AccessSource::Cpu, kind, cycle);
+  }
   redrawInidispEarly(address, busBefore);
 }
 

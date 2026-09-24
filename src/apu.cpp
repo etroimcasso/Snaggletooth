@@ -272,6 +272,13 @@ std::uint8_t Apu::busRead(std::uint16_t address) {
   } else {
     value = state_->ram[address];
   }
+  // With nothing armed the access is the bus alone, and this test is all it
+  // pays; the two pointers are the "is anything armed" tests.
+  if (armed_ == nullptr && standins_ == nullptr) return value;
+  return readWithHost(address, value);
+}
+
+std::uint8_t Apu::readWithHost(std::uint16_t address, std::uint8_t value) {
   // The live core's cycle index is the access's cycle: the fetch runs at 0 and
   // each later cycle at its own index, the index moving on after the cycle.
   const std::uint8_t cycle = cpu_.state().tcu;
@@ -285,9 +292,13 @@ std::uint8_t Apu::busRead(std::uint16_t address) {
 }
 
 void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
-  const std::optional<std::uint8_t> stored = watchWrite(address, value, cpu_.state().tcu);
-  if (!stored.has_value()) return;  // a vetoed write stores nothing
-  const std::uint8_t v = *stored;
+  std::uint8_t v = value;
+  // With nothing armed the access is the bus alone, and this test is all it pays.
+  if (armed_ != nullptr) {
+    const std::optional<std::uint8_t> stored = watchWrite(address, value, cpu_.state().tcu);
+    if (!stored.has_value()) return;  // a vetoed write stores nothing
+    v = *stored;
+  }
   if (address >= 0x00F0u && address <= 0x00FFu) {
     writeRegister(static_cast<std::uint8_t>(address), v);
     return;

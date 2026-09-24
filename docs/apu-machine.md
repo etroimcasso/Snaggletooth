@@ -221,9 +221,9 @@ apu.writePort(0, 0xCC);              // host -> SPC700 (the CPU reads this at $F
 std::uint8_t reply = apu.readPort(0);  // SPC700 -> host (what the CPU wrote to $F4)
 ```
 
-`writePort`/`readPort` are the *other side of the same bus* the CPU reaches at `$F4`–`$F7`. Today the
-host drives them directly; when a main-CPU component lands it drives the same four registers, so the
-port surface is shaped for a bus, not for a host convenience.
+`writePort`/`readPort` are the *other side of the same bus* the CPU reaches at `$F4`–`$F7`. Inside the
+[SNES machine](snes-machine.md#the-apu-clock) the 65816 drives them through `$2140`–`$2143`; a host
+holding the audio machine on its own drives them directly, through the same four registers.
 
 Two CONTROL bits let the SPC700 clear its input ports: writing CONTROL with bit 4 set zeroes input
 ports 0 and 1, bit 5 zeroes ports 2 and 3. The clear happens on every write with the bit set (it is
@@ -314,10 +314,18 @@ apu.run(50'000);                                       // run on
 apu.restore(snapshot);                                 // rewind to the capture
 ```
 
-This is the whole-state-as-a-value model: `Apu` holds no hidden state, so a snapshot plus a record of
-host port writes replays a session exactly. A machine built over storage you hold takes a snapshot
-the same way and resumes from one assigned into its storage with `reload()` (see
-[Running in storage you hold](#running-in-storage-you-hold)).
+This is the whole-state-as-a-value model: `Apu` holds no hidden state, so the same state and the same
+trace give the same bytes. The trace is everything a host does to the machine — its port writes, the
+RAM it pokes, the DSP and overlay registers and the register file it writes, its answers to watched
+accesses, the stand-ins it arms and the routines it calls — and a snapshot plus a record of it replays
+a session exactly, to the whole state and every audio frame; `tests/apu/host_surface_test.cpp` holds
+the whole host face to that on one running program with a voice playing. A machine built over storage
+you hold takes a snapshot the same way and resumes from one assigned into its storage with `reload()`
+(see [Running in storage you hold](#running-in-storage-you-hold)).
+
+What a host sets up is its own and not part of the state: the observer, the watchers, the addresses
+armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
+leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set.
 
 ## Host RAM access
 
@@ -484,8 +492,8 @@ them. The two directions are independent, arming a place already armed does noth
 has never armed a place holds no table at all. The register overlay and the boot-ROM window sit on the
 same addresses as the RAM beneath them, so this bus has no aliases: an address is a byte. The watcher
 is the host's object, not part of the state: a snapshot does not carry it and `restore()` leaves it in
-place. With none set, or nothing armed, an access pays a single test, and an opcode fetch one more for
-the [instruction watch](#standing-in-for-a-routine).
+place. With nothing armed — no place for a watch and no instruction for a
+[stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test.
 
 ## Standing in for a routine
 
@@ -525,8 +533,8 @@ fetch, since that is the byte the machine answers.
 
 `watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
 what stands there, disarming one not armed does nothing, and a machine that has never armed an
-instruction holds no table at all — so a watch nobody arms costs nothing but one test a cycle and one
-more an opcode fetch. This bus has no aliases: the address armed is the address told.
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a cycle. This
+bus has no aliases: the address armed is the address told.
 
 The watcher is told once per instruction, at an instruction boundary of a running core — never per
 cycle, and never on a sleeping or stopped core, which sits on a boundary and begins nothing. The
@@ -585,9 +593,8 @@ as it was.
 the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file
 the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at
 the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the
-machine from its own code, a driver's main-CPU half standing in the host, reads what it wants there;
-a host that interrupted a program and wants its file back saves it with `cpuState()` before the call
-and restores it with `setCpuState` after.
+machine from its own code reads what it wants there; a host that interrupted a program and wants its
+file back saves it with `cpuState()` before the call and restores it with `setCpuState` after.
 
 `guard` is the number of instructions the routine may run, the `RET` among them; an idle cycle of a
 sleeping or stopped core counts as one. On overrun the routine is abandoned at its boundary and the
@@ -655,5 +662,8 @@ for its address. A call made from inside a watcher's call is the same call, at a
 - `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, `reset()`,
   `reload()`, `peek()`, the observer's boundary report, the two watches and the two calls.
 - `tests/apu/` — the overlay, port, timer, cycle-timing and observer suites, each derived from the
-  register and low-level-timing documentation.
+  register and low-level-timing documentation, and the host face's: reaching in
+  (`host_memory_test.cpp`), the two watches (`access_watch_test.cpp`, `instruction_watch_test.cpp`),
+  the calls (`guest_call_test.cpp`), and the whole face on one running program
+  (`host_surface_test.cpp`).
 - [docs/spc700-cpu.md](spc700-cpu.md) — the CPU core the machine wraps.

@@ -836,6 +836,19 @@ machine.restore(saved);   // back to the saved cycle, exactly
 object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
 moved, never copied; a moved machine carries its audio machine after its state.
 
+The machine is deterministic: the same state and the same trace give the same bytes. The trace is
+everything that reaches the machine from outside — the pads presented before each run, and whatever a
+host does through [the faces below](#reaching-into-the-machine): the bytes it pokes, the register files
+it writes, its answers to watched accesses, the stand-ins it arms and the routines it calls. Two
+machines restored from one snapshot and driven by one trace end on equal `SnesState` values and hand
+over the same audio frames; `tests/snes/host_surface_test.cpp` holds the whole host face to that on one
+running cartridge.
+
+What a host sets up is its own and not part of the state: the observers, the watchers, the places
+armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
+leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set —
+the routine a stand-in held off runs there.
+
 ## Reaching into the machine
 
 Beside the whole-state snapshot, a host reaches into individual places the machine holds, reading and
@@ -937,11 +950,12 @@ access to an armed place — the CPU's, either transfer engine's, and the work-R
 tells the watcher which made it.
 
 The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
-leaves it in place. With none set, or nothing armed, an access pays a single test, and an opcode fetch
-one more for the [instruction watch](#standing-in-for-a-routine). With something armed, an access is
-classified into the byte it reaches, and only as far as the spaces holding an armed byte require: a
-host watching work RAM alone costs a fetch from the image the work-RAM and register-window range tests
-and nothing more.
+leaves it in place. With nothing armed — no place for a watch and no instruction for a
+[stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test. With something
+armed, an access is
+classified into the byte it reaches, and only as far as the spaces holding an armed byte require: with
+work RAM alone armed, a fetch from the image is settled by the bank tests and one test of the armed
+spaces, and reaches none of the cartridge's lookups.
 
 ### A watch is on the byte
 
@@ -1048,8 +1062,8 @@ fetch, since that is the byte the machine answers.
 
 `watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
 what stands there, disarming one not armed does nothing, and a machine that has never armed an
-instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle
-and one more an opcode fetch. A watched place is a byte, as an access watch's is
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle.
+A watched place is a byte, as an access watch's is
 ([physical](#a-watch-is-on-the-byte)): a routine in the low 8 KB of work RAM armed through `$7E:0100`
 is heard entered by a `JSR $0100` in bank `$00`, and a routine in the image armed through bank `$00`
 is heard entered through bank `$80`. The watcher is told the 24-bit address the fetch drives,

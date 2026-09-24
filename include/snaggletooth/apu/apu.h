@@ -319,8 +319,9 @@ class Apu {
 
   // Drains the 32 kHz stereo frames the DSP has produced since the last drain,
   // clearing the internal queue. One frame lands per DSP sample — every 32
-  // machine cycles — so a caller drains periodically to bound the queue. Frames are output, not machine state: they are not part of a
-  // snapshot, and restore() and reset() discard any that are pending.
+  // machine cycles — so a caller drains periodically to bound the queue. Frames
+  // are output, not machine state: they are not part of a snapshot, and
+  // restore() and reset() discard any that are pending.
   [[nodiscard]] std::vector<StereoFrame> takeFrames();
 
   // The frames produced since the last drain, into the caller's own storage, and
@@ -482,6 +483,11 @@ class Apu {
 
   std::uint8_t busRead(std::uint16_t address);
   void busWrite(std::uint16_t address, std::uint8_t value);
+  // The CPU's read on a machine with something armed, given the byte the bus
+  // answered: the return standing in for a watched instruction over the fetch
+  // that begins it, and the access watch. Kept out of busRead so the access a
+  // machine with nothing armed makes stays one test and the bus.
+  std::uint8_t readWithHost(std::uint16_t address, std::uint8_t value);
   std::uint8_t readRegister(std::uint8_t reg);
   void writeRegister(std::uint8_t reg, std::uint8_t value);
 

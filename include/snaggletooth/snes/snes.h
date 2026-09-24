@@ -973,6 +973,11 @@ class Snes {
 
   std::uint8_t busRead(std::uint32_t address, CycleKind kind);
   void busWrite(std::uint32_t address, std::uint8_t value, CycleKind kind);
+  // The CPU's read on a machine with something armed: the bus, the return
+  // standing in for a watched instruction over the fetch that begins it, and
+  // the access watch. Kept out of busRead so the access a machine with nothing
+  // armed makes stays one test and the bus.
+  std::uint8_t readWithHost(std::uint32_t address, CycleKind kind, std::uint8_t cycle);
   void busInternal() {
     lastCost_ = 6;
     if (state_.dmaResumePad) {  // an internal cycle can be the first one after a transfer
@@ -1111,9 +1116,8 @@ class Snes {
   // machine reads an image exactly where the header says it is — except that a
   // LoROM cartridge declaring a coprocessor keeps its cartridge banks' lower halves
   // for the chip, which the machine does not carry, and reads open bus there.
-  // saveRamIndex
-  // answers the offset into the save, already reduced to its size, for an address
-  // that reaches it — nothing when the cartridge has no save.
+  // saveRamIndex answers the offset into the save, already reduced to its size,
+  // for an address that reaches it — nothing when the cartridge has no save.
   [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
   [[nodiscard]] std::optional<std::size_t> saveRamIndex(std::uint8_t bank,
                                                         std::uint16_t offset) const noexcept;
