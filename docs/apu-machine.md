@@ -32,7 +32,12 @@ boot-ROM window*).
 - [Boot and reset](#boot-and-reset)
 - [Snapshot and restore](#snapshot-and-restore)
 - [Host RAM access](#host-ram-access)
+  - [The CPU register file](#the-cpu-register-file)
+- [Audio output](#audio-output)
 - [The observer](#the-observer)
+- [Answering an access](#answering-an-access)
+- [Standing in for a routine](#standing-in-for-a-routine)
+- [Calling into the sound program](#calling-into-the-sound-program)
 - [Gotchas](#gotchas)
 - [Where to look](#where-to-look)
 
@@ -144,6 +149,16 @@ The registers:
 | `$FA`–`$FC` | T0–T2 TARGET | Write-only timer targets. |
 | `$FD`–`$FF` | T0–T2 OUT | Read-only 4-bit timer outputs; a read clears the value. |
 
+A host reaches these sixteen registers by index (0–15 for `$F0`–`$FF`) without running the CPU, on the
+sound CPU's own paths: `writeOverlayRegister` applies the write and its effect and lands the byte in the
+RAM beneath, and `readOverlayRegister` returns what the CPU would read — so reading a timer output
+(`$FD`–`$FF`) through it clears that output, which is why it is not a `const` read.
+
+```cpp
+apu.writeOverlayRegister(1, 0x01);               // CONTROL ($F1): enable timer 0
+std::uint8_t out = apu.readOverlayRegister(13);  // T0OUT ($FD): the count, then cleared
+```
+
 ### DSP register file
 
 DSPADDR (`$F2`) selects one of 128 DSP registers; DSPDATA (`$F3`) reads or writes the selected one.
@@ -160,6 +175,16 @@ apu.loadRam(0x0200, select_and_write);
 apu.setPc(0x0200);
 apu.run(10);
 // apu.state().dsp[0x10] == 0x7F
+```
+
+A host reaches the file directly, without going through DSPADDR/DSPDATA: `writeDspRegister(index, value)`
+writes it the way a DSPDATA write does — the same ENDX acknowledge, the same KON arming, the same cycle
+stamp — and `readDspRegister(index)` returns the stored byte, masking the index with `$7F`. A host write
+and the program's own DSPDATA write are one thing; a write with the index above `$7F` is ignored.
+
+```cpp
+apu.writeDspRegister(0x10, 0x7F);            // the same write the program above makes
+std::uint8_t v = apu.readDspRegister(0x10);  // 0x7F
 ```
 
 ## The boot-ROM window
@@ -196,9 +221,9 @@ apu.writePort(0, 0xCC);              // host -> SPC700 (the CPU reads this at $F
 std::uint8_t reply = apu.readPort(0);  // SPC700 -> host (what the CPU wrote to $F4)
 ```
 
-`writePort`/`readPort` are the *other side of the same bus* the CPU reaches at `$F4`–`$F7`. Today the
-host drives them directly; when a main-CPU component lands it drives the same four registers, so the
-port surface is shaped for a bus, not for a host convenience.
+`writePort`/`readPort` are the *other side of the same bus* the CPU reaches at `$F4`–`$F7`. Inside the
+[SNES machine](snes-machine.md#the-apu-clock) the 65816 drives them through `$2140`–`$2143`; a host
+holding the audio machine on its own drives them directly, through the same four registers.
 
 Two CONTROL bits let the SPC700 clear its input ports: writing CONTROL with bit 4 set zeroes input
 ports 0 and 1, bit 5 zeroes ports 2 and 3. The clear happens on every write with the bit set (it is
@@ -289,10 +314,18 @@ apu.run(50'000);                                       // run on
 apu.restore(snapshot);                                 // rewind to the capture
 ```
 
-This is the whole-state-as-a-value model: `Apu` holds no hidden state, so a snapshot plus a record of
-host port writes replays a session exactly. A machine built over storage you hold takes a snapshot
-the same way and resumes from one assigned into its storage with `reload()` (see
-[Running in storage you hold](#running-in-storage-you-hold)).
+This is the whole-state-as-a-value model: `Apu` holds no hidden state, so the same state and the same
+trace give the same bytes. The trace is everything a host does to the machine — its port writes, the
+RAM it pokes, the DSP and overlay registers and the register file it writes, its answers to watched
+accesses, the stand-ins it arms and the routines it calls — and a snapshot plus a record of it replays
+a session exactly, to the whole state and every audio frame; `tests/apu/host_surface_test.cpp` holds
+the whole host face to that on one running program with a voice playing. A machine built over storage
+you hold takes a snapshot the same way and resumes from one assigned into its storage with `reload()`
+(see [Running in storage you hold](#running-in-storage-you-hold)).
+
+What a host sets up is its own and not part of the state: the observer, the watchers, the addresses
+armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
+leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set.
 
 ## Host RAM access
 
@@ -310,6 +343,11 @@ apu.setPc(0x0200);                          // point the CPU at a loaded image
 These bypass the overlay — RAM is RAM from the host side, so `readRam($00F2)` returns the byte beneath
 DSPADDR, not the register the CPU would see there.
 
+`poke` and `addressable` name the same reach in the console's vocabulary: `poke(address, value)` writes
+the RAM beneath the overlay and always lands, because the whole 64 KB is RAM, and `addressable(address,
+bytes)` answers whether a span fits without running past the end. The registers at `$F0`–`$FF` are
+reached by name (see [The register overlay](#the-register-overlay)), not through these.
+
 `peek` is the other reading: what a fetch by the CPU at an address returns, without making one. It
 answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — the
 sixteen register bytes included, from the RAM beneath them, since no program is fetched from the
@@ -318,6 +356,37 @@ overlay — and changes nothing, so a host can decode the instruction the CPU is
 ```cpp
 apu.mapIplRom(boot);
 std::uint8_t opcode = apu.peek(0xFFC0);  // boot[0] while the window is mapped; the RAM byte once it is not
+```
+
+### The CPU register file
+
+`cpuState()` reads the SPC700's registers whole, and `setCpuState()` writes them, reloading the live core
+and re-locking the sample slot so the written set is live on the next cycle — without discarding pending
+output, unlike `restore()`. Instruction progress is part of the value, so a machine written
+mid-instruction resumes where the value says.
+
+```cpp
+Spc700State regs = apu.cpuState();
+regs.pc = 0x0200;
+apu.setCpuState(regs);  // the next step runs from $0200
+```
+
+## Audio output
+
+The DSP delivers one 32 kHz stereo frame every 32 machine cycles. Frames accumulate as the machine runs
+and a host drains them; they are output, not machine state, so a snapshot does not carry pending frames
+and `restore()` and `reset()` discard them.
+
+`takeFrames()` returns the frames produced since the last drain in a fresh vector.
+`takeFrames(std::span<StereoFrame>)` drains into the caller's own storage instead and returns how many it
+wrote; frames past the end of the span stay queued for the next drain, and nothing is allocated — a host
+producing sound on a callback that must not allocate drains through this form.
+
+```cpp
+std::vector<StereoFrame> frames = apu.takeFrames();  // a fresh vector
+
+std::array<StereoFrame, 512> buffer;
+std::size_t written = apu.takeFrames(buffer);        // no allocation; any beyond 512 stay queued
 ```
 
 ## The observer
@@ -376,6 +445,168 @@ The [intermediate representation](ir.md#running-beside-the-machine) is its first
 program replayed instruction by instruction with an interpreter beside the core, held to every
 access, every register and every cycle the observer reports.
 
+## Answering an access
+
+Beside the observer, which reports every settled access and cannot change it, a host answers accesses
+before they take effect. It sets an `ApuAccessWatcher` and arms the places it cares about; each access
+to an armed place asks the watcher what happens. The sound CPU is the only thing on this bus, so the
+watcher is told a 16-bit address and no source; the DSP's own sample and echo fetches are not the CPU's
+and are not watched, the same reads the observer leaves out.
+
+```cpp
+struct Guard final : ApuAccessWatcher {
+  AccessAnswer read(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) override {
+    return AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
+  }
+  AccessAnswer write(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) override {
+    return AccessAnswer::veto();          // drop the program's writes here
+  }
+};
+
+Guard guard;
+apu.setAccessWatcher(&guard);
+apu.watchAccess(0x0250, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 bytes, both directions
+```
+
+An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
+and leaves a read as it stands, since nothing can stop the CPU receiving a byte; `instead(byte)` puts
+`byte` in the access's place — the read delivers it, the write stores it. `AccessAnswer` is one class
+for both machines; the console's watcher is `AccessWatcher`
+([snes-machine.md §Answering an access](snes-machine.md#answering-an-access)).
+
+`cycle` is which cycle of the instruction the access is, counted as the chip spends them: 0 is the
+opcode fetch, an operand fetch follows at 1, and every cycle counts whether or not it reaches the
+bus. `MOV A,!abs` reads its byte at 3; `MOV !abs,A` reads its destination at 3 and writes it at 4,
+the read being the one most store opcodes make before they write; `MOVW YA,dp` reads the low byte
+at 2 and, after a cycle inside the chip, the high byte at 4. This bus carries no kind, so an opcode
+fetch and a data read of one address are told apart by the cycle alone: a fetch is cycle 0, or the
+operand cycles that follow it at the program counter. A host answering one byte of a word access is
+answering that byte alone.
+
+A register read is told after the register's own effect. A read of a timer output (`$FD`–`$FF`) has
+already cleared it when the watcher is told; `instead` changes what the program receives, and a
+veto cannot put the count back, because a read cannot be prevented.
+
+`watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
+them. The two directions are independent, arming a place already armed does nothing, and a machine that
+has never armed a place holds no table at all. The register overlay and the boot-ROM window sit on the
+same addresses as the RAM beneath them, so this bus has no aliases: an address is a byte. The watcher
+is the host's object, not part of the state: a snapshot does not carry it and `restore()` leaves it in
+place. With nothing armed — no place for a watch and no instruction for a
+[stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test.
+
+## Standing in for a routine
+
+A host is told before the instruction at a watched address runs, and can have a return stand at that
+address so the routine there never runs. It sets an `ApuInstructionWatcher` and arms the addresses it
+cares about, each with what stands there while it is armed:
+
+```cpp
+struct Hook final : ApuInstructionWatcher {
+  Apu& apu;
+  explicit Hook(Apu& a) : apu(a) {}
+  void reached(std::uint16_t address) override {
+    Spc700State regs = apu.cpuState();   // live: the registers as the routine was entered
+    regs.a = 0x01;                       // the answer the routine would have produced
+    apu.setCpuState(regs);               // what the return runs under
+  }
+};
+
+Hook hook(apu);
+apu.setInstructionWatcher(&hook);
+apu.watchInstruction(0x0400, ApuStandin::Return);  // CALL !$0400: told, then RET stands in
+apu.watchInstruction(0x0500, ApuStandin::None);    // told, and the instruction runs
+```
+
+`ApuStandin` names what stands at the address: `None` tells the watcher and lets the instruction run;
+`Return` answers the fetch with `RET`, for a routine a `CALL` entered. A host that does not say takes
+`Return`. With a return standing in, the one instruction that runs at the address is the `RET`: the
+caller resumes as it would after the routine returned, with the stack pointer where it was before the
+call, and the return spends exactly the cycles a real one spends — a stand-in and a RAM byte holding a
+real `RET` land on the same registers and the same master count. A stand-in stands whether or not a
+watcher is set.
+
+RAM is never written. Only the fetch that begins the instruction the watcher was told about answers
+the return: `peek` of the byte and a data read of it (`MOV A,!$0400`) answer RAM, and disarming has
+nothing to put back. An access watch armed on the same address is told `RET` as the value of that
+fetch, since that is the byte the machine answers.
+
+`watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
+what stands there, disarming one not armed does nothing, and a machine that has never armed an
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a cycle. This
+bus has no aliases: the address armed is the address told.
+
+The watcher is told once per instruction, at an instruction boundary of a running core — never per
+cycle, and never on a sleeping or stopped core, which sits on a boundary and begins nothing. The
+sound CPU takes no interrupts, so a boundary is a boundary. The machine's clock has not moved for the
+call: being told advances no counter — not the master counter, not a timer, not the DSP's slot — and a
+watched run lands on the same state and the same audio as a plain one. The host runs on its own time.
+
+`cpuState()` is live inside the call, at the instruction, and a register file written with
+`setCpuState()` there is what the instruction runs under — which is how a host answers for a routine:
+told at its entry, it writes the registers the routine would have left and lets the return stand in.
+A host that moves the program counter inside the call sends the CPU elsewhere, and the return queued
+for the watched address is not applied to the fetch there: the instruction at the new address runs as
+it stands. A host that disarms the address inside the call lets the routine run.
+
+## Calling into the sound program
+
+A host runs a routine the machine already holds and gets control back when it returns. There are two
+forms, one verb each:
+
+```cpp
+// In the program's own context: its registers and its stack, put back afterwards.
+bool returned = apu.callInContext(0x0400, ApuStandin::Return, 10000);
+
+// In a frame of the host's own: the host's presets, a stack the host names.
+Spc700State presets = apu.cpuState();
+presets.a = 0x05;
+apu.setCpuState(presets);
+bool ok = apu.callOnStack(0x0500, 0xD0, ApuStandin::Return, 10000);
+std::uint8_t result = apu.cpuState().a;   // what the routine left
+```
+
+Both return whether the routine returned; `false` means the guard tripped or the call was refused.
+`returns` is `ApuStandin::Return`, the one return the sound CPU has: the call pushes the landing the
+way `CALL` pushes its own — the high byte at the stack pointer's page-one address, the low byte one
+below, the pointer wrapping inside the page — through the RAM, spending no cycle, and points the CPU at
+the entry. The landing is the program counter as it stands, and nothing there is executed.
+
+The routine is the machine running: its cycles are real, the timers tick and the DSP produces its
+samples through them, and `state().divider` moves by what the routine spent. `run()` afterwards runs
+its whole budget on top — the counter is the host's measure of what a call cost.
+
+The call ends at the first instruction boundary where the stack pointer is back at its value before
+the push **and** the program counter is at the landing. Both are required: a routine that jumps to the
+landing without returning does not end the call, nor does one that pops its own frame while still
+inside itself.
+
+`callInContext` saves the register file, runs the routine on the program's own stack, and puts the
+whole file back — the program counter, the stack pointer, the halt state, all of it — so the
+interrupted program carries on unaware. What the routine changed in RAM and in the registers it wrote
+stands. A host that wants the routine's registers reads them live inside an instruction watch on the
+routine's `RET`, before the file goes back, exactly as the console's guide shows for the 65816. A
+sleeping or stopped core is called like any other, and the file put back leaves it sleeping or stopped
+as it was.
+
+`callOnStack` runs the routine under the register file as the host wrote it with `setCpuState`, with
+the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file
+the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at
+the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the
+machine from its own code reads what it wants there; a host that interrupted a program and wants its
+file back saves it with `cpuState()` before the call and restores it with `setCpuState` after.
+
+`guard` is the number of instructions the routine may run, the `RET` among them; an idle cycle of a
+sleeping or stopped core counts as one. On overrun the routine is abandoned at its boundary and the
+call returns `false` — the file put back for `callInContext`, left where it stopped for `callOnStack`.
+A guard of zero runs nothing.
+
+A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
+touched — when `returns` is `ApuStandin::None`, or when the machine is not between instructions:
+inside an access watcher's call, or after a `run()` that stopped mid-instruction. Between `step()`
+calls and inside an instruction watcher's call it is. Every 16-bit entry is RAM, so none is refused
+for its address. A call made from inside a watcher's call is the same call, at any depth.
+
 ## Gotchas
 
 - **The CPU's access is the last thing in its cycle.** Everything the machine clocks — the counter,
@@ -401,13 +632,38 @@ access, every register and every cycle the observer reports.
   read at each of its addresses from its program counter on, in order — the core fetches them in that
   order — and keep every other access: the byte after a one-byte instruction that the core reads
   and throws away is data, not a fetch.
+- **A watch sees fetches too, and a store's read of its destination.** The watcher is told cycle 0
+  for the opcode fetch and the operand cycles after it; most store opcodes read the byte they are
+  about to write one cycle before writing it, so arming an address for reads hears a `MOV !abs,A`
+  there as a read at cycle 3 before its write at cycle 4.
+- **A watched timer read has already cleared the output.** Arming `$FD`–`$FF` tells the watcher the
+  count the read returned; the output is 0 by then whatever the answer.
+- **A stand-in is a `RET` and nothing more.** What the routine would have left in the registers is
+  the host's to write with `setCpuState` inside the call; nothing writes it for you. A routine a
+  `CALL` entered returns through `RET`; one entered through `PCALL` or `TCALL` returns the same way,
+  so the stand-in serves all three.
+- **The stand-in answers one fetch.** The opcode fetch of the instruction the watcher was told about.
+  `peek`, a `MOV A,!abs` of the byte, the observer's report of a data read and an access watch on any
+  read but that fetch all see RAM's own byte.
+- **`watchInstruction` with one argument arms `ApuStandin::Return`.** A host that wants to be told and
+  nothing more says `ApuStandin::None`.
+- **A called routine must end in `RET`.** One that ends in `RETI` pops a status byte the call never
+  pushed: the stack pointer is never back, the call never ends, and the guard trips.
+- **`callInContext` puts the register file back.** `cpuState()` after it is the program's file, not the
+  routine's. Read a routine's registers inside an instruction watch on its `RET`, or call with
+  `callOnStack`, which leaves them.
+- **A call moves the counter, and `run()` does not know it.** `run(n)` after a call runs `n` cycles on
+  top of the routine's; a host pacing the machine by cycles adds what `state().divider` moved.
 
 ## Where to look
 
 - `include/snaggletooth/apu/apu.h` — the `ApuState`/`TimerState` value structs, the `Apu` class and
-  the `ApuObserver` interface.
+  the `ApuObserver`, `ApuAccessWatcher` and `ApuInstructionWatcher` interfaces.
 - `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, `reset()`,
-  `reload()`, `peek()` and the observer's boundary report.
+  `reload()`, `peek()`, the observer's boundary report, the two watches and the two calls.
 - `tests/apu/` — the overlay, port, timer, cycle-timing and observer suites, each derived from the
-  register and low-level-timing documentation.
+  register and low-level-timing documentation, and the host face's: reaching in
+  (`host_memory_test.cpp`), the two watches (`access_watch_test.cpp`, `instruction_watch_test.cpp`),
+  the calls (`guest_call_test.cpp`), and the whole face on one running program
+  (`host_surface_test.cpp`).
 - [docs/spc700-cpu.md](spc700-cpu.md) — the CPU core the machine wraps.

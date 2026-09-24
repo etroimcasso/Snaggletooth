@@ -129,6 +129,8 @@ struct Cpu65816State {
   InterruptRequest servicing = InterruptRequest::None;
 
   CpuRunState run = CpuRunState::Running;
+
+  [[nodiscard]] bool operator==(const Cpu65816State&) const noexcept = default;
 };
 
 // The registers a reset leaves, from the registers it found and the word at $00FFFC.
@@ -181,6 +183,13 @@ class Cpu65816 {
   // Whether the core sits between instructions — the only point at which an
   // instruction can begin, and the state a completed instruction leaves behind.
   [[nodiscard]] bool atInstructionBoundary() const noexcept { return state_.tcu == 0; }
+
+  // Whether the next cycle at a boundary begins a hardware interrupt sequence
+  // rather than fetching an opcode: a non-maskable request is latched, or the
+  // maskable line is held with the interrupt-disable flag clear. Reads state only.
+  [[nodiscard]] bool takesRequestNext() const noexcept {
+    return pendingRequest() != InterruptRequest::None;
+  }
 
   // The interrupt lines, driven by the machine. NMI is edge-sensitive: the falling
   // edge latches a pending request that survives until it is serviced. IRQ is

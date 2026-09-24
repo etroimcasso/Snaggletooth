@@ -3,6 +3,8 @@
 // restore, a halted core, and the reset line.
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -138,6 +140,32 @@ TEST(SnesMachine, TakeFramesDrainsTheQueue) {
   m.run(118125);
   EXPECT_EQ(m.takeFrames().size(), 176u);
   EXPECT_TRUE(m.takeFrames().empty());
+}
+
+TEST(SnesMachine, TakeFramesIntoABufferMatchesTheVectorDrain) {
+  Snes m = loopMachine(Region::Ntsc);
+  m.run(118125);  // 176 frames queued
+  Snes ref = loopMachine(Region::Ntsc);
+  ref.run(118125);
+  const std::vector<StereoFrame> all = ref.takeFrames();
+  ASSERT_EQ(all.size(), 176u);
+
+  std::vector<StereoFrame> collected;
+  std::array<StereoFrame, 32> buf{};
+  for (;;) {
+    const std::size_t n = m.takeFrames(buf);
+    for (std::size_t i = 0; i < n; ++i) collected.push_back(buf[i]);
+    if (n < buf.size()) break;  // a short fill drains the last of the queue
+  }
+  EXPECT_EQ(collected, all);  // the same frames, in the same order
+}
+
+TEST(SnesMachine, TakeFramesIntoASmallBufferLeavesTheRestQueued) {
+  Snes m = loopMachine(Region::Ntsc);
+  m.run(118125);  // 176 frames queued
+  std::array<StereoFrame, 100> buf{};
+  EXPECT_EQ(m.takeFrames(buf), 100u);     // the buffer filled
+  EXPECT_EQ(m.takeFrames().size(), 76u);  // and the rest stayed queued
 }
 
 // ---- snapshot and restore -------------------------------------------------

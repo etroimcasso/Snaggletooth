@@ -630,4 +630,37 @@ TEST(ApuObserver, ClearingItStopsTheReport) {
   EXPECT_EQ(apu.observer(), nullptr);
 }
 
+// ── The allocation-free drain ────────────────────────────────────────────────
+
+TEST(ApuMachine, TakeFramesIntoABufferMatchesTheVectorDrain) {
+  Apu apu;
+  apu.run(320u);  // ten DSP samples' worth of cycles
+  Apu ref;
+  ref.run(320u);
+  const std::vector<StereoFrame> all = ref.takeFrames();
+  ASSERT_GE(all.size(), 5u);
+
+  std::vector<StereoFrame> collected;
+  std::array<StereoFrame, 4> buf{};
+  for (;;) {
+    const std::size_t n = apu.takeFrames(buf);
+    for (std::size_t i = 0; i < n; ++i) collected.push_back(buf[i]);
+    if (n < buf.size()) break;  // a short fill drains the last of the queue
+  }
+  EXPECT_EQ(collected, all);  // the same frames, in the same order
+}
+
+TEST(ApuMachine, TakeFramesIntoASmallBufferLeavesTheRestQueued) {
+  Apu apu;
+  apu.run(320u);
+  Apu ref;
+  ref.run(320u);
+  const std::size_t total = ref.takeFrames().size();
+  ASSERT_GE(total, 5u);
+
+  std::array<StereoFrame, 4> buf{};
+  EXPECT_EQ(apu.takeFrames(buf), 4u);            // the buffer filled
+  EXPECT_EQ(apu.takeFrames().size(), total - 4u);  // and the rest stayed queued
+}
+
 }  // namespace

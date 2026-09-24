@@ -57,9 +57,15 @@ Apu::Apu(Apu&& moved, ApuState* storage) noexcept
       iplImage_(std::move(moved.iplImage_)),
       observer_(moved.observer_),
       boundaryState_(moved.boundaryState_),
-      sinceBoundary_(moved.sinceBoundary_) {
+      sinceBoundary_(moved.sinceBoundary_),
+      accessWatcher_(moved.accessWatcher_),
+      armed_(std::move(moved.armed_)),
+      instructionWatcher_(moved.instructionWatcher_),
+      standins_(std::move(moved.standins_)) {
   moved.state_ = nullptr;
   moved.observer_ = nullptr;
+  moved.accessWatcher_ = nullptr;
+  moved.instructionWatcher_ = nullptr;
 }
 
 void Apu::restore(ApuState state) {
@@ -132,7 +138,10 @@ void Apu::machineCycle() {
   sampleFrame();
 
   // The CPU's access closes the cycle. A halted core reaches nothing here, and
-  // the cycle still passes for everything above.
+  // the cycle still passes for everything above. The instruction watch comes
+  // first, at a boundary of a running core; the pointer is the "is anything
+  // armed" test, and an unarmed machine pays it alone.
+  if (standins_ != nullptr) tellInstruction();
   Bus bus{*this};
   cpu_.stepCycle(bus);
 
@@ -200,10 +209,36 @@ std::vector<StereoFrame> Apu::takeFrames() {
   return drained;
 }
 
-void Apu::writeDspRegister(std::uint8_t reg, std::uint8_t value) {
-  // The DSP owns the write's semantics — ENDX's acknowledge, KON's arming, the
-  // stamp a DSP-written register carries (see cpuWriteDspRegister).
-  cpuWriteDspRegister(state_->dsp, reg, value);
+std::size_t Apu::takeFrames(std::span<StereoFrame> into) noexcept {
+  const std::size_t taken = std::min(into.size(), frames_.size());
+  std::copy_n(frames_.begin(), taken, into.begin());
+  // Keep what did not fit for the next drain. A StereoFrame is trivially
+  // copyable, so the shift moves bytes and allocates nothing.
+  frames_.erase(frames_.begin(), frames_.begin() + static_cast<std::ptrdiff_t>(taken));
+  return taken;
+}
+
+void Apu::writeDspRegister(std::uint8_t index, std::uint8_t value) {
+  // cpuWriteDspRegister owns the write's semantics and ignores an index past
+  // $7F, the way a DSPDATA write does.
+  cpuWriteDspRegister(state_->dsp, index, value);
+}
+
+std::uint8_t Apu::readDspRegister(std::uint8_t index) const noexcept {
+  return state_->dsp[index & 0x7Fu];  // DSPDATA masks the index with $7F
+}
+
+void Apu::writeOverlayRegister(std::uint8_t index, std::uint8_t value) {
+  writeRegister(static_cast<std::uint8_t>(0xF0u + (index & 0x0Fu)), value);
+}
+
+std::uint8_t Apu::readOverlayRegister(std::uint8_t index) {
+  return readRegister(static_cast<std::uint8_t>(0xF0u + (index & 0x0Fu)));
+}
+
+void Apu::setCpuState(const Spc700State& state) {
+  state_->cpu = state;
+  syncCpuAndSlot();  // reloads the live core and re-locks the sample slot; pending output stands
 }
 
 void Apu::reset() {
@@ -225,23 +260,193 @@ void Apu::reset() {
 }
 
 std::uint8_t Apu::busRead(std::uint16_t address) {
-  if (address >= 0x00F0u && address <= 0x00FFu)
-    return readRegister(static_cast<std::uint8_t>(address));
-  // The boot-ROM window: with an image mapped and CONTROL bit 7 set, an SPC700 read
-  // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
-  // (busWrite always hits RAM), so a driver can scratch the window and still read the
-  // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
-  if (iplImage_ && address >= kIplWindowBase && (state_->control & kControlIplRom) != 0u)
-    return (*iplImage_)[address - kIplWindowBase];
-  return state_->ram[address];
+  std::uint8_t value;
+  if (address >= 0x00F0u && address <= 0x00FFu) {
+    value = readRegister(static_cast<std::uint8_t>(address));
+  } else if (iplImage_ && address >= kIplWindowBase && (state_->control & kControlIplRom) != 0u) {
+    // The boot-ROM window: with an image mapped and CONTROL bit 7 set, an SPC700 read
+    // in $FFC0-$FFFF returns the image, not the RAM beneath. Writes are unconditional
+    // (busWrite always hits RAM), so a driver can scratch the window and still read the
+    // mapped bytes back. With no image mapped or the bit clear, the address is RAM.
+    value = (*iplImage_)[address - kIplWindowBase];
+  } else {
+    value = state_->ram[address];
+  }
+  // With nothing armed the access is the bus alone, and this test is all it
+  // pays; the two pointers are the "is anything armed" tests.
+  if (armed_ == nullptr && standins_ == nullptr) return value;
+  return readWithHost(address, value);
+}
+
+std::uint8_t Apu::readWithHost(std::uint16_t address, std::uint8_t value) {
+  // The live core's cycle index is the access's cycle: the fetch runs at 0 and
+  // each later cycle at its own index, the index moving on after the cycle.
+  const std::uint8_t cycle = cpu_.state().tcu;
+  // The return standing in for the instruction the watcher was told about
+  // answers the fetch that begins it; any opcode fetch clears what is queued.
+  if (cycle == 0u && standins_ != nullptr && standins_->pendingOpcode != 0u) {
+    if (address == standins_->pendingAddress) value = standins_->pendingOpcode;
+    standins_->pendingOpcode = 0u;
+  }
+  return watchRead(address, value, cycle);
 }
 
 void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
+  std::uint8_t v = value;
+  // With nothing armed the access is the bus alone, and this test is all it pays.
+  if (armed_ != nullptr) {
+    const std::optional<std::uint8_t> stored = watchWrite(address, value, cpu_.state().tcu);
+    if (!stored.has_value()) return;  // a vetoed write stores nothing
+    v = *stored;
+  }
   if (address >= 0x00F0u && address <= 0x00FFu) {
-    writeRegister(static_cast<std::uint8_t>(address), value);
+    writeRegister(static_cast<std::uint8_t>(address), v);
     return;
   }
-  state_->ram[address] = value;
+  state_->ram[address] = v;
+}
+
+std::uint8_t Apu::watchRead(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) {
+  // The table pointer is the "is anything armed" test: null means nothing is
+  // watched, whether or not a sink is set, and the access pays this one test.
+  if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
+  if ((armed_->read[address >> 3] & (1u << (address & 7u))) == 0u) return value;
+  return accessWatcher_->read(address, value, cycle).applyToRead(value);
+}
+
+std::optional<std::uint8_t> Apu::watchWrite(std::uint16_t address, std::uint8_t value,
+                                            std::uint8_t cycle) {
+  if (armed_ == nullptr || accessWatcher_ == nullptr) return value;
+  if ((armed_->write[address >> 3] & (1u << (address & 7u))) == 0u) return value;
+  const AccessAnswer answer = accessWatcher_->write(address, value, cycle);
+  if (!answer.storesWrite()) return std::nullopt;  // veto
+  return answer.applyToWrite(value);
+}
+
+void Apu::setArmed(std::uint16_t address, bool onRead, bool onWrite, bool arm) {
+  const std::uint16_t byteIndex = static_cast<std::uint16_t>(address >> 3);
+  const std::uint8_t mask = static_cast<std::uint8_t>(1u << (address & 7u));
+  const auto touch = [&](std::array<std::uint8_t, 8192>& bits) {
+    if (arm) {
+      if ((bits[byteIndex] & mask) == 0u) {  // idempotent: count only a newly-set bit
+        bits[byteIndex] |= mask;
+        ++armed_->armed;
+      }
+    } else if ((bits[byteIndex] & mask) != 0u) {
+      bits[byteIndex] &= static_cast<std::uint8_t>(~mask);
+      --armed_->armed;
+    }
+  };
+  if (onRead) touch(armed_->read);
+  if (onWrite) touch(armed_->write);
+}
+
+void Apu::watchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite) {
+  if (bytes == 0 || (!onRead && !onWrite)) return;
+  if (!armed_) armed_ = std::make_unique<AccessArmedSet>();
+  for (std::size_t i = 0; i < bytes; ++i) {
+    setArmed(static_cast<std::uint16_t>((static_cast<std::size_t>(address) + i) & 0xFFFFu),
+             onRead, onWrite, true);
+  }
+}
+
+void Apu::unwatchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite) {
+  if (!armed_ || bytes == 0 || (!onRead && !onWrite)) return;
+  for (std::size_t i = 0; i < bytes; ++i) {
+    setArmed(static_cast<std::uint16_t>((static_cast<std::size_t>(address) + i) & 0xFFFFu),
+             onRead, onWrite, false);
+  }
+  if (armed_->armed == 0u) armed_.reset();  // the last place disarmed: back to one null pointer
+}
+
+namespace {
+
+// The opcode a stand-in answers the fetch with: RET for Return, nothing for
+// None or for an address not armed.
+constexpr std::uint8_t kRet = 0x6F;
+[[nodiscard]] constexpr std::uint8_t standinOpcode(std::uint8_t code) noexcept {
+  return code == 1u + static_cast<std::uint8_t>(ApuStandin::Return) ? kRet : std::uint8_t{0};
+}
+
+}  // namespace
+
+void Apu::tellInstruction() {
+  const Spc700State& cpu = cpu_.state();
+  if (cpu.run != RunState::Running || cpu.tcu != 0u) return;
+  const std::uint16_t address = cpu.pc;
+  if (standins_->code(address) == 0u) return;
+  state_->cpu = cpu;  // live for cpuState() inside the call
+  if (instructionWatcher_ != nullptr) instructionWatcher_->reached(address);
+  // What stands there once the host has answered — the call may have disarmed
+  // it, moved the program counter, or run the machine — queued for the fetch.
+  if (standins_ == nullptr) return;
+  standins_->pendingOpcode = standinOpcode(standins_->code(address));
+  standins_->pendingAddress = address;
+}
+
+void Apu::watchInstruction(std::uint16_t address, ApuStandin standin) {
+  if (!standins_) standins_ = std::make_unique<StandinSet>();
+  if (standins_->code(address) == 0u) ++standins_->armed;  // newly armed; re-arming only replaces the stand-in
+  standins_->set(address, static_cast<std::uint8_t>(1u + static_cast<std::uint8_t>(standin)));
+}
+
+void Apu::unwatchInstruction(std::uint16_t address) {
+  if (!standins_ || standins_->code(address) == 0u) return;
+  standins_->set(address, 0u);
+  --standins_->armed;
+  if (standins_->armed == 0u) standins_.reset();  // the last place disarmed: back to one null pointer
+}
+
+bool Apu::runCall(std::uint16_t entry, Spc700State file, std::size_t guard) {
+  // The landing: the program counter as it stands, pushed as CALL pushes it —
+  // the high byte at the pointer's address in page one, the low byte one
+  // below, the pointer wrapping inside the page — and pulled by RET as it
+  // stands, with no step past it.
+  const std::uint16_t landing = file.pc;
+  const std::uint8_t stackBefore = file.sp;
+  state_->ram[0x0100u + file.sp] = static_cast<std::uint8_t>(landing >> 8);
+  state_->ram[0x0100u + ((file.sp - 1u) & 0xFFu)] = static_cast<std::uint8_t>(landing);
+  file.sp = static_cast<std::uint8_t>(file.sp - 2u);
+  file.pc = entry;
+  file.run = RunState::Running;
+  setCpuState(file);
+
+  // The machine runs as it runs from step(): every cycle its own. An
+  // instruction ends at a boundary — an idle cycle of a halted core lands on
+  // one too — and the guard counts those.
+  std::size_t left = guard;
+  for (;;) {
+    if (left == 0u) {
+      state_->cpu = cpu_.state();
+      return false;
+    }
+    machineCycle();
+    if (!cpu_.atInstructionBoundary()) continue;
+    --left;
+    const Spc700State& cpu = cpu_.state();
+    if (cpu.sp == stackBefore && cpu.pc == landing) {
+      state_->cpu = cpu;
+      return true;
+    }
+  }
+}
+
+bool Apu::callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard) {
+  state_->cpu = cpu_.state();
+  const Spc700State before = state_->cpu;
+  if (returns == ApuStandin::None || before.tcu != 0u) return false;
+  const bool returned = runCall(entry, before, guard);
+  setCpuState(before);  // the program's file, back as it was
+  return returned;
+}
+
+bool Apu::callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
+                      std::size_t guard) {
+  state_->cpu = cpu_.state();
+  Spc700State file = state_->cpu;
+  if (returns == ApuStandin::None || file.tcu != 0u) return false;
+  file.sp = stackTop;
+  return runCall(entry, file, guard);
 }
 
 std::uint8_t Apu::readRegister(std::uint8_t reg) {

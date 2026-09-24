@@ -43,6 +43,21 @@ finishes.
 - [The bus observer](#the-bus-observer)
 - [The save observer](#the-save-observer)
 - [Snapshot and restore](#snapshot-and-restore)
+- [Reaching into the machine](#reaching-into-the-machine)
+  - [Memory by bus address](#memory-by-bus-address)
+  - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
+  - [The CPU register file](#the-cpu-register-file)
+  - [Draining audio without allocating](#draining-audio-without-allocating)
+- [Answering an access](#answering-an-access)
+  - [A watch is on the byte](#a-watch-is-on-the-byte)
+  - [What the watcher is told](#what-the-watcher-is-told)
+- [Standing in for a routine](#standing-in-for-a-routine)
+  - [Where the watch fires](#where-the-watch-fires)
+  - [Inside the call](#inside-the-call)
+- [Calling into the guest](#calling-into-the-guest)
+  - [In the guest's own context](#in-the-guests-own-context)
+  - [In a frame of the host's own](#in-a-frame-of-the-hosts-own)
+  - [The guard, and what is refused](#the-guard-and-what-is-refused)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
 - [See also](#see-also)
@@ -92,6 +107,15 @@ The bus maps a 24-bit address the way the console does:
 
 A read of an address the machine does not map returns the last value the data bus carried — the open-bus
 behavior real hardware shows. The cartridge is read-only: a write to a ROM address changes nothing.
+
+The machine reads the bus through a table of its 2048 pages, one entry per 8 KB, built once from the
+[cartridge functions](snes-cartridge.md) when the machine is constructed. Every window in the table
+above is whole pages, so an entry says which memory a page's bytes are in and where its first byte
+lands, and an access finds its byte with one load of the entry and an add. `peek`, `poke`, `physical`
+and the access watch read the same table, so every path agrees on what an address reaches. An image
+whose size is not a multiple of 8 KB carries a chip smaller than a page, whose repeat can begin inside
+one; its pages are found through `romOffset` at each access instead, so every image reads exactly. The
+save's size is not in the table, since a restore can change it, and is applied at each access.
 
 ### How a cartridge lays across the bus
 
@@ -821,6 +845,364 @@ machine.restore(saved);   // back to the saved cycle, exactly
 object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
 moved, never copied; a moved machine carries its audio machine after its state.
 
+The machine is deterministic: the same state and the same trace give the same bytes. The trace is
+everything that reaches the machine from outside — the pads presented before each run, and whatever a
+host does through [the faces below](#reaching-into-the-machine): the bytes it pokes, the register files
+it writes, its answers to watched accesses, the stand-ins it arms and the routines it calls. Two
+machines restored from one snapshot and driven by one trace end on equal `SnesState` values and hand
+over the same audio frames; `tests/snes/host_surface_test.cpp` holds the whole host face to that on one
+running cartridge.
+
+What a host sets up is its own and not part of the state: the observers, the watchers, the places
+armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
+leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set —
+the routine a stand-in held off runs there.
+
+## Reaching into the machine
+
+Beside the whole-state snapshot, a host reaches into individual places the machine holds, reading and
+writing them without spending a cycle and without a register's side effect. This is for a host that
+edits memory, seeds a value, or reads one out between runs — not for the program the machine runs.
+
+### Memory by bus address
+
+`peek` answers the byte a 24-bit bus address holds, `poke` writes it, and `addressable` says whether a
+span is memory the face reaches. The three agree, because `addressable` is `peek`'s own answer.
+
+```cpp
+std::optional<std::uint8_t> byte = machine.peek(0x7E0000);  // a work-RAM byte
+machine.poke(0x008000, 0x42);                               // a byte of the cartridge image
+bool ok = machine.addressable(0x008000, 2);                 // two ROM bytes: true
+```
+
+`peek` reaches work RAM, the cartridge's ROM and its save, and answers `std::nullopt` for anything the
+face does not reach as memory — a register, or an address the cartridge leaves open. `poke` returns
+whether the byte landed. A `poke` to ROM changes the machine's own copy of the image, not a file, and no
+snapshot carries it; a `poke` to the save writes the save without reporting it to the save observer,
+which reports the program's stores rather than the host's own edits. A register address is refused by
+both: reading a register on the console would change it, and the register file is already in the state a
+host holds.
+
+### The memories the bus cannot name
+
+Video RAM, the palette, the sprite table and the audio machine's RAM are written by name, each the way
+the chip reads it: no port address steps, no latch moves, no increment happens. The picture path reads
+these at every dot, so a write shows at the next one.
+
+```cpp
+machine.writeVram(0x1234, 0xAB);    // 64 KB
+machine.writeCgram(0x00, 0x1F);     // 512 bytes
+machine.writeOam(0x00, 0x80);       // 544 bytes
+machine.writeApuRam(0x0200, 0x5C);  // the audio machine's RAM
+```
+
+An address past a memory's end is ignored. The read-only spans `vram()`, `cgram()`, `oam()` and
+`peekApu()` hand the same bytes back.
+
+### The CPU register file
+
+`cpuState()` reads the 65816's registers whole, and `setCpuState()` writes them, reloading the live core
+so the written set is live on the next cycle. Instruction progress is part of the value, so a machine
+written mid-instruction resumes exactly where the value says.
+
+```cpp
+Cpu65816State regs = machine.cpuState();
+regs.pc = 0x8000;
+machine.setCpuState(regs);  // the next step runs from $8000
+```
+
+### Draining audio without allocating
+
+`takeFrames()` returns the stereo frames produced since the last drain in a fresh vector.
+`takeFrames(std::span<StereoFrame>)` drains into the caller's own storage instead and returns how many
+it wrote; frames past the end of the span stay queued for the next drain, and nothing is allocated — a
+host producing sound on a callback that must not allocate drains through this form.
+
+```cpp
+std::array<StereoFrame, 512> buffer;
+std::size_t written = machine.takeFrames(buffer);
+```
+
+## Answering an access
+
+Beside the observer, which reports every settled access and cannot change it, a host answers accesses
+before they take effect. It sets an `AccessWatcher` and arms the places it cares about; each access to
+an armed place asks the watcher what happens — let it through, prevent it, or stand a byte in its place.
+
+```cpp
+struct Guard final : AccessWatcher {
+  AccessAnswer read(std::uint32_t address, std::uint8_t value, AccessSource source,
+                    CycleKind kind, std::uint8_t cycle) override {
+    return AccessAnswer::instead(0xFF);  // answer $FF wherever the program reads here
+  }
+  AccessAnswer write(std::uint32_t address, std::uint8_t value, AccessSource source,
+                     CycleKind kind, std::uint8_t cycle) override {
+    return AccessAnswer::veto();          // drop the program's writes here
+  }
+};
+
+Guard guard;
+machine.setAccessWatcher(&guard);
+machine.watchAccess(0x7E0100, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 bytes, both directions
+```
+
+An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
+and leaves a read as it stands, since nothing can stop the chip receiving a byte; `instead(byte)` puts
+`byte` in the access's place — the read delivers it, the write stores it. `AccessAnswer` is one class
+for both machines, declared in `apu/apu.h`; the console's watcher is `AccessWatcher` and the audio
+machine's `ApuAccessWatcher` ([apu-machine.md §Answering an access](apu-machine.md#answering-an-access)).
+
+`watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
+them. The two directions are independent, arming a place already armed does nothing, and a machine that
+has never armed a place holds no table at all — so a watch nobody arms costs nothing. A watch sees every
+access to an armed place — the CPU's, either transfer engine's, and the work-RAM port's — and `source`
+tells the watcher which made it.
+
+The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
+leaves it in place. With nothing armed — no place for a watch and no instruction for a
+[stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test. With something
+armed, an access pays one load more: the armed set holds, for each page of the bus and each direction,
+the run of armed bits that page reaches, or nothing, so an access to a page holding nothing armed
+costs the bus and two tests, and one to a page that does finds its bit with an add, through whichever
+alias it drove. A page the machine cannot read as one run — an image found through `romOffset`, a save
+that folds inside the page, a system page with an open-bus byte armed between its registers — is
+classified per access instead.
+
+### A watch is on the byte
+
+A place is a byte, not a bus address. The console reaches most bytes through several addresses: the
+low 8 KB of work RAM answers at `$7E:0000`–`$1FFF` and at `$0000`–`$1FFF` of every system bank (129
+addresses for one byte), every register answers at its offset in all 128 system banks, the image
+repeats across the banks the map gives it, and a save smaller than its window repeats across the
+window. Arming any one of a byte's addresses arms the byte, so the watcher hears every access to it
+through every alias, and disarming through another alias disarms it. The watcher is told the 24-bit
+address the access drove, whichever alias that was.
+
+`physical` answers which byte an address reaches, as the machine reads it — the space and the index
+within it — and is what the watch keys on:
+
+```cpp
+Snes::Physical p = machine.physical(0x000010);   // {Space::WorkRam, 0x10}
+Snes::Physical q = machine.physical(0x7E0010);   // the same: {Space::WorkRam, 0x10}
+Snes::Physical r = machine.physical(0x808100);   // {Space::CartridgeRom, image offset}
+Snes::Physical s = machine.physical(0x802140);   // {Space::Register, 0x2140}
+```
+
+`WorkRam`'s index is the offset into the 128 KB; `Register`'s the 16-bit offset; `SaveRam`'s the
+offset into the save, reduced to its size; `CartridgeRom`'s the offset into the image after the map's
+mirroring; `OpenBus` — an address that reaches no byte — is a place of its own, keyed by the address
+itself. `physical` spends no cycle and touches no register.
+
+### What the watcher is told
+
+`source` is which part of the machine made the access: the CPU, either transfer engine, or the
+work-RAM port reaching work RAM on its own behalf through `$2180`.
+
+`kind` is what the cycle was for, as the CPU core drives it (`CycleKind`, `cpu/cpu65816.h`): an
+opcode fetch, an operand fetch, a data read or write, the read half or the write half of a
+read-modify-write, an interrupt's vector read. So a host tells a program reading a byte from the
+core fetching an instruction at the same address, and a load from the read that begins an `INC`. A
+transfer engine's and the port's accesses are plain data reads and writes.
+
+`cycle` is which cycle of the instruction the access is, counted as the chip spends them: 0 is the
+opcode fetch, and every cycle counts whether or not it reaches the bus — an internal cycle moves the
+count on. The order is the chip's own:
+
+| Access | Cycles |
+|---|---|
+| A 16-bit load (`LDA !abs`, M = 0) | low byte at 3, high byte at 4 |
+| A 16-bit push (`PHA`, M = 0) | high byte at 2, low byte at 3 |
+| A native 16-bit read-modify-write (`INC !abs`, M = 0) | reads low at 3 and high at 4, writes back high at 6 and low at 7 |
+| An emulation-mode read-modify-write (`INC !abs`) | reads at 3, writes the byte it read at 4 (`RmwModifyWrite`), then the new byte at 5 (`RmwWrite`) |
+| A hardware interrupt's vector, emulation mode | low byte at 5, high byte at 6 (one later each in native mode) |
+
+Width is not told: the chip does not know it at the bus. A host answering one byte of a two-byte
+access is answering that byte alone, and a veto on the high byte of a 16-bit store tears it — the low
+byte lands, the high byte stands as it was. A host that needs the width decodes the instruction at
+`cpuState().pc` through `peek`, or runs the [intermediate representation](ir.md) beside the machine.
+
+For a transfer engine, `cycle` is the byte's position in the channel's transfer pattern, 0 to 3, the
+read and the write of one byte carrying the same one — so the second byte of a two-register pattern
+is told as 1 on both sides. A table read carries 0 for a line count or a pointer's low byte and 1 for
+its high byte. The work-RAM port's own access carries the cycle of the access to `$2180` that drove
+it: 3 for a `LDA !$2180`.
+
+A register with a read side effect has already had it when its read is told. A read of `$4210` has
+cleared the NMI flag, a read of `$2140`–`$2143` has taken the port's byte, a read of `$4211` has
+acknowledged the timer. The answer changes only what the program receives — `instead` hands it
+another byte — and a veto cannot undo the effect, because a read cannot be prevented. A host that
+wants a program not to acknowledge an interrupt cannot do it here; `peek` refuses registers for the
+same reason.
+
+## Standing in for a routine
+
+A host is told before the instruction at a watched address runs, and can have a return stand at that
+address so the routine there never runs. It sets an `InstructionWatcher` and arms the addresses it
+cares about, each with what stands there while it is armed:
+
+```cpp
+struct Hook final : InstructionWatcher {
+  Snes& machine;
+  explicit Hook(Snes& m) : machine(m) {}
+  void reached(std::uint32_t address) override {
+    Cpu65816State regs = machine.cpuState();   // live: the registers as the routine was entered
+    regs.a = 0x0001;                           // the answer the routine would have produced
+    machine.setCpuState(regs);                 // what the return runs under
+  }
+};
+
+Hook hook(machine);
+machine.setInstructionWatcher(&hook);
+machine.watchInstruction(0x008100, Standin::Near);   // JSR $8100: told, then RTS stands in
+machine.watchInstruction(0x009000, Standin::None);   // told, and the instruction runs
+```
+
+`Standin` names what stands at the address: `None` tells the watcher and lets the instruction run;
+`Near` answers the fetch with `RTS`, for a routine a `JSR` entered; `Long` answers it with `RTL`, for
+one a `JSL` entered. A host that does not say takes `Near`. With a return standing in, the one
+instruction that runs at the address is the return: the caller resumes as it would after the routine
+returned, with the stack pointer where it was before the call, and the return spends exactly the
+cycles a real one spends — a stand-in and a cartridge holding a real `RTS` at that byte land on
+byte-identical states. A stand-in stands whether or not a watcher is set.
+
+The cartridge is never written. Only the fetch that begins the instruction the watcher was told
+about answers the return: `peek` of the byte, a data read of it (`LDA !$8100`), a transfer engine's
+read and the read an interrupt sequence discards all answer the cartridge, and disarming has nothing
+to put back. An access watch armed on the same byte is told the return's opcode as the value of that
+fetch, since that is the byte the machine answers.
+
+`watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
+what stands there, disarming one not armed does nothing, and a machine that has never armed an
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle, and
+with one armed, an instruction on a page holding no armed instruction costs one load more.
+A watched place is a byte, as an access watch's is
+([physical](#a-watch-is-on-the-byte)): a routine in the low 8 KB of work RAM armed through `$7E:0100`
+is heard entered by a `JSR $0100` in bank `$00`, and a routine in the image armed through bank `$00`
+is heard entered through bank `$80`. The watcher is told the 24-bit address the fetch drives,
+whichever alias that is.
+
+### Where the watch fires
+
+The watcher is told once per instruction the chip begins, at an instruction boundary the CPU takes
+as one — never per cycle. Concretely:
+
+| Situation | Told? |
+|---|---|
+| The instruction begins | Yes, once, before its opcode fetch |
+| A block move (`MVN`, `MVP`) | Once per byte it moves — the chip begins each byte as an instruction of its own, fetching the opcode again |
+| A transfer engine holds the bus | No: no instruction begins inside a DMA or an HDMA event; the next instruction is told once the transfer has ended |
+| The core is halted (`WAI`, `STP`) | No: a halted core sits on a boundary and begins nothing |
+| A hardware interrupt is due at the boundary | No: the interrupt sequence takes the boundary, and the interrupted instruction is told when the handler returns to it |
+
+So a `STA $420B` that arms a transfer is followed by one more CPU cycle before the transfer engages —
+the next instruction's opcode fetch — and that instruction is told before the transfer, the one after
+it once the transfer has run. A `WAI` woken by an interrupt is followed by the interrupt sequence, not
+by the instruction after the `WAI`; that instruction is told after the handler's `RTI`.
+
+### Inside the call
+
+The machine's clock has not moved for the call: being told advances no counter — not the master
+counter, not the beam, not the audio machine, not a timer — and a watched run lands on the same state
+and the same audio as a plain one. The host runs on its own time.
+
+`cpuState()` is live inside the call, at the instruction, and a register file written with
+`setCpuState()` there is what the instruction runs under — which is how a host answers for a routine:
+told at its entry, it writes the registers the routine would have left and lets the return stand in.
+Writing the register file touches the CPU alone; queued audio frames and the rest of the machine
+stand. A host that moves the program counter inside the call sends the CPU elsewhere, and the return
+queued for the watched address is not applied to the fetch there: the instruction at the new address
+runs as it stands. A host that disarms the address inside the call lets the routine run.
+
+## Calling into the guest
+
+A host runs a routine the machine already holds and gets control back when it returns. There are two
+forms, one verb each:
+
+```cpp
+// In the guest's own context: its registers and its stack, put back afterwards.
+bool returned = machine.callInContext(0x008100, Standin::Near, 10000);
+
+// In a frame of the host's own: the host's presets, a stack the host names.
+Cpu65816State presets = machine.cpuState();
+presets.a = 0x0005;
+machine.setCpuState(presets);
+bool ok = machine.callOnStack(0x008300, 0x01F0, Standin::Near, 10000);
+std::uint16_t result = machine.cpuState().a;   // what the routine left
+```
+
+Both return whether the routine returned; `false` means the guard tripped or the call was refused.
+`Standin::Near` names a routine that ends in `RTS` and `Standin::Long` one that ends in `RTL`; the
+call pushes the landing the way `JSR` or `JSL` would push theirs — two bytes within page one for a
+near return in emulation mode, three that may leave it for a long one — through `poke`, spending no
+cycle, and points the CPU at the entry. The landing is the program counter as it stands, in the entry's
+bank for a near return and the current bank for a long one, and nothing there is executed.
+
+The routine is the machine running. Its cycles are real and priced by region, the beam moves, the
+audio machine is paced, a transfer it arms runs, and a hardware interrupt due is taken inside it and is
+not pending again afterwards. `state().master` moves by what the routine spent, and those cycles come
+out of the budget the host runs next: a call between two `run()` calls shortens the second by the
+routine's cycles, and a call made inside a watcher's call during `run()` ends that `run()` that much
+sooner. A refresh pause or a transfer the routine crosses is spent as it always is.
+
+The call ends at the first instruction boundary where the stack pointer is back at its value before
+the push **and** the program counter is at the landing. Both are required: a routine that branches
+through the landing without returning does not end the call, nor does one that pops its own frame
+while still inside itself, and an interrupt taken inside the routine returns into it, not out of it.
+
+### In the guest's own context
+
+`callInContext` saves the register file, runs the routine on the guest's own stack, and puts the whole
+file back — the program counter, the stack pointer, the halt state, all of it — so the interrupted
+program carries on unaware. What the routine changed in memory stands. A host that wants the routine's
+registers reads them live inside an instruction watch on the routine's return:
+
+```cpp
+struct Result final : InstructionWatcher {
+  Snes& machine;
+  std::uint16_t a = 0;
+  explicit Result(Snes& m) : machine(m) {}
+  void reached(std::uint32_t) override { a = machine.cpuState().a; }   // at the RTS: the routine's A
+};
+
+Result result(machine);
+machine.setInstructionWatcher(&result);
+machine.watchInstruction(0x008102, Standin::None);  // the routine's RTS
+machine.callInContext(0x008100, Standin::Near, 10000);
+```
+
+A waiting or stopped core is called like any other: the routine runs, and the file put back leaves the
+core waiting or stopped as it was.
+
+### In a frame of the host's own
+
+`callOnStack` runs the routine under the register file as the host wrote it with `setCpuState`, with
+the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file
+the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at
+the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the
+machine from its own code reads what it wants there; a host that interrupted a program and wants its
+file back saves it with `cpuState()` before the call and restores it with `setCpuState` after.
+
+### The guard, and what is refused
+
+`guard` is the number of instructions the routine may run, the return among them; an idle cycle of a
+halted core counts as one, so a routine that waits for an interrupt that never comes trips it too. On
+overrun the routine is abandoned at its boundary and the call returns `false` — the file put back for
+`callInContext`, left where it stopped for `callOnStack`. A guard of zero runs nothing.
+
+A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
+touched — when:
+
+- `returns` is `Standin::None`: a call needs a return to end it.
+- The machine is not between instructions: inside an access watcher's call, or after a `run()` that
+  stopped mid-instruction. Between `step()` calls and inside an instruction watcher's call it is.
+- The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's
+  own act, and the call never does it on the guest's behalf.
+- The landing would land where the memory face does not reach — a stack pointer in the register file,
+  for instance.
+
+A call made from inside a watcher's call is the same call, at any depth: a watcher told inside one call
+may make another.
+
 ## Gotchas
 
 - The reset vector is read from the cartridge at construction. An image with a zero vector starts the
@@ -848,6 +1230,44 @@ moved, never copied; a moved machine carries its audio machine after its state.
 - An observer sees fetches too: to count only the data an instruction touched, drop `OpcodeFetch` and
   `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle
   the CPU spent, count its accesses and the internal cycles together.
+- An opcode fetch is a read like any other: arming a code address for reads has the watcher answer the
+  CPU's fetches of it, so `instead(byte)` there feeds the core a different opcode. `kind` says which
+  accesses are fetches; a host that wants the program's reads alone answers `OpcodeFetch` and
+  `OperandFetch` with `proceed()`.
+- A watch is on the byte, not the address: arming `$7E0010` hears a `LDA $10` in bank `$00`, a
+  `LDA >$BF0010`, and the work-RAM port reading `$7E:0010` — and the watcher is told the address each
+  one drove. Arming a register at `$2140` hears it from every system bank. Counting accesses to "the
+  bank-$7E address" counts every alias.
+- The high byte of a 16-bit access is its own access, told one cycle after the low byte. A host that
+  substitutes or vetoes one of the two tears the pair; answer both, on their two cycles, to answer the
+  word.
+- A read of `$4210`, `$4211`, `$2140`–`$2143` or any other register with a read side effect is told
+  after the effect: the watcher sees the byte the register answered, `instead` changes what the program
+  receives, and neither `veto` nor anything else puts the flag back.
+- The access watch and the bus observer are separate mechanisms. A read the watch substitutes is what
+  the observer reports, because the machine answered that byte; a write the watch vetoes or substitutes
+  the observer still reports as the source drove it — the watch changed the effect, not the drive.
+- An instruction watch counts instructions the chip begins, not opcodes in the program: a block move
+  is told once per byte, and an instruction a hardware interrupt lands on is told after the handler
+  returns to it, not at the boundary the interrupt took.
+- A stand-in is a return and nothing more. `Near` for a routine a `JSR` entered, `Long` for one a
+  `JSL` entered; the wrong one leaves the stack a byte off, exactly as the wrong return instruction
+  would. What the routine would have left in the registers is the host's to write with `setCpuState`
+  inside the call; nothing writes it for you.
+- The stand-in answers one fetch: the opcode fetch of the instruction the watcher was told about. A
+  host reading the byte through `peek`, an `LDA` of it, the bus observer's report of a data read and
+  an access watch on any read but that fetch all see the cartridge's own byte.
+- `watchInstruction` with one argument arms `Standin::Near`. A host that wants to be told and nothing
+  more says `Standin::None`.
+- A call's `returns` must match the routine's return instruction. `Near` for one that ends in `RTS`,
+  `Long` for one that ends in `RTL`; the wrong one leaves the stack pointer a byte off, the call never
+  ends, and the guard trips. A routine that ends in `RTI` returns through neither and is not callable.
+- A call spends the machine's time. `state().master` moves by the routine's cycles, and the next
+  `run()` runs that much less of its budget — a long routine called between two `run()` calls can leave
+  the next one with nothing to run. `step()` is unaffected: it runs its instruction regardless.
+- `callInContext` puts the register file back, so `cpuState()` after it is the guest's file, not the
+  routine's. Read a routine's registers inside an instruction watch on its return, or call with
+  `callOnStack`, which leaves them.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.

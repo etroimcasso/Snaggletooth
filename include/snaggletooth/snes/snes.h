@@ -36,6 +36,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -145,6 +146,8 @@ struct DmaChannel {
   std::uint16_t a2a = 0xFFFF;  // $43n8/$43n9: the HDMA table's current address, low 16 bits
   std::uint8_t nltr = 0xFF;    // $43nA: the HDMA line counter (bits6-0) and the repeat flag (bit7)
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
+
+  [[nodiscard]] bool operator==(const DmaChannel&) const noexcept = default;
 };
 
 // A standard controller's twelve buttons, in the order the pad shifts them out —
@@ -272,6 +275,89 @@ class SaveObserver {
   // all in a frame where none did. The span is the machine's own storage and is
   // valid for the call.
   virtual void changed(std::span<const std::uint8_t> save) = 0;
+};
+
+// A host told, before a watched access takes effect, that the program is
+// reading or writing a place it armed (Snes::watchAccess), and answering what
+// happens (AccessAnswer, `apu/apu.h`). A place is a byte, not a bus address:
+// the low 8 KB of work RAM answers at $7E:0000-$1FFF and at $0000-$1FFF of every
+// system bank, every register answers at its offset in all 128 system banks,
+// and the cartridge's image and save repeat across the banks the map gives
+// them — arming any one of a byte's addresses arms the byte, and the watcher is
+// told the 24-bit `address` the access drove, whichever alias it was.
+//
+// `source` is which part of the machine made the access; `kind` is what the
+// cycle was for, as the CPU core drives it (`cpu/cpu65816.h`), so an opcode
+// fetch and a data read of one address are told apart, and the read half of a
+// read-modify-write from a load; an engine's and the port's accesses are plain
+// data reads and writes. `cycle` is which cycle of the instruction the access
+// is, counted as the chip spends them: 0 is the opcode fetch, every cycle counts
+// whether or not it reaches the bus, a 16-bit load's low byte is at one cycle
+// and its high byte at the next, a 16-bit push writes its high byte first, a
+// native 16-bit read-modify-write reads low then high and writes back high then
+// low, and an emulation-mode read-modify-write writes its address twice — the
+// byte it read (RmwModifyWrite), then the new one (RmwWrite). For a transfer
+// engine, `cycle` is the byte's position in the channel's transfer pattern,
+// the read and the write of one byte carrying the same one; a table read
+// carries 0 for a line count or a pointer's low byte and 1 for its high byte.
+// The work-RAM port's own access carries the cycle of the access to $2180 that
+// drove it. Width is not told — the chip does not know it at the bus — so a
+// host answering one byte of a two-byte access is answering that byte alone.
+//
+// A register with a read side effect has already had it when its read is told:
+// a read of $4210 has cleared the NMI flag, a read of $2140-$2143 has taken the
+// port's byte. The answer changes only what the program receives; a veto
+// cannot undo the effect, and nothing can, because a read cannot be prevented.
+//
+// A mechanism beside BusObserver, which still reports every settled access
+// after the fact and cannot answer. Set by pointer like the observers: the
+// host's object outlives every step it is set for, and it is not part of the
+// state, so a snapshot does not carry it and restore() leaves it in place.
+class AccessWatcher {
+ public:
+  virtual ~AccessWatcher() = default;
+  // The program is about to read `address`, where the machine would answer
+  // `value`.
+  virtual AccessAnswer read(std::uint32_t address, std::uint8_t value, AccessSource source,
+                            CycleKind kind, std::uint8_t cycle) = 0;
+  // The program is about to write `value` to `address`.
+  virtual AccessAnswer write(std::uint32_t address, std::uint8_t value, AccessSource source,
+                             CycleKind kind, std::uint8_t cycle) = 0;
+};
+
+// What stands at a watched address while it is armed (Snes::watchInstruction):
+// nothing, so the instruction there runs once the host has been told; or a
+// return, so the routine there never runs — the fetch that begins the
+// instruction answers the return's opcode in place of the byte the cartridge
+// holds, and the one instruction that runs is the return.
+enum class Standin : std::uint8_t {
+  None,  // the instruction runs after the host is told
+  Near,  // a return within the bank (RTS), for a routine a JSR entered
+  Long,  // a return across banks (RTL), for one a JSL entered
+};
+
+// A host told, before the instruction at a watched address runs, that the CPU
+// has reached it. Told once per instruction the chip begins — a block move
+// begins each byte it moves as an instruction of its own — at an instruction
+// boundary the CPU takes as a boundary: not while a transfer engine holds the
+// bus, not while the core is halted, and not at a boundary a hardware interrupt
+// takes, where the interrupted instruction is told when the handler returns to
+// it. A watched place is a byte, as an access watch's is (physical): arming a
+// routine in the low 8 KB of work RAM through bank $7E hears it entered from a
+// system bank, and `address` is the 24-bit address the fetch drives.
+//
+// The machine's clock has not moved for this call: the host runs on its own
+// time, and the cycles the instruction — or the return standing in for it —
+// spends are the same as with no host at all. cpuState() is live inside the
+// call, and a register file written with setCpuState() inside it is what the
+// instruction runs under. The watcher is the host's object, set by pointer and
+// not part of the state, so a snapshot does not carry it and restore() leaves
+// it in place.
+class InstructionWatcher {
+ public:
+  virtual ~InstructionWatcher() = default;
+  // The instruction at `address` is about to run.
+  virtual void reached(std::uint32_t address) = 0;
 };
 
 // How a machine is built: the cartridge image, the clock rate, and whether to
@@ -439,6 +525,8 @@ struct SnesState {
   bool hdmaLineFired = false;    // this scanline's delivery has been triggered
   bool hdmaRunPending = false;   // an HDMA event is due on the next machine cycle
   bool hdmaIniting = false;      // that pending event is the start-of-frame init (rather than a delivery)
+
+  [[nodiscard]] bool operator==(const SnesState&) const noexcept = default;
 };
 
 class Snes {
@@ -571,6 +659,155 @@ class Snes {
     return apu_.peek(address);
   }
 
+  // A host reaching into the machine's memory by 24-bit bus address, without
+  // spending a cycle and without a register's side effect. peek answers the
+  // byte the address holds — work RAM, the cartridge's ROM, or its save — and
+  // std::nullopt for anything this face does not reach as memory: a register,
+  // or an address the cartridge leaves open. poke writes that byte and returns
+  // whether it landed; a poke to ROM changes the machine's own copy of the
+  // image, never a file, and no snapshot carries it. addressable answers, for
+  // `bytes` bytes from `address`, whether every one is memory this face reaches;
+  // it is peek's own answer, so no two callers are told different things about
+  // one address, and a zero-length span is addressable.
+  [[nodiscard]] std::optional<std::uint8_t> peek(std::uint32_t address) const noexcept;
+  bool poke(std::uint32_t address, std::uint8_t value) noexcept;
+  [[nodiscard]] bool addressable(std::uint32_t address, std::size_t bytes) const noexcept;
+
+  // The four memories the bus cannot name, each written the way the chip reads
+  // it: no port address steps, no latch moves, no increment happens. VRAM is
+  // 64 KB, CGRAM 512 bytes, OAM 544 bytes, and an address past a memory's end
+  // is ignored. writeApuRam writes the audio machine's RAM (Apu::writeRam). The
+  // picture path reads these memories at every dot, so a write shows at the next
+  // one; none of the four is a register write, so none drives a side effect.
+  void writeVram(std::uint16_t address, std::uint8_t value) noexcept;
+  void writeCgram(std::uint16_t address, std::uint8_t value) noexcept;
+  void writeOam(std::uint16_t address, std::uint8_t value) noexcept;
+  void writeApuRam(std::uint16_t address, std::uint8_t value) noexcept;
+
+  // The CPU's register file, read and written whole on a stopped machine.
+  // cpuState() answers the registers as they stand; setCpuState() reloads the
+  // live core from `state`, the way restore() does, so the written set is live
+  // for the next cycle. Instruction progress is part of the value: a machine
+  // written mid-instruction resumes exactly where the value says.
+  [[nodiscard]] const Cpu65816State& cpuState() const noexcept { return state_.cpu; }
+  void setCpuState(const Cpu65816State& state);
+
+  // The 32 kHz stereo frames produced since the last drain, into the caller's
+  // own storage, returning how many were written. Frames past the end of `into`
+  // stay queued for the next drain, and nothing is allocated — a host producing
+  // sound on a callback that must not allocate drains here. takeFrames() with no
+  // buffer is the drain that allocates a fresh vector.
+  [[nodiscard]] std::size_t takeFrames(std::span<StereoFrame> into) noexcept;
+
+  // The watcher (AccessWatcher, above) told every armed access, or none, which
+  // is how the machine starts. With none set, or nothing armed, an access pays
+  // one test.
+  void setAccessWatcher(AccessWatcher* watcher) noexcept { accessWatcher_ = watcher; }
+  [[nodiscard]] AccessWatcher* accessWatcher() const noexcept { return accessWatcher_; }
+
+  // Arms or disarms a watch on `bytes` bytes from `address`, for reads, writes,
+  // or both. A watch is on the byte an address reaches (physical, below), so
+  // arming one of a byte's addresses arms every access to it through any of
+  // them, and disarming through another alias disarms it. Arming a place
+  // already armed does nothing and disarming one not armed does nothing; the two
+  // directions are independent, so a host that wants writes does not make the
+  // machine pay for reads. A machine that has never armed a place holds no
+  // table at all, and disarming the last place frees it again. A watch sees
+  // every access to the place — the CPU's, either transfer engine's, and the
+  // work-RAM port's — and tells the watcher which made it.
+  void watchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite);
+  void unwatchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite);
+
+  // The byte a bus address reaches, as the machine reads it: which memory, and
+  // where in it. Two addresses that answer the same byte classify the same —
+  // the low 8 KB of work RAM at $7E:0000-$1FFF and at $0000-$1FFF of every
+  // system bank, a register at its offset in every system bank, the save
+  // reduced to its size across its window, the image at the offset the map and
+  // its mirroring reach — so a watch armed through one alias fires through
+  // every other. An address that reaches no byte, open bus, is a place of its
+  // own keyed by the address itself. WorkRam's index is the byte's offset in
+  // the 128 KB; Register's the 16-bit offset; SaveRam's the offset into the
+  // save; CartridgeRom's the offset into the image; OpenBus's the address.
+  // Pure: no cycle is spent and no register is touched.
+  enum class Space : std::uint8_t { WorkRam, Register, SaveRam, CartridgeRom, OpenBus };
+  struct Physical {
+    Space space;
+    std::uint32_t index;
+    [[nodiscard]] bool operator==(const Physical&) const noexcept = default;
+  };
+  [[nodiscard]] Physical physical(std::uint32_t address) const noexcept;
+
+  // The watcher (InstructionWatcher, above) told each armed instruction the CPU
+  // reaches, or none, which is how the machine starts. With none set, or nothing
+  // armed, a cycle pays one test.
+  void setInstructionWatcher(InstructionWatcher* watcher) noexcept {
+    instructionWatcher_ = watcher;
+  }
+  [[nodiscard]] InstructionWatcher* instructionWatcher() const noexcept {
+    return instructionWatcher_;
+  }
+
+  // Arms a watch on the instruction at `address`, with `standin` standing there
+  // while it is armed: None tells the watcher and lets the instruction run; Near
+  // or Long tells the watcher and answers the fetch with a return (Standin,
+  // above), so the routine's body never runs and the caller resumes as it would
+  // after the routine returned, the return spending exactly what a real one
+  // spends. A watch is on the byte the address reaches (physical), so the
+  // routine is heard entered through any alias. Arming an armed place replaces
+  // what stands there; disarming a place not armed does nothing. A stand-in
+  // stands whether or not a watcher is set. The cartridge is never written: peek
+  // and a data read of the byte answer the cartridge, and disarming has nothing
+  // to put back. A machine that has never armed an instruction holds no table
+  // at all, and disarming the last one frees it again.
+  void watchInstruction(std::uint32_t address, Standin standin = Standin::Near);
+  void unwatchInstruction(std::uint32_t address);
+
+  // Runs the routine at `entry` and returns when it returns: true when it did,
+  // false when the guard tripped or the call was refused. The routine is the
+  // machine running — its cycles are real and priced by region, the beam moves,
+  // the audio machine is paced, a transfer the routine arms runs and a hardware
+  // interrupt due is taken — and they are spent from the budget the host runs,
+  // so state().master moves and the next run() runs that much less.
+  //
+  // callInContext runs the routine in the guest's own context: the registers and
+  // the stack pointer as they stand, the landing pushed where the guest's own
+  // call would push it, and the whole register file put back afterwards, so the
+  // interrupted program carries on unaware. What the routine changed in memory
+  // stands. A host that wants the routine's registers reads them live inside
+  // an instruction watch on the routine's return (Standin::None), before the
+  // file goes back.
+  //
+  // callOnStack runs it in a frame of the host's own: the register file is
+  // whatever the host wrote with setCpuState, the stack pointer starts at
+  // `stackTop`, and nothing is put back — cpuState() afterwards is the file the
+  // routine left, or where it was abandoned, for the host to read and, if it
+  // wants the guest's file back, to restore itself.
+  //
+  // `returns` names the return the routine ends with: Near pushes two bytes for
+  // a routine an RTS leaves, Long three for one an RTL leaves. The landing is
+  // the program counter as it stands, in the entry's bank for Near and the
+  // current bank for Long; nothing there is executed. The call ends at the first
+  // instruction boundary where the stack pointer is back at its value before the
+  // push and the program counter is at the landing — both, so a routine that
+  // branches through the landing without returning does not end it, and an
+  // interrupt taken inside the routine returns into it, not out of it. The
+  // landing's bytes are pushed through poke, spending no cycle.
+  //
+  // `guard` bounds a routine that never returns, in instructions the routine may
+  // run; an idle cycle of a halted core counts as one, so a wait for an
+  // interrupt that never comes trips it too. On overrun the routine is
+  // abandoned at its boundary and the call returns false. Zero runs nothing.
+  //
+  // The call is refused, returning false with nothing done, when `returns` is
+  // Standin::None, when the machine is not between instructions (inside an
+  // access watcher's call, or after a run() that stopped mid-instruction),
+  // when the entry's own bank does not map it (addressable(entry, 1)), or
+  // when the stack the landing would land on is not memory this face reaches.
+  // A call made from inside a watcher's call, at any depth, is the same call.
+  bool callInContext(std::uint32_t entry, Standin returns, std::size_t guard);
+  bool callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
+                   std::size_t guard);
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
@@ -580,12 +817,12 @@ class Snes {
   struct Bus {
     Snes& m;
     std::uint8_t read(std::uint32_t address, CycleKind kind) {
-      const std::uint8_t value = m.busRead(address);
+      const std::uint8_t value = m.busRead(address, kind);
       m.observe(address, value, false, kind, AccessSource::Cpu);
       return value;
     }
     void write(std::uint32_t address, std::uint8_t value, CycleKind kind) {
-      m.busWrite(address, value);
+      m.busWrite(address, value, kind);
       m.observe(address, value, true, kind, AccessSource::Cpu);
     }
     void internal(std::uint32_t address) {
@@ -624,17 +861,22 @@ class Snes {
   // A transfer engine's two sides of one byte, reported as its accesses: the
   // read on one bus and the write on the other, in that order, each naming the
   // channel it served. A read of an HDMA table says so with `table`, and one past
-  // the table's end with `pastTableEnd` as well.
+  // the table's end with `pastTableEnd` as well. `cycle` is what the access
+  // watch is told: the byte's position in the channel's transfer pattern, or for
+  // a table read 0 for a count or a pointer's low byte and 1 for its high byte.
   std::uint8_t engineRead(std::uint32_t address, bool aBus, AccessSource source,
-                          std::uint8_t channel, bool table = false, bool pastTableEnd = false);
+                          std::uint8_t channel, std::uint8_t cycle, bool table = false,
+                          bool pastTableEnd = false);
   void engineWrite(std::uint32_t address, std::uint8_t value, bool aBus, AccessSource source,
-                   std::uint8_t channel);
+                   std::uint8_t channel, std::uint8_t cycle);
   // One byte of a transfer between A-bus address `aAddr` and B-bus address `bAddr`,
-  // into the A bus when `toA`. Work RAM named on both sides — a work-RAM address on
-  // the A bus and $2180-$2183 on the B bus — is not copied: the port's side is open
-  // bus, its address does not step, and the port reports no access of its own.
+  // into the A bus when `toA`; `unit` is the byte's position in the transfer
+  // pattern, which both of its accesses carry. Work RAM named on both sides — a
+  // work-RAM address on the A bus and $2180-$2183 on the B bus — is not copied:
+  // the port's side is open bus, its address does not step, and the port reports
+  // no access of its own.
   void engineByte(std::uint32_t aAddr, std::uint32_t bAddr, bool toA, AccessSource source,
-                  std::uint8_t channel, bool table);
+                  std::uint8_t channel, std::uint8_t unit, bool table);
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
@@ -729,8 +971,13 @@ class Snes {
   // audio machine's state is state_.apu itself, so nothing else is copied.
   void sync();
 
-  std::uint8_t busRead(std::uint32_t address);
-  void busWrite(std::uint32_t address, std::uint8_t value);
+  std::uint8_t busRead(std::uint32_t address, CycleKind kind);
+  void busWrite(std::uint32_t address, std::uint8_t value, CycleKind kind);
+  // The CPU's read on a machine with something armed: the bus, the return
+  // standing in for a watched instruction over the fetch that begins it, and
+  // the access watch. Kept out of busRead so the access a machine with nothing
+  // armed makes stays one test and the bus.
+  std::uint8_t readWithHost(std::uint32_t address, CycleKind kind, std::uint8_t cycle);
   void busInternal() {
     lastCost_ = 6;
     if (state_.dmaResumePad) {  // an internal cycle can be the first one after a transfer
@@ -745,8 +992,126 @@ class Snes {
   // register's read or write side effect), and nothing about the cycle's cost or
   // its tick. busRead/busWrite price and tick a CPU access and then route through
   // these; the DMA engine routes two accesses through them under one priced cycle.
-  std::uint8_t routeRead(std::uint32_t address);
-  void routeWrite(std::uint32_t address, std::uint8_t value);
+  // The access watch is applied here, told `source`, `kind` and `cycle`, so the
+  // one site covers the CPU's and both engines' accesses (the work-RAM port's
+  // own access is watched at readWramPort/writeWramPort, which reach work RAM
+  // without passing here, and carry the driving access's cycle there).
+  std::uint8_t routeRead(std::uint32_t address, AccessSource source, CycleKind kind,
+                         std::uint8_t cycle);
+  void routeWrite(std::uint32_t address, std::uint8_t value, AccessSource source, CycleKind kind,
+                  std::uint8_t cycle);
+  // The mapped bus itself, without the watch: which byte an address answers and
+  // where a write lands, read through the page table (pages_, below).
+  // routeRead/routeWrite wrap these with the watch; `cycle` passes through to
+  // the work-RAM port for its own access's report.
+  std::uint8_t routeReadRaw(std::uint32_t address, std::uint8_t cycle);
+  void routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t cycle);
+
+  // What each 8 KB page of the bus reaches. The bus is 2048 pages, eight to a
+  // bank, and every window it dispatches on is whole pages — work RAM's mirror
+  // in a system bank's first page, the register pages, each map's save window,
+  // the cartridge above $8000 and whole cartridge banks — so one entry per page
+  // says which memory the page's bytes are in and where its first byte lands,
+  // and an access finds its byte with one load of the entry and an add. The
+  // table is built once from the cartridge functions (`cartridge.h`) at
+  // construction, from the map, the image's size and the board, and is fixed
+  // with them; the router, peek and poke, the classification and the watch all
+  // read it, so one map answers every path. What can change afterwards is not
+  // in it: the save's size, which a restore replaces, is read at each access,
+  // and the image's bytes, which poke writes in place.
+  enum class PageKind : std::uint8_t {
+    WorkRam,     // base is the offset into the 128 KB
+    System,      // a system bank's $2000-$5FFF: the register windows at their offsets, open bus between them
+    SaveWindow,  // base is the offset into the save before it is reduced to the save's size; with no save the page is its fallback
+    Rom,         // base is the image offset of the page's first byte, and the page is linear from it
+    RomSlow,     // the image, when its size is not a multiple of 8 KB: a chip smaller than a page can repeat inside one, so the byte is found through romOffset at each access
+    RomEmpty,    // the image, when there is none: reads zero and classifies to offset 0
+    OpenBus,     // nothing decodes the page: a read answers the data bus's last byte, a write changes nothing
+  };
+  struct Page {
+    PageKind kind;
+    PageKind fallback;           // a save window on a cartridge with no save: what the page is then (Rom, RomSlow, RomEmpty or OpenBus)
+    std::uint32_t base;          // where the page's first byte lands in its space, as kind says
+    std::uint32_t fallbackBase;  // the fallback's base, for Rom
+  };
+  static constexpr std::size_t kPageBytes = 8192u;
+  static constexpr std::size_t kPages = 2048u;
+  // Fills pages_ from the cartridge functions, one page at a time: the region of
+  // the page's first address, its save offset and its image offset, and the
+  // board rule that keeps a coprocessor's lower halves for the chip.
+  void buildPages();
+  // The image page beginning at a ROM address: linear when the image is a
+  // multiple of 8 KB, found through romOffset at each access when it is not,
+  // and empty when there is no image.
+  [[nodiscard]] Page imagePage(std::uint32_t address) const noexcept;
+
+  // The page an address reads once the save has answered: the page itself, or,
+  // in a save window on a cartridge with no save, what the board reads there.
+  // Under LoROM that is what the bank's upper half reads, so the address
+  // carried is the upper half's; under HiROM and ExHiROM it is open bus, and
+  // the address is not asked for.
+  struct Resolved {
+    PageKind kind;
+    std::uint32_t base;
+    std::uint32_t address;
+  };
+  [[nodiscard]] Resolved resolve(std::uint32_t address) const noexcept {
+    const Page& page = pages_[(address >> 13) & (kPages - 1u)];
+    if (page.kind != PageKind::SaveWindow || !state_.sram.empty()) {
+      return Resolved{page.kind, page.base, address};
+    }
+    return Resolved{page.fallback, page.fallbackBase, address | 0x8000u};
+  }
+
+  // Applies the access watch to one access, when the watcher is set and the
+  // byte the address reaches is armed. watchRead answers the byte to deliver;
+  // watchWrite answers the byte to store, or nothing when a write is vetoed.
+  // With nothing armed each is a single test of the table pointer; with
+  // something armed, one load of the page's pointer in the armed set, null
+  // unless a byte the page reaches is armed, then the bit at the address's
+  // offset in the run; a page that points at kSlowRun is classified instead.
+  [[nodiscard]] std::uint8_t watchRead(std::uint32_t address, std::uint8_t value,
+                                       AccessSource source, CycleKind kind, std::uint8_t cycle);
+  [[nodiscard]] std::optional<std::uint8_t> watchWrite(std::uint32_t address, std::uint8_t value,
+                                                       AccessSource source, CycleKind kind,
+                                                       std::uint8_t cycle);
+  // physical(), answered only when the byte's space is in `spaces` (one bit per
+  // Space) and nothing otherwise. With every bit set it is physical().
+  [[nodiscard]] std::optional<Physical> classify(std::uint32_t address,
+                                                 std::uint8_t spaces) const noexcept;
+  // The armed table's slot for the chunk holding the byte `place`, or nothing
+  // for a byte past its space's size — which a save enlarged by a restore after
+  // the first arm can reach.
+  [[nodiscard]] std::optional<std::size_t> armedSlot(Physical place) const noexcept;
+  // Sets or clears the armed bit for the byte `place`, in either direction,
+  // allocating its chunk on its first arm and freeing it when its last bit
+  // clears.
+  void setArmed(Physical place, bool onRead, bool onWrite, bool arm);
+  // The layout both armed tables share: each Space's first slot and how many
+  // slots it has, one per 64 K-byte chunk of the space, laid out space after
+  // space — work RAM's two, the register file's one, the save's as it is sized
+  // at this moment, the image's one per 64 KB, and one per bank of open bus.
+  // Answers the total.
+  [[nodiscard]] std::uint32_t chunkLayout(std::array<std::uint32_t, 5>& base,
+                                          std::array<std::uint32_t, 5>& chunks) const noexcept;
+
+  // The instruction watch at a boundary the CPU takes as one: running, between
+  // instructions, no hardware request due. When the byte the program counter
+  // reaches is armed, the watcher is told with the register file live, and what
+  // stands there once the call returns is queued for the fetch that follows.
+  // Called once per CPU cycle while an instruction is armed.
+  void tellInstruction();
+  // What stands at the byte `address` reaches: 0 for a byte not armed, else
+  // 1 + the Standin.
+  [[nodiscard]] std::uint8_t standinAt(std::uint32_t address) const noexcept;
+
+  // The call both forms share, from `file` — the register file the routine
+  // starts under, at a boundary, its stack pointer the stack to push on: the
+  // landing pushed, the core pointed at `entry`, and the machine run to the
+  // boundary where the routine has returned or the guard has tripped. Answers
+  // whether it returned; false with nothing done when a push would not land.
+  // The core is left where the loop ended.
+  bool runCall(std::uint32_t entry, Cpu65816State file, Standin returns, std::size_t guard);
 
   // The general-purpose DMA engine ($420B): trigger, and one machine cycle of a
   // running transfer (an overhead cycle or a single byte, priced at eight master
@@ -754,9 +1119,12 @@ class Snes {
   void triggerDma(std::uint8_t channels);
   void dmaCycle();
   // The A-bus side of a DMA byte: a read of a memory-mapped region returns open
-  // bus and a write to one is inert, the way the console forbids DMA there.
-  std::uint8_t dmaReadA(std::uint32_t address);
-  void dmaWriteA(std::uint32_t address, std::uint8_t value);
+  // bus and a write to one is inert, the way the console forbids DMA there. A
+  // reachable address routes through routeRead/routeWrite, carrying `source`
+  // and `cycle`.
+  std::uint8_t dmaReadA(std::uint32_t address, AccessSource source, std::uint8_t cycle);
+  void dmaWriteA(std::uint32_t address, std::uint8_t value, AccessSource source,
+                 std::uint8_t cycle);
   [[nodiscard]] static bool aBusExcluded(std::uint32_t address) noexcept;
   // Whether an A-bus address is work RAM: banks $7E-$7F, or the first $2000 of a
   // system bank.
@@ -790,32 +1158,11 @@ class Snes {
   // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
-  // The address the cartridge's ROM sees for a bus address the save did not answer:
-  // the address itself, except in LoROM's save window, where a lower half is
-  // answered by its bank's upper half.
-  [[nodiscard]] std::uint32_t romView(std::uint8_t bank, std::uint16_t offset) const noexcept;
-
-  // The cartridge byte an address reaches under the machine's map, mirrored across
-  // the image; zero for an address that reaches no cartridge. Pure — it neither
-  // prices the cycle nor touches the data bus.
-  [[nodiscard]] std::uint8_t romByte(std::uint8_t bank, std::uint16_t offset) const noexcept;
-
-  // Whether an address lands on the cartridge under the machine's map, and whether
-  // it lands on save RAM. Both answer through the cartridge functions, so the
-  // machine reads an image exactly where the header says it is — except that a
-  // LoROM cartridge declaring a coprocessor keeps its cartridge banks' lower halves
-  // for the chip, which the machine does not carry, and reads open bus there.
-  // saveRamIndex
-  // answers the offset into the save, already reduced to its size, for an address
-  // that reaches it — nothing when the cartridge has no save.
-  [[nodiscard]] bool addressIsRom(std::uint8_t bank, std::uint16_t offset) const noexcept;
-  [[nodiscard]] std::optional<std::size_t> saveRamIndex(std::uint8_t bank,
-                                                        std::uint16_t offset) const noexcept;
-
   // The work-RAM data port: $2180 reads or writes work RAM at the port address and
-  // steps it; $2181-$2183 set the address and read back as open bus.
-  std::uint8_t readWramPort(std::uint16_t offset);
-  void writeWramPort(std::uint16_t offset, std::uint8_t value);
+  // steps it; $2181-$2183 set the address and read back as open bus. `cycle` is
+  // the driving access's, which the port's own access is watched with.
+  std::uint8_t readWramPort(std::uint16_t offset, std::uint8_t cycle);
+  void writeWramPort(std::uint16_t offset, std::uint8_t value, std::uint8_t cycle);
 
   // The PPU's input pins as they stand: where the beam is, the frame parity, the
   // two blank signals as $4212 reports them, the clock rate, and the level of the
@@ -857,7 +1204,8 @@ class Snes {
     return value;
   }
 
-  // The word at $00FFFC, where the CPU starts.
+  // The word at $00FFFC, where the CPU starts, read from the cartridge as the
+  // bus reads it.
   [[nodiscard]] std::uint16_t resetVector() const noexcept;
 
   // The CPU's power-on state: emulation mode, the interrupt disable set, and the
@@ -871,6 +1219,7 @@ class Snes {
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
   CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it
   bool plainBoard_ = true;           // the header declares no coprocessor, so LoROM's lower halves repeat the image
+  std::array<Page, kPages> pages_{}; // what each page of the bus reaches, built from the three above and fixed with them
   bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
@@ -909,6 +1258,108 @@ class Snes {
   // the console, so a snapshot does not carry it.
   bool saveChanged_ = false;
   bool saveFinished_ = false;  // a frame that changed the window ended this cycle
+  // The bytes a host has armed for a watch, one bit per byte per direction,
+  // keyed by the byte an address reaches (physical) and held behind one owning
+  // pointer null until the first arm — which is also the access path's "is
+  // anything armed" test. Each direction is one slot per 64 K-byte chunk of each
+  // space, laid out space after space: work RAM's two, the register file's one,
+  // the save's, the image's one per 64 KB, and one per bank of open bus. A
+  // chunk's 8 KB of bits is allocated only when a byte in it is armed and freed
+  // when its last one is disarmed, so an unused machine carries one null pointer
+  // and allocates nothing, and arming a byte allocates one chunk however many
+  // addresses reach it.
+  //
+  // An access finds its bit through the page it drives: the set holds, per page
+  // of the bus and per direction, a pointer to the 1 KB of bits for the 8 KB run
+  // of the space that page reaches, null when no byte of that run is armed, so
+  // every alias of a run shares one pointer and an access to a page holding
+  // nothing armed pays one load and one test. A page whose bytes the page
+  // table does not reach linearly — an image found through romOffset, a save
+  // wrapped or reduced unevenly inside the page, a system page with an open-bus
+  // byte armed between its registers — points at kSlowRun instead, and each
+  // access there is classified and looked up in its chunk. The pointers are
+  // rebuilt from the chunks after every arm, every disarm and every restore.
+  struct ArmedChunk {
+    std::array<std::uint8_t, 8192> bits{};  // one bit per byte of the chunk
+    std::array<std::uint16_t, 8> runs{};    // bits set in each 8 KB run of the chunk
+    std::uint32_t armed = 0;                 // bits set here, to free the chunk at zero
+    // Whether the byte at `index` within its space is armed here.
+    [[nodiscard]] bool has(std::uint32_t index) const noexcept {
+      return (bits[(index & 0xFFFFu) >> 3] & (1u << (index & 7u))) != 0u;
+    }
+  };
+  struct AccessArmedSet {
+    std::array<std::uint32_t, 5> base{};   // each Space's first slot
+    std::array<std::uint32_t, 5> chunks{}; // and how many slots it has
+    std::vector<std::unique_ptr<ArmedChunk>> read;
+    std::vector<std::unique_ptr<ArmedChunk>> write;
+    std::array<std::uint32_t, 5> perSpace{};  // set bits in each space, both directions
+    std::uint8_t spaces = 0;                  // one bit per Space with anything armed
+    std::size_t armed = 0;  // set (byte, direction) bits, to free the set at zero
+    std::array<const std::uint8_t*, kPages> pageRead{};   // per page: the run's bits, kSlowRun, or null
+    std::array<const std::uint8_t*, kPages> pageWrite{};
+  };
+  static constexpr std::uint8_t kSlowRun = 0u;  // the page pointer that says: classify this access
+  AccessWatcher* accessWatcher_ = nullptr;  // told every armed access; none by default
+  std::unique_ptr<AccessArmedSet> armed_;   // the armed table; null until the first arm
+  // The bytes a host has armed for an instruction watch and what stands at each,
+  // two bits per byte — 0 not armed, else 1 + the Standin — keyed by the byte an
+  // address reaches (physical) in the same chunk layout as the access table,
+  // and held behind one owning pointer null until the first arm, which is also
+  // the cycle's "is anything armed" test. A chunk's 16 KB is allocated only when
+  // a byte in it is armed and freed when its last one is disarmed. An
+  // instruction finds its code as an access finds its bit: through a per-page
+  // pointer to the 2 KB of codes for the run the page reaches, null when none
+  // of the run is armed and kSlowRun where the page needs classifying. The set
+  // also carries the return queued for the fetch that begins the instruction
+  // the watcher was last told about: the opcode to answer and the address it is
+  // for, cleared by the next opcode fetch whichever address that fetches.
+  struct StandinChunk {
+    std::array<std::uint8_t, 16384> codes{};  // two bits per byte of the chunk
+    std::array<std::uint16_t, 8> runs{};      // bytes armed in each 8 KB run of the chunk
+    std::uint32_t armed = 0;                   // bytes armed here, to free the chunk at zero
+    // The code for the byte at `index` within its space.
+    [[nodiscard]] std::uint8_t code(std::uint32_t index) const noexcept {
+      return static_cast<std::uint8_t>((codes[(index & 0xFFFFu) >> 2] >> ((index & 3u) * 2u)) & 3u);
+    }
+    void set(std::uint32_t index, std::uint8_t code) noexcept {
+      const std::uint32_t at = (index & 0xFFFFu) >> 2;
+      const unsigned shift = (index & 3u) * 2u;
+      codes[at] = static_cast<std::uint8_t>((codes[at] & ~(3u << shift)) | (code << shift));
+    }
+  };
+  struct StandinSet {
+    std::array<std::uint32_t, 5> base{};   // each Space's first slot
+    std::array<std::uint32_t, 5> chunks{}; // and how many slots it has
+    std::vector<std::unique_ptr<StandinChunk>> slots;
+    std::array<std::uint32_t, 5> perSpace{};  // bytes armed in each space
+    std::uint8_t spaces = 0;                  // one bit per Space with anything armed
+    std::size_t armed = 0;                    // bytes armed, to free the set at zero
+    std::uint8_t pendingOpcode = 0;           // the return the next opcode fetch answers, or 0
+    std::uint32_t pendingAddress = 0;         // the address that fetch must drive
+    std::array<const std::uint8_t*, kPages> page{};  // per page: the run's codes, kSlowRun, or null
+  };
+  InstructionWatcher* instructionWatcher_ = nullptr;  // told each armed instruction reached; none by default
+  std::unique_ptr<StandinSet> standins_;              // the armed instructions; null until the first arm
+
+  // What a page reaches, for the watch: one 8 KB run of one space — the space
+  // and the index of the run's first byte — no byte at all, or bytes the page
+  // does not reach linearly, which the classification settles per access. A
+  // save window is read as the save now stands, so a restore can change the
+  // answer. For Slow, `run.space` names the space whose armed bytes matter.
+  struct PageRun {
+    Space space;
+    std::uint32_t start;
+  };
+  enum class PageReach : std::uint8_t { None, Run, Slow };
+  [[nodiscard]] PageReach pageRun(std::size_t page, PageRun& run) const noexcept;
+  // Rebuilds every per-page pointer of the armed set and the stand-in set from
+  // their chunks and the page table.
+  void refreshWatchPages();
+  // Whether the byte `address` reaches is armed in `table`, by classification:
+  // the lookup for a page that points at kSlowRun.
+  [[nodiscard]] bool armedThrough(std::uint32_t address,
+                                  const std::vector<std::unique_ptr<ArmedChunk>>& table) const noexcept;
 };
 
 }  // namespace snaggletooth

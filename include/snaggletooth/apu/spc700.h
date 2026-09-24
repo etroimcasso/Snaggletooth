@@ -66,6 +66,8 @@ struct Spc700State {
   std::uint16_t ptr = 0;  // pointer / second-address scratch
   std::uint16_t tmp = 0;  // data scratch (an operand byte, or a value in flight)
   bool taken = false;     // a branch condition, settled before the cycles it prices
+
+  [[nodiscard]] bool operator==(const Spc700State&) const noexcept = default;
 };
 
 class Spc700 {
