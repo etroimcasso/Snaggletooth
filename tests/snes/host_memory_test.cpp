@@ -164,6 +164,24 @@ TEST(SnesHostMemory, SetCpuStateIsLiveOnTheNextCycle) {
   EXPECT_EQ(m.cpuState().a, 0x00AAu);   // and a NOP left the accumulator alone
 }
 
+TEST(SnesHostMemory, SetCpuStateKeepsQueuedAudioFramesAndTheRestOfTheMachine) {
+  // Writing the register file touches the CPU alone: the audio frames queued
+  // since the last drain are still there, and the machine runs on to the same
+  // state as one whose registers were never written.
+  Snes a = machine();
+  Snes b = machine();
+  a.run(100000u);  // enough for the audio machine to queue frames
+  b.run(100000u);
+  a.setCpuState(a.cpuState());  // the same registers, written back
+  a.run(100000u);
+  b.run(100000u);
+  const std::vector<StereoFrame> fa = a.takeFrames();
+  const std::vector<StereoFrame> fb = b.takeFrames();
+  EXPECT_GT(fa.size(), 100u);
+  EXPECT_EQ(fa, fb) << "no frame was dropped by the write";
+  EXPECT_TRUE(a.state() == b.state());
+}
+
 // ---- the machine that hosts nothing behaves exactly as it does today ------
 
 TEST(SnesHostMemory, NothingReachedInLandsByteIdenticalToAPlainRun) {

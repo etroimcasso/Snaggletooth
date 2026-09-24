@@ -176,11 +176,14 @@ Snes::Snes(Snes&& moved) noexcept
       saveChanged_(moved.saveChanged_),
       saveFinished_(moved.saveFinished_),
       accessWatcher_(moved.accessWatcher_),
-      armed_(std::move(moved.armed_)) {
+      armed_(std::move(moved.armed_)),
+      instructionWatcher_(moved.instructionWatcher_),
+      standins_(std::move(moved.standins_)) {
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.saveObserver_ = nullptr;
   moved.accessWatcher_ = nullptr;
+  moved.instructionWatcher_ = nullptr;
 }
 
 void Snes::setFrameObserver(FrameObserver* observer) noexcept {
@@ -354,6 +357,9 @@ void Snes::machineCycle() {
     dmaCycle();
   } else {
     const bool armedAtStart = state_.dmaArm != 0u;
+    // The instruction watch, at a boundary the CPU takes as one; the pointer is
+    // the "is anything armed" test, and an unarmed machine pays it alone.
+    if (standins_ != nullptr) tellInstruction();
     Bus bus{*this};
     cpu_.stepCycle(bus);
     if (armedAtStart && --state_.dmaArm == 0u && state_.mdmaen != 0u) {
@@ -538,7 +544,12 @@ void Snes::writeApuRam(std::uint16_t address, std::uint8_t value) noexcept {
 
 void Snes::setCpuState(const Cpu65816State& state) {
   state_.cpu = state;
-  load();  // reloads the live core from state_.cpu, as restore() does
+  // The CPU's part of load(): the live core reloaded, the interrupt lines
+  // re-derived. Nothing else changed, so the picture's derived answers, the
+  // audio machine's slot and its queued frames all stand.
+  cpu_.restore(state_.cpu);
+  cpu_.syncNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
+  cpu_.setIrqLine(state_.timeup);
 }
 
 std::size_t Snes::takeFrames(std::span<StereoFrame> into) noexcept {
@@ -556,7 +567,16 @@ std::uint8_t Snes::busRead(std::uint32_t address, CycleKind kind) {
   videoAdvanced_ = true;
   // The live core's cycle index is the access's cycle: the fetch runs at 0 and
   // each later cycle at its own index, the index moving on after the cycle.
-  return routeRead(address, AccessSource::Cpu, kind, cpu_.state().tcu);
+  const std::uint8_t cycle = cpu_.state().tcu;
+  std::uint8_t value = routeReadRaw(address, cycle);
+  // The return standing in for the instruction the watcher was told about
+  // answers the fetch that begins it, on the data bus like any fetched byte;
+  // any opcode fetch clears what is queued.
+  if (kind == CycleKind::OpcodeFetch && standins_ != nullptr && standins_->pendingOpcode != 0u) {
+    if (address == standins_->pendingAddress) value = latch(standins_->pendingOpcode);
+    standins_->pendingOpcode = 0u;
+  }
+  return watchRead(address, value, AccessSource::Cpu, kind, cycle);
 }
 
 void Snes::busWrite(std::uint32_t address, std::uint8_t value, CycleKind kind) {
@@ -821,20 +841,8 @@ void Snes::setArmed(Physical place, bool onRead, bool onWrite, bool arm) {
 void Snes::watchAccess(std::uint32_t address, std::size_t bytes, bool onRead, bool onWrite) {
   if (bytes == 0 || (!onRead && !onWrite)) return;
   if (!armed_) {
-    // The table's layout: each space's chunks in turn. The save's count is the
-    // save's size at this moment, so the slots exist for every byte it holds.
     armed_ = std::make_unique<AccessArmedSet>();
-    const auto chunksFor = [](std::size_t bytesHeld) {
-      return static_cast<std::uint32_t>((bytesHeld + 0xFFFFu) >> 16);
-    };
-    const std::array<std::uint32_t, 5> counts = {2u, 1u, chunksFor(state_.sram.size()),
-                                                 chunksFor(rom_.size()), 256u};
-    std::uint32_t total = 0;
-    for (std::size_t s = 0; s < counts.size(); ++s) {
-      armed_->base[s] = total;
-      armed_->chunks[s] = counts[s];
-      total += counts[s];
-    }
+    const std::uint32_t total = chunkLayout(armed_->base, armed_->chunks);
     armed_->read.resize(total);
     armed_->write.resize(total);
   }
@@ -852,6 +860,104 @@ void Snes::unwatchAccess(std::uint32_t address, std::size_t bytes, bool onRead, 
     setArmed(physical(a), onRead, onWrite, false);
   }
   if (armed_->armed == 0u) armed_.reset();  // the last place disarmed: back to one null pointer
+}
+
+std::uint32_t Snes::chunkLayout(std::array<std::uint32_t, 5>& base,
+                                std::array<std::uint32_t, 5>& chunks) const noexcept {
+  // The save's count is the save's size at this moment, so the slots exist for
+  // every byte it holds.
+  const auto chunksFor = [](std::size_t bytesHeld) {
+    return static_cast<std::uint32_t>((bytesHeld + 0xFFFFu) >> 16);
+  };
+  const std::array<std::uint32_t, 5> counts = {2u, 1u, chunksFor(state_.sram.size()),
+                                               chunksFor(rom_.size()), 256u};
+  std::uint32_t total = 0;
+  for (std::size_t s = 0; s < counts.size(); ++s) {
+    base[s] = total;
+    chunks[s] = counts[s];
+    total += counts[s];
+  }
+  return total;
+}
+
+std::uint8_t Snes::standinAt(std::uint32_t address) const noexcept {
+  const std::optional<Physical> place = classify(address, standins_->spaces);
+  if (!place.has_value()) return 0u;
+  const std::size_t space = static_cast<std::size_t>(place->space);
+  const std::uint32_t chunk = place->index >> 16;
+  if (chunk >= standins_->chunks[space]) return 0u;  // past the space's size
+  const StandinChunk* slot = standins_->slots[standins_->base[space] + chunk].get();
+  return slot == nullptr ? std::uint8_t{0} : slot->code(place->index);
+}
+
+namespace {
+
+// The opcode a stand-in answers the fetch with: RTS for Near, RTL for Long,
+// nothing for None or for a byte not armed.
+[[nodiscard]] constexpr std::uint8_t standinOpcode(std::uint8_t code) noexcept {
+  switch (code) {
+    case 1u + static_cast<std::uint8_t>(Standin::Near): return 0x60u;
+    case 1u + static_cast<std::uint8_t>(Standin::Long): return 0x6Bu;
+    default: return 0u;
+  }
+}
+
+}  // namespace
+
+void Snes::tellInstruction() {
+  const Cpu65816State& cpu = cpu_.state();
+  if (cpu.run != CpuRunState::Running || cpu.tcu != 0u || cpu_.takesRequestNext()) return;
+  const std::uint32_t address = (static_cast<std::uint32_t>(cpu.pbr) << 16) | cpu.pc;
+  if (standinAt(address) == 0u) return;
+  state_.cpu = cpu;  // live for cpuState() inside the call
+  if (instructionWatcher_ != nullptr) instructionWatcher_->reached(address);
+  // What stands there once the host has answered — the call may have disarmed
+  // it, moved the program counter, or run the machine — queued for the fetch.
+  if (standins_ == nullptr) return;
+  standins_->pendingOpcode = standinOpcode(standinAt(address));
+  standins_->pendingAddress = address;
+}
+
+void Snes::watchInstruction(std::uint32_t address, Standin standin) {
+  if (!standins_) {
+    standins_ = std::make_unique<StandinSet>();
+    standins_->slots.resize(chunkLayout(standins_->base, standins_->chunks));
+  }
+  const Physical place = physical(address & 0xFFFFFFu);
+  const std::size_t space = static_cast<std::size_t>(place.space);
+  const std::uint32_t chunk = place.index >> 16;
+  if (chunk < standins_->chunks[space]) {  // a byte past its space's size has no slot
+    std::unique_ptr<StandinChunk>& slot = standins_->slots[standins_->base[space] + chunk];
+    if (!slot) slot = std::make_unique<StandinChunk>();
+    if (slot->code(place.index) == 0u) {  // a newly-armed byte; re-arming only replaces the stand-in
+      ++slot->armed;
+      ++standins_->perSpace[space];
+      ++standins_->armed;
+      standins_->spaces |= static_cast<std::uint8_t>(1u << space);
+    }
+    slot->set(place.index, static_cast<std::uint8_t>(1u + static_cast<std::uint8_t>(standin)));
+  }
+  if (standins_->armed == 0u) standins_.reset();  // nothing could be armed: back to one null pointer
+}
+
+void Snes::unwatchInstruction(std::uint32_t address) {
+  if (!standins_) return;
+  const Physical place = physical(address & 0xFFFFFFu);
+  const std::size_t space = static_cast<std::size_t>(place.space);
+  const std::uint32_t chunk = place.index >> 16;
+  if (chunk < standins_->chunks[space]) {
+    std::unique_ptr<StandinChunk>& slot = standins_->slots[standins_->base[space] + chunk];
+    if (slot && slot->code(place.index) != 0u) {
+      slot->set(place.index, 0u);
+      --slot->armed;
+      --standins_->perSpace[space];
+      --standins_->armed;
+      if (standins_->perSpace[space] == 0u)
+        standins_->spaces &= static_cast<std::uint8_t>(~(1u << space));
+      if (slot->armed == 0u) slot.reset();  // free the chunk's 16 KB when its last byte clears
+    }
+  }
+  if (standins_->armed == 0u) standins_.reset();  // the last place disarmed: back to one null pointer
 }
 
 std::uint8_t Snes::readWramPort(std::uint16_t offset, std::uint8_t cycle) {

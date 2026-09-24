@@ -653,6 +653,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/machine_test.cpp
     tests/snes/host_memory_test.cpp
     tests/snes/access_watch_test.cpp
+    tests/snes/instruction_watch_test.cpp
     tests/snes/observer_test.cpp
     tests/snes/save_observer_test.cpp
     tests/snes/timing_test.cpp
@@ -675,6 +676,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/apu/machine_test.cpp
     tests/apu/host_memory_test.cpp
     tests/apu/access_watch_test.cpp
+    tests/apu/instruction_watch_test.cpp
     tests/apu/port_test.cpp
     tests/apu/timer_test.cpp
     tests/apu/cycle_timing_test.cpp

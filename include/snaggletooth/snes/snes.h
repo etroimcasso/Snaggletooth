@@ -325,6 +325,41 @@ class AccessWatcher {
                              CycleKind kind, std::uint8_t cycle) = 0;
 };
 
+// What stands at a watched address while it is armed (Snes::watchInstruction):
+// nothing, so the instruction there runs once the host has been told; or a
+// return, so the routine there never runs — the fetch that begins the
+// instruction answers the return's opcode in place of the byte the cartridge
+// holds, and the one instruction that runs is the return.
+enum class Standin : std::uint8_t {
+  None,  // the instruction runs after the host is told
+  Near,  // a return within the bank (RTS), for a routine a JSR entered
+  Long,  // a return across banks (RTL), for one a JSL entered
+};
+
+// A host told, before the instruction at a watched address runs, that the CPU
+// has reached it. Told once per instruction the chip begins — a block move
+// begins each byte it moves as an instruction of its own — at an instruction
+// boundary the CPU takes as a boundary: not while a transfer engine holds the
+// bus, not while the core is halted, and not at a boundary a hardware interrupt
+// takes, where the interrupted instruction is told when the handler returns to
+// it. A watched place is a byte, as an access watch's is (physical): arming a
+// routine in the low 8 KB of work RAM through bank $7E hears it entered from a
+// system bank, and `address` is the 24-bit address the fetch drives.
+//
+// The machine's clock has not moved for this call: the host runs on its own
+// time, and the cycles the instruction — or the return standing in for it —
+// spends are the same as with no host at all. cpuState() is live inside the
+// call, and a register file written with setCpuState() inside it is what the
+// instruction runs under. The watcher is the host's object, set by pointer and
+// not part of the state, so a snapshot does not carry it and restore() leaves
+// it in place.
+class InstructionWatcher {
+ public:
+  virtual ~InstructionWatcher() = default;
+  // The instruction at `address` is about to run.
+  virtual void reached(std::uint32_t address) = 0;
+};
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
@@ -702,6 +737,31 @@ class Snes {
   };
   [[nodiscard]] Physical physical(std::uint32_t address) const noexcept;
 
+  // The watcher (InstructionWatcher, above) told each armed instruction the CPU
+  // reaches, or none, which is how the machine starts. With none set, or nothing
+  // armed, a cycle pays one test.
+  void setInstructionWatcher(InstructionWatcher* watcher) noexcept {
+    instructionWatcher_ = watcher;
+  }
+  [[nodiscard]] InstructionWatcher* instructionWatcher() const noexcept {
+    return instructionWatcher_;
+  }
+
+  // Arms a watch on the instruction at `address`, with `standin` standing there
+  // while it is armed: None tells the watcher and lets the instruction run; Near
+  // or Long tells the watcher and answers the fetch with a return (Standin,
+  // above), so the routine's body never runs and the caller resumes as it would
+  // after the routine returned, the return spending exactly what a real one
+  // spends. A watch is on the byte the address reaches (physical), so the
+  // routine is heard entered through any alias. Arming an armed place replaces
+  // what stands there; disarming a place not armed does nothing. A stand-in
+  // stands whether or not a watcher is set. The cartridge is never written: peek
+  // and a data read of the byte answer the cartridge, and disarming has nothing
+  // to put back. A machine that has never armed an instruction holds no table
+  // at all, and disarming the last one frees it again.
+  void watchInstruction(std::uint32_t address, Standin standin = Standin::Near);
+  void unwatchInstruction(std::uint32_t address);
+
  private:
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
@@ -919,6 +979,23 @@ class Snes {
   // allocating its chunk on its first arm and freeing it when its last bit
   // clears.
   void setArmed(Physical place, bool onRead, bool onWrite, bool arm);
+  // The layout both armed tables share: each Space's first slot and how many
+  // slots it has, one per 64 K-byte chunk of the space, laid out space after
+  // space — work RAM's two, the register file's one, the save's as it is sized
+  // at this moment, the image's one per 64 KB, and one per bank of open bus.
+  // Answers the total.
+  [[nodiscard]] std::uint32_t chunkLayout(std::array<std::uint32_t, 5>& base,
+                                          std::array<std::uint32_t, 5>& chunks) const noexcept;
+
+  // The instruction watch at a boundary the CPU takes as one: running, between
+  // instructions, no hardware request due. When the byte the program counter
+  // reaches is armed, the watcher is told with the register file live, and what
+  // stands there once the call returns is queued for the fetch that follows.
+  // Called once per CPU cycle while an instruction is armed.
+  void tellInstruction();
+  // What stands at the byte `address` reaches: 0 for a byte not armed, else
+  // 1 + the Standin.
+  [[nodiscard]] std::uint8_t standinAt(std::uint32_t address) const noexcept;
 
   // The general-purpose DMA engine ($420B): trigger, and one machine cycle of a
   // running transfer (an overhead cycle or a single byte, priced at eight master
@@ -1117,6 +1194,40 @@ class Snes {
   };
   AccessWatcher* accessWatcher_ = nullptr;  // told every armed access; none by default
   std::unique_ptr<AccessArmedSet> armed_;   // the armed table; null until the first arm
+  // The bytes a host has armed for an instruction watch and what stands at each,
+  // two bits per byte — 0 not armed, else 1 + the Standin — keyed by the byte an
+  // address reaches (physical) in the same chunk layout as the access table,
+  // and held behind one owning pointer null until the first arm, which is also
+  // the cycle's "is anything armed" test. A chunk's 16 KB is allocated only when
+  // a byte in it is armed and freed when its last one is disarmed. The set also
+  // carries the return queued for the fetch that begins the instruction the
+  // watcher was last told about: the opcode to answer and the address it is
+  // for, cleared by the next opcode fetch whichever address that fetches.
+  struct StandinChunk {
+    std::array<std::uint8_t, 16384> codes{};  // two bits per byte of the chunk
+    std::uint32_t armed = 0;                   // bytes armed here, to free the chunk at zero
+    // The code for the byte at `index` within its space.
+    [[nodiscard]] std::uint8_t code(std::uint32_t index) const noexcept {
+      return static_cast<std::uint8_t>((codes[(index & 0xFFFFu) >> 2] >> ((index & 3u) * 2u)) & 3u);
+    }
+    void set(std::uint32_t index, std::uint8_t code) noexcept {
+      const std::uint32_t at = (index & 0xFFFFu) >> 2;
+      const unsigned shift = (index & 3u) * 2u;
+      codes[at] = static_cast<std::uint8_t>((codes[at] & ~(3u << shift)) | (code << shift));
+    }
+  };
+  struct StandinSet {
+    std::array<std::uint32_t, 5> base{};   // each Space's first slot
+    std::array<std::uint32_t, 5> chunks{}; // and how many slots it has
+    std::vector<std::unique_ptr<StandinChunk>> slots;
+    std::array<std::uint32_t, 5> perSpace{};  // bytes armed in each space
+    std::uint8_t spaces = 0;                  // one bit per Space with anything armed
+    std::size_t armed = 0;                    // bytes armed, to free the set at zero
+    std::uint8_t pendingOpcode = 0;           // the return the next opcode fetch answers, or 0
+    std::uint32_t pendingAddress = 0;         // the address that fetch must drive
+  };
+  InstructionWatcher* instructionWatcher_ = nullptr;  // told each armed instruction reached; none by default
+  std::unique_ptr<StandinSet> standins_;              // the armed instructions; null until the first arm
 };
 
 }  // namespace snaggletooth

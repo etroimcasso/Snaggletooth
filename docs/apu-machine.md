@@ -36,6 +36,7 @@ boot-ROM window*).
 - [Audio output](#audio-output)
 - [The observer](#the-observer)
 - [Answering an access](#answering-an-access)
+- [Standing in for a routine](#standing-in-for-a-routine)
 - [Gotchas](#gotchas)
 - [Where to look](#where-to-look)
 
@@ -482,7 +483,62 @@ them. The two directions are independent, arming a place already armed does noth
 has never armed a place holds no table at all. The register overlay and the boot-ROM window sit on the
 same addresses as the RAM beneath them, so this bus has no aliases: an address is a byte. The watcher
 is the host's object, not part of the state: a snapshot does not carry it and `restore()` leaves it in
-place. With none set, or nothing armed, an access pays a single test.
+place. With none set, or nothing armed, an access pays a single test, and an opcode fetch one more for
+the [instruction watch](#standing-in-for-a-routine).
+
+## Standing in for a routine
+
+A host is told before the instruction at a watched address runs, and can have a return stand at that
+address so the routine there never runs. It sets an `ApuInstructionWatcher` and arms the addresses it
+cares about, each with what stands there while it is armed:
+
+```cpp
+struct Hook final : ApuInstructionWatcher {
+  Apu& apu;
+  explicit Hook(Apu& a) : apu(a) {}
+  void reached(std::uint16_t address) override {
+    Spc700State regs = apu.cpuState();   // live: the registers as the routine was entered
+    regs.a = 0x01;                       // the answer the routine would have produced
+    apu.setCpuState(regs);               // what the return runs under
+  }
+};
+
+Hook hook(apu);
+apu.setInstructionWatcher(&hook);
+apu.watchInstruction(0x0400, ApuStandin::Return);  // CALL !$0400: told, then RET stands in
+apu.watchInstruction(0x0500, ApuStandin::None);    // told, and the instruction runs
+```
+
+`ApuStandin` names what stands at the address: `None` tells the watcher and lets the instruction run;
+`Return` answers the fetch with `RET`, for a routine a `CALL` entered. A host that does not say takes
+`Return`. With a return standing in, the one instruction that runs at the address is the `RET`: the
+caller resumes as it would after the routine returned, with the stack pointer where it was before the
+call, and the return spends exactly the cycles a real one spends — a stand-in and a RAM byte holding a
+real `RET` land on the same registers and the same master count. A stand-in stands whether or not a
+watcher is set.
+
+RAM is never written. Only the fetch that begins the instruction the watcher was told about answers
+the return: `peek` of the byte and a data read of it (`MOV A,!$0400`) answer RAM, and disarming has
+nothing to put back. An access watch armed on the same address is told `RET` as the value of that
+fetch, since that is the byte the machine answers.
+
+`watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
+what stands there, disarming one not armed does nothing, and a machine that has never armed an
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a cycle and one
+more an opcode fetch. This bus has no aliases: the address armed is the address told.
+
+The watcher is told once per instruction, at an instruction boundary of a running core — never per
+cycle, and never on a sleeping or stopped core, which sits on a boundary and begins nothing. The
+sound CPU takes no interrupts, so a boundary is a boundary. The machine's clock has not moved for the
+call: being told advances no counter — not the master counter, not a timer, not the DSP's slot — and a
+watched run lands on the same state and the same audio as a plain one. The host runs on its own time.
+
+`cpuState()` is live inside the call, at the instruction, and a register file written with
+`setCpuState()` there is what the instruction runs under — which is how a host answers for a routine:
+told at its entry, it writes the registers the routine would have left and lets the return stand in.
+A host that moves the program counter inside the call sends the CPU elsewhere, and the return queued
+for the watched address is not applied to the fetch there: the instruction at the new address runs as
+it stands. A host that disarms the address inside the call lets the routine run.
 
 ## Gotchas
 
@@ -515,13 +571,22 @@ place. With none set, or nothing armed, an access pays a single test.
   there as a read at cycle 3 before its write at cycle 4.
 - **A watched timer read has already cleared the output.** Arming `$FD`–`$FF` tells the watcher the
   count the read returned; the output is 0 by then whatever the answer.
+- **A stand-in is a `RET` and nothing more.** What the routine would have left in the registers is
+  the host's to write with `setCpuState` inside the call; nothing writes it for you. A routine a
+  `CALL` entered returns through `RET`; one entered through `PCALL` or `TCALL` returns the same way,
+  so the stand-in serves all three.
+- **The stand-in answers one fetch.** The opcode fetch of the instruction the watcher was told about.
+  `peek`, a `MOV A,!abs` of the byte, the observer's report of a data read and an access watch on any
+  read but that fetch all see RAM's own byte.
+- **`watchInstruction` with one argument arms `ApuStandin::Return`.** A host that wants to be told and
+  nothing more says `ApuStandin::None`.
 
 ## Where to look
 
 - `include/snaggletooth/apu/apu.h` — the `ApuState`/`TimerState` value structs, the `Apu` class and
-  the `ApuObserver` interface.
+  the `ApuObserver`, `ApuAccessWatcher` and `ApuInstructionWatcher` interfaces.
 - `src/apu.cpp` — the machine cycle, the overlay routing, the timers, `step()`/`run()`, `reset()`,
-  `reload()`, `peek()` and the observer's boundary report.
+  `reload()`, `peek()`, the observer's boundary report and the two watches.
 - `tests/apu/` — the overlay, port, timer, cycle-timing and observer suites, each derived from the
   register and low-level-timing documentation.
 - [docs/spc700-cpu.md](spc700-cpu.md) — the CPU core the machine wraps.

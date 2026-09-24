@@ -51,6 +51,9 @@ finishes.
 - [Answering an access](#answering-an-access)
   - [A watch is on the byte](#a-watch-is-on-the-byte)
   - [What the watcher is told](#what-the-watcher-is-told)
+- [Standing in for a routine](#standing-in-for-a-routine)
+  - [Where the watch fires](#where-the-watch-fires)
+  - [Inside the call](#inside-the-call)
 - [Gotchas](#gotchas)
 - [What remains open](#what-remains-open)
 - [See also](#see-also)
@@ -930,10 +933,11 @@ access to an armed place — the CPU's, either transfer engine's, and the work-R
 tells the watcher which made it.
 
 The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
-leaves it in place. With none set, or nothing armed, an access pays a single test. With something
-armed, an access is classified into the byte it reaches, and only as far as the spaces holding an
-armed byte require: a host watching work RAM alone costs a fetch from the image the work-RAM and
-register-window range tests and nothing more.
+leaves it in place. With none set, or nothing armed, an access pays a single test, and an opcode fetch
+one more for the [instruction watch](#standing-in-for-a-routine). With something armed, an access is
+classified into the byte it reaches, and only as far as the spaces holding an armed byte require: a
+host watching work RAM alone costs a fetch from the image the work-RAM and register-window range tests
+and nothing more.
 
 ### A watch is on the byte
 
@@ -1001,6 +1005,84 @@ another byte — and a veto cannot undo the effect, because a read cannot be pre
 wants a program not to acknowledge an interrupt cannot do it here; `peek` refuses registers for the
 same reason.
 
+## Standing in for a routine
+
+A host is told before the instruction at a watched address runs, and can have a return stand at that
+address so the routine there never runs. It sets an `InstructionWatcher` and arms the addresses it
+cares about, each with what stands there while it is armed:
+
+```cpp
+struct Hook final : InstructionWatcher {
+  Snes& machine;
+  explicit Hook(Snes& m) : machine(m) {}
+  void reached(std::uint32_t address) override {
+    Cpu65816State regs = machine.cpuState();   // live: the registers as the routine was entered
+    regs.a = 0x0001;                           // the answer the routine would have produced
+    machine.setCpuState(regs);                 // what the return runs under
+  }
+};
+
+Hook hook(machine);
+machine.setInstructionWatcher(&hook);
+machine.watchInstruction(0x008100, Standin::Near);   // JSR $8100: told, then RTS stands in
+machine.watchInstruction(0x009000, Standin::None);   // told, and the instruction runs
+```
+
+`Standin` names what stands at the address: `None` tells the watcher and lets the instruction run;
+`Near` answers the fetch with `RTS`, for a routine a `JSR` entered; `Long` answers it with `RTL`, for
+one a `JSL` entered. A host that does not say takes `Near`. With a return standing in, the one
+instruction that runs at the address is the return: the caller resumes as it would after the routine
+returned, with the stack pointer where it was before the call, and the return spends exactly the
+cycles a real one spends — a stand-in and a cartridge holding a real `RTS` at that byte land on
+byte-identical states. A stand-in stands whether or not a watcher is set.
+
+The cartridge is never written. Only the fetch that begins the instruction the watcher was told
+about answers the return: `peek` of the byte, a data read of it (`LDA !$8100`), a transfer engine's
+read and the read an interrupt sequence discards all answer the cartridge, and disarming has nothing
+to put back. An access watch armed on the same byte is told the return's opcode as the value of that
+fetch, since that is the byte the machine answers.
+
+`watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
+what stands there, disarming one not armed does nothing, and a machine that has never armed an
+instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle
+and one more an opcode fetch. A watched place is a byte, as an access watch's is
+([physical](#a-watch-is-on-the-byte)): a routine in the low 8 KB of work RAM armed through `$7E:0100`
+is heard entered by a `JSR $0100` in bank `$00`, and a routine in the image armed through bank `$00`
+is heard entered through bank `$80`. The watcher is told the 24-bit address the fetch drives,
+whichever alias that is.
+
+### Where the watch fires
+
+The watcher is told once per instruction the chip begins, at an instruction boundary the CPU takes
+as one — never per cycle. Concretely:
+
+| Situation | Told? |
+|---|---|
+| The instruction begins | Yes, once, before its opcode fetch |
+| A block move (`MVN`, `MVP`) | Once per byte it moves — the chip begins each byte as an instruction of its own, fetching the opcode again |
+| A transfer engine holds the bus | No: no instruction begins inside a DMA or an HDMA event; the next instruction is told once the transfer has ended |
+| The core is halted (`WAI`, `STP`) | No: a halted core sits on a boundary and begins nothing |
+| A hardware interrupt is due at the boundary | No: the interrupt sequence takes the boundary, and the interrupted instruction is told when the handler returns to it |
+
+So a `STA $420B` that arms a transfer is followed by one more CPU cycle before the transfer engages —
+the next instruction's opcode fetch — and that instruction is told before the transfer, the one after
+it once the transfer has run. A `WAI` woken by an interrupt is followed by the interrupt sequence, not
+by the instruction after the `WAI`; that instruction is told after the handler's `RTI`.
+
+### Inside the call
+
+The machine's clock has not moved for the call: being told advances no counter — not the master
+counter, not the beam, not the audio machine, not a timer — and a watched run lands on the same state
+and the same audio as a plain one. The host runs on its own time.
+
+`cpuState()` is live inside the call, at the instruction, and a register file written with
+`setCpuState()` there is what the instruction runs under — which is how a host answers for a routine:
+told at its entry, it writes the registers the routine would have left and lets the return stand in.
+Writing the register file touches the CPU alone; queued audio frames and the rest of the machine
+stand. A host that moves the program counter inside the call sends the CPU elsewhere, and the return
+queued for the watched address is not applied to the fetch there: the instruction at the new address
+runs as it stands. A host that disarms the address inside the call lets the routine run.
+
 ## Gotchas
 
 - The reset vector is read from the cartridge at construction. An image with a zero vector starts the
@@ -1045,6 +1127,18 @@ same reason.
 - The access watch and the bus observer are separate mechanisms. A read the watch substitutes is what
   the observer reports, because the machine answered that byte; a write the watch vetoes or substitutes
   the observer still reports as the source drove it — the watch changed the effect, not the drive.
+- An instruction watch counts instructions the chip begins, not opcodes in the program: a block move
+  is told once per byte, and an instruction a hardware interrupt lands on is told after the handler
+  returns to it, not at the boundary the interrupt took.
+- A stand-in is a return and nothing more. `Near` for a routine a `JSR` entered, `Long` for one a
+  `JSL` entered; the wrong one leaves the stack a byte off, exactly as the wrong return instruction
+  would. What the routine would have left in the registers is the host's to write with `setCpuState`
+  inside the call; nothing writes it for you.
+- The stand-in answers one fetch: the opcode fetch of the instruction the watcher was told about. A
+  host reading the byte through `peek`, an `LDA` of it, the bus observer's report of a data read and
+  an access watch on any read but that fetch all see the cartridge's own byte.
+- `watchInstruction` with one argument arms `Standin::Near`. A host that wants to be told and nothing
+  more says `Standin::None`.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.

@@ -59,10 +59,13 @@ Apu::Apu(Apu&& moved, ApuState* storage) noexcept
       boundaryState_(moved.boundaryState_),
       sinceBoundary_(moved.sinceBoundary_),
       accessWatcher_(moved.accessWatcher_),
-      armed_(std::move(moved.armed_)) {
+      armed_(std::move(moved.armed_)),
+      instructionWatcher_(moved.instructionWatcher_),
+      standins_(std::move(moved.standins_)) {
   moved.state_ = nullptr;
   moved.observer_ = nullptr;
   moved.accessWatcher_ = nullptr;
+  moved.instructionWatcher_ = nullptr;
 }
 
 void Apu::restore(ApuState state) {
@@ -135,7 +138,10 @@ void Apu::machineCycle() {
   sampleFrame();
 
   // The CPU's access closes the cycle. A halted core reaches nothing here, and
-  // the cycle still passes for everything above.
+  // the cycle still passes for everything above. The instruction watch comes
+  // first, at a boundary of a running core; the pointer is the "is anything
+  // armed" test, and an unarmed machine pays it alone.
+  if (standins_ != nullptr) tellInstruction();
   Bus bus{*this};
   cpu_.stepCycle(bus);
 
@@ -268,7 +274,14 @@ std::uint8_t Apu::busRead(std::uint16_t address) {
   }
   // The live core's cycle index is the access's cycle: the fetch runs at 0 and
   // each later cycle at its own index, the index moving on after the cycle.
-  return watchRead(address, value, cpu_.state().tcu);
+  const std::uint8_t cycle = cpu_.state().tcu;
+  // The return standing in for the instruction the watcher was told about
+  // answers the fetch that begins it; any opcode fetch clears what is queued.
+  if (cycle == 0u && standins_ != nullptr && standins_->pendingOpcode != 0u) {
+    if (address == standins_->pendingAddress) value = standins_->pendingOpcode;
+    standins_->pendingOpcode = 0u;
+  }
+  return watchRead(address, value, cycle);
 }
 
 void Apu::busWrite(std::uint16_t address, std::uint8_t value) {
@@ -333,6 +346,44 @@ void Apu::unwatchAccess(std::uint16_t address, std::size_t bytes, bool onRead, b
              onRead, onWrite, false);
   }
   if (armed_->armed == 0u) armed_.reset();  // the last place disarmed: back to one null pointer
+}
+
+namespace {
+
+// The opcode a stand-in answers the fetch with: RET for Return, nothing for
+// None or for an address not armed.
+constexpr std::uint8_t kRet = 0x6F;
+[[nodiscard]] constexpr std::uint8_t standinOpcode(std::uint8_t code) noexcept {
+  return code == 1u + static_cast<std::uint8_t>(ApuStandin::Return) ? kRet : std::uint8_t{0};
+}
+
+}  // namespace
+
+void Apu::tellInstruction() {
+  const Spc700State& cpu = cpu_.state();
+  if (cpu.run != RunState::Running || cpu.tcu != 0u) return;
+  const std::uint16_t address = cpu.pc;
+  if (standins_->code(address) == 0u) return;
+  state_->cpu = cpu;  // live for cpuState() inside the call
+  if (instructionWatcher_ != nullptr) instructionWatcher_->reached(address);
+  // What stands there once the host has answered — the call may have disarmed
+  // it, moved the program counter, or run the machine — queued for the fetch.
+  if (standins_ == nullptr) return;
+  standins_->pendingOpcode = standinOpcode(standins_->code(address));
+  standins_->pendingAddress = address;
+}
+
+void Apu::watchInstruction(std::uint16_t address, ApuStandin standin) {
+  if (!standins_) standins_ = std::make_unique<StandinSet>();
+  if (standins_->code(address) == 0u) ++standins_->armed;  // newly armed; re-arming only replaces the stand-in
+  standins_->set(address, static_cast<std::uint8_t>(1u + static_cast<std::uint8_t>(standin)));
+}
+
+void Apu::unwatchInstruction(std::uint16_t address) {
+  if (!standins_ || standins_->code(address) == 0u) return;
+  standins_->set(address, 0u);
+  --standins_->armed;
+  if (standins_->armed == 0u) standins_.reset();  // the last place disarmed: back to one null pointer
 }
 
 std::uint8_t Apu::readRegister(std::uint8_t reg) {

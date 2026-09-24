@@ -174,6 +174,35 @@ class ApuAccessWatcher {
   virtual AccessAnswer write(std::uint16_t address, std::uint8_t value, std::uint8_t cycle) = 0;
 };
 
+// What stands at a watched address while it is armed (Apu::watchInstruction):
+// nothing, so the instruction there runs once the host has been told; or a
+// return (RET), so the routine there never runs — the fetch that begins the
+// instruction answers the return's opcode in place of the byte RAM holds, and
+// the one instruction that runs is the return.
+enum class ApuStandin : std::uint8_t {
+  None,    // the instruction runs after the host is told
+  Return,  // a return (RET), for a routine a CALL entered
+};
+
+// A host told, before the instruction at a watched address runs, that the
+// sound CPU has reached it. Told once per instruction, at an instruction
+// boundary of a running core: a sleeping or stopped core sits on a boundary
+// and is not told. This bus has no aliases, so a watched place is the address.
+//
+// The machine's clock has not moved for this call: the host runs on its own
+// time, and the cycles the instruction — or the return standing in for it —
+// spends are the same as with no host at all. cpuState() is live inside the
+// call, and a register file written with setCpuState() inside it is what the
+// instruction runs under. The watcher is the host's object, set by pointer and
+// not part of the state, so a snapshot does not carry it and restore() leaves
+// it in place.
+class ApuInstructionWatcher {
+ public:
+  virtual ~ApuInstructionWatcher() = default;
+  // The instruction at `address` is about to run.
+  virtual void reached(std::uint16_t address) = 0;
+};
+
 class Apu {
  public:
   // The seeded post-IPL power-on machine: zeroed RAM, SP at $01EF, TEST $0A,
@@ -357,6 +386,30 @@ class Apu {
   void watchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite);
   void unwatchAccess(std::uint16_t address, std::size_t bytes, bool onRead, bool onWrite);
 
+  // The watcher (ApuInstructionWatcher, above) told each armed instruction the
+  // CPU reaches, or none, which is how the machine starts. With none set, or
+  // nothing armed, a cycle pays one test.
+  void setInstructionWatcher(ApuInstructionWatcher* watcher) noexcept {
+    instructionWatcher_ = watcher;
+  }
+  [[nodiscard]] ApuInstructionWatcher* instructionWatcher() const noexcept {
+    return instructionWatcher_;
+  }
+
+  // Arms a watch on the instruction at `address`, with `standin` standing there
+  // while it is armed: None tells the watcher and lets the instruction run;
+  // Return tells the watcher and answers the fetch with RET (ApuStandin,
+  // above), so the routine's body never runs and the caller resumes as it would
+  // after the routine returned, the return spending exactly what a real one
+  // spends. Arming an armed place replaces what stands there; disarming a place
+  // not armed does nothing. A stand-in stands whether or not a watcher is set.
+  // RAM is never written: peek and a data read of the byte answer RAM, and
+  // disarming has nothing to put back. A machine that has never armed an
+  // instruction holds no table at all, and disarming the last one frees it
+  // again.
+  void watchInstruction(std::uint16_t address, ApuStandin standin = ApuStandin::Return);
+  void unwatchInstruction(std::uint16_t address);
+
  private:
   // The internal bus: $00F0-$00FF route to the register overlay, everything else
   // is RAM. Both the CPU and its dummy reads pass through here, and every call
@@ -403,6 +456,12 @@ class Apu {
   // Sets or clears the armed bit for `address`, in either direction.
   void setArmed(std::uint16_t address, bool onRead, bool onWrite, bool arm);
 
+  // The instruction watch at a boundary of a running core. When the program
+  // counter's address is armed, the watcher is told with the register file
+  // live, and what stands there once the call returns is queued for the fetch
+  // that follows. Called once per cycle while an instruction is armed.
+  void tellInstruction();
+
   // One machine cycle. The master counter advances, the timer ticks and the DSP
   // sample boundary that land on the new count are taken, and then the CPU makes
   // its one bus access — the order the chips share their multiplexed bus in, and
@@ -443,6 +502,30 @@ class Apu {
   };
   ApuAccessWatcher* accessWatcher_ = nullptr;  // told every armed access; none by default
   std::unique_ptr<AccessArmedSet> armed_;      // the armed table; null until the first arm
+  // The addresses a host has armed for an instruction watch and what stands at
+  // each, two bits per 16-bit address — 0 not armed, else 1 + the ApuStandin —
+  // behind one owning pointer held null until the first arm, which is also the
+  // cycle's "is anything armed" test; the structure is freed and the pointer
+  // restored to null when the last address is disarmed. It also carries the
+  // return queued for the fetch that begins the instruction the watcher was
+  // last told about: the opcode to answer and the address it is for, cleared by
+  // the next opcode fetch whichever address that fetches.
+  struct StandinSet {
+    std::array<std::uint8_t, 16384> codes{};  // two bits per address
+    std::size_t armed = 0;                     // addresses armed, to free the set at zero
+    std::uint8_t pendingOpcode = 0;            // the return the next opcode fetch answers, or 0
+    std::uint16_t pendingAddress = 0;          // the address that fetch must drive
+    [[nodiscard]] std::uint8_t code(std::uint16_t address) const noexcept {
+      return static_cast<std::uint8_t>((codes[address >> 2] >> ((address & 3u) * 2u)) & 3u);
+    }
+    void set(std::uint16_t address, std::uint8_t code) noexcept {
+      const unsigned shift = (address & 3u) * 2u;
+      codes[address >> 2] =
+          static_cast<std::uint8_t>((codes[address >> 2] & ~(3u << shift)) | (code << shift));
+    }
+  };
+  ApuInstructionWatcher* instructionWatcher_ = nullptr;  // told each armed instruction reached; none by default
+  std::unique_ptr<StandinSet> standins_;                 // the armed instructions; null until the first arm
 };
 
 }  // namespace snaggletooth
