@@ -144,3 +144,19 @@ This is the only target that links SDL. It is built when `SNAGGLETOOTH_BUILD_PLA
 parent build that already defines `SDL3::SDL3`, or from the pinned submodule at `third_party/sdl`,
 built statically with the subsystems a window, a speaker and a gamepad do not need switched off. The
 library itself never links SDL.
+
+**Run a `Release` build.** A `Debug` build of the machine is several times slower, and the player
+built that way falls well short of the console's rate, so the rate in the window's title reads
+as a slow emulator when it is only the build. A Debug player says so before anything else when
+it starts. These commands build the player as `Release` on every platform:
+
+```
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target snes_player
+```
+
+The player is then `build/snes_player`, or `build\Release\snes_player.exe` on Windows. On
+Windows, `--config Release` is the flag that matters: without it the build is `Debug`, and the
+player lands in `build\Debug\`.
+[docs/build-and-consume.md](../../docs/build-and-consume.md#building-a-release-build) says which
+flag each generator reads.

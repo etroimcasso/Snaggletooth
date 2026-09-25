@@ -6,6 +6,7 @@ library and drives a machine.
 ## Contents
 
 - [Requirements](#requirements)
+  - [Building a Release build](#building-a-release-build)
 - [Targets](#targets)
 - [Build modes](#build-modes)
   - [Build options](#build-options)
@@ -28,17 +29,37 @@ library and drives a machine.
 - Git. SDL3 is a submodule, needed by the player alone; clone with `--recurse-submodules` when
   you want the player, and plainly when you do not.
 
+### Building a Release build
+
+These three commands build `Release` on every platform, with every generator — Linux, macOS
+and Windows alike:
+
 ```sh
 git clone --recurse-submodules <repo-url>
 cd Snaggletooth
-cmake -B build
-cmake --build build
-ctest --test-dir build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build -C Release
 ```
 
-A build is optimized by default: when nothing supplies `CMAKE_BUILD_TYPE`, a top-level configure
-sets it to `Release`. Multi-config generators choose at build time as they always do
-(`cmake --build build --config Release`).
+Keep all three flags. Which one takes effect depends on the generator, and the other is
+ignored:
+
+- **Makefiles** (the default on Linux and macOS) **and Ninja** build one type per build
+  directory, chosen at configure time by `-DCMAKE_BUILD_TYPE=Release`. The binaries land in
+  `build/`.
+- **Visual Studio** — the default on Windows — builds whichever type `cmake --build` is given,
+  chosen by `--config Release`, and `ctest` runs the one named by `-C Release`. **Leave
+  `--config` out and it builds `Debug`**, whatever the configure step said. The binaries land
+  in `build\Release\`; a player in `build\Debug\` is the Debug build. In the Visual Studio IDE,
+  set the configuration drop-down to `Release` before building.
+
+A Debug build is unoptimized, with the compiler's runtime checks on. It runs the machine
+several times slower, and the player falls well short of the console's rate even on a fast
+desktop processor. A player built that way says so when it starts.
+
+A build directory keeps the generator it was first configured with. To change generators,
+configure a new directory rather than reusing the old one.
 
 ## Targets
 
@@ -46,7 +67,7 @@ sets it to `Release`. Multi-config generators choose at build time as they alway
 |---|---|---|
 | `snaggletooth` | `snaggletooth::snaggletooth` | The library: both machines, both CPU cores, the S-DSP, the PPU and the cartridge functions. This is what a program of your own links. |
 | `snaggletooth_spc`, `snaggletooth_video`, `snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_formats`, `snaggletooth_spc700`, `snaggletooth_cpu65816`, `snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential`, `snaggletooth_rom_render`, `snaggletooth_rom`, `snaggletooth_player_pads` | — | The tool libraries. Each command-line tool is a thin `main` over one of them, and a program that wants a tool's capability links the library rather than running the tool. [tools/README.md](../tools/README.md) lists which library carries what. |
-| `snes_disasm`, `snes_render`, `snes_verify`, `snes_lift`, `snes_differential`, `snes_examples`, `cpu65816_disasm`, `cpu65816_asm`, `spc700_disasm`, `spc700_asm`, `rom_render`, `spc_render` | — | The command-line tools. They land in the build directory's root. |
+| `snes_disasm`, `snes_render`, `snes_verify`, `snes_lift`, `snes_differential`, `snes_examples`, `cpu65816_disasm`, `cpu65816_asm`, `spc700_disasm`, `spc700_asm`, `rom_render`, `spc_render` | — | The command-line tools. They land in `build/`, or in `build\Release\` under Visual Studio (see [Building a Release build](#building-a-release-build)). |
 | `snes_player` | — | The player: a cartridge in a window, driven by a keyboard, a controller or an input script, recorded as it runs. The one target that links SDL. |
 | `snaggletooth_tests` | — | The suite, one GoogleTest binary registered with `ctest`. |
 
