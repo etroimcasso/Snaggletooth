@@ -447,12 +447,12 @@ std::vector<Routine> routines(const CartridgeDisassembly& disassembly) {
   // code line was reached by the trace from an entry through these same flows,
   // entering calls where this walk does not — so every line is in the routine of
   // some root, and no other label starts one.
-  const CartridgeMap map = disassembly.header.map;
+  const CartridgeBoard& board = disassembly.board;
   std::set<Address> roots;
   auto placed = [&](Address address) {
-    const std::optional<std::size_t> offset = romOffset(map, address, disassembly.imageBytes);
+    const std::optional<std::size_t> offset = romOffset(board, address, disassembly.imageBytes);
     if (!offset) return;
-    if (const std::optional<std::uint32_t> home = romAddress(map, *offset)) roots.insert(*home);
+    if (const std::optional<std::uint32_t> home = romAddress(board.map, *offset)) roots.insert(*home);
   };
   for (const TraceEntry& entry : disassembly.entries) placed(entry.address);
   for (const ReachedTarget& seen : disassembly.reached) placed(seen.target);
@@ -537,10 +537,10 @@ Cpu65816Mode cpuModeOf(const ir::Mode& mode) {
 }
 
 // The address every byte of the image is placed at, or nothing off the image.
-std::optional<Address> homeOf(CartridgeMap map, std::size_t imageBytes, Address address) {
-  const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+std::optional<Address> homeOf(const CartridgeBoard& board, std::size_t imageBytes, Address address) {
+  const std::optional<std::size_t> offset = romOffset(board, address, imageBytes);
   if (!offset) return std::nullopt;
-  return romAddress(map, *offset);
+  return romAddress(board.map, *offset);
 }
 
 std::vector<std::uint32_t> valuesOf(const ir::Values& values) {
@@ -550,21 +550,21 @@ std::vector<std::uint32_t> valuesOf(const ir::Values& values) {
 }  // namespace
 
 ProvenProgram proveProgram(const CartridgeDisassembly& disassembly, std::span<const std::uint8_t> rom) {
-  const CartridgeMap map = disassembly.header.map;
+  const CartridgeBoard& board = disassembly.board;
   const std::size_t imageBytes = rom.size();
 
   // Every vector begins in bank zero, which the chip clears to take it — reset
   // with the direct register and the data bank cleared too, the others knowing
   // nothing else. An entry a person added begins in the bank of the address they
   // gave, and knows nothing else.
-  const std::optional<Address> reset = homeOf(map, imageBytes, disassembly.header.emulation.reset);
+  const std::optional<Address> reset = homeOf(board, imageBytes, disassembly.header.emulation.reset);
   struct Vector {
     Address home = 0;
     Cpu65816Mode mode;
   };
   std::vector<Vector> vectors;
   for (const VectorEntry& vector : vectorEntries(disassembly.header)) {
-    const std::optional<Address> home = homeOf(map, imageBytes, vector.address);
+    const std::optional<Address> home = homeOf(board, imageBytes, vector.address);
     if (!home) continue;
     const bool native = vector.name.ends_with("_native");
     vectors.push_back(Vector{.home = *home, .mode = native ? Cpu65816Mode::nativeUnknown() : Cpu65816Mode::reset()});
@@ -595,12 +595,12 @@ ProvenProgram proveProgram(const CartridgeDisassembly& disassembly, std::span<co
     sightings.push_back(ir::Sighting{.site = derived.site, .target = derived.target});
   }
 
-  ir::ImageReader image = [map, imageBytes, rom](ir::Address address) -> std::optional<std::uint8_t> {
-    const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+  ir::ImageReader image = [board, imageBytes, rom](ir::Address address) -> std::optional<std::uint8_t> {
+    const std::optional<std::size_t> offset = romOffset(board, address, imageBytes);
     if (!offset) return std::nullopt;
     return rom[*offset];
   };
-  ir::Canonical canonical = [map, imageBytes](ir::Address address) { return homeOf(map, imageBytes, address); };
+  ir::Canonical canonical = [board, imageBytes](ir::Address address) { return homeOf(board, imageBytes, address); };
   // The stack pointer is sixteen bits in bank zero, and bank zero's low eight
   // kilobytes are work RAM, mirrored in every bank that shows the registers and
   // in bank $7E itself; nowhere else in bank zero can a stack be written.

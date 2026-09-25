@@ -443,7 +443,37 @@ stop     $00:8000 `JSL $40:1234`: the target $40:1234 is a LoROM bank's lower ha
 
 The trace follows such a target when a run took the CPU there or an entry names
 it, and not on the word of the bytes alone. A table the bytes derive is held to
-the same rule: a destination in a repeated half is a note, not an entry.
+the same rule: a destination in a repeated half is a note, not an entry. On a
+LoROM board with no save the save window's lower halves — `$70-$7D` and `$F0-$FF`
+below `$8000` — repeat their upper halves like every other cartridge bank's, so a
+call or jump there is the same stop, naming the half the target repeats; with a
+save behind the window the target is the save's, and the stop says so:
+
+```
+stop     $00:8000 `JSL $70:1234`: the target $70:1234 is a LoROM bank's lower half, which repeats $70:9234; add an entry for it if the program runs there
+stop     $00:8000 `JSL $70:1234`: the target $70:1234 is save RAM, not in the image
+```
+
+HiROM's and ExHiROM's windows sit in the expansion area of the system banks,
+`$6000-$7FFF`, which holds no image byte on any board, so a call or jump there is
+a stop naming the expansion area, and with a save behind the window one naming
+the save:
+
+```
+stop     $00:8000 `JML $20:6000`: the target $20:6000 is the expansion area, not in the image
+```
+
+A coprocessor's LoROM board gives the lower halves of its cartridge banks to the
+chip, so a call or jump there names no image byte. The stop says the target is
+the chip's, and no entry lifts it — the chip's own code is the chip's backend's,
+which no coprocessor has yet:
+
+```
+stop     $00:8000 `JSL $60:1234`: the target $60:1234 is the coprocessor's, not in the image
+```
+
+Which halves are which is the [board's](snes-cartridge.md#the-board), read from
+the header and written into the manifest's `save` and `chip` lines.
 
 A stop is answered with an entry. Add a line to the manifest naming the address
 the trace should continue from, a label for it, and the mode execution arrives in:
@@ -511,9 +541,10 @@ Nothing is inferred from where the CPU landed. The pointer is read before the
 step, and the landing only confirms it: a step that services an interrupt instead
 lands in the handler and records nothing, a step on which a DMA transfer holds the
 CPU off the bus runs no instruction and records nothing, and the jump is seen on
-the step that runs it. A pointer the run cannot read — one in a register window or
-the save window rather than the image or work RAM — is named in a `note` and
-recorded nowhere. The run is deterministic: work RAM is cleared at power-on and
+the step that runs it. A pointer the run cannot read — one in a register window, in
+the save, or in a coprocessor's half rather than the image or work RAM — is named
+in a `note` and recorded nowhere; a LoROM save window with no save behind it is
+the image, and a pointer there is read. The run is deterministic: work RAM is cleared at power-on and
 the machine has no other seed, so the same cartridge reaches the same set.
 
 A run sees what it exercised. An unattended boot reaches what the cartridge does
@@ -1293,8 +1324,8 @@ value the paths disagree on has `none`. The analysis follows the accumulator
 and the index registers by the byte, so an eight-bit load is known while the
 other byte is not; it does not follow the carry, so the result of `ADC`, `SBC`,
 `ROL` and `ROR` is never known, and it does not follow the decimal flag. Memory
-other than the image — work RAM, a register, the save window — is a value the
-cartridge supplies when it runs, and a load from it is not known.
+other than the image — work RAM, a register, the save, a coprocessor's half — is
+a value the cartridge supplies when it runs, and a load from it is not known.
 
 **The routines.** A [`routine` line](project-manifest.md#28-routines) per
 routine says which lines belong together, which routines it calls, and its

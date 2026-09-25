@@ -35,12 +35,14 @@ struct VectorEntry {
 
 // The disassembler that owns the bytes at an address.
 enum class CodeOwner : std::uint8_t {
-  None,      // nothing to disassemble: RAM, registers, a save, or open bus
+  None,      // nothing to disassemble: RAM, registers, a save, a coprocessor's half, or open bus
   Cpu65816,  // the main CPU's instruction set
 };
 
-// Which disassembler owns the bytes at `address` under `map`. Cartridge ROM is the
-// main CPU's; everything else holds no code an image can be read for.
-[[nodiscard]] CodeOwner codeOwner(CartridgeMap map, Address address) noexcept;
+// Which disassembler owns the bytes at `address` on `board`. Cartridge ROM is the
+// main CPU's — a LoROM save window with no save behind it included, which reads
+// the image; everything else holds no code an image can be read for, a
+// coprocessor's half among it, which the chip's own disassembler will take.
+[[nodiscard]] CodeOwner codeOwner(const CartridgeBoard& board, Address address) noexcept;
 
 }  // namespace snaggletooth::disasm

@@ -37,6 +37,39 @@ inline std::string mapName(CartridgeMap map) {
   return "LoROM";
 }
 
+// The chip's name as the manifest's `chip` line writes it, one per
+// `Coprocessor` (`docs/project-manifest.md` §2.1).
+inline std::string_view coprocessorName(Coprocessor chip) {
+  switch (chip) {
+    case Coprocessor::None: return "none";
+    case Coprocessor::Dsp: return "DSP";
+    case Coprocessor::Gsu: return "SuperFX";
+    case Coprocessor::Obc1: return "OBC1";
+    case Coprocessor::Sa1: return "SA-1";
+    case Coprocessor::Sdd1: return "S-DD1";
+    case Coprocessor::Srtc: return "S-RTC";
+    case Coprocessor::Other: return "other";
+    case Coprocessor::Spc7110: return "SPC7110";
+    case Coprocessor::St010: return "ST010";
+    case Coprocessor::St018: return "ST018";
+    case Coprocessor::Cx4: return "CX4";
+    case Coprocessor::Unknown: return "unknown";
+  }
+  return "unknown";
+}
+
+// The `Coprocessor` a `chip` line's word names, or nothing for a word that is
+// not one of the names above.
+inline std::optional<Coprocessor> parseCoprocessor(std::string_view word) {
+  for (const Coprocessor chip : {Coprocessor::None, Coprocessor::Dsp, Coprocessor::Gsu, Coprocessor::Obc1,
+                                 Coprocessor::Sa1, Coprocessor::Sdd1, Coprocessor::Srtc, Coprocessor::Other,
+                                 Coprocessor::Spc7110, Coprocessor::St010, Coprocessor::St018,
+                                 Coprocessor::Cx4, Coprocessor::Unknown}) {
+    if (coprocessorName(chip) == word) return chip;
+  }
+  return std::nullopt;
+}
+
 // The words of a manifest line, split at spaces and tabs outside double quotes;
 // the quotes themselves are dropped.
 inline std::vector<std::string> tokens(std::string_view line) {

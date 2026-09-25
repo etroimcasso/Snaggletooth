@@ -1,14 +1,14 @@
 # The cartridge
 
-`snaggletooth/snes/cartridge.h` reads a cartridge image as a value: its header, the map it lays across
-the bus under, and where each bus address lands in the image. The [machine](snes-machine.md) reads a
-cartridge through these functions, and so does every tool built over it, so the two can never disagree
-about where a byte is.
+`snaggletooth/snes/cartridge.h` reads a cartridge image as a value: its header, the board it is on —
+the map it lays across the bus under, the chip beside the ROM, the save — and where each bus address
+lands in the image. The [machine](snes-machine.md) reads a cartridge through these functions, and so
+does every tool built over it, so the two can never disagree about where a byte is.
 
-Nothing here runs anything. A header is parsed from a span of bytes; a map translates between a 24-bit
-bus address and an image offset in both directions; a region says what an address reaches. Building a
-machine is the caller's next step, or not — a disassembler wants the header's vectors and the map and
-never a machine at all.
+Nothing here runs anything. A header is parsed from a span of bytes; a board translates between a
+24-bit bus address and an image offset in both directions; a region says what an address reaches.
+Building a machine is the caller's next step, or not — a disassembler wants the header's vectors and
+the board and never a machine at all.
 
 ## Contents
 
@@ -16,6 +16,7 @@ never a machine at all.
 - [A copier's header](#a-copiers-header)
 - [The header](#the-header)
 - [The three maps](#the-three-maps)
+- [The board](#the-board)
 - [Where an address lands](#where-an-address-lands)
 - [Save RAM](#save-ram)
 - [Gotchas](#gotchas)
@@ -41,11 +42,13 @@ Everything lives in `snaggletooth`.
 | `kCopierHeaderBytes` | 512 — every copier's header is this long. |
 | `readCopierHeader(file)` | The copier's header a file carries ahead of its image, or nothing when the file begins with the image. |
 | `describeCopierHeader(header, imageBytes)` | One line saying what the header declares, and how the image that follows differs from it. |
-| `CartridgeRegion` | `System`, `WorkRam`, `Rom` or `SaveRam` — what a bus address reaches. |
-| `cartridgeRegion(map, address)` | The region an address lands in under a map. |
-| `romOffset(map, address, imageBytes)` | The image byte a ROM address reads, mirrored across the image. |
+| `CartridgeBoard` | The board a cartridge is on: its map, its `Coprocessor`, and its save in bytes — zero for none. |
+| `cartridgeBoard(rom)` | The board an image's header declares; a plain LoROM board with no save for an image with no header. |
+| `CartridgeRegion` | `System`, `WorkRam`, `Rom`, `SaveRam` or `Coprocessor` — what a bus address reaches. |
+| `cartridgeRegion(board, address)` | The region an address lands in on a board. |
+| `romOffset(board, address, imageBytes)` | The image byte a ROM address reads on a board, mirrored across the image. |
 | `romAddress(map, offset)` | The bus address that reads an image offset whole. |
-| `saveRamOffset(map, address)` | The offset into the save an address reaches, before the save's size reduces it. |
+| `saveRamOffset(board, address)` | The offset into the save an address reaches on a board, before the save's size reduces it. |
 
 ## A copier's header
 
@@ -193,38 +196,76 @@ undecoded — so an address past a chip reads that chip again rather than runnin
 megabyte above it repeats **the second** chip, not the image. `romOffset` applies the rule, which is
 why it takes the image size.
 
+## The board
+
+The map says how the image lays across the bus; what an address reaches also depends on what else is
+on the board — whether there is a save behind the map's window, and whether a coprocessor sits
+beside the ROM. `CartridgeBoard` holds the three, and `cartridgeBoard` reads them from the header:
+the map from the site the header is read at, the chip from the chipset byte, the save from its size
+code. An image too small to hold a header is a plain LoROM board with no save.
+
+```cpp
+const CartridgeBoard board = cartridgeBoard(image);
+board.map;           // CartridgeMap::LoRom
+board.coprocessor;   // Coprocessor::Dsp
+board.saveRamBytes;  // 8192, or 0 for a cartridge with none
+
+// A board of the caller's own, for a cartridge whose header says the wrong thing.
+const CartridgeBoard plain{.map = CartridgeMap::HiRom, .coprocessor = Coprocessor::None, .saveRamBytes = 0};
+```
+
+The board answers two questions the map cannot. **A save window with no save behind it** is whatever
+the board decodes there: LoROM's window sits in cartridge banks, where a board with no save decodes
+nothing, so the window's lower halves repeat their upper halves as every other cartridge bank's does
+— `$70:1234` reads the byte at `$70:9234`; HiROM's and ExHiROM's windows sit in the expansion area,
+where nothing else is, and read open bus. **A coprocessor's LoROM board** gives the lower halves of
+its cartridge banks to the chip — `$60-$6F` to a DSP on the 2 MB boards, and to an ST010's ports and
+RAM — so every cartridge bank's lower half outside the save window is the chip's, and the window's
+lower halves are the chip's too when the board has no save. A coprocessor on a HiROM or ExHiROM
+board changes nothing here: the chips' own maps on those boards are not modelled. The [machine](snes-machine.md#save-ram)
+reads both rules through these functions.
+
 ## Where an address lands
 
 ```cpp
 const std::size_t size = image.size();
-romOffset(CartridgeMap::HiRom, 0xC11234, size);   // 0x011234
-romOffset(CartridgeMap::HiRom, 0x008000, size);   // 0x008000 — the system bank's upper half
-romOffset(CartridgeMap::HiRom, 0x001000, size);   // nothing: that is the system area
-romOffset(CartridgeMap::LoRom, 0x018000, size);   // 0x008000
-romOffset(CartridgeMap::LoRom, 0x401234, size);   // 0x201234 — a lower half, as $40:9234
-romOffset(CartridgeMap::LoRom, 0x701234, size);   // nothing: the save window
-romOffset(CartridgeMap::ExHiRom, 0x401000, size); // 0x401000 — the second 4 MB
+const CartridgeBoard hiRom{.map = CartridgeMap::HiRom, .coprocessor = Coprocessor::None, .saveRamBytes = 8192};
+const CartridgeBoard loRom{.map = CartridgeMap::LoRom, .coprocessor = Coprocessor::None, .saveRamBytes = 8192};
+const CartridgeBoard bare{.map = CartridgeMap::LoRom, .coprocessor = Coprocessor::None, .saveRamBytes = 0};
+const CartridgeBoard dsp{.map = CartridgeMap::LoRom, .coprocessor = Coprocessor::Dsp, .saveRamBytes = 0};
+const CartridgeBoard exHiRom{.map = CartridgeMap::ExHiRom, .coprocessor = Coprocessor::None, .saveRamBytes = 8192};
+
+romOffset(hiRom, 0xC11234, size);    // 0x011234
+romOffset(hiRom, 0x008000, size);    // 0x008000 — the system bank's upper half
+romOffset(hiRom, 0x001000, size);    // nothing: that is the system area
+romOffset(loRom, 0x018000, size);    // 0x008000
+romOffset(loRom, 0x401234, size);    // 0x201234 — a lower half, as $40:9234
+romOffset(loRom, 0x701234, size);    // nothing: the save is behind the window
+romOffset(bare, 0x701234, size);     // 0x381234 — no save, so the window reads as $70:9234
+romOffset(dsp, 0x601234, size);      // nothing: the chip's half
+romOffset(exHiRom, 0x401000, size);  // 0x401000 — the second 4 MB
 
 romAddress(CartridgeMap::HiRom, 0x123456);        // $D2:3456
 romAddress(CartridgeMap::LoRom, 0x008000);        // $01:8000
 romAddress(CartridgeMap::ExHiRom, 0x7E0000);      // nothing: no address reads it
 ```
 
-`romOffset` answers for any 24-bit address and returns nothing when the address is not ROM under the
-map, so it can be asked about an address before knowing what is there. `romAddress` goes the other
-way and picks the banks that carry the image without a gap: `$00-$7D` and `$FE-$FF` under LoROM,
-`$C0-$FF` under HiROM, and under ExHiROM `$C0-$FF` for the first 4 MB then `$40-$7D`. It returns
-nothing for an offset the map cannot reach — beyond 4 MB under LoROM and HiROM, beyond 8 MB under
-ExHiROM, or under ExHiROM the lower halves of the two banks work RAM hides.
+`romOffset` answers for any 24-bit address and returns nothing when the address is not the image on
+the board, so it can be asked about an address before knowing what is there. `romAddress` goes the
+other way, is the map's alone, and picks the banks that carry the image without a gap: `$00-$7D` and
+`$FE-$FF` under LoROM, `$C0-$FF` under HiROM, and under ExHiROM `$C0-$FF` for the first 4 MB then
+`$40-$7D`. It returns nothing for an offset the map cannot reach — beyond 4 MB under LoROM and HiROM,
+beyond 8 MB under ExHiROM, or under ExHiROM the lower halves of the two banks work RAM hides.
 
-`cartridgeRegion` names what an address reaches:
+`cartridgeRegion` names what an address reaches on the board:
 
 | Region | Where |
 |---|---|
 | `WorkRam` | banks `$7E-$7F` |
-| `System` | the lower half of a system bank (`$00-$3F`, `$80-$BF`): the work-RAM mirror, the registers, the expansion area |
-| `Rom` | the upper half of every bank; the whole of a cartridge bank under HiROM and ExHiROM, and under LoROM outside the save window |
-| `SaveRam` | the save window, whether or not the cartridge declares a save |
+| `System` | the lower half of a system bank (`$00-$3F`, `$80-$BF`): the work-RAM mirror, the registers, the expansion area — HiROM's and ExHiROM's save windows among it on a board with no save |
+| `Rom` | the upper half of every bank; the whole of a cartridge bank under HiROM and ExHiROM; under LoROM a cartridge bank's lower half on a plain board, the save window's included when the board has no save |
+| `SaveRam` | the save window, on a board with a save |
+| `Coprocessor` | under LoROM on a coprocessor's board, a cartridge bank's lower half outside the save window — and the window's lower halves too when the board has no save |
 
 ## Save RAM
 
@@ -233,23 +274,21 @@ halves of `$70-$7D` and `$F0-$FF`, 32 KB per bank. HiROM fits it into the system
 window, `$20-$3F` and `$A0-$BF` at `$6000-$7FFF`, 8 KB per bank. ExHiROM keeps it in `$80-$BF` at
 `$6000-$7FFF`.
 
-What a cartridge with no save RAM answers in the window is the board's. HiROM's and ExHiROM's
-windows sit in the expansion area, where nothing else is, and read open bus. LoROM's sits in
-cartridge banks, and a board with no save RAM decodes nothing there: the window's lower halves repeat
-their upper halves as every other cartridge bank's does. The map alone cannot say which cartridge it
-is asked about, so `cartridgeRegion` answers `SaveRam` and `romOffset` answers nothing for the window
-under every map, and `Snes` — which knows whether it holds a save — reads the image there for a
-LoROM cartridge that has none.
+The window is the save's only on a board with a save: `cartridgeRegion` answers `SaveRam` there and
+`romOffset` answers nothing. On a board with none the window is whatever the board decodes there —
+the image through the upper half on a plain LoROM board, the chip's half on a coprocessor's, open bus
+in HiROM's and ExHiROM's expansion area — as [the board](#the-board) says.
 
 `saveRamOffset` gives the linear offset into the save an address reaches, before the save's own size
-folds it — `$71:1234` under LoROM is offset `$9234`, `$21:6000` under HiROM is `$2000`. A save
-smaller than its window repeats within it: the machine reduces the offset to the declared size, and a
-caller holding a save does the same.
+folds it — `$71:1234` under LoROM is offset `$9234`, `$21:6000` under HiROM is `$2000` — and nothing
+outside the window or on a board with no save. A save smaller than its window repeats within it: the
+machine reduces the offset to the declared size, and a caller holding a save does the same.
 
 ```cpp
-saveRamOffset(CartridgeMap::LoRom, 0x711234);   // 0x9234
-saveRamOffset(CartridgeMap::HiRom, 0x216000);   // 0x2000
-saveRamOffset(CartridgeMap::HiRom, 0x205FFF);   // nothing: below the window
+saveRamOffset(loRom, 0x711234);   // 0x9234
+saveRamOffset(hiRom, 0x216000);   // 0x2000
+saveRamOffset(hiRom, 0x205FFF);   // nothing: below the window
+saveRamOffset(bare, 0x711234);    // nothing: no save on the board
 ```
 
 ## Gotchas
@@ -264,15 +303,18 @@ saveRamOffset(CartridgeMap::HiRom, 0x205FFF);   // nothing: below the window
   header: LoROM and zero. `parseCartridgeHeader` returns nothing for that image.
 - A vector of `$0000` points at work RAM and one of `$FFFF` at the last ROM byte; neither is a
   handler. A cartridge leaves a vector it does not use at either.
-- `cartridgeRegion` reports the save window for every map whether or not the cartridge declares a
-  save. A caller that knows the cartridge has none reads a LoROM window through its upper half —
-  `address | $8000` — which is what the machine does; under HiROM and ExHiROM it is open bus.
-- The map is a plain board's. A coprocessor's board gives lower halves of its LoROM cartridge banks to
-  the chip, and these functions still answer `Rom` there; `Snes` reads the header's `coprocessor` and
-  answers open bus for them, carrying no such chip.
-- The boards differ in ways the image does not say, and the map takes none of them: the older LoROM
-  boards give the save the whole 64 KB of its banks, one HiROM family keeps the save in `$10-$1F` as
-  well as `$30-$3F`, and one leaves a quarter of its ROM banks empty. The header names no board.
+- The three functions answer for the board they are given. A board with `saveRamBytes` of zero reads
+  its LoROM window as the image and its HiROM or ExHiROM window as the system's; one with a
+  coprocessor gives its LoROM lower halves to the chip. A caller that wants the map's answer alone —
+  every window the save's, every lower half the image — asks with a board that declares a save and no
+  chip.
+- `cartridgeBoard` reads the chip from the chipset byte as `parseCartridgeHeader` does, so a chipset
+  nibble the layout does not list is `Coprocessor::Unknown`, and a board with one keeps its lower
+  halves for the chip as any coprocessor's board does.
+- The boards differ in ways the image does not say, and `CartridgeBoard` takes none of them: the older
+  LoROM boards give the save the whole 64 KB of its banks, one HiROM family keeps the save in `$10-$1F`
+  as well as `$30-$3F`, and one leaves a quarter of its ROM banks empty. The header names no board
+  beyond its map, its chip and its save.
 - `chipsetSubtype` is read from `$FFBF` on every cartridge, because a custom coprocessor needs it,
   but it means something only under a chipset high nibble of `$F` or an extended header. On a
   cartridge with neither it is whatever byte the bank holds there, often `$FF` or `$00`.

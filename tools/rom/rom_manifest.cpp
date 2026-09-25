@@ -256,6 +256,20 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       else return fail(words[1] + " is not a map");
       continue;
     }
+    if (words[0] == "save") {
+      if (words.size() != 2) return fail("save is a byte count");
+      const std::optional<std::size_t> count = parseCount(words[1]);
+      if (!count) return fail(words[1] + " is not a byte count");
+      input.saveRamBytes = *count;
+      continue;
+    }
+    if (words[0] == "chip") {
+      if (words.size() != 2) return fail("chip is a coprocessor's name or none");
+      const std::optional<Coprocessor> chip = text::parseCoprocessor(words[1]);
+      if (!chip) return fail(words[1] + " is not a coprocessor the manifest names");
+      input.coprocessor = *chip;
+      continue;
+    }
     if (words[0] == "sound") {
       if (words.size() != 5 || words[2] != "SPC700" || words[3] != "entry") {
         return fail("sound is a path, SPC700, entry, and the entry address");
@@ -414,6 +428,15 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
     }
   }
   return input;
+}
+
+CartridgeBoard manifestBoard(const ManifestInput& input) {
+  // The largest save any window holds: a manifest that names no save is read
+  // as a board with its map's whole window behind it.
+  constexpr std::size_t kWholeWindow = 128u * 1024u;
+  return CartridgeBoard{.map = input.map.value_or(CartridgeMap::LoRom),
+                        .coprocessor = input.coprocessor.value_or(Coprocessor::None),
+                        .saveRamBytes = input.saveRamBytes.value_or(kWholeWindow)};
 }
 
 std::string manifestMismatch(const ManifestInput& input, std::span<const std::uint8_t> rom) {

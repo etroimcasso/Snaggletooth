@@ -84,6 +84,8 @@ bank:
 ```
 image    65536
 map      LoROM
+save     0
+chip     none
 title    "FACTS DEMO CARTRIDGE"
 checksum $EDCB $1234
 
@@ -121,14 +123,39 @@ the bytes do not name carries the `stop` lines of
 ```
 image    <bytes>
 map      LoROM | HiROM | ExHiROM
+save     <bytes>
+chip     <name>
 title    "<text>"
 checksum $XXXX $XXXX
 ```
 
 `image` is the image's size in bytes, and `checksum` its header checksum and
 complement, as the header carries them. Together they name the image the manifest
-was written for. `map` is the map the header names and `title` the header's title,
-with anything outside printable ASCII removed.
+was written for. `map`, `save` and `chip` are the [board](snes-cartridge.md#the-board)
+the header declares — the map, the save in bytes with `0` for none, and the
+coprocessor beside the ROM — which every reader of the tree places an address on,
+and `title` the header's title, with anything outside printable ASCII removed.
+`chip` is one word per `Coprocessor`:
+
+| `chip` | The chip |
+|---|---|
+| `none` | no coprocessor |
+| `DSP` | a DSP-1 to DSP-4 |
+| `SuperFX` | the SuperFX family |
+| `OBC1` | the OBC1 |
+| `SA-1` | the SA-1 |
+| `S-DD1` | the S-DD1 |
+| `S-RTC` | the S-RTC |
+| `other` | the Super Game Boy and Satellaview hardware |
+| `SPC7110` | the SPC7110 |
+| `ST010` | the ST010 and ST011 |
+| `ST018` | the ST018 |
+| `CX4` | the Cx4 |
+| `unknown` | a chipset code the header layout does not list |
+
+A manifest without `save` and `chip` names a plain board whose map's whole
+window is the save's — every window the save's, every lower half the image —
+and a tree written without them renders and verifies on that board.
 
 ### 2.2 Files
 
@@ -1208,8 +1235,8 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 When [`snes_verify`](snes-disassembler.md#verifying-the-tree) runs over the
 directory, it reads:
 
-- `map`, and every `file` line — each file is assembled and its bytes placed at
-  the image offset their address reads from under the map;
+- `map`, `save` and `chip`, and every `file` line — each file is assembled and
+  its bytes placed at the image offset their address reads from on the board;
 - the `sound` line and every `block` line — the sound file is assembled, and
   each block `at` an offset is placed there; an `unplaced` block is the bank's
   and is not compared;
@@ -1220,11 +1247,11 @@ Everything else is what the last run found and is written fresh — the `access`
 `dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed`, `landed`,
 `walked`, `preview` and `sample` lines among them — and the next disassembly reads none of it back: they are what
 the trace and the run saw, and the next sees it again. A `stop` line records;
-only an `entry` line directs. `snes_render` reads the `access`, `routine`,
+only an `entry` line directs. `snes_render` reads `map`, `save` and `chip`, and the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the
 bank files from `program.snagir` and the sound file from `apu.snagir`, for
-the register names, the routine comments, the `INCBIN` lines and the sound
-file's header ([snes-disassembler.md §Library](snes-disassembler.md#library)).
+the board a lifted file's address is placed on, the register names, the
+routine comments, the `INCBIN` lines and the sound file's header ([snes-disassembler.md §Library](snes-disassembler.md#library)).
 `snes_lift` and `snes_differential` read the program files beside the
 manifest and nothing of the manifest itself ([snagir.md](snagir.md)).
 The disassembler writes the manifest, the program files and the lifted files

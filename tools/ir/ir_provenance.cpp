@@ -160,8 +160,8 @@ std::optional<OriginInterval> Provenance::Runs::holding(std::size_t offset) cons
 
 // ---- the shadow of a run --------------------------------------------------------
 
-Provenance::Provenance(CartridgeMap map, std::size_t imageBytes, std::size_t cap)
-    : invocation_(0x20000u, 0u), map_(map), imageBytes_(imageBytes), origins_(cap),
+Provenance::Provenance(const CartridgeBoard& board, std::size_t imageBytes, std::size_t cap)
+    : invocation_(0x20000u, 0u), board_(board), imageBytes_(imageBytes), origins_(cap),
       workRam_(0x20000u, kNoOrigin), writers_(0x20000u), written_(0x20000u, false) {
   frames_.push_back(Invocation{.id = nextInvocation_++, .runs = {}});
   frameIndex_.emplace(frames_.back().id, 0u);
@@ -285,10 +285,10 @@ Origin Provenance::at(Address address) {
       return origins_.hardwareRegister(offset);
     }
   }
-  if (const std::optional<std::size_t> offset = romOffset(map_, address, imageBytes_)) {
+  if (const std::optional<std::size_t> offset = romOffset(board_, address, imageBytes_)) {
     return origins_.image(*offset);
   }
-  if (saveRamOffset(map_, address)) return origins_.save();
+  if (saveRamOffset(board_, address)) return origins_.save();
   return kNoOrigin;
 }
 
@@ -330,7 +330,7 @@ void Provenance::noteRead(std::size_t offset) { frames_.back().runs.read(offset)
 
 Origin Provenance::read(Address address) {
   address &= 0xFFFFFFu;
-  if (const std::optional<std::size_t> offset = romOffset(map_, address, imageBytes_)) noteRead(*offset);
+  if (const std::optional<std::size_t> offset = romOffset(board_, address, imageBytes_)) noteRead(*offset);
   return at(address);
 }
 

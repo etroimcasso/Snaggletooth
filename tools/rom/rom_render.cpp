@@ -68,7 +68,7 @@ namespace {
 std::vector<Range> placedBlockRanges(const RenderInput& input, const RenderRegion& region) {
   std::vector<Range> ranges;
   if (!input.sound) return ranges;
-  const std::optional<std::size_t> start = romOffset(input.map, region.first, input.imageBytes);
+  const std::optional<std::size_t> start = romOffset(input.board, region.first, input.imageBytes);
   if (!start) return ranges;
   const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
   for (const RenderBlock& block : input.sound->blocks) {
@@ -641,8 +641,8 @@ using Span = std::pair<std::size_t, std::size_t>;  // image offsets, inclusive
 
 // Where a lifted file's bytes lie in the image, or nothing for an address
 // outside it.
-std::optional<Span> imageSpan(CartridgeMap map, std::size_t imageBytes, Address first, std::size_t bytes) {
-  const std::optional<std::size_t> start = romOffset(map, first, imageBytes);
+std::optional<Span> imageSpan(const CartridgeBoard& board, std::size_t imageBytes, Address first, std::size_t bytes) {
+  const std::optional<std::size_t> start = romOffset(board, first, imageBytes);
   if (!start || bytes == 0) return std::nullopt;
   return Span{*start, *start + bytes - 1u};
 }
@@ -651,7 +651,7 @@ std::optional<Span> imageSpan(CartridgeMap map, std::size_t imageBytes, Address 
 // address within its bank — up, down, or not at all — and wraps at the bank's
 // edge, so a range is at most two runs; a run whose start is not in the image
 // is not in it.
-std::vector<Span> transferSpans(CartridgeMap map, std::size_t imageBytes, Address memory, std::size_t bytes,
+std::vector<Span> transferSpans(const CartridgeBoard& board, std::size_t imageBytes, Address memory, std::size_t bytes,
                                 MovedStep step) {
   std::vector<Span> spans;
   if (bytes == 0) return spans;
@@ -659,7 +659,7 @@ std::vector<Span> transferSpans(CartridgeMap map, std::size_t imageBytes, Addres
   const Address bank = memory & 0xFF0000u;
   const std::uint32_t offset = memory & 0xFFFFu;
   auto add = [&](Address first, std::size_t length) {
-    const std::optional<std::size_t> start = romOffset(map, first, imageBytes);
+    const std::optional<std::size_t> start = romOffset(board, first, imageBytes);
     if (start && length != 0) spans.push_back(Span{*start, *start + length - 1u});
   };
   if (step == MovedStep::Decrement) {
@@ -685,14 +685,14 @@ bool anyOverlap(const Span& span, const std::vector<Span>& spans) {
 // transfer the code proves, the destination of the `dma` line that set it up.
 // A stream's and a staged file's comment names the class alone, so theirs is
 // not looked for.
-Address assetRegister(const ManifestInput& manifest, CartridgeMap map, std::size_t imageBytes,
+Address assetRegister(const ManifestInput& manifest, const CartridgeBoard& board, std::size_t imageBytes,
                       const ManifestAsset& asset) {
-  const std::optional<Span> span = imageSpan(map, imageBytes, asset.first, asset.bytes);
+  const std::optional<Span> span = imageSpan(board, imageBytes, asset.first, asset.bytes);
   if (!span) return 0;
   if (asset.kind == MovedKind::Proven) {
     for (const ManifestDma& dma : manifest.dmas) {
       if (!dma.destination || !dma.source || !dma.bytes) continue;
-      if (anyOverlap(*span, transferSpans(map, imageBytes, *dma.source, *dma.bytes, dma.step))) {
+      if (anyOverlap(*span, transferSpans(board, imageBytes, *dma.source, *dma.bytes, dma.step))) {
         return *dma.destination;
       }
     }
@@ -700,7 +700,7 @@ Address assetRegister(const ManifestInput& manifest, CartridgeMap map, std::size
   }
   for (const MovedRange& moved : manifest.moved) {
     if (moved.kind != asset.kind || !moved.toRegister) continue;
-    if (anyOverlap(*span, transferSpans(map, imageBytes, moved.memory, moved.bytes, moved.step))) {
+    if (anyOverlap(*span, transferSpans(board, imageBytes, moved.memory, moved.bytes, moved.step))) {
       return moved.registerAddress;
     }
   }
@@ -738,7 +738,7 @@ std::optional<RenderInput> readRenderInput(const std::filesystem::path& director
   }
 
   RenderInput input;
-  input.map = *manifest->map;
+  input.board = manifestBoard(*manifest);
   input.imageBytes = *manifest->imageBytes;
   for (const ir::ProgramRegion& region : parsed->file.regions) {
     input.regions.push_back(RenderRegion{.file = region.file,
@@ -754,7 +754,7 @@ std::optional<RenderInput> readRenderInput(const std::filesystem::path& director
     input.assets.push_back(RenderAsset{.file = asset.file,
                                        .classes = asset.classes,
                                        .kind = asset.kind,
-                                       .registerAddress = assetRegister(*manifest, input.map, input.imageBytes, asset),
+                                       .registerAddress = assetRegister(*manifest, input.board, input.imageBytes, asset),
                                        .first = asset.first,
                                        .bytes = asset.bytes});
   }

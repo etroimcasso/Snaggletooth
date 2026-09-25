@@ -200,11 +200,28 @@ void readChipset(CartridgeHeader& header) noexcept {
   return text;
 }
 
-// The image index an address reaches before the image's own size folds it: the
-// map's linear layout, with nothing when the address is not ROM.
-[[nodiscard]] std::optional<std::size_t> linearRomIndex(CartridgeMap map,
-                                                        std::uint32_t address) noexcept {
-  if (cartridgeRegion(map, address) != CartridgeRegion::Rom) return std::nullopt;
+// Whether an address is in the map's save window — the lower halves of LoROM's
+// banks $70-$7D and $F0-$FF, HiROM's $20-$3F and $A0-$BF at $6000-$7FFF,
+// ExHiROM's $80-$BF at $6000-$7FFF — whether or not the board has a save there.
+[[nodiscard]] bool inSaveWindow(CartridgeMap map, std::uint32_t address) noexcept {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  switch (map) {
+    case CartridgeMap::LoRom:
+      return ((bank >= 0x70 && bank <= 0x7D) || bank >= 0xF0) && offset <= 0x7FFFu;
+    case CartridgeMap::HiRom:
+      return ((bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF)) &&
+             offset >= 0x6000u && offset <= 0x7FFFu;
+    case CartridgeMap::ExHiRom:
+      return bank >= 0x80 && bank <= 0xBF && offset >= 0x6000u && offset <= 0x7FFFu;
+  }
+  return false;
+}
+
+// The image index a ROM address reaches before the image's own size folds it:
+// the map's linear layout. The caller has asked the board that the address is
+// `Rom`.
+[[nodiscard]] std::size_t linearRomIndex(CartridgeMap map, std::uint32_t address) noexcept {
   const std::size_t bank = (address >> 16) & 0xFFu;
   const std::size_t offset = address & 0xFFFFu;
   switch (map) {
@@ -221,7 +238,7 @@ void readChipset(CartridgeHeader& header) noexcept {
       // HiROM's layout in $80-$FF; the same layout again in $00-$7D, 4 MB in.
       return (((bank & 0x3Fu) << 16) | offset) | ((bank & 0x80u) != 0u ? 0u : kExHiRomHalf);
   }
-  return std::nullopt;
+  return 0;
 }
 
 // The image byte an index past the image reaches. A cartridge carries one ROM
@@ -450,30 +467,49 @@ std::size_t declaredSaveRamBytes(std::span<const std::uint8_t> rom) noexcept {
   return saveBytesFromCode(rom[site->base + kHeaderSaveSize]);
 }
 
-CartridgeRegion cartridgeRegion(CartridgeMap map, std::uint32_t address) noexcept {
+CartridgeBoard cartridgeBoard(std::span<const std::uint8_t> rom) noexcept {
+  CartridgeBoard board;
+  board.map = detectCartridgeMap(rom);
+  board.saveRamBytes = declaredSaveRamBytes(rom);
+  const std::optional<Site> site = bestSite(rom);
+  if (site.has_value()) {
+    // The chipset byte and the sub-type byte that tells the custom chips apart,
+    // read as parseCartridgeHeader reads them.
+    CartridgeHeader header;
+    header.chipset = rom[site->base + kHeaderChipset];
+    header.chipsetSubtype = rom[site->base - kExtendedBytes + kExtendedChipsetSubtype];
+    readChipset(header);
+    board.coprocessor = header.coprocessor;
+  }
+  return board;
+}
+
+CartridgeRegion cartridgeRegion(const CartridgeBoard& board, std::uint32_t address) noexcept {
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
   if (bank >= 0x7E && bank <= 0x7F) return CartridgeRegion::WorkRam;
+  const bool window = board.saveRamBytes != 0 && inSaveWindow(board.map, address);
   const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
   if (systemBank) {
     if (offset >= 0x8000u) return CartridgeRegion::Rom;
-    return saveRamOffset(map, address).has_value() ? CartridgeRegion::SaveRam
-                                                   : CartridgeRegion::System;
+    return window ? CartridgeRegion::SaveRam : CartridgeRegion::System;
   }
-  // A cartridge bank is the image whole. A LoROM board leaves the cartridge's A15
-  // unconnected, so there a bank's lower half repeats its upper half — outside the
-  // save window, which takes the lower halves of its own banks.
-  if (map != CartridgeMap::LoRom || offset >= 0x8000u) return CartridgeRegion::Rom;
-  return saveRamOffset(map, address).has_value() ? CartridgeRegion::SaveRam
-                                                 : CartridgeRegion::Rom;
+  // A cartridge bank is the image whole under HiROM and ExHiROM. Under LoROM the
+  // board leaves the cartridge's A15 unconnected, so a bank's lower half repeats
+  // its upper half — outside the save window, which takes the lower halves of its
+  // own banks when the board has a save; and on a coprocessor's board the lower
+  // halves the save does not take are the chip's.
+  if (board.map != CartridgeMap::LoRom || offset >= 0x8000u) return CartridgeRegion::Rom;
+  if (window) return CartridgeRegion::SaveRam;
+  return board.coprocessor == Coprocessor::None ? CartridgeRegion::Rom
+                                                : CartridgeRegion::Coprocessor;
 }
 
-std::optional<std::size_t> romOffset(CartridgeMap map, std::uint32_t address,
+std::optional<std::size_t> romOffset(const CartridgeBoard& board, std::uint32_t address,
                                      std::size_t imageBytes) noexcept {
   if (imageBytes == 0) return std::nullopt;
-  const std::optional<std::size_t> linear = linearRomIndex(map, address);
-  if (!linear.has_value()) return std::nullopt;
-  return mirroredIndex(*linear, imageBytes);
+  if (cartridgeRegion(board, address) != CartridgeRegion::Rom) return std::nullopt;
+  return mirroredIndex(linearRomIndex(board.map, address), imageBytes);
 }
 
 std::optional<std::uint32_t> romAddress(CartridgeMap map, std::size_t offset) noexcept {
@@ -504,27 +540,19 @@ std::optional<std::uint32_t> romAddress(CartridgeMap map, std::size_t offset) no
   return std::nullopt;
 }
 
-std::optional<std::size_t> saveRamOffset(CartridgeMap map, std::uint32_t address) noexcept {
+std::optional<std::size_t> saveRamOffset(const CartridgeBoard& board, std::uint32_t address) noexcept {
+  if (board.saveRamBytes == 0 || !inSaveWindow(board.map, address)) return std::nullopt;
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
   const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
-  switch (map) {
-    case CartridgeMap::LoRom: {
-      const bool window = (bank >= 0x70 && bank <= 0x7D) || bank >= 0xF0;
-      if (!window || offset > 0x7FFFu) return std::nullopt;
+  switch (board.map) {
+    case CartridgeMap::LoRom:
       return (static_cast<std::size_t>(bank & 0x0Fu) << 15) | static_cast<std::size_t>(offset);
-    }
-    case CartridgeMap::HiRom: {
-      const bool window = (bank >= 0x20 && bank <= 0x3F) || (bank >= 0xA0 && bank <= 0xBF);
-      if (!window || offset < 0x6000u || offset > 0x7FFFu) return std::nullopt;
+    case CartridgeMap::HiRom:
       return (static_cast<std::size_t>(bank & 0x1Fu) << 13) |
              (static_cast<std::size_t>(offset) - 0x6000u);
-    }
-    case CartridgeMap::ExHiRom: {
-      const bool window = bank >= 0x80 && bank <= 0xBF;
-      if (!window || offset < 0x6000u || offset > 0x7FFFu) return std::nullopt;
+    case CartridgeMap::ExHiRom:
       return (static_cast<std::size_t>(bank & 0x3Fu) << 13) |
              (static_cast<std::size_t>(offset) - 0x6000u);
-    }
   }
   return std::nullopt;
 }

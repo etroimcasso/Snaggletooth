@@ -1,14 +1,14 @@
 #pragma once
 
-// A cartridge as a value: its header, how its image lays across the bus, and
-// where each bus address lands.
+// A cartridge as a value: its header, the board it is on, and where each bus
+// address lands.
 //
 // Every cartridge carries a header at a fixed place in its image, and the
 // header's own layout is the same under every map. This file reads it, decides
-// which map the image uses, and translates between a bus address and an image
-// offset both ways. The machine and the tools built over it both read a
-// cartridge through these functions, so they can never disagree about where a
-// byte is.
+// which map the image uses, reads the board — the map, the chip beside the ROM
+// and the save — and translates between a bus address and an image offset both
+// ways. The machine and the tools built over it both read a cartridge through
+// these functions, so they can never disagree about where a byte is.
 //
 // Three maps exist. LoROM gives each bank a 32 KB window in its upper half and
 // lays those windows end to end. HiROM gives each cartridge bank the whole 64 KB
@@ -182,34 +182,59 @@ struct CopierHeader {
 // cartridge can address are clamped to 128 KB.
 [[nodiscard]] std::size_t declaredSaveRamBytes(std::span<const std::uint8_t> rom) noexcept;
 
-// What a bus address reaches under a map.
-enum class CartridgeRegion : std::uint8_t {
-  System,   // the lower half of a system bank: work-RAM mirror, registers, expansion
-  WorkRam,  // banks $7E-$7F
-  Rom,      // the cartridge image
-  SaveRam,  // the cartridge's save window
+// The board a cartridge is on, as its header declares it: the map the image lays
+// across the bus under, the chip beside the ROM, and the save. What a bus
+// address reaches depends on all three — a LoROM board with no save reads the
+// image through its save window, and a coprocessor's board gives lower halves
+// of its cartridge banks to the chip — so the functions below take the board.
+struct CartridgeBoard {
+  CartridgeMap map = CartridgeMap::LoRom;
+  Coprocessor coprocessor = Coprocessor::None;
+  std::size_t saveRamBytes = 0;  // zero for a cartridge with no save
 };
 
-// The region a 24-bit bus address lands in under `map`. Under LoROM the lower half
-// of a cartridge bank — $40-$7D and $C0-$FF below $8000 — is the image, reaching the
-// bytes the bank's upper half reaches, because the board leaves the cartridge's A15
-// unconnected.
-//
-// The save window is reported whether or not the cartridge carries any save RAM,
-// since the map alone cannot say. What a cartridge with none answers there is the
-// board's: HiROM's and ExHiROM's windows sit in the expansion area and read open
-// bus, and LoROM's sits in cartridge banks and repeats the image as every other
-// lower half does. `Snes` reads it that way; `romOffset` gives no offset inside
-// the window.
-[[nodiscard]] CartridgeRegion cartridgeRegion(CartridgeMap map, std::uint32_t address) noexcept;
+// The board an image's header declares: the map from the site the header is
+// read at, the coprocessor from the chipset byte, and the save from its size
+// code, each as `detectCartridgeMap`, `parseCartridgeHeader` and
+// `declaredSaveRamBytes` read it. An image with no header is a plain LoROM board
+// with no save.
+[[nodiscard]] CartridgeBoard cartridgeBoard(std::span<const std::uint8_t> rom) noexcept;
 
-// The image byte a ROM address reads, for an image of `imageBytes`. Nothing when
-// the address is not ROM under the map — the save window included — or the image
-// is empty. An address past the
-// image repeats it the way the board does: a cartridge carries one chip per power
-// of two in its size, wired one after another, and an address past a chip reads
+// What a bus address reaches on a board.
+enum class CartridgeRegion : std::uint8_t {
+  System,       // the lower half of a system bank: work-RAM mirror, registers, expansion
+  WorkRam,      // banks $7E-$7F
+  Rom,          // the cartridge image
+  SaveRam,      // the cartridge's save, in the map's window
+  Coprocessor,  // the lower half of a LoROM cartridge bank a coprocessor's board gives to the chip
+};
+
+// The region a 24-bit bus address lands in on `board`.
+//
+// Under LoROM the lower half of a cartridge bank — $40-$7D and $C0-$FF below
+// $8000 — is the image on a plain board, reaching the bytes the bank's upper half
+// reaches, because the board leaves the cartridge's A15 unconnected. On a
+// coprocessor's board every such half outside the save window is the chip's,
+// `Coprocessor`.
+//
+// The save window is `SaveRam` only on a board with a save. With none, what the
+// window answers is the board's: LoROM's window sits in cartridge banks, so its
+// lower halves are `Rom` on a plain board and the chip's on a coprocessor's;
+// HiROM's and ExHiROM's sit in the expansion area and are `System`, which reads
+// open bus. A coprocessor on a HiROM or ExHiROM board changes nothing here: the
+// chips' own maps on those boards are not modelled.
+[[nodiscard]] CartridgeRegion cartridgeRegion(const CartridgeBoard& board,
+                                              std::uint32_t address) noexcept;
+
+// The image byte a ROM address reads on `board`, for an image of `imageBytes`.
+// Nothing when the address is not `Rom` on the board — a save window with a
+// save behind it, a chip's half — or the image is empty. Through a LoROM save
+// window with no save it is the upper half's byte. An address past the image
+// repeats it the way the board does: a cartridge carries one chip per power of
+// two in its size, wired one after another, and an address past a chip reads
 // that chip again rather than running into the next one.
-[[nodiscard]] std::optional<std::size_t> romOffset(CartridgeMap map, std::uint32_t address,
+[[nodiscard]] std::optional<std::size_t> romOffset(const CartridgeBoard& board,
+                                                   std::uint32_t address,
                                                    std::size_t imageBytes) noexcept;
 
 // The bus address that reads image offset `offset` whole under the map, in the
@@ -220,11 +245,12 @@ enum class CartridgeRegion : std::uint8_t {
 [[nodiscard]] std::optional<std::uint32_t> romAddress(CartridgeMap map,
                                                       std::size_t offset) noexcept;
 
-// The offset into the save an address reaches, before it is reduced to the save's
-// size; nothing when the address is outside the save window. LoROM keeps the save
-// in the lower halves of banks $70-$7D and $F0-$FF; HiROM in $20-$3F and $A0-$BF
-// at $6000-$7FFF; ExHiROM in $80-$BF at $6000-$7FFF.
-[[nodiscard]] std::optional<std::size_t> saveRamOffset(CartridgeMap map,
+// The offset into the save an address reaches on `board`, before it is reduced
+// to the save's size; nothing when the address is outside the save window, or
+// the board has no save. LoROM keeps the save in the lower halves of banks
+// $70-$7D and $F0-$FF; HiROM in $20-$3F and $A0-$BF at $6000-$7FFF; ExHiROM in
+// $80-$BF at $6000-$7FFF.
+[[nodiscard]] std::optional<std::size_t> saveRamOffset(const CartridgeBoard& board,
                                                        std::uint32_t address) noexcept;
 
 }  // namespace snaggletooth

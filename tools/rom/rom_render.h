@@ -12,7 +12,7 @@
 // program the disassembler lifted: `readRenderInput` builds everything it needs
 // from the files, and `renderRegion` and `renderSoundFile` write a file from
 // that alone. The library links the representation, the two chip backends and
-// the cartridge map, and nothing that can trace, run or lift, so a source file
+// the cartridge board, and nothing that can trace, run or lift, so a source file
 // can only have come from the files.
 
 #include <cstddef>
@@ -115,9 +115,9 @@ struct RenderSound {
 };
 
 // Everything a source file is rendered from besides the program: the image's
-// map and size, every region, the facts, and the sound program.
+// board and size, every region, the facts, and the sound program.
 struct RenderInput {
-  CartridgeMap map = CartridgeMap::LoRom;
+  CartridgeBoard board;
   std::size_t imageBytes = 0;
   std::vector<RenderRegion> regions;
   std::vector<RenderAccess> accesses;  // in site order
@@ -164,7 +164,7 @@ struct RenderInput {
 
 // The renderer's input read from a tree on disk: `program.snagir` for the main
 // CPU's program, the regions, the labels and the data runs; `project.snagifest`
-// for the map, the image size, the facts, the lifted files and the sound
+// for the board, the image size, the facts, the lifted files and the sound
 // program's entry and blocks; and, where the manifest names a sound program,
 // `apu.snagir` for its nodes and regions. Nothing, with `error` naming the
 // file and the line, when a file is missing or does not read, or when

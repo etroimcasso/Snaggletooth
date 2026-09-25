@@ -245,12 +245,13 @@ for (const snaggletooth::disasm::VectorEntry& entry :
 }
 ```
 
-`vectorEntries` returns the vectors that land in ROM under the header's map, in
+`vectorEntries` returns the vectors that land in ROM on the header's board, in
 vector-table order with reset first; a vector pointing at RAM or a register is left
-out. `codeOwner(map, address)` says which disassembler owns the bytes at a bus
-address — the main CPU's for cartridge ROM, none for RAM, registers, a save window
-and open bus. Both read the cartridge through the library's own header functions,
-so a tool and the machine never disagree about a byte.
+out. `codeOwner(board, address)` says which disassembler owns the bytes at a bus
+address on a `CartridgeBoard` — the main CPU's for cartridge ROM, a LoROM save
+window with no save behind it included, and none for RAM, registers, a save, a
+coprocessor's half and open bus. Both read the cartridge through the library's own
+cartridge functions, so a tool and the machine never disagree about a byte.
 
 The library target is `snaggletooth_rom`; `tools/` is on its public include path,
 and it links both chip backends, the representation the bank files are

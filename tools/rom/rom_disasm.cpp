@@ -33,6 +33,7 @@ using text::address16;
 using text::address24;
 using text::classesText;
 using text::hex;
+using text::coprocessorName;
 using text::mapName;
 
 namespace {
@@ -57,23 +58,25 @@ std::string modeText(const Cpu65816Mode& mode) {
 // The address every byte of the image is placed at: the one `romAddress` reports
 // for its offset. An address that reaches the image through a mirror is placed
 // at the same bytes' one home.
-std::optional<Address> canonical(CartridgeMap map, std::size_t imageBytes, Address address) {
-  const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+std::optional<Address> canonical(const CartridgeBoard& board, std::size_t imageBytes, Address address) {
+  const std::optional<std::size_t> offset = romOffset(board, address, imageBytes);
   if (!offset) return std::nullopt;
-  const std::optional<std::uint32_t> home = romAddress(map, *offset);
+  const std::optional<std::uint32_t> home = romAddress(board.map, *offset);
   if (!home) return std::nullopt;
   return *home;
 }
 
 // Whether `address` names the image through a LoROM cartridge bank's lower half,
-// which repeats the bank's upper half. The trace goes there when a run took the CPU
-// there or a person's entry names it, and not on the word of the bytes alone: a jump
-// or a derived pointer into a repeated half is left as a stop, which an entry lifts.
-bool repeatedHalf(CartridgeMap map, Address address) {
+// which repeats the bank's upper half — the save window's lower halves among
+// them on a board with no save. The trace goes there when a run took the CPU
+// there or a person's entry names it, and not on the word of the bytes alone: a
+// jump or a derived pointer into a repeated half is left as a stop, which an
+// entry lifts.
+bool repeatedHalf(const CartridgeBoard& board, Address address) {
   // Below $8000 under LoROM only a cartridge bank is the image: a system bank's lower
-  // half is the console's, and the save window its own.
-  return map == CartridgeMap::LoRom && (address & 0xFFFFu) < 0x8000u &&
-         cartridgeRegion(map, address) == CartridgeRegion::Rom;
+  // half is the console's, a save its own, and a coprocessor's half the chip's.
+  return board.map == CartridgeMap::LoRom && (address & 0xFFFFu) < 0x8000u &&
+         cartridgeRegion(board, address) == CartridgeRegion::Rom;
 }
 
 bool within(const SourceRegion& region, Address address) {
@@ -82,15 +85,15 @@ bool within(const SourceRegion& region, Address address) {
 
 // Whether a region reads consecutive image bytes from `first` to `last`, which is
 // what lets its file be one span of source under one `ORG`.
-bool contiguous(CartridgeMap map, std::size_t imageBytes, const SourceRegion& region) {
+bool contiguous(const CartridgeBoard& board, std::size_t imageBytes, const SourceRegion& region) {
   if (region.last < region.first) return false;
-  const std::optional<std::size_t> start = romOffset(map, region.first, imageBytes);
+  const std::optional<std::size_t> start = romOffset(board, region.first, imageBytes);
   if (!start) return false;
   const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
   if (*start + length > imageBytes) return false;
   for (std::size_t i = 0; i < length; ++i) {
     const std::optional<std::size_t> offset =
-        romOffset(map, region.first + static_cast<Address>(i), imageBytes);
+        romOffset(board, region.first + static_cast<Address>(i), imageBytes);
     if (!offset || *offset != *start + i) return false;
   }
   return true;
@@ -114,7 +117,7 @@ std::vector<Range> joined(std::vector<Range> ranges) {
 
 // The stop an instruction leaves behind when its successors are not in the
 // bytes, or none when they are.
-std::optional<std::string> stopReason(const Instruction& instruction, CartridgeMap map,
+std::optional<std::string> stopReason(const Instruction& instruction, const CartridgeBoard& board,
                                       std::size_t imageBytes, const SourceRegion& region) {
   const bool leaves = instruction.flow == Flow::Jump || instruction.flow == Flow::Call;
   if (!leaves) return std::nullopt;
@@ -125,17 +128,24 @@ std::optional<std::string> stopReason(const Instruction& instruction, CartridgeM
   }
   const Address target = *instruction.target;
   if (within(region, target)) return std::nullopt;
-  if (repeatedHalf(map, target)) {
+  if (repeatedHalf(board, target)) {
     return "`" + instruction.text + "`: the target " + address24(target) +
            " is a LoROM bank's lower half, which repeats " + address24(target | 0x8000u) +
            "; add an entry for it if the program runs there";
   }
-  if (canonical(map, imageBytes, target)) return std::nullopt;
+  if (canonical(board, imageBytes, target)) return std::nullopt;
   std::string where;
-  switch (cartridgeRegion(map, target)) {
+  switch (cartridgeRegion(board, target)) {
     case CartridgeRegion::WorkRam: where = "work RAM"; break;
-    case CartridgeRegion::System: where = "a system register or a work-RAM mirror"; break;
+    case CartridgeRegion::System:
+      // A system bank's lower half is the work-RAM mirror and the registers up
+      // to $5FFF, then the expansion area — HiROM's and ExHiROM's save window
+      // on a board with a save, and no image byte on any board.
+      where = (target & 0xFFFFu) >= 0x6000u ? "the expansion area"
+                                           : "a system register or a work-RAM mirror";
+      break;
     case CartridgeRegion::SaveRam: where = "save RAM"; break;
+    case CartridgeRegion::Coprocessor: where = "the coprocessor's"; break;
     case CartridgeRegion::Rom: where = "the cartridge, beyond the image"; break;
   }
   return "`" + instruction.text + "`: the target " + address24(target) + " is " + where +
@@ -1149,7 +1159,7 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
 // the image is lifted as the run its carrier read, the same way. A source
 // whose bytes went to two classes is one file under `staged/`, named for both.
 void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
-  const CartridgeMap map = out.header.map;
+  const CartridgeBoard& board = out.board;
   const std::size_t imageBytes = out.imageBytes;
 
   // Every instruction's bytes and every placed block's, as image offsets.
@@ -1157,7 +1167,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   for (const RegionListing& region : out.regions) {
     for (const Line& line : region.listing.lines) {
       if (!line.isCode) continue;
-      if (const std::optional<std::size_t> at = romOffset(map, line.address, imageBytes)) {
+      if (const std::optional<std::size_t> at = romOffset(board, line.address, imageBytes)) {
         code.emplace_back(*at, line.instruction.length);
       }
     }
@@ -1202,7 +1212,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     std::uint32_t outside = 0;
     for (std::uint32_t i = 0; i < range.bytes; ++i) {
       const std::uint16_t offset16 = static_cast<std::uint16_t>(up ? range.memory + i : range.memory - i);
-      const std::optional<std::size_t> at = romOffset(map, bank | offset16, imageBytes);
+      const std::optional<std::size_t> at = romOffset(board, bank | offset16, imageBytes);
       if (!at) {
         ++outside;
         previous.reset();
@@ -1230,7 +1240,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                           " of its bytes are not the image and are not lifted");
     }
     for (const Piece& piece : mine) {
-      const Address home = romAddress(map, piece.offset).value_or(0);
+      const Address home = romAddress(board.map, piece.offset).value_or(0);
       const Address last = home + static_cast<Address>(piece.length) - 1u;
       if (overlapsCode(piece.offset, piece.length)) {
         out.notes.push_back(movedText(range) + ": " + address24(home) + "-" + address24(last) +
@@ -1253,7 +1263,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     if (std::find(out.notes.begin(), out.notes.end(), note) == out.notes.end()) out.notes.push_back(note);
   };
   auto admit = [&](Piece piece, const std::string& what) {
-    const Address home = romAddress(map, piece.offset).value_or(0);
+    const Address home = romAddress(board.map, piece.offset).value_or(0);
     const Address last = home + static_cast<Address>(piece.length) - 1u;
     if (overlapsCode(piece.offset, piece.length)) {
       refuse(what + ": " + address24(home) + "-" + address24(last) +
@@ -1288,7 +1298,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     const MovedRange* differing = nullptr;
     for (const MovedRange& range : out.moved) {
       if (range.channel != dma.channel) continue;
-      if (canonical(map, imageBytes, range.site) != std::optional<Address>{start}) continue;
+      if (canonical(board, imageBytes, range.site) != std::optional<Address>{start}) continue;
       if (range.toRegister && range.memory == *dma.source && range.step == *dma.step && range.bytes == *dma.bytes) {
         confirmed = true;
       } else if (differing == nullptr) {
@@ -1311,7 +1321,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     std::uint32_t outside = 0;
     for (std::uint32_t i = 0; i < *dma.bytes; ++i) {
       const std::uint16_t offset16 = static_cast<std::uint16_t>(up ? *dma.source + i : *dma.source - i);
-      const std::optional<std::size_t> at = romOffset(map, bank | offset16, imageBytes);
+      const std::optional<std::size_t> at = romOffset(board, bank | offset16, imageBytes);
       if (!at) {
         ++outside;
         previous.reset();
@@ -1395,7 +1405,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // fresh by a run, and the line is what keeps the file.
   for (const ManifestAsset& kept : request.assets) {
     if (kept.kind != MovedKind::Staged && kept.kind != MovedKind::Stream) continue;
-    const std::optional<std::size_t> offset = romOffset(map, kept.first, imageBytes);
+    const std::optional<std::size_t> offset = romOffset(board, kept.first, imageBytes);
     if (!offset || *offset + kept.bytes > imageBytes) continue;
     const bool covered = std::any_of(pieces.begin(), pieces.end(), [&](const Piece& piece) {
       return piece.offset < *offset + kept.bytes && *offset < piece.offset + piece.length;
@@ -1491,7 +1501,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       for (std::size_t k = i; k < j; ++k) anyStream = anyStream || pieces[k].kind == MovedKind::Stream;
       if (!anyStream) agree = false;
     }
-    const std::optional<Address> home = romAddress(map, first.offset);
+    const std::optional<Address> home = romAddress(board.map, first.offset);
     if (!agree) {
       std::string places;
       for (std::size_t k = i; k < j; ++k) {
@@ -1683,10 +1693,10 @@ namespace {
 // two paths read two ways, the listing's first — into one program in address
 // order, with the interrupt sequences. Run again whenever the regions change.
 void liftProgram(CartridgeDisassembly& out, std::span<const std::uint8_t> rom) {
-  const CartridgeMap map = out.header.map;
+  const CartridgeBoard& board = out.board;
   ir::Program program;
   for (const RegionListing& region : out.regions) {
-    const std::optional<std::size_t> start = romOffset(map, region.region.first, rom.size());
+    const std::optional<std::size_t> start = romOffset(board, region.region.first, rom.size());
     if (!start) continue;
     const std::size_t length = static_cast<std::size_t>(region.region.last - region.region.first) + 1u;
     ir::Program lifted = ir::lift65816(region.listing, rom.subspan(*start, length), region.region.first);
@@ -1712,14 +1722,15 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     return out;
   }
   out.header = *header;
-  const CartridgeMap map = header->map;
+  out.board = cartridgeBoard(request.rom);
+  const CartridgeBoard& board = out.board;
   const std::size_t imageBytes = request.rom.size();
 
   // The regions, each checked to read consecutive image bytes.
   std::vector<SourceRegion> regions =
-      request.regions.empty() ? bankRegions(map, imageBytes) : request.regions;
+      request.regions.empty() ? bankRegions(board.map, imageBytes) : request.regions;
   for (auto it = regions.begin(); it != regions.end();) {
-    if (contiguous(map, imageBytes, *it)) {
+    if (contiguous(board, imageBytes, *it)) {
       ++it;
       continue;
     }
@@ -1836,7 +1847,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // tree places it to trace it.
   for (std::size_t n = 0; n < entries.size(); ++n) {
     const TraceEntry& entry = entries[n];
-    const std::optional<Address> home = canonical(map, imageBytes, entry.address);
+    const std::optional<Address> home = canonical(board, imageBytes, entry.address);
     if (!home) {
       out.notes.push_back("entry " + entry.name + " at " + address24(entry.address) +
                           " is not in the image; not traced");
@@ -1856,7 +1867,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // are each kept as the CPU arrives there, in the bank it runs in; the tree
   // places each to trace it and to name it.
   for (const ReachedTarget& seen : reached) {
-    const std::optional<Address> home = canonical(map, imageBytes, seen.target);
+    const std::optional<Address> home = canonical(board, imageBytes, seen.target);
     if (!home) {
       out.notes.push_back("reached " + address24(seen.target) + " from " + address24(seen.site) +
                           " is not in the image; not traced");
@@ -1875,7 +1886,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
         .target = seen.target, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = label});
   }
   for (const Landing& landing : ran) {
-    const std::optional<Address> home = canonical(map, imageBytes, landing.target);
+    const std::optional<Address> home = canonical(board, imageBytes, landing.target);
     if (!home) {
       out.notes.push_back("ran " + address24(landing.target) + " from " + address24(landing.site) +
                           " is not in the image; not traced");
@@ -1906,7 +1917,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
         if (!pending[i].owed) continue;
         pending[i].owed = false;
         const SourceRegion& region = regions[i];
-        const std::size_t start = *romOffset(map, region.first, imageBytes);
+        const std::size_t start = *romOffset(board, region.first, imageBytes);
         const std::size_t length = static_cast<std::size_t>(region.last - region.first) + 1u;
         Request traceRequest;
         traceRequest.image = request.rom.subspan(start, length);
@@ -1920,8 +1931,8 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
           const Instruction& instruction = line.instruction;
           const bool leaves = instruction.flow == Flow::Jump || instruction.flow == Flow::Call;
           if (!leaves || !instruction.target || within(region, *instruction.target)) continue;
-          if (repeatedHalf(map, *instruction.target)) continue;  // a stop, not an entry
-          const std::optional<Address> home = canonical(map, imageBytes, *instruction.target);
+          if (repeatedHalf(board, *instruction.target)) continue;  // a stop, not an entry
+          const std::optional<Address> home = canonical(board, imageBytes, *instruction.target);
           if (!home) continue;
           const std::optional<Decoded> again =
               backend.decode(traceRequest.image, region.first, line.address, line.context);
@@ -1948,7 +1959,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     for (std::size_t i = 0; i < regions.size(); ++i) {
       Listing listing = listings[i];
       if (pending[i].entries.empty()) {
-        const std::size_t start = *romOffset(map, regions[i].first, imageBytes);
+        const std::size_t start = *romOffset(board, regions[i].first, imageBytes);
         const std::size_t length = static_cast<std::size_t>(regions[i].last - regions[i].first) + 1u;
         Line line;
         line.isCode = false;
@@ -1975,12 +1986,12 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
         return sameDerivation(d, derived);
       });
       if (known) continue;
-      if (repeatedHalf(map, derived.target)) {
+      if (repeatedHalf(board, derived.target)) {
         out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
                             " is a LoROM bank's lower half; not traced");
         continue;
       }
-      const std::optional<Address> home = canonical(map, imageBytes, derived.target);
+      const std::optional<Address> home = canonical(board, imageBytes, derived.target);
       if (!home) {
         out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
                             " is not in the image; not traced");
@@ -2043,7 +2054,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     for (const Line& line : region.listing.lines) {
       if (!line.isCode || derivedSites.count(line.address)) continue;
       if (const std::optional<std::string> reason =
-              stopReason(line.instruction, map, imageBytes, region.region)) {
+              stopReason(line.instruction, board, imageBytes, region.region)) {
         out.stops.push_back(TraceStop{.address = line.address, .reason = *reason});
       }
     }
@@ -2104,7 +2115,7 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
   Placement placement;
   placement.image.assign(disassembly.imageBytes, 0u);
   std::vector<std::uint8_t> count(disassembly.imageBytes, 0u);
-  const CartridgeMap map = disassembly.header.map;
+  const CartridgeBoard& board = disassembly.board;
   auto place = [&](std::size_t offset, std::uint8_t byte) {
     if (offset >= placement.image.size()) return;
     placement.image[offset] = byte;
@@ -2114,7 +2125,7 @@ Placement placeBytes(const CartridgeDisassembly& disassembly) {
   for (const RenderRegion& region : input.regions) {
     const Listing lines = regionLines(region, input);
     for (const Line& line : lines.lines) {
-      const std::optional<std::size_t> start = romOffset(map, line.address, disassembly.imageBytes);
+      const std::optional<std::size_t> start = romOffset(board, line.address, disassembly.imageBytes);
       if (!start) continue;
       const std::vector<std::uint8_t>& bytes = line.isCode ? line.instruction.bytes : line.data;
       for (std::size_t i = 0; i < bytes.size(); ++i) place(*start + i, bytes[i]);
@@ -2140,10 +2151,12 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
   out += "; A Snaggletooth cartridge project. The next run reads the `entry`, `reached`,\n"
          "; `ran`, `derived`, `moved`, `asset` and `file` lines; snes_verify reads `map`,\n"
-         "; `file`, `sound` and `block`; everything else is written fresh from what the run\n"
-         "; found.\n";
+         "; `save`, `chip`, `file`, `sound` and `block`; everything else is written fresh\n"
+         "; from what the run found.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
-  out += "map      " + mapName(disassembly.header.map) + "\n";
+  out += "map      " + mapName(disassembly.board.map) + "\n";
+  out += "save     " + std::to_string(disassembly.board.saveRamBytes) + "\n";
+  out += "chip     " + std::string(coprocessorName(disassembly.board.coprocessor)) + "\n";
   std::string title;
   for (const char c : disassembly.header.title) {
     if (c >= 0x20 && c < 0x7F && c != '"') title.push_back(c);
@@ -2281,7 +2294,7 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   // and image hull, one per register whose value entered, one for the save,
   // and one saying `computed` for a source built from constants alone.
   const std::map<Address, std::string> routineOf = routineByLine(disassembly);
-  const CartridgeMap map = disassembly.header.map;
+  const CartridgeBoard& board = disassembly.board;
   std::string origins;
   for (const StagedRange& range : disassembly.staged) {
     const std::string head = "origin   " + address24(range.memory) + " bytes " +
@@ -2297,7 +2310,7 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
         continue;
       }
       for (const ir::OriginInterval& run : source.sources) {
-        origins += head + "from " + address24(romAddress(map, run.first).value_or(0)) + " bytes " +
+        origins += head + "from " + address24(romAddress(board.map, run.first).value_or(0)) + " bytes " +
                    std::to_string(run.last - run.first + 1u) + " using " +
                    std::to_string(usedWithin(source.origin, run)) + by + " " +
                    std::string(originMark(source.origin)) + "\n";
@@ -2379,7 +2392,7 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
            (stream.registerClass ? std::string(cpu65816RegisterClassName(*stream.registerClass))
                                  : std::string("none")) +
            " from " +
-           address24(stream.memory ? *stream.memory : romAddress(map, stream.romOffset).value_or(0)) +
+           address24(stream.memory ? *stream.memory : romAddress(board.map, stream.romOffset).value_or(0)) +
            " bytes " + std::to_string(stream.bytes) + " times " + std::to_string(stream.times) + " at " +
            (stream.landing ? portAddressText(stream.landing->memory, stream.landing->lowest) + "-" +
                                  portAddressText(stream.landing->memory, stream.landing->highest)
@@ -2531,7 +2544,7 @@ bool writeFile(const std::filesystem::path& path, std::string_view text, std::st
 
 RenderInput renderInputOf(const CartridgeDisassembly& disassembly) {
   RenderInput input;
-  input.map = disassembly.header.map;
+  input.board = disassembly.board;
   input.imageBytes = disassembly.imageBytes;
   for (const RegionListing& region : disassembly.regions) {
     input.regions.push_back(RenderRegion{.file = region.region.file,

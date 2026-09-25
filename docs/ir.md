@@ -566,7 +566,7 @@ constant — and, byte by byte, the origin and the last writer of work RAM.
 ```cpp
 #include "ir/ir_provenance.h"
 
-snaggletooth::ir::Provenance shadow{map, imageBytes, /*cap=*/64};
+snaggletooth::ir::Provenance shadow{board, imageBytes, /*cap=*/64};  // the cartridge's CartridgeBoard
 interpreter.shadow = &shadow;
 shadow.site = placedAddress;      // the instruction about to run, as the tree places it
 interpreter.execute(*node, bus);  // every store to work RAM lands its origin, under `site`
@@ -577,7 +577,10 @@ const snaggletooth::ir::OriginSet& set = shadow.origins().of(*origin);  // set.i
 The rules are data dependence: a load takes the origin of the bytes at the
 address, never of the address; an operation's result takes the union of its
 operands' origins; a constant and a flag have none; a read from a hardware
-register or the save carries the mark. A union wider than the cap is widened to
+register or the save carries the mark. Which addresses are the image, the save
+and nothing is the board's: a LoROM save window with no save behind it reads the
+image through the upper half and carries that byte's origin, and a coprocessor's
+half carries nothing, as open bus does. A union wider than the cap is widened to
 its hull and marked `approximate`, and the mark is carried through every union
 after. The shadow also follows every `called()` and `returned()` the host
 reports and keeps each invocation's image reads as runs, by the rule

@@ -34,6 +34,7 @@ namespace {
 using examples::kUploadedProgram;
 using examples::kUploadedTable;
 using examples::liftingImage;
+using examples::hiRomImage;
 using examples::loRomImage;
 using examples::ramCodeImage;
 using examples::wrappingImage;
@@ -199,6 +200,100 @@ TEST(RomDisasm, AJumpIntoARepeatedLowerHalfIsAStopThatAnEntryLifts) {
   const Line* nop = codeLineAt(regionNamed(named, "bank_40.asm").listing, 0x409234u);
   ASSERT_NE(nop, nullptr);
   EXPECT_EQ(nop->instruction.text, "NOP");
+}
+
+// On a LoROM board with no save the save window's lower halves repeat their
+// upper halves like every other cartridge bank's, so a jump there is the same
+// stop, naming the half the target repeats; with a save behind the window the
+// target is the save's, and the stop says so.
+TEST(RomDisasm, AJumpIntoABareSaveWindowIsTheRepeatedHalfStop) {
+  std::vector<std::uint8_t> rom = loRomImage(128);  // 4 MB and no save: bank $70 is its own bytes
+  put(rom, 0x0000u, {0x22u, 0x34u, 0x12u, 0x70u,   // JSL $70:1234
+                     0xDBu});                       // STP
+  put(rom, 0x381234u, {0xEAu, 0x6Bu});             // $70:9234: NOP, RTL
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  EXPECT_EQ(d.board.saveRamBytes, 0u);
+  ASSERT_EQ(d.stops.size(), 1u);
+  EXPECT_NE(d.stops[0].reason.find("lower half, which repeats $70:9234"), std::string::npos) << d.stops[0].reason;
+
+  rom[0x7FC0u + 0x18u] = 0x03u;  // the save-size code: 8 KB behind the window
+  const CartridgeDisassembly saved = disassembleWithoutSound(rom);
+  EXPECT_EQ(saved.board.saveRamBytes, 8192u);
+  ASSERT_EQ(saved.stops.size(), 1u);
+  EXPECT_NE(saved.stops[0].reason.find("the target $70:1234 is save RAM, not in the image"), std::string::npos)
+      << saved.stops[0].reason;
+}
+
+// HiROM's save window sits in the expansion area of the system banks: on a board
+// with no save nothing decodes it, and a jump there is a stop naming the
+// expansion area; with a save behind it the target is the save's.
+TEST(RomDisasm, AJumpIntoAHiRomWindowWithNoSaveIsAnExpansionAreaStop) {
+  std::vector<std::uint8_t> rom = hiRomImage(2);
+  put(rom, 0x8000u, {0x5Cu, 0x00u, 0x60u, 0x20u,   // JML $20:6000
+                     0xDBu});                       // STP
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  ASSERT_EQ(d.stops.size(), 1u);
+  EXPECT_NE(d.stops[0].reason.find("the target $20:6000 is the expansion area, not in the image"),
+            std::string::npos)
+      << d.stops[0].reason;
+
+  rom[0xFFC0u + 0x18u] = 0x01u;  // the save-size code: 2 KB behind the window
+  const CartridgeDisassembly saved = disassembleWithoutSound(rom);
+  ASSERT_EQ(saved.stops.size(), 1u);
+  EXPECT_NE(saved.stops[0].reason.find("the target $20:6000 is save RAM, not in the image"), std::string::npos)
+      << saved.stops[0].reason;
+}
+
+// A coprocessor's LoROM board gives the lower halves of its cartridge banks to
+// the chip, so a jump there names no image byte: the stop says the target is
+// the chip's, and no entry lifts it.
+TEST(RomDisasm, AJumpIntoACoprocessorsHalfIsAStop) {
+  std::vector<std::uint8_t> rom = loRomImage(128);
+  rom[0x7FC0u + 0x16u] = 0x03u;                    // the chipset byte: a DSP
+  put(rom, 0x0000u, {0x22u, 0x34u, 0x12u, 0x60u,   // JSL $60:1234
+                     0xDBu});                       // STP
+  put(rom, 0x301234u, {0xEAu, 0x6Bu});             // $60:9234, which the half would repeat on a plain board
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  EXPECT_EQ(d.board.coprocessor, Coprocessor::Dsp);
+  ASSERT_EQ(d.stops.size(), 1u);
+  EXPECT_EQ(d.stops[0].address, 0x008000u);
+  EXPECT_NE(d.stops[0].reason.find("the target $60:1234 is the coprocessor's, not in the image"), std::string::npos)
+      << d.stops[0].reason;
+  EXPECT_EQ(codeLineAt(regionNamed(d, "bank_60.asm").listing, 0x609234u), nullptr);
+}
+
+// The manifest names the board in two lines after the map, and reads them back;
+// a manifest without them reads as a plain board whose map's whole window is the
+// save's.
+TEST(RomDisasm, TheManifestNamesTheBoardAndReadsItBack) {
+  std::vector<std::uint8_t> rom = loRomImage(128);
+  rom[0x7FC0u + 0x16u] = 0x05u;  // a DSP with RAM and a battery
+  rom[0x7FC0u + 0x18u] = 0x03u;  // 8 KB of save
+  put(rom, 0x0000u, {0xDBu});
+  const std::string text = renderManifest(disassembleWithoutSound(rom));
+  EXPECT_NE(text.find("map      LoROM\nsave     8192\nchip     DSP\n"), std::string::npos);
+
+  std::string error;
+  const std::optional<ManifestInput> read = parseManifest(text, error);
+  ASSERT_TRUE(read.has_value()) << error;
+  const CartridgeBoard board = manifestBoard(*read);
+  EXPECT_EQ(board.map, CartridgeMap::LoRom);
+  EXPECT_EQ(board.coprocessor, Coprocessor::Dsp);
+  EXPECT_EQ(board.saveRamBytes, 8192u);
+
+  const std::optional<ManifestInput> older = parseManifest("image 4194304\nmap LoROM\n", error);
+  ASSERT_TRUE(older.has_value()) << error;
+  const CartridgeBoard plain = manifestBoard(*older);
+  EXPECT_EQ(plain.map, CartridgeMap::LoRom);
+  EXPECT_EQ(plain.coprocessor, Coprocessor::None);
+  EXPECT_NE(plain.saveRamBytes, 0u);
+  EXPECT_EQ(cartridgeRegion(plain, 0x701234u), CartridgeRegion::SaveRam);
+  EXPECT_EQ(cartridgeRegion(plain, 0x601234u), CartridgeRegion::Rom);
+
+  EXPECT_FALSE(parseManifest("chip Gizmo\n", error).has_value());
+  EXPECT_NE(error.find("not a coprocessor"), std::string::npos) << error;
+  EXPECT_FALSE(parseManifest("save many\n", error).has_value());
+  EXPECT_NE(error.find("byte count"), std::string::npos) << error;
 }
 
 // A table the bytes bound is held to the same rule: the destination in the image's
@@ -610,6 +705,8 @@ TEST(RomDisasm, TheManifestReadsBackItsEntriesAndFiles) {
   const CartridgeDisassembly d = disassembleCartridge(request);
   const std::string text = renderManifest(d);
   EXPECT_NE(text.find("map      LoROM\n"), std::string::npos);
+  EXPECT_NE(text.find("save     0\n"), std::string::npos);
+  EXPECT_NE(text.find("chip     none\n"), std::string::npos);
   EXPECT_NE(text.find("image    98304\n"), std::string::npos);
   EXPECT_NE(text.find("file     bank_01.asm 65816 $01:8000 $01:FFFF\n"), std::string::npos);
   EXPECT_NE(text.find("entry    $00:8000 reset e=1 m=8 x=8\n"), std::string::npos);
@@ -1176,7 +1273,7 @@ TEST(RomAssets, EveryLiftedRangeIsAFileUnderTheDirectoryOfItsMemory) {
     EXPECT_EQ(asset.first, expected[i].first) << asset.file;
     EXPECT_EQ(asset.bytes.size(), expected[i].bytes) << asset.file;
     // The bytes are the image's at the offset the address reads from.
-    const std::optional<std::size_t> offset = romOffset(CartridgeMap::LoRom, asset.first, rom.size());
+    const std::optional<std::size_t> offset = romOffset(d.board, asset.first, rom.size());
     ASSERT_TRUE(offset.has_value());
     EXPECT_EQ(asset.romOffset, *offset);
     EXPECT_TRUE(std::equal(asset.bytes.begin(), asset.bytes.end(), rom.begin() + static_cast<std::ptrdiff_t>(*offset)))
@@ -1860,7 +1957,7 @@ TEST(RomAssets, AProvenTransferIsLiftedAsItsFile) {
     EXPECT_EQ(asset.kind, expected[i].kind) << asset.file;
     EXPECT_EQ(asset.first, expected[i].first) << asset.file;
     EXPECT_EQ(asset.bytes.size(), expected[i].bytes) << asset.file;
-    const std::optional<std::size_t> offset = romOffset(CartridgeMap::LoRom, asset.first, rom.size());
+    const std::optional<std::size_t> offset = romOffset(d.board, asset.first, rom.size());
     ASSERT_TRUE(offset.has_value());
     EXPECT_TRUE(std::equal(asset.bytes.begin(), asset.bytes.end(), rom.begin() + static_cast<std::ptrdiff_t>(*offset)))
         << asset.file;

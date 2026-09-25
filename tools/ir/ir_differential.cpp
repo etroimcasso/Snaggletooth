@@ -17,10 +17,10 @@ namespace {
 // the one home of the image bytes it reads, so a bank that mirrors the image
 // finds the node placed in the bank the image is written for. An address
 // outside the image — code in work RAM — is its own.
-Address placed(CartridgeMap map, std::size_t imageBytes, Address address) {
-  const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+Address placed(const CartridgeBoard& board, std::size_t imageBytes, Address address) {
+  const std::optional<std::size_t> offset = romOffset(board, address, imageBytes);
   if (!offset) return address;
-  const std::optional<std::uint32_t> home = romAddress(map, *offset);
+  const std::optional<std::uint32_t> home = romAddress(board.map, *offset);
   return home ? *home : address;
 }
 
@@ -268,7 +268,7 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
   machine.setApuObserver(&audio);
   Interpreter interpreter;
   interpreter.registers = registersOf(machine.state().cpu);
-  const CartridgeMap map = detectCartridgeMap(replay.rom);
+  const CartridgeBoard board = cartridgeBoard(replay.rom);
   const std::size_t imageBytes = replay.rom.size();
 
   // The recorded run is presented as the cartridge disassembler presents it: the
@@ -345,7 +345,7 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
     Divergence prototype;
     prototype.instruction = step;
     prototype.site =
-        placed(map, imageBytes, (static_cast<Address>(before.pbr) << 16) | before.pc);
+        placed(board, imageBytes, (static_cast<Address>(before.pbr) << 16) | before.pc);
     std::uint32_t cycles = 0;
     const Node* node = nullptr;
 
@@ -357,7 +357,7 @@ DifferentialReport differential(const Program& program, const Replay& replay) {
       ++report.constructs[nmi ? "NMI" : "IRQ"];
     } else {
       const Registers& r = interpreter.registers;
-      node = program.find(placed(map, imageBytes, (static_cast<Address>(r.pbr) << 16) | r.pc), r.e,
+      node = program.find(placed(board, imageBytes, (static_cast<Address>(r.pbr) << 16) | r.pc), r.e,
                           r.accumulator8(), r.index8());
       if (node == nullptr) {
         ++report.unlifted;

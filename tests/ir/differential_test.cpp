@@ -220,6 +220,37 @@ TEST(Differential, ADivergenceInAMirrorBankNamesTheSiteTheTreePlaces) {
   EXPECT_EQ(d.actual, 0x11u);
 }
 
+// The tree places an instruction the CPU fetched through a LoROM save window
+// with no save behind it at the bank's upper half, where the image byte is, so
+// the node is found and the check names that site — and, as for any repeated
+// lower half, the program counter the CPU carries is the half's own, which the
+// check reports against the node's. On a coprocessor's board the same half is
+// the chip's, the fetch reaches no image byte, and the instruction is counted
+// as unlifted at the address the CPU ran it from.
+TEST(Differential, CodeRunThroughABareWindowIsPlacedAndThroughAChipsHalfIsNot) {
+  std::vector<std::uint8_t> rom = examples::loRomImage(128);  // 4 MB, no save: bank $70 is its own bytes
+  examples::put(rom, 0x0000u, {0xA9u, 0x01u,                  // LDA #$01, so the branch below falls through
+                               0x5Cu, 0x10u, 0x80u, 0x70u});  // JML $70:8010
+  examples::put(rom, 0x380010u, {0xF0u, 0x04u,                // $70:8010: BEQ $70:8016
+                                 0x5Cu, 0x16u, 0x00u, 0x70u,  // $70:8012: JML $70:0016, the window
+                                 0xDBu});                     // $70:8016: STP, which $70:0016 repeats
+  const DifferentialReport bare = replay(rom, programOf(rom));
+  EXPECT_TRUE(bare.stopped);
+  EXPECT_EQ(bare.unlifted, 0u) << "the STP at $70:0016 is the node at $70:8016";
+  EXPECT_TRUE(bare.unliftedSites.empty());
+  EXPECT_EQ(bare.constructs.at("STP"), 1u);
+  ASSERT_FALSE(bare.divergences.empty());
+  for (const Divergence& d : bare.divergences) EXPECT_EQ(d.site, 0x708016u) << describe(d);
+  EXPECT_EQ(bare.divergences.front().what, "register pc") << describe(bare.divergences.front());
+
+  rom[0x7FC0u + 0x16u] = 0x03u;  // the chipset byte: a DSP, whose board keeps the half
+  const DifferentialReport chip = replay(rom, programOf(rom), kFrame);
+  EXPECT_FALSE(chip.stopped);
+  EXPECT_NE(chip.unlifted, 0u);
+  EXPECT_NE(std::find(chip.unliftedSites.begin(), chip.unliftedSites.end(), 0x700016u), chip.unliftedSites.end())
+      << "the address the CPU ran it from, placed nowhere";
+}
+
 // ---- the sound program ----------------------------------------------------------------
 //
 // The uploading cartridge sends twenty instructions — two immediate loads, a

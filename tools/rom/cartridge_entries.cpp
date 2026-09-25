@@ -4,10 +4,13 @@ namespace snaggletooth::disasm {
 
 std::vector<VectorEntry> vectorEntries(const CartridgeHeader& header) {
   std::vector<VectorEntry> entries;
+  // The header declares the board, and a vector is fetched from bank $00 and
+  // names a handler in bank $00 — whose upper half is ROM on every board and
+  // whose lower half is the console's on every board.
+  const CartridgeBoard board{.map = header.map, .coprocessor = header.coprocessor, .saveRamBytes = header.saveRamBytes};
   auto add = [&](std::uint16_t vector, std::string_view name) {
-    // A vector is fetched from bank $00 and names a handler in bank $00.
     const Address address = vector;
-    if (cartridgeRegion(header.map, address) != CartridgeRegion::Rom) return;
+    if (cartridgeRegion(board, address) != CartridgeRegion::Rom) return;
     entries.push_back(VectorEntry{.address = address, .name = name});
   };
   add(header.emulation.reset, "reset");
@@ -23,9 +26,9 @@ std::vector<VectorEntry> vectorEntries(const CartridgeHeader& header) {
   return entries;
 }
 
-CodeOwner codeOwner(CartridgeMap map, Address address) noexcept {
-  return cartridgeRegion(map, address) == CartridgeRegion::Rom ? CodeOwner::Cpu65816
-                                                              : CodeOwner::None;
+CodeOwner codeOwner(const CartridgeBoard& board, Address address) noexcept {
+  return cartridgeRegion(board, address) == CartridgeRegion::Rom ? CodeOwner::Cpu65816
+                                                                : CodeOwner::None;
 }
 
 }  // namespace snaggletooth::disasm
