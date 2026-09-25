@@ -208,7 +208,9 @@ The tools are off in a parent build unless it sets `SNAGGLETOOTH_BUILD_TOOLS`, w
 tool libraries and command-line tools without the suite.
 
 The public headers are under [`include/snaggletooth/`](include/snaggletooth); the pages under
-[`docs/`](docs/README.md) describe each component's surface and how to drive it.
+[`docs/`](docs/README.md) describe each component's surface and how to drive it, and
+[docs/build-and-consume.md](docs/build-and-consume.md) covers the build, the targets, the
+options and what a program that links the library owns.
 
 ### Running the tools
 
@@ -254,6 +256,9 @@ the tools.
 [docs/README.md](docs/README.md) indexes every page with what it covers and says where to
 start for a given task. By subject:
 
+- **Building and consuming** — [build-and-consume.md](docs/build-and-consume.md): the targets,
+  the build options, linking the library or a tool library from a program of your own, the
+  dependencies and the test data.
 - **The machine** — [snes-machine.md](docs/snes-machine.md),
   [snes-cartridge.md](docs/snes-cartridge.md), [65816-cpu.md](docs/65816-cpu.md).
 - **The audio unit** — [apu-machine.md](docs/apu-machine.md),

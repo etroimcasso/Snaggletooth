@@ -21,6 +21,7 @@ what is unstarted.
 
 | If you want to | Read |
 |---|---|
+| Build the project, or link the library into a program of your own | [build-and-consume.md](build-and-consume.md) |
 | Hear a cartridge or a dump | [spc-rendering.md](spc-rendering.md) |
 | Run a whole SNES machine | [snes-machine.md](snes-machine.md) |
 | See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
@@ -58,6 +59,12 @@ what is unstarted.
 | Watch every access a running machine makes | [snes-machine.md §The bus observer](snes-machine.md#the-bus-observer), [apu-machine.md §The observer](apu-machine.md#the-observer) |
 | Run a directory of cartridges through every tool | [tools/README.md](../tools/README.md) |
 | Get the example cartridges the pages' output comes from | [tools/examples/README.md](../tools/examples/README.md) |
+
+## Building and consuming
+
+| Page | Covers |
+|---|---|
+| [build-and-consume.md](build-and-consume.md) | Building the project — the requirements, every target, the three configurations one tree supports and the options between them — and consuming it: linking the library from a parent build, what the library is and is not, driving the console and the audio unit from a program of your own, linking a tool library in process, the version identity, the dependencies and what each is for, the third-party test data and how it is pointed at, and the license |
 
 ## The machine
 
