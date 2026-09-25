@@ -19,6 +19,12 @@ Three things live in this repository:
 - **The documentation**, under [`docs/`](docs/README.md): a page per component, every value
   in it derived from public hardware documentation and validated against it.
 
+> [!IMPORTANT]
+> **Build and run Snaggletooth as a Release build.** A Debug build of the emulator runs
+> several times slower, and the player cannot hold the console's frame rate in one, even on a
+> fast desktop processor. On Windows, CMake builds Debug unless you pass `--config Release`.
+> [Building](#building) has the commands for every platform.
+
 ## Contents
 
 - [Why this exists](#why-this-exists)
@@ -183,16 +189,29 @@ https://github.com/user-attachments/assets/b300d0fc-e591-425a-a2a0-2003db7bcb64
 
 ### Building
 
-Requires a C++20 toolchain and CMake 3.24 or later. A build is optimized by default.
+Requires a C++20 toolchain and CMake 3.24 or later.
+
+**The emulator is meant to run as a Release build.** These commands build `Release` on Linux,
+macOS and Windows alike:
 
 ```
-cmake -B build
-cmake --build build
-ctest --test-dir build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build -C Release
 ```
 
-The tools build whenever Snaggletooth is the top-level project and land in the build
-directory's root; each is its own target, listed in [tools/README.md](tools/README.md#building).
+**Keep every flag.** On Windows, `cmake --build` without `--config Release` builds `Debug`
+whatever the configure step said, and the player lands in `build\Debug\` instead of
+`build\Release\`. A Debug build runs the machine several times slower, and the player cannot
+hold the console's 60 frames a second in one. The frame rate it shows then measures the build,
+not the emulator. A Debug player warns about this when it starts. In the Visual Studio IDE, set
+the configuration drop-down to `Release`.
+[docs/build-and-consume.md](docs/build-and-consume.md#building-a-release-build) says which flag
+each generator reads.
+
+The tools build whenever Snaggletooth is the top-level project and land in `build/` —
+`build\Release\` on Windows; each is its own target, listed in
+[tools/README.md](tools/README.md#building).
 
 ### Embedding the library
 

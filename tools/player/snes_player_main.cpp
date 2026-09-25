@@ -43,7 +43,8 @@
 // still emulated exactly, and the sound is opened a sixth of a per cent slower so it
 // stays with the picture. A panel at another rate entirely leaves the run on the
 // console's own, and --vsync names either arrangement outright. Which one a run took is
-// the first thing it says.
+// the first thing it says — after a warning, printed only by a Debug build, that the
+// rates it reports are the build's rather than the emulator's.
 
 #include <algorithm>
 #include <cstddef>
@@ -85,6 +86,16 @@ namespace player = snaggletooth::player;
 constexpr int kSampleRate = 32000;
 constexpr int kChannels = 2;
 constexpr int kBytesPerSample = kChannels * static_cast<int>(sizeof(std::int16_t));
+
+// Whether this player was compiled without optimization. Every optimized build type
+// defines NDEBUG and Debug does not, so its absence is how a Debug build is told
+// apart. A Debug build runs the machine several times slower, and its frame rates say
+// nothing about the emulator's own speed.
+#ifdef NDEBUG
+constexpr bool kDebugBuild = false;
+#else
+constexpr bool kDebugBuild = true;
+#endif
 
 // The rate a frame's interval works out to, in thousandths of a frame a second, so a
 // rate is reported exactly without leaving the integers.
@@ -793,6 +804,13 @@ int main(int argc, char** argv) {
   }
   if (imagePath.empty()) usage(argv[0]);
   if (scale == 0u) scale = 1u;
+  // The first thing a run says, and said under --quiet too: every rate the run
+  // reports after it is the build's, not the emulator's.
+  if constexpr (kDebugBuild) {
+    std::cerr << "this player is a Debug build: the machine runs several times slower than a "
+                 "Release build, so expect frame rates below the console's. Build with "
+                 "--config Release (docs/build-and-consume.md).\n";
+  }
   if (!inputPath.empty() && !inputDir.empty()) {
     std::cerr << "--input and --input-dir both name a recorded run; give one\n";
     return 2;

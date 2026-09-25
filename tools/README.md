@@ -67,10 +67,12 @@ vendors the library sets the first to have them without the suite. Each is its o
 target:
 
 ```
-cmake --build build --target snes_disasm snes_render snes_verify snes_lift snes_differential snes_examples cpu65816_disasm spc700_disasm cpu65816_asm spc700_asm rom_render spc_render
+cmake --build build --config Release --target snes_disasm snes_render snes_verify snes_lift snes_differential snes_examples cpu65816_disasm spc700_disasm cpu65816_asm spc700_asm rom_render spc_render
 ```
 
-The binaries land in the build directory's root.
+The binaries land in `build/`, or in `build\Release\` on Windows. Keep `--config Release`: on
+Windows the build is `Debug` without it, which runs the machine several times slower
+([docs/build-and-consume.md](../docs/build-and-consume.md#building-a-release-build)).
 
 ## How the pieces fit
 
