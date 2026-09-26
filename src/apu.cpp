@@ -58,6 +58,7 @@ Apu::Apu(Apu&& moved, ApuState* storage) noexcept
       observer_(moved.observer_),
       boundaryState_(moved.boundaryState_),
       sinceBoundary_(moved.sinceBoundary_),
+      insideCycle_(moved.insideCycle_),
       accessWatcher_(moved.accessWatcher_),
       armed_(std::move(moved.armed_)),
       instructionWatcher_(moved.instructionWatcher_),
@@ -143,7 +144,9 @@ void Apu::machineCycle() {
   // armed" test, and an unarmed machine pays it alone.
   if (standins_ != nullptr) tellInstruction();
   Bus bus{*this};
+  insideCycle_ = true;  // a call into the program from inside the access is refused
   cpu_.stepCycle(bus);
+  insideCycle_ = false;
 
   // The observer is told each boundary the cycle lands on, with the state at
   // the one before and every cycle between. A halted core sits on a boundary,
@@ -432,9 +435,13 @@ bool Apu::runCall(std::uint16_t entry, Spc700State file, std::size_t guard) {
 }
 
 bool Apu::callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard) {
+  // The refusals come first and spend nothing. A machine a budget stopped inside
+  // an instruction then runs to the boundary exactly as step() would, those
+  // cycles the program's own; the file taken there is the one it resumes at.
+  if (returns == ApuStandin::None || insideCycle_) return false;
+  while (!cpu_.atInstructionBoundary()) machineCycle();
   state_->cpu = cpu_.state();
   const Spc700State before = state_->cpu;
-  if (returns == ApuStandin::None || before.tcu != 0u) return false;
   const bool returned = runCall(entry, before, guard);
   setCpuState(before);  // the program's file, back as it was
   return returned;
@@ -442,9 +449,11 @@ bool Apu::callInContext(std::uint16_t entry, ApuStandin returns, std::size_t gua
 
 bool Apu::callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
                       std::size_t guard) {
+  // Refused, or run to the boundary first, as callInContext is.
+  if (returns == ApuStandin::None || insideCycle_) return false;
+  while (!cpu_.atInstructionBoundary()) machineCycle();
   state_->cpu = cpu_.state();
   Spc700State file = state_->cpu;
-  if (returns == ApuStandin::None || file.tcu != 0u) return false;
   file.sp = stackTop;
   return runCall(entry, file, guard);
 }

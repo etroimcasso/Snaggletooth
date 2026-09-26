@@ -601,11 +601,17 @@ sleeping or stopped core counts as one. On overrun the routine is abandoned at i
 call returns `false` — the file put back for `callInContext`, left where it stopped for `callOnStack`.
 A guard of zero runs nothing.
 
+A `run()` that stops inside an instruction leaves the call to finish it: the machine runs to the next
+instruction boundary, exactly as `step()` would, and then calls. Those cycles are the program's own
+and `state().divider` moves by them as by the routine's; `callInContext` puts back the file at that
+boundary, so the program resumes at the instruction after the one the budget stopped inside.
+
 A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
-touched — when `returns` is `ApuStandin::None`, or when the machine is not between instructions:
-inside an access watcher's call, or after a `run()` that stopped mid-instruction. Between `step()`
-calls and inside an instruction watcher's call it is. Every 16-bit entry is RAM, so none is refused
-for its address. A call made from inside a watcher's call is the same call, at any depth.
+touched — when `returns` is `ApuStandin::None`, or when it is made from inside a host's call that the
+machine makes during the CPU's access: the access watcher's, an opcode fetch included, or the
+observer's `access` report. Every 16-bit entry is RAM, so none is refused for its address. An
+instruction watcher is told, and the observer's `instruction` report made, between instructions, so a
+call from inside either is the same call, at any depth.
 
 ## Gotchas
 

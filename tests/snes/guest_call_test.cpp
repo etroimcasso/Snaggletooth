@@ -12,17 +12,26 @@
 // through the landing, or one that empties and refills its frame, does not end
 // the call. The guard cases pin its unit: instructions, the return counted,
 // zero running nothing, a runaway abandoned with the file put back. The
-// refusal cases pin that a refused call does nothing at all. The time cases
-// pin that the routine's cycles are the machine's own — the same a JSR spends,
-// an interrupt due taken inside it and not again afterwards, a waiting core
-// called and left waiting. The re-entrancy cases pin a call from inside a
-// watcher's call, at two depths, and the way a host reads a routine's
-// registers: live, inside a watch on its return. The last cases pin the
-// machine that calls nothing, and a call after a move.
+// refusal cases pin that a refused call does nothing at all. The stopped-
+// machine cases pin that a machine a budget left inside an instruction, or
+// inside an interrupt sequence, is run to its boundary first — the same file
+// and the same master count as a machine that stepped there — and that those
+// cycles come out of the budget the host runs next. The time cases pin that
+// the routine's cycles are the machine's own — the same a JSR spends, an
+// interrupt due taken inside it and not again afterwards, a waiting core
+// called and left waiting. The re-entrancy cases pin a call from inside an
+// instruction watcher's call, at two depths, and the way a host reads a
+// routine's registers: live, inside a watch on its return. The cycle cases
+// pin that a call from inside any host's call the machine makes during a
+// cycle — an access watcher's on the opcode fetch, the bus observer's, the
+// frame observer's, the audio machine's observer's — is refused and leaves the
+// machine as a plain run leaves it. The last cases pin the machine that calls
+// nothing, and a call after a move.
 
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -83,6 +92,11 @@ Snes parkedGuest(std::initializer_list<std::uint8_t> routine = {kIncAbs, 0x30u, 
   m.step();
   return m;
 }
+
+// LDA #$77 ; STA !$0020 ; NOP ; BRA -8 — a guest that runs forever, its opcode
+// at $8000 fetched once a pass and its store to $0020 made once a pass.
+const std::initializer_list<std::uint8_t> kLoop = {kLdaImm, 0x77u, kStaAbs, 0x20u, 0x00u,
+                                                   kNop,    kBra,  0xF8u};
 
 // ---- calling in the guest's own context ---------------------------------------
 
@@ -254,18 +268,6 @@ TEST(SnesGuestCall, StandinNoneIsRefused) {
   EXPECT_TRUE(m.state() == before);
 }
 
-TEST(SnesGuestCall, AMachineStoppedMidInstructionIsRefused) {
-  // One master cycle from reset is the LDA's opcode fetch: the core is inside
-  // the instruction, and a call there is refused.
-  Snes m = programMachine(kGuest);
-  m.run(1u);
-  ASSERT_NE(int{m.cpuState().tcu}, 0);
-  const SnesState before = m.state();
-  EXPECT_FALSE(m.callInContext(kRoutine, Standin::Near, 100));
-  EXPECT_FALSE(m.callOnStack(kRoutine, 0x01F0u, Standin::Near, 100));
-  EXPECT_TRUE(m.state() == before);
-}
-
 TEST(SnesGuestCall, AStackTheFaceDoesNotReachIsRefused) {
   // A stack pointer in the register file: the landing would land on $2100,
   // which poke refuses, so the call refuses before writing anything.
@@ -273,6 +275,101 @@ TEST(SnesGuestCall, AStackTheFaceDoesNotReachIsRefused) {
   const SnesState before = m.state();
   EXPECT_FALSE(m.callOnStack(kRoutine, 0x2100u, Standin::Near, 100));
   EXPECT_TRUE(m.state() == before);
+}
+
+// ---- a machine a budget stopped inside an instruction ----------------------------------
+
+TEST(SnesGuestCall, AMachineStoppedMidInstructionFinishesItThenCalls) {
+  // One master cycle from reset is the LDA's opcode fetch: the core is inside
+  // the instruction. The call runs the LDA to its end, then the routine, and
+  // the file put back is the one at that boundary — the landing — exactly as
+  // on a machine that stepped the LDA and then made the same call.
+  Snes a = programMachine(kGuest);
+  a.run(1u);
+  ASSERT_NE(int{a.cpuState().tcu}, 0);
+  Snes b = parkedGuest();
+  EXPECT_TRUE(a.callInContext(kRoutine, Standin::Near, 100));
+  EXPECT_TRUE(b.callInContext(kRoutine, Standin::Near, 100));
+  EXPECT_EQ(a.state().wram[0x30], 1u) << "the routine ran";
+  EXPECT_EQ(int{a.cpuState().pc}, int{kLanding}) << "the file at the LDA's end";
+  EXPECT_TRUE(a.cpuState() == b.cpuState());
+  EXPECT_EQ(a.state().master, b.state().master) << "the LDA's cycles and the routine's, nothing else";
+  a.run(20000u);
+  EXPECT_EQ(a.state().wram[0x20], 0x11u) << "the guest carried on unaware";
+  EXPECT_EQ(a.cpuState().run, CpuRunState::Stopped);
+}
+
+TEST(SnesGuestCall, CallOnStackOnAMachineStoppedMidInstructionFinishesItFirst) {
+  // The same stop, called in a frame of the host's own: the LDA finishes, so
+  // the routine's file carries its A, and the frame starts from the landing.
+  Snes a = programMachine(kGuest);
+  a.run(1u);
+  ASSERT_NE(int{a.cpuState().tcu}, 0);
+  Snes b = parkedGuest();
+  EXPECT_TRUE(a.callOnStack(kRoutine, 0x01F0u, Standin::Near, 100));
+  EXPECT_TRUE(b.callOnStack(kRoutine, 0x01F0u, Standin::Near, 100));
+  EXPECT_EQ(a.state().wram[0x30], 1u);
+  EXPECT_EQ(int{a.cpuState().pc}, int{kLanding}) << "the routine's file, back at the landing";
+  EXPECT_EQ(int{a.cpuState().s}, 0x01F0);
+  EXPECT_EQ(static_cast<int>(a.cpuState().a & 0xFFu), 0x11) << "the LDA ran before the routine";
+  EXPECT_TRUE(a.cpuState() == b.cpuState());
+  EXPECT_EQ(a.state().master, b.state().master);
+}
+
+TEST(SnesGuestCall, AMachineStoppedInsideAnInterruptSequenceFinishesItThenCalls) {
+  // NMI enabled and the guest spinning. One cycle into the sequence vertical
+  // blank starts, the call runs the sequence to its end and the routine in the
+  // handler's context: the file put back is the handler's entry. The handler
+  // then runs to its RTI and the guest spins on.
+  Snes m = programMachine({kLdaImm, 0x80u, kStaAbs, 0x00u, 0x42u,  // LDA #$80 ; STA $4200
+                           kIncAbs, 0x20u, 0x00u, kBra, 0xFBu});   // INC !$0020 ; BRA back
+  place(m, 0x008200u, {kIncAbs, 0x10u, 0x00u, kRti});  // the handler
+  m.poke(0x00FFFAu, 0x00u);                             // the NMI vector -> $8200
+  m.poke(0x00FFFBu, 0x82u);
+  for (int i = 0; i < 100000 && !m.cpuState().nmiPending; ++i) m.step();
+  ASSERT_TRUE(m.cpuState().nmiPending);
+  // A refresh due at the boundary spends its cycles first; the sequence's first
+  // cycle is the first CPU cycle after it.
+  for (int i = 0; i < 64 && m.cpuState().servicing == InterruptRequest::None; ++i) m.run(1u);
+  ASSERT_NE(m.cpuState().servicing, InterruptRequest::None);
+  ASSERT_NE(int{m.cpuState().tcu}, 0);
+  EXPECT_TRUE(m.callInContext(kRoutine, Standin::Near, 100));
+  EXPECT_EQ(m.state().wram[0x30], 1u) << "the routine ran";
+  EXPECT_EQ(int{m.cpuState().pc}, 0x8200) << "the handler's entry: the sequence finished first";
+  EXPECT_EQ(int{m.cpuState().pbr}, 0x00);
+  EXPECT_EQ(m.cpuState().servicing, InterruptRequest::None);
+  EXPECT_EQ(m.state().wram[0x10], 0u) << "the handler has not run yet";
+  m.step();  // INC !$0010
+  m.step();  // RTI
+  EXPECT_EQ(m.state().wram[0x10], 1u) << "the handler ran to its RTI";
+  EXPECT_GE(int{m.cpuState().pc}, 0x8005);
+  EXPECT_LE(int{m.cpuState().pc}, 0x8008) << "back in the guest's loop";
+  const std::uint8_t spun = m.state().wram[0x20];
+  m.step();
+  m.step();
+  EXPECT_NE(m.state().wram[0x20], spun) << "the guest spins on";
+}
+
+TEST(SnesGuestCall, ACallOnAStoppedMachineSpendsFromTheBudgetTheHostRunsNext) {
+  // The finishing cycles and the routine's are both the machine's own: a run of
+  // one cycle, the call, and a run of the rest of the budget land where one run
+  // of the whole budget lands, within one cycle.
+  constexpr std::uint64_t kBudget = 20000u;
+  Snes a = programMachine(kGuest);
+  Snes b = programMachine(kGuest);
+  const std::uint64_t start = a.state().master;
+  a.run(1u);
+  ASSERT_NE(int{a.cpuState().tcu}, 0);
+  EXPECT_TRUE(a.callInContext(kRoutine, Standin::Near, 100));
+  ASSERT_LT(a.state().master, start + kBudget);
+  a.run(kBudget - 1u);
+  b.run(kBudget);
+  // run() stops at the first cycle boundary at or past its budget, and a cycle
+  // is at most twelve master cycles.
+  EXPECT_GE(a.state().master, start + kBudget);
+  EXPECT_LT(a.state().master, start + kBudget + 12u);
+  EXPECT_GE(b.state().master, start + kBudget);
+  EXPECT_LT(b.state().master, start + kBudget + 12u);
 }
 
 // ---- the routine is the machine running ----------------------------------------------
@@ -419,19 +516,138 @@ TEST(SnesGuestCall, ARoutinesRegistersAreReadLiveInsideAWatchOnItsReturn) {
   EXPECT_EQ(static_cast<int>(m.cpuState().a & 0xFFu), 0x11) << "and the guest's own A is back";
 }
 
+// ---- a call from inside a cycle is refused ---------------------------------------------
+
+// Both verbs, made from inside a host's call during a cycle; what they
+// answered is kept. Four calls of each verb are enough to pin the refusal.
+struct Caller {
+  Snes* machine = nullptr;
+  std::size_t made = 0;  // counted before each call, so a call that runs cannot recurse without end
+  std::vector<bool> returned;
+  void call() {
+    if (made >= 4u) return;
+    ++made;
+    returned.push_back(machine->callInContext(kRoutine, Standin::Near, 100));
+    returned.push_back(machine->callOnStack(kRoutine, 0x01F0u, Standin::Near, 100));
+  }
+  [[nodiscard]] bool allRefused() const {
+    for (const bool r : returned) {
+      if (r) return false;
+    }
+    return !returned.empty();
+  }
+};
+
+// An access watcher that calls from inside each access it is told, and keeps
+// what the access was.
+struct AccessCaller final : AccessWatcher, Caller {
+  std::vector<CycleKind> kinds;
+  std::vector<std::uint8_t> cycles;
+  AccessAnswer read(std::uint32_t, std::uint8_t, AccessSource, CycleKind kind,
+                    std::uint8_t cycle) override {
+    kinds.push_back(kind);
+    cycles.push_back(cycle);
+    call();
+    return AccessAnswer::proceed();
+  }
+  AccessAnswer write(std::uint32_t, std::uint8_t, AccessSource, CycleKind kind,
+                     std::uint8_t cycle) override {
+    kinds.push_back(kind);
+    cycles.push_back(cycle);
+    call();
+    return AccessAnswer::proceed();
+  }
+};
+
+TEST(SnesGuestCall, ACallFromInsideAnAccessWatchersCallOnAnOpcodeFetchIsRefused) {
+  // The opcode fetch is the instruction's cycle 0, before the core has counted
+  // into it; a call made there is refused as at every other access, and the
+  // machine runs on exactly as a machine with no watcher.
+  Snes a = programMachine(kLoop);
+  Snes b = programMachine(kLoop);
+  AccessCaller w;
+  w.machine = &b;
+  b.setAccessWatcher(&w);
+  b.watchAccess(0x008000u, 1, /*onRead=*/true, /*onWrite=*/false);  // the LDA's opcode
+  b.run(200000u);
+  a.run(200000u);
+  ASSERT_FALSE(w.kinds.empty());
+  EXPECT_EQ(w.kinds[0], CycleKind::OpcodeFetch);
+  EXPECT_EQ(int{w.cycles[0]}, 0);
+  EXPECT_TRUE(w.allRefused());
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
+// The bus observer, calling from inside its report of each opcode fetch.
+struct ObserverCaller final : BusObserver, Caller {
+  void access(const BusAccess& access) override {
+    if (access.kind == CycleKind::OpcodeFetch) call();
+  }
+  void internal(std::uint32_t, std::optional<CycleKind>) override {}
+};
+
+TEST(SnesGuestCall, ACallFromInsideTheBusObserversReportOfAnOpcodeFetchIsRefused) {
+  Snes a = programMachine(kLoop);
+  Snes b = programMachine(kLoop);
+  ObserverCaller o;
+  o.machine = &b;
+  b.setObserver(&o);
+  b.run(200000u);
+  a.run(200000u);
+  EXPECT_TRUE(o.allRefused());
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
+// The frame observer, calling from inside each finished frame.
+struct FrameCaller final : FrameObserver, Caller {
+  void frame(const VideoFrame&) override { call(); }
+};
+
+// The audio machine's observer, set through the console, calling from inside
+// each access and each boundary it is told.
+struct ApuObserverCaller final : ApuObserver, Caller {
+  void access(std::uint16_t, std::uint8_t, bool) override { call(); }
+  void instruction(const Spc700State&, const Spc700State&, std::uint32_t) override { call(); }
+};
+
+TEST(SnesGuestCall, ACallFromInsideTheFrameObserverOrTheAudioMachinesObserverIsRefused) {
+  // Both are told inside a console cycle — a frame as the beam reaches the next
+  // one, the audio machine as the cycle pays it its share — so a call from
+  // either is refused, a boundary of the sound CPU's included.
+  Snes a = programMachine(kLoop);
+  Snes b = programMachine(kLoop);
+  FrameCaller f;
+  f.machine = &b;
+  b.setFrameObserver(&f);
+  ApuObserverCaller o;
+  o.machine = &b;
+  b.setApuObserver(&o);
+  b.run(2u * 262u * 1364u);
+  a.run(2u * 262u * 1364u);
+  EXPECT_TRUE(f.allRefused()) << "a frame finished, and the calls from it were refused";
+  EXPECT_TRUE(o.allRefused());
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
 // ---- the machine that calls nothing behaves exactly as it does today ---------------
 
 TEST(SnesGuestCall, RefusedCallsLeaveAMachineByteIdenticalToAPlainRun) {
-  const std::initializer_list<std::uint8_t> loop = {kLdaImm, 0x77u, kStaAbs, 0x20u, 0x00u,
-                                                     kNop, kBra, 0xF8u};  // BRA -8: back to $8000
-  Snes a = programMachine(loop);
-  Snes b = programMachine(loop);
+  // Every refusal that remains: no return, an entry the bank does not map, and
+  // calls from inside an access watcher's call on the guest's store.
+  Snes a = programMachine(kLoop);
+  Snes b = programMachine(kLoop);
   EXPECT_FALSE(b.callInContext(kRoutine, Standin::None, 100));
   EXPECT_FALSE(b.callOnStack(0x006000u, 0x01F0u, Standin::Near, 100));
-  b.run(1u);
-  EXPECT_FALSE(b.callInContext(kRoutine, Standin::Near, 100));  // mid-instruction
-  b.run(200000u - 1u);
+  AccessCaller w;
+  w.machine = &b;
+  b.setAccessWatcher(&w);
+  b.watchAccess(0x7E0020u, 1, /*onRead=*/false, /*onWrite=*/true);  // the STA's store
+  b.run(200000u);
   a.run(200000u);
+  EXPECT_TRUE(w.allRefused());
   EXPECT_TRUE(a.state() == b.state());
   EXPECT_EQ(a.takeFrames(), b.takeFrames());
 }

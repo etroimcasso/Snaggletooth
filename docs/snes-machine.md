@@ -1196,19 +1196,35 @@ halted core counts as one, so a routine that waits for an interrupt that never c
 overrun the routine is abandoned at its boundary and the call returns `false` — the file put back for
 `callInContext`, left where it stopped for `callOnStack`. A guard of zero runs nothing.
 
+A `run()` budget usually stops the machine inside an instruction — or inside a refresh pause, a
+transfer or an interrupt sequence. A call made there first runs the machine to the next instruction
+boundary, exactly as `step()` would, and then calls. Those cycles are the guest's own: `state().master`
+moves by them as it does by the routine's, and they come out of the budget the host runs next.
+`callInContext` puts back the file at that boundary, so the guest resumes at the instruction after the
+one the budget stopped inside:
+
+```cpp
+machine.run(budget);                                   // may stop mid-instruction
+machine.callInContext(0x008100, Standin::Near, 10000); // finishes it, then calls
+```
+
 A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
 touched — when:
 
 - `returns` is `Standin::None`: a call needs a return to end it.
-- The machine is not between instructions: inside an access watcher's call, or after a `run()` that
-  stopped mid-instruction. Between `step()` calls and inside an instruction watcher's call it is.
 - The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's
   own act, and the call never does it on the guest's behalf.
-- The landing would land where the memory face does not reach — a stack pointer in the register file,
-  for instance.
+- It is made from inside a host's call that the machine makes during a cycle: an access watcher's —
+  an opcode fetch included — the bus observer's, the frame observer's, the save observer's, or the
+  observer set with `setApuObserver`. The machine is part-way through the chip's work there, and a
+  call cannot run until the cycle ends.
 
-A call made from inside a watcher's call is the same call, at any depth: a watcher told inside one call
-may make another.
+A call whose landing would land where the memory face does not reach — a stack pointer in the register
+file, for instance — is refused too, after any finishing cycles, with those cycles spent and nothing
+pushed.
+
+An instruction watcher is told between instructions, so a call made from inside its call is the same
+call, at any depth: a watcher told inside one call may make another.
 
 ## Gotchas
 

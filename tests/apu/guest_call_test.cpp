@@ -12,12 +12,18 @@
 // landing, or one that empties and refills its frame, does not end the call.
 // The guard cases pin its unit: instructions, the RET counted, zero running
 // nothing, a runaway abandoned with the file put back. The refusal cases pin
-// that a refused call does nothing at all. The time cases pin that the
-// routine's cycles are the machine's own — the same a CALL's routine spends —
-// and that a sleeping core is called and left sleeping. The re-entrancy cases
-// pin a call from inside a watcher's call, at two depths, and the way a host
-// reads a routine's registers: live, inside a watch on its RET. The last cases
-// pin the machine that calls nothing, and a call after a move.
+// that a refused call does nothing at all. The stopped-machine cases pin that
+// a machine a budget left inside an instruction is run to its boundary first —
+// the same file and the same count as a machine that stepped there. The time
+// cases pin that the routine's cycles are the machine's own — the same a
+// CALL's routine spends — and that a sleeping core is called and left
+// sleeping. The re-entrancy cases pin a call from inside an instruction
+// watcher's call, at two depths, a call from inside the observer's report of
+// a boundary, and the way a host reads a routine's registers: live, inside a
+// watch on its RET. The access cases pin that a call from inside the access
+// watcher's call on the opcode fetch, or the observer's report of it, is
+// refused and leaves the machine as a plain run leaves it. The last cases pin
+// the machine that calls nothing, and a call after a move.
 
 #include <cstddef>
 #include <cstdint>
@@ -31,8 +37,11 @@
 
 namespace {
 
+using snaggletooth::AccessAnswer;
 using snaggletooth::Apu;
+using snaggletooth::ApuAccessWatcher;
 using snaggletooth::ApuInstructionWatcher;
+using snaggletooth::ApuObserver;
 using snaggletooth::ApuStandin;
 using snaggletooth::ApuState;
 using snaggletooth::RunState;
@@ -88,6 +97,11 @@ Apu parked(std::initializer_list<std::uint8_t> routine = {kIncAbs, 0x60u, 0x02u,
   apu.step();
   return apu;
 }
+
+// MOV A,#$77 ; MOV !$0250,A ; BRA -7 — a program that runs forever, its opcode
+// at $0300 fetched once a pass and its store to $0250 made once a pass.
+const std::initializer_list<std::uint8_t> kLoop = {kMovAImm, 0x77u, kMovAbsA, 0x50u,
+                                                   0x02u,    kBra,  0xF9u};
 
 // ---- calling in the program's own context ---------------------------------------
 
@@ -220,16 +234,43 @@ TEST(ApuGuestCall, StandinNoneIsRefused) {
   EXPECT_TRUE(apu.state() == before);
 }
 
-TEST(ApuGuestCall, AMachineStoppedMidInstructionIsRefused) {
+// ---- a machine a budget stopped inside an instruction ----------------------------------
+
+TEST(ApuGuestCall, AMachineStoppedMidInstructionFinishesItThenCalls) {
   // One cycle from the entry is the MOV's opcode fetch: the core is inside the
-  // instruction, and a call there is refused.
-  Apu apu = loaded(kProgram);
-  apu.run(1u);
-  ASSERT_NE(int{apu.cpuState().tcu}, 0);
-  const ApuState before = apu.state();
-  EXPECT_FALSE(apu.callInContext(kRoutine, ApuStandin::Return, 100));
-  EXPECT_FALSE(apu.callOnStack(kRoutine, 0xD0u, ApuStandin::Return, 100));
-  EXPECT_TRUE(apu.state() == before);
+  // instruction. The call runs the MOV to its end, then the routine, and the
+  // file put back is the one at that boundary — the landing — exactly as on a
+  // machine that stepped the MOV and then made the same call.
+  Apu a = loaded(kProgram);
+  a.run(1u);
+  ASSERT_NE(int{a.cpuState().tcu}, 0);
+  Apu b = parked();
+  EXPECT_TRUE(a.callInContext(kRoutine, ApuStandin::Return, 100));
+  EXPECT_TRUE(b.callInContext(kRoutine, ApuStandin::Return, 100));
+  EXPECT_EQ(a.readRam(kMark), 1u) << "the routine ran";
+  EXPECT_EQ(int{a.cpuState().pc}, int{kLanding}) << "the file at the MOV's end";
+  EXPECT_TRUE(a.cpuState() == b.cpuState());
+  EXPECT_EQ(a.state().divider, b.state().divider) << "the MOV's cycles and the routine's, nothing else";
+  a.run(2000u);
+  EXPECT_EQ(a.readRam(kResult), 0x11u) << "the program carried on unaware";
+  EXPECT_EQ(a.cpuState().run, RunState::Stopped);
+}
+
+TEST(ApuGuestCall, CallOnStackOnAMachineStoppedMidInstructionFinishesItFirst) {
+  // The same stop, called in a frame of the host's own: the MOV finishes, so
+  // the routine's file carries its A, and the frame starts from the landing.
+  Apu a = loaded(kProgram);
+  a.run(1u);
+  ASSERT_NE(int{a.cpuState().tcu}, 0);
+  Apu b = parked();
+  EXPECT_TRUE(a.callOnStack(kRoutine, 0xD0u, ApuStandin::Return, 100));
+  EXPECT_TRUE(b.callOnStack(kRoutine, 0xD0u, ApuStandin::Return, 100));
+  EXPECT_EQ(a.readRam(kMark), 1u);
+  EXPECT_EQ(int{a.cpuState().pc}, int{kLanding}) << "the routine's file, back at the landing";
+  EXPECT_EQ(int{a.cpuState().sp}, 0xD0);
+  EXPECT_EQ(int{a.cpuState().a}, 0x11) << "the MOV ran before the routine";
+  EXPECT_TRUE(a.cpuState() == b.cpuState());
+  EXPECT_EQ(a.state().divider, b.state().divider);
 }
 
 // ---- the routine is the machine running ----------------------------------------------
@@ -336,19 +377,131 @@ TEST(ApuGuestCall, ARoutinesRegistersAreReadLiveInsideAWatchOnItsReturn) {
   EXPECT_EQ(int{apu.cpuState().a}, 0x11) << "and the program's own A is back";
 }
 
+// An observer that calls into the program from inside its first report of a
+// boundary, once: the routine's own boundaries are reported inside the call,
+// and those make none.
+struct BoundaryCaller final : ApuObserver {
+  Apu* machine = nullptr;
+  bool called = false;
+  std::vector<bool> returned;
+  void access(std::uint16_t, std::uint8_t, bool) override {}
+  void instruction(const Spc700State&, const Spc700State&, std::uint32_t) override {
+    if (called) return;
+    called = true;
+    returned.push_back(machine->callInContext(kRoutine, ApuStandin::Return, 100));
+  }
+};
+
+TEST(ApuGuestCall, ACallFromInsideTheObserversReportOfABoundaryProceeds) {
+  // The report comes after the CPU's access, at the boundary the cycle landed
+  // on: the call is made between instructions and runs there.
+  Apu apu = loaded(kProgram);
+  BoundaryCaller o;
+  o.machine = &apu;
+  apu.setObserver(&o);
+  apu.run(2000u);
+  ASSERT_EQ(o.returned.size(), 1u);
+  EXPECT_TRUE(o.returned[0]);
+  EXPECT_EQ(apu.readRam(kMark), 1u) << "the routine ran";
+  EXPECT_EQ(apu.readRam(kResult), 0x11u) << "and the program carried on";
+  EXPECT_EQ(apu.cpuState().run, RunState::Stopped);
+}
+
+// ---- a call from inside the CPU's access is refused ------------------------------------
+
+// Both verbs, made from inside a host's call during the CPU's access; what
+// they answered is kept. Four calls of each verb are enough to pin the refusal.
+struct Caller {
+  Apu* machine = nullptr;
+  std::size_t made = 0;  // counted before each call, so a call that runs cannot recurse without end
+  std::vector<bool> returned;
+  void call() {
+    if (made >= 4u) return;
+    ++made;
+    returned.push_back(machine->callInContext(kRoutine, ApuStandin::Return, 100));
+    returned.push_back(machine->callOnStack(kRoutine, 0xD0u, ApuStandin::Return, 100));
+  }
+  [[nodiscard]] bool allRefused() const {
+    for (const bool r : returned) {
+      if (r) return false;
+    }
+    return !returned.empty();
+  }
+};
+
+// An access watcher that calls from inside each access it is told, and keeps
+// the cycle each one was.
+struct AccessCaller final : ApuAccessWatcher, Caller {
+  std::vector<std::uint8_t> cycles;
+  AccessAnswer read(std::uint16_t, std::uint8_t, std::uint8_t cycle) override {
+    cycles.push_back(cycle);
+    call();
+    return AccessAnswer::proceed();
+  }
+  AccessAnswer write(std::uint16_t, std::uint8_t, std::uint8_t cycle) override {
+    cycles.push_back(cycle);
+    call();
+    return AccessAnswer::proceed();
+  }
+};
+
+TEST(ApuGuestCall, ACallFromInsideAnAccessWatchersCallOnAnOpcodeFetchIsRefused) {
+  // The opcode fetch is the instruction's cycle 0, before the core has counted
+  // into it; a call made there is refused as at every other access, and the
+  // machine runs on exactly as a machine with no watcher.
+  Apu a = loaded(kLoop);
+  Apu b = loaded(kLoop);
+  AccessCaller w;
+  w.machine = &b;
+  b.setAccessWatcher(&w);
+  b.watchAccess(kEntry, 1, /*onRead=*/true, /*onWrite=*/false);  // the first MOV's opcode
+  b.run(50000u);
+  a.run(50000u);
+  ASSERT_FALSE(w.cycles.empty());
+  EXPECT_EQ(int{w.cycles[0]}, 0) << "the opcode fetch";
+  EXPECT_TRUE(w.allRefused());
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
+// The observer, calling from inside its report of each read of the loop's
+// first byte — the opcode fetch, the one read the program makes of it.
+struct FetchCaller final : ApuObserver, Caller {
+  void access(std::uint16_t address, std::uint8_t, bool write) override {
+    if (address == kEntry && !write) call();
+  }
+  void instruction(const Spc700State&, const Spc700State&, std::uint32_t) override {}
+};
+
+TEST(ApuGuestCall, ACallFromInsideTheObserversReportOfAnOpcodeFetchIsRefused) {
+  Apu a = loaded(kLoop);
+  Apu b = loaded(kLoop);
+  FetchCaller o;
+  o.machine = &b;
+  b.setObserver(&o);
+  b.run(50000u);
+  a.run(50000u);
+  EXPECT_TRUE(o.allRefused());
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
 // ---- the machine that calls nothing behaves exactly as it does today ---------------
 
 TEST(ApuGuestCall, RefusedCallsLeaveAMachineByteIdenticalToAPlainRun) {
-  const std::initializer_list<std::uint8_t> loop = {kMovAImm, 0x77u, kMovAbsA,
-                                                     0x50u,    0x02u, kBra, 0xF9u};
-  Apu a = loaded(loop);
-  Apu b = loaded(loop);
+  // Every refusal that remains: no return, and calls from inside an access
+  // watcher's call on the program's store.
+  Apu a = loaded(kLoop);
+  Apu b = loaded(kLoop);
   EXPECT_FALSE(b.callInContext(kRoutine, ApuStandin::None, 100));
   EXPECT_FALSE(b.callOnStack(kRoutine, 0xD0u, ApuStandin::None, 100));
-  b.run(1u);
-  EXPECT_FALSE(b.callInContext(kRoutine, ApuStandin::Return, 100));  // mid-instruction
-  b.run(50000u - 1u);
+  AccessCaller w;
+  w.machine = &b;
+  b.setAccessWatcher(&w);
+  b.watchAccess(kResult, 1, /*onRead=*/false, /*onWrite=*/true);  // the MOV's store
+  b.run(50000u);
   a.run(50000u);
+  EXPECT_TRUE(w.allRefused());
   EXPECT_TRUE(a.state() == b.state());
   EXPECT_EQ(a.takeFrames(), b.takeFrames());
 }

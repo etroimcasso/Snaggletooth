@@ -444,10 +444,17 @@ class Apu {
   // the routine is abandoned at its boundary and the call returns false. Zero
   // runs nothing.
   //
+  // A machine a run() stopped inside an instruction is first run to the next
+  // instruction boundary, exactly as step() runs it. Those cycles are the
+  // program's own: state().divider moves by them as by the routine's, and
+  // callInContext's file is the one at that boundary, where the program resumes.
+  //
   // The call is refused, returning false with nothing done, when `returns` is
-  // ApuStandin::None or when the machine is not between instructions (inside
-  // an access watcher's call, or after a run() that stopped mid-instruction).
-  // A call made from inside a watcher's call, at any depth, is the same call.
+  // ApuStandin::None, or when it is made from inside a host's call the machine
+  // makes during the CPU's access — the access watcher's, or the observer's
+  // access report. An instruction watcher is told, and the observer's
+  // instruction report made, between instructions, and a call from inside
+  // either, at any depth, is the same call.
   bool callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard);
   bool callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
                    std::size_t guard);
@@ -543,6 +550,11 @@ class Apu {
   ApuObserver* observer_ = nullptr;  // told every access and every boundary; none by default
   Spc700State boundaryState_{};      // the CPU at the last boundary reported, the `before` of the next
   std::uint32_t sinceBoundary_ = 0;  // cycles run since it
+  // Whether the CPU's access is in progress, where the access watcher and the
+  // observer's access report run part-way through an instruction. A call into the
+  // program made while it is set is refused. It belongs to the cycle, not to the
+  // machine, so a snapshot does not carry it.
+  bool insideCycle_ = false;
   // The addresses a host has armed for a watch, one bit per 16-bit address per
   // direction, behind one owning pointer held null until the first arm. The
   // sound CPU's space is 64 KB, so each direction is a single 8 KB bitmap; the

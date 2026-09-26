@@ -801,12 +801,21 @@ class Snes {
   // interrupt that never comes trips it too. On overrun the routine is
   // abandoned at its boundary and the call returns false. Zero runs nothing.
   //
+  // A machine a run() stopped inside an instruction — or inside a refresh, a
+  // transfer or an interrupt sequence — is first run to the next instruction
+  // boundary, exactly as step() runs it. Those cycles are the guest's own: they
+  // come out of the budget the host runs next, the same as the routine's, and
+  // callInContext's file is the one at that boundary, where the guest resumes.
+  //
   // The call is refused, returning false with nothing done, when `returns` is
-  // Standin::None, when the machine is not between instructions (inside an
-  // access watcher's call, or after a run() that stopped mid-instruction),
-  // when the entry's own bank does not map it (addressable(entry, 1)), or
-  // when the stack the landing would land on is not memory this face reaches.
-  // A call made from inside a watcher's call, at any depth, is the same call.
+  // Standin::None, when the entry's own bank does not map it (addressable(entry,
+  // 1)), or when it is made from inside a host's call the machine makes during a
+  // cycle — an access watcher's, the bus observer's, the frame or save
+  // observer's, or the audio machine's observer's. An instruction watcher is
+  // told between instructions, and a call from inside its call, at any depth, is
+  // the same call. A call is refused after the finishing cycles, with them spent
+  // and nothing pushed, when the stack the landing would land on is not memory
+  // this face reaches.
   bool callInContext(std::uint32_t entry, Standin returns, std::size_t guard);
   bool callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
                    std::size_t guard);
@@ -1234,6 +1243,11 @@ class Snes {
   bool timerHPoint_ = false;         // the H point, on whatever line
   bool timerHPointOnVLine_ = false;  // the H point, on the line VTIME names
   bool timerZeroOnVLine_ = false;    // the H = 0 point, on that line
+  // Whether the machine is inside a cycle, where a host's callback runs part-way
+  // through the chip's work: set for the whole cycle but the instruction watch at
+  // its start. A call into the guest made while it is set is refused. It belongs
+  // to the cycle, not to the machine, so a snapshot does not carry it.
+  bool insideCycle_ = false;
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
   std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported
   FrameObserver* frameObserver_ = nullptr;  // told every finished frame; none by default

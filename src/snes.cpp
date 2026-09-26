@@ -165,6 +165,7 @@ Snes::Snes(Snes&& moved) noexcept
       timerHPoint_(moved.timerHPoint_),
       timerHPointOnVLine_(moved.timerHPointOnVLine_),
       timerZeroOnVLine_(moved.timerZeroOnVLine_),
+      insideCycle_(moved.insideCycle_),
       observer_(moved.observer_),
       portLanding_(moved.portLanding_),
       frameObserver_(moved.frameObserver_),
@@ -341,8 +342,13 @@ void Snes::refreshCycle() {
 }
 
 void Snes::machineCycle() {
+  // Every host callback the cycle reaches — a watcher's, an observer's, the audio
+  // machine's — runs inside it, and a call into the guest made from one is refused.
+  // The instruction watch alone runs between instructions, and is outside it.
+  insideCycle_ = true;
   if (state_.refreshLeft != 0u) {
     refreshCycle();
+    insideCycle_ = false;
     return;
   }
 
@@ -374,7 +380,9 @@ void Snes::machineCycle() {
       const std::uint32_t in = at & (kPageBytes - 1u);
       if (codes != nullptr &&
           (codes == &kSlowRun || ((codes[in >> 2] >> ((in & 3u) * 2u)) & 3u) != 0u)) {
+        insideCycle_ = false;
         tellInstruction();
+        insideCycle_ = true;
       }
     }
     Bus bus{*this};
@@ -401,6 +409,7 @@ void Snes::machineCycle() {
   }
 
   closeCycle();
+  insideCycle_ = false;
 }
 
 std::uint32_t Snes::step() {
@@ -1232,12 +1241,15 @@ bool Snes::runCall(std::uint32_t entry, Cpu65816State file, Standin returns, std
 }
 
 bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard) {
+  // The refusals come first and spend nothing. A machine a budget stopped inside
+  // an instruction — or inside a refresh, a transfer or an interrupt sequence —
+  // then runs to the boundary exactly as step() would, those cycles the guest's
+  // own, out of the budget the host runs next; the file taken there is the one
+  // the guest resumes at.
+  if (returns == Standin::None || insideCycle_ || !addressable(entry & 0xFFFFFFu, 1)) return false;
+  while (!cpu_.atInstructionBoundary()) machineCycle();
   sync();
   const Cpu65816State before = state_.cpu;
-  if (returns == Standin::None || before.tcu != 0u || before.servicing != InterruptRequest::None ||
-      !addressable(entry & 0xFFFFFFu, 1)) {
-    return false;
-  }
   const bool returned = runCall(entry, before, returns, guard);
   // The guest's file, back as it was — but the interrupt lines as they now
   // stand: an edge the routine's run took is not taken twice, and one that
@@ -1251,12 +1263,11 @@ bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard
 
 bool Snes::callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
                        std::size_t guard) {
+  // Refused, or run to the boundary first, as callInContext is.
+  if (returns == Standin::None || insideCycle_ || !addressable(entry & 0xFFFFFFu, 1)) return false;
+  while (!cpu_.atInstructionBoundary()) machineCycle();
   sync();
   Cpu65816State file = state_.cpu;
-  if (returns == Standin::None || file.tcu != 0u || file.servicing != InterruptRequest::None ||
-      !addressable(entry & 0xFFFFFFu, 1)) {
-    return false;
-  }
   file.s = stackTop;
   return runCall(entry, file, returns, guard);
 }
