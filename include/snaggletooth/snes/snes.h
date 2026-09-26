@@ -371,10 +371,13 @@ struct SnesConfig {
   // The cartridge's map. Left absent, it is read from the image's own header,
   // which is what lets any cartridge boot without the caller knowing its layout.
   // Set it to run an image whose header is wrong, absent, or not a header at all.
+  // It is the map of the board the machine builds (`cartridgeBoard`).
   std::optional<CartridgeMap> map = std::nullopt;
 
   // The save RAM to give the machine, in bytes. Left absent, it is taken from the
-  // cartridge header. Set it to zero to run a cartridge without its save.
+  // cartridge header. Set it to zero to run a cartridge without its save. It
+  // sizes the save and the board both: with zero, the board reads as one with
+  // no save, so a LoROM window reads the image and a HiROM window open bus.
   std::optional<std::size_t> saveRamBytes = std::nullopt;
 
   // An audio boot ROM to run in place of the built-in stub. Absent by default, so
@@ -1036,14 +1039,15 @@ class Snes {
   };
   static constexpr std::size_t kPageBytes = 8192u;
   static constexpr std::size_t kPages = 2048u;
-  // Fills pages_ from the cartridge functions, one page at a time: the region of
-  // the page's first address, its save offset and its image offset, and the
-  // board rule that keeps a coprocessor's lower halves for the chip.
+  // Fills pages_ from the cartridge functions, one page at a time: what the
+  // board answers for the page's first address — its region, its save offset,
+  // its image offset — and, for a save window, what the board answers there
+  // with no save.
   void buildPages();
-  // The image page beginning at a ROM address: linear when the image is a
-  // multiple of 8 KB, found through romOffset at each access when it is not,
-  // and empty when there is no image.
-  [[nodiscard]] Page imagePage(std::uint32_t address) const noexcept;
+  // The image page beginning at a ROM address on `board`: linear when the image
+  // is a multiple of 8 KB, found through romOffset at each access when it is
+  // not, and empty when there is no image.
+  [[nodiscard]] Page imagePage(const CartridgeBoard& board, std::uint32_t address) const noexcept;
 
   // The page an address reads once the save has answered: the page itself, or,
   // in a save window on a cartridge with no save, what the board reads there.
@@ -1217,9 +1221,8 @@ class Snes {
   Apu apu_;                          // the live audio machine, paced by the interleave, running in state_.apu (declared after it: the storage exists before the machine built over it)
   std::vector<std::uint8_t> rom_;    // the cartridge image, fixed for the machine's life
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
-  CartridgeMap map_ = CartridgeMap::LoRom;  // how that image lays across the bus, fixed with it
-  bool plainBoard_ = true;           // the header declares no coprocessor, so LoROM's lower halves repeat the image
-  std::array<Page, kPages> pages_{}; // what each page of the bus reaches, built from the three above and fixed with them
+  CartridgeBoard board_;             // the board the image is on: its map, its chip and its save, fixed with it
+  std::array<Page, kPages> pages_{}; // what each page of the bus reaches, built from the two above and fixed with them
   bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator

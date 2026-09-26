@@ -145,7 +145,7 @@ recorded run it replays; and `snaggletooth_rom` itself, whose run on the
 machine lifts every executed instruction, on either CPU, and holds it to the
 same check — and which links the representation for the bank files it renders.
 The shadow is its own target too, `snaggletooth_ir_provenance`, which links the
-representation and the cartridge map and nothing else; `snaggletooth_rom` links
+representation and the cartridge board and nothing else; `snaggletooth_rom` links
 it for the run.
 
 ## See also

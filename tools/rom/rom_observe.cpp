@@ -24,36 +24,37 @@ namespace {
 // The address the tree places the bytes the CPU holds at `address`: the one
 // home of the image bytes it reads, so a bank that mirrors the image names the
 // bank the image is written for. An address outside the image is its own.
-Address placed(CartridgeMap map, std::size_t imageBytes, Address address) {
-  const std::optional<std::size_t> offset = romOffset(map, address, imageBytes);
+Address placed(const CartridgeBoard& board, std::size_t imageBytes, Address address) {
+  const std::optional<std::size_t> offset = romOffset(board, address, imageBytes);
   if (!offset) return address;
-  const std::optional<std::uint32_t> home = romAddress(map, *offset);
+  const std::optional<std::uint32_t> home = romAddress(board.map, *offset);
   return home ? *home : address;
 }
 
-bool inImage(CartridgeMap map, std::size_t imageBytes, Address address) {
-  return romOffset(map, address, imageBytes).has_value();
+bool inImage(const CartridgeBoard& board, std::size_t imageBytes, Address address) {
+  return romOffset(board, address, imageBytes).has_value();
 }
 
 // The byte the CPU would read at a bus address, from what the run can see: the
-// image, and work RAM — banks $7E-$7F whole, and the first 8 KB of every bank that
-// mirrors them. A register, the save window, or open bus is nothing: the core reads
-// it, the toolkit does not pretend to.
-std::optional<std::uint8_t> readByte(CartridgeMap map, std::span<const std::uint8_t> rom,
+// image — through a LoROM save window with no save behind it as through any
+// lower half — and work RAM — banks $7E-$7F whole, and the first 8 KB of every
+// bank that mirrors them. A register, a save, a coprocessor's half, or open bus
+// is nothing: the core reads it, the toolkit does not pretend to.
+std::optional<std::uint8_t> readByte(const CartridgeBoard& board, std::span<const std::uint8_t> rom,
                                      const SnesState& state, Address address) {
   const std::uint32_t bank = (address >> 16) & 0xFFu;
   const std::uint32_t offset = address & 0xFFFFu;
   if (bank == 0x7Eu || bank == 0x7Fu) return state.wram[((bank - 0x7Eu) << 16) | offset];
   const bool mirrors = bank <= 0x3Fu || (bank >= 0x80u && bank <= 0xBFu);
   if (mirrors && offset < 0x2000u) return state.wram[offset];
-  if (const std::optional<std::size_t> at = romOffset(map, address, rom.size())) return rom[*at];
+  if (const std::optional<std::size_t> at = romOffset(board, address, rom.size())) return rom[*at];
   return std::nullopt;
 }
 
-std::optional<std::uint16_t> readWord(CartridgeMap map, std::span<const std::uint8_t> rom,
+std::optional<std::uint16_t> readWord(const CartridgeBoard& board, std::span<const std::uint8_t> rom,
                                       const SnesState& state, Address address) {
-  const std::optional<std::uint8_t> low = readByte(map, rom, state, address);
-  const std::optional<std::uint8_t> high = readByte(map, rom, state, address + 1u);
+  const std::optional<std::uint8_t> low = readByte(board, rom, state, address);
+  const std::optional<std::uint8_t> high = readByte(board, rom, state, address + 1u);
   if (!low || !high) return std::nullopt;
   return static_cast<std::uint16_t>(*low | (*high << 8));
 }
@@ -80,11 +81,11 @@ struct Pending {
   bool call = false;
 };
 
-std::optional<Pending> pendingTarget(CartridgeMap map, std::span<const std::uint8_t> rom,
+std::optional<Pending> pendingTarget(const CartridgeBoard& board, std::span<const std::uint8_t> rom,
                                      const SnesState& state, bool& unreadable) {
   const Cpu65816State& cpu = state.cpu;
   const Address site = (static_cast<Address>(cpu.pbr) << 16) | cpu.pc;
-  const std::optional<std::uint8_t> opcode = readByte(map, rom, state, site);
+  const std::optional<std::uint8_t> opcode = readByte(board, rom, state, site);
   if (!opcode) return std::nullopt;
   const Cpu65816Opcode& info = cpu65816Opcodes()[*opcode];
   const bool indirect = info.mode == Cpu65816Addressing::AbsoluteIndirect ||
@@ -94,7 +95,7 @@ std::optional<Pending> pendingTarget(CartridgeMap map, std::span<const std::uint
 
   // The operand follows the opcode within the program bank.
   const Address operandAt = (site & 0xFF0000u) | ((cpu.pc + 1u) & 0xFFFFu);
-  const std::optional<std::uint16_t> operand = readWord(map, rom, state, operandAt);
+  const std::optional<std::uint16_t> operand = readWord(board, rom, state, operandAt);
   if (!operand) {
     unreadable = true;
     return std::nullopt;
@@ -105,14 +106,14 @@ std::optional<Pending> pendingTarget(CartridgeMap map, std::span<const std::uint
   switch (info.mode) {
     // `(!abs)`: a two-byte pointer in bank zero; the program bank is unchanged.
     case Cpu65816Addressing::AbsoluteIndirect:
-      if (const std::optional<std::uint16_t> ptr = readWord(map, rom, state, *operand)) {
+      if (const std::optional<std::uint16_t> ptr = readWord(board, rom, state, *operand)) {
         target = programBank | *ptr;
       }
       break;
     // `[!abs]`: a three-byte pointer in bank zero; the third byte is the bank.
     case Cpu65816Addressing::AbsoluteIndirectLong: {
-      const std::optional<std::uint16_t> low = readWord(map, rom, state, *operand);
-      const std::optional<std::uint8_t> bank = readByte(map, rom, state, *operand + 2u);
+      const std::optional<std::uint16_t> low = readWord(board, rom, state, *operand);
+      const std::optional<std::uint8_t> bank = readByte(board, rom, state, *operand + 2u);
       if (low && bank) target = (static_cast<Address>(*bank) << 16) | *low;
       break;
     }
@@ -120,7 +121,7 @@ std::optional<Pending> pendingTarget(CartridgeMap map, std::span<const std::uint
     // bank, wrapping within it; the program bank is unchanged.
     case Cpu65816Addressing::AbsoluteIndexedIndirect: {
       const Address pointerAt = programBank | ((*operand + cpu.x) & 0xFFFFu);
-      if (const std::optional<std::uint16_t> ptr = readWord(map, rom, state, pointerAt)) {
+      if (const std::optional<std::uint16_t> ptr = readWord(board, rom, state, pointerAt)) {
         target = programBank | *ptr;
       }
       break;
@@ -995,7 +996,7 @@ bool indirectForm(const ir::Instruction& instruction) {
 // instruction lifted from the bytes the CPU fetched, checked, and read for
 // where the CPU went next and what its registers held.
 struct Lockstep {
-  CartridgeMap map;
+  CartridgeBoard board;
   std::size_t imageBytes;
   ir::Provenance& shadow;
   const Cpu65816Backend& backend = cpu65816Backend();
@@ -1031,8 +1032,8 @@ struct Lockstep {
   std::uint64_t diverged = 0;
   std::uint64_t steps = 0;
 
-  Lockstep(CartridgeMap m, std::size_t bytes, const Cpu65816State& start, ir::Provenance& p)
-      : map(m), imageBytes(bytes), shadow(p) {
+  Lockstep(const CartridgeBoard& b, std::size_t bytes, const Cpu65816State& start, ir::Provenance& p)
+      : board(b), imageBytes(bytes), shadow(p) {
     interpreter.registers = ir::registersOf(start);
     interpreter.shadow = &shadow;
   }
@@ -1068,7 +1069,7 @@ struct Lockstep {
     }
 
     const Address rawSite = (static_cast<Address>(before.pbr) << 16) | before.pc;
-    const Address site = placed(map, imageBytes, rawSite);
+    const Address site = placed(board, imageBytes, rawSite);
     ir::Divergence prototype;
     prototype.instruction = ordinal;
     prototype.site = site;
@@ -1121,7 +1122,7 @@ struct Lockstep {
     const ir::Node& node = found->second;
 
     // What the run saw at the site, before the instruction ran.
-    if (inImage(map, imageBytes, rawSite)) {
+    if (inImage(board, imageBytes, rawSite)) {
       Values& values = seen[site];
       values.d.insert(before.d);
       values.dbr.insert(before.dbr);
@@ -1155,20 +1156,20 @@ struct Lockstep {
     if (instruction.flow == ir::Flow::Call) expectedReturns.insert(following);
     if (after.run != CpuRunState::Running) return;  // a wait or a stop: no landing
     const Address rawLanded = (static_cast<Address>(after.pbr) << 16) | after.pc;
-    const Address landed = placed(map, imageBytes, rawLanded);
+    const Address landed = placed(board, imageBytes, rawLanded);
     const bool fallsThrough = instruction.flow == ir::Flow::Continue ||
                               instruction.flow == ir::Flow::Branch ||
                               instruction.flow == ir::Flow::Call;
     const bool named =
         rawLanded == rawSite ||  // a block move with bytes left, run again
         (fallsThrough && landed == following) ||
-        (instruction.target && landed == placed(map, imageBytes, *instruction.target)) ||
+        (instruction.target && landed == placed(board, imageBytes, *instruction.target)) ||
         indirectForm(instruction) ||  // a reached target
         instruction.mnemonic == std::string_view("BRK") ||  // the vector the header names
         instruction.mnemonic == std::string_view("COP") ||
         (instruction.flow == ir::Flow::Return && expectedReturns.count(landed) != 0);
     if (named) return;
-    if (!inImage(map, imageBytes, rawLanded)) {
+    if (!inImage(board, imageBytes, rawLanded)) {
       if (notedSites.insert(site).second) {
         notes.push_back("run: the CPU arrived at " + formatAddress(rawLanded, 24) + " from " +
                         formatAddress(site, 24) + ", which the tree does not hold; not recorded");
@@ -1569,14 +1570,14 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
     notes.push_back("no run: the image is too small to hold a cartridge header at any site");
     return observation;
   }
-  const CartridgeMap map = header->map;
+  const CartridgeBoard board = cartridgeBoard(rom);
 
   Snes machine{SnesConfig{.rom = rom}};
-  ir::Provenance shadow{map, rom.size(), kOriginCap};
+  ir::Provenance shadow{board, rom.size(), kOriginCap};
   Recorder recorder{machine, shadow};
   shadow.carries = &recorder;
   machine.setObserver(&recorder);
-  Lockstep lockstep{map, rom.size(), machine.state().cpu, shadow};
+  Lockstep lockstep{board, rom.size(), machine.state().cpu, shadow};
   AudioLockstep audio{machine, notes};
   machine.setApuObserver(&audio);
   std::set<std::tuple<Address, Address, std::uint32_t>> seen;
@@ -1605,7 +1606,7 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
     const std::uint16_t stackBefore = before.cpu.s;
     const std::uint16_t lineBefore = before.vpos;
     bool unreadable = false;
-    const std::optional<Pending> pending = pendingTarget(map, rom, before, unreadable);
+    const std::optional<Pending> pending = pendingTarget(board, rom, before, unreadable);
     const Cpu65816Mode mode = modeOf(before.cpu);
     if (unreadable && unreadableSites.insert(site).second) {
       notes.push_back("run: the jump at " + formatAddress(site, 24) +

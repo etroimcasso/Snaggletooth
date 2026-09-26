@@ -251,6 +251,34 @@ TEST(RomObserve, APointerTheRunCannotReadIsNotedNotGuessed) {
   EXPECT_NE(notes[0].find("cannot see"), std::string::npos) << notes[0];
 }
 
+// A pointer in a LoROM save window with no save behind it is image bytes the
+// run can see, read as the CPU reads them; on a coprocessor's board the same
+// half is the chip's, which the run cannot see, and the jump is noted, not
+// guessed.
+TEST(RomObserve, APointerInABareWindowIsReadAndOneInAChipsHalfIsNot) {
+  std::vector<std::uint8_t> rom = loRomImage(128);  // 4 MB, no save: bank $70 is its own bytes
+  put(rom, 0x0000u, {0x5Cu, 0x00u, 0x80u, 0x70u});  // JML $70:8000
+  put(rom, 0x380000u, {0xA2u, 0x00u,                // $70:8000: LDX #$00
+                       0x7Cu, 0x00u, 0x10u,         // $70:8002: JMP (!$1000,X), the pointer at $70:1000
+                       0xDBu});                     // $70:8005: STP
+  put(rom, 0x381000u, {0x05u, 0x80u});              // $70:9000, which $70:1000 repeats: $8005
+  std::vector<std::string> notes;
+  const std::vector<ReachedTarget> seen = run(rom, kFrame, &notes);
+  const ReachedTarget* jump = reachedFrom(seen, 0x708002u);
+  ASSERT_NE(jump, nullptr);
+  EXPECT_EQ(jump->target, 0x708005u);
+  for (const std::string& note : notes) EXPECT_EQ(note.find("cannot see"), std::string::npos) << note;
+
+  rom[0x7FC0u + 0x16u] = 0x03u;  // the chipset byte: a DSP, whose board keeps the half
+  notes.clear();
+  const std::vector<ReachedTarget> chip = run(rom, kFrame, &notes);
+  EXPECT_EQ(reachedFrom(chip, 0x708002u), nullptr);
+  const bool noted = std::any_of(notes.begin(), notes.end(), [](const std::string& note) {
+    return note.find("$70:8002") != std::string::npos && note.find("cannot see") != std::string::npos;
+  });
+  EXPECT_TRUE(noted);
+}
+
 TEST(RomObserve, TheBudgetBoundsTheRun) {
   const std::vector<std::uint8_t> rom = dispatchingImage();
   // A budget that ends before the copy into work RAM has been made: only what

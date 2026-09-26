@@ -118,12 +118,13 @@ Snes::Snes(SnesConfig config)
     : apu_(&state_.apu),  // the audio machine runs in the snapshot's own storage, seeded at power-on
       rom_(config.rom.begin(), config.rom.end()),
       region_(config.region) {
-  map_ = config.map.value_or(detectCartridgeMap(rom_));
-  const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom_);
-  plainBoard_ = !header.has_value() || header->coprocessor == Coprocessor::None;
-  buildPages();  // from the map, the image and the board, all three now fixed
-  const std::size_t save = config.saveRamBytes.value_or(declaredSaveRamBytes(rom_));
-  state_.sram.assign(save > kMaxSaveRamBytes ? kMaxSaveRamBytes : save, 0u);
+  // The board is the header's, with the map and the save the caller overrides.
+  board_ = cartridgeBoard(rom_);
+  if (config.map.has_value()) board_.map = *config.map;
+  if (config.saveRamBytes.has_value()) board_.saveRamBytes = *config.saveRamBytes;
+  if (board_.saveRamBytes > kMaxSaveRamBytes) board_.saveRamBytes = kMaxSaveRamBytes;
+  buildPages();  // from the image and the board, both now fixed
+  state_.sram.assign(board_.saveRamBytes, 0u);
   const ApuRatio ratio = region_ == Region::Pal ? kPalApu : kNtscApu;
   apuNum_ = ratio.num;
   apuDen_ = ratio.den;
@@ -154,8 +155,7 @@ Snes::Snes(Snes&& moved) noexcept
       apu_(std::move(moved.apu_), &state_.apu),  // the audio machine follows its state here
       rom_(std::move(moved.rom_)),
       region_(moved.region_),
-      map_(moved.map_),
-      plainBoard_(moved.plainBoard_),
+      board_(moved.board_),
       pages_(moved.pages_),
       bootsAudio_(moved.bootsAudio_),
       apuNum_(moved.apuNum_),
@@ -449,7 +449,7 @@ std::uint32_t Snes::accessCost(std::uint32_t address) const noexcept {
                         : 8u;                     // $00-$3F LoROM is always slow
 }
 
-Snes::Page Snes::imagePage(std::uint32_t address) const noexcept {
+Snes::Page Snes::imagePage(const CartridgeBoard& board, std::uint32_t address) const noexcept {
   Page page{.kind = PageKind::RomEmpty,
             .fallback = PageKind::OpenBus,
             .base = 0u,
@@ -463,11 +463,20 @@ Snes::Page Snes::imagePage(std::uint32_t address) const noexcept {
   // least a page, so no repeat begins inside a page: the offset of the page's
   // first byte carries the page.
   page.kind = PageKind::Rom;
-  page.base = static_cast<std::uint32_t>(*romOffset(map_, address, rom_.size()));
+  page.base = static_cast<std::uint32_t>(*romOffset(board, address, rom_.size()));
   return page;
 }
 
 void Snes::buildPages() {
+  // The table is fixed while the save's presence is not: a restore can fill or
+  // empty the save, and resolve reads which at each access. So the window's
+  // pages are built for the board with a save — any size, the functions ask
+  // only whether there is one — and each carries as its fallback what the board
+  // answers there with none.
+  CartridgeBoard windowed = board_;
+  windowed.saveRamBytes = kMaxSaveRamBytes;
+  CartridgeBoard bare = board_;
+  bare.saveRamBytes = 0;
   for (std::size_t p = 0; p < pages_.size(); ++p) {
     const std::uint32_t address = static_cast<std::uint32_t>(p * kPageBytes);
     const std::uint8_t bank = static_cast<std::uint8_t>(address >> 16);
@@ -493,36 +502,29 @@ void Snes::buildPages() {
       continue;
     }
     // The rest is the cartridge's, laid out as the cartridge functions say.
-    switch (cartridgeRegion(map_, address)) {
+    switch (cartridgeRegion(windowed, address)) {
       case CartridgeRegion::SaveRam:
         page.kind = PageKind::SaveWindow;
-        page.base = static_cast<std::uint32_t>(*saveRamOffset(map_, address));
-        // With no save the window is the board's. LoROM's sits in cartridge banks,
-        // where a plain board decodes nothing and the lower half reads what the
-        // upper half reads, and a coprocessor's board keeps the half for the chip;
-        // HiROM's and ExHiROM's sit in the expansion area and read open bus.
-        if (map_ == CartridgeMap::LoRom && plainBoard_) {
-          const Page upper = imagePage(address | 0x8000u);
+        page.base = static_cast<std::uint32_t>(*saveRamOffset(windowed, address));
+        // With no save the window is the board's: on a plain LoROM board the
+        // lower half reads what the upper half reads, on a coprocessor's board
+        // it is the chip's, and HiROM's and ExHiROM's windows sit in the
+        // expansion area — the last two read open bus, the fallback's default.
+        if (cartridgeRegion(bare, address) == CartridgeRegion::Rom) {
+          const Page upper = imagePage(bare, address);
           page.fallback = upper.kind;
           page.fallbackBase = upper.base;
         }
         break;
       case CartridgeRegion::Rom: {
-        // A coprocessor's board is not one of the plain ones: it gives lower halves
-        // of its cartridge banks to the chip — $60-$6F to a DSP or an ST010 — and
-        // the machine carries no such chip, so those halves answer as any absent
-        // chip's ports do, with open bus.
-        const bool cartridgeBank = (bank >= 0x40 && bank <= 0x7D) || bank >= 0xC0;
-        const bool chipsHalf =
-            !plainBoard_ && map_ == CartridgeMap::LoRom && cartridgeBank && offset < 0x8000u;
-        if (chipsHalf) break;
-        const Page image = imagePage(address);
+        const Page image = imagePage(board_, address);
         page.kind = image.kind;
         page.base = image.base;
         break;
       }
-      case CartridgeRegion::System:   // a system bank's expansion pages: nothing decodes them
-      case CartridgeRegion::WorkRam:  // answered above
+      case CartridgeRegion::Coprocessor:  // the chip's half; the machine carries no chip, so it answers as an absent chip's ports do, with open bus
+      case CartridgeRegion::System:       // a system bank's expansion pages: nothing decodes them
+      case CartridgeRegion::WorkRam:      // answered above
         break;
     }
   }
@@ -535,7 +537,7 @@ std::optional<std::uint8_t> Snes::peek(std::uint32_t address) const noexcept {
     case PageKind::WorkRam: return state_.wram[r.base + in];
     case PageKind::SaveWindow: return state_.sram[(r.base + in) % state_.sram.size()];
     case PageKind::Rom: return rom_[r.base + in];
-    case PageKind::RomSlow: return rom_[*romOffset(map_, r.address, rom_.size())];
+    case PageKind::RomSlow: return rom_[*romOffset(board_, r.address, rom_.size())];
     case PageKind::RomEmpty: return std::uint8_t{0};
     case PageKind::System:   // a register
     case PageKind::OpenBus:  // an address the cartridge leaves open
@@ -561,7 +563,7 @@ bool Snes::poke(std::uint32_t address, std::uint8_t value) noexcept {
       rom_[r.base + in] = value;
       return true;
     case PageKind::RomSlow:
-      rom_[*romOffset(map_, r.address, rom_.size())] = value;
+      rom_[*romOffset(board_, r.address, rom_.size())] = value;
       return true;
     case PageKind::RomEmpty:  // no byte to change
     case PageKind::System:
@@ -708,7 +710,7 @@ std::uint8_t Snes::routeReadRaw(std::uint32_t address, std::uint8_t cycle) {
     }
     case PageKind::SaveWindow: return latch(state_.sram[(r.base + in) % state_.sram.size()]);
     case PageKind::Rom: return latch(rom_[r.base + in]);
-    case PageKind::RomSlow: return latch(rom_[*romOffset(map_, r.address, rom_.size())]);
+    case PageKind::RomSlow: return latch(rom_[*romOffset(board_, r.address, rom_.size())]);
     case PageKind::RomEmpty: return latch(0u);
     case PageKind::OpenBus: return state_.mdr;  // an unmapped read returns the last value the data bus carried
   }
@@ -816,7 +818,7 @@ std::optional<Snes::Physical> Snes::classify(std::uint32_t address,
     case PageKind::RomSlow:
       if (!want(Space::CartridgeRom)) return std::nullopt;
       return Physical{Space::CartridgeRom,
-                      static_cast<std::uint32_t>(*romOffset(map_, r.address, rom_.size()))};
+                      static_cast<std::uint32_t>(*romOffset(board_, r.address, rom_.size()))};
     case PageKind::RomEmpty:  // an empty image reads as zero at offset 0
       if (!want(Space::CartridgeRom)) return std::nullopt;
       return Physical{Space::CartridgeRom, 0u};

@@ -499,17 +499,32 @@ struct WalkMachine {
   Snes machine;
   std::vector<std::uint8_t> image;  // the pattern the image carries
   std::size_t saveBytes;
+  Coprocessor chip;
 };
 
-WalkMachine walkMachine(CartridgeMap map, std::size_t imageBytes, std::size_t saveBytes) {
+// A patterned image on a board of the map and save given and, when `chip`
+// names one, a LoROM header declaring that chip, since the machine reads the
+// chip from the header alone.
+WalkMachine walkMachine(CartridgeMap map, std::size_t imageBytes, std::size_t saveBytes,
+                        Coprocessor chip = Coprocessor::None) {
   std::vector<std::uint8_t> rom(imageBytes);
   for (std::size_t i = 0; i < rom.size(); ++i) rom[i] = patternAt(static_cast<std::uint32_t>(i), 0xA5u);
+  if (chip != Coprocessor::None) {
+    const std::size_t site = 0x7FC0u;
+    for (std::size_t i = 0; i < 21; ++i) rom[site + i] = 'A';
+    rom[site + 0x15] = 0x20u;  // the map-mode byte: LoROM
+    rom[site + 0x16] = 0x03u;  // the chipset byte: a DSP
+    rom[site + 0x1C] = 0x34u;  // a complement and checksum that agree
+    rom[site + 0x1D] = 0x12u;
+    rom[site + 0x1E] = 0xCBu;
+    rom[site + 0x1F] = 0xEDu;
+  }
   Snes m(SnesConfig{.rom = rom, .map = map, .saveRamBytes = saveBytes});
   SnesState s = m.state();
   for (std::size_t i = 0; i < s.wram.size(); ++i) s.wram[i] = patternAt(static_cast<std::uint32_t>(i), 0x3Cu);
   for (std::size_t i = 0; i < s.sram.size(); ++i) s.sram[i] = patternAt(static_cast<std::uint32_t>(i), 0xC3u);
   m.restore(s);
-  return WalkMachine{std::move(m), std::move(rom), saveBytes};
+  return WalkMachine{std::move(m), std::move(rom), saveBytes, chip};
 }
 
 // Whether a system-bank offset is one the bus routes to a register: the same
@@ -608,31 +623,34 @@ TEST(SnesAccessWatch, TwoAddressesThatReadOneByteClassifyTheSame) {
 }
 
 // The table against the functions it is built from. For every address
-// physical() puts on the image, the index is the one romOffset answers — the
-// upper half's, in LoROM's save window on a cartridge with no save, where the
-// board reads what the upper half reads — and for every address it puts on the
-// save, the offset saveRamOffset answers reduced to the save's size. The walk
-// above holds the table to the read path, which reads the same table; this
-// holds it to its source at every address.
+// physical() puts on the image, the index is the one romOffset answers on the
+// machine's board — through LoROM's save window on a board with no save, where
+// the board reads what the upper half reads — for every address it puts on the
+// save, the offset saveRamOffset answers reduced to the save's size, and every
+// address the board gives to a chip is open bus. The walk above holds the table
+// to the read path, which reads the same table; this holds it to its source at
+// every address.
 std::optional<std::string> walkAgainstTheCartridgeFunctions(const WalkMachine& w,
                                                             CartridgeMap map) {
   const Snes& m = w.machine;
+  const CartridgeBoard board{.map = map, .coprocessor = w.chip, .saveRamBytes = w.saveBytes};
   for (std::uint64_t a = 0; a < 0x1000000u; ++a) {
     const std::uint32_t address = static_cast<std::uint32_t>(a);
     const Snes::Physical p = m.physical(address);
     char why[96];
+    if (cartridgeRegion(board, address) == CartridgeRegion::Coprocessor &&
+        p.space != Snes::Space::OpenBus) {
+      std::snprintf(why, sizeof why, "$%06X: the chip's half is not open bus", address);
+      return std::string(why);
+    }
     if (p.space == Snes::Space::CartridgeRom) {
-      std::optional<std::size_t> expected = romOffset(map, address, w.image.size());
-      if (!expected.has_value() && map == CartridgeMap::LoRom &&
-          saveRamOffset(map, address).has_value()) {
-        expected = romOffset(map, address | 0x8000u, w.image.size());
-      }
+      const std::optional<std::size_t> expected = romOffset(board, address, w.image.size());
       if (!expected.has_value() || *expected != p.index) {
         std::snprintf(why, sizeof why, "$%06X: image index %u is not romOffset's", address, p.index);
         return std::string(why);
       }
     } else if (p.space == Snes::Space::SaveRam) {
-      const std::optional<std::size_t> linear = saveRamOffset(map, address);
+      const std::optional<std::size_t> linear = saveRamOffset(board, address);
       if (!linear.has_value() || w.saveBytes == 0 || *linear % w.saveBytes != p.index) {
         std::snprintf(why, sizeof why, "$%06X: save index %u is not saveRamOffset's", address, p.index);
         return std::string(why);
@@ -671,6 +689,14 @@ TEST(SnesAccessWatch, TheWalkHoldsWithNoSaveAndWithASaveSmallerThanAPage) {
   walkBothWays(walkMachine(CartridgeMap::LoRom, 0x10000u, 0u), CartridgeMap::LoRom);
   walkBothWays(walkMachine(CartridgeMap::LoRom, 0x10000u, 0x800u), CartridgeMap::LoRom);
   walkBothWays(walkMachine(CartridgeMap::HiRom, 0x10000u, 0u), CartridgeMap::HiRom);
+}
+
+TEST(SnesAccessWatch, TheWalkHoldsOnACoprocessorsBoard) {
+  // A DSP's LoROM board gives every cartridge bank's lower half to the chip,
+  // the save window's too when there is no save; with a save the window is the
+  // save's and the other halves stay the chip's.
+  walkBothWays(walkMachine(CartridgeMap::LoRom, 0x10000u, 0u, Coprocessor::Dsp), CartridgeMap::LoRom);
+  walkBothWays(walkMachine(CartridgeMap::LoRom, 0x10000u, 0x2000u, Coprocessor::Dsp), CartridgeMap::LoRom);
 }
 
 // ---- the watcher is told what the cycle was for ------------------------------

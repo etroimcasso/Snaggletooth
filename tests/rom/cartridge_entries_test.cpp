@@ -84,20 +84,38 @@ TEST(CartridgeEntries, TwoVectorsNamingOneHandlerGiveTwoEntries) {
   EXPECT_EQ(entries[5].name, "nmi_native");
 }
 
+// A board with a save and no chip, the shape every map-only case assumed.
+CartridgeBoard boardOn(CartridgeMap map, std::size_t saveRamBytes = 8192u,
+                       Coprocessor coprocessor = Coprocessor::None) {
+  return CartridgeBoard{.map = map, .coprocessor = coprocessor, .saveRamBytes = saveRamBytes};
+}
+
 TEST(CartridgeEntries, CodeOwnerFollowsTheRegion) {
   for (const CartridgeMap map : {CartridgeMap::LoRom, CartridgeMap::HiRom, CartridgeMap::ExHiRom}) {
-    EXPECT_EQ(codeOwner(map, 0x008000u), CodeOwner::Cpu65816);
-    EXPECT_EQ(codeOwner(map, 0xC08000u), CodeOwner::Cpu65816);
-    EXPECT_EQ(codeOwner(map, 0x7E0000u), CodeOwner::None);  // work RAM
-    EXPECT_EQ(codeOwner(map, 0x002140u), CodeOwner::None);  // a register
+    EXPECT_EQ(codeOwner(boardOn(map), 0x008000u), CodeOwner::Cpu65816);
+    EXPECT_EQ(codeOwner(boardOn(map), 0xC08000u), CodeOwner::Cpu65816);
+    EXPECT_EQ(codeOwner(boardOn(map), 0x7E0000u), CodeOwner::None);  // work RAM
+    EXPECT_EQ(codeOwner(boardOn(map), 0x002140u), CodeOwner::None);  // a register
   }
-  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x400000u), CodeOwner::Cpu65816);  // a lower half repeats its upper
-  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0xC00000u), CodeOwner::Cpu65816);
-  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x001000u), CodeOwner::None);      // a system bank's does not
-  EXPECT_EQ(codeOwner(CartridgeMap::LoRom, 0x700000u), CodeOwner::None);      // the save
-  EXPECT_EQ(codeOwner(CartridgeMap::HiRom, 0x400000u), CodeOwner::Cpu65816);  // a whole bank
-  EXPECT_EQ(codeOwner(CartridgeMap::HiRom, 0x206000u), CodeOwner::None);      // the save
-  EXPECT_EQ(codeOwner(CartridgeMap::ExHiRom, 0x806000u), CodeOwner::None);    // the save
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom), 0x400000u), CodeOwner::Cpu65816);  // a lower half repeats its upper
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom), 0xC00000u), CodeOwner::Cpu65816);
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom), 0x001000u), CodeOwner::None);      // a system bank's does not
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom), 0x700000u), CodeOwner::None);      // the save
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::HiRom), 0x400000u), CodeOwner::Cpu65816);  // a whole bank
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::HiRom), 0x206000u), CodeOwner::None);      // the save
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::ExHiRom), 0x806000u), CodeOwner::None);    // the save
+}
+
+// The board decides the halves the map alone cannot: a LoROM save window with
+// no save behind it reads the image, so its bytes are the main CPU's; a
+// coprocessor's half holds no code the main CPU's disassembler can read, and
+// the chip's own backend takes it.
+TEST(CartridgeEntries, CodeOwnerFollowsTheBoard) {
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom, 0u), 0x700000u), CodeOwner::Cpu65816);  // a bare window
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom, 0u, Coprocessor::Dsp), 0x600000u), CodeOwner::None);
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom, 0u, Coprocessor::Dsp), 0x700000u), CodeOwner::None);
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::LoRom, 0u, Coprocessor::Dsp), 0x608000u), CodeOwner::Cpu65816);
+  EXPECT_EQ(codeOwner(boardOn(CartridgeMap::HiRom, 0u), 0x206000u), CodeOwner::None);  // the expansion area
 }
 
 // The chain end to end: a header read from an image gives the entries a trace

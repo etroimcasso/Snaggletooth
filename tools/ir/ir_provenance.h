@@ -208,7 +208,7 @@ class CarrySink {
 // `site`.
 class Provenance final : public Shadow {
  public:
-  Provenance(CartridgeMap map, std::size_t imageBytes, std::size_t cap);
+  Provenance(const CartridgeBoard& board, std::size_t imageBytes, std::size_t cap);
 
   Address site = 0;
   void flowBroke() noexcept { broken_ = true; }
@@ -217,9 +217,10 @@ class Provenance final : public Shadow {
   CarrySink* carries = nullptr;
 
   // The origin of what the bus holds at `address`: the image byte's, through
-  // any mirror; the shadow's, for work RAM through any mirror; a register mark
-  // for the hardware registers; the save mark for the save window; nothing
-  // for open bus. `$2180` is the port, and what it holds is what the port
+  // any mirror and through a LoROM save window with no save behind it; the
+  // shadow's, for work RAM through any mirror; a register mark for the
+  // hardware registers; the save mark for the save; nothing for open bus or a
+  // coprocessor's half. `$2180` is the port, and what it holds is what the port
   // reaches — the host says where through `portRead`.
   [[nodiscard]] Origin at(Address address);
 
@@ -340,7 +341,7 @@ class Provenance final : public Shadow {
   // the callers whose run begins or ends where it does.
   [[nodiscard]] std::optional<OriginInterval> sourceRun(std::uint32_t invocation, std::size_t offset) const;
 
-  CartridgeMap map_;
+  CartridgeBoard board_;
   std::size_t imageBytes_;
   Origins origins_;
   Origin places_[kPlaces][kBytes]{};

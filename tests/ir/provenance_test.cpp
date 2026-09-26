@@ -69,14 +69,18 @@ struct Carries final : CarrySink {
 
 // One program: the interpreter, its shadow and its memory, with instructions
 // placed at $00:8000 onward and run one after another.
+// A LoROM board with a save and no chip, the board every case below runs on
+// unless it says otherwise.
+constexpr CartridgeBoard kBoard{.map = CartridgeMap::LoRom, .coprocessor = Coprocessor::None, .saveRamBytes = 8192u};
+
 struct Machine {
-  Provenance shadow{CartridgeMap::LoRom, kImageBytes, kCap};
+  Provenance shadow;
   Interpreter interpreter;
   FlatBus bus;
   Carries carries;
   Address expectedNext = 0x008000u;  // where falling through the last instruction leads
 
-  Machine() {
+  explicit Machine(const CartridgeBoard& board = kBoard) : shadow{board, kImageBytes, kCap} {
     interpreter.shadow = &shadow;
     shadow.carries = &carries;
     interpreter.registers.pc = 0x8000u;
@@ -327,6 +331,25 @@ TEST(Provenance, AHardwareRegisterAndTheSaveAreMarksAValueCarries) {
   m.run({0xAFu, 0x00u, 0x50u, 0x00u});  // LDA $00:5000
   m.run({0x8Du, 0x02u, 0x02u});         // STA !$0202
   EXPECT_TRUE(m.originAt(0x7E0202u).empty());
+}
+
+// The board decides what a LoROM save window and a cartridge bank's lower half
+// hold: with no save the window is the image through the upper half, so a read
+// there carries the image byte's origin; on a coprocessor's board the half is the
+// chip's, and a read there carries nothing, as open bus does.
+TEST(Provenance, ABareWindowReadIsTheImageAndAChipsHalfIsNothing) {
+  Machine bare{CartridgeBoard{.map = CartridgeMap::LoRom, .coprocessor = Coprocessor::None, .saveRamBytes = 0u}};
+  bare.run({0xAFu, 0x34u, 0x12u, 0x70u});  // LDA $70:1234: the image at $70:9234, offset $1234 of a one-bank image
+  bare.run({0x8Du, 0x00u, 0x02u});         // STA !$0200
+  EXPECT_EQ(bare.originAt(0x7E0200u), imageSet({{0x1234u, 0x1234u}}));
+
+  Machine chip{CartridgeBoard{.map = CartridgeMap::LoRom, .coprocessor = Coprocessor::Dsp, .saveRamBytes = 0u}};
+  chip.run({0xAFu, 0x34u, 0x12u, 0x60u});  // LDA $60:1234: the chip's half
+  chip.run({0x8Du, 0x00u, 0x02u});         // STA !$0200
+  EXPECT_TRUE(chip.originAt(0x7E0200u).empty());
+  chip.run({0xAFu, 0x34u, 0x12u, 0x70u});  // LDA $70:1234: the chip's too, with no save
+  chip.run({0x8Du, 0x01u, 0x02u});         // STA !$0201
+  EXPECT_TRUE(chip.originAt(0x7E0201u).empty());
 }
 
 TEST(Provenance, ThePortIsPairedWithWhereItReached) {

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -427,55 +428,63 @@ TEST(CartridgeHeader, TheVectorsFollowTheHeaderInTheirDocumentedSlots) {
 
 // ---- where a bus address lands -------------------------------------------------
 
+// A board with a save and no chip, the shape every case of the functions below
+// assumes unless it says otherwise.
+CartridgeBoard boardOn(CartridgeMap map, std::size_t saveRamBytes = 8192u,
+                       Coprocessor coprocessor = Coprocessor::None) {
+  return CartridgeBoard{.map = map, .coprocessor = coprocessor, .saveRamBytes = saveRamBytes};
+}
+
+
 TEST(CartridgeHeader, LoRomLaysUpperHalvesEndToEnd) {
   const std::size_t size = 4u * kMegabyte;
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x008000u, size), 0x000000u);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x00FFFFu, size), 0x007FFFu);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x018000u, size), 0x008000u);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x808000u, size), 0x000000u);  // the high bit only picks the speed
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0xFF8000u, size), 0x3F8000u);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x400000u, size), 0x200000u);  // a cartridge bank's lower half repeats its upper
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x401234u, size), romOffset(CartridgeMap::LoRom, 0x409234u, size));
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0xEF7FFFu, size), 0x37FFFFu);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x001234u, size), std::nullopt);  // a system bank's lower half does not
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x700000u, size), std::nullopt);  // the save window
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0xFF7FFFu, size), std::nullopt);  // which runs through bank $FF
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x7E8000u, size), std::nullopt);  // work RAM
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x008000u, size), 0x000000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x00FFFFu, size), 0x007FFFu);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x018000u, size), 0x008000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x808000u, size), 0x000000u);  // the high bit only picks the speed
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0xFF8000u, size), 0x3F8000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x400000u, size), 0x200000u);  // a cartridge bank's lower half repeats its upper
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x401234u, size), romOffset(boardOn(CartridgeMap::LoRom), 0x409234u, size));
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0xEF7FFFu, size), 0x37FFFFu);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x001234u, size), std::nullopt);  // a system bank's lower half does not
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x700000u, size), std::nullopt);  // the save window
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0xFF7FFFu, size), std::nullopt);  // which runs through bank $FF
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x7E8000u, size), std::nullopt);  // work RAM
 }
 
 TEST(CartridgeHeader, HiRomLaysWholeBanksEndToEnd) {
   const std::size_t size = 4u * kMegabyte;
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0xC00000u, size), 0x000000u);
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0xC11234u, size), 0x011234u);
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0x401000u, size), 0x001000u);   // the first cartridge region, whole
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0x008000u, size), 0x008000u);   // a system bank's upper half
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0x3FFFFFu, size), 0x3FFFFFu);
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0x001000u, size), std::nullopt);  // the system area
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0x206000u, size), std::nullopt);  // the save window
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0xC00000u, size), 0x000000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0xC11234u, size), 0x011234u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0x401000u, size), 0x001000u);   // the first cartridge region, whole
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0x008000u, size), 0x008000u);   // a system bank's upper half
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0x3FFFFFu, size), 0x3FFFFFu);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0x001000u, size), std::nullopt);  // the system area
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0x206000u, size), std::nullopt);  // the save window
 }
 
 TEST(CartridgeHeader, ExHiRomServesTheSecondFourMegabytesInTheLowBanks) {
   const std::size_t size = 8u * kMegabyte;
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0xC00000u, size), 0x000000u);  // the first 4 MB, as HiROM
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x808000u, size), 0x008000u);
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x400000u, size), 0x400000u);  // the second 4 MB
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x7D1234u, size), 0x7D1234u);
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x008000u, size), 0x408000u);  // its mirror in the system banks
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x3E8000u, size), 0x7E8000u);  // where work RAM hides a bank
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x7E0000u, size), std::nullopt);
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x806000u, size), std::nullopt);  // the save window
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x206000u, size), std::nullopt);  // not a save window here: the system area
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0xC00000u, size), 0x000000u);  // the first 4 MB, as HiROM
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x808000u, size), 0x008000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x400000u, size), 0x400000u);  // the second 4 MB
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x7D1234u, size), 0x7D1234u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x008000u, size), 0x408000u);  // its mirror in the system banks
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x3E8000u, size), 0x7E8000u);  // where work RAM hides a bank
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x7E0000u, size), std::nullopt);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x806000u, size), std::nullopt);  // the save window
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x206000u, size), std::nullopt);  // not a save window here: the system area
 }
 
 TEST(CartridgeHeader, AnAddressPastTheImageRepeatsTheChipItLandsOn) {
   // A 512 KB image is one chip and repeats whole. A 3 MB image is a 2 MB chip
   // then a 1 MB chip, and the megabyte above it repeats the second chip.
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x108234u, 512u * 1024u), 0x000234u);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x608000u, 3u * kMegabyte), 0x200000u);
-  EXPECT_EQ(romOffset(CartridgeMap::LoRom, 0x6A8000u, 3u * kMegabyte), 0x250000u);
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0xF00000u, 3u * kMegabyte), 0x200000u);
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x600000u, 6u * kMegabyte), 0x400000u);  // 6 MB past the start: the 2 MB chip again
-  EXPECT_EQ(romOffset(CartridgeMap::HiRom, 0xC00000u, 0u), std::nullopt);  // no image, no byte
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x108234u, 512u * 1024u), 0x000234u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x608000u, 3u * kMegabyte), 0x200000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::LoRom), 0x6A8000u, 3u * kMegabyte), 0x250000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0xF00000u, 3u * kMegabyte), 0x200000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x600000u, 6u * kMegabyte), 0x400000u);  // 6 MB past the start: the 2 MB chip again
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::HiRom), 0xC00000u, 0u), std::nullopt);  // no image, no byte
 }
 
 TEST(CartridgeHeader, ARomAddressReadsItsOffsetBackWhole) {
@@ -485,7 +494,7 @@ TEST(CartridgeHeader, ARomAddressReadsItsOffsetBackWhole) {
                                      std::size_t{0x123456}, std::size_t{0x3F8000}, std::size_t{0x3FFFFF}}) {
       const std::optional<std::uint32_t> address = romAddress(map, offset);
       ASSERT_TRUE(address.has_value()) << "map " << static_cast<int>(map) << " offset " << offset;
-      EXPECT_EQ(romOffset(map, *address, size), offset) << "map " << static_cast<int>(map);
+      EXPECT_EQ(romOffset(boardOn(map), *address, size), offset) << "map " << static_cast<int>(map);
     }
   }
   EXPECT_EQ(romAddress(CartridgeMap::LoRom, 0x000000u), 0x008000u);
@@ -494,7 +503,7 @@ TEST(CartridgeHeader, ARomAddressReadsItsOffsetBackWhole) {
   EXPECT_EQ(romAddress(CartridgeMap::ExHiRom, 0x123456u), 0xD23456u);
   EXPECT_EQ(romAddress(CartridgeMap::ExHiRom, 0x400000u), 0x400000u);
   EXPECT_EQ(romAddress(CartridgeMap::ExHiRom, 0x7E8000u), 0x3E8000u);
-  EXPECT_EQ(romOffset(CartridgeMap::ExHiRom, 0x3E8000u, size), 0x7E8000u);
+  EXPECT_EQ(romOffset(boardOn(CartridgeMap::ExHiRom), 0x3E8000u, size), 0x7E8000u);
   EXPECT_EQ(romAddress(CartridgeMap::ExHiRom, 0x7E0000u), std::nullopt);  // no address reads it
   EXPECT_EQ(romAddress(CartridgeMap::LoRom, 0x400000u), std::nullopt);    // beyond the map
   EXPECT_EQ(romAddress(CartridgeMap::HiRom, 0x400000u), std::nullopt);
@@ -503,7 +512,7 @@ TEST(CartridgeHeader, ARomAddressReadsItsOffsetBackWhole) {
 
 TEST(CartridgeHeader, RegionsUnderEachMap) {
   using R = CartridgeRegion;
-  for (const CartridgeMap map : {CartridgeMap::LoRom, CartridgeMap::HiRom, CartridgeMap::ExHiRom}) {
+  for (const CartridgeBoard map : {boardOn(CartridgeMap::LoRom), boardOn(CartridgeMap::HiRom), boardOn(CartridgeMap::ExHiRom)}) {
     EXPECT_EQ(cartridgeRegion(map, 0x7E0000u), R::WorkRam);
     EXPECT_EQ(cartridgeRegion(map, 0x7FFFFFu), R::WorkRam);
     EXPECT_EQ(cartridgeRegion(map, 0x000000u), R::System);
@@ -512,55 +521,174 @@ TEST(CartridgeHeader, RegionsUnderEachMap) {
     EXPECT_EQ(cartridgeRegion(map, 0xBFFFFFu), R::Rom);
     EXPECT_EQ(cartridgeRegion(map, 0xC08000u), R::Rom);
   }
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xC00000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0xC00000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0xC00000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x400000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x6F7FFFu), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xFE0000u), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xFF7FFFu), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0xFF8000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x700000u), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x708000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::LoRom, 0x206000u), R::System);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0x400000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0x206000u), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0xA07FFFu), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0x1F6000u), R::System);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::HiRom, 0x700000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0x400000u), R::Rom);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0x806000u), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0xBF7FFFu), R::SaveRam);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0x206000u), R::System);
-  EXPECT_EQ(cartridgeRegion(CartridgeMap::ExHiRom, 0x3E8000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0xC00000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom), 0xC00000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom), 0xC00000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0x400000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0x6F7FFFu), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0xFE0000u), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0xFF7FFFu), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0xFF8000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0x700000u), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0x708000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom), 0x206000u), R::System);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom), 0x400000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom), 0x206000u), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom), 0xA07FFFu), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom), 0x1F6000u), R::System);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom), 0x700000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom), 0x400000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom), 0x806000u), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom), 0xBF7FFFu), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom), 0x206000u), R::System);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom), 0x3E8000u), R::Rom);
 }
 
 TEST(CartridgeHeader, SaveWindowsUnderEachMap) {
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x700000u), 0x0000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x711234u), 0x9234u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xF00000u), 0x0000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x7D7FFFu), (std::size_t{0x0D} << 15) | 0x7FFFu);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xFE0010u), (std::size_t{0x0E} << 15) | 0x0010u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xFF7FFFu), (std::size_t{0x0F} << 15) | 0x7FFFu);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0xEF0000u), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x708000u), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x7E0000u), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::LoRom, 0x6F0000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0x700000u), 0x0000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0x711234u), 0x9234u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0xF00000u), 0x0000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0x7D7FFFu), (std::size_t{0x0D} << 15) | 0x7FFFu);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0xFE0010u), (std::size_t{0x0E} << 15) | 0x0010u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0xFF7FFFu), (std::size_t{0x0F} << 15) | 0x7FFFu);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0xEF0000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0x708000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0x7E0000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::LoRom), 0x6F0000u), std::nullopt);
 
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0x206000u), 0x0000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0x216000u), 0x2000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0xA06000u), 0x0000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0x3F7FFFu), (std::size_t{0x1F} << 13) | 0x1FFFu);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0x205FFFu), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0x1F6000u), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::HiRom, 0x700000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0x206000u), 0x0000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0x216000u), 0x2000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0xA06000u), 0x0000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0x3F7FFFu), (std::size_t{0x1F} << 13) | 0x1FFFu);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0x205FFFu), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0x1F6000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::HiRom), 0x700000u), std::nullopt);
 
-  EXPECT_EQ(saveRamOffset(CartridgeMap::ExHiRom, 0x806000u), 0x0000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::ExHiRom, 0x816000u), 0x2000u);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::ExHiRom, 0xBF7FFFu), (std::size_t{0x3F} << 13) | 0x1FFFu);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::ExHiRom, 0x206000u), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::ExHiRom, 0x805FFFu), std::nullopt);
-  EXPECT_EQ(saveRamOffset(CartridgeMap::ExHiRom, 0xC06000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::ExHiRom), 0x806000u), 0x0000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::ExHiRom), 0x816000u), 0x2000u);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::ExHiRom), 0xBF7FFFu), (std::size_t{0x3F} << 13) | 0x1FFFu);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::ExHiRom), 0x206000u), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::ExHiRom), 0x805FFFu), std::nullopt);
+  EXPECT_EQ(saveRamOffset(boardOn(CartridgeMap::ExHiRom), 0xC06000u), std::nullopt);
+}
+
+// A LoROM board with no save decodes nothing in its save window, so the window's
+// lower halves repeat their upper halves as every other cartridge bank's does:
+// the region is the image and the offset the upper half's; the save answers
+// nowhere.
+TEST(CartridgeHeader, ABareLoRomWindowIsTheImageThroughItsUpperHalf) {
+  using R = CartridgeRegion;
+  const CartridgeBoard bare = boardOn(CartridgeMap::LoRom, 0u);
+  const std::size_t size = 4u * kMegabyte;
+  EXPECT_EQ(cartridgeRegion(bare, 0x701234u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(bare, 0xFF0000u), R::Rom);
+  EXPECT_EQ(romOffset(bare, 0x701234u, size), romOffset(bare, 0x709234u, size));
+  EXPECT_EQ(romOffset(bare, 0x701234u, size), 0x381234u);
+  EXPECT_EQ(romOffset(bare, 0xFF7FFFu, size), 0x3FFFFFu);
+  EXPECT_EQ(saveRamOffset(bare, 0x701234u), std::nullopt);
+  // The same addresses with a save behind the window: the save, and no offset.
+  const CartridgeBoard saved = boardOn(CartridgeMap::LoRom);
+  EXPECT_EQ(cartridgeRegion(saved, 0x701234u), R::SaveRam);
+  EXPECT_EQ(romOffset(saved, 0x701234u, size), std::nullopt);
+  EXPECT_EQ(saveRamOffset(saved, 0x701234u), 0x1234u);
+  // A system bank's lower half is the console's on either board.
+  EXPECT_EQ(cartridgeRegion(bare, 0x001234u), R::System);
+  EXPECT_EQ(romOffset(bare, 0x001234u, size), std::nullopt);
+}
+
+// HiROM's and ExHiROM's windows sit in the expansion area, where a board with no
+// save has nothing: the region is the system's, and neither the image nor the
+// save answers there.
+TEST(CartridgeHeader, ABareHiRomWindowIsTheSystemsAndAnswersNothing) {
+  using R = CartridgeRegion;
+  const std::size_t size = kMegabyte;
+  for (const auto& [map, window] : {std::pair{CartridgeMap::HiRom, 0x206000u},
+                                    std::pair{CartridgeMap::ExHiRom, 0x806000u}}) {
+    const CartridgeBoard bare = boardOn(map, 0u);
+    EXPECT_EQ(cartridgeRegion(bare, window), R::System);
+    EXPECT_EQ(romOffset(bare, window, size), std::nullopt);
+    EXPECT_EQ(saveRamOffset(bare, window), std::nullopt);
+    EXPECT_EQ(cartridgeRegion(boardOn(map), window), R::SaveRam);
+    EXPECT_EQ(saveRamOffset(boardOn(map), window), 0x0000u);
+  }
+}
+
+// A coprocessor's LoROM board gives every cartridge bank's lower half outside
+// the save window to the chip, and the window's lower halves too when the board
+// has no save: the region is the chip's and no image offset answers. The upper
+// halves are the image on every board, and a save takes its window back.
+TEST(CartridgeHeader, ACoprocessorsLoRomBoardKeepsItsLowerHalvesForTheChip) {
+  using R = CartridgeRegion;
+  const std::size_t size = 4u * kMegabyte;
+  const CartridgeBoard chip = boardOn(CartridgeMap::LoRom, 0u, Coprocessor::Dsp);
+  for (const std::uint32_t half : {0x401234u, 0x601234u, 0x6F7FFFu, 0x701234u, 0xC00000u, 0xFF0000u}) {
+    EXPECT_EQ(cartridgeRegion(chip, half), R::Coprocessor) << half;
+    EXPECT_EQ(romOffset(chip, half, size), std::nullopt) << half;
+    EXPECT_EQ(saveRamOffset(chip, half), std::nullopt) << half;
+  }
+  EXPECT_EQ(cartridgeRegion(chip, 0x609234u), R::Rom);
+  EXPECT_EQ(romOffset(chip, 0x609234u, size), 0x301234u);
+  EXPECT_EQ(cartridgeRegion(chip, 0x008000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(chip, 0x001234u), R::System);
+  // A chip the layout does not list is a chip still.
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::LoRom, 0u, Coprocessor::Unknown), 0x601234u), R::Coprocessor);
+  // With a save, the window is the save's and the other halves stay the chip's.
+  const CartridgeBoard saved = boardOn(CartridgeMap::LoRom, 8192u, Coprocessor::Dsp);
+  EXPECT_EQ(cartridgeRegion(saved, 0x701234u), R::SaveRam);
+  EXPECT_EQ(saveRamOffset(saved, 0x701234u), 0x1234u);
+  EXPECT_EQ(cartridgeRegion(saved, 0x601234u), R::Coprocessor);
+  // A HiROM or ExHiROM board with a coprocessor answers as a plain one.
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom, 0u, Coprocessor::Dsp), 0x400000u), R::Rom);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom, 0u, Coprocessor::Dsp), 0x206000u), R::System);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::HiRom, 8192u, Coprocessor::Dsp), 0x206000u), R::SaveRam);
+  EXPECT_EQ(cartridgeRegion(boardOn(CartridgeMap::ExHiRom, 0u, Coprocessor::Sa1), 0x400000u), R::Rom);
+}
+
+// The board is read from the header: the map from the site, the save from its
+// size code, the chip from the chipset byte and the sub-type byte.
+TEST(CartridgeHeader, TheBoardIsReadFromTheHeader) {
+  std::vector<std::uint8_t> rom = authored(512u * 1024u, kLoRomSite, 0x20u, /*8 KB*/ 3u);
+  writeHardware(rom, kLoRomSite, 0x05u, 0x08u, 0x01u, 0x01u, 0x00u);  // a DSP with RAM and a battery
+  CartridgeBoard board = cartridgeBoard(rom);
+  EXPECT_EQ(board.map, CartridgeMap::LoRom);
+  EXPECT_EQ(board.coprocessor, Coprocessor::Dsp);
+  EXPECT_EQ(board.saveRamBytes, 8192u);
+
+  rom = authored(kMegabyte, kHiRomSite, 0x31u, /*2 KB*/ 1u);
+  writeHardware(rom, kHiRomSite, 0x02u, 0x0Au, 0x01u, 0x01u, 0x00u);  // RAM and a battery, no chip
+  board = cartridgeBoard(rom);
+  EXPECT_EQ(board.map, CartridgeMap::HiRom);
+  EXPECT_EQ(board.coprocessor, Coprocessor::None);
+  EXPECT_EQ(board.saveRamBytes, 2048u);
+
+  struct Case {
+    std::uint8_t chipset;
+    std::uint8_t subtype;
+    Coprocessor coprocessor;
+  };
+  const Case cases[] = {
+      {0x00u, 0x00u, Coprocessor::None},   {0x02u, 0x00u, Coprocessor::None},   {0x03u, 0x00u, Coprocessor::Dsp},
+      {0x15u, 0x00u, Coprocessor::Gsu},    {0x25u, 0x00u, Coprocessor::Obc1},   {0x35u, 0x00u, Coprocessor::Sa1},
+      {0x43u, 0x00u, Coprocessor::Sdd1},   {0x55u, 0x00u, Coprocessor::Srtc},   {0xE3u, 0x00u, Coprocessor::Other},
+      {0xF5u, 0x00u, Coprocessor::Spc7110}, {0xF6u, 0x01u, Coprocessor::St010}, {0xF5u, 0x02u, Coprocessor::St018},
+      {0xF3u, 0x10u, Coprocessor::Cx4},    {0x73u, 0x00u, Coprocessor::Unknown},
+  };
+  for (const Case& c : cases) {
+    rom = authored(512u * 1024u, kLoRomSite, 0x20u, 0u);
+    writeHardware(rom, kLoRomSite, c.chipset, 0x08u, 0x01u, 0x01u, 0x00u);
+    rom[kLoRomSite - 1] = c.subtype;
+    EXPECT_EQ(cartridgeBoard(rom).coprocessor, c.coprocessor) << "chipset " << int{c.chipset};
+    EXPECT_EQ(cartridgeBoard(rom).saveRamBytes, 0u);
+  }
+}
+
+// An image too small to hold a header is a plain LoROM board with no save, as
+// detectCartridgeMap and declaredSaveRamBytes answer for it.
+TEST(CartridgeHeader, AnImageWithNoHeaderIsAPlainLoRomBoardWithNoSave) {
+  const CartridgeBoard board = cartridgeBoard(patternedImage(256u));
+  EXPECT_EQ(board.map, CartridgeMap::LoRom);
+  EXPECT_EQ(board.coprocessor, Coprocessor::None);
+  EXPECT_EQ(board.saveRamBytes, 0u);
 }
 
 // ---- the machine reads through the same functions -------------------------------

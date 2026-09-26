@@ -213,6 +213,7 @@ struct ManifestAsset {
 // A whole cartridge, disassembled.
 struct CartridgeDisassembly {
   CartridgeHeader header;
+  CartridgeBoard board;  // the board the header declares, which every reading of an address goes through
   std::size_t imageBytes = 0;
   std::vector<TraceEntry> entries;  // every entry the trace started from, the vectors first
   std::vector<RegionListing> regions;
@@ -395,9 +396,10 @@ struct ManifestDma {
 
 // What a manifest gives the tools that read it. The next disassembly takes the
 // entries, the reached and derived targets, the landings, the moved ranges, the
-// assets' paths and the file split; a verification takes the map, the file
-// split, the sound program and its blocks, which together say where every
-// file's bytes land; both take the image identity. Everything else in a
+// assets' paths and the file split; a verification takes the board — the map,
+// the save and the chip — the file split, the sound program and its blocks,
+// which together say where every file's bytes land; both take the image
+// identity. Everything else in a
 // manifest is what the last run found, and is written fresh.
 struct ManifestInput {
   std::vector<TraceEntry> entries;
@@ -408,6 +410,8 @@ struct ManifestInput {
   std::vector<ManifestAsset> assets;
   std::vector<DerivedTarget> derived;
   std::optional<CartridgeMap> map;
+  std::optional<std::size_t> saveRamBytes;   // the `save` line, when the manifest carries one
+  std::optional<Coprocessor> coprocessor;     // the `chip` line, when the manifest carries one
   std::optional<ManifestSound> sound;
   std::optional<std::size_t> imageBytes;
   std::optional<std::uint16_t> checksum;
@@ -421,12 +425,19 @@ struct ManifestInput {
 };
 
 // Reads the entries, reached and derived targets, landings, moved ranges,
-// assets, regions, map, sound program and image identity out of a manifest,
+// assets, regions, board, sound program and image identity out of a manifest,
 // and the accesses, routines, seen registers and transfers the renderer reads.
 // Nothing, with `error` naming the line, when a line does not parse, when a
 // block names a file no `sound` line does, or when a routine calls a label no
 // routine line names.
 [[nodiscard]] std::optional<ManifestInput> parseManifest(std::string_view text, std::string& error);
+
+// The board a manifest's header lines name: `map`, `save` and `chip`. A
+// manifest with no `save` and `chip` lines names a plain board with a save
+// filling its map's window — every window the save's, every lower half the
+// image — which is the board a tree without the lines is placed on. `input.map`
+// must be set.
+[[nodiscard]] CartridgeBoard manifestBoard(const ManifestInput& input);
 
 // Why `input` cannot direct a run over `rom`, or an empty string when it can: a
 // manifest names the size and checksum of the image it was written for, and an

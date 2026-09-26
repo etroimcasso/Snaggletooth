@@ -66,10 +66,10 @@ void placeRun(Rebuild& rebuild, const std::string& fileName, Address address, un
 }
 
 // A bank file: every range it emits, placed at the image offset its address
-// reads from under the map. A range must read consecutive image bytes, which is
+// reads from on the board. A range must read consecutive image bytes, which is
 // what one `ORG` over a bank's window gives; a range whose bytes do not is
 // reported and not placed.
-void verifyBankFile(Rebuild& rebuild, CartridgeMap map, const SourceRegion& region,
+void verifyBankFile(Rebuild& rebuild, const CartridgeBoard& board, const SourceRegion& region,
                     const SourceReader& read, VerifyReport& report) {
   VerifiedFile file{.file = region.file,
                     .chip = "65816",
@@ -100,11 +100,11 @@ void verifyBankFile(Rebuild& rebuild, CartridgeMap map, const SourceRegion& regi
     return;
   }
   for (const assembler::Range& range : assembly.ranges) {
-    const std::optional<std::size_t> start = romOffset(map, range.start, rebuild.rom.size());
+    const std::optional<std::size_t> start = romOffset(board, range.start, rebuild.rom.size());
     bool consecutive = start.has_value();
     for (std::size_t i = 1; consecutive && i < range.bytes.size(); ++i) {
       const std::optional<std::size_t> offset =
-          romOffset(map, range.start + static_cast<Address>(i), rebuild.rom.size());
+          romOffset(board, range.start + static_cast<Address>(i), rebuild.rom.size());
       consecutive = offset && *offset == *start + i;
     }
     if (!consecutive) {
@@ -191,8 +191,9 @@ VerifyReport verifyProject(const ManifestInput& manifest, std::span<const std::u
   if (!report.error.empty()) return report;
 
   Rebuild rebuild(rom);
+  const CartridgeBoard board = manifestBoard(manifest);
   for (const SourceRegion& region : manifest.regions) {
-    verifyBankFile(rebuild, *manifest.map, region, read, report);
+    verifyBankFile(rebuild, board, region, read, report);
   }
   if (manifest.sound) verifySoundFile(rebuild, *manifest.sound, read, report);
 

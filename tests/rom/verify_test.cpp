@@ -3,6 +3,7 @@
 // damages it in one way, and pins what the report says: identical, or which
 // file differs where, what did not assemble, what nobody produced.
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -139,6 +140,38 @@ TEST(RomVerify, TheManifestReadsBackTheMapAndTheSoundProgram) {
 }
 
 // ---- a tree as written ------------------------------------------------------
+
+// The manifest's `save` and `chip` lines are the board the bank files are placed
+// on: a tree that carries them verifies as the disassembler wrote it, and a range
+// a file places through a LoROM save window reads the image only when the board
+// has no save.
+TEST(RomVerify, ATreeWithTheBoardLinesVerifiesAndARangeThroughABareWindowPlaces) {
+  const std::vector<std::uint8_t> rom = threeBankImage();
+  const Tree tree = treeOf(rom, false);
+  EXPECT_NE(tree.manifest.find("save     0\nchip     none\n"), std::string::npos);
+  EXPECT_TRUE(verify(tree, rom).identical());
+
+  std::vector<std::uint8_t> big(4u * 1024u * 1024u, 0u);  // 4 MB: bank $70 is its own bytes
+  std::copy(rom.begin(), rom.begin() + 0x8000, big.begin());
+  big[0x381234u] = 0xEAu;
+  big[0x381235u] = 0x6Bu;
+  Tree window;
+  window.files["bank_70.asm"] = "        ORG $70:1234\n        NOP\n        RTL\n";
+  const std::string head = "image 4194304\nmap LoROM\nchecksum $EDCB $1234\nfile bank_70.asm 65816 $70:0000 $70:7FFF\n";
+  window.manifest = head + "save 0\nchip none\n";
+  VerifyReport bare = verify(window, big);
+  VerifiedFile file = fileNamed(bare, "bank_70.asm");
+  EXPECT_TRUE(file.problem.empty()) << file.problem;
+  EXPECT_EQ(file.runs, 1u);
+  EXPECT_EQ(file.bytes, 2u);
+  EXPECT_EQ(file.differing, 0u);
+
+  window.manifest = head + "save 8192\nchip none\n";
+  VerifyReport saved = verify(window, big);
+  file = fileNamed(saved, "bank_70.asm");
+  EXPECT_NE(file.problem.find("does not read consecutive image bytes"), std::string::npos) << file.problem;
+  EXPECT_EQ(file.runs, 0u);
+}
 
 TEST(RomVerify, ATreeTheDisassemblerWroteAssemblesToItsImage) {
   const std::vector<std::uint8_t> rom = uploadingImage();

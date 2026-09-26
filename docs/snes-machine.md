@@ -100,7 +100,7 @@ The bus maps a 24-bit address the way the console does:
 | `$00-$3F` / `$80-$BF:$420D` | MEMSEL, the second region's speed select |
 | `$8000-$FFFF` (any bank) | the cartridge |
 | `$40-$7D` / `$C0-$FF:$0000-$FFFF` | the cartridge across the whole bank, under HiROM and ExHiROM |
-| `$40-$7D` / `$C0-$FF:$0000-$7FFF` | under LoROM, the bytes the same bank's upper half reads |
+| `$40-$7D` / `$C0-$FF:$0000-$7FFF` | under LoROM, the bytes the same bank's upper half reads on a plain board; on a coprocessor's board, the chip's |
 | `$70-$7D` / `$F0-$FF:$0000-$7FFF` | save RAM, under LoROM, on a cartridge that has any |
 | `$20-$3F` / `$A0-$BF:$6000-$7FFF` | save RAM, under HiROM |
 | `$80-$BF:$6000-$7FFF` | save RAM, under ExHiROM |
@@ -159,6 +159,12 @@ RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `
 answers what an image asks for without building a machine. Each map keeps the save in its own window,
 listed in the table above and described in [the cartridge page](snes-cartridge.md#save-ram).
 
+The machine is built on the [board](snes-cartridge.md#the-board) the header declares — `cartridgeBoard`,
+with `SnesConfig::map` and `SnesConfig::saveRamBytes` standing in for the header's map and save when
+they are set — and reads what the board decodes in a save window and in a cartridge bank's lower half
+through `cartridgeRegion` and `romOffset`, so the machine and every tool built over the same functions
+answer alike. Two rules follow from the board and are the chip's, not the machine's own.
+
 A LoROM cartridge whose header declares a coprocessor is on that chip's board, which gives lower
 halves of its cartridge banks to the chip — `$60-$6F` to a DSP on the 2 MB boards, and to an ST010's
 ports and RAM. The machine carries no coprocessor, so on such a cartridge every cartridge bank's lower
@@ -169,7 +175,8 @@ A cartridge with no save answers in the window as its board does. HiROM's and Ex
 the expansion area and read open bus. LoROM's sits in cartridge banks, where a board with no save RAM
 decodes nothing, so the window's lower halves repeat their upper halves like every other cartridge
 bank's: on a LoROM cartridge with no save, `$70:1234` reads the byte at `$70:9234`, and a store there
-changes nothing.
+changes nothing. The save's presence is read at each access, not when the table is built, so a
+restore that fills or empties the save changes what the window answers without rebuilding anything.
 
 Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
 the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address
