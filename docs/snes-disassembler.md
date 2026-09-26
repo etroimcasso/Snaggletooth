@@ -446,30 +446,29 @@ it, and not on the word of the bytes alone. A table the bytes derive is held to
 the same rule: a destination in a repeated half is a note, not an entry. On a
 LoROM board with no save the save window's lower halves — `$70-$7D` and `$F0-$FF`
 below `$8000` — repeat their upper halves like every other cartridge bank's, so a
-call or jump there is the same stop, naming the half the target repeats; with a
-save behind the window the target is the save's, and the stop says so:
+call or jump there is the same stop, naming the half the target repeats. The
+`bare_window` cartridge from [`tools/examples/`](../tools/examples/README.md), one
+bank with no save, calls into its window:
 
 ```
-stop     $00:8000 `JSL $70:1234`: the target $70:1234 is a LoROM bank's lower half, which repeats $70:9234; add an entry for it if the program runs there
-stop     $00:8000 `JSL $70:1234`: the target $70:1234 is save RAM, not in the image
+stop     $00:803E `JSL $70:1340`: the target $70:1340 is a LoROM bank's lower half, which repeats $70:9340; add an entry for it if the program runs there
 ```
+
+With a save behind the window the target is the save's, and the stop says the
+target is save RAM, not in the image.
 
 HiROM's and ExHiROM's windows sit in the expansion area of the system banks,
 `$6000-$7FFF`, which holds no image byte on any board, so a call or jump there is
 a stop naming the expansion area, and with a save behind the window one naming
-the save:
+the save. A coprocessor's LoROM board gives the lower halves of its cartridge
+banks to the chip, so a call or jump there names no image byte either: the stop
+says the target is the chip's, and no entry lifts it — the chip's own code is the
+chip's backend's, which no coprocessor has yet. The `chip_half` cartridge, a DSP
+board, calls into the chip's half and then jumps into the expansion area:
 
 ```
-stop     $00:8000 `JML $20:6000`: the target $20:6000 is the expansion area, not in the image
-```
-
-A coprocessor's LoROM board gives the lower halves of its cartridge banks to the
-chip, so a call or jump there names no image byte. The stop says the target is
-the chip's, and no entry lifts it — the chip's own code is the chip's backend's,
-which no coprocessor has yet:
-
-```
-stop     $00:8000 `JSL $60:1234`: the target $60:1234 is the coprocessor's, not in the image
+stop     $00:8016 `JSL $60:1000`: the target $60:1000 is the coprocessor's, not in the image
+stop     $00:801A `JML $20:6000`: the target $20:6000 is the expansion area, not in the image
 ```
 
 Which halves are which is the [board's](snes-cartridge.md#the-board), read from

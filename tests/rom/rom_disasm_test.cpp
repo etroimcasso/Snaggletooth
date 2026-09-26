@@ -2626,4 +2626,62 @@ TEST(RomSamples, TheProjectWritesEveryWav) {
   std::filesystem::remove_all(directory, ec);
 }
 
+// ---- the board's cartridges ------------------------------------------------------
+//
+// The two cartridges the pages' board examples come from, each run for three
+// frames: one reads, sends and calls through a LoROM save window with no save
+// behind it, the other calls into a DSP board's lower half.
+
+// On a board with no save the window is the image: the call into it is the
+// repeated-half stop, and the transfer through it is lifted as the image range
+// at its home. A run with no button down never takes the call.
+TEST(RomDisasm, TheBareWindowCartridgeReadsSendsAndCallsThroughItsWindow) {
+  const std::vector<std::uint8_t> rom = examples::bareWindowImage();
+  const CartridgeDisassembly d = lifted(rom);
+  EXPECT_EQ(d.board.map, CartridgeMap::LoRom);
+  EXPECT_EQ(d.board.coprocessor, Coprocessor::None);
+  EXPECT_EQ(d.board.saveRamBytes, 0u);
+  ASSERT_EQ(d.stops.size(), 1u) << renderManifest(d);
+  EXPECT_EQ(d.stops[0].address, 0x00803Eu);
+  EXPECT_NE(d.stops[0].reason.find("the target $70:1340 is a LoROM bank's lower half, which repeats $70:9340"),
+            std::string::npos)
+      << d.stops[0].reason;
+  ASSERT_EQ(d.assets.size(), 1u) << renderManifest(d);
+  EXPECT_EQ(d.assets[0].file, "vram/00_9300.bin");
+  EXPECT_EQ(d.assets[0].first, 0x009300u);
+  EXPECT_EQ(d.assets[0].romOffset, 0x1300u);
+  ASSERT_EQ(d.assets[0].bytes.size(), 32u);
+  EXPECT_TRUE(std::equal(d.assets[0].bytes.begin(), d.assets[0].bytes.end(), rom.begin() + 0x1300));
+  const std::string text = renderManifest(d);
+  EXPECT_NE(text.find("map      LoROM\nsave     0\nchip     none\n"), std::string::npos);
+  EXPECT_EQ(text.find("\nran "), std::string::npos) << "the run did not take the call";
+  const Line* stp = codeLineAt(regionNamed(d, "bank_00.asm").listing, 0x008042u);
+  ASSERT_NE(stp, nullptr);
+  EXPECT_EQ(stp->instruction.text, "STP");
+}
+
+// On a coprocessor's board the half is the chip's: the call into it and the jump
+// into the expansion area are stops naming what each target is, and a run with
+// no button down takes neither.
+TEST(RomDisasm, TheChipHalfCartridgeCallsIntoTheChipsHalf) {
+  const std::vector<std::uint8_t> rom = examples::chipHalfImage();
+  const CartridgeDisassembly d = lifted(rom);
+  EXPECT_EQ(d.board.coprocessor, Coprocessor::Dsp);
+  EXPECT_EQ(d.board.saveRamBytes, 0u);
+  ASSERT_EQ(d.stops.size(), 2u) << renderManifest(d);
+  EXPECT_EQ(d.stops[0].address, 0x008016u);
+  EXPECT_NE(d.stops[0].reason.find("the target $60:1000 is the coprocessor's, not in the image"), std::string::npos)
+      << d.stops[0].reason;
+  EXPECT_EQ(d.stops[1].address, 0x00801Au);
+  EXPECT_NE(d.stops[1].reason.find("the target $20:6000 is the expansion area, not in the image"), std::string::npos)
+      << d.stops[1].reason;
+  EXPECT_TRUE(d.assets.empty());
+  const std::string text = renderManifest(d);
+  EXPECT_NE(text.find("map      LoROM\nsave     0\nchip     DSP\n"), std::string::npos);
+  EXPECT_EQ(text.find("\nran "), std::string::npos) << "the run took neither the call nor the jump";
+  const Line* stp = codeLineAt(regionNamed(d, "bank_00.asm").listing, 0x00801Eu);
+  ASSERT_NE(stp, nullptr);
+  EXPECT_EQ(stp->instruction.text, "STP");
+}
+
 }  // namespace snaggletooth::disasm

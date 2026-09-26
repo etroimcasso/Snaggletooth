@@ -204,11 +204,20 @@ beside the ROM. `CartridgeBoard` holds the three, and `cartridgeBoard` reads the
 the map from the site the header is read at, the chip from the chipset byte, the save from its size
 code. An image too small to hold a header is a plain LoROM board with no save.
 
+The two cartridges under [`tools/examples/`](../tools/examples/README.md) that
+the pages' board examples come from — `chip_half`, whose header names a DSP and
+no save, and `bare_window`, a plain board with no save — read as:
+
 ```cpp
-const CartridgeBoard board = cartridgeBoard(image);
-board.map;           // CartridgeMap::LoRom
-board.coprocessor;   // Coprocessor::Dsp
-board.saveRamBytes;  // 8192, or 0 for a cartridge with none
+const CartridgeBoard chip = cartridgeBoard(chipHalfImage());
+chip.map;           // CartridgeMap::LoRom
+chip.coprocessor;   // Coprocessor::Dsp
+chip.saveRamBytes;  // 0
+
+const CartridgeBoard bare = cartridgeBoard(bareWindowImage());
+bare.map;           // CartridgeMap::LoRom
+bare.coprocessor;   // Coprocessor::None
+bare.saveRamBytes;  // 0
 
 // A board of the caller's own, for a cartridge whose header says the wrong thing.
 const CartridgeBoard plain{.map = CartridgeMap::HiRom, .coprocessor = Coprocessor::None, .saveRamBytes = 0};

@@ -153,6 +153,18 @@ and `title` the header's title, with anything outside printable ASCII removed.
 | `CX4` | the Cx4 |
 | `unknown` | a chipset code the header layout does not list |
 
+The `chip_half` cartridge from [`tools/examples/`](../tools/examples/README.md),
+one bank whose header names a DSP and no save, opens its manifest so:
+
+```
+image    32768
+map      LoROM
+save     0
+chip     DSP
+title    "AAAAAAAAAAAAAAAAAAAAA"
+checksum $EDCB $1234
+```
+
 A manifest without `save` and `chip` names a plain board whose map's whole
 window is the save's — every window the save's, every lower half the image —
 and a tree written without them renders and verifies on that board.
