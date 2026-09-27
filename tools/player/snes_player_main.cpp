@@ -3,7 +3,7 @@
 //
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
 //               [--input <script> | --input-dir <directory>] [--config <file>]
-//               [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]
+//               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled] [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -45,6 +45,10 @@
 // console's own, and --vsync names either arrangement outright. Which one a run took is
 // the first thing it says — after a warning, printed only by a Debug build, that the
 // rates it reports are the build's rather than the emulator's.
+//
+// --unthrottled turns the pacing off: no frame waits for its deadline and vsync is
+// off, so the machine runs as fast as the host allows. Its first line says so, and
+// the mean rate is printed at exit as for every run.
 
 #include <algorithm>
 #include <cstddef>
@@ -153,7 +157,7 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
   std::cerr << "usage: " << program
             << " <image> [--out <directory>] [--seconds N] [--scale N]"
                " [--input <script> | --input-dir <directory>] [--config <file>]"
-               " [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]\n       "
+               " [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled] [--mute] [--quiet]\n       "
             << program << " --default-config\n       " << program << " --user-files\n";
   std::exit(2);
 }
@@ -413,7 +417,7 @@ class Sound {
 class Player final : public snaggletooth::FrameObserver {
  public:
   Player(Snes& machine, snaggletooth::Region region, const snaggletooth::disasm::InputScript& script,
-         bool scripted, Devices& devices, unsigned scale, player::Vsync vsync,
+         bool scripted, Devices& devices, unsigned scale, player::Vsync vsync, bool unthrottled,
          const std::string& title)
       : machine_(machine),
         deadline_(region),
@@ -423,6 +427,7 @@ class Player final : public snaggletooth::FrameObserver {
         devices_(devices),
         scale_(scale),
         vsync_(vsync),
+        unthrottled_(unthrottled),
         pacing_{.rate = player::consoleFrameRate(clock_), .locked = false},
         title_(title) {}
 
@@ -457,7 +462,13 @@ class Player final : public snaggletooth::FrameObserver {
       return false;
     }
     SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
-    holdToPanel();
+    // An unthrottled run switches vsync off explicitly: the SDL_RENDER_VSYNC hint can
+    // open a renderer with it on.
+    if (unthrottled_) {
+      SDL_SetRenderVSync(renderer_, 0);
+    } else {
+      holdToPanel();
+    }
     started_ = SDL_GetTicksNS();
     lastFrame_ = started_;
     resumed_ = started_;
@@ -522,20 +533,23 @@ class Player final : public snaggletooth::FrameObserver {
     // where the run is held to one and the console's where it is not, and it bounds the
     // rate whether or not the present waits — a panel that will not wait, or a
     // compositor that hands back a present without one, then costs the run its phase
-    // rather than its speed.
-    const std::uint64_t due = started_ + owedAt(frames_);
-    const std::uint64_t before = SDL_GetTicksNS();
-    if (before < due) {
-      SDL_DelayNS(due - before);
-    } else if (before - due > kForgivenDebt * interval()) {
-      // The run lost real time — the window went away, the machine was descheduled —
-      // and it is not getting it back. The origin moves forward by what was lost, so
-      // the frames after this one are owed from here. Without that, every deadline is
-      // still counted from an origin the run cannot reach any more, every one of them
-      // has already gone by, and the machine runs flat out until it catches a schedule
-      // that stopped being true — a second of lost time replayed as a second of the
-      // game at several times its speed. A run that lost time stays late.
-      started_ += before - due;
+    // rather than its speed. An unthrottled run skips the wait, and the next frame
+    // begins as soon as this one is shown.
+    if (!unthrottled_) {
+      const std::uint64_t due = started_ + owedAt(frames_);
+      const std::uint64_t before = SDL_GetTicksNS();
+      if (before < due) {
+        SDL_DelayNS(due - before);
+      } else if (before - due > kForgivenDebt * interval()) {
+        // The run lost real time — the window went away, the machine was descheduled —
+        // and it is not getting it back. The origin moves forward by what was lost, so
+        // the frames after this one are owed from here. Without that, every deadline is
+        // still counted from an origin the run cannot reach any more, every one of them
+        // has already gone by, and the machine runs flat out until it catches a schedule
+        // that stopped being true — a second of lost time replayed as a second of the
+        // game at several times its speed. A run that lost time stays late.
+        started_ += before - due;
+      }
     }
 
     // The controllers are read after that wait rather than before it. The frame that
@@ -692,6 +706,7 @@ class Player final : public snaggletooth::FrameObserver {
   player::PadRecorder recorder_;
   unsigned scale_;
   player::Vsync vsync_;
+  bool unthrottled_;                        // no frame deadline and no vsync
   player::Pacing pacing_;                   // the rate the run is held to
   std::optional<player::FramePace> panel_;  // and its deadlines, where that is the panel's
   std::string title_;
@@ -724,6 +739,7 @@ int main(int argc, char** argv) {
   std::string configPath;
   std::string regionName;
   player::Vsync vsync = player::Vsync::Auto;
+  bool unthrottled = false;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
   bool quiet = false;
@@ -792,6 +808,8 @@ int main(int argc, char** argv) {
         std::cerr << "--scale needs a number\n";
         usage(argv[0]);
       }
+    } else if (arg == "--unthrottled") {
+      unthrottled = true;
     } else if (arg == "--mute") {
       mute = true;
     } else if (arg == "--quiet") {
@@ -995,14 +1013,18 @@ int main(int argc, char** argv) {
   if (save) machine.setSaveObserver(&*save);
 
   const std::string stem = std::filesystem::path(imagePath).stem().string();
-  Player player(machine, region, script, scripted, devices, scale, vsync, stem);
+  Player player(machine, region, script, scripted, devices, scale, vsync, unthrottled, stem);
   if (!player.open()) return 1;
   // Which of the two arrangements the run took, before anything else it does: a run
   // that feels wrong is asked this first, and nobody should have to guess at it.
   const snaggletooth::player::Pacing pacing = player.pacing();
   if (!quiet) {
-    std::cerr << (pacing.locked ? "held to the display at " : "the console's own ")
-              << rateText(milliFps(pacing.rate)) << " Hz\n";
+    if (unthrottled) {
+      std::cerr << "unthrottled: no frame pacing, no vsync\n";
+    } else {
+      std::cerr << (pacing.locked ? "held to the display at " : "the console's own ")
+                << rateText(milliFps(pacing.rate)) << " Hz\n";
+    }
   }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);

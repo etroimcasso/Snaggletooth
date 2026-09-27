@@ -6,7 +6,7 @@ run when asked to.
 ```
 snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
-                    [--region ntsc|pal] [--vsync on|off|auto] [--mute] [--quiet]
+                    [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled] [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
 ```
@@ -48,6 +48,15 @@ there and the beat comes back with it.
 `--vsync` names the arrangement outright: `on` holds the run to whatever the panel reports, `off`
 keeps the console's rate and hands every present straight back, and `auto`, the default, decides by
 the rule above.
+
+`--unthrottled` turns the pacing off: no frame waits for its deadline and vsync is off, so the
+machine runs as fast as the host allows. The run's first line says so —
+
+```
+unthrottled: no frame pacing, no vsync
+```
+
+— and the mean rate is printed at exit, as for every run.
 
 The sound goes to the default playback device as the machine makes it, 32 kHz stereo. The device is
 told the rate the run *delivers* at rather than the rate the chip makes: a held run makes its
