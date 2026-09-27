@@ -298,11 +298,20 @@ class Ppu {
   Ppu(PpuState& state, Derived& derived) noexcept : s_(state), d_(derived) {}
 
   // A read of $2100-$213F: the byte the chip drove, or nothing, which the machine
-  // answers with the CPU's own open bus. A register that reads at all is read
-  // with its side effects — a counter's flip-flop, the prefetch, the address
-  // step — and a write-only register in the first half's groups answers with
-  // that half's open-bus value.
+  // answers with the CPU's own open bus. The byte is registerValue's; the read
+  // then makes its side effects — the half's open-bus value takes the byte, a
+  // counter's flip-flop toggles, the prefetch loads, the address steps, the
+  // counters latch — and a write-only register in the first half's groups
+  // answers with that half's open-bus value.
   [[nodiscard]] std::optional<std::uint8_t> read(std::uint16_t offset, const PpuInputs& in);
+
+  // The byte a read of $2100-$213F at `offset` answers, or nothing where it
+  // answers with the CPU's open bus, from `s` and `in` alone and with nothing
+  // moved: no open-bus value stored, no flip-flop toggled, no prefetch, no
+  // address stepped, no counter latched. read() answers the same byte.
+  [[nodiscard]] static std::optional<std::uint8_t> registerValue(const PpuState& s,
+                                                                 std::uint16_t offset,
+                                                                 const PpuInputs& in) noexcept;
 
   // A write to $2100-$213F, and where it landed when it reached a video memory:
   // the VRAM word address for a write to $2118 or $2119, the palette word for a
@@ -632,19 +641,23 @@ class Ppu {
                                         bool half) const noexcept;
 
   // How far a line is into the current row of mosaic blocks: 0 on the row's first.
+  // The static form answers from `s`, for registerValue, which has no Ppu; the
+  // static forms below are the same.
   [[nodiscard]] std::uint16_t mosaicIndex(std::uint16_t line) const noexcept;
+  [[nodiscard]] static std::uint16_t mosaicIndex(const PpuState& s, std::uint16_t line) noexcept;
 
   // Whether the chip is drawing a Mode 7 picture at an access: mode 7, forced
   // blank off, and a line before vertical blank's start — every dot of such a
   // line, horizontal blank included.
-  [[nodiscard]] bool drawingModeSeven(const PpuInputs& in) const noexcept;
+  [[nodiscard]] static bool drawingModeSeven(const PpuState& s, const PpuInputs& in) noexcept;
 
   // What $2134-$2136 hold at a dot of a Mode 7 picture: two products a dot on the
   // chip's own schedule, each with its low three bits dropped — the offset and
   // line products in the line's first three dots, then matrix A times the column
   // in a dot's first half and matrix C times it in the second. The line term is
   // the line less BG1's mosaic index where BG1 is mosaiced, flipped after.
-  [[nodiscard]] std::int32_t multiplierWhileDrawing(const PpuInputs& in) const noexcept;
+  [[nodiscard]] static std::int32_t multiplierWhileDrawing(const PpuState& s,
+                                                           const PpuInputs& in) noexcept;
 
   // The front-most pixel of one screen, by the order its mode keeps, each layer
   // taken only where that screen enables it and the windows leave it there. `half`
@@ -694,14 +707,24 @@ class Ppu {
   // Whether vertical blank is open to the memories, and whether the taller picture
   // was asked for after the blank had already begun — which shuts them again until
   // the line that picture ends on.
-  [[nodiscard]] bool inVblankWindow(const PpuInputs& in) const noexcept;
-  [[nodiscard]] bool overscanLate(const PpuInputs& in) const noexcept;
+  // registerValue's computation, which read() and registerValue() both take
+  // inline, so a read spends no call on its byte. Defined in ppu.cpp, the one
+  // file that calls it.
+  [[nodiscard]] static inline std::optional<std::uint8_t> valueAt(const PpuState& s,
+                                                                  std::uint16_t offset,
+                                                                  const PpuInputs& in) noexcept;
+
+  [[nodiscard]] static bool inVblankWindow(const PpuState& s, const PpuInputs& in) noexcept;
+  [[nodiscard]] static bool overscanLate(const PpuState& s, const PpuInputs& in) noexcept;
 
   // Whether each memory can be reached now. VRAM and the sprite table only in
   // vertical blank or forced blank; the palette in horizontal blank too.
   [[nodiscard]] bool vramReachable(const PpuInputs& in) const noexcept;
   [[nodiscard]] bool oamReachable(const PpuInputs& in) const noexcept;
   [[nodiscard]] bool cgramReachable(const PpuInputs& in) const noexcept;
+  [[nodiscard]] static bool vramReachable(const PpuState& s, const PpuInputs& in) noexcept;
+  [[nodiscard]] static bool oamReachable(const PpuState& s, const PpuInputs& in) noexcept;
+  [[nodiscard]] static bool cgramReachable(const PpuState& s, const PpuInputs& in) noexcept;
 
   // The VRAM word the address currently reaches, after any $2115 translation.
   [[nodiscard]] std::uint16_t vramWordAddress() const noexcept;

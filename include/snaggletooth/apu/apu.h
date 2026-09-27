@@ -272,13 +272,19 @@ class Apu {
   }
   void loadRam(std::uint16_t address, std::span<const std::uint8_t> bytes) noexcept;
 
-  // What a fetch by the sound CPU at `address` returns, without making one: the
-  // boot-ROM image while an image is mapped and CONTROL bit 7 is set, the RAM
-  // byte otherwise. The sixteen register bytes are answered from the RAM
-  // beneath them, as readRam answers them; no program is fetched from the
-  // overlay. Nothing changes, so a host can decode the instruction the CPU is
-  // about to run.
+  // The byte at `address` as the sound CPU's memory holds it, without a fetch:
+  // the boot-ROM image while an image is mapped and CONTROL bit 7 is set, the RAM
+  // byte otherwise. At $00F0-$00FF it is the RAM beneath the registers, as
+  // readRam answers it, where the CPU's own read answers the register; a
+  // register's value is peekRegister's. Nothing changes, so a host can decode
+  // the instruction the CPU is about to run.
   [[nodiscard]] std::uint8_t peek(std::uint16_t address) const noexcept;
+
+  // The byte the sound CPU's read of a register at `address` ($00F0-$00FF) would
+  // return, with nothing moved: a timer's output is answered and not cleared, the
+  // DSP register under DSPADDR is answered and the address stands. std::nullopt
+  // for any other address — RAM and the boot-ROM window are peek's.
+  [[nodiscard]] std::optional<std::uint8_t> peekRegister(std::uint16_t address) const noexcept;
 
   // Points the CPU at a loaded image (the machine has no IPL ROM to set an entry
   // for). A convenience over restoring a whole state with a changed PC.
@@ -333,12 +339,13 @@ class Apu {
 
   // A host reaching into the machine's RAM by 16-bit address, beside readRam /
   // writeRam and in the console's vocabulary. peek answers the byte the sound
-  // CPU would fetch (above); poke writes the RAM beneath the register overlay,
+  // CPU's memory holds (above); poke writes the RAM beneath the register overlay,
   // and always lands, because the whole 64 KB is RAM. addressable answers
   // whether `bytes` from `address` are RAM this face reaches — every address is,
   // so it answers whether the range fits without running past the end. The
-  // sixteen registers at $00F0-$00FF are reached by name below, not here, and a
-  // read of $00F0-$00FF through peek returns the RAM beneath, not the register.
+  // sixteen registers at $00F0-$00FF are read by address through peekRegister
+  // (above) and by name below, not here, and a read of $00F0-$00FF through peek
+  // returns the RAM beneath, not the register.
   bool poke(std::uint16_t address, std::uint8_t value) noexcept {
     state_->ram[address] = value;
     return true;
@@ -362,7 +369,8 @@ class Apu {
   // two AUXIO bytes and the three timers. Written and read as the sound CPU's
   // own access does, side effects and all — a write lands in the RAM beneath and
   // applies the register's effect, and reading a timer's output clears it, so
-  // readOverlayRegister is not const.
+  // readOverlayRegister is not const. peekRegister is the same read without the
+  // clear.
   void writeOverlayRegister(std::uint8_t index, std::uint8_t value);
   [[nodiscard]] std::uint8_t readOverlayRegister(std::uint8_t index);
 
@@ -444,10 +452,17 @@ class Apu {
   // the routine is abandoned at its boundary and the call returns false. Zero
   // runs nothing.
   //
+  // A machine a run() stopped inside an instruction is first run to the next
+  // instruction boundary, exactly as step() runs it. Those cycles are the
+  // program's own: state().divider moves by them as by the routine's, and
+  // callInContext's file is the one at that boundary, where the program resumes.
+  //
   // The call is refused, returning false with nothing done, when `returns` is
-  // ApuStandin::None or when the machine is not between instructions (inside
-  // an access watcher's call, or after a run() that stopped mid-instruction).
-  // A call made from inside a watcher's call, at any depth, is the same call.
+  // ApuStandin::None, or when it is made from inside a host's call the machine
+  // makes during the CPU's access — the access watcher's, or the observer's
+  // access report. An instruction watcher is told, and the observer's
+  // instruction report made, between instructions, and a call from inside
+  // either, at any depth, is the same call.
   bool callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard);
   bool callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
                    std::size_t guard);
@@ -488,7 +503,10 @@ class Apu {
   // that begins it, and the access watch. Kept out of busRead so the access a
   // machine with nothing armed makes stays one test and the bus.
   std::uint8_t readWithHost(std::uint16_t address, std::uint8_t value);
+  // The CPU's read of register `reg` ($F0-$FF): registerValue's byte, then the
+  // clear a read of $FD-$FF makes. registerValue has no effect.
   std::uint8_t readRegister(std::uint8_t reg);
+  [[nodiscard]] std::uint8_t registerValue(std::uint8_t reg) const noexcept;
   void writeRegister(std::uint8_t reg, std::uint8_t value);
 
   // Applies the access watch to one CPU access, when the watcher is set and the
@@ -543,6 +561,12 @@ class Apu {
   ApuObserver* observer_ = nullptr;  // told every access and every boundary; none by default
   Spc700State boundaryState_{};      // the CPU at the last boundary reported, the `before` of the next
   std::uint32_t sinceBoundary_ = 0;  // cycles run since it
+  // Whether the CPU's access is in progress, where the access watcher and the
+  // observer's access report run part-way through an instruction. A call into the
+  // program made while it is set is refused. It belongs to the cycle, not to the
+  // machine, so a snapshot does not carry it, and restore(), reload() and reset()
+  // clear it.
+  bool insideCycle_ = false;
   // The addresses a host has armed for a watch, one bit per 16-bit address per
   // direction, behind one owning pointer held null until the first arm. The
   // sound CPU's space is 64 KB, so each direction is a single 8 KB bitmap; the

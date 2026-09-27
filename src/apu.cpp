@@ -58,6 +58,7 @@ Apu::Apu(Apu&& moved, ApuState* storage) noexcept
       observer_(moved.observer_),
       boundaryState_(moved.boundaryState_),
       sinceBoundary_(moved.sinceBoundary_),
+      insideCycle_(moved.insideCycle_),
       accessWatcher_(moved.accessWatcher_),
       armed_(std::move(moved.armed_)),
       instructionWatcher_(moved.instructionWatcher_),
@@ -74,6 +75,10 @@ void Apu::restore(ApuState state) {
 }
 
 void Apu::reload() {
+  // No host's call is on the stack of the machine that begins here, whatever a
+  // throw from one left behind. setCpuState reloads the core too and keeps the
+  // marker: a watcher may call it part-way through a cycle.
+  insideCycle_ = false;
   syncCpuAndSlot();
   frames_.clear();  // pending output belongs to the machine that produced it
 }
@@ -143,7 +148,9 @@ void Apu::machineCycle() {
   // armed" test, and an unarmed machine pays it alone.
   if (standins_ != nullptr) tellInstruction();
   Bus bus{*this};
+  insideCycle_ = true;  // a call into the program from inside the access is refused
   cpu_.stepCycle(bus);
+  insideCycle_ = false;
 
   // The observer is told each boundary the cycle lands on, with the state at
   // the one before and every cycle between. A halted core sits on a boundary,
@@ -255,6 +262,7 @@ void Apu::reset() {
   for (std::size_t addr = 0x0100; addr < fresh.ram.size(); ++addr)
     fresh.ram[addr] = state_->ram[addr];
   *state_ = std::move(fresh);
+  insideCycle_ = false;  // as reload() clears it
   syncCpuAndSlot();
   frames_.clear();  // a reset abandons any un-drained output
 }
@@ -432,9 +440,13 @@ bool Apu::runCall(std::uint16_t entry, Spc700State file, std::size_t guard) {
 }
 
 bool Apu::callInContext(std::uint16_t entry, ApuStandin returns, std::size_t guard) {
+  // The refusals come first and spend nothing. A machine a budget stopped inside
+  // an instruction then runs to the boundary exactly as step() would, those
+  // cycles the program's own; the file taken there is the one it resumes at.
+  if (returns == ApuStandin::None || insideCycle_) return false;
+  while (!cpu_.atInstructionBoundary()) machineCycle();
   state_->cpu = cpu_.state();
   const Spc700State before = state_->cpu;
-  if (returns == ApuStandin::None || before.tcu != 0u) return false;
   const bool returned = runCall(entry, before, guard);
   setCpuState(before);  // the program's file, back as it was
   return returned;
@@ -442,14 +454,21 @@ bool Apu::callInContext(std::uint16_t entry, ApuStandin returns, std::size_t gua
 
 bool Apu::callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin returns,
                       std::size_t guard) {
+  // Refused, or run to the boundary first, as callInContext is.
+  if (returns == ApuStandin::None || insideCycle_) return false;
+  while (!cpu_.atInstructionBoundary()) machineCycle();
   state_->cpu = cpu_.state();
   Spc700State file = state_->cpu;
-  if (returns == ApuStandin::None || file.tcu != 0u) return false;
   file.sp = stackTop;
   return runCall(entry, file, guard);
 }
 
-std::uint8_t Apu::readRegister(std::uint8_t reg) {
+std::optional<std::uint8_t> Apu::peekRegister(std::uint16_t address) const noexcept {
+  if (address < 0x00F0u || address > 0x00FFu) return std::nullopt;
+  return registerValue(static_cast<std::uint8_t>(address));
+}
+
+std::uint8_t Apu::registerValue(std::uint8_t reg) const noexcept {
   switch (reg) {
     case 0xF2: return state_->dspAddr;                       // DSPADDR reads back the latched address
     case 0xF3: return state_->dsp[state_->dspAddr & 0x7Fu];   // DSPDATA masks the address with $7F
@@ -457,16 +476,18 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
       return state_->inputPorts[reg - 0xF4u];
     case 0xF8: case 0xF9:                                   // AUXIO: the port's own byte, not the RAM beneath
       return state_->auxPorts[reg - 0xF8u];
-    case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
-      TimerState& t = state_->timers[reg - 0xFDu];
-      const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
-      t.stage3 = 0;
-      return out;
-    }
+    case 0xFD: case 0xFE: case 0xFF:                        // TnOUT: the 4-bit stage-3 counter
+      return static_cast<std::uint8_t>(state_->timers[reg - 0xFDu].stage3 & 0x0Fu);
     // TEST, CONTROL and TnTARGET are write-only and read back 0.
     default:
       return 0;
   }
+}
+
+std::uint8_t Apu::readRegister(std::uint8_t reg) {
+  const std::uint8_t v = registerValue(reg);
+  if (reg >= 0xFDu) state_->timers[reg - 0xFDu].stage3 = 0;  // reading TnOUT clears the counter
+  return v;
 }
 
 void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {

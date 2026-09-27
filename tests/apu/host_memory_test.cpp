@@ -1,5 +1,6 @@
 // The audio machine's host memory face, in its own 16-bit vocabulary: reaching
-// into RAM by address (peek / poke / addressable), the DSP register file and the
+// into RAM by address (peek / poke / addressable), a register's value by address
+// without its read's effect (peekRegister), the DSP register file and the
 // sound CPU's $00F0-$00FF overlay reached by name, the allocation-free contract
 // that a register write does not advance the sample slot, and the CPU register
 // file read and written whole. Each case reads a value back or steps the machine
@@ -10,8 +11,10 @@
 // the DSP register file byte-identical, acknowledge for ENDX included.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -132,6 +135,76 @@ TEST(ApuHostMemory, OverlayRegisterReadClearsATimerOutput) {
   apu.restore(st);
   EXPECT_EQ(apu.readOverlayRegister(kT0Out), 0x0Au);  // $FD returns the output
   EXPECT_EQ(apu.readOverlayRegister(kT0Out), 0x00u);  // reading it cleared it
+}
+
+// ---- peekRegister: a register's value, with nothing moved -----------------
+
+TEST(ApuHostMemory, PeekRegisterAnswersExactlyTheSixteenRegisters) {
+  Apu apu;
+  for (std::uint32_t address = 0; address <= 0xFFFFu; ++address) {
+    const bool isRegister = address >= 0x00F0u && address <= 0x00FFu;
+    EXPECT_EQ(apu.peekRegister(static_cast<std::uint16_t>(address)).has_value(), isRegister)
+        << address;
+  }
+}
+
+TEST(ApuHostMemory, PeekRegisterAnswersEachRegisterWithNothingMoved) {
+  ApuState st;
+  st.timers[0].stage3 = 0x0Au;  // a pending T0 output
+  st.dspAddr = 0x0Cu;
+  st.dsp[0x0Cu] = 0x55u;
+  st.inputPorts[0] = 0x11u;
+  st.inputPorts[1] = 0x22u;
+  st.inputPorts[2] = 0x33u;
+  st.inputPorts[3] = 0x44u;
+  st.auxPorts[0] = 0x81u;
+  st.auxPorts[1] = 0x82u;
+  for (std::size_t a = 0x00F0u; a <= 0x00FFu; ++a) st.ram[a] = 0xEEu;  // the RAM beneath, never answered
+  Apu apu;
+  apu.restore(st);
+  const ApuState before = apu.state();
+
+  EXPECT_EQ(apu.peekRegister(0x00FDu), std::optional<std::uint8_t>{0x0Au});  // T0OUT, answered
+  EXPECT_EQ(apu.peekRegister(0x00F3u), std::optional<std::uint8_t>{0x55u});  // the DSP register under DSPADDR
+  EXPECT_EQ(apu.peekRegister(0x00F2u), std::optional<std::uint8_t>{0x0Cu});  // DSPADDR itself
+  EXPECT_EQ(apu.peekRegister(0x00F4u), std::optional<std::uint8_t>{0x11u});  // the input ports
+  EXPECT_EQ(apu.peekRegister(0x00F5u), std::optional<std::uint8_t>{0x22u});
+  EXPECT_EQ(apu.peekRegister(0x00F6u), std::optional<std::uint8_t>{0x33u});
+  EXPECT_EQ(apu.peekRegister(0x00F7u), std::optional<std::uint8_t>{0x44u});
+  EXPECT_EQ(apu.peekRegister(0x00F8u), std::optional<std::uint8_t>{0x81u});  // AUXIO's own bytes
+  EXPECT_EQ(apu.peekRegister(0x00F9u), std::optional<std::uint8_t>{0x82u});
+  for (const std::uint16_t zero : {std::uint16_t{0x00F0u}, std::uint16_t{0x00F1u}, std::uint16_t{0x00FAu},
+                                   std::uint16_t{0x00FBu}, std::uint16_t{0x00FCu}}) {
+    EXPECT_EQ(apu.peekRegister(zero), std::optional<std::uint8_t>{0x00u}) << zero;  // write-only
+  }
+  EXPECT_EQ(apu.peekRegister(0x00EFu), std::nullopt);
+  EXPECT_EQ(apu.peekRegister(0x0100u), std::nullopt);
+  EXPECT_TRUE(apu.state() == before);  // the count stands, and so does everything else
+
+  // The read answers the same byte, and clears the count.
+  EXPECT_EQ(apu.readOverlayRegister(kT0Out), 0x0Au);
+  EXPECT_EQ(apu.state().timers[0].stage3, 0x00u);
+  EXPECT_EQ(apu.peekRegister(0x00FDu), std::optional<std::uint8_t>{0x00u});
+}
+
+TEST(ApuHostMemory, PeekingEveryRegisterBetweenRunsLandsByteIdenticalToAPlainRun) {
+  ApuState st;
+  st.timers[0].stage3 = 0x05u;  // an output a read would clear
+  Apu a;
+  Apu b;
+  a.restore(st);
+  b.restore(st);
+  a.run(1000u);
+  b.run(1000u);
+  std::size_t answered = 0;
+  for (std::uint32_t address = 0; address <= 0xFFFFu; ++address) {
+    if (a.peekRegister(static_cast<std::uint16_t>(address)).has_value()) ++answered;
+  }
+  EXPECT_EQ(answered, 16u);
+  a.run(1000u);
+  b.run(1000u);
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
 }
 
 // ---- the CPU register file ------------------------------------------------

@@ -274,6 +274,14 @@ class SaveObserver {
   // that moved. Told once per frame however many stores landed in it, and not at
   // all in a frame where none did. The span is the machine's own storage and is
   // valid for the call.
+  //
+  // It arrives from inside step() or run(), at the end of the cycle in which the
+  // beam reaches the next frame's first line, after that cycle has closed. It may
+  // throw: step() or run() then returns through the throw with the machine at
+  // that cycle's end, state() coherent there, and the report not made again. The
+  // next run() finishes the budget the throw interrupted before it spends its
+  // own, so run(a) then run(b) lands where run(a + b) does; a step() interrupted
+  // this way leaves an instruction part-run, which the next step() finishes.
   virtual void changed(std::span<const std::uint8_t> save) = 0;
 };
 
@@ -656,25 +664,46 @@ class Snes {
   void setApuObserver(ApuObserver* observer) noexcept { apu_.setObserver(observer); }
   [[nodiscard]] ApuObserver* apuObserver() const noexcept { return apu_.observer(); }
 
-  // What a fetch by the sound CPU at `address` returns, without making one:
-  // Apu::peek on the live audio machine.
+  // The audio machine's byte at `address`, without a fetch: Apu::peek on the live
+  // audio machine — the RAM, or the boot-ROM image where one is mapped, and at
+  // $00F0-$00FF the RAM beneath the registers.
   [[nodiscard]] std::uint8_t peekApu(std::uint16_t address) const noexcept {
     return apu_.peek(address);
+  }
+
+  // The byte the sound CPU's read of a register at `address` ($00F0-$00FF) would
+  // return, with nothing moved: Apu::peekRegister on the live audio machine.
+  // std::nullopt for any other address.
+  [[nodiscard]] std::optional<std::uint8_t> peekApuRegister(std::uint16_t address) const noexcept {
+    return apu_.peekRegister(address);
   }
 
   // A host reaching into the machine's memory by 24-bit bus address, without
   // spending a cycle and without a register's side effect. peek answers the
   // byte the address holds — work RAM, the cartridge's ROM, or its save — and
   // std::nullopt for anything this face does not reach as memory: a register,
-  // or an address the cartridge leaves open. poke writes that byte and returns
-  // whether it landed; a poke to ROM changes the machine's own copy of the
-  // image, never a file, and no snapshot carries it. addressable answers, for
+  // whose value is peekRegister's (below), or an address the cartridge leaves
+  // open. poke writes that byte and returns whether it landed; a poke to ROM
+  // changes the machine's own copy of the image, never a file, and no snapshot
+  // carries it. addressable answers, for
   // `bytes` bytes from `address`, whether every one is memory this face reaches;
   // it is peek's own answer, so no two callers are told different things about
   // one address, and a zero-length span is addressable.
   [[nodiscard]] std::optional<std::uint8_t> peek(std::uint32_t address) const noexcept;
   bool poke(std::uint32_t address, std::uint8_t value) noexcept;
   [[nodiscard]] bool addressable(std::uint32_t address, std::size_t bytes) const noexcept;
+
+  // The byte a read of a register at `address` would return, computed as the read
+  // computes it — from the state as it stands, the open-bus bits from the byte the
+  // bus last carried — with nothing moved: no flag cleared, no port clocked, no
+  // address stepped, no latch or flip-flop touched, no counter latched, and the
+  // data bus left holding what it held. std::nullopt for an address that is not a
+  // register (physical(address).space != Space::Register): memory and open bus
+  // are peek's. A read ticks the beam before it answers and a peek does not, so
+  // a bit the beam decides ($4212's blank flags, the field bit of $213F, the
+  // multiplier's ports while a Mode 7 picture is drawn) is answered at the
+  // position the machine stands at.
+  [[nodiscard]] std::optional<std::uint8_t> peekRegister(std::uint32_t address) const noexcept;
 
   // The four memories the bus cannot name, each written the way the chip reads
   // it: no port address steps, no latch moves, no increment happens. VRAM is
@@ -801,12 +830,23 @@ class Snes {
   // interrupt that never comes trips it too. On overrun the routine is
   // abandoned at its boundary and the call returns false. Zero runs nothing.
   //
+  // A machine a run() stopped inside an instruction — or inside a refresh, a
+  // transfer or an interrupt sequence — is first run to the next instruction
+  // boundary, exactly as step() runs it. Those cycles are the guest's own: they
+  // come out of the budget the host runs next, the same as the routine's, and
+  // callInContext's file is the one at that boundary, where the guest resumes.
+  //
   // The call is refused, returning false with nothing done, when `returns` is
-  // Standin::None, when the machine is not between instructions (inside an
-  // access watcher's call, or after a run() that stopped mid-instruction),
-  // when the entry's own bank does not map it (addressable(entry, 1)), or
-  // when the stack the landing would land on is not memory this face reaches.
-  // A call made from inside a watcher's call, at any depth, is the same call.
+  // Standin::None, when the entry's own bank does not map it (addressable(entry,
+  // 1)), or when it is made from inside a host's call the machine makes during a
+  // cycle — an access watcher's, the bus observer's, or the audio machine's
+  // observer's. An instruction watcher is told between instructions, and a call
+  // from inside its call, at any depth, is the same call. The frame and save
+  // observers are told at a cycle's end, and a call from inside their reports
+  // runs the machine to its boundary first, as above; a frame the routine
+  // finishes is reported inside the call. A call is refused after the finishing
+  // cycles, with them spent and nothing pushed, when the stack the landing would
+  // land on is not memory this face reaches.
   bool callInContext(std::uint32_t entry, Standin returns, std::size_t guard);
   bool callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
                    std::size_t guard);
@@ -883,7 +923,8 @@ class Snes {
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
-  // by the master cycles it now owes.
+  // by the master cycles it now owes. A frame or save report the cycle owes is
+  // made after it closes.
   void machineCycle();
 
   // The master cycles the refresh holds the CPU off the bus, spent a fast cycle at a
@@ -925,13 +966,17 @@ class Snes {
   // through $213E.
   void rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept;
 
+  // Makes the frame and save reports the cycle just closed owes, after writing
+  // the register file back. Called at the end of machineCycle, outside the
+  // cycle, and from nowhere else: the line that finishes a frame cannot be left
+  // half done, and a host's report may throw.
+  void deliverFinished();
   // Hands the finished picture to the frame observer: the rows the frame's own
   // vertical blank left below it, the frame's parity, and the raster the dots
-  // wrote. Called as the beam reaches the next frame's first line.
+  // wrote. Called at the end of the cycle in which the beam reaches the next
+  // frame's first line, which draws nothing, so the raster is the finished frame.
   void deliverFrame();
-  // Hands the save window to the observer. Called from between cycles rather than
-  // from the line that finished the frame, because that line cannot throw and what
-  // a host does with a save can.
+  // Hands the save window to the observer, at the end of the same cycle.
   void deliverSave();
 
   // The events inside one line, for the master-cycle span (`from`, `to`] of a line
@@ -1154,8 +1199,10 @@ class Snes {
   void endDmaOnChannels(std::uint8_t channels) noexcept;
 
   // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
-  // register files, read and written by their documented layout.
+  // register files, read and written by their documented layout. dmaRegValue is
+  // the byte a read answers, with no effect: the read stores it on the data bus.
   std::uint8_t readDmaReg(std::uint16_t offset);
+  [[nodiscard]] std::uint8_t dmaRegValue(std::uint16_t offset) const noexcept;
   void writeDmaReg(std::uint16_t offset, std::uint8_t value);
 
   // The master-cycle cost of reaching `address`, by the documented region map. The
@@ -1165,7 +1212,10 @@ class Snes {
   // The work-RAM data port: $2180 reads or writes work RAM at the port address and
   // steps it; $2181-$2183 set the address and read back as open bus. `cycle` is
   // the driving access's, which the port's own access is watched with.
+  // wramPortValue is the byte a read answers before a watcher sees it, with the
+  // address left where it stands.
   std::uint8_t readWramPort(std::uint16_t offset, std::uint8_t cycle);
+  [[nodiscard]] std::uint8_t wramPortValue(std::uint16_t offset) const noexcept;
   void writeWramPort(std::uint16_t offset, std::uint8_t value, std::uint8_t cycle);
 
   // The PPU's input pins as they stand: where the beam is, the frame parity, the
@@ -1177,17 +1227,25 @@ class Snes {
 
   // The CPU-side registers ($4200-$421F): interrupt enables and flags, the H/V timer
   // settings, the multiply/divide unit, the I/O port, and the auto-joypad read.
+  // cpuRegValue is the byte a read answers, with no effect: the read then clears
+  // RDNMI's or TIMEUP's flag and stores the byte on the data bus.
   std::uint8_t readCpuReg(std::uint16_t offset);
+  [[nodiscard]] std::uint8_t cpuRegValue(std::uint16_t offset) const noexcept;
   void writeCpuReg(std::uint16_t offset, std::uint8_t value);
 
   // The serial controller ports: a write to $4016 drives the strobe line, and a
   // read of $4016 or $4017 returns a port's next bit and clocks its register.
+  // joypadPortValue is the byte that read answers, with the register left
+  // unclocked.
   std::uint8_t readJoypadPort(std::uint16_t offset);
+  [[nodiscard]] std::uint8_t joypadPortValue(std::uint16_t offset) const noexcept;
   void writeJoypadStrobe(std::uint8_t value) noexcept;
   // Latches every port's sixteen bits — the strobe pulse a program or the
-  // auto-read gives — and one bit clocked out of a port's register.
+  // auto-read gives — and one bit clocked out of a port's register. joypadBit
+  // is the bit the next clock gives, without the clock.
   void latchJoypads() noexcept;
   [[nodiscard]] std::uint8_t clockJoypad(std::size_t port) noexcept;
+  [[nodiscard]] std::uint8_t joypadBit(std::size_t port) const noexcept;
 
   // Takes the beam to the line beginning at `lineStart`, wrapping the frame, and runs
   // the events that line's start carries: the frame's own — the overflow flags and
@@ -1234,6 +1292,12 @@ class Snes {
   bool timerHPoint_ = false;         // the H point, on whatever line
   bool timerHPointOnVLine_ = false;  // the H point, on the line VTIME names
   bool timerZeroOnVLine_ = false;    // the H = 0 point, on that line
+  // Whether the machine is inside a cycle, where a host's callback runs part-way
+  // through the chip's work: set for the whole cycle but the instruction watch at
+  // its start; the frame and save reports come after it clears. A call into the
+  // guest made while it is set is refused. It belongs to the cycle, not to the
+  // machine, so a snapshot does not carry it, and restore() and reset() clear it.
+  bool insideCycle_ = false;
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
   std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported
   FrameObserver* frameObserver_ = nullptr;  // told every finished frame; none by default

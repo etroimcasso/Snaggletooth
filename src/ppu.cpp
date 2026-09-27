@@ -148,27 +148,31 @@ std::int32_t PpuState::multiplyResult() const noexcept {
 
 // ---- the memories' windows ---------------------------------------------------
 
-bool Ppu::inVblankWindow(const PpuInputs& in) const noexcept {
+bool Ppu::inVblankWindow(const PpuState& s, const PpuInputs& in) noexcept {
   // Vertical blank opens the memories — except when the taller picture was asked for
   // after the blank had already begun. That resumes nothing the blank stopped, but the
   // chip holds its memories as though it were still drawing, to the line the taller
   // picture ends on.
-  return in.vblank && !(overscanLate(in));
+  return in.vblank && !(overscanLate(s, in));
 }
 
-bool Ppu::overscanLate(const PpuInputs& in) const noexcept {
-  return s_.overscan() && in.vpos < kOverscanVblankStartLine;
+bool Ppu::overscanLate(const PpuState& s, const PpuInputs& in) noexcept {
+  return s.overscan() && in.vpos < kOverscanVblankStartLine;
 }
 
-bool Ppu::vramReachable(const PpuInputs& in) const noexcept {
-  return inVblankWindow(in) || s_.forcedBlank();
+bool Ppu::vramReachable(const PpuState& s, const PpuInputs& in) noexcept {
+  return inVblankWindow(s, in) || s.forcedBlank();
 }
-bool Ppu::oamReachable(const PpuInputs& in) const noexcept {
-  return inVblankWindow(in) || s_.forcedBlank();
+bool Ppu::oamReachable(const PpuState& s, const PpuInputs& in) noexcept {
+  return inVblankWindow(s, in) || s.forcedBlank();
 }
-bool Ppu::cgramReachable(const PpuInputs& in) const noexcept {
-  return inVblankWindow(in) || in.hblank || s_.forcedBlank();
+bool Ppu::cgramReachable(const PpuState& s, const PpuInputs& in) noexcept {
+  return inVblankWindow(s, in) || in.hblank || s.forcedBlank();
 }
+
+bool Ppu::vramReachable(const PpuInputs& in) const noexcept { return vramReachable(s_, in); }
+bool Ppu::oamReachable(const PpuInputs& in) const noexcept { return oamReachable(s_, in); }
+bool Ppu::cgramReachable(const PpuInputs& in) const noexcept { return cgramReachable(s_, in); }
 
 // ---- the VRAM port -----------------------------------------------------------
 
@@ -299,10 +303,12 @@ void Ppu::beginLine(std::uint16_t line) noexcept {
   }
 }
 
-std::uint16_t Ppu::mosaicIndex(std::uint16_t line) const noexcept {
-  const unsigned current = s_.mosaicBlockLine;
+std::uint16_t Ppu::mosaicIndex(const PpuState& s, std::uint16_t line) noexcept {
+  const unsigned current = s.mosaicBlockLine;
   return static_cast<std::uint16_t>(line < current ? 0u : line - current);
 }
+
+std::uint16_t Ppu::mosaicIndex(std::uint16_t line) const noexcept { return mosaicIndex(s_, line); }
 
 Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
                                   bool half) const noexcept {
@@ -818,25 +824,25 @@ std::optional<Ppu::Shown> Ppu::sampleField(Layer layer, std::uint16_t x,
   return Shown{.word = pixel, .priority = false, .direct = std::nullopt};
 }
 
-bool Ppu::drawingModeSeven(const PpuInputs& in) const noexcept {
-  return (s_.bgmode & 0x07u) == 7u && !s_.forcedBlank() && !in.vblank &&
-         in.vpos < s_.vblankStartLine();
+bool Ppu::drawingModeSeven(const PpuState& s, const PpuInputs& in) noexcept {
+  return (s.bgmode & 0x07u) == 7u && !s.forcedBlank() && !in.vblank &&
+         in.vpos < s.vblankStartLine();
 }
 
-std::int32_t Ppu::multiplierWhileDrawing(const PpuInputs& in) const noexcept {
-  const std::int32_t a = static_cast<std::int16_t>(s_.m7a);
-  const std::int32_t b = static_cast<std::int16_t>(s_.m7b);
-  const std::int32_t c = static_cast<std::int16_t>(s_.m7c);
-  const std::int32_t d = static_cast<std::int16_t>(s_.m7d);
-  const std::int32_t ox = clippedOffset(signed13(s_.m7hofs) - signed13(s_.m7x));
-  const std::int32_t oy = clippedOffset(signed13(s_.m7vofs) - signed13(s_.m7y));
+std::int32_t Ppu::multiplierWhileDrawing(const PpuState& s, const PpuInputs& in) noexcept {
+  const std::int32_t a = static_cast<std::int16_t>(s.m7a);
+  const std::int32_t b = static_cast<std::int16_t>(s.m7b);
+  const std::int32_t c = static_cast<std::int16_t>(s.m7c);
+  const std::int32_t d = static_cast<std::int16_t>(s.m7d);
+  const std::int32_t ox = clippedOffset(signed13(s.m7hofs) - signed13(s.m7x));
+  const std::int32_t oy = clippedOffset(signed13(s.m7vofs) - signed13(s.m7y));
   // The line term is the line less BG1's mosaic index, under the vertical flip; the
   // column term is the dot less three, wrapped at 256, under the horizontal flip.
   const std::int32_t line =
-      (s_.mosaic & 0x01u) != 0u ? in.vpos - mosaicIndex(in.vpos) : in.vpos;
-  const std::int32_t sy = (s_.m7sel & 0x02u) != 0u ? (line ^ 0xFF) : line;
+      (s.mosaic & 0x01u) != 0u ? in.vpos - mosaicIndex(s, in.vpos) : in.vpos;
+  const std::int32_t sy = (s.m7sel & 0x02u) != 0u ? (line ^ 0xFF) : line;
   const std::int32_t column = (in.hdot - 3) & 0xFF;
-  const std::int32_t sx = (s_.m7sel & 0x01u) != 0u ? (column ^ 0xFF) : column;
+  const std::int32_t sx = (s.m7sel & 0x01u) != 0u ? (column ^ 0xFF) : column;
   switch (in.hdot) {
     case 0u: return scheduled(in.lateHalf ? d * oy : a * ox);
     case 1u: return scheduled(in.lateHalf ? c * ox : b * oy);
@@ -1136,122 +1142,135 @@ void Ppu::latchCounters(const PpuInputs& in) noexcept {
 
 // ---- reads -------------------------------------------------------------------
 
-std::optional<std::uint8_t> Ppu::read(std::uint16_t offset, const PpuInputs& in) {
+// A function every call site takes inline, whatever the compiler's own measure
+// of it: GCC and Clang by the attribute, MSVC by its keyword.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define SNAGGLETOOTH_FORCE_INLINE __forceinline
+#else
+#define SNAGGLETOOTH_FORCE_INLINE [[gnu::always_inline]] inline
+#endif
+
+SNAGGLETOOTH_FORCE_INLINE std::optional<std::uint8_t> Ppu::valueAt(const PpuState& s,
+                                                                   std::uint16_t offset,
+                                                                   const PpuInputs& in) noexcept {
   // The three ports hold the plain product — matrix A times the byte last written
   // to $211C — except while the chip is drawing a Mode 7 picture, when they hold
   // what its own multiplier is doing at this dot.
-  const auto product = [this, &in] {
-    return drawingModeSeven(in) ? multiplierWhileDrawing(in) : s_.multiplyResult();
+  const auto product = [&s, &in] {
+    return drawingModeSeven(s, in) ? multiplierWhileDrawing(s, in) : s.multiplyResult();
   };
   switch (offset) {
-    case 0x2134: {  // MPYL
-      const std::uint8_t v = static_cast<std::uint8_t>(product() & 0xFF);
-      s_.ppu1Bus = v;
-      return v;
-    }
-    case 0x2135: {  // MPYM
-      const std::uint8_t v = static_cast<std::uint8_t>((product() >> 8) & 0xFF);
-      s_.ppu1Bus = v;
-      return v;
-    }
-    case 0x2136: {  // MPYH
-      const std::uint8_t v = static_cast<std::uint8_t>((product() >> 16) & 0xFF);
-      s_.ppu1Bus = v;
-      return v;
-    }
-    case 0x2137:  // SLHV: the software latch, while the latch line is high; the value read is the CPU's open bus
-      if (in.extLatch) latchCounters(in);
+    case 0x2134: return static_cast<std::uint8_t>(product() & 0xFF);          // MPYL
+    case 0x2135: return static_cast<std::uint8_t>((product() >> 8) & 0xFF);   // MPYM
+    case 0x2136: return static_cast<std::uint8_t>((product() >> 16) & 0xFF);  // MPYH
+    case 0x2137:  // SLHV: the value read is the CPU's open bus
       return std::nullopt;
-    case 0x2138: {  // RDOAM: the byte at the OAM address, which then steps
-      const std::uint16_t at = s_.oamAddress & 0x3FFu;
-      s_.oamAddress = static_cast<std::uint16_t>((at + 1u) & 0x3FFu);
-      if (!oamReachable(in)) return s_.ppu1Bus;  // the table is the chip's now; the address stepped all the same
+    case 0x2138: {  // RDOAM: the byte at the OAM address
+      if (!oamReachable(s, in)) return s.ppu1Bus;  // the table is the chip's now
+      const std::uint16_t at = s.oamAddress & 0x3FFu;
       const std::size_t index = at >= 0x200u ? 0x200u | (at & 0x1Fu) : at;
-      s_.ppu1Bus = s_.oam[index];
-      return s_.ppu1Bus;
+      return s.oam[index];
     }
-    case 0x2139: {  // RDVRAML: the low byte of the prefetch register
-      const std::uint8_t v = static_cast<std::uint8_t>(s_.vramLatch & 0xFFu);
+    case 0x2139:  // RDVRAML: the low byte of the prefetch register
+      return static_cast<std::uint8_t>(s.vramLatch & 0xFFu);
+    case 0x213A:  // RDVRAMH: the high byte of the prefetch register
+      return static_cast<std::uint8_t>(s.vramLatch >> 8);
+    case 0x213B: {  // RDCGRAM: two reads make a word; the high byte's top bit is the second half's open bus
+      if (!cgramReachable(s, in)) return s.ppu2Bus;
+      const std::uint16_t byte = static_cast<std::uint16_t>(s.cgadd) << 1;
+      if (!s.cgLatchHigh) return s.cgram[byte & 0x1FFu];
+      return static_cast<std::uint8_t>((s.cgram[(byte + 1u) & 0x1FFu] & 0x7Fu) | (s.ppu2Bus & 0x80u));
+    }
+    case 0x213C:  // OPHCT: the latched dot, low byte then the ninth bit under open bus
+      if (!s.ophctHigh) return static_cast<std::uint8_t>(s.ophct & 0xFFu);
+      return static_cast<std::uint8_t>(((s.ophct >> 8) & 1u) | (s.ppu2Bus & 0xFEu));
+    case 0x213D:  // OPVCT: the latched line, the same way through its own flip-flop
+      if (!s.opvctHigh) return static_cast<std::uint8_t>(s.opvct & 0xFFu);
+      return static_cast<std::uint8_t>(((s.opvct >> 8) & 1u) | (s.ppu2Bus & 0xFEu));
+    case 0x213E:  // STAT77: the overflow flags, master, open bus, the first half's version
+      return static_cast<std::uint8_t>((s.timeOver ? 0x80u : 0x00u) | (s.rangeOver ? 0x40u : 0x00u) |
+                                       (s.ppu1Bus & 0x10u) | 0x01u);
+    case 0x213F:  // STAT78: the field, the latch flag, open bus, the clock rate, the second half's version
+      return static_cast<std::uint8_t>(((in.field & 1u) << 7) | (s.countersLatched ? 0x40u : 0x00u) |
+                                       (s.ppu2Bus & 0x20u) | (in.pal ? 0x10u : 0x00u) | 0x03u);
+    default:
+      break;
+  }
+  if (readsPpu1Bus(offset)) return s.ppu1Bus;
+  return std::nullopt;  // every other write-only register reads as the CPU's open bus
+}
+
+std::optional<std::uint8_t> Ppu::registerValue(const PpuState& s, std::uint16_t offset,
+                                                const PpuInputs& in) noexcept {
+  return valueAt(s, offset, in);
+}
+
+std::optional<std::uint8_t> Ppu::read(std::uint16_t offset, const PpuInputs& in) {
+  const std::optional<std::uint8_t> v = valueAt(s_, offset, in);
+  if (!v.has_value()) {
+    // Of the registers that answer with the CPU's open bus, SLHV alone does
+    // something: the software latch, while the latch line is high.
+    if (offset == 0x2137 && in.extLatch) latchCounters(in);
+    return v;
+  }
+  const std::uint8_t byte = *v;
+  switch (offset) {
+    case 0x2134:
+    case 0x2135:
+    case 0x2136:
+    case 0x213E:
+      s_.ppu1Bus = byte;
+      break;
+    case 0x2138:  // RDOAM: the address steps whether or not the table answered
+      s_.oamAddress = static_cast<std::uint16_t>(((s_.oamAddress & 0x3FFu) + 1u) & 0x3FFu);
+      s_.ppu1Bus = byte;
+      break;
+    case 0x2139:
       if ((s_.vmain & 0x80u) == 0u) {
         // Prefetch from the OLD address, THEN increment — the documented glitch.
         // Outside the window the memory is not read and the register stands.
         if (vramReachable(in)) s_.vramLatch = readVramWord();
         stepVramAddress(/*highByte=*/false);
       }
-      s_.ppu1Bus = v;
-      return v;
-    }
-    case 0x213A: {  // RDVRAMH: the high byte of the prefetch register
-      const std::uint8_t v = static_cast<std::uint8_t>(s_.vramLatch >> 8);
+      s_.ppu1Bus = byte;
+      break;
+    case 0x213A:
       if ((s_.vmain & 0x80u) != 0u) {
         if (vramReachable(in)) s_.vramLatch = readVramWord();
         stepVramAddress(/*highByte=*/true);
       }
-      s_.ppu1Bus = v;
-      return v;
-    }
-    case 0x213B: {  // RDCGRAM: two reads make a word; the high byte's top bit is the second half's open bus
-      const bool reachable = cgramReachable(in);
-      const std::uint16_t byte = static_cast<std::uint16_t>(s_.cgadd) << 1;
-      std::uint8_t v;
+      s_.ppu1Bus = byte;
+      break;
+    case 0x213B:  // RDCGRAM: the second read of the pair moves to the next word
       if (!s_.cgLatchHigh) {
-        v = reachable ? s_.cgram[byte & 0x1FFu] : s_.ppu2Bus;
         s_.cgLatchHigh = true;
       } else {
-        v = reachable ? static_cast<std::uint8_t>((s_.cgram[(byte + 1u) & 0x1FFu] & 0x7Fu) | (s_.ppu2Bus & 0x80u))
-                      : s_.ppu2Bus;
         s_.cgadd = static_cast<std::uint8_t>(s_.cgadd + 1u);
         s_.cgLatchHigh = false;
       }
-      s_.ppu2Bus = v;
-      return v;
-    }
-    case 0x213C: {  // OPHCT: the latched dot, low byte then the ninth bit under open bus
-      std::uint8_t v;
-      if (!s_.ophctHigh) {
-        v = static_cast<std::uint8_t>(s_.ophct & 0xFFu);
-      } else {
-        v = static_cast<std::uint8_t>(((s_.ophct >> 8) & 1u) | (s_.ppu2Bus & 0xFEu));
-      }
+      s_.ppu2Bus = byte;
+      break;
+    case 0x213C:
       s_.ophctHigh = !s_.ophctHigh;
-      s_.ppu2Bus = v;
-      return v;
-    }
-    case 0x213D: {  // OPVCT: the latched line, the same way through its own flip-flop
-      std::uint8_t v;
-      if (!s_.opvctHigh) {
-        v = static_cast<std::uint8_t>(s_.opvct & 0xFFu);
-      } else {
-        v = static_cast<std::uint8_t>(((s_.opvct >> 8) & 1u) | (s_.ppu2Bus & 0xFEu));
-      }
+      s_.ppu2Bus = byte;
+      break;
+    case 0x213D:
       s_.opvctHigh = !s_.opvctHigh;
-      s_.ppu2Bus = v;
-      return v;
-    }
-    case 0x213E: {  // STAT77: the overflow flags, master, open bus, the first half's version
-      const std::uint8_t v = static_cast<std::uint8_t>(
-          (s_.timeOver ? 0x80u : 0x00u) | (s_.rangeOver ? 0x40u : 0x00u) | (s_.ppu1Bus & 0x10u) | 0x01u);
-      s_.ppu1Bus = v;
-      return v;
-    }
-    case 0x213F: {  // STAT78: the field, the latch flag, open bus, the clock rate, the second half's version
-      const std::uint8_t v = static_cast<std::uint8_t>(
-          ((in.field & 1u) << 7) | (s_.countersLatched ? 0x40u : 0x00u) | (s_.ppu2Bus & 0x20u) |
-          (in.pal ? 0x10u : 0x00u) | 0x03u);
+      s_.ppu2Bus = byte;
+      break;
+    case 0x213F:
       // The read clears the latch flag, but only while the latch line is high. The
       // two counters' flip-flops it resets whatever that line is doing: that is a
       // side effect of the read itself.
       if (in.extLatch) s_.countersLatched = false;
       s_.ophctHigh = false;
       s_.opvctHigh = false;
-      s_.ppu2Bus = v;
-      return v;
-    }
+      s_.ppu2Bus = byte;
+      break;
     default:
       break;
   }
-  if (readsPpu1Bus(offset)) return s_.ppu1Bus;
-  return std::nullopt;  // every other write-only register reads as the CPU's open bus
+  return v;
 }
 
 // ---- writes ------------------------------------------------------------------

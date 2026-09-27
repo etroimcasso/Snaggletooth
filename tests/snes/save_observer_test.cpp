@@ -3,9 +3,10 @@
 // it stands. It is what a host persists a save from — the core says WHEN and what
 // the bytes are, and never learns where they go. The cases hold it to reporting
 // once a frame however many stores landed, to saying nothing in a frame where none
-// did, and to leaving a machine nobody is watching exactly as it was; and they hold
-// it to the terms the machine's other three observers already keep — the host's
-// object, not part of the state.
+// did, and to leaving a machine nobody is watching exactly as it was; they hold it
+// to the terms the machine's other three observers already keep — the host's
+// object, not part of the state; and they hold a report that throws to leaving the
+// machine at the end of the cycle it was made from.
 
 #include <cstdint>
 #include <initializer_list>
@@ -220,6 +221,50 @@ TEST(SaveObserver, TheObserverIsNotPartOfTheState) {
   watched.restore(watched.state());
   watched.run(kOneFrame);
   EXPECT_GT(saves.reports.size(), before);
+}
+
+// ---- a report that throws ---------------------------------------------------------
+
+// Throws a type of the test's own from its first report and counts every report.
+struct ThrowsOnce final : SaveObserver {
+  struct Thrown {};
+  int reports = 0;
+  void changed(std::span<const std::uint8_t>) override {
+    ++reports;
+    if (reports == 1) throw Thrown{};
+  }
+};
+
+TEST(SaveObserver, AReportThatThrowsLeavesTheMachineAtTheCyclesEnd) {
+  // The report is made after the cycle has closed, so the throw leaves the
+  // machine at that cycle's end with state() coherent there: a machine restored
+  // from it runs on exactly as the one that threw. The next run() finishes the
+  // interrupted budget, so the two runs land where one run of the budget does,
+  // and the report the throw interrupted is not made again. A call afterwards
+  // proceeds: the throw left nothing inside a cycle.
+  std::vector<std::uint8_t> rom = storesForever();
+  rom[0x0100u] = 0x60u;  // RTS at $8100: a routine the cartridge holds
+  Snes a = machineWithSave(rom);
+  Snes b = machineWithSave(rom);
+  Saves saves;
+  a.setSaveObserver(&saves);
+  ThrowsOnce throws;
+  b.setSaveObserver(&throws);
+
+  EXPECT_THROW(b.run(kTwoFrames), ThrowsOnce::Thrown);
+  ASSERT_EQ(throws.reports, 1);
+  Snes restored = machineWithSave(rom);
+  restored.restore(b.state());
+
+  b.run(0u);
+  restored.run(0u);
+  a.run(kTwoFrames);
+  EXPECT_TRUE(a.state() == b.state()) << "run(a) then run(0) across the throw is run(a)";
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+  EXPECT_TRUE(restored.state() == b.state()) << "state() was coherent where the throw left it";
+  EXPECT_EQ(throws.reports, 2) << "the second frame's report, and the first not made again";
+  EXPECT_EQ(saves.reports.size(), 2u);
+  EXPECT_TRUE(b.callInContext(0x008100u, Standin::Near, 10));
 }
 
 TEST(SaveObserver, ClearingItStopsTheCalls) {

@@ -48,6 +48,8 @@ m.vram()[0x20];      // the low byte of VRAM word $0010
 `Ppu` is the chip's behaviour over that state: `read`, `write`, `latchCounters`, and the verbs the
 machine calls as the beam reaches a line or a frame. The machine builds one over its own state for
 each access and never keeps it; a host that runs the machine never needs to touch it.
+`Ppu::registerValue` is `read`'s byte without its effects, computed from a `PpuState` and the inputs
+alone; the machine's `peekRegister` answers the PPU's registers through it.
 
 ## What the chip is told
 
@@ -105,8 +107,8 @@ Three events belong to the chip rather than the machine:
 ## The picture
 
 A host that wants to see what a program draws sets a frame observer on the machine
-(`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, as the beam
-reaches the next frame's first line:
+(`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, at the end of
+the cycle in which the beam reaches the next frame's first line:
 
 ```cpp
 struct Watcher final : FrameObserver {

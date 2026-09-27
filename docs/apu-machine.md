@@ -159,6 +159,16 @@ apu.writeOverlayRegister(1, 0x01);               // CONTROL ($F1): enable timer 
 std::uint8_t out = apu.readOverlayRegister(13);  // T0OUT ($FD): the count, then cleared
 ```
 
+`peekRegister` reads a register by its address, `$00F0`–`$00FF`, without the effect: it answers the
+byte `readOverlayRegister` would return and moves nothing, so a timer's output stands and `DSPDATA`
+answers the DSP register under `DSPADDR` with the address where it is. Any other address answers
+`std::nullopt`. A console reaches the same through `Snes::peekApuRegister`.
+
+```cpp
+std::optional<std::uint8_t> count = apu.peekRegister(0x00FD);  // T0OUT: the count, left standing
+std::optional<std::uint8_t> none = apu.peekRegister(0x0400);   // RAM: std::nullopt
+```
+
 ### DSP register file
 
 DSPADDR (`$F2`) selects one of 128 DSP registers; DSPDATA (`$F3`) reads or writes the selected one.
@@ -346,12 +356,14 @@ DSPADDR, not the register the CPU would see there.
 `poke` and `addressable` name the same reach in the console's vocabulary: `poke(address, value)` writes
 the RAM beneath the overlay and always lands, because the whole 64 KB is RAM, and `addressable(address,
 bytes)` answers whether a span fits without running past the end. The registers at `$F0`–`$FF` are
-reached by name (see [The register overlay](#the-register-overlay)), not through these.
+reached by name and by `peekRegister` (see [The register overlay](#the-register-overlay)), not through
+these.
 
-`peek` is the other reading: what a fetch by the CPU at an address returns, without making one. It
-answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — the
-sixteen register bytes included, from the RAM beneath them, since no program is fetched from the
-overlay — and changes nothing, so a host can decode the instruction the CPU is about to run:
+`peek` is the other reading: the byte the CPU's memory holds at an address, without a fetch. It
+answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — at
+`$F0`–`$FF` the RAM beneath the registers, where the CPU's own read answers the register; a register's
+value is `peekRegister`'s — and changes nothing, so a host can decode the instruction the CPU is about
+to run:
 
 ```cpp
 apu.mapIplRom(boot);
@@ -601,11 +613,19 @@ sleeping or stopped core counts as one. On overrun the routine is abandoned at i
 call returns `false` — the file put back for `callInContext`, left where it stopped for `callOnStack`.
 A guard of zero runs nothing.
 
+A `run()` that stops inside an instruction leaves the call to finish it: the machine runs to the next
+instruction boundary, exactly as `step()` would, and then calls. Those cycles are the program's own
+and `state().divider` moves by them as by the routine's; `callInContext` puts back the file at that
+boundary, so the program resumes at the instruction after the one the budget stopped inside.
+
 A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
-touched — when `returns` is `ApuStandin::None`, or when the machine is not between instructions:
-inside an access watcher's call, or after a `run()` that stopped mid-instruction. Between `step()`
-calls and inside an instruction watcher's call it is. Every 16-bit entry is RAM, so none is refused
-for its address. A call made from inside a watcher's call is the same call, at any depth.
+touched — when `returns` is `ApuStandin::None`, or when it is made from inside a host's call that the
+machine makes during the CPU's access: the access watcher's, an opcode fetch included, or the
+observer's `access` report. Every 16-bit entry is RAM, so none is refused for its address. An
+instruction watcher is told, and the observer's `instruction` report made, between instructions, so a
+call from inside either is the same call, at any depth. A snapshot does not carry the marker that
+refuses a call made during the access, and `restore()` and `reset()` clear it: a host that restores
+after a throw from the watcher or the observer gets a machine that calls.
 
 ## Gotchas
 
