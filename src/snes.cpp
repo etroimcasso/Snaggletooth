@@ -868,6 +868,25 @@ Snes::Physical Snes::physical(std::uint32_t address) const noexcept {
   return *classify(address, kEverySpace);  // every space wanted, so every address classifies
 }
 
+std::optional<std::uint8_t> Snes::peekRegister(std::uint32_t address) const noexcept {
+  const Physical place = physical(address);
+  if (place.space != Space::Register) return std::nullopt;
+  // The windows routeReadRaw dispatches on, each answered by the value its read
+  // returns; a register that answers with nothing is the data bus's byte.
+  const auto offset = static_cast<std::uint16_t>(place.index);
+  if (offset >= 0x2100 && offset <= 0x213F) {
+    return Ppu::registerValue(state_.ppu, offset, ppuInputs()).value_or(state_.mdr);
+  }
+  if (offset >= 0x2140 && offset <= 0x217F) {
+    return apu_.readPort(static_cast<std::uint8_t>(offset & 3u));
+  }
+  if (offset >= 0x2180 && offset <= 0x2183) return wramPortValue(offset);
+  if (offset == 0x4016 || offset == 0x4017) return joypadPortValue(offset);
+  if (offset >= 0x4200 && offset <= 0x421F) return cpuRegValue(offset);
+  if (offset >= 0x4300 && offset <= 0x437F) return dmaRegValue(offset);
+  return state_.mdr;
+}
+
 std::optional<std::size_t> Snes::armedSlot(Physical place) const noexcept {
   const std::size_t space = static_cast<std::size_t>(place.space);
   const std::uint32_t chunk = place.index >> 16;
@@ -1298,10 +1317,15 @@ bool Snes::callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin retu
   return runCall(entry, file, returns, guard);
 }
 
+std::uint8_t Snes::wramPortValue(std::uint16_t offset) const noexcept {
+  if (offset == 0x2180) return state_.wram[state_.wmadd & 0x1FFFFu];
+  return state_.mdr;  // $2181-$2183 are write-only
+}
+
 std::uint8_t Snes::readWramPort(std::uint16_t offset, std::uint8_t cycle) {
   if (offset == 0x2180) {
     const std::uint32_t at = state_.wmadd & 0x1FFFFu;
-    std::uint8_t v = state_.wram[at];
+    std::uint8_t v = wramPortValue(offset);
     state_.wmadd = (at + 1u) & 0x1FFFFu;
     // The port's own read of work RAM, at the bank-$7E address it reached, is an
     // access a host can watch (source WramPort, the driving access's cycle); the
@@ -1310,7 +1334,7 @@ std::uint8_t Snes::readWramPort(std::uint16_t offset, std::uint8_t cycle) {
     observe(0x7E0000u | at, v, false, CycleKind::DataRead, AccessSource::WramPort);
     return latch(v);
   }
-  return state_.mdr;  // $2181-$2183 are write-only
+  return wramPortValue(offset);
 }
 
 void Snes::writeWramPort(std::uint16_t offset, std::uint8_t value, std::uint8_t cycle) {
@@ -1804,41 +1828,41 @@ PpuInputs Snes::ppuInputs() const noexcept {
   };
 }
 
-std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
+std::uint8_t Snes::cpuRegValue(std::uint16_t offset) const noexcept {
   switch (offset) {
-    case 0x4210: {  // RDNMI: the vblank flag (bit 7), CPU version 2 (bits 3-0), open bus between
-      const std::uint8_t v = static_cast<std::uint8_t>(
-          (state_.vblankNmi ? 0x80u : 0x00u) | (state_.mdr & 0x70u) | 0x02u);
-      state_.vblankNmi = false;  // reading acknowledges the flag
-      return latch(v);
-    }
-    case 0x4211: {  // TIMEUP: the H/V-timer IRQ flag (bit 7), open bus below
+    case 0x4210:  // RDNMI: the vblank flag (bit 7), CPU version 2 (bits 3-0), open bus between
+      return static_cast<std::uint8_t>((state_.vblankNmi ? 0x80u : 0x00u) | (state_.mdr & 0x70u) |
+                                       0x02u);
+    case 0x4211:  // TIMEUP: the H/V-timer IRQ flag (bit 7), open bus below
       // A read in the very cycle the flag rises receives it set and acknowledges
       // nothing (fullsnes.txt 1781-1784): the cycle has ticked, so the crossing is
       // known here, and the cycle's end raises the flag over this read's clear.
-      const std::uint8_t v = static_cast<std::uint8_t>(
-          ((state_.timeup || timerCrossed()) ? 0x80u : 0x00u) | (state_.mdr & 0x7Fu));
-      state_.timeup = false;  // reading acknowledges the flag
-      return latch(v);
-    }
-    case 0x4212: {  // HVBJOY: vblank (bit 7), hblank (bit 6), auto-joypad busy (bit 0), open bus between
-      const std::uint8_t v = static_cast<std::uint8_t>(
-          (state_.inVblank ? 0x80u : 0x00u) | (inHblank() ? 0x40u : 0x00u) |
-          (state_.mdr & 0x3Eu) | (autoJoypadBusy() ? 0x01u : 0x00u));
-      return latch(v);
-    }
-    case 0x4213: return latch(state_.wrio);  // RDIO: the port's lines, which nothing on the console drives, so as written
-    case 0x4214: return latch(static_cast<std::uint8_t>(state_.rddiv & 0xFFu));
-    case 0x4215: return latch(static_cast<std::uint8_t>(state_.rddiv >> 8));
-    case 0x4216: return latch(static_cast<std::uint8_t>(state_.rdmpy & 0xFFu));
-    case 0x4217: return latch(static_cast<std::uint8_t>(state_.rdmpy >> 8));
+      return static_cast<std::uint8_t>(((state_.timeup || timerCrossed()) ? 0x80u : 0x00u) |
+                                       (state_.mdr & 0x7Fu));
+    case 0x4212:  // HVBJOY: vblank (bit 7), hblank (bit 6), auto-joypad busy (bit 0), open bus between
+      return static_cast<std::uint8_t>((state_.inVblank ? 0x80u : 0x00u) |
+                                       (inHblank() ? 0x40u : 0x00u) | (state_.mdr & 0x3Eu) |
+                                       (autoJoypadBusy() ? 0x01u : 0x00u));
+    case 0x4213: return state_.wrio;  // RDIO: the port's lines, which nothing on the console drives, so as written
+    case 0x4214: return static_cast<std::uint8_t>(state_.rddiv & 0xFFu);
+    case 0x4215: return static_cast<std::uint8_t>(state_.rddiv >> 8);
+    case 0x4216: return static_cast<std::uint8_t>(state_.rdmpy & 0xFFu);
+    case 0x4217: return static_cast<std::uint8_t>(state_.rdmpy >> 8);
     default:
       break;
   }
   if (offset >= 0x4218 && offset <= 0x421F) {
-    return latch(state_.joy[static_cast<std::size_t>(offset - 0x4218)]);  // the auto-read's registers as they stand, part-shifted while it is busy
+    return state_.joy[static_cast<std::size_t>(offset - 0x4218)];  // the auto-read's registers as they stand, part-shifted while it is busy
   }
   return state_.mdr;  // other CPU-register reads are open bus
+}
+
+std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
+  const std::uint8_t v = cpuRegValue(offset);
+  // Reading RDNMI or TIMEUP acknowledges its flag.
+  if (offset == 0x4210) state_.vblankNmi = false;
+  if (offset == 0x4211) state_.timeup = false;
+  return latch(v);
 }
 
 void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
@@ -1998,16 +2022,24 @@ void Snes::latchJoypads() noexcept {
   }
 }
 
-std::uint8_t Snes::clockJoypad(std::size_t port) noexcept {
+std::uint8_t Snes::joypadBit(std::size_t port) const noexcept {
   const std::optional<Joypad>& pad = state_.pads[port];
   if (!pad) return 0u;  // an empty port's data line stays high, which reads as zero
   // While the strobe is held high the pad keeps reloading its register, so every
-  // clock returns the first bit — B — and the count never advances.
+  // clock returns the first bit — B.
   if (state_.joyStrobe) return static_cast<std::uint8_t>((pad->bits() >> 15) & 1u);
   if (state_.joyClocks[port] >= 16u) return 1u;  // past the sixteenth bit a pad returns its padding, low
-  const std::uint8_t bit =
-      static_cast<std::uint8_t>((state_.joyLatch[port] >> (15u - state_.joyClocks[port])) & 1u);
-  ++state_.joyClocks[port];
+  return static_cast<std::uint8_t>((state_.joyLatch[port] >> (15u - state_.joyClocks[port])) & 1u);
+}
+
+std::uint8_t Snes::clockJoypad(std::size_t port) noexcept {
+  const std::uint8_t bit = joypadBit(port);
+  // The count advances only while a pad is shifting out the bits it latched: an
+  // empty port has none, a held strobe keeps reloading them, and past the
+  // sixteenth the pad has none left.
+  if (state_.pads[port] && !state_.joyStrobe && state_.joyClocks[port] < 16u) {
+    ++state_.joyClocks[port];
+  }
   return bit;
 }
 
@@ -2051,15 +2083,22 @@ void Snes::clockAutoJoypad(std::uint64_t now) noexcept {
   }
 }
 
-std::uint8_t Snes::readJoypadPort(std::uint16_t offset) {
+std::uint8_t Snes::joypadPortValue(std::uint16_t offset) const noexcept {
   if (offset == 0x4016) {
     // JOYSER0: bit 0 is port 1's data line, bit 1 its second line (nothing is on
     // it); the rest is open bus.
-    return latch(static_cast<std::uint8_t>((state_.mdr & 0xFCu) | clockJoypad(0)));
+    return static_cast<std::uint8_t>((state_.mdr & 0xFCu) | joypadBit(0));
   }
   // JOYSER1: bit 0 is port 2's data line, bit 1 its second line; bits 4-2 are
   // wired low and read as ones; the rest is open bus.
-  return latch(static_cast<std::uint8_t>((state_.mdr & 0xE0u) | 0x1Cu | clockJoypad(1)));
+  return static_cast<std::uint8_t>((state_.mdr & 0xE0u) | 0x1Cu | joypadBit(1));
+}
+
+std::uint8_t Snes::readJoypadPort(std::uint16_t offset) {
+  const std::uint8_t v = joypadPortValue(offset);
+  // The read clocks the port's register; the bit it clocks out is v's bit 0.
+  static_cast<void>(clockJoypad(offset == 0x4016 ? 0u : 1u));
+  return latch(v);
 }
 
 void Snes::writeJoypadStrobe(std::uint8_t value) noexcept {

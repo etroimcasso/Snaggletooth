@@ -463,7 +463,12 @@ bool Apu::callOnStack(std::uint16_t entry, std::uint8_t stackTop, ApuStandin ret
   return runCall(entry, file, guard);
 }
 
-std::uint8_t Apu::readRegister(std::uint8_t reg) {
+std::optional<std::uint8_t> Apu::peekRegister(std::uint16_t address) const noexcept {
+  if (address < 0x00F0u || address > 0x00FFu) return std::nullopt;
+  return registerValue(static_cast<std::uint8_t>(address));
+}
+
+std::uint8_t Apu::registerValue(std::uint8_t reg) const noexcept {
   switch (reg) {
     case 0xF2: return state_->dspAddr;                       // DSPADDR reads back the latched address
     case 0xF3: return state_->dsp[state_->dspAddr & 0x7Fu];   // DSPDATA masks the address with $7F
@@ -471,16 +476,18 @@ std::uint8_t Apu::readRegister(std::uint8_t reg) {
       return state_->inputPorts[reg - 0xF4u];
     case 0xF8: case 0xF9:                                   // AUXIO: the port's own byte, not the RAM beneath
       return state_->auxPorts[reg - 0xF8u];
-    case 0xFD: case 0xFE: case 0xFF: {                      // TnOUT: return the 4-bit stage-3 counter, then clear it
-      TimerState& t = state_->timers[reg - 0xFDu];
-      const std::uint8_t out = static_cast<std::uint8_t>(t.stage3 & 0x0Fu);
-      t.stage3 = 0;
-      return out;
-    }
+    case 0xFD: case 0xFE: case 0xFF:                        // TnOUT: the 4-bit stage-3 counter
+      return static_cast<std::uint8_t>(state_->timers[reg - 0xFDu].stage3 & 0x0Fu);
     // TEST, CONTROL and TnTARGET are write-only and read back 0.
     default:
       return 0;
   }
+}
+
+std::uint8_t Apu::readRegister(std::uint8_t reg) {
+  const std::uint8_t v = registerValue(reg);
+  if (reg >= 0xFDu) state_->timers[reg - 0xFDu].stage3 = 0;  // reading TnOUT clears the counter
+  return v;
 }
 
 void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {

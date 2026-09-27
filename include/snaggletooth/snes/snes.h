@@ -664,25 +664,46 @@ class Snes {
   void setApuObserver(ApuObserver* observer) noexcept { apu_.setObserver(observer); }
   [[nodiscard]] ApuObserver* apuObserver() const noexcept { return apu_.observer(); }
 
-  // What a fetch by the sound CPU at `address` returns, without making one:
-  // Apu::peek on the live audio machine.
+  // The audio machine's byte at `address`, without a fetch: Apu::peek on the live
+  // audio machine — the RAM, or the boot-ROM image where one is mapped, and at
+  // $00F0-$00FF the RAM beneath the registers.
   [[nodiscard]] std::uint8_t peekApu(std::uint16_t address) const noexcept {
     return apu_.peek(address);
+  }
+
+  // The byte the sound CPU's read of a register at `address` ($00F0-$00FF) would
+  // return, with nothing moved: Apu::peekRegister on the live audio machine.
+  // std::nullopt for any other address.
+  [[nodiscard]] std::optional<std::uint8_t> peekApuRegister(std::uint16_t address) const noexcept {
+    return apu_.peekRegister(address);
   }
 
   // A host reaching into the machine's memory by 24-bit bus address, without
   // spending a cycle and without a register's side effect. peek answers the
   // byte the address holds — work RAM, the cartridge's ROM, or its save — and
   // std::nullopt for anything this face does not reach as memory: a register,
-  // or an address the cartridge leaves open. poke writes that byte and returns
-  // whether it landed; a poke to ROM changes the machine's own copy of the
-  // image, never a file, and no snapshot carries it. addressable answers, for
+  // whose value is peekRegister's (below), or an address the cartridge leaves
+  // open. poke writes that byte and returns whether it landed; a poke to ROM
+  // changes the machine's own copy of the image, never a file, and no snapshot
+  // carries it. addressable answers, for
   // `bytes` bytes from `address`, whether every one is memory this face reaches;
   // it is peek's own answer, so no two callers are told different things about
   // one address, and a zero-length span is addressable.
   [[nodiscard]] std::optional<std::uint8_t> peek(std::uint32_t address) const noexcept;
   bool poke(std::uint32_t address, std::uint8_t value) noexcept;
   [[nodiscard]] bool addressable(std::uint32_t address, std::size_t bytes) const noexcept;
+
+  // The byte a read of a register at `address` would return, computed as the read
+  // computes it — from the state as it stands, the open-bus bits from the byte the
+  // bus last carried — with nothing moved: no flag cleared, no port clocked, no
+  // address stepped, no latch or flip-flop touched, no counter latched, and the
+  // data bus left holding what it held. std::nullopt for an address that is not a
+  // register (physical(address).space != Space::Register): memory and open bus
+  // are peek's. A read ticks the beam before it answers and a peek does not, so
+  // a bit the beam decides ($4212's blank flags, the field bit of $213F, the
+  // multiplier's ports while a Mode 7 picture is drawn) is answered at the
+  // position the machine stands at.
+  [[nodiscard]] std::optional<std::uint8_t> peekRegister(std::uint32_t address) const noexcept;
 
   // The four memories the bus cannot name, each written the way the chip reads
   // it: no port address steps, no latch moves, no increment happens. VRAM is
@@ -1178,8 +1199,10 @@ class Snes {
   void endDmaOnChannels(std::uint8_t channels) noexcept;
 
   // The DMA channel registers ($4300-$437F): the eight channels' sixteen-byte
-  // register files, read and written by their documented layout.
+  // register files, read and written by their documented layout. dmaRegValue is
+  // the byte a read answers, with no effect: the read stores it on the data bus.
   std::uint8_t readDmaReg(std::uint16_t offset);
+  [[nodiscard]] std::uint8_t dmaRegValue(std::uint16_t offset) const noexcept;
   void writeDmaReg(std::uint16_t offset, std::uint8_t value);
 
   // The master-cycle cost of reaching `address`, by the documented region map. The
@@ -1189,7 +1212,10 @@ class Snes {
   // The work-RAM data port: $2180 reads or writes work RAM at the port address and
   // steps it; $2181-$2183 set the address and read back as open bus. `cycle` is
   // the driving access's, which the port's own access is watched with.
+  // wramPortValue is the byte a read answers before a watcher sees it, with the
+  // address left where it stands.
   std::uint8_t readWramPort(std::uint16_t offset, std::uint8_t cycle);
+  [[nodiscard]] std::uint8_t wramPortValue(std::uint16_t offset) const noexcept;
   void writeWramPort(std::uint16_t offset, std::uint8_t value, std::uint8_t cycle);
 
   // The PPU's input pins as they stand: where the beam is, the frame parity, the
@@ -1201,17 +1227,25 @@ class Snes {
 
   // The CPU-side registers ($4200-$421F): interrupt enables and flags, the H/V timer
   // settings, the multiply/divide unit, the I/O port, and the auto-joypad read.
+  // cpuRegValue is the byte a read answers, with no effect: the read then clears
+  // RDNMI's or TIMEUP's flag and stores the byte on the data bus.
   std::uint8_t readCpuReg(std::uint16_t offset);
+  [[nodiscard]] std::uint8_t cpuRegValue(std::uint16_t offset) const noexcept;
   void writeCpuReg(std::uint16_t offset, std::uint8_t value);
 
   // The serial controller ports: a write to $4016 drives the strobe line, and a
   // read of $4016 or $4017 returns a port's next bit and clocks its register.
+  // joypadPortValue is the byte that read answers, with the register left
+  // unclocked.
   std::uint8_t readJoypadPort(std::uint16_t offset);
+  [[nodiscard]] std::uint8_t joypadPortValue(std::uint16_t offset) const noexcept;
   void writeJoypadStrobe(std::uint8_t value) noexcept;
   // Latches every port's sixteen bits — the strobe pulse a program or the
-  // auto-read gives — and one bit clocked out of a port's register.
+  // auto-read gives — and one bit clocked out of a port's register. joypadBit
+  // is the bit the next clock gives, without the clock.
   void latchJoypads() noexcept;
   [[nodiscard]] std::uint8_t clockJoypad(std::size_t port) noexcept;
+  [[nodiscard]] std::uint8_t joypadBit(std::size_t port) const noexcept;
 
   // Takes the beam to the line beginning at `lineStart`, wrapping the frame, and runs
   // the events that line's start carries: the frame's own — the overflow flags and

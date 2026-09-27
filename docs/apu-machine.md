@@ -159,6 +159,16 @@ apu.writeOverlayRegister(1, 0x01);               // CONTROL ($F1): enable timer 
 std::uint8_t out = apu.readOverlayRegister(13);  // T0OUT ($FD): the count, then cleared
 ```
 
+`peekRegister` reads a register by its address, `$00F0`–`$00FF`, without the effect: it answers the
+byte `readOverlayRegister` would return and moves nothing, so a timer's output stands and `DSPDATA`
+answers the DSP register under `DSPADDR` with the address where it is. Any other address answers
+`std::nullopt`. A console reaches the same through `Snes::peekApuRegister`.
+
+```cpp
+std::optional<std::uint8_t> count = apu.peekRegister(0x00FD);  // T0OUT: the count, left standing
+std::optional<std::uint8_t> none = apu.peekRegister(0x0400);   // RAM: std::nullopt
+```
+
 ### DSP register file
 
 DSPADDR (`$F2`) selects one of 128 DSP registers; DSPDATA (`$F3`) reads or writes the selected one.
@@ -346,12 +356,14 @@ DSPADDR, not the register the CPU would see there.
 `poke` and `addressable` name the same reach in the console's vocabulary: `poke(address, value)` writes
 the RAM beneath the overlay and always lands, because the whole 64 KB is RAM, and `addressable(address,
 bytes)` answers whether a span fits without running past the end. The registers at `$F0`–`$FF` are
-reached by name (see [The register overlay](#the-register-overlay)), not through these.
+reached by name and by `peekRegister` (see [The register overlay](#the-register-overlay)), not through
+these.
 
-`peek` is the other reading: what a fetch by the CPU at an address returns, without making one. It
-answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — the
-sixteen register bytes included, from the RAM beneath them, since no program is fetched from the
-overlay — and changes nothing, so a host can decode the instruction the CPU is about to run:
+`peek` is the other reading: the byte the CPU's memory holds at an address, without a fetch. It
+answers the mapped boot-ROM image while CONTROL bit 7 maps it and the RAM byte otherwise — at
+`$F0`–`$FF` the RAM beneath the registers, where the CPU's own read answers the register; a register's
+value is `peekRegister`'s — and changes nothing, so a host can decode the instruction the CPU is about
+to run:
 
 ```cpp
 apu.mapIplRom(boot);

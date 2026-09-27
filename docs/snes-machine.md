@@ -48,6 +48,7 @@ finishes.
   - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
   - [The CPU register file](#the-cpu-register-file)
   - [Draining audio without allocating](#draining-audio-without-allocating)
+  - [A register's value](#a-registers-value)
 - [Answering an access](#answering-an-access)
   - [A watch is on the byte](#a-watch-is-on-the-byte)
   - [What the watcher is told](#what-the-watcher-is-told)
@@ -779,9 +780,9 @@ every access the sound CPU makes and every instruction boundary it crosses. `set
 on the audio machine inside the console, under the same terms — the host's object, not part of the
 state, none by default — and `apuObserver()` reads it back. Because the audio machine runs inside the
 CPU's cycles, its report arrives from within `step()` and `run()`, between the bus observer's
-accesses. `peekApu` answers what a fetch by the sound CPU at an address returns, without making one —
-the boot-ROM image while the window is mapped, the RAM byte otherwise — so a host can decode the
-instruction the sound CPU is about to run.
+accesses. `peekApu` answers the byte the sound CPU's memory holds at an address, without a fetch —
+the boot-ROM image while the window is mapped, the RAM byte otherwise, and at `$00F0`–`$00FF` the RAM
+beneath the registers — so a host can decode the instruction the sound CPU is about to run.
 
 ```cpp
 struct AudioLog final : ApuObserver {
@@ -891,8 +892,8 @@ face does not reach as memory — a register, or an address the cartridge leaves
 whether the byte landed. A `poke` to ROM changes the machine's own copy of the image, not a file, and no
 snapshot carries it; a `poke` to the save writes the save without reporting it to the save observer,
 which reports the program's stores rather than the host's own edits. A register address is refused by
-both: reading a register on the console would change it, and the register file is already in the state a
-host holds.
+both: `peek` and `poke` reach memory, and a register's value is
+[`peekRegister`](#a-registers-value)'s.
 
 ### The memories the bus cannot name
 
@@ -932,6 +933,36 @@ host producing sound on a callback that must not allocate drains through this fo
 ```cpp
 std::array<StereoFrame, 512> buffer;
 std::size_t written = machine.takeFrames(buffer);
+```
+
+### A register's value
+
+`peekRegister` answers the byte a read of a register would return, computed as the read computes it,
+and moves nothing: no flag is cleared, no port is clocked, no address steps, no flip-flop or latch
+changes, no counter is latched, and the data bus keeps the byte it held. The bits a read takes from
+open bus come from that byte. An address that is not a register — one [`physical`](#a-watch-is-on-the-byte)
+does not place in `Space::Register` — answers `std::nullopt`: memory and open bus are `peek`'s.
+
+```cpp
+std::optional<std::uint8_t> rdnmi = machine.peekRegister(0x004210);  // the NMI flag, left set
+std::optional<std::uint8_t> port = machine.peekRegister(0x002140);   // the byte the sound CPU left in port 0
+std::optional<std::uint8_t> vram = machine.peekRegister(0x002139);   // the prefetch's low byte; the address stands
+std::optional<std::uint8_t> none = machine.peekRegister(0x7E0000);   // work RAM: std::nullopt
+```
+
+A register answers at its offset in every system bank, as a read does. One whose read answers with the
+data bus alone — a write-only PPU register other than those that answer with the chip's first-half
+value ([ppu.md](ppu.md#the-status-registers-and-the-three-open-buses)), `$2137`, `$2181`–`$2183`, `$4200`–`$420F`, a
+channel's `$43xC`–`$43xE` — answers the bus's byte. A peek between
+two `run()` calls leaves the machine exactly as it was, so the run after it lands where it would have.
+
+`peekApuRegister` answers the audio machine's sixteen registers at `$00F0`–`$00FF` the same way: a
+timer's output is answered and not cleared, and the DSP register under `DSPADDR` is answered with the
+address left where it stands ([apu-machine.md](apu-machine.md#the-register-overlay)). Any other address
+answers `std::nullopt`.
+
+```cpp
+std::optional<std::uint8_t> input = machine.peekApuRegister(0x00F4);  // the byte the program sent through $2140
 ```
 
 ## Answering an access
@@ -1042,8 +1073,9 @@ A register with a read side effect has already had it when its read is told. A r
 cleared the NMI flag, a read of `$2140`–`$2143` has taken the port's byte, a read of `$4211` has
 acknowledged the timer. The answer changes only what the program receives — `instead` hands it
 another byte — and a veto cannot undo the effect, because a read cannot be prevented. A host that
-wants a program not to acknowledge an interrupt cannot do it here; `peek` refuses registers for the
-same reason.
+wants a program not to acknowledge an interrupt cannot do it here. A host that wants a register's byte
+without its effect reads it with [`peekRegister`](#a-registers-value), which leaves the register as it
+stands.
 
 ## Standing in for a routine
 
@@ -1291,6 +1323,10 @@ machine that calls.
 - The stand-in answers one fetch: the opcode fetch of the instruction the watcher was told about. A
   host reading the byte through `peek`, an `LDA` of it, the bus observer's report of a data read and
   an access watch on any read but that fetch all see the cartridge's own byte.
+- `peekRegister` answers at the position the machine stands at. A read ticks the beam through its own
+  cycle before it answers and a peek spends no cycle, so `$4212`'s blank flags, `$213F`'s field bit
+  and the multiplier's ports while a Mode 7 picture is drawn are answered as they stand, and an `LDA`
+  of the same address an instruction later can read them otherwise.
 - `watchInstruction` with one argument arms `Standin::Near`. A host that wants to be told and nothing
   more says `Standin::None`.
 - A call's `returns` must match the routine's return instruction. `Near` for one that ends in `RTS`,

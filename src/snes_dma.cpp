@@ -387,25 +387,27 @@ void Snes::hdmaCycle() {
 
 // ---- the channel registers ($4300-$437F) ----------------------------------
 
-std::uint8_t Snes::readDmaReg(std::uint16_t offset) {
-  DmaChannel& ch = state_.dma[(offset >> 4) & 7u];
+std::uint8_t Snes::dmaRegValue(std::uint16_t offset) const noexcept {
+  const DmaChannel& ch = state_.dma[(offset >> 4) & 7u];
   switch (offset & 0xFu) {
-    case 0x0: return latch(ch.dmap);
-    case 0x1: return latch(ch.bbad);
-    case 0x2: return latch(static_cast<std::uint8_t>(ch.a1t & 0xFFu));
-    case 0x3: return latch(static_cast<std::uint8_t>(ch.a1t >> 8));
-    case 0x4: return latch(ch.a1b);
-    case 0x5: return latch(static_cast<std::uint8_t>(ch.das & 0xFFu));
-    case 0x6: return latch(static_cast<std::uint8_t>(ch.das >> 8));
-    case 0x7: return latch(ch.dasb);
-    case 0x8: return latch(static_cast<std::uint8_t>(ch.a2a & 0xFFu));
-    case 0x9: return latch(static_cast<std::uint8_t>(ch.a2a >> 8));
-    case 0xA: return latch(ch.nltr);
+    case 0x0: return ch.dmap;
+    case 0x1: return ch.bbad;
+    case 0x2: return static_cast<std::uint8_t>(ch.a1t & 0xFFu);
+    case 0x3: return static_cast<std::uint8_t>(ch.a1t >> 8);
+    case 0x4: return ch.a1b;
+    case 0x5: return static_cast<std::uint8_t>(ch.das & 0xFFu);
+    case 0x6: return static_cast<std::uint8_t>(ch.das >> 8);
+    case 0x7: return ch.dasb;
+    case 0x8: return static_cast<std::uint8_t>(ch.a2a & 0xFFu);
+    case 0x9: return static_cast<std::uint8_t>(ch.a2a >> 8);
+    case 0xA: return ch.nltr;
     case 0xB:
-    case 0xF: return latch(ch.unused);
+    case 0xF: return ch.unused;
     default: return state_.mdr;  // $43xC-$43xE are open bus
   }
 }
+
+std::uint8_t Snes::readDmaReg(std::uint16_t offset) { return latch(dmaRegValue(offset)); }
 
 void Snes::writeDmaReg(std::uint16_t offset, std::uint8_t value) {
   DmaChannel& ch = state_.dma[(offset >> 4) & 7u];
