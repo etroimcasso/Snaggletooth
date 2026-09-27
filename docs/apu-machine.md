@@ -611,7 +611,9 @@ touched — when `returns` is `ApuStandin::None`, or when it is made from inside
 machine makes during the CPU's access: the access watcher's, an opcode fetch included, or the
 observer's `access` report. Every 16-bit entry is RAM, so none is refused for its address. An
 instruction watcher is told, and the observer's `instruction` report made, between instructions, so a
-call from inside either is the same call, at any depth.
+call from inside either is the same call, at any depth. A snapshot does not carry the marker that
+refuses a call made during the access, and `restore()` and `reset()` clear it: a host that restores
+after a throw from the watcher or the observer gets a machine that calls.
 
 ## Gotchas
 

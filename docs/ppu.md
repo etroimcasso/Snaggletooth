@@ -105,8 +105,8 @@ Three events belong to the chip rather than the machine:
 ## The picture
 
 A host that wants to see what a program draws sets a frame observer on the machine
-(`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, as the beam
-reaches the next frame's first line:
+(`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, at the end of
+the cycle in which the beam reaches the next frame's first line:
 
 ```cpp
 struct Watcher final : FrameObserver {

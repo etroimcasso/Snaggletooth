@@ -1,6 +1,6 @@
 // The SNES machine: power-on state, one-instruction stepping, exact master-cycle
 // budgeting, the CPU-to-APU clock interleave at both console rates, snapshot and
-// restore, a halted core, and the reset line.
+// restore, a halted core, the reset line, and a frame report that throws.
 
 #include <algorithm>
 #include <array>
@@ -640,6 +640,41 @@ struct FrameCount : FrameObserver {
     }
   }
 };
+
+// Throws a type of the test's own from its first frame and counts every frame.
+struct ThrowsOnFirstFrame final : FrameObserver {
+  struct Thrown {};
+  int frames = 0;
+  void frame(const VideoFrame&) override {
+    ++frames;
+    if (frames == 1) throw Thrown{};
+  }
+};
+
+TEST(SnesMachine, AFrameReportThatThrowsLeavesTheMachineAtTheCyclesEnd) {
+  // The frame is reported after the cycle in which the beam reached the next
+  // frame's first line has closed, so a throw leaves the machine there, at that
+  // line. The next run() finishes the interrupted budget: the two runs land
+  // where one run of the budget does, and the frame is not reported again.
+  const std::uint64_t kTwoFrames = 2u * consoleClock(Region::Ntsc).masterCyclesPerFrame + 20000u;
+  Snes a = loopMachine();
+  Snes b = loopMachine();
+  FrameCount counted;
+  a.setFrameObserver(&counted);
+  ThrowsOnFirstFrame throws;
+  b.setFrameObserver(&throws);
+  EXPECT_THROW(b.run(kTwoFrames), ThrowsOnFirstFrame::Thrown);
+  ASSERT_EQ(throws.frames, 1);
+  EXPECT_EQ(b.state().vpos, 0u) << "at the first line of the next frame";
+  EXPECT_LE(b.state().hpos, 12u) << "within the one cycle that reached it";
+  b.run(0u);
+  a.run(kTwoFrames);
+  EXPECT_TRUE(key(a) == key(b));
+  EXPECT_TRUE(a.state() == b.state());
+  EXPECT_EQ(a.takeFrames(), b.takeFrames());
+  EXPECT_EQ(throws.frames, 2) << "the second frame, and the first not reported again";
+  EXPECT_EQ(counted.frames, 2);
+}
 
 TEST(SnesMachine, ResetNeverDeliversThePictureTheBeamWasPartWayDown) {
   // The next picture handed over is the first whole one drawn after the reset, and

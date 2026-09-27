@@ -553,7 +553,8 @@ class Apu {
   // Whether the CPU's access is in progress, where the access watcher and the
   // observer's access report run part-way through an instruction. A call into the
   // program made while it is set is refused. It belongs to the cycle, not to the
-  // machine, so a snapshot does not carry it.
+  // machine, so a snapshot does not carry it, and restore(), reload() and reset()
+  // clear it.
   bool insideCycle_ = false;
   // The addresses a host has armed for a watch, one bit per 16-bit address per
   // direction, behind one owning pointer held null until the first arm. The

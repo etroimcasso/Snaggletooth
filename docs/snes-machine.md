@@ -823,9 +823,13 @@ not at all in a frame where none did — and again after `restore()`, a caller r
 having changed it as surely as a store would. The span is the machine's own storage, valid for the
 call.
 
-The report is handed over between cycles, beside a finished picture, rather than from inside the line
-that ends a frame: what a program does with a save — writing a file, most plainly — may fail, and it
-is free to throw here.
+The report is made at the end of the cycle in which the beam reaches the next frame's first line,
+after that cycle has closed and after the frame observer's report of the same frame. What a host does
+with a save — writing a file, most plainly — may fail, and the report may throw: `step()` or `run()`
+returns through the throw with the machine at that cycle's end and `state()` coherent there, and the
+report is not made again. The next `run()` finishes the budget the throw interrupted before it spends
+its own, so `run(a)` then `run(b)` lands where `run(a + b)` does. A frame observer's report may throw on
+the same terms; a save report the same cycle owes is then made at the end of the next cycle.
 
 On the same terms as the others: the host's object, not part of the state, so a snapshot does not
 carry it and `restore()` leaves it in place; `saveObserver()` reads back what is set; the machine
@@ -1215,9 +1219,8 @@ touched — when:
 - The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's
   own act, and the call never does it on the guest's behalf.
 - It is made from inside a host's call that the machine makes during a cycle: an access watcher's —
-  an opcode fetch included — the bus observer's, the frame observer's, the save observer's, or the
-  observer set with `setApuObserver`. The machine is part-way through the chip's work there, and a
-  call cannot run until the cycle ends.
+  an opcode fetch included — the bus observer's, or the observer set with `setApuObserver`. The
+  machine is part-way through the chip's work there, and a call cannot run until the cycle ends.
 
 A call whose landing would land where the memory face does not reach — a stack pointer in the register
 file, for instance — is refused too, after any finishing cycles, with those cycles spent and nothing
@@ -1225,6 +1228,14 @@ pushed.
 
 An instruction watcher is told between instructions, so a call made from inside its call is the same
 call, at any depth: a watcher told inside one call may make another.
+
+The frame and save observers are told at the end of a cycle, after it has closed, so a call from
+inside their reports proceeds: it runs the machine to the next instruction boundary first, as a call
+after a `run()` does, and then calls. A frame the routine finishes is reported inside the call.
+
+A snapshot does not carry the marker that refuses a call made during a cycle, and `restore()` and
+`reset()` clear it: a host that restores after a throw from a watcher or the bus observer gets a
+machine that calls.
 
 ## Gotchas
 

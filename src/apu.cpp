@@ -75,6 +75,10 @@ void Apu::restore(ApuState state) {
 }
 
 void Apu::reload() {
+  // No host's call is on the stack of the machine that begins here, whatever a
+  // throw from one left behind. setCpuState reloads the core too and keeps the
+  // marker: a watcher may call it part-way through a cycle.
+  insideCycle_ = false;
   syncCpuAndSlot();
   frames_.clear();  // pending output belongs to the machine that produced it
 }
@@ -258,6 +262,7 @@ void Apu::reset() {
   for (std::size_t addr = 0x0100; addr < fresh.ram.size(); ++addr)
     fresh.ram[addr] = state_->ram[addr];
   *state_ = std::move(fresh);
+  insideCycle_ = false;  // as reload() clears it
   syncCpuAndSlot();
   frames_.clear();  // a reset abandons any un-drained output
 }

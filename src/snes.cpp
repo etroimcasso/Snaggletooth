@@ -210,6 +210,9 @@ void Snes::load() {
   // replaced, so none of those answers stands: the first dot drawn after this works
   // them out from what the caller supplied.
   derived_.dropAll();
+  // No host's call is on the stack of the machine that begins here, whatever a
+  // throw from one left behind.
+  insideCycle_ = false;
   cpu_.restore(state_.cpu);
   apu_.reload();  // its state is state_.apu, written in place by the restore or the seeding above
   // The NMI pin's remembered level is not part of the snapshot, so re-derive it from
@@ -342,13 +345,15 @@ void Snes::refreshCycle() {
 }
 
 void Snes::machineCycle() {
-  // Every host callback the cycle reaches — a watcher's, an observer's, the audio
-  // machine's — runs inside it, and a call into the guest made from one is refused.
-  // The instruction watch alone runs between instructions, and is outside it.
+  // Every host callback the cycle reaches — a watcher's, the bus observer's, the
+  // audio machine's — runs inside it, and a call into the guest made from one is
+  // refused. The instruction watch runs between instructions and the frame and save
+  // reports after the cycle has closed, and both are outside it.
   insideCycle_ = true;
   if (state_.refreshLeft != 0u) {
     refreshCycle();
     insideCycle_ = false;
+    deliverFinished();
     return;
   }
 
@@ -410,6 +415,27 @@ void Snes::machineCycle() {
 
   closeCycle();
   insideCycle_ = false;
+  deliverFinished();
+}
+
+void Snes::deliverFinished() {
+  // A picture the beam finished this cycle, and the save window that frame
+  // changed, go to whoever is watching once the cycle has closed: the master
+  // counter advanced, the audio machine paid, the interrupt lines settled. The
+  // register file is written back first, so state() inside a report — or after
+  // one that threw — is the machine at this cycle's end. Each flag clears before
+  // its report, so a report that throws is not made again, and the one after it
+  // is made at the end of the next cycle.
+  if (!frameFinished_ && !saveFinished_) return;
+  sync();
+  if (frameFinished_) {
+    frameFinished_ = false;
+    deliverFrame();
+  }
+  if (saveFinished_) {
+    saveFinished_ = false;
+    deliverSave();
+  }
 }
 
 std::uint32_t Snes::step() {
@@ -1643,11 +1669,12 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
           ? static_cast<std::uint16_t>(state_.vblankBeginLine - 1u)
           : static_cast<std::uint16_t>(state_.ppu.vblankStartLine() - 1u);
     }
-    // A frame that changed the save window is owed a report, handed over where the
-    // picture is rather than from here: this line advances inside a cycle that
-    // cannot throw, and what a host does with a save — writing a file, most
-    // plainly — can. The beam reaches this line whether or not anyone is watching
-    // the picture, so a save is reported to a host that asked for nothing else.
+    // A frame that changed the save window is owed a report. Both reports are made
+    // at the end of this cycle, by deliverFinished, and not from here: the line's
+    // own work cannot be left half done, and what a host does with a picture or a
+    // save — writing a file, most plainly — may throw. The beam reaches this line
+    // whether or not anyone is watching the picture, so a save is reported to a
+    // host that asked for nothing else.
     if (saveObserver_ != nullptr && saveChanged_) {
       saveChanged_ = false;
       saveFinished_ = true;
@@ -1736,20 +1763,6 @@ void Snes::tickVideo(std::uint32_t cost) {
     state_.hdmaLineFired = true;
     state_.hdmaRunPending = true;
     state_.hdmaIniting = false;
-  }
-
-  // A picture the beam finished this cycle goes to whoever is watching, with
-  // everything the cycle owed the machine already done.
-  if (frameFinished_) {
-    frameFinished_ = false;
-    deliverFrame();
-  }
-  // And the save window that frame changed, in the same place and for the same
-  // reason: the machine is between cycles here, so a host may do what it likes
-  // with the bytes, including throwing.
-  if (saveFinished_) {
-    saveFinished_ = false;
-    deliverSave();
   }
 }
 

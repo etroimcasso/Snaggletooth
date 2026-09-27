@@ -274,6 +274,14 @@ class SaveObserver {
   // that moved. Told once per frame however many stores landed in it, and not at
   // all in a frame where none did. The span is the machine's own storage and is
   // valid for the call.
+  //
+  // It arrives from inside step() or run(), at the end of the cycle in which the
+  // beam reaches the next frame's first line, after that cycle has closed. It may
+  // throw: step() or run() then returns through the throw with the machine at
+  // that cycle's end, state() coherent there, and the report not made again. The
+  // next run() finishes the budget the throw interrupted before it spends its
+  // own, so run(a) then run(b) lands where run(a + b) does; a step() interrupted
+  // this way leaves an instruction part-run, which the next step() finishes.
   virtual void changed(std::span<const std::uint8_t> save) = 0;
 };
 
@@ -810,12 +818,14 @@ class Snes {
   // The call is refused, returning false with nothing done, when `returns` is
   // Standin::None, when the entry's own bank does not map it (addressable(entry,
   // 1)), or when it is made from inside a host's call the machine makes during a
-  // cycle — an access watcher's, the bus observer's, the frame or save
-  // observer's, or the audio machine's observer's. An instruction watcher is
-  // told between instructions, and a call from inside its call, at any depth, is
-  // the same call. A call is refused after the finishing cycles, with them spent
-  // and nothing pushed, when the stack the landing would land on is not memory
-  // this face reaches.
+  // cycle — an access watcher's, the bus observer's, or the audio machine's
+  // observer's. An instruction watcher is told between instructions, and a call
+  // from inside its call, at any depth, is the same call. The frame and save
+  // observers are told at a cycle's end, and a call from inside their reports
+  // runs the machine to its boundary first, as above; a frame the routine
+  // finishes is reported inside the call. A call is refused after the finishing
+  // cycles, with them spent and nothing pushed, when the stack the landing would
+  // land on is not memory this face reaches.
   bool callInContext(std::uint32_t entry, Standin returns, std::size_t guard);
   bool callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
                    std::size_t guard);
@@ -892,7 +902,8 @@ class Snes {
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
-  // by the master cycles it now owes.
+  // by the master cycles it now owes. A frame or save report the cycle owes is
+  // made after it closes.
   void machineCycle();
 
   // The master cycles the refresh holds the CPU off the bus, spent a fast cycle at a
@@ -934,13 +945,17 @@ class Snes {
   // through $213E.
   void rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept;
 
+  // Makes the frame and save reports the cycle just closed owes, after writing
+  // the register file back. Called at the end of machineCycle, outside the
+  // cycle, and from nowhere else: the line that finishes a frame cannot be left
+  // half done, and a host's report may throw.
+  void deliverFinished();
   // Hands the finished picture to the frame observer: the rows the frame's own
   // vertical blank left below it, the frame's parity, and the raster the dots
-  // wrote. Called as the beam reaches the next frame's first line.
+  // wrote. Called at the end of the cycle in which the beam reaches the next
+  // frame's first line, which draws nothing, so the raster is the finished frame.
   void deliverFrame();
-  // Hands the save window to the observer. Called from between cycles rather than
-  // from the line that finished the frame, because that line cannot throw and what
-  // a host does with a save can.
+  // Hands the save window to the observer, at the end of the same cycle.
   void deliverSave();
 
   // The events inside one line, for the master-cycle span (`from`, `to`] of a line
@@ -1245,8 +1260,9 @@ class Snes {
   bool timerZeroOnVLine_ = false;    // the H = 0 point, on that line
   // Whether the machine is inside a cycle, where a host's callback runs part-way
   // through the chip's work: set for the whole cycle but the instruction watch at
-  // its start. A call into the guest made while it is set is refused. It belongs
-  // to the cycle, not to the machine, so a snapshot does not carry it.
+  // its start; the frame and save reports come after it clears. A call into the
+  // guest made while it is set is refused. It belongs to the cycle, not to the
+  // machine, so a snapshot does not carry it, and restore() and reset() clear it.
   bool insideCycle_ = false;
   BusObserver* observer_ = nullptr;  // told every access and internal cycle; none by default
   std::optional<std::uint16_t> portLanding_;  // where the access in progress landed through a video data port, until it is reported

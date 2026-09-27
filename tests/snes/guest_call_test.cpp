@@ -24,14 +24,17 @@
 // routine's registers: live, inside a watch on its return. The cycle cases
 // pin that a call from inside any host's call the machine makes during a
 // cycle — an access watcher's on the opcode fetch, the bus observer's, the
-// frame observer's, the audio machine's observer's — is refused and leaves the
-// machine as a plain run leaves it. The last cases pin the machine that calls
-// nothing, and a call after a move.
+// audio machine's observer's — is refused and leaves the machine as a plain
+// run leaves it; that a call from inside a frame or save report, made at a
+// cycle's end, proceeds; and that restore() and reset() clear what a throw from
+// inside a cycle left behind. The last cases pin the machine that calls nothing,
+// and a call after a move.
 
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -600,11 +603,6 @@ TEST(SnesGuestCall, ACallFromInsideTheBusObserversReportOfAnOpcodeFetchIsRefused
   EXPECT_EQ(a.takeFrames(), b.takeFrames());
 }
 
-// The frame observer, calling from inside each finished frame.
-struct FrameCaller final : FrameObserver, Caller {
-  void frame(const VideoFrame&) override { call(); }
-};
-
 // The audio machine's observer, set through the console, calling from inside
 // each access and each boundary it is told.
 struct ApuObserverCaller final : ApuObserver, Caller {
@@ -612,24 +610,164 @@ struct ApuObserverCaller final : ApuObserver, Caller {
   void instruction(const Spc700State&, const Spc700State&, std::uint32_t) override { call(); }
 };
 
-TEST(SnesGuestCall, ACallFromInsideTheFrameObserverOrTheAudioMachinesObserverIsRefused) {
-  // Both are told inside a console cycle — a frame as the beam reaches the next
-  // one, the audio machine as the cycle pays it its share — so a call from
-  // either is refused, a boundary of the sound CPU's included.
+TEST(SnesGuestCall, ACallFromInsideTheAudioMachinesObserverIsRefused) {
+  // The audio machine is told inside a console cycle, as the cycle pays it its
+  // share, so a call from its observer is refused, a boundary of the sound
+  // CPU's included.
   Snes a = programMachine(kLoop);
   Snes b = programMachine(kLoop);
-  FrameCaller f;
-  f.machine = &b;
-  b.setFrameObserver(&f);
   ApuObserverCaller o;
   o.machine = &b;
   b.setApuObserver(&o);
   b.run(2u * 262u * 1364u);
   a.run(2u * 262u * 1364u);
-  EXPECT_TRUE(f.allRefused()) << "a frame finished, and the calls from it were refused";
   EXPECT_TRUE(o.allRefused());
   EXPECT_TRUE(a.state() == b.state());
   EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
+// ---- a call from inside a frame or save report proceeds --------------------------------
+
+// INC !$0020 ; BRA -5 — a guest whose store changes every pass.
+const std::initializer_list<std::uint8_t> kCounter = {kIncAbs, 0x20u, 0x00u, kBra, 0xFBu};
+
+// A frame is 262 lines of 1364 master cycles less the four its short line
+// drops; two of them and a margin is a run that finishes two frames.
+constexpr std::uint64_t kTwoFrames = 2u * 357364u + 20000u;
+
+// What a call from inside a report did: its answer, and the register file the
+// machine held once it had returned.
+struct FirstReportCall {
+  Snes* machine = nullptr;
+  int reports = 0;
+  std::vector<bool> returned;
+  std::optional<Cpu65816State> after;
+  void report() {
+    ++reports;
+    if (reports != 1) return;
+    returned.push_back(machine->callInContext(kRoutine, Standin::Near, 100));
+    after = machine->cpuState();
+  }
+};
+
+// A frame observer that calls into the guest from inside its first report.
+struct FrameCaller final : FrameObserver, FirstReportCall {
+  void frame(const VideoFrame&) override { report(); }
+};
+
+// A frame observer that counts.
+struct FrameCounter final : FrameObserver {
+  int frames = 0;
+  void frame(const VideoFrame&) override { ++frames; }
+};
+
+TEST(SnesGuestCall, ACallFromInsideTheFrameObserversReportProceeds) {
+  // The frame is reported at the end of the cycle that finished it, after the
+  // cycle has closed: the call runs the instruction in flight to its boundary,
+  // then the routine, and the guest carries on. The call's cycles come out of
+  // the budget, so the run hands over as many frames as a plain one.
+  Snes a = programMachine(kCounter);
+  Snes b = programMachine(kCounter);
+  FrameCounter counted;
+  a.setFrameObserver(&counted);
+  FrameCaller f;
+  f.machine = &b;
+  b.setFrameObserver(&f);
+  b.run(kTwoFrames);
+  a.run(kTwoFrames);
+  ASSERT_EQ(f.returned.size(), 1u);
+  EXPECT_TRUE(f.returned[0]) << "the call from the report proceeded";
+  EXPECT_EQ(b.state().wram[0x30], 1u) << "the routine ran";
+  ASSERT_TRUE(f.after.has_value());
+  EXPECT_EQ(int{f.after->tcu}, 0) << "the file afterwards is at an instruction boundary";
+  EXPECT_EQ(f.reports, counted.frames) << "as many frames as a plain run";
+  EXPECT_EQ(counted.frames, 2);
+  const std::uint8_t count = b.state().wram[0x20];
+  b.step();  // INC or BRA
+  b.step();
+  EXPECT_NE(b.state().wram[0x20], count) << "the guest carries on";
+}
+
+// LDA #$01 ; STA $700000 ; INC A ; BRA -7 — a guest that stores into the save
+// window every pass, with the routine at $8100, on a cartridge with a window.
+Snes savingMachine() {
+  constexpr std::uint8_t kStaLong = 0x8Fu;
+  std::vector<std::uint8_t> rom = {kLdaImm, 0x01u, kStaLong, 0x00u, 0x00u, 0x70u, kIncA, kBra, 0xF9u};
+  rom.resize(0x8000u, 0x00u);
+  rom[0x0100u] = kIncAbs;  // INC !$0030 ; RTS at $8100
+  rom[0x0101u] = 0x30u;
+  rom[0x0102u] = 0x00u;
+  rom[0x0103u] = kRts;
+  rom[0x7FFCu] = 0x00u;  // reset -> $8000
+  rom[0x7FFDu] = 0x80u;
+  return Snes(SnesConfig{.rom = rom, .saveRamBytes = 2048u});
+}
+
+// A save observer that calls into the guest from inside its first report.
+struct SaveCaller final : SaveObserver, FirstReportCall {
+  void changed(std::span<const std::uint8_t>) override { report(); }
+};
+
+// A save observer that counts.
+struct SaveCounter final : SaveObserver {
+  int reports = 0;
+  void changed(std::span<const std::uint8_t>) override { ++reports; }
+};
+
+TEST(SnesGuestCall, ACallFromInsideTheSaveObserversReportProceeds) {
+  Snes a = savingMachine();
+  Snes b = savingMachine();
+  SaveCounter counted;
+  a.setSaveObserver(&counted);
+  SaveCaller s;
+  s.machine = &b;
+  b.setSaveObserver(&s);
+  b.run(kTwoFrames);
+  a.run(kTwoFrames);
+  ASSERT_EQ(s.returned.size(), 1u);
+  EXPECT_TRUE(s.returned[0]) << "the call from the report proceeded";
+  EXPECT_EQ(b.state().wram[0x30], 1u) << "the routine ran";
+  ASSERT_TRUE(s.after.has_value());
+  EXPECT_EQ(int{s.after->tcu}, 0) << "the file afterwards is at an instruction boundary";
+  EXPECT_EQ(s.reports, counted.reports) << "as many reports as a plain run";
+  EXPECT_EQ(counted.reports, 2);
+  const std::uint8_t stored = b.state().sram[0];
+  for (int i = 0; i < 4; ++i) b.step();  // one pass: a store of the next value among them
+  EXPECT_NE(b.state().sram[0], stored) << "the guest carries on";
+}
+
+// ---- restore and reset clear what a throw from inside a cycle left ----------------------
+
+// An access watcher that throws from every access it is told.
+struct Thrower final : AccessWatcher {
+  struct Thrown {};
+  AccessAnswer read(std::uint32_t, std::uint8_t, AccessSource, CycleKind, std::uint8_t) override {
+    throw Thrown{};
+  }
+  AccessAnswer write(std::uint32_t, std::uint8_t, AccessSource, CycleKind, std::uint8_t) override {
+    throw Thrown{};
+  }
+};
+
+TEST(SnesGuestCall, RestoreAndResetClearWhatAThrowFromInsideACycleLeft) {
+  // A watcher that throws leaves the machine inside the cycle it threw from,
+  // and a call is refused there. A snapshot does not carry that, so a restore
+  // of one taken before the run gives a machine that calls, and so does a reset.
+  Snes m = parkedGuest();
+  const SnesState snapshot = m.state();
+  Thrower w;
+  m.setAccessWatcher(&w);
+  m.watchAccess(0x008002u, 1, /*onRead=*/true, /*onWrite=*/false);  // the STA's opcode
+  EXPECT_THROW(m.run(100u), Thrower::Thrown);
+  EXPECT_FALSE(m.callInContext(kRoutine, Standin::Near, 100)) << "left inside the cycle";
+  m.restore(snapshot);
+  EXPECT_TRUE(m.callInContext(kRoutine, Standin::Near, 100)) << "restore() cleared it";
+  EXPECT_EQ(m.state().wram[0x30], 1u);
+  EXPECT_THROW(m.run(100u), Thrower::Thrown);
+  EXPECT_FALSE(m.callInContext(kRoutine, Standin::Near, 100));
+  m.reset();
+  EXPECT_TRUE(m.callInContext(kRoutine, Standin::Near, 100)) << "reset() cleared it";
+  EXPECT_EQ(m.state().wram[0x30], 2u);
 }
 
 // ---- the machine that calls nothing behaves exactly as it does today ---------------

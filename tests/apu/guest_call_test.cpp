@@ -22,8 +22,10 @@
 // a boundary, and the way a host reads a routine's registers: live, inside a
 // watch on its RET. The access cases pin that a call from inside the access
 // watcher's call on the opcode fetch, or the observer's report of it, is
-// refused and leaves the machine as a plain run leaves it. The last cases pin
-// the machine that calls nothing, and a call after a move.
+// refused and leaves the machine as a plain run leaves it; that restore() and
+// reset() clear what a throw from inside the access left behind, and that
+// setCpuState from inside the access does not. The last cases pin the machine
+// that calls nothing, and a call after a move.
 
 #include <cstddef>
 #include <cstdint>
@@ -504,6 +506,60 @@ TEST(ApuGuestCall, RefusedCallsLeaveAMachineByteIdenticalToAPlainRun) {
   EXPECT_TRUE(w.allRefused());
   EXPECT_TRUE(a.state() == b.state());
   EXPECT_EQ(a.takeFrames(), b.takeFrames());
+}
+
+// ---- restore and reset clear what a throw from inside the access left -------------------
+
+// An access watcher that throws from every access it is told.
+struct Thrower final : ApuAccessWatcher {
+  struct Thrown {};
+  AccessAnswer read(std::uint16_t, std::uint8_t, std::uint8_t) override { throw Thrown{}; }
+  AccessAnswer write(std::uint16_t, std::uint8_t, std::uint8_t) override { throw Thrown{}; }
+};
+
+TEST(ApuGuestCall, RestoreAndResetClearWhatAThrowFromInsideTheAccessLeft) {
+  // A watcher that throws leaves the machine inside the access it threw from,
+  // and a call is refused there. A snapshot does not carry that, so a restore
+  // of one taken before the run gives a machine that calls, and so does a reset.
+  Apu apu = parked();
+  const ApuState snapshot = apu.state();
+  Thrower w;
+  apu.setAccessWatcher(&w);
+  apu.watchAccess(kLanding, 1, /*onRead=*/true, /*onWrite=*/false);  // the MOV's opcode
+  EXPECT_THROW(apu.run(10u), Thrower::Thrown);
+  EXPECT_FALSE(apu.callInContext(kRoutine, ApuStandin::Return, 100)) << "left inside the access";
+  apu.restore(snapshot);
+  EXPECT_TRUE(apu.callInContext(kRoutine, ApuStandin::Return, 100)) << "restore() cleared it";
+  EXPECT_EQ(apu.readRam(kMark), 1u);
+  EXPECT_THROW(apu.run(10u), Thrower::Thrown);
+  EXPECT_FALSE(apu.callInContext(kRoutine, ApuStandin::Return, 100));
+  apu.reset();
+  apu.setPc(kEntry);
+  EXPECT_TRUE(apu.callInContext(kRoutine, ApuStandin::Return, 100)) << "reset() cleared it";
+  EXPECT_EQ(apu.readRam(kMark), 2u);
+}
+
+// A watcher that writes the register file back as it stands from inside the
+// access, then calls.
+struct FileWriter final : ApuAccessWatcher, Caller {
+  AccessAnswer read(std::uint16_t, std::uint8_t, std::uint8_t) override {
+    machine->setCpuState(machine->cpuState());
+    call();
+    return AccessAnswer::proceed();
+  }
+  AccessAnswer write(std::uint16_t, std::uint8_t, std::uint8_t) override { return AccessAnswer::proceed(); }
+};
+
+TEST(ApuGuestCall, SetCpuStateFromInsideTheAccessKeepsTheRefusal) {
+  // setCpuState reloads the core as restore() does, but a watcher may call it
+  // part-way through the access, and a call after it there is still refused.
+  Apu apu = loaded(kLoop);
+  FileWriter w;
+  w.machine = &apu;
+  apu.setAccessWatcher(&w);
+  apu.watchAccess(kEntry, 1, /*onRead=*/true, /*onWrite=*/false);  // the first MOV's opcode
+  apu.run(2000u);
+  EXPECT_TRUE(w.allRefused());
 }
 
 TEST(ApuGuestCall, ACallAfterAMove) {
