@@ -492,12 +492,13 @@ class Player final : public snaggletooth::FrameObserver {
   }
 
   // Records what the run draws and what each frame costs, into `directory` under
-  // `stem`. Without it the run is the window alone. The recording is opened on the
-  // first frame, at that frame's shape; a run whose picture changes shape is laid out
-  // at its largest as the recording closes.
-  void record(const std::filesystem::path& directory, const std::string& stem) {
+  // `stem`, and the run's buttons to `script`. Without it the run is the window alone.
+  // The recording is opened on the first frame, at that frame's shape; a run whose
+  // picture changes shape is laid out at its largest as the recording closes.
+  void record(const std::filesystem::path& directory, const std::string& stem,
+              const std::filesystem::path& script) {
     recordAt_ = directory / (stem + ".avi");
-    scriptAt_ = directory / (stem + ".snaginput");
+    scriptAt_ = script;
     table_.open(directory / (stem + ".csv"));
     if (table_) {
       table_ << "frame,wall_ns,emulated_ns,master,dots,milli_fps,mean_milli_fps\n";
@@ -1068,7 +1069,8 @@ int main(int argc, char** argv) {
   }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);
-    player.record(outDir, stem);
+    // The script takes the name every replay looks for, so the directory replays the run.
+    player.record(outDir, stem, snaggletooth::disasm::scriptPathFor(outDir, imagePath));
   }
   machine.setFrameObserver(&player);
   player.beginRun();

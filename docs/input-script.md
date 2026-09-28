@@ -140,7 +140,7 @@ request.input = *script;  // a CartridgeRequest; observeRun replays it
 
 A directory of scripts, as `--input-dir` takes, holds one file per image named
 `scriptPathFor(directory, image)` — the image's file name without its extension,
-spaces as underscores, `.snaginput` — and may hold a `default.snaginput`. `scriptFor` picks
+exactly as it is, then `.snaginput` — and may hold a `default.snaginput`. `scriptFor` picks
 the one to play: the image's own when it exists, else `default.snaginput`, else the
 image's own path so a caller finds nothing to replay. A `default.snaginput` that leaves
 a title and a menu behind is what lets every cartridge in a corpus be played

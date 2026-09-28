@@ -125,7 +125,7 @@ cartridge runs, so the run plays the game rather than watching it; a script that
 cannot be read is refused with its line named, and `--input` under `--no-run` is
 refused as well, having nothing to replay into. `--input-dir <directory>` names a
 directory of recorded runs instead: the one named for the image — its file name
-without the extension, spaces as underscores, `.snaginput` — is replayed when it is
+without the extension, exactly as it is, then `.snaginput` — is replayed when it is
 there; the directory's `default.snaginput` is replayed when it is not, so every image
 in a corpus is played; and the ports stay empty only when the directory holds
 neither. The two forms are not given together.

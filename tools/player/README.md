@@ -144,7 +144,7 @@ asked for:
 | `<image>.avi` | every frame exactly as the machine drove it, uncompressed, at the largest shape the run produced (`../video/README.md`) |
 | `<image>.csv` | a row a frame: wall and emulation time in nanoseconds, master cycles, dots drawn, and the rate instantaneous and mean |
 | `<image>.wav` | the sound the run produced, 32 kHz stereo — the chip's own rate, whatever the panel showing it runs at |
-| `<image>.snaginput` | the buttons, as a script that replays the run |
+| `<image>.snaginput` | the buttons, as a script that replays the run — under the name every replay looks for, so `--input-dir` on this directory, here or in the toolkit, replays the run |
 
 They come together — one run, one set of evidence. The script is written whatever drove the run, so
 a run you played by hand replays exactly, and one driven by a script is written back in the same

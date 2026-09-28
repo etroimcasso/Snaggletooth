@@ -23,8 +23,8 @@ snes_player <image> --input-dir tools/inputs
 ```
 
 A command looks in that directory for the image's own script first —
-`scriptPathFor` names it: the image's file name without its extension, spaces as
-underscores, `.snaginput` — and falls back to `default.snaginput`. A single run
+`scriptPathFor` names it: the image's file name without its extension, exactly as
+it is, then `.snaginput` — and falls back to `default.snaginput`. A single run
 takes `--input <file>` instead and names the script directly.
 
 ## Adding one

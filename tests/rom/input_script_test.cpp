@@ -312,10 +312,10 @@ TEST(InputScriptReplay, TheRequestCarriesTheScriptIntoTheTree) {
       << manifest;
 }
 
-TEST(InputScript, ADirectoryKeepsAnImagesRunUnderItsNameWithSpacesAsUnderscores) {
-  EXPECT_EQ(scriptPathFor("runs", "Some Game (U) [!].sfc").generic_string(), "runs/Some_Game_(U)_[!].snaginput");
+TEST(InputScript, ADirectoryKeepsAnImagesRunUnderTheImagesOwnName) {
+  EXPECT_EQ(scriptPathFor("runs", "Some Game (U) [!].sfc").generic_string(), "runs/Some Game (U) [!].snaginput");
   EXPECT_EQ(scriptPathFor("runs", "/images/plain.smc").generic_string(), "runs/plain.snaginput");
-  EXPECT_EQ(scriptPathFor("a/b", "two  spaces.smc").generic_string(), "a/b/two__spaces.snaginput");
+  EXPECT_EQ(scriptPathFor("a/b", "two  spaces.smc").generic_string(), "a/b/two  spaces.snaginput");
 }
 
 TEST(InputScript, ADirectoryPlaysItsDefaultForAnImageWithoutARunOfItsOwn) {
@@ -326,7 +326,7 @@ TEST(InputScript, ADirectoryPlaysItsDefaultForAnImageWithoutARunOfItsOwn) {
   std::filesystem::create_directories(dir);
 
   // Neither file exists: the image's own path comes back, and it is not a file.
-  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "Some_Game_(U).snaginput");
+  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "Some Game (U).snaginput");
   EXPECT_FALSE(std::filesystem::is_regular_file(scriptFor(dir, "Some Game (U).sfc")));
 
   {
@@ -335,9 +335,9 @@ TEST(InputScript, ADirectoryPlaysItsDefaultForAnImageWithoutARunOfItsOwn) {
   EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "default.snaginput");
 
   {
-    std::ofstream(dir / "Some_Game_(U).snaginput") << "frame 20 1 a\n";
+    std::ofstream(dir / "Some Game (U).snaginput") << "frame 20 1 a\n";
   }
-  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "Some_Game_(U).snaginput");
+  EXPECT_EQ(scriptFor(dir, "Some Game (U).sfc"), dir / "Some Game (U).snaginput");
   EXPECT_EQ(scriptFor(dir, "Other Game.smc"), dir / "default.snaginput");
 
   std::filesystem::remove_all(dir, ec);

@@ -171,11 +171,7 @@ std::optional<InputScript> parseInputScript(std::string_view text, std::string& 
 
 std::filesystem::path scriptPathFor(const std::filesystem::path& directory,
                                     const std::filesystem::path& image) {
-  std::string name = image.stem().string();
-  for (char& c : name) {
-    if (c == ' ') c = '_';
-  }
-  return directory / (name + ".snaginput");
+  return directory / (image.stem().string() + ".snaginput");
 }
 
 std::filesystem::path scriptFor(const std::filesystem::path& directory,

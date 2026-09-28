@@ -113,7 +113,7 @@ image under that directory when there is one, and the directory's `default.snagi
 when there is not. `rom/input_script.h` reads the script (`parseInputScript`),
 says what a port holds at a frame (`InputScript::padAt`), names the file a
 directory keeps for an image (`scriptPathFor`: the image's name without its
-extension, spaces as underscores, `.snaginput`), and picks the one to play
+extension, exactly as it is, then `.snaginput`), and picks the one to play
 (`scriptFor`: the image's own, else `default.snaginput`).
 
 The facts it attaches to addresses — the hardware each instruction reaches, the
