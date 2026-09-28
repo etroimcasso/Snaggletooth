@@ -666,7 +666,7 @@ A program can reach the three memories only when the chip is not using them:
 |---|---|
 | VRAM (`$2118`/`$2119` written, `$2139`/`$213A` read, `$2116`/`$2117` prefetching) | vertical blank or forced blank |
 | OAM (`$2104` written, `$2138` read) | vertical blank or forced blank |
-| CGRAM (`$2122` written, `$213B` read) | vertical blank, horizontal blank or forced blank |
+| CGRAM (`$2122` written, `$213B` read) | every dot but the picture's own — dots 22 to 277 of lines 1 to the last before vertical blank — and every dot of forced blank |
 
 Outside its window a write is ignored: the byte does not land, and the access reported to the
 [bus observer](snes-machine.md#the-bus-observer) carries no landing. The address steps all the
@@ -679,8 +679,13 @@ Vertical blank here is the machine's latched fact, not a comparison of the line:
 `$2133` bit 2 chooses — 225 or 240 — to the end of the frame, and line 0 is not part of it. One state
 parts the windows from that fact. **Asking for the taller picture after the blank has already begun shuts
 the memories again until line 240**: it resumes neither the picture nor anything the blank stopped, but
-the chip holds VRAM, the sprite table and the palette's blank-only half as though it were still drawing.
+the chip holds VRAM, the sprite table and the palette's picture dots as though it were still drawing.
 Forced blank opens them regardless.
+
+The palette's window is the picture's dots, not the horizontal-blank flag. `$4212` bit 6 falls at dot
+1 and the first dot drawn is 22, so a palette write between them lands, and the line that begins shows
+it from its first pixel. A program that sends a few colours a line by DMA from late in the line before
+relies on those dots: its transfer runs on past the line's start.
 
 ```cpp
 // The screen on, the beam inside the picture: nothing lands, the address moves.
@@ -810,8 +815,9 @@ Each of these is a question the documentation leaves, recorded rather than decid
   the registers and memories as they stand at its own dot, which is where a mid-picture write lands;
   the distance itself is a measurement against a test ROM that has not been made.
 - What a write to a scroll register mid-line does to a tile whose entry the chip has already fetched.
-- How the palette's own mid-line access window sits against the chip's fetch of the colours it is
-  drawing with.
+- Which palette entry a write at a picture dot reaches. The register page says the wrong one and names
+  none; such a write reaches no entry here — see
+  [`ppu-behavior.md`](ppu-behavior.md#where-a-write-at-a-picture-dot-goes-is-not-stated).
 - What the memory refresh's pause does to a counter latched inside it.
 - Whether a Mode 7 register written mid-line reaches that line's offset and line terms or only the
   per-pixel ones. The multiplier's schedule computes the offset and line products in the line's first

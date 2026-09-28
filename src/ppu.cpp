@@ -167,7 +167,12 @@ bool Ppu::oamReachable(const PpuState& s, const PpuInputs& in) noexcept {
   return inVblankWindow(s, in) || s.forcedBlank();
 }
 bool Ppu::cgramReachable(const PpuState& s, const PpuInputs& in) noexcept {
-  return inVblankWindow(s, in) || in.hblank || s.forcedBlank();
+  // The palette is shut only while the picture is being drawn from it: the picture's
+  // dots of a line the picture holds. The dots either side of them are open, the
+  // start of a line included, though the horizontal-blank flag falls at its dot 1.
+  const bool drawing = !inVblankWindow(s, in) && in.vpos != 0u && in.hdot >= kFirstPictureDot &&
+                       in.hdot <= kLastPictureDot;
+  return !drawing || s.forcedBlank();
 }
 
 bool Ppu::vramReachable(const PpuInputs& in) const noexcept { return vramReachable(s_, in); }

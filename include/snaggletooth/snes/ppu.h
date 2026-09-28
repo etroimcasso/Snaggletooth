@@ -38,8 +38,8 @@
 // never keeps it.
 //
 // What the chip is told about the machine at an access is PpuInputs — its
-// input pins: where the beam is, the frame parity, the two blank signals, the
-// clock rate and the level of the counter-latch line. It learns nothing else.
+// input pins: where the beam is, the frame parity, the vertical-blank signal,
+// the clock rate and the level of the counter-latch line. It learns nothing else.
 
 #include <array>
 #include <cstddef>
@@ -60,6 +60,11 @@ constexpr std::uint16_t kOverscanVblankStartLine = 240u;
 constexpr unsigned kSprites = 128u;
 constexpr std::uint16_t kPictureWidth = 256u;
 constexpr std::uint16_t kHiresWidth = 512u;
+
+// The dots a line of picture is drawn on, one position each: 22 to 277 of every
+// line from 1 to the last before vertical blank. Line 0 draws nothing.
+constexpr std::uint16_t kFirstPictureDot = 22u;
+constexpr std::uint16_t kLastPictureDot = 277u;
 
 // What the chip can afford on one line: the sprites Range keeps, and the 8x8
 // tiles Time loads from them. A sprite past the first is dropped and a tile past
@@ -106,7 +111,6 @@ struct PpuInputs {
   std::uint16_t vpos = 0;   // the beam's line
   std::uint8_t field = 0;   // the frame parity, toggled every frame
   bool vblank = false;      // the vertical-blank signal: raised at the start line and held to the frame's end
-  bool hblank = false;      // the horizontal-blank signal: raised at H=274 and lowered at H=1, on every line
   bool pal = false;         // the clock-rate pin: 50 Hz when set
   bool extLatch = true;     // the counter-latch line's level, WRIO bit 7 (high when nothing pulls it)
   bool lateHalf = false;    // the dot's second half: the last two of a four-cycle dot's master cycles, the last three of a six-cycle dot's
@@ -704,9 +708,6 @@ class Ppu {
   // INIDISP holds.
   [[nodiscard]] std::array<std::uint8_t, 4> convert(std::uint16_t colour) const noexcept;
 
-  // Whether vertical blank is open to the memories, and whether the taller picture
-  // was asked for after the blank had already begun — which shuts them again until
-  // the line that picture ends on.
   // registerValue's computation, which read() and registerValue() both take
   // inline, so a read spends no call on its byte. Defined in ppu.cpp, the one
   // file that calls it.
@@ -714,11 +715,15 @@ class Ppu {
                                                                   std::uint16_t offset,
                                                                   const PpuInputs& in) noexcept;
 
+  // Whether vertical blank is open to the memories, and whether the taller picture
+  // was asked for after the blank had already begun — which shuts them again until
+  // the line that picture ends on.
   [[nodiscard]] static bool inVblankWindow(const PpuState& s, const PpuInputs& in) noexcept;
   [[nodiscard]] static bool overscanLate(const PpuState& s, const PpuInputs& in) noexcept;
 
   // Whether each memory can be reached now. VRAM and the sprite table only in
-  // vertical blank or forced blank; the palette in horizontal blank too.
+  // vertical blank or forced blank; the palette at every dot the picture is not
+  // being drawn on, and in forced blank.
   [[nodiscard]] bool vramReachable(const PpuInputs& in) const noexcept;
   [[nodiscard]] bool oamReachable(const PpuInputs& in) const noexcept;
   [[nodiscard]] bool cgramReachable(const PpuInputs& in) const noexcept;

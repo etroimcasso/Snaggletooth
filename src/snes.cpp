@@ -59,11 +59,10 @@ constexpr std::uint16_t kNmiFlagOffset = 2u;
 constexpr std::uint16_t kOamReloadOffset = 40u;
 constexpr std::uint16_t kHdmaDeliver = 1112u;
 
-// The picture the chip draws: dots 22 to 277 of every line the frame's own vertical
-// blank leaves below it, the first line of a frame drawing nothing. Every one of
-// those dots is four master cycles wide, the two long ones lying well past them.
-constexpr std::uint16_t kFirstPictureDot = 22u;
-constexpr std::uint16_t kLastPictureDot = 277u;
+// The picture the chip draws, kFirstPictureDot to kLastPictureDot of every line the
+// frame's own vertical blank leaves below it, the first line of a frame drawing
+// nothing. Every one of those dots is four master cycles wide, the two long ones
+// lying well past them.
 static_assert(kPictureWidth == kLastPictureDot - kFirstPictureDot + 1u,
               "the picture is as wide as the dots it is drawn from");
 constexpr std::uint16_t kTallestPicture = kOverscanVblankStartLine - 1u;
@@ -1821,7 +1820,6 @@ PpuInputs Snes::ppuInputs() const noexcept {
       .vpos = state_.vpos,
       .field = state_.field,
       .vblank = state_.inVblank,
-      .hblank = inHblank(),
       .pal = region_ == Region::Pal,
       .extLatch = (state_.wrio & 0x80u) != 0u,
       .lateHalf = lateHalfOf(state_.hpos, lineLength() == kShortLineMaster),

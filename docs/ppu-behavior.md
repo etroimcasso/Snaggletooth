@@ -65,6 +65,9 @@ disagree it names the disagreement and what decided it.
 - [The picture's edges](#the-pictures-edges)
   - [The console outputs no scanline 0](#the-console-outputs-no-scanline-0)
   - [Where the visible span ends is not settled by the documents](#where-the-visible-span-ends-is-not-settled-by-the-documents)
+- [The palette's window](#the-palettes-window)
+  - [The palette is shut at the picture's dots, not by the blank flag](#the-palette-is-shut-at-the-pictures-dots-not-by-the-blank-flag)
+  - [Where a write at a picture dot goes is not stated](#where-a-write-at-a-picture-dot-goes-is-not-stated)
 - [The converter](#the-converter)
   - [Brightness scales by (N+1)/16, and 0 is off rather than dim](#brightness-scales-by-n116-and-0-is-off-rather-than-dim)
 - [The status registers](#the-status-registers)
@@ -821,6 +824,35 @@ to something tidier. Nothing yet measured depends on the last dot.
 
 *Documented but uncertain at the source.*
 
+## The palette's window
+
+### The palette is shut at the picture's dots, not by the blank flag
+
+The register page lets the CPU reach the palette "during Vertical Blank, Horizontal Blank or Force
+Blank". The horizontal-blank flag, `$4212` bit 6, is raised at dot 274 and lowered at dot 1; fullsnes's
+event list draws the picture at dots 22–277. The two do not coincide, and taking the flag for the
+window shuts the palette across dots 1–21 of every line, where nothing is drawn.
+
+The staged test ROMs that change the palette on every line decide it. Each sends sixteen bytes a line
+by a transfer started late in the line before, and the transfer runs about ten dots past the next
+line's start. With the flag as the window those bytes are lost: gradients come out as coarse blocks
+and a photograph as speckle. With the picture's dots as the window all three draw their reference
+pictures exactly, at five bits a channel. **The palette is shut at dots 22 to 277 of a line the
+picture holds and open at every other dot**, line 0 and forced blank included.
+
+*Documented but contested*, decided by the test ROMs. Where the window's edges sit to the dot is the
+visible span's own question mark, above; a cartridge written here measures it, and has not yet been
+run on a console.
+
+### Where a write at a picture dot goes is not stated
+
+The register page says a write during the picture reaches "the wrong CGRAM address" and names none;
+anomie sends the palette to his sprite-table text, which says the same of the sprite table. Here
+such a write reaches no entry: the byte is dropped, and the address and the flip-flop step as they
+would have. Which entry the chip writes is what the same cartridge measures.
+
+*Documented as happening; the address is undocumented.*
+
 ## The converter
 
 ### Brightness scales by (N+1)/16, and 0 is off rather than dim
@@ -865,8 +897,8 @@ own "What remains open" carries the register-file ones alongside these.
   loaded and not when, and fullsnes calls the access time of steps 2 and 3 unknown. Here the pass runs
   whole as the line begins, while the Range pass before it runs progressively at two dots a sprite.
 - What a write to a scroll register mid-line does to a tile whose entry has already been fetched.
-- How the palette's mid-line access window sits against the chip's own fetch of the colours it is
-  drawing with.
+- Which palette entry a write at a picture dot reaches, and where the palette's window begins and ends
+  to the dot, both above. A write there reaches no entry until something says which one it does.
 - The last dot of the visible span, above.
 - Direct colour's channel order and what `$2130`'s regions and the fixed colour do to a composed
   pixel, both above: measured on three implementations and open only to the console, which no

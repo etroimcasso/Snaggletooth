@@ -579,7 +579,7 @@ sends its sprite table every frame lands it at the same place every frame, and o
 screen is off continues from wherever the last access left the address.
 
 Each port reaches its memory only in the window the hardware allows — VRAM and OAM in vertical blank or
-forced blank, the palette in horizontal blank too. Outside it a write is ignored and the access reported
+forced blank, the palette at every dot the picture is not being drawn on. Outside it a write is ignored and the access reported
 to the [observer](#the-bus-observer) carries no landing, while the address steps as it would have; the
 rule is stated in full in [ppu.md](ppu.md#the-memories-and-their-windows). The screen powers on in
 forced blank, so a program that fills the memories before turning the picture on reaches them freely.

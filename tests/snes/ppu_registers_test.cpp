@@ -109,23 +109,28 @@ struct Frame final : FrameObserver {
   }
 };
 
-// Draws with the backdrop lit and no layers, `program` running from the start of
-// picture line 100, and hands back the frame that line belongs to. `program` does
-// not stop — the run spans the line and on past the frame's end to deliver it.
-Frame renderFromPictureLine(std::vector<std::uint8_t> program) {
+// Draws with the backdrop lit and no layers, `program` running from `hpos` master
+// cycles into line `vpos`, and hands back the frame that line belongs to. `program`
+// does not stop — the run spans the line and on past the frame's end to deliver it.
+Frame renderFrom(std::vector<std::uint8_t> program, std::uint16_t vpos, std::uint16_t hpos) {
   const std::vector<std::uint8_t> rom = cartridge(std::move(program));
   Snes m(SnesConfig{.rom = rom});
   SnesState s = m.state();
-  s.vpos = 100u;
-  s.hpos = 0u;
+  s.vpos = vpos;
+  s.hpos = hpos;
   s.ppu.inidisp = 0x0Fu;    // the screen on at full brightness
   s.ppu.cgram[0] = 0x1Fu;   // the backdrop a bright red, so a lit dot is not black
   s.ppu.cgram[1] = 0x00u;
   m.restore(s);
   Frame frame;
   m.setFrameObserver(&frame);
-  m.run(230000u);  // from line 100 past the frame's end, delivering it once
+  m.run(230000u);  // past the frame's end, delivering it once
   return frame;
+}
+
+// The same, from the start of picture line 100.
+Frame renderFromPictureLine(std::vector<std::uint8_t> program) {
+  return renderFrom(std::move(program), 100u, 0u);
 }
 
 // How many dots of picture row `row` came out forced-black.
@@ -474,6 +479,24 @@ TEST(SnesPpuRegisters, APaletteWriteInsideThePictureIsIgnoredAndStepsTheAddress)
   EXPECT_FALSE(m.state().ppu.cgLatchHigh);
   ASSERT_EQ(landings.landed.size(), 2u);
   EXPECT_FALSE(landings.landed[1].has_value());
+}
+
+TEST(SnesPpuRegisters, APaletteWriteAtTheStartOfALineShowsAcrossThatLine) {
+  // CGADD <- 0 and the backdrop's two bytes, green, three stores of 46 cycles from
+  // master 1246 of line 99: the last resolves at master 20 of line 100, dot 5, before
+  // the picture's first dot. Picture row 99, which line 100 draws, is green from its
+  // first dot to its last, where a dropped write would leave it red.
+  std::vector<std::uint8_t> program = join({store(0x21u, 0x00u), store(0x22u, 0xE0u), store(0x22u, 0x03u)});
+  program.back() = 0x80u;  // BRA -2 in place of STP: the run spans the frame
+  program.push_back(0xFEu);
+  const Frame frame = renderFrom(std::move(program), 99u, 1246u);
+  ASSERT_TRUE(frame.got);
+  unsigned green = 0u;
+  for (unsigned x = 0u; x < 256u; ++x) {
+    const std::size_t at = (99u * frame.width + x) * 4u;
+    green += frame.pixels[at] == 0u && frame.pixels[at + 1u] != 0u ? 1u : 0u;
+  }
+  EXPECT_EQ(green, 256u);
 }
 
 TEST(SnesPpuRegisters, APaletteReadInsideThePictureAnswersWithTheSecondHalfsOpenBus) {

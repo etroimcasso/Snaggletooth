@@ -295,26 +295,61 @@ TEST(SnesPpuBeam, HorizontalBlankTogglesInForcedBlankToo) {
   EXPECT_EQ(readWithin(0x4212u, line, 1200u) & 0x40u, 0x40u);
 }
 
-TEST(SnesPpuBeam, ThePaletteWindowFollowsTheHorizontalBlankFlagsOwnEdges) {
-  // The palette can be reached in horizontal blank, so where the flag's edges are is
-  // where a mid-picture write to it lands: one resolving at master 1100 is inside the
-  // blank and one at master 40 is not.
-  const Placement line{.vpos = kPictureLine};
-
-  Landings late(0x2122u);
+// Whether a palette write resolving `master` cycles into the placement's line lands.
+// A target before the line's own start is reached from the line before it.
+bool paletteWriteLands(const Placement& line, std::uint16_t master) {
+  Landings landings(0x2122u);
   Placement at = line;
-  at.hpos = static_cast<std::uint16_t>(1100u - kImmediateLoad - kAbsoluteAccess);
-  placed(writeProgram(0x2122u, 0x12u), at, &late);
-  ASSERT_EQ(late.landed.size(), 1u);
-  EXPECT_TRUE(late.landed[0].has_value());
+  const auto lead = static_cast<std::uint16_t>(kImmediateLoad + kAbsoluteAccess);
+  if (master < lead) {
+    at.vpos = static_cast<std::uint16_t>(line.vpos - 1u);
+    at.hpos = static_cast<std::uint16_t>(kLine - lead + master);
+  } else {
+    at.hpos = static_cast<std::uint16_t>(master - lead);
+  }
+  placed(writeProgram(0x2122u, 0x12u), at, &landings);
+  return landings.landed.size() == 1u && landings.landed[0].has_value();
+}
 
-  Landings early(0x2122u);
-  Placement before = line;
-  before.vpos = static_cast<std::uint16_t>(line.vpos - 1u);
-  before.hpos = static_cast<std::uint16_t>(kLine - kImmediateLoad - kAbsoluteAccess + 40u);
-  placed(writeProgram(0x2122u, 0x12u), before, &early);
-  ASSERT_EQ(early.landed.size(), 1u);
-  EXPECT_FALSE(early.landed[0].has_value());
+TEST(SnesPpuBeam, ThePaletteIsShutOnlyAtTheDotsThePictureIsDrawnOn) {
+  // The picture is drawn at dots 22 to 277, four master cycles each, so a palette
+  // write resolving at dot 21 or dot 278 lands and one at dot 22 or dot 277 does
+  // not. The start of the line is open although the blank flag falls at its dot 1.
+  const Placement line{.vpos = kPictureLine};
+  EXPECT_TRUE(paletteWriteLands(line, 4u));      // dot 1
+  EXPECT_TRUE(paletteWriteLands(line, 40u));     // dot 10
+  EXPECT_TRUE(paletteWriteLands(line, 84u));     // dot 21
+  EXPECT_FALSE(paletteWriteLands(line, 88u));    // dot 22
+  EXPECT_FALSE(paletteWriteLands(line, 600u));   // dot 150
+  EXPECT_FALSE(paletteWriteLands(line, 1108u));  // dot 277
+  EXPECT_TRUE(paletteWriteLands(line, 1112u));   // dot 278
+}
+
+TEST(SnesPpuBeam, ThePaletteIsOpenAcrossTheLineThatDrawsNothing) {
+  // Line 0 of a frame draws no picture, so its picture dots are open too.
+  const Placement first{.vpos = 0u};
+  EXPECT_TRUE(paletteWriteLands(first, 88u));
+  EXPECT_TRUE(paletteWriteLands(first, 600u));
+  EXPECT_TRUE(paletteWriteLands(first, 1108u));
+}
+
+TEST(SnesPpuBeam, ThePaletteIsShutAtThePictureDotsOfALateTallPicture) {
+  // The taller picture asked for after vertical blank began holds the memories as
+  // though it were still drawing, to line 239: the palette is shut at its picture
+  // dots and open either side of them.
+  const Placement late{.vpos = 230u, .setini = 0x04u, .inVblank = true};
+  EXPECT_TRUE(paletteWriteLands(late, 40u));
+  EXPECT_FALSE(paletteWriteLands(late, 600u));
+  EXPECT_TRUE(paletteWriteLands(late, 1112u));
+}
+
+TEST(SnesPpuBeam, ThePaletteIsOpenAtEveryDotOfVerticalAndForcedBlank) {
+  const Placement blank{.vpos = 230u, .inVblank = true};
+  EXPECT_TRUE(paletteWriteLands(blank, 600u));
+  const Placement forced{.vpos = kPictureLine, .inidisp = 0x80u};
+  EXPECT_TRUE(paletteWriteLands(forced, 88u));
+  EXPECT_TRUE(paletteWriteLands(forced, 600u));
+  EXPECT_TRUE(paletteWriteLands(forced, 1108u));
 }
 
 // ---- vertical blank and the NMI flag -------------------------------------------
