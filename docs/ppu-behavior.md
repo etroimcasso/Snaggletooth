@@ -40,8 +40,8 @@ disagree it names the disagreement and what decided it.
   - [The two rows ignore the line, and the vertical one is eight lines below](#the-two-rows-ignore-the-line-and-the-vertical-one-is-eight-lines-below)
   - [A 16×16 table serves two columns an entry, and can serve both axes from one word](#a-1616-table-serves-two-columns-an-entry-and-can-serve-both-axes-from-one-word)
 - [Mosaic](#mosaic)
-  - [A size written part-way down a row: fullsnes gives a counter, anomie a restart](#a-size-written-part-way-down-a-row-fullsnes-gives-a-counter-anomie-a-restart)
-  - [Mode 7's blocks stand in the picture, and EXTBG reads two bits for two axes](#mode-7s-blocks-stand-in-the-picture-and-extbg-reads-two-bits-for-two-axes)
+  - [A size written part-way down a row takes effect when that row ends](#a-size-written-part-way-down-a-row-takes-effect-when-that-row-ends)
+  - [Mode 7's blocks stand in the picture, and EXTBG reads bit 0 down and bit 1 across](#mode-7s-blocks-stand-in-the-picture-and-extbg-reads-bit-0-down-and-bit-1-across)
   - [The multiplier's line term subtracts a mosaic index nobody else defines](#the-multipliers-line-term-subtracts-a-mosaic-index-nobody-else-defines)
 - [The windows](#the-windows)
   - [fullsnes prints the window-area field values off by one](#fullsnes-prints-the-window-area-field-values-off-by-one)
@@ -118,11 +118,15 @@ what a claim rests on.
 
 Neither of those is original silicon. An observation from the console itself outranks both, and is
 named as the tiebreaker wherever one of them decided a question below. **Every cartridge written
-here is owed a run on an original console, and none has had one yet:** the console that will run
-them is waiting on an original power supply, since it is not worth risking on any other. Until it
-runs them, a cartridge written here is run on Mesen, bsnes and snes9x, and the reading two of the
-three give is the one taken; a finding decided that way is provisional — held as stated, and
+here is owed a run on an original console, and one has had it so far:** the mosaic sweep, below, on
+an SNS-001 of the launch revision.
+Until a cartridge has run on the console it is run on Mesen, bsnes and snes9x, and the reading two of
+the three give is the one taken; a finding decided that way is provisional — held as stated, and
 reopened rather than defended if the console disagrees.
+
+An emulator's reading is its build's, and a later build may read differently, so a reading is named
+with its build wherever the build is known. The builds behind the readings taken before 2026-09-28
+were not written down.
 
 ---
 
@@ -506,16 +510,16 @@ The sources agree on the register (fullsnes 1054–1063, anomie 178–183, the r
 block showing its upper-left pixel (fullsnes 1055–1057, anomie 184–186 and 2012–2014), on the first
 block standing at the picture's left edge (fullsnes 1065, anomie 186) and its first line (fullsnes
 1066), and on mosaic applying after the scroll and before the windows and colour math (anomie
-197–200, 2012–2013). Three things are weaker, and a cartridge of ours, `mosaic/sweep.sfc`, asks the
-first two with a control image that has mosaic off everywhere.
+197–200, 2012–2013). Three things are weaker. A cartridge of ours, `mosaic/sweep.sfc`, asks the first
+two, with a control image that has mosaic off everywhere, and **an original console answers both**.
 
-**What has been read of it.** The cartridge was run on an FPGA reconstruction of the console and on
-Mesen, bsnes and snes9x. The reconstruction draws the sweep as this machine does, band for band; the
-three software implementations each draw something else, and where they and the reconstruction
-disagree the reconstruction's reading is the one taken. A reconstruction is not silicon, so every
-finding below stays provisional until the console runs it.
+**What the console showed.** The cartridge was run on an original SNES — an SNS-001, the launch
+revision — on 2026-09-28, and the console draws the sweep as this machine does, band for band, read
+by eye across the whole picture. An FPGA reconstruction of the console draws it the same way. Mesen,
+bsnes and snes9x each draw something else; MesenCE 2.2.1 and the Mesen-S 0.4.0 libretro core were
+set against the console's picture and both differ from it.
 
-### A size written part-way down a row: fullsnes gives a counter, anomie a restart
+### A size written part-way down a row takes effect when that row ends
 
 fullsnes 1067–1070 says the hardware "does first finish [the] current block (using the old vertical
 size) before applying the new vertical size", and that vertical mosaic is implemented by subtracting
@@ -529,24 +533,29 @@ turning mosaic on part-way down the picture exercises. From a block of size 3 wi
 on its second line they part: fullsnes's rows run on to the old row's end, anomie's restart where the
 write landed.
 
-*Documented twice and contested, corroborated on a reconstruction, provisional — console pending.*
-fullsnes's counter is built, as the
-mechanism and as the reading that gives anomie's same-value observation for free. The cartridge's
-second band turns 4×4 blocks on and then writes 3×3 two lines later; the reader finds both lines from
-the picture itself and scores both readings, each with its first row on the line the blocks appear or
-on the line after, so a transfer landing a line later than expected does not decide the question.
+**The console settles it: fullsnes's counter.** A row of blocks runs its full height at the size it
+began with, and a new size begins with the next row; the rows do not restart on the line the register
+is written. Anomie's same-value observation is what the counter gives: writing the size the register
+already holds changes nothing, because nothing restarts on a write at all.
 
-### Mode 7's blocks stand in the picture, and EXTBG reads two bits for two axes
+*Documented twice and contested; settled on the console.* The cartridge's second band turns 4×4
+blocks on and then writes 3×3 two lines later. Its reader finds both lines from the picture itself and
+scores both readings, each with its first row on the line the blocks appear or on the line after, so
+a transfer landing a line later than expected does not decide the question.
+
+### Mode 7's blocks stand in the picture, and EXTBG reads bit 0 down and bit 1 across
 
 Anomie 207–214 and 2029–2037 say the matrix does not move the blocks, so BG1's corner is a picture
 position the matrix then reads; and that EXTBG's BG2 reads bit 0 as vertical mosaic and bit 1 as
 horizontal, so `$F1` gives 1×16 blocks, `$F2` 16×1 and `$F3` 16×16 while BG1 reads bit 0 for both.
 One source, said twice.
 
-*Documented once, corroborated on a reconstruction, provisional — console pending.* Built as stated.
-The cartridge's third band turns
-the field a quarter turn under 4×4 blocks, so blocks aligned to the picture and blocks aligned to the
-field show different rows of it; its fourth shows EXTBG's layer alone under `$F1`, `$F2` and `$F3`.
+**The console confirms both.** Mode 7's blocks are aligned to the picture, the matrix reading each
+block's corner; EXTBG's BG2 is mosaiced down by bit 0 and across by bit 1.
+
+*Documented once; confirmed on the console.* The cartridge's third band turns the field a quarter turn
+under 4×4 blocks, so blocks aligned to the picture and blocks aligned to the field show different rows
+of it; its fourth shows EXTBG's layer alone under `$F1`, `$F2` and `$F3`.
 
 ### The multiplier's line term subtracts a mosaic index nobody else defines
 
@@ -901,8 +910,7 @@ own "What remains open" carries the register-file ones alongside these.
   to the dot, both above. A write there reaches no entry until something says which one it does.
 - The last dot of the visible span, above.
 - Direct colour's channel order and what `$2130`'s regions and the fixed colour do to a composed
-  pixel, both above: measured on three implementations and open only to the console, which no
-  cartridge here has been run on yet.
+  pixel, both above: measured on three implementations and open only to the console.
 - Mode 7's three, above: the truncation of the transform's products and the flipped line's row,
   read on three implementations and open only to the console; and the values the multiplier's
   ports hold at each dot while it draws, which a reconstruction has shown to move and nothing has
@@ -914,7 +922,6 @@ own "What remains open" carries the register-file ones alongside these.
 - Offset-per-tile's four, above: each built as its one source states it or, where the source parts
   from itself, as the reading described, with a cartridge of ours asking the question and nothing yet
   read from it.
-- Mosaic's two, above: corroborated on a reconstruction and open to the console.
 - What a mosaic size written part-way along a line does to the rest of that line. The width is read at
   the dot, so the rest of the line takes it.
 - Whether a mosaic block's corner is read once or re-read from the registers at each dot of the block.
