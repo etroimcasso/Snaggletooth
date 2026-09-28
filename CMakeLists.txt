@@ -707,6 +707,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/formats/reader_test.cpp
     tests/tools/avi_test.cpp
     tests/tools/player_test.cpp
+    tests/tools/player_interlace_test.cpp
     tests/tools/user_files_test.cpp
     tools/player/user_files.cpp
   )

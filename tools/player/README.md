@@ -6,14 +6,15 @@ run when asked to.
 ```
 snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
-                    [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled] [--mute] [--quiet]
+                    [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
+                    [--interlace weave|bob|off] [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
 ```
 
 The window shows the picture the machine draws, frame by frame, at the rate the run is held to —
 a frame drawn in half-pixels, 512 wide, fills the same window as a 256-wide one, each half-pixel half
-a scaled pixel, and an interlaced run shows each field as it comes,
+a scaled pixel, and an interlaced run is woven into its full-height picture (see below),
 with the rate it achieves in its title so what the run costs is visible while it runs. It closes
 when the window is closed or when `--seconds` of the master clock have been spent; nothing else
 stops it.
@@ -57,6 +58,23 @@ unthrottled: no frame pacing, no vsync
 ```
 
 — and the mean rate is printed at exit, as for every run.
+
+## Interlacing
+
+A cartridge that turns interlace on (SETINI bit 0) draws one field a frame — half the picture's
+lines, the two fields alternating — and the SNES's signal wove them into one full-height picture.
+The player does the same, and `--interlace` names how:
+
+| Mode | What it shows |
+|---|---|
+| `weave` | the two fields interleaved into the full-height picture the console drew — 448 lines, or 478 with overscan — field F's line at row `2i+F`. Sharp; it combs where the two fields differ under motion. The **default**. |
+| `bob` | each field on its own, its lines doubled to full height, a new picture every field. No combing; a shimmer where the fields differ. |
+| `off` | the field as the machine made it, half height — what the player did before this. |
+
+A run the cartridge did **not** interlace draws a whole picture a frame and is shown unchanged
+whatever the mode; there is nothing to weave. The window's size does not change — the full-height
+picture fills the same area, at double the vertical resolution, the way 480i filled the same screen
+as 240p. `--out` keeps whatever is shown, so a recording of an interlaced run is the woven picture.
 
 The sound goes to the default playback device as the machine makes it, 32 kHz stereo. The device is
 told the rate the run *delivers* at rather than the rate the chip makes: a held run makes its

@@ -3,7 +3,8 @@
 //
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
 //               [--input <script> | --input-dir <directory>] [--config <file>]
-//               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled] [--mute] [--quiet]
+//               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
+//               [--interlace weave|bob|off] [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -49,6 +50,13 @@
 // --unthrottled turns the pacing off: no frame waits for its deadline and vsync is
 // off, so the machine runs as fast as the host allows. Its first line says so, and
 // the mean rate is printed at exit as for every run.
+//
+// A cartridge that turns interlace on draws one field a frame, and the player weaves
+// the two into the full-height picture the console's signal carried. --interlace names
+// how: weave, the two fields interleaved for the sharp full-height picture the console
+// drew, and the default; bob, each field on its own doubled to full height, no combing
+// under motion; off, the field as the machine made it, half height. A run the cartridge
+// did not interlace is untouched whatever the mode, and --out keeps whatever is shown.
 
 #include <algorithm>
 #include <cstddef>
@@ -60,6 +68,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,6 +77,7 @@
 #include "SDL3/SDL_main.h"  // SDL_SetMainReady, which the tool calls to keep its own main()
 #include "player/default_snagpad.h"
 #include "player/display.h"
+#include "player/interlace.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
 #include "player/user_files.h"
@@ -157,7 +167,8 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
   std::cerr << "usage: " << program
             << " <image> [--out <directory>] [--seconds N] [--scale N]"
                " [--input <script> | --input-dir <directory>] [--config <file>]"
-               " [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled] [--mute] [--quiet]\n       "
+               " [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]\n"
+               "       [--interlace weave|bob|off] [--mute] [--quiet]\n       "
             << program << " --default-config\n       " << program << " --user-files\n";
   std::exit(2);
 }
@@ -418,7 +429,7 @@ class Player final : public snaggletooth::FrameObserver {
  public:
   Player(Snes& machine, snaggletooth::Region region, const snaggletooth::disasm::InputScript& script,
          bool scripted, Devices& devices, unsigned scale, player::Vsync vsync, bool unthrottled,
-         const std::string& title)
+         player::Interlace interlace, const std::string& title)
       : machine_(machine),
         deadline_(region),
         clock_(snaggletooth::consoleClock(region)),
@@ -428,6 +439,7 @@ class Player final : public snaggletooth::FrameObserver {
         scale_(scale),
         vsync_(vsync),
         unthrottled_(unthrottled),
+        weaver_(interlace),
         pacing_{.rate = player::consoleFrameRate(clock_), .locked = false},
         title_(title) {}
 
@@ -455,8 +467,10 @@ class Player final : public snaggletooth::FrameObserver {
     // and a run nobody can press a button on is not a run. Asking for it is one call
     // and costs nothing where it was already focused.
     SDL_RaiseWindow(window_);
+    // Tall enough for a woven interlaced frame, which is twice a field's height; a
+    // progressive frame uses the top rows and leaves the rest.
     texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
-                                 static_cast<int>(kTextureWidth), static_cast<int>(kTallHeight));
+                                 static_cast<int>(kTextureWidth), static_cast<int>(kTextureHeight));
     if (texture_ == nullptr) {
       std::cerr << "cannot make a texture: " << SDL_GetError() << "\n";
       return false;
@@ -512,10 +526,24 @@ class Player final : public snaggletooth::FrameObserver {
     const std::uint64_t emulated = SDL_GetTicksNS() - resumed_;
     ++frames_;
 
-    show(picture);
+    // A cartridge running interlaced hands over one field a frame; the weaver composes
+    // the two into the full-height picture the console's signal carried, the way the
+    // run asked for. A progressive run, or --interlace off, passes straight through.
+    const bool interlaced = machine_.state().ppu.interlace();
+    const player::Shown shown = weaver_.present(picture.pixels.data(), picture.width,
+                                                picture.height, picture.field, interlaced);
+    show(shown);
+    // The window and the recording show the same picture: what --out keeps is what was
+    // on screen, woven and all.
+    const snaggletooth::VideoFrame kept{
+        .pixels = std::span<const std::uint8_t>(
+            shown.pixels, static_cast<std::size_t>(shown.width) * shown.height * 4u),
+        .width = shown.width,
+        .height = shown.height,
+        .field = picture.field};
     if (!recordAt_.empty() && !recording_) {
       recording_ = std::make_unique<snaggletooth::video::AviRecording>(
-          recordAt_, picture.width, picture.height,
+          recordAt_, kept.width, kept.height,
           snaggletooth::video::FrameRate{
               .rate = static_cast<std::uint32_t>(clock_.hertzNumerator),
               .scale = static_cast<std::uint32_t>(clock_.masterCyclesPerFrame *
@@ -526,7 +554,7 @@ class Player final : public snaggletooth::FrameObserver {
         recording_.reset();
       }
     }
-    if (recording_) recording_->add(picture);
+    if (recording_) recording_->add(kept);
 
     // Each frame is held until its share of the run has passed, so a machine that
     // emulates faster than the console runs is watchable. The share is the panel's
@@ -603,6 +631,9 @@ class Player final : public snaggletooth::FrameObserver {
   static constexpr unsigned kTextureWidth = 512u;
   static constexpr unsigned kShortHeight = 224u;
   static constexpr unsigned kTallHeight = 239u;
+  // The texture holds the largest thing shown: a woven interlaced frame, twice the
+  // taller field's height.
+  static constexpr unsigned kTextureHeight = 2u * kTallHeight;
   static constexpr std::uint64_t kTitleFrames = 30u;
   // How far behind the run may fall before its lateness is written off rather than
   // chased. Under this a single short frame settles it, which keeps the run's own
@@ -644,10 +675,9 @@ class Player final : public snaggletooth::FrameObserver {
     return panel_ ? panel_->wholeNanos() : deadline_.wholeNanos();
   }
 
-  void show(const VideoFrame& picture) {
+  void show(const player::Shown& picture) {
     const SDL_Rect rows{0, 0, static_cast<int>(picture.width), static_cast<int>(picture.height)};
-    SDL_UpdateTexture(texture_, &rows, picture.pixels.data(),
-                      static_cast<int>(picture.width * 4u));
+    SDL_UpdateTexture(texture_, &rows, picture.pixels, static_cast<int>(picture.width * 4u));
     const SDL_FRect source{0.0f, 0.0f, static_cast<float>(picture.width),
                            static_cast<float>(picture.height)};
     SDL_RenderClear(renderer_);
@@ -707,6 +737,7 @@ class Player final : public snaggletooth::FrameObserver {
   unsigned scale_;
   player::Vsync vsync_;
   bool unthrottled_;                        // no frame deadline and no vsync
+  player::FieldWeaver weaver_;              // composes interlaced fields for the screen
   player::Pacing pacing_;                   // the rate the run is held to
   std::optional<player::FramePace> panel_;  // and its deadlines, where that is the panel's
   std::string title_;
@@ -740,6 +771,7 @@ int main(int argc, char** argv) {
   std::string regionName;
   player::Vsync vsync = player::Vsync::Auto;
   bool unthrottled = false;
+  player::Interlace interlace = player::Interlace::Weave;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
   bool quiet = false;
@@ -810,6 +842,13 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--unthrottled") {
       unthrottled = true;
+    } else if (arg == "--interlace") {
+      const std::optional<player::Interlace> mode = player::parseInterlace(next("--interlace"));
+      if (!mode) {
+        std::cerr << "--interlace is weave, bob or off\n";
+        usage(argv[0]);
+      }
+      interlace = *mode;
     } else if (arg == "--mute") {
       mute = true;
     } else if (arg == "--quiet") {
@@ -1013,7 +1052,8 @@ int main(int argc, char** argv) {
   if (save) machine.setSaveObserver(&*save);
 
   const std::string stem = std::filesystem::path(imagePath).stem().string();
-  Player player(machine, region, script, scripted, devices, scale, vsync, unthrottled, stem);
+  Player player(machine, region, script, scripted, devices, scale, vsync, unthrottled, interlace,
+                stem);
   if (!player.open()) return 1;
   // Which of the two arrangements the run took, before anything else it does: a run
   // that feels wrong is asked this first, and nobody should have to guess at it.
