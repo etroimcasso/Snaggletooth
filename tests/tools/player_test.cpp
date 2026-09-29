@@ -645,7 +645,7 @@ TEST(PlayerDisplay, TheWindowIsTheFramesOwnPixelsTimesTheScale) {
   // The factor is the scale in both axes for every shape, whether the scale is odd or even,
   // so a nearest-neighbour present lands each source pixel on a whole block of output pixels.
   for (const unsigned scale : {2u, 3u, 4u, 5u, 6u}) {
-    for (const auto [w, h] : {std::pair{256u, 224u}, std::pair{256u, 448u}, std::pair{512u, 448u}}) {
+    for (const auto& [w, h] : {std::pair{256u, 224u}, std::pair{256u, 448u}, std::pair{512u, 448u}}) {
       const WindowSize window = windowSize(w, h, scale);
       EXPECT_EQ(window.width, w * scale) << "scale " << scale;
       EXPECT_EQ(window.height, h * scale) << "scale " << scale;
