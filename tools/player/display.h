@@ -155,4 +155,27 @@ struct Pacing {
   return Pacing{.rate = locked ? panel : console, .locked = locked};
 }
 
+// ---- the window's size --------------------------------------------------------------
+//
+// The picture the machine draws comes in more than one shape: a progressive frame is 224
+// lines, a woven interlaced one 448; a normal frame is 256 pixels across, a hi-res one 512.
+// `windowSize` gives the window that shows a frame of a given shape at an integer `scale`:
+// the frame's own pixels times the scale. A present that copies the frame to that window
+// with nearest-neighbour then makes each source pixel exactly `scale` output pixels square —
+// a whole-number factor in both axes, so the picture holds its grid whatever the shape. A
+// taller or wider frame takes a larger window at the same scale: an interlaced window is
+// twice a progressive one's height, a hi-res one twice its width, the size the console's
+// signal carried. An application resizes its window to this as the frame's shape changes.
+struct WindowSize {
+  unsigned width = 0;
+  unsigned height = 0;
+  friend constexpr bool operator==(const WindowSize&, const WindowSize&) = default;
+};
+
+// The window a frame of `frameWidth` x `frameHeight` pixels fills at an integer `scale`.
+[[nodiscard]] constexpr WindowSize windowSize(unsigned frameWidth, unsigned frameHeight,
+                                              unsigned scale) noexcept {
+  return WindowSize{.width = frameWidth * scale, .height = frameHeight * scale};
+}
+
 }  // namespace snaggletooth::player

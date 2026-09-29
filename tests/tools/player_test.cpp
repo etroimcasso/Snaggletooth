@@ -631,4 +631,28 @@ TEST(PlayerDisplay, AnUnlockableDisplayKeepsTheConsolesRate) {
   EXPECT_EQ(paceRun(kNtsc, kPanel60, Vsync::Off).rate.numerator, kNtsc.numerator);
 }
 
+TEST(PlayerDisplay, TheWindowIsTheFramesOwnPixelsTimesTheScale) {
+  // A progressive frame, 256x224, at scale 5 is a 1280x1120 window.
+  EXPECT_EQ(windowSize(256u, 224u, 5u), (WindowSize{.width = 1280u, .height = 1120u}));
+
+  // A woven interlaced frame is 448 lines, so at the same scale its window is twice as tall
+  // as the progressive one and no wider — the height the console's signal carried.
+  EXPECT_EQ(windowSize(256u, 448u, 5u), (WindowSize{.width = 1280u, .height = 2240u}));
+
+  // A hi-res frame is 512 pixels across, so its window is twice as wide.
+  EXPECT_EQ(windowSize(512u, 224u, 5u), (WindowSize{.width = 2560u, .height = 1120u}));
+
+  // The factor is the scale in both axes for every shape, whether the scale is odd or even,
+  // so a nearest-neighbour present lands each source pixel on a whole block of output pixels.
+  for (const unsigned scale : {2u, 3u, 4u, 5u, 6u}) {
+    for (const auto& [w, h] : {std::pair{256u, 224u}, std::pair{256u, 448u}, std::pair{512u, 448u}}) {
+      const WindowSize window = windowSize(w, h, scale);
+      EXPECT_EQ(window.width, w * scale) << "scale " << scale;
+      EXPECT_EQ(window.height, h * scale) << "scale " << scale;
+      EXPECT_EQ(window.width % w, 0u) << "a whole factor across, scale " << scale;
+      EXPECT_EQ(window.height % h, 0u) << "a whole factor down, scale " << scale;
+    }
+  }
+}
+
 }  // namespace snaggletooth::player
