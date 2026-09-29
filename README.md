@@ -20,7 +20,7 @@ Three things live in this repository:
   in it derived from public hardware documentation and validated against it.
 
 > [!IMPORTANT]
-> **Build and run Snaggletooth as a Release build.** A Debug build of the emulator runs
+> **Build and run Snaggletooth as a Release build.** A Debug build of the core runs
 > several times slower, and the player cannot hold the console's frame rate in one, even on a
 > fast desktop processor. On Windows, CMake builds Debug unless you pass `--config Release`.
 > [Building](#building) has the commands for every platform.
@@ -155,7 +155,7 @@ reaches `main`.
 
 ## Media
 
-The machine running, as the player shows it. Every capture is the emulator's own output — the
+The machine running, as the player shows it. Every capture is the core's own output — the
 frames the PPU hands to its observer and the audio the S-DSP mixes — with nothing composited or
 retouched.
 
@@ -191,7 +191,7 @@ https://github.com/user-attachments/assets/b300d0fc-e591-425a-a2a0-2003db7bcb64
 
 Requires a C++20 toolchain and CMake 3.24 or later.
 
-**The emulator is meant to run as a Release build.** These commands build `Release` on Linux,
+**The core is meant to run as a Release build.** These commands build `Release` on Linux,
 macOS and Windows alike:
 
 ```
@@ -204,7 +204,7 @@ ctest --test-dir build -C Release
 whatever the configure step said, and the player lands in `build\Debug\` instead of
 `build\Release\`. A Debug build runs the machine several times slower, and the player cannot
 hold the console's 60 frames a second in one. The frame rate it shows then measures the build,
-not the emulator. A Debug player warns about this when it starts. In the Visual Studio IDE, set
+not the core. A Debug player warns about this when it starts. In the Visual Studio IDE, set
 the configuration drop-down to `Release`.
 [docs/build-and-consume.md](docs/build-and-consume.md#building-a-release-build) says which flag
 each generator reads.
