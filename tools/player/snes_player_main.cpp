@@ -462,7 +462,14 @@ class Player final : public snaggletooth::FrameObserver {
     if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(initial.width),
                                      static_cast<int>(initial.height), 0, &window_,
                                      &renderer_)) {
-      std::cerr << "cannot open a window: " << SDL_GetError() << "\n";
+      const char* driver = SDL_GetCurrentVideoDriver();
+      std::cerr << "cannot open a window: " << SDL_GetError() << "\n"
+                << "  video driver in use: " << (driver != nullptr ? driver : "(none)")
+                << "; backends built in:";
+      for (int i = 0, n = SDL_GetNumVideoDrivers(); i < n; ++i) {
+        std::cerr << ' ' << SDL_GetVideoDriver(i);
+      }
+      std::cerr << "\n";
       return false;
     }
     windowSize_ = initial;
@@ -1022,6 +1029,20 @@ int main(int argc, char** argv) {
   const struct Shutdown {
     ~Shutdown() { SDL_Quit(); }
   } shutdown;
+
+  // Which video backend SDL chose is the first thing to know when a window does not
+  // appear: "wayland" or "x11" is a real display; "offscreen" or "dummy" means SDL
+  // found no display it could drive for this session; "x11" under a Wayland session
+  // is a fall through XWayland. The backends SDL was built with are listed too, so a
+  // missing "wayland" here names the cause on a Wayland-only session.
+  if (!quiet) {
+    const char* driver = SDL_GetCurrentVideoDriver();
+    std::cerr << "video driver: " << (driver != nullptr ? driver : "(none)") << "; backends built in:";
+    for (int i = 0, n = SDL_GetNumVideoDrivers(); i < n; ++i) {
+      std::cerr << ' ' << SDL_GetVideoDriver(i);
+    }
+    std::cerr << "\n";
+  }
 
   Devices devices;
   {
