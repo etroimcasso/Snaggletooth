@@ -452,17 +452,20 @@ class Player final : public snaggletooth::FrameObserver {
   Player(const Player&) = delete;
   Player& operator=(const Player&) = delete;
 
-  // Opens the window at the picture's own size times the scale. The picture can be
-  // either height and either width, so the texture is as large as the largest and
-  // each frame draws the part it has, stretched to the same window: a frame drawn
-  // in half-pixels fills it with each half-pixel half a scaled pixel wide.
+  // Opens the window at a progressive frame's size times the scale; `show` resizes it to
+  // each frame's own shape as frames arrive, so the first interlaced or hi-res frame grows
+  // the window to fit. The texture is as large as the largest picture and each frame fills
+  // the part it has; the window is always the frame's own pixels times the scale, so the
+  // present scales by a whole number and never combs.
   [[nodiscard]] bool open() {
-    if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(kWidth * scale_),
-                                     static_cast<int>(kShortHeight * scale_), 0, &window_,
+    const player::WindowSize initial = player::windowSize(kWidth, kShortHeight, scale_);
+    if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(initial.width),
+                                     static_cast<int>(initial.height), 0, &window_,
                                      &renderer_)) {
       std::cerr << "cannot open a window: " << SDL_GetError() << "\n";
       return false;
     }
+    windowSize_ = initial;
     // A window opened from a terminal does not take the keyboard on every platform,
     // and a run nobody can press a button on is not a run. Asking for it is one call
     // and costs nothing where it was already focused.
@@ -677,6 +680,14 @@ class Player final : public snaggletooth::FrameObserver {
   }
 
   void show(const player::Shown& picture) {
+    // The window is this frame's own pixels times the scale, so a nearest-neighbour present
+    // makes each source pixel a scale-by-scale block. A frame of a new shape — interlace
+    // turned on, hi-res entered — resizes the window to fit before it is shown.
+    const player::WindowSize want = player::windowSize(picture.width, picture.height, scale_);
+    if (want != windowSize_) {
+      SDL_SetWindowSize(window_, static_cast<int>(want.width), static_cast<int>(want.height));
+      windowSize_ = want;
+    }
     const SDL_Rect rows{0, 0, static_cast<int>(picture.width), static_cast<int>(picture.height)};
     SDL_UpdateTexture(texture_, &rows, picture.pixels, static_cast<int>(picture.width * 4u));
     const SDL_FRect source{0.0f, 0.0f, static_cast<float>(picture.width),
@@ -745,6 +756,7 @@ class Player final : public snaggletooth::FrameObserver {
   SDL_Window* window_ = nullptr;
   SDL_Renderer* renderer_ = nullptr;
   SDL_Texture* texture_ = nullptr;
+  player::WindowSize windowSize_{};  // the window's current pixels, resized when the frame's shape changes
   std::filesystem::path recordAt_;  // where the recording goes, once its height is known
   std::filesystem::path scriptAt_;  // where the run's own script goes
   std::unique_ptr<snaggletooth::video::AviRecording> recording_;
