@@ -630,6 +630,10 @@ void Snes::writeApuRam(std::uint16_t address, std::uint8_t value) noexcept {
   apu_.writeRam(address, value);
 }
 
+void Snes::writeApuPort(std::uint8_t index, std::uint8_t value) noexcept {
+  apu_.writePort(static_cast<std::uint8_t>(index & 3u), value);
+}
+
 void Snes::setCpuState(const Cpu65816State& state) {
   state_.cpu = state;
   // The CPU's part of load(): the live core reloaded, the interrupt lines

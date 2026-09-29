@@ -46,6 +46,7 @@ finishes.
 - [Reaching into the machine](#reaching-into-the-machine)
   - [Memory by bus address](#memory-by-bus-address)
   - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
+  - [A communication port from the console's side](#a-communication-port-from-the-consoles-side)
   - [The CPU register file](#the-cpu-register-file)
   - [Draining audio without allocating](#draining-audio-without-allocating)
   - [A register's value](#a-registers-value)
@@ -910,6 +911,21 @@ machine.writeApuRam(0x0200, 0x5C);  // the audio machine's RAM
 
 An address past a memory's end is ignored. The read-only spans `vram()`, `cgram()`, `oam()` and
 `peekApu()` hand the same bytes back.
+
+### A communication port from the console's side
+
+A store to `$2140-$2143` is how the CPU talks to the APU: it sets the input latch the sound CPU reads
+at `$F4-$F7`. `writeApuPort` makes that store from the host's side, so a host standing where the CPU
+stands hands the sound program a byte without running code to do it. `index` is `0-3`, taken modulo
+four the way the bus mirrors the ports across `$2140-$217F`; the output latch the sound CPU wrote —
+[`peekRegister`](#a-registers-value) at `$2140 + index` reads it — is left alone, and nothing else
+moves.
+
+```cpp
+machine.writeApuPort(0, 0xCC);  // port 0's input latch, which the sound CPU reads at $F4
+```
+
+Like the memory writes, it lands where the machine stands between `run()`s.
 
 ### The CPU register file
 

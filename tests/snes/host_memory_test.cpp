@@ -434,6 +434,59 @@ TEST(SnesHostMemory, WriteApuRamReachesTheAudioMachine) {
   EXPECT_EQ(m.peekApu(0x0200u), 0x5Cu);
 }
 
+TEST(SnesHostMemory, WriteApuPortSetsTheInputLatchTheSpc700Reads) {
+  Snes m = machine();
+  const std::array<std::uint8_t, 4> outputBefore = m.state().apu.outputPorts;
+  // Each port takes its value from the console's side, in the input latch the SPC700
+  // reads at $F4 + index — the same latch a CPU store to $2140 + index sets.
+  m.writeApuPort(0u, 0x12u);
+  m.writeApuPort(1u, 0x34u);
+  m.writeApuPort(2u, 0x56u);
+  m.writeApuPort(3u, 0x78u);
+  EXPECT_EQ(m.state().apu.inputPorts[0], 0x12u);
+  EXPECT_EQ(m.state().apu.inputPorts[1], 0x34u);
+  EXPECT_EQ(m.state().apu.inputPorts[2], 0x56u);
+  EXPECT_EQ(m.state().apu.inputPorts[3], 0x78u);
+  // The output latches the SPC700 wrote stand: writing one side never disturbs the other.
+  for (std::size_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(m.state().apu.outputPorts[i], outputBefore[i]) << "output port " << i;
+  }
+  // An index past 3 wraps modulo 4, the way the bus mirrors the ports through $217F.
+  m.writeApuPort(4u, 0x9Au);  // -> port 0
+  m.writeApuPort(7u, 0xBCu);  // -> port 3
+  EXPECT_EQ(m.state().apu.inputPorts[0], 0x9Au);
+  EXPECT_EQ(m.state().apu.inputPorts[3], 0xBCu);
+}
+
+TEST(SnesHostMemory, WriteApuPortDrivesTheRunningSpc700) {
+  // The 5A22's own way of talking to the sound CPU, done from the host's side. The
+  // cartridge loops harmlessly while the APU boots its upload stub; the stub reads
+  // input port 0 at $F4 and echoes it to output port 0 to acknowledge each step, so a
+  // byte set with writeApuPort comes back through peekRegister once the running SPC700
+  // has read it — the whole path, not just the latch.
+  Snes m = machine();
+  const auto ready = [&] {
+    return m.peekRegister(0x2140u).value_or(0x00u) == 0xAAu &&
+           m.peekRegister(0x2141u).value_or(0x00u) == 0xBBu;
+  };
+  bool posted = false;
+  for (int i = 0; i < 4000 && !(posted = ready()); ++i) m.run(256u);
+  ASSERT_TRUE(posted) << "the stub posts its ready bytes on the output ports";
+
+  // The first command by the stub's protocol: point it at an address and kick port 0
+  // with $CC, all through writeApuPort — the same stores the CPU would make to $2140-$2143.
+  m.writeApuPort(2u, 0x00u);  // the address low byte, $0200
+  m.writeApuPort(3u, 0x02u);
+  m.writeApuPort(1u, 0x01u);  // nonzero sets an address rather than starting a program
+  m.writeApuPort(0u, 0xCCu);
+
+  bool echoed = false;
+  for (int i = 0; i < 4000 && !(echoed = m.peekRegister(0x2140u).value_or(0x00u) == 0xCCu); ++i) {
+    m.run(256u);
+  }
+  EXPECT_TRUE(echoed) << "the running SPC700 read the port writeApuPort set and echoed it";
+}
+
 // ---- the CPU register file ------------------------------------------------
 
 TEST(SnesHostMemory, SetCpuStateIsLiveOnTheNextCycle) {

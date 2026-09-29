@@ -716,6 +716,14 @@ class Snes {
   void writeOam(std::uint16_t address, std::uint8_t value) noexcept;
   void writeApuRam(std::uint16_t address, std::uint8_t value) noexcept;
 
+  // Sets comm port `index` from the console's side, exactly as the CPU's store to
+  // $2140 + index does: the input latch the SPC700 reads at $F4 + index. The output
+  // latch the SPC700 wrote — peekRegister($2140 + index) returns it — is left as it
+  // stands, and nothing else moves. `index` is taken modulo 4, the way the bus mirrors
+  // the four ports across $2140-$217F. Called between run()s it lands where the machine
+  // stands, the same as writeApuRam.
+  void writeApuPort(std::uint8_t index, std::uint8_t value) noexcept;
+
   // The CPU's register file, read and written whole on a stopped machine.
   // cpuState() answers the registers as they stand; setCpuState() reloads the
   // live core from `state`, the way restore() does, so the written set is live
