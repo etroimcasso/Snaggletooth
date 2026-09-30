@@ -30,7 +30,9 @@
 // way. A separate emulation flag (e) reproduces a 6502: while e is set, m and x are
 // forced set, the stack is pinned to page one, and the index high bytes read zero.
 
+#include <array>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 
 namespace snaggletooth {
@@ -1085,6 +1087,42 @@ class Cpu65816 {
   template <SnesBus B>
   bool executeControlCycle(B& bus, const CtrlForm& form);
 
+  // ---- the decode ---------------------------------------------------------
+  // Which cycle sequence an opcode runs: the software interrupts' sequence, one of
+  // the five instruction families above, or one of the instructions the cycle
+  // engine carries out opcode by opcode.
+  enum class OpcodeFamily : std::uint8_t {
+    Interrupt,
+    DirectPage,
+    Absolute,
+    Indirect,
+    Stack,
+    Control,
+    Other,
+  };
+
+  // What the decode knows of one opcode: its family and, for the five families
+  // that have one, its form. Only the form of the opcode's own family is filled
+  // in; the other four keep their defaults.
+  struct OpcodeDecode {
+    OpcodeFamily family = OpcodeFamily::Other;
+    DpForm dp{};
+    AbsForm abs{};
+    IndForm ind{};
+    StackForm stack{};
+    CtrlForm ctrl{};
+  };
+
+  // Decodes one opcode by asking the classifiers in turn — the software interrupts
+  // first, then the direct-page, absolute, indirect, stack and control-flow
+  // families — and taking the first that claims it.
+  [[nodiscard]] static constexpr OpcodeDecode decodeOpcode(std::uint8_t opcode) noexcept;
+
+  // The decode of an opcode, from a table of all 256 that decodeOpcode builds at
+  // compile time. An opcode's family and form depend on the opcode alone, so the
+  // table never changes and holds no machine state: nothing saves or restores it.
+  [[nodiscard]] static const OpcodeDecode& decoded(std::uint8_t opcode) noexcept;
+
   // ---- the interrupts and the halts ----------------------------------------
   // Whether the opcode is a software interrupt — the two instructions that run the
   // interrupt sequence themselves.
@@ -1492,6 +1530,35 @@ constexpr bool Cpu65816::indirectForm(std::uint8_t opcode, IndForm& form) noexce
     default:
       return false;
   }
+}
+
+constexpr Cpu65816::OpcodeDecode Cpu65816::decodeOpcode(std::uint8_t opcode) noexcept {
+  OpcodeDecode decode{};
+  if (softwareInterrupt(opcode)) {
+    decode.family = OpcodeFamily::Interrupt;
+  } else if (directPageForm(opcode, decode.dp)) {
+    decode.family = OpcodeFamily::DirectPage;
+  } else if (absoluteForm(opcode, decode.abs)) {
+    decode.family = OpcodeFamily::Absolute;
+  } else if (indirectForm(opcode, decode.ind)) {
+    decode.family = OpcodeFamily::Indirect;
+  } else if (stackForm(opcode, decode.stack)) {
+    decode.family = OpcodeFamily::Stack;
+  } else if (controlForm(opcode, decode.ctrl)) {
+    decode.family = OpcodeFamily::Control;
+  }
+  return decode;
+}
+
+inline const Cpu65816::OpcodeDecode& Cpu65816::decoded(std::uint8_t opcode) noexcept {
+  static constexpr std::array<OpcodeDecode, 256> kTable = [] {
+    std::array<OpcodeDecode, 256> table{};
+    for (std::size_t i = 0; i < table.size(); ++i) {
+      table[i] = decodeOpcode(static_cast<std::uint8_t>(i));
+    }
+    return table;
+  }();
+  return kTable[opcode];
 }
 
 inline void Cpu65816::applyImmediate(std::uint8_t opcode, std::uint16_t operand) {
@@ -2383,21 +2450,15 @@ bool Cpu65816::executeCycle(B& bus) {
   if (state_.servicing != InterruptRequest::None) return executeInterruptCycle(bus);
 
   const std::uint8_t opcode = state_.ir;
-  if (softwareInterrupt(opcode)) return executeInterruptCycle(bus);
-  if (DpForm form{}; directPageForm(opcode, form)) {
-    return executeDirectPageCycle(bus, form);
-  }
-  if (AbsForm form{}; absoluteForm(opcode, form)) {
-    return executeAbsoluteCycle(bus, form);
-  }
-  if (IndForm form{}; indirectForm(opcode, form)) {
-    return executeIndirectCycle(bus, form);
-  }
-  if (StackForm form{}; stackForm(opcode, form)) {
-    return executeStackCycle(bus, form);
-  }
-  if (CtrlForm form{}; controlForm(opcode, form)) {
-    return executeControlCycle(bus, form);
+  const OpcodeDecode& decode = decoded(opcode);
+  switch (decode.family) {
+    case OpcodeFamily::Interrupt: return executeInterruptCycle(bus);
+    case OpcodeFamily::DirectPage: return executeDirectPageCycle(bus, decode.dp);
+    case OpcodeFamily::Absolute: return executeAbsoluteCycle(bus, decode.abs);
+    case OpcodeFamily::Indirect: return executeIndirectCycle(bus, decode.ind);
+    case OpcodeFamily::Stack: return executeStackCycle(bus, decode.stack);
+    case OpcodeFamily::Control: return executeControlCycle(bus, decode.ctrl);
+    case OpcodeFamily::Other: break;
   }
   switch (opcode) {
     // ---- the block moves, which carry one byte per seven cycles ----
