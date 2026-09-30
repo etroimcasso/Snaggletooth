@@ -724,6 +724,16 @@ class Snes {
   // stands, the same as writeApuRam.
   void writeApuPort(std::uint8_t index, std::uint8_t value) noexcept;
 
+  // Writes DSP register `index` ($00-$7F) from the host's side, exactly as the sound
+  // CPU's write through DSPDATA does: the byte is stored, an ENDX ($7C) write
+  // acknowledges every end flag instead, a KON ($4C) write arms the key-on the next
+  // poll consumes, and a write to a register the DSP itself writes carries the DSP's
+  // standing cycle, so the DSP's own write in the two cycles after it loses to it. An
+  // index above $7F is ignored, as DSPDATA ignores it. Writing one spends no cycle.
+  // The register's value is read from state().apu.dsp[index]. Called between run()s it
+  // lands where the machine stands, the same as writeApuPort.
+  void writeApuDspRegister(std::uint8_t index, std::uint8_t value) noexcept;
+
   // The CPU's register file, read and written whole on a stopped machine.
   // cpuState() answers the registers as they stand; setCpuState() reloads the
   // live core from `state`, the way restore() does, so the written set is live

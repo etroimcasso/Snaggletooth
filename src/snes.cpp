@@ -634,6 +634,10 @@ void Snes::writeApuPort(std::uint8_t index, std::uint8_t value) noexcept {
   apu_.writePort(static_cast<std::uint8_t>(index & 3u), value);
 }
 
+void Snes::writeApuDspRegister(std::uint8_t index, std::uint8_t value) noexcept {
+  apu_.writeDspRegister(index, value);
+}
+
 void Snes::setCpuState(const Cpu65816State& state) {
   state_.cpu = state;
   // The CPU's part of load(): the live core reloaded, the interrupt lines

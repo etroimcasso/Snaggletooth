@@ -190,7 +190,8 @@ apu.run(10);
 A host reaches the file directly, without going through DSPADDR/DSPDATA: `writeDspRegister(index, value)`
 writes it the way a DSPDATA write does — the same ENDX acknowledge, the same KON arming, the same cycle
 stamp — and `readDspRegister(index)` returns the stored byte, masking the index with `$7F`. A host write
-and the program's own DSPDATA write are one thing; a write with the index above `$7F` is ignored.
+and the program's own DSPDATA write are one thing; a write with the index above `$7F` is ignored. A
+console reaches the same write through `Snes::writeApuDspRegister`.
 
 ```cpp
 apu.writeDspRegister(0x10, 0x7F);            // the same write the program above makes

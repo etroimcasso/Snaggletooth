@@ -1,7 +1,8 @@
 // The console's host memory face: reaching into any place the machine has by bus
 // address (peek / poke / addressable), a register's value without its read's
 // effects (peekRegister, peekApuRegister), the four memories the bus cannot name,
-// and the CPU register file read and written whole. Each case reads a value back
+// a DSP register written from the console's side, and the CPU register file read
+// and written whole. Each case reads a value back
 // or steps the machine and reads the result — never "the symbol exists". The
 // register cases hold each peeked byte against what the program's own LDA of the
 // address loads from the same state, the open-bus bits against the data bus at
@@ -485,6 +486,120 @@ TEST(SnesHostMemory, WriteApuPortDrivesTheRunningSpc700) {
     m.run(256u);
   }
   EXPECT_TRUE(echoed) << "the running SPC700 read the port writeApuPort set and echoed it";
+}
+
+// ---- a DSP register from the console's side -------------------------------
+
+TEST(SnesHostMemory, WriteApuDspRegisterStoresTheByteAndIgnoresAnIndexPast7F) {
+  Snes m = machine();
+  m.writeApuDspRegister(0x10u, 0x7Fu);  // a plain register: the byte is stored
+  EXPECT_EQ(m.state().apu.dsp[0x10u], 0x7Fu);
+  EXPECT_EQ(m.state().apu.dsp.regs[0x10u], 0x7Fu);
+  // An index above $7F is ignored, the way DSPDATA ignores it: nothing is stored,
+  // nothing is armed, nothing is stamped, so the whole state is left as it stood.
+  const SnesState before = m.state();
+  m.writeApuDspRegister(0x80u, 0x55u);
+  m.writeApuDspRegister(0xFFu, 0x55u);
+  EXPECT_TRUE(m.state() == before);
+}
+
+TEST(SnesHostMemory, WriteApuDspRegisterToKonArmsTheKeyOnAtTheStandingCycle) {
+  Snes m = machine();
+  m.run(50000u);  // so the DSP stands at a nonzero cycle
+  const std::uint64_t standing = m.state().apu.dsp.cycleCount;
+  EXPECT_NE(standing, std::uint64_t{0});
+  m.writeApuDspRegister(0x4Cu, 0x05u);  // KON: arm voices 0 and 2
+  EXPECT_EQ(m.state().apu.dsp.regs[0x4Cu], 0x05u);
+  EXPECT_EQ(m.state().apu.dsp.internalKon, 0x05u);
+  EXPECT_EQ(m.state().apu.dsp.konWriteCycle, standing);  // stamped where the DSP stands
+  EXPECT_EQ(m.state().apu.dsp.cycleCount, standing);     // the write spent no cycle
+  // A second KON write between polls replaces the pending value: of two writes only
+  // the last keys anything on.
+  m.writeApuDspRegister(0x4Cu, 0x02u);
+  EXPECT_EQ(m.state().apu.dsp.internalKon, 0x02u);
+}
+
+TEST(SnesHostMemory, WriteApuDspRegisterToEndxAcknowledgesInsteadOfStoring) {
+  Snes m = machine();
+  m.run(50000u);
+  const std::uint64_t standing = m.state().apu.dsp.cycleCount;
+  m.writeApuDspRegister(0x7Cu, 0xFFu);  // ENDX: an acknowledge, not a store
+  EXPECT_EQ(m.state().apu.dsp.regs[0x7Cu], 0x00u);        // the $FF was not stored
+  EXPECT_EQ(m.state().apu.dsp.endxWriteCycle, standing);  // the acknowledge is stamped
+}
+
+TEST(SnesHostMemory, WriteApuDspRegisterToOutxAndEnvxCarriesTheDspsCycle) {
+  Snes m = machine();
+  m.run(50000u);
+  const std::uint64_t standing = m.state().apu.dsp.cycleCount;
+  m.writeApuDspRegister(0x19u, 0x11u);  // V1OUTX: a register the DSP itself writes
+  EXPECT_EQ(m.state().apu.dsp.regs[0x19u], 0x11u);
+  EXPECT_EQ(m.state().apu.dsp.outxWriteCycle[1], standing);
+  EXPECT_EQ(m.state().apu.dsp.outxWriteCycle[0], kNoCpuWrite);  // no other voice stamped
+  m.writeApuDspRegister(0x28u, 0x22u);  // V2ENVX
+  EXPECT_EQ(m.state().apu.dsp.regs[0x28u], 0x22u);
+  EXPECT_EQ(m.state().apu.dsp.envxWriteCycle[2], standing);
+}
+
+TEST(SnesHostMemory, WriteApuDspRegisterKeysAVoiceTheRunningMachinePlays) {
+  // The whole path from the console's side: the verb arms the key-on, the DSP's poll
+  // consumes it, and the voice reads the BRR sample the host loaded into the audio
+  // machine's RAM. A one-block looped square wave and its directory entry go in
+  // through writeApuRam; the twelve register writes that key a voice go in through
+  // writeApuDspRegister.
+  Snes m = machine();
+  const auto ready = [&] {
+    return m.peekRegister(0x2140u).value_or(0x00u) == 0xAAu &&
+           m.peekRegister(0x2141u).value_or(0x00u) == 0xBBu;
+  };
+  bool posted = false;
+  for (int i = 0; i < 4000 && !(posted = ready()); ++i) m.run(256u);
+  ASSERT_TRUE(posted) << "the stub posts its ready bytes on the output ports";
+
+  // The directory entry (start $0700, loop $0700) and a looped one-block BRR square
+  // wave, the same bytes a voice is keyed on elsewhere.
+  const std::array<std::uint8_t, 4> directory = {0x00u, 0x07u, 0x00u, 0x07u};
+  for (std::size_t i = 0; i < directory.size(); ++i) {
+    m.writeApuRam(static_cast<std::uint16_t>(0x0600u + i), directory[i]);
+  }
+  const std::array<std::uint8_t, 9> brr = {0xC3u, 0x77u, 0x77u, 0x77u, 0x77u,
+                                           0x99u, 0x99u, 0x99u, 0x99u};
+  for (std::size_t i = 0; i < brr.size(); ++i) {
+    m.writeApuRam(static_cast<std::uint16_t>(0x0700u + i), brr[i]);
+  }
+
+  // Silent so far: the DSP powers on muted (FLG $E0), so every frame is zero.
+  (void)m.takeFrames();  // discard the frames from booting
+  m.run(100000u);
+  for (const StereoFrame& f : m.takeFrames()) {
+    ASSERT_EQ(f.left, 0) << "muted before the voice is keyed";
+    ASSERT_EQ(f.right, 0) << "muted before the voice is keyed";
+  }
+
+  // Key voice 0 on the square wave, full volume, the amplifier unmuted, all from the
+  // host's side.
+  m.writeApuDspRegister(0x00u, 0x7Fu);  // V0VOLL
+  m.writeApuDspRegister(0x01u, 0x7Fu);  // V0VOLR
+  m.writeApuDspRegister(0x02u, 0x00u);  // V0PITCHL
+  m.writeApuDspRegister(0x03u, 0x10u);  // V0PITCHH
+  m.writeApuDspRegister(0x04u, 0x00u);  // V0SRCN
+  m.writeApuDspRegister(0x05u, 0x00u);  // V0ADSR1: the gain register rules
+  m.writeApuDspRegister(0x07u, 0x7Fu);  // V0GAIN: direct, full
+  m.writeApuDspRegister(0x0Cu, 0x7Fu);  // MVOLL
+  m.writeApuDspRegister(0x1Cu, 0x7Fu);  // MVOLR
+  m.writeApuDspRegister(0x5Du, 0x06u);  // DIR: the directory at $0600
+  m.writeApuDspRegister(0x6Cu, 0x20u);  // FLG: unmuted, echo writes off
+  m.writeApuDspRegister(0x4Cu, 0x01u);  // KON: voice 0
+
+  m.run(100000u);
+  bool sounded = false;
+  for (const StereoFrame& f : m.takeFrames()) {
+    if (f.left != 0 || f.right != 0) {
+      sounded = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(sounded) << "the keyed voice made sound through the host-written DSP register";
 }
 
 // ---- the CPU register file ------------------------------------------------

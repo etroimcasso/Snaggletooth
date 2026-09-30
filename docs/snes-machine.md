@@ -47,6 +47,7 @@ finishes.
   - [Memory by bus address](#memory-by-bus-address)
   - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
   - [A communication port from the console's side](#a-communication-port-from-the-consoles-side)
+  - [A DSP register from the host's side](#a-dsp-register-from-the-hosts-side)
   - [The CPU register file](#the-cpu-register-file)
   - [Draining audio without allocating](#draining-audio-without-allocating)
   - [A register's value](#a-registers-value)
@@ -923,6 +924,21 @@ moves.
 
 ```cpp
 machine.writeApuPort(0, 0xCC);  // port 0's input latch, which the sound CPU reads at $F4
+```
+
+Like the memory writes, it lands where the machine stands between `run()`s.
+
+### A DSP register from the host's side
+
+`writeApuDspRegister` writes one of the 128 DSP registers (`$00-$7F`) the way the sound program's own
+`MOV DSPDATA` write does: the byte is stored, an ENDX (`$7C`) write acknowledges every end flag instead,
+a KON (`$4C`) write arms the key-on the next poll consumes, and a write to a register the DSP itself
+writes carries the DSP's standing cycle. An index above `$7F` is ignored, the way `DSPDATA` ignores it,
+and a register's value is read back from `state().apu.dsp[index]`. The register file itself is the
+[audio machine](apu-machine.md#dsp-register-file)'s.
+
+```cpp
+machine.writeApuDspRegister(0x4C, 0x01);  // KON: key voice 0 on, as MOV DSPDATA would
 ```
 
 Like the memory writes, it lands where the machine stands between `run()`s.
