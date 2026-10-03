@@ -136,9 +136,10 @@ program cannot tell the difference.
 **One position per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical
 blank leaves below it — 256 positions, each one pixel, or two half-pixels on a line drawn
 [in half-pixels](#the-half-pixel-line); the frame's first line draws nothing, which is why a background offset of
-−1 is what puts a tilemap's first row on the picture's first line. Each pixel is resolved from the
-registers and the memories **as they stand at its own dot**, so a write that lands mid-line changes
-the dots after it and not the ones before.
+−1 is what puts a tilemap's first row on the picture's first line. Each background reads its tiles
+ahead of the beam, a column at a time, and each pixel is drawn from those reads and from the registers
+as they stand at its own dot — [the tile reads](#the-tile-reads) give the dots, and with them what a
+write that lands mid-line reaches.
 
 **Every mode is drawn**, each background on the screen its own bit of `$212C` or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
 are and how deep each one is:
@@ -212,6 +213,53 @@ the four places they take are the mode's as much as a background's are. Mode 7's
 place and no priority bit; the second layer `$2133` bit 6 makes of it takes its priority from the
 pixel itself.
 
+### The tile reads
+
+Each background a mode draws from a tilemap reads the line in tile columns: column `E` covers
+positions `8E` to `8E + 7`, and a thirty-third column, `E = 32`, is read for the last positions a fine
+scroll reaches. Each column is read in three steps, at fixed dots of the line:
+
+| read | dot | what it reads |
+|---|---|---|
+| the entry | `8E + 3` | the tilemap entry, at the coarse horizontal scroll and the vertical scroll as they stand — or as [the offset table](#offset-per-tile) gives them — with the map's base and size and the mode's depth and tile size |
+| the character | `8E + 7` | the character's row, at the character base as it stands — both characters of a two-character tile |
+| the fine scroll | `8E + 22` | the horizontal scroll's low three bits, at the dot position `8E` is drawn on (`E` = 0 to 31) |
+
+Position `8E + k` is drawn from pixel `k + f` of column `E`, `f` being the fine scroll column `E`
+read, or pixel `k + f − 8` of column `E + 1` where that passes the column's eighth. Everything else
+about a pixel is read at its own dot: the screens, the windows, the priority chart, the palette terms
+the mode gives a background, `$2130`'s direct-color bit, color math, the brightness and mosaic's
+block width.
+
+**A write mid-line** reaches every column whose read of the written register comes after it, and no
+column whose read came before it, however many of that column's positions are drawn after the write.
+A dot's reads are made before its pixel, so a write landing after dot `D` reaches a read at a dot
+later than `D` and misses one at `D` or before. A write to `INIDISP` reaches the chip
+[a dot early](#the-picture), reads included.
+
+```
+BG1HOFS written mid-line, landing after dot 254:
+  column 31's entry was read at 251, so no column of the line moves;
+  with a fine scroll of 0 no position reaches column 32. The next line is drawn at the new scroll.
+BG1HOFS written mid-line, landing after dot 170:
+  column 21's entry, read at 171, is the first to take the new coarse scroll; column 19's
+  fine scroll, read at 174, is the first to take the new fine one.
+```
+
+**Forced blank.** The CPU has the video memory while the screen is forced blank, and the chip reads
+no tile then: a column whose entry or character read falls under the blank holds nothing, and once
+the blank lifts mid-line its positions show the backdrop until the first column read after the lift.
+In Mode 7 the field is read through the matrix at every pixel and no column is read.
+
+**The state.** The reads are part of `PpuState` (`tiles`, one `TileRead` per background per column),
+made whether or not a frame observer is set, so a machine nobody watches holds the reads a watched
+one does, and a snapshot taken between a column's reads draws the rest of the line as the unbroken
+line would.
+
+This is the schedule of PPU1 version 1 and PPU2 version 1, measured on
+[the project's SNES](ppu-behavior.md#sources), an SNS-001 with every chip at version 1 —
+[the evidence](ppu-behavior.md#the-chip-reads-each-tile-ahead-of-the-beam).
+
 ### Offset-per-tile
 
 In modes 2, 4 and 6 BG3's tilemap is not drawn, whatever `$212C` and `$212D` bit 2 hold: it is a
@@ -249,8 +297,10 @@ For each picture column, a background with a table reads its offsets like this:
   `x + ((entry & $3F8) | (HOFS & 7))`. A vertical entry replaces the register whole: the row read is
   `line + (entry & $3FF)`. An axis whose entry does not apply keeps its register.
 
-The position then wraps at the background's map size as any other does. The table and both scroll
-registers are read at the dot, so a write to any of them mid-line changes the columns after it.
+The position then wraps at the background's map size as any other does. The table and the coarse
+scroll are read with the tile's entry, the fine scroll at its first pixel
+([the tile reads](#the-tile-reads)), so a write to any of them mid-line changes the columns read after
+it.
 
 **Mode 6** reads its table exactly as mode 2 does, BG1 under bit 13, in columns of eight positions —
 which is a mode 6 tile's width. BG3's tile there is eight positions wide too, so its size bit changes
@@ -497,8 +547,8 @@ chooses between the two sizes.
   writes the pair and then steps the address moves the front sprite for one frame and gets the reload
   value's sprite on the next.
 
-**The two passes.** Sprites are the one part of the picture not resolved at the dot that shows them.
-**Range** walks the sprite table across the visible dots of the line *before* the one it is gathering
+**The two passes.** Sprites are gathered a whole line ahead of the dots that show them, where a
+background's tiles are read [a column ahead](#the-tile-reads). **Range** walks the sprite table across the visible dots of the line *before* the one it is gathering
 for, two dots a sprite from the picture's first, keeping the sprites that line crosses and that have
 at least one column at or right of the left edge. **Time** then runs in the horizontal blank that
 follows and draws those sprites into a line buffer, back to front, so the sprite nearest the front
@@ -811,10 +861,27 @@ Each of these is a question the documentation leaves, recorded rather than decid
   is read only for the line it was gathered for, so that line shows no sprites at all.
 - Where the picture's last dot is. The event list gives the visible span as dots 22–277 and marks it
   with its own question mark; the span is taken as written rather than rounded to something tidier.
-- How far ahead of a dot the chip fetches that dot's map entry and character. A pixel is resolved from
-  the registers and memories as they stand at its own dot, which is where a mid-picture write lands;
-  the distance itself is a measurement against a test ROM that has not been made.
-- What a write to a scroll register mid-line does to a tile whose entry the chip has already fetched.
+- The dot the vertical scroll is read at. It is read with the tile's entry, at `8E + 3`; it could as
+  well be read with the character, at `8E + 7`.
+- What a column whose reads fell under forced blank shows when the blank lifts mid-line. It holds
+  nothing and shows the backdrop; it could as well show what the column held on the line before.
+- The dot the mode's depth and tile size are read at. They are read with the entry; they could as well
+  be read with the character.
+- The dot the mode's palette terms are applied at. They are applied at the pixel, so a mode written
+  mid-line draws the columns read before it at their old depth through the new mode's palette terms;
+  they could as well travel with the column's reads.
+- Whether a two-character tile's second character is read with its first, at `8E + 7`, as built, or at
+  a later dot.
+- Whether a 16×16 block's entry is read once a column of eight positions, as built, or once a block.
+- The dot the offset table's own entries are read at. They are read with the tile's entry; they could
+  as well be read before it.
+- What the four positions after a fine-scroll write that lands on a column's own read show on the
+  console. The build takes the write as after the read. The console's picture there, through its NTSC
+  encoder over S-Video, is dim with red and blue fringes, which is what a four-pixel black run between
+  two whites looks like through that encoder; whether the chip draws those four pixels black is not yet
+  read.
+- Whether Mode 7's field is read ahead of the beam like a tilemap. It is read through the matrix at
+  every pixel.
 - Which palette entry a write at a picture dot reaches. The register page says the wrong one and names
   none; such a write reaches no entry here — see
   [`ppu-behavior.md`](ppu-behavior.md#where-a-write-at-a-picture-dot-goes-is-not-stated).
@@ -824,9 +891,9 @@ Each of these is a question the documentation leaves, recorded rather than decid
   three dots; whether the drawing unit re-reads them is not stated. Every term is read at the dot.
 - What a size written to `$2106` part-way along a line does to the rest of that line. The width is
   read at the dot, so the rest of the line takes the new width.
-- Whether a mosaiced block's corner is read once, at the corner's own dot, or re-read from the
-  registers at each dot of the block. Every dot reads the registers as they stand, as the Mode 7
-  mid-line question above records.
+- Whether a mosaiced block's corner is read once, at the corner's own dot, or re-read at each dot of
+  the block. Each dot of the block takes the corner position's pixel from the tile reads of the
+  corner's column, and the width as the register stands at that dot.
 - What `$2133` bit 6 shows outside Mode 7. fullsnes describes an external input shorted to half the
   data bus and a program "will just see garbage"; no source gives a picture. Nothing drawn changes.
 - What the left half at position 0 takes on a line drawn in half-pixels. No main pixel stands to its

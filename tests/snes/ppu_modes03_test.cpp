@@ -140,6 +140,21 @@ Picture draw(const PpuState& ppu) {
   return picture;
 }
 
+// The PPU as a machine that drew `line` from its start under `ppu` holds it at
+// master cycle `hpos` of that line: the tile columns the beam has passed hold the
+// reads the chip made of them.
+PpuState passedTo(const PpuState& ppu, std::uint16_t line, std::uint16_t hpos) {
+  const std::vector<std::uint8_t> rom = haltedCartridge();
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = ppu;
+  state.vpos = line;
+  state.hpos = 0u;
+  machine.restore(state);
+  machine.run(hpos);
+  return machine.state().ppu;
+}
+
 // A frame drawn by a machine that begins `program` with the beam at (line, hpos),
 // so the program's own writes land on the picture. hpos counts master cycles into
 // the line, four to a picture position, and a load-and-store pair costs 46 of them.
@@ -148,7 +163,7 @@ Picture drawWith(const PpuState& ppu, std::vector<std::uint8_t> program, std::ui
   const std::vector<std::uint8_t> rom = cartridge(std::move(program));
   Snes machine(SnesConfig{.rom = rom});
   SnesState state = machine.state();
-  state.ppu = ppu;
+  state.ppu = passedTo(ppu, line, hpos);
   state.vpos = line;
   state.hpos = hpos;
   machine.restore(state);

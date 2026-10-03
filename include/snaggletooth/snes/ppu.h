@@ -11,8 +11,11 @@
 // address flip-flops, the counter latch, the two open-bus values the chip's
 // halves remember, and the windows in which each memory can be reached.
 //
-// A pixel is resolved from that state as it stands at the pixel's own dot, so a
-// program that writes a register mid-line changes the rest of the line. Every
+// Each background reads every tile column of a line ahead of the beam, at three
+// fixed dots: the tilemap entry at 8E + 3, the character rows at 8E + 7 and the
+// fine horizontal scroll at 8E + 22, the dot the column's first pixel is drawn
+// on. A register written mid-line reaches the tiles whose read of it comes after
+// the write; everything else about a pixel is read at the pixel's own dot. Every
 // mode draws the backgrounds it has, at the depths it gives them, and the
 // sprites, in that mode's own priority order, over the backdrop. In modes 2, 4
 // and 6 BG3's tilemap is not drawn: it is a table of offsets the other
@@ -26,10 +29,10 @@
 // tile showing on the sub screen and the odd ones on the main. $2133 bit 3 draws
 // any other mode's line the same way, from tiles one character wide.
 //
-// Sprites are the one part of the picture not resolved at the dot that shows
-// them. A line's sprites are found and gathered during the line before it, in
-// two passes the chip runs across that line's dots, and what those passes leave
-// is part of the chip's state.
+// Sprites are gathered a whole line ahead of the dots that show them: a line's
+// sprites are found and gathered during the line before it, in two passes the
+// chip runs across that line's dots, and what those passes leave is part of the
+// chip's state.
 //
 // The state is a plain value, PpuState, held once inside the machine's state
 // and nowhere else, so a snapshot of the machine carries the PPU whole and a
@@ -65,6 +68,17 @@ constexpr std::uint16_t kHiresWidth = 512u;
 // line from 1 to the last before vertical blank. Line 0 draws nothing.
 constexpr std::uint16_t kFirstPictureDot = 22u;
 constexpr std::uint16_t kLastPictureDot = 277u;
+
+// The tile columns a background reads on a line and the dot the first read falls
+// on. Column E covers positions 8E to 8E + 7; its tilemap entry is read at dot
+// 8E + 3, its character rows at 8E + 7, and its fine horizontal scroll at 8E + 22,
+// the dot position 8E is drawn on. The thirty-third column, E = 32, is read like
+// the others and is reached only by a fine scroll's last pixels.
+constexpr std::uint16_t kTileColumns = 33u;
+constexpr std::uint16_t kFirstTileReadDot = 3u;
+constexpr std::uint16_t kEntryReadDot = 3u;
+constexpr std::uint16_t kCharacterReadDot = 7u;
+constexpr std::uint16_t kFineReadDot = 22u;
 
 // What the chip can afford on one line: the sprites Range keeps, and the 8x8
 // tiles Time loads from them. A sprite past the first is dropped and a tile past
@@ -103,6 +117,29 @@ struct SpriteLine {
   std::uint8_t first = 0;
 
   [[nodiscard]] bool operator==(const SpriteLine&) const noexcept = default;
+};
+
+// What one background's reads of one tile column hold on the line being drawn.
+// The entry read stores the tilemap entry, where in the background it was read,
+// and the mode's terms for the tile: its depth, its size and whether it is two
+// characters wide. The character read stores the tile's pixels, both flips
+// applied, as color indices in the order they are drawn — eight, or sixteen for
+// a tile two characters wide, the even ones on the sub screen's halves and the
+// odd ones on the main screen's. The fine read stores the fine scroll the
+// column's positions are drawn with. A column read while the screen is forced
+// blank, or for a background the mode does not draw from a tilemap, holds
+// nothing: depth 0 and every pixel transparent.
+struct TileRead {
+  std::array<std::uint8_t, 16> pixel{};  // color index per pixel, 0 transparent
+  std::uint16_t entry = 0;               // the tilemap entry: vhopppcc cccccccc
+  std::uint16_t bgX = 0;                 // the background column the entry was read at, a multiple of 8
+  std::uint16_t bgY = 0;                 // the background row: the line read, plus the vertical offset
+  std::uint8_t planes = 0;               // the depth the mode gave the background: 2, 4 or 8, or 0
+  std::uint8_t fine = 0;                 // the horizontal scroll's low three bits at the column's first pixel
+  bool large = false;                    // $2105's tile-size bit for the background: 16x16 blocks
+  bool hires = false;                    // the mode's tiles are two characters wide (modes 5 and 6)
+
+  [[nodiscard]] bool operator==(const TileRead&) const noexcept = default;
 };
 
 // The machine as the PPU sees it at one access.
@@ -243,6 +280,14 @@ struct PpuState {
   };
   MainDecision lastMain{};
 
+  // ---- the tile reads ----------------------------------------------------------
+  // Each background's reads of the line's tile columns, by background and column.
+  // A column's pixels are drawn from what its reads stored, so a register written
+  // between a read and the pixels it feeds changes the next column it reaches and
+  // not this one, and a snapshot taken part-way along a line carries the reads the
+  // rest of the line is drawn from.
+  std::array<std::array<TileRead, kTileColumns>, 4> tiles{};
+
   // ---- status -----------------------------------------------------------------
   // Raised by the two passes whether or not $212C shows the sprites at all, and
   // cleared as the next picture begins.
@@ -370,12 +415,26 @@ class Ppu {
   // more line of the current row otherwise.
   void beginLine(std::uint16_t line) noexcept;
 
+  // The tile reads that fall on `dot` of the beam's line, for every background.
+  // At dot 8E + 3 (E = 0 … 32) each background the mode draws from a tilemap
+  // reads column E's entry: the line it reads the map at, the coarse horizontal
+  // scroll and the vertical scroll as they stand — through BG3's offset table in
+  // modes 2, 4 and 6 — the mode's depth and tile size, and the map's base and
+  // size. At dot 8E + 7 it reads the column's character rows under the character
+  // base as it stands. At dot 8E + 22 (E = 0 … 31), the dot position 8E is drawn
+  // on, it reads the fine horizontal scroll the column's positions are drawn
+  // with. A read under forced blank, when the CPU has the video memory, stores
+  // nothing for the column, and so does a read in Mode 7, whose field is read
+  // through the matrix at every pixel. The machine calls it for every dot from
+  // kFirstTileReadDot on, before that dot's pixel, watched or not.
+  void tileReads(std::uint16_t dot, const PpuInputs& in) noexcept;
+
   // What the chip's converter drives at picture position (x, y), four bytes a
   // pixel — red, green, blue, then 255 — with x across a line's 256 positions and
   // y the beam's line, 1 for the picture's first.
   //
   // A position is drawn in half-pixels in modes 5 and 6, and in any other mode
-  // while $2133 bit 3 is set, read at the dot like every register. Its right half
+  // while $2133 bit 3 is set, read at the dot. Its right half
   // is the main screen's pixel under colour math. Its left half is the sub screen's
   // front-most pixel, or colour 0 where the sub screen shows nothing, drawn under
   // what the main pixel one position to its left decided: black where $2130 blacked
@@ -386,8 +445,8 @@ class Ppu {
   // math, in both halves. Every position records its main pixel's decision in the
   // state, so a line resumed from a snapshot draws on as the unbroken line would. The main screen's
   // pixel is the one its enabled backgrounds and the line's sprites name at that
-  // dot, taken in the mode's priority order, or the backdrop where none of them
-  // shows. Everything is scaled by INIDISP's brightness; forced blank and
+  // dot — a background's from the tile reads of its column — taken in the mode's
+  // priority order, or the backdrop where none of them shows. Everything is scaled by INIDISP's brightness; forced blank and
   // brightness zero are black on both halves.
   struct Dot {
     std::array<std::uint8_t, 4> left;   // the sub screen's half, or the pixel itself
@@ -415,10 +474,8 @@ class Ppu {
 
   // One background as its own registers describe it, with what the mode makes of
   // it: its depth, and where in the palette its colours are read. A character
-  // takes eight bytes for each of its bitplanes. Its two offsets are not here —
-  // they are read from the registers at the dot, so a background scrolled part-way
-  // along a line moves the positions after the write and leaves this description
-  // standing.
+  // takes eight bytes for each of its bitplanes. Its two offsets are not here:
+  // each tile column's reads take them from the registers at the read's own dot.
   struct Background {
     Layer layer;                 // which of the four this describes, and so whose offsets it reads
     std::uint8_t screen;         // its $2107-$210A: the map's base and the map's size
@@ -448,7 +505,7 @@ class Ppu {
     std::uint16_t vertical;
   };
 
-  // A background's two offset registers as they stand at this dot.
+  // A background's two offset registers as they stand.
   [[nodiscard]] Offsets scrollOf(Layer layer) const noexcept;
 
   // The tilemap entry a background holds at one of its own positions: the base its
@@ -460,7 +517,8 @@ class Ppu {
                                       unsigned bgY) const noexcept;
 
 
-  // The offsets a background is read with at picture column x: its own two
+  // The offsets the entry read of the tile column holding picture position x
+  // takes for a background, at the read's own dot: its own two
   // registers' low ten bits, or where the mode gives it an offset table, what BG3's
   // tilemap says for the tile column x falls in. The first tile column takes the
   // registers whatever the table holds; tile T after it reads BG3's tile T - 1 from
@@ -481,13 +539,22 @@ class Ppu {
     std::optional<std::uint16_t> direct;
   };
 
-  // What a background shows at a picture position, or nothing where its tile's
-  // pixel is colour 0, which every palette treats as transparent. `half` is which
-  // half of the position a two-character tile is read for: the left, its even
-  // pixel, or the right, its odd one. A tile one character wide has one pixel to
-  // the position and ignores it.
+  // What a background shows at a picture position, drawn from the tile reads of
+  // the position's column, or nothing where the pixel is color 0, which every
+  // palette treats as transparent. Position 8E + k is pixel k + f of column E,
+  // f being the fine scroll column E read, and pixel k + f - 8 of column E + 1
+  // where that passes the column's eighth. `half` is which half of the position a
+  // two-character tile is read for: the left, its even pixel, or the right, its
+  // odd one. A tile one character wide has one pixel to the position and ignores
+  // it. The palette word is worked out with the mode's palette terms and $2130's
+  // direct-color bit as they stand at the pixel.
   [[nodiscard]] std::optional<Shown> sample(const Background& background, std::uint16_t x,
-                                            std::uint16_t y, bool half) const noexcept;
+                                            bool half) const noexcept;
+
+  // The two reads of one tile column for one background: the entry at dot
+  // 8E + 3 and the character rows at dot 8E + 7, described with tileReads.
+  void readEntry(const Background& background, unsigned column, const PpuInputs& in) noexcept;
+  void readCharacter(unsigned layer, unsigned column) noexcept;
 
   // One sprite as its OAM record describes it: its position, the first of its
   // characters, its attribute byte, and the size its own flag chose from the
@@ -701,7 +768,7 @@ class Ppu {
   // The registers one of the four backgrounds reads, and the shape of the mode's
   // tiles: its screen register, its character-base nibble, its tile-size bit, and
   // whether the mode's tiles are two characters wide. What else the mode makes of
-  // it is added by background(); its offsets are read at the dot by scrollOf().
+  // it is added by background(); its offsets are read by scrollOf().
   [[nodiscard]] Background registersOf(Layer layer) const noexcept;
 
   // The converter's four bytes for one 15-bit palette word at the brightness

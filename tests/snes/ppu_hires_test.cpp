@@ -1,6 +1,6 @@
 // Modes 5 and 6, whose tiles are two characters wide and whose lines are drawn in
-// half-pixels; the half-pixel line any other mode draws under $2133 bit 3; and the
-// interlaced picture.
+// half-pixels; the half-pixel line any other mode draws under $2133 bit 3; the
+// interlaced picture; and the dot a two-character tile's characters are read at.
 //
 // Every expectation is computed by hand from the register pages, fullsnes and
 // anomie. A hires line is 512 half-pixels: half-pixel h belongs to full pixel h / 2,
@@ -16,6 +16,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <string>
 #include <system_error>
@@ -1906,6 +1907,109 @@ TEST(PpuHiresCartridges, AnInterlacedSpriteImageHalvesItsSpritesAndAlternatesIts
 }
 TEST(PpuHiresCartridges, AnInterlacedPictureImageAlternatesItsFields) {
   expectInterlaced("InterlaceMoogle.sfc", false);
+}
+
+// ---- the dot a two-character tile is read at --------------------------------------
+
+// The PPU as a machine that drew `line` from its start under `ppu` holds it at
+// master cycle `hpos` of that line: the tile columns the beam has passed hold the
+// reads the chip made of them.
+PpuState passedTo(const PpuState& ppu, std::uint16_t line, std::uint16_t hpos) {
+  const std::vector<std::uint8_t> rom = cartridge({kStp});
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = ppu;
+  state.vpos = line;
+  state.hpos = 0u;
+  machine.restore(state);
+  machine.run(hpos);
+  return machine.state().ppu;
+}
+
+// A frame drawn by a machine that begins `program` with the beam at (line, hpos),
+// the line drawn from its start up to there.
+Picture drawFrom(const PpuState& ppu, std::vector<std::uint8_t> program, std::uint16_t line,
+                 std::uint16_t hpos) {
+  program.push_back(kStp);
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = passedTo(ppu, line, hpos);
+  state.vpos = line;
+  state.hpos = hpos;
+  machine.restore(state);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+  machine.run(kOneFrame);
+  return picture;
+}
+
+// The dot each write to $2100-$213F of `program`, begun at (line, hpos), lands
+// after: the beam's master cycle into the line over four, when the write is made.
+std::vector<unsigned> landingDots(std::vector<std::uint8_t> program, std::uint16_t line,
+                                  std::uint16_t hpos) {
+  struct Landings final : BusObserver {
+    const Snes* observed = nullptr;
+    std::vector<unsigned> dots;
+    void access(const BusAccess& access) override {
+      const std::uint32_t offset = access.address & 0xFFFFu;
+      if (access.write && offset >= 0x2100u && offset <= 0x213Fu) {
+        dots.push_back(observed->state().hpos / 4u);
+      }
+    }
+    void internal(std::uint32_t, std::optional<CycleKind>) override {}
+  };
+  program.push_back(kStp);
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.vpos = line;
+  state.hpos = hpos;
+  machine.restore(state);
+  Landings landings;
+  landings.observed = &machine;
+  machine.setObserver(&landings);
+  machine.run(2000u);
+  return landings.dots;
+}
+
+TEST(SnesPpuHiresModes, ATwoCharacterTileReadsBothCharactersAtDotEightEPlusSeven) {
+  // Mode 5, BG1 on both screens, every entry naming the tile of characters 2 and 3:
+  // both color 1 at $8000, both color 2 at $E000. $210B <- $57 moves BG1's
+  // characters to $E000. Column 12's rows — both characters — are read at dot 103:
+  // a write landing after dot 102 reaches both halves of every one of its positions,
+  // one landing after dot 103 reaches neither, and column 13 takes both.
+  PpuState before = placed(0x05u);
+  before.tm = 0x01u;
+  before.ts = 0x01u;
+  fillMap(before, kBg1Map, entry(2u, kBg1Palette, false));
+  putSolid(before, kBg1Chars, 4u, 2u, 1u);
+  putSolid(before, kBg1Chars, 4u, 3u, 1u);
+  putSolid(before, 0xE000u, 4u, 2u, 2u);
+  putSolid(before, 0xE000u, 4u, 3u, 2u);
+  PpuState after = before;
+  after.bg12nba = 0x57u;
+  const std::vector<std::uint8_t> program = store(0x0Bu, 0x57u);
+  ASSERT_EQ(landingDots(program, 50u, 362u), (std::vector<unsigned>{102u}));
+  ASSERT_EQ(landingDots(program, 50u, 366u), (std::vector<unsigned>{103u}));
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  ASSERT_EQ(never.width, 512u);
+  ASSERT_NE(never.at(2u * 96u, 50u), always.at(2u * 96u, 50u));
+  ASSERT_NE(never.at(2u * 96u + 1u, 50u), always.at(2u * 96u + 1u, 50u));
+
+  const Picture early = drawFrom(before, program, 50u, 362u);
+  EXPECT_EQ(early.at(2u * 95u + 1u, 50u), never.at(2u * 95u + 1u, 50u));
+  for (unsigned half = 2u * 96u; half < 2u * 104u; ++half) {
+    EXPECT_EQ(early.at(half, 50u), always.at(half, 50u)) << half;
+  }
+
+  const Picture onTheRead = drawFrom(before, program, 50u, 366u);
+  for (unsigned half = 2u * 96u; half < 2u * 104u; ++half) {
+    EXPECT_EQ(onTheRead.at(half, 50u), never.at(half, 50u)) << half;
+  }
+  EXPECT_EQ(onTheRead.at(2u * 104u, 50u), always.at(2u * 104u, 50u));
+  EXPECT_EQ(onTheRead.at(2u * 104u + 1u, 50u), always.at(2u * 104u + 1u, 50u));
 }
 
 }  // namespace

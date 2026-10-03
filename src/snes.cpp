@@ -1569,18 +1569,22 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   if (state_.vpos == 0u || state_.inVblank) return;
 
   // The dots the span passed, by the same reckoning the line's events use: a dot is
-  // reached when the span covers the master cycle it begins on.
+  // reached when the span covers the master cycle it begins on. The tile reads begin
+  // before the picture's first dot, and each falls before the pixel of its own dot.
   const std::uint64_t first = (from - lineStart) / 4u + 1u;
   const std::uint64_t last = (to - lineStart) / 4u;
-  const std::uint64_t dot = first < kFirstPictureDot ? kFirstPictureDot : first;
+  const std::uint64_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
   Ppu ppu{state_.ppu, derived_};
   const PpuInputs in = ppuInputs();
 
-  // What the chip carries from one position to the next is decided whether or not
-  // anyone is watching, since it is part of the state a snapshot holds.
+  // The tile reads, and what the chip carries from one position to the next, are
+  // made whether or not anyone is watching, since both are part of the state a
+  // snapshot holds.
   if (frameObserver_ == nullptr) {
     for (std::uint64_t at = dot; at <= stop; ++at) {
+      ppu.tileReads(static_cast<std::uint16_t>(at), in);
+      if (at < kFirstPictureDot) continue;
       ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
     }
     return;
@@ -1593,6 +1597,8 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
 
   const std::size_t line = state_.vpos - 1u;
   for (std::uint64_t at = dot; at <= stop; ++at) {
+    ppu.tileReads(static_cast<std::uint16_t>(at), in);
+    if (at < kFirstPictureDot) continue;
     const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
     const Ppu::Dot out = ppu.dot(x, in);
     if (out.hires && !frameWide_) widenFrame(line, x);
@@ -1761,9 +1767,10 @@ void Snes::tickVideo(std::uint32_t cost) {
     // Finding the next line's sprites is the chip's own work and it does it for
     // nobody's benefit, because a program can read what the pass found.
     rangeSpan(lineStart, stop);
-    // The picture is resolved a dot at a time, from the registers and the memories
-    // as they stand at each one. A machine nobody is watching resolves only what the
-    // chip carries from one position to the next.
+    // The picture is drawn a dot at a time: each background's tile reads at their
+    // own dots, and each pixel from those reads and the registers as they stand at
+    // its dot. A machine nobody is watching makes the reads and resolves only what
+    // the chip carries from one position to the next.
     drawSpan(lineStart, at, stop);
     at = stop;
     state_.hpos = static_cast<std::uint16_t>(at - lineStart);

@@ -3,8 +3,9 @@
 // background as the pixel at its top-left corner.
 //
 // Every expectation is computed by hand from the register pages and anomie's
-// description of the lookup; the pictures are placed as a program would have left
-// them. The offset pictures read one BG1 through a table: its tile column C is
+// description of the lookup, and the dot a table entry is read at from the
+// console's own read schedule — with the tile column's entry; the pictures are
+// placed as a program would have left them. The offset pictures read one BG1 through a table: its tile column C is
 // drawn in hue C mod 8, bright on an even tile row and dark on an odd one, so a
 // pixel's colour names the background position it was read from.
 
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <string>
 #include <system_error>
@@ -143,15 +145,31 @@ Picture draw(const PpuState& ppu) {
   return picture;
 }
 
+// The PPU as a machine that drew `line` from its start under `ppu` holds it at
+// master cycle `hpos` of that line: the tile columns the beam has passed hold the
+// reads the chip made of them.
+PpuState passedTo(const PpuState& ppu, std::uint16_t line, std::uint16_t hpos) {
+  const std::vector<std::uint8_t> rom = cartridge({kStp});
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = ppu;
+  state.vpos = line;
+  state.hpos = 0u;
+  machine.restore(state);
+  machine.run(hpos);
+  return machine.state().ppu;
+}
+
 // A frame drawn from a placed PPU state by a machine that begins `program` with
-// the beam at (line, hpos): the program's own writes land on the picture.
+// the beam at (line, hpos), the line drawn from its start up to there: the
+// program's own writes land on the picture.
 Picture drawWith(const PpuState& ppu, std::vector<std::uint8_t> program, std::uint16_t line,
                  std::uint16_t hpos) {
   program.push_back(kStp);
   const std::vector<std::uint8_t> rom = cartridge(std::move(program));
   Snes machine(SnesConfig{.rom = rom});
   SnesState state = machine.state();
-  state.ppu = ppu;
+  state.ppu = passedTo(ppu, line, hpos);
   state.vpos = line;
   state.hpos = hpos;
   machine.restore(state);
@@ -159,6 +177,37 @@ Picture drawWith(const PpuState& ppu, std::vector<std::uint8_t> program, std::ui
   machine.setFrameObserver(&picture);
   machine.run(kOneFrame);
   return picture;
+}
+
+// The dot each write to $2100-$213F of `program`, begun at (line, hpos), lands
+// after: the last dot the beam had reached when the write was made, which is the
+// beam's master cycle into the line over four. A tile read at a dot up to and
+// including it is made before the write, and one at a later dot after it.
+std::vector<unsigned> landingDots(std::vector<std::uint8_t> program, std::uint16_t line,
+                                  std::uint16_t hpos) {
+  struct Landings final : BusObserver {
+    const Snes* observed = nullptr;
+    std::vector<unsigned> dots;
+    void access(const BusAccess& access) override {
+      const std::uint32_t offset = access.address & 0xFFFFu;
+      if (access.write && offset >= 0x2100u && offset <= 0x213Fu) {
+        dots.push_back(observed->state().hpos / 4u);
+      }
+    }
+    void internal(std::uint32_t, std::optional<CycleKind>) override {}
+  };
+  program.push_back(kStp);
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.vpos = line;
+  state.hpos = hpos;
+  machine.restore(state);
+  Landings landings;
+  landings.observed = &machine;
+  machine.setObserver(&landings);
+  machine.run(2000u);
+  return landings.dots;
 }
 
 // LDA #v ; STA $21xx
@@ -712,14 +761,15 @@ TEST(SnesPpuOffsetModes, ModeFoursEntryStillNeedsItsApplyBit) {
   EXPECT_EQ(draw(ppu).at(8u, 1u), straight(8u, 1u));
 }
 
-// ---- the table at the dot ------------------------------------------------------
+// ---- the table, read with each tile column's entry -----------------------------
 
 TEST(SnesPpuOffsetModes, TheTablesScrollWrittenMidLineMovesTheColumnsAfterTheWrite) {
   // A program beginning at dot 75 of line 50 writes BG3HOFS = 8 in two halves, the
-  // second landing some twenty-five dots later. Column 56 was drawn before either
-  // write. Column 209 is tile 26: before the write it reads table column 25, +32,
-  // and after it column 26, +16. Each column is compared with the frame the same
-  // table draws with the scroll set throughout and with it never set.
+  // second landing after dot 98. Column 56 was drawn before either write. Position
+  // 209 is in tile column 26, whose entry and table entry are read at dot 211:
+  // before the write it reads table column 25, +32, and after it column 26, +16.
+  // Each column is compared with the frame the same table draws with the scroll set
+  // throughout and with it never set.
   PpuState before = alternating();
   PpuState after = alternating();
   after.bg3hofs = 8u;
@@ -734,34 +784,67 @@ TEST(SnesPpuOffsetModes, TheTablesScrollWrittenMidLineMovesTheColumnsAfterTheWri
   EXPECT_EQ(picture.at(10u, 50u), kBlack);
 }
 
-TEST(SnesPpuOffsetModes, TheTablesEntryWrittenUnderForcedBlankReachesTheSameLineWhenTheBlankLifts) {
-  // A program beginning at master cycle 300 of line 50 forces the blank at picture
-  // column 65, writes BG3's entry for the tile column at 136 through the video port
-  // while the memory is reachable, and lifts the blank at column 134. The positions
-  // the blank covered are black; the ones after it read the offset the program wrote,
-  // on the same line it wrote it on. The table's entry for picture tile T is BG3's
-  // tile T - 1, so the tile at column 136 reads BG3's tile 16.
-  PpuState before = offsetPicture(0x02u);
-  PpuState after = before;
-  putTable(after, 16u, 0u, kToBg1 | 8u);
+TEST(SnesPpuOffsetModes, TheOffsetTableIsReadWithTheEntry) {
+  // BG3HOFS <- 8 in two halves; the first leaves the table's coarse scroll at 0.
+  // Tile column 12's entry is read at dot 99, and with it the table entry it is
+  // read through: BG3's tile 11, +32, before the second write, and tile 12, +16,
+  // after it. A second write landing after dot 98 moves column 12; one landing after
+  // dot 99 leaves it and moves column 13.
+  const PpuState before = alternating();
+  PpuState after = alternating();
+  after.bg3hofs = 8u;
+  const std::vector<std::uint8_t> program = joined({store(0x11u, 0x08u), store(0x11u, 0x00u)});
+  ASSERT_EQ(landingDots(program, 50u, 300u), (std::vector<unsigned>{86u, 98u}));
+  ASSERT_EQ(landingDots(program, 50u, 304u), (std::vector<unsigned>{87u, 99u}));
   const Picture never = draw(before);
   const Picture always = draw(after);
-  const Picture picture = drawWith(before,
-                                   joined({
-                                       store(0x00u, 0x80u),  // forced blank
-                                       store(0x15u, 0x80u),  // step after the high byte
-                                       store(0x16u, 0x10u),  // word $0C10: BG3's tile 16, row 0
-                                       store(0x17u, 0x0Cu),
-                                       store(0x18u, 0x08u),  // the offset
-                                       store(0x19u, 0x20u),  // and the bit that applies it to BG1
-                                       store(0x00u, 0x0Fu),  // the screen on again
-                                   }),
-                                   50u, 300u);
+  ASSERT_NE(never.at(96u, 50u), always.at(96u, 50u));
+  ASSERT_NE(never.at(104u, 50u), always.at(104u, 50u));
+
+  const Picture early = drawWith(before, program, 50u, 300u);
+  EXPECT_EQ(early.at(95u, 50u), never.at(95u, 50u));
+  EXPECT_EQ(early.at(96u, 50u), always.at(96u, 50u));
+
+  const Picture onTheRead = drawWith(before, program, 50u, 304u);
+  EXPECT_EQ(onTheRead.at(96u, 50u), never.at(96u, 50u));
+  EXPECT_EQ(onTheRead.at(103u, 50u), never.at(103u, 50u));
+  EXPECT_EQ(onTheRead.at(104u, 50u), always.at(104u, 50u));
+}
+
+TEST(SnesPpuOffsetModes, TheTablesEntryWrittenUnderForcedBlankReachesTheSameLineWhenTheBlankLifts) {
+  // A program beginning at master cycle 300 of line 50 forces the blank after dot
+  // 86, writes BG3's entry for tile column 20 through the video port while the
+  // memory is reachable, and lifts the blank after dot 155. The positions drawn under
+  // the blank are black. The chip reads nothing while the CPU has the memory, so
+  // columns 10 to 18, whose entry or rows fell under the blank, hold nothing and
+  // show the backdrop once it lifts. The table's entry for tile column T is BG3's
+  // tile T - 1, read with the column's own entry, so column 20 — read at dot 163 —
+  // reads BG3's tile 19 as the program wrote it, on the same line.
+  PpuState before = offsetPicture(0x02u);
+  PpuState after = before;
+  putTable(after, 19u, 0u, kToBg1 | 8u);
+  const std::vector<std::uint8_t> program = joined({
+      store(0x00u, 0x80u),  // forced blank
+      store(0x15u, 0x80u),  // step after the high byte
+      store(0x16u, 0x13u),  // word $0C13: BG3's tile 19, row 0
+      store(0x17u, 0x0Cu),
+      store(0x18u, 0x08u),  // the offset
+      store(0x19u, 0x20u),  // and the bit that applies it to BG1
+      store(0x00u, 0x0Fu),  // the screen on again
+  });
+  const std::vector<unsigned> landed = landingDots(program, 50u, 300u);
+  ASSERT_EQ(landed.size(), 7u);
+  ASSERT_EQ(landed.front(), 86u);
+  ASSERT_EQ(landed.back(), 155u);
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, program, 50u, 300u);
   EXPECT_EQ(picture.at(60u, 50u), never.at(60u, 50u));
   EXPECT_EQ(picture.at(100u, 50u), kBlack);
-  EXPECT_NE(never.at(140u, 50u), always.at(140u, 50u));
-  EXPECT_EQ(picture.at(140u, 50u), always.at(140u, 50u));
-  EXPECT_EQ(picture.at(140u, 51u), always.at(140u, 51u));
+  EXPECT_EQ(picture.at(140u, 50u), out(kBackdrop));
+  EXPECT_NE(never.at(164u, 50u), always.at(164u, 50u));
+  EXPECT_EQ(picture.at(164u, 50u), always.at(164u, 50u));
+  EXPECT_EQ(picture.at(164u, 51u), always.at(164u, 51u));
   EXPECT_EQ(picture.at(10u, 50u), kBlack);
 }
 

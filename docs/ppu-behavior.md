@@ -72,6 +72,9 @@ disagree it names the disagreement and what decided it.
   - [Brightness scales by (N+1)/16, and 0 is off rather than dim](#brightness-scales-by-n116-and-0-is-off-rather-than-dim)
 - [The status registers](#the-status-registers)
   - [The latch flag clears on a read only while the latch line is high](#the-latch-flag-clears-on-a-read-only-while-the-latch-line-is-high)
+- [The chip reads each tile ahead of the beam](#the-chip-reads-each-tile-ahead-of-the-beam)
+  - [The entry at 8E + 3, the character at 8E + 7](#the-entry-at-8e--3-the-character-at-8e--7)
+  - [The fine scroll at the tile's first pixel](#the-fine-scroll-at-the-tiles-first-pixel)
 - [What is not settled yet](#what-is-not-settled-yet)
 
 ## The evidentiary standard
@@ -85,9 +88,14 @@ Three kinds of claim appear here, and they are not equally strong:
 - **Undocumented.** No published source states it. Derived from observed behavior, which means the
   claim is only as good as the reconstruction behind it — so the reconstruction is described, not
   just asserted.
+- **Measured on the console.** An original SNES — the project's own, an SNS-001 with every chip at
+  version 1 — ran a cartridge written for the question, and what it drew is the answer. This is the
+  strongest claim on the page, whatever the documents say: it is the behavior of PPU1 version 1 and
+  PPU2 version 1, and a document that says otherwise describes another revision or is wrong.
 
 Where running software decides a question, it outranks both documents. A document describes what
-someone understood; a cartridge that draws correctly is the hardware's own software agreeing.
+someone understood; a cartridge that draws correctly is the hardware's own software agreeing. Where
+the console has run a question, it outranks every other source on this page.
 
 **No implementation's source is read.** Snaggletooth is a clean-room implementation: the contract is
 public hardware documentation plus observable behavior. That is the line, and it is about *source* —
@@ -104,6 +112,7 @@ what a claim rests on.
 
 | Source | Role |
 |---|---|
+| **The project's SNES**: an SNS-001 of the US launch revision, 5A22 version 1, 5C77 (PPU1) version 1, 5C78 (PPU2) version 1, its chips' versions read from the console by a cartridge written here | **The arbiter above every other.** It runs the cartridges written here from a flash cartridge, and what it draws is the behavior of PPU1 v1 and PPU2 v1; no document, emulator or reconstruction overrides it. Its picture reaches the screen through the console's own NTSC encoder over S-Video, so a color or a dimming on a thin run is the encoder's to explain before it is the chip's. It has settled the mosaic sweep and the tile reads, below. |
 | Martin Korth's fullsnes, "SNES PPU" | Primary. Register tables, the picture's event list, the tile and map layouts, the brightness law. |
 | SNESdev Wiki, "PPU registers", "Backgrounds", "Sprites" | Primary. The clean register account and the background structure. |
 | Anomie's PPU register document | **Cross-check only, and known wrong in one place.** Its background section prints the tilemap word with a half-screen base step; see below. Useful for the behaviors it measured, never to be taken alone. |
@@ -116,10 +125,10 @@ what a claim rests on.
 | snes9x | A third, independent of both. Not accuracy-first, so it does not carry a question alone — but it breaks a tie between the other two, which is what it did for the colour-math halving below. |
 | The Analogue Super NT | Corroboration only, and weak. It is an FPGA reconstruction that **fails every Blargg test ROM**, so it does not carry a fine-grained behavioral question. Useful where a result is categorical — a picture that is entirely one colour or entirely another — and not otherwise. |
 
-Neither of those is original silicon. An observation from the console itself outranks both, and is
-named as the tiebreaker wherever one of them decided a question below. **Every cartridge written
-here is owed a run on an original console, and one has had it so far:** the mosaic sweep, below, on
-an SNS-001 of the launch revision.
+Neither the reconstruction nor any emulator is original silicon. The project's SNES outranks them all,
+and is named as the tiebreaker wherever one of them decided a question below. **Every cartridge
+written here is owed a run on it, and two have had it so far:** the mosaic sweep and the tile-read
+bands, both below.
 Until a cartridge has run on the console it is run on Mesen, bsnes and snes9x, and the reading two of
 the three give is the one taken; a finding decided that way is provisional — held as stated, and
 reopened rather than defended if the console disagrees.
@@ -513,8 +522,8 @@ block standing at the picture's left edge (fullsnes 1065, anomie 186) and its fi
 197–200, 2012–2013). Three things are weaker. A cartridge of ours, `mosaic/sweep.sfc`, asks the first
 two, with a control image that has mosaic off everywhere, and **an original console answers both**.
 
-**What the console showed.** The cartridge was run on an original SNES — an SNS-001, the launch
-revision — on 2026-09-28, and the console draws the sweep as this machine does, band for band, read
+**What the console showed.** The cartridge was run on [the project's SNES](#sources) — an SNS-001
+of the launch revision, every chip at version 1 — on 2026-09-28, and the console draws the sweep as this machine does, band for band, read
 by eye across the whole picture. An FPGA reconstruction of the console draws it the same way. Mesen,
 bsnes and snes9x each draw something else; MesenCE 2.2.1 and the Mesen-S 0.4.0 libretro core were
 set against the console's picture and both differ from it.
@@ -894,18 +903,78 @@ behave differently, and reading them as one rule is the easy mistake.
 *Documented* by the register page, which states the gate in one clause and the selector reset in a
 separate note.
 
+## The chip reads each tile ahead of the beam
+
+No source says when the chip reads what it draws a background from. fullsnes's event list draws the
+picture at dots 22–277 and gives the VRAM port's prefetch and the sprite fetch count; anomie gives the
+CPU's opcode fetches; neither gives a background's cadence. The question matters wherever a program
+writes a background register while the picture is drawn: a commercial platformer writes BG3's
+horizontal scroll at dots 250–254 of one picture line every frame, and a chip that read the scroll at
+each pixel's own dot would draw the rest of that line at the new scroll. The console draws nothing
+there.
+
+A cartridge written here asks it directly. Sixteen bands of seven lines each write one register at a
+dot of their own — eight bands sixteen dots apart, eight one dot apart — over a picture that turns
+white from the first tile the chip read after the write; a numbered ruler names every tile column, and
+each band prints the dot its lines latched just after the write. Five images write the tilemap base,
+the character base, the coarse scroll, the fine scroll, and — the control — the map already there.
+All five were run on [the project's SNES](#sources), an SNS-001 with every chip at version 1, and
+what follows is the behavior of its PPU1 and PPU2.
+
+### The entry at 8E + 3, the character at 8E + 7
+
+The tilemap-base image draws every bar one tile column right of the character-base image's. Among the
+one-dot bands, the band whose write landed on dot 203 flickers between columns 25 and 26 — one dot
+from a read, the console's four-frame clock carrying the CPU's phase across it — and the band on dot
+199 in the character-base image does the same between 24 and 25. Every other band of both images fits
+one rule with no other constant: **tile column E's tilemap entry is read at dot 8E + 3 and its
+character rows at dot 8E + 7**, nineteen and fifteen dots before the column's first pixel at
+8E + 22.
+
+The scroll image writes the horizontal scroll by a whole screen, and every band's bar begins at the
+first column whose entry is read after its write, as the tilemap-base image's do: the coarse scroll is
+read with the entry, and nowhere earlier. The
+control image draws no bar on any band, so every bar in the others is its write's and nothing else's.
+
+The platformer's line follows: its write lands after tile 31's entry read at dot 251, and with a fine
+scroll of 0 before and after it no pixel of that line changes.
+
+*Undocumented; measured on the console.*
+
+### The fine scroll at the tile's first pixel
+
+The fine-scroll image writes a scroll of 4 over black and white stripes, so a column the new scroll
+reaches draws half-stripes. Each band's shift begins at the column whose first pixel is drawn at or
+just after its write: bands written at dots 174, 190, 206, 222 and 238 shift from columns 19, 21, 23,
+25 and 27, whose first pixels fall at 174, 190, 206, 222 and 238. **A column's fine scroll is read at
+its first pixel, dot 8E + 22**, and every position of the column is drawn with it — position 8E + k
+from pixel k + f of the column's tile, or from the next column's tile past the eighth.
+
+Where a band's write lands on a column's own read, the four positions after the latch draw dim on the
+console's output, with a red fringe on one side and a blue one on the other. That is what a four-pixel
+black run between two whites looks like through the console's NTSC encoder over S-Video, so the
+picture alone does not say whether the chip drew those four pixels black. Here they are drawn black.
+
+*Undocumented; measured on the console, the four positions on a latch excepted.*
+
 ## What is not settled yet
 
 Recorded rather than decided by invention. These are the PPU questions currently open; `ppu.md`'s
 own "What remains open" carries the register-file ones alongside these.
 
-- How far ahead of a dot the chip fetches that dot's map entry and character. Pixels are resolved
-  from the registers as they stand at their own dot, which is where a mid-picture write lands; the
-  distance itself wants a test ROM that exercises it.
+- The tile reads' corners the cartridge above does not reach: the dot the vertical scroll is read at
+  (with the entry, as built, or with the character); what a column read under forced blank shows when
+  the blank lifts mid-line (nothing, as built, or the line before's); the dot the mode's depth and tile
+  size are read at (with the entry, as built, or with the character) and the dot its palette terms
+  apply at (the pixel, as built, or with the column); whether a two-character tile's second character
+  is read with its first; whether a 16×16 block's entry is read once a column, as built, or once a
+  block; the dot the offset table's entries are read at (with the tile's entry, as built, or before
+  it); what the chip draws on the four positions after a fine-scroll write that lands on its read
+  (black, as built); and whether Mode 7's field is read ahead like a tilemap (it is read at every
+  pixel, as built).
 - How the Time pass's tile loads are spread across horizontal blank. anomie's step 2 says what is
   loaded and not when, and fullsnes calls the access time of steps 2 and 3 unknown. Here the pass runs
   whole as the line begins, while the Range pass before it runs progressively at two dots a sprite.
-- What a write to a scroll register mid-line does to a tile whose entry has already been fetched.
 - Which palette entry a write at a picture dot reaches, and where the palette's window begins and ends
   to the dot, both above. A write there reaches no entry until something says which one it does.
 - The last dot of the visible span, above.
@@ -924,8 +993,8 @@ own "What remains open" carries the register-file ones alongside these.
   read from it.
 - What a mosaic size written part-way along a line does to the rest of that line. The width is read at
   the dot, so the rest of the line takes it.
-- Whether a mosaic block's corner is read once or re-read from the registers at each dot of the block.
-  Every dot reads the registers as they stand.
+- Whether a mosaic block's corner is read once or re-read at each dot of the block. Each dot takes the
+  corner position's pixel from the tile reads of the corner's column.
 - Hires's seven, above: corroborated on a reconstruction and bsnes and open to the console — among
   them what position 0's left half takes, which no source knows, and the addend a main pixel's math
   takes where the sub screen is empty on a line drawn in half-pixels.
