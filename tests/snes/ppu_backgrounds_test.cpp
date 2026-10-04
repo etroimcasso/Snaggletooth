@@ -4,9 +4,10 @@
 // order at both depths, both flips, 16x16 blocks, the palette bits, colour 0's
 // transparency, scrolling, the backdrop, the registers each of the three
 // backgrounds reads, the priority chart across them and the register that exchanges
-// it for the other, the layers the main screen does not show, and the dots each
+// it for the other, the layers the main screen does not show, the dots each
 // background reads a tile column's entry, character rows and fine scroll at, which
-// every write landing mid-line is measured against. Every expectation is computed
+// every write landing mid-line is measured against, and what a column holds when its
+// reads fall under forced blank. Every expectation is computed
 // by hand from the register page and the console's own read schedule; the pictures
 // are placed as a program would have left them, and one case drives the whole path
 // from a cartridge that writes the video memories through their ports.
@@ -159,6 +160,12 @@ PpuState passedTo(const PpuState& ppu, std::uint16_t line, std::uint16_t hpos) {
   machine.restore(state);
   machine.run(hpos);
   return machine.state().ppu;
+}
+
+// LDX #count ; DEX ; BNE back to the DEX — a wait of 5 x count + 1 CPU cycles
+// before whatever follows, with the index register eight bits wide as it is at reset.
+std::vector<std::uint8_t> waitLoop(std::uint8_t count) {
+  return {0xA2u, count, 0xCAu, 0xD0u, 0xFDu};
 }
 
 // A frame drawn by a machine that begins `program` with the beam at (line, hpos),
@@ -1857,6 +1864,90 @@ TEST(SnesPpuPicture, AScrollWrittenAfterTheLinesLastEntryReadChangesNoPixelOfTha
   for (unsigned x = 0u; x < kPictureWidth; ++x) {
     EXPECT_EQ(picture.at(x, 50u), always.at(x, 50u)) << x;
   }
+}
+
+// ---- what a column holds under forced blank ----------------------------------------
+//
+// The cases above begin at line 50 with every column empty, so a build that left a
+// column untouched under the blank would draw the same picture as one that emptied
+// it. These two begin with the line before drawn, or read the state itself.
+
+TEST(SnesPpuPicture, AColumnReadUnderForcedBlankHoldsNothingOfTheLineBefore) {
+  // One machine, begun at master cycle 300 of line 49 with every column empty: its
+  // program waits a line, so line 49 is drawn whole and every column holds its tile
+  // as line 50 begins, then sets forced blank after dot 85 of line 50, exchanges the
+  // row line 50 reads through the port, and lifts the blank after dot 164 — the
+  // stores cross the line's memory refresh, which holds the CPU off the bus for ten
+  // dots. The positions drawn under the blank, up to 142, are black. The columns
+  // whose entry or rows fell under the blank — 10 to 20 — hold nothing, not the tile
+  // line 49 read into them, so positions 151, 152 and 160 show the backdrop; column
+  // 21, whose entry is read at dot 171, after the lift, shows the row the program
+  // wrote.
+  const PpuState before = oneCharacterEverywhere();
+  PpuState after = before;
+  after.vram[kTileOneRowAtLineFifty] = 0x00u;
+  after.vram[kTileOneRowAtLineFifty + 1u] = 0xFFu;
+  std::vector<std::uint8_t> program = joined({
+      waitLoop(36u),            // with the NOP, a line less half a dot, as measured
+      {0xEAu},                  // NOP
+      storePort(0x00u, 0x80u),  // forced blank
+      storePort(0x15u, 0x80u),  // step after the high byte
+      storePort(0x16u, kTileOneRowWord & 0xFFu),
+      storePort(0x17u, kTileOneRowWord >> 8),
+      storePort(0x18u, 0x00u),  // plane 0 clear
+      storePort(0x19u, 0xFFu),  // plane 1 set
+      storePort(0x00u, 0x0Fu),  // the screen on again
+  });
+  const std::vector<unsigned> landed = landingDots(program, 49u, 300u);
+  ASSERT_EQ(landed.size(), 7u);
+  ASSERT_EQ(landed.front(), 85u);
+  ASSERT_EQ(landed.back(), 164u);
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  ASSERT_NE(never.at(152u, 49u), kBackdropOut);
+  ASSERT_NE(never.at(168u, 49u), always.at(168u, 49u));
+
+  program.push_back(kStp);
+  const std::vector<std::uint8_t> rom = cartridge(std::move(program));
+  Snes machine(SnesConfig{.rom = rom});
+  SnesState state = machine.state();
+  state.ppu = before;
+  state.vpos = 49u;
+  state.hpos = 300u;
+  machine.restore(state);
+  Picture picture;
+  machine.setFrameObserver(&picture);
+  machine.run(kOneFrame);
+
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(60u, 49u), never.at(60u, 49u));
+  EXPECT_EQ(picture.at(100u, 49u), kBlack);
+  EXPECT_EQ(picture.at(140u, 49u), kBlack);
+  EXPECT_EQ(picture.at(151u, 49u), kBackdropOut);
+  EXPECT_EQ(picture.at(152u, 49u), kBackdropOut);
+  EXPECT_EQ(picture.at(160u, 49u), kBackdropOut);
+  EXPECT_EQ(picture.at(168u, 49u), always.at(168u, 49u));
+}
+
+TEST(SnesPpuPicture, TheFineScrollIsLatchedIntoAColumnUnderForcedBlank) {
+  // A fine scroll of 4 with the screen forced blank from power-on: every column's
+  // entry and rows fall under the blank and hold nothing, and the fine latch at each
+  // column's first pixel still reads the register — the state carries 4 for columns
+  // 0 to 31 at the end of line 50, and the thirty-third column, whose latch no line
+  // reaches, keeps 0. No pixel shows it: the blank's positions are black and the
+  // columns are empty.
+  PpuState blank = oneCharacterEverywhere();
+  blank.bg1hofs = 4u;
+  blank.inidisp = 0x8Fu;  // forced blank, brightness 15
+  const PpuState held = passedTo(blank, 50u, 1300u);  // past column 31's latch at dot 270
+  for (unsigned column = 0u; column < 32u; ++column) {
+    EXPECT_EQ(held.tiles[0][column].fine, 4u) << column;
+    EXPECT_EQ(held.tiles[0][column].planes, 0u) << column;
+  }
+  EXPECT_EQ(held.tiles[0][32].fine, 0u);
+  const Picture picture = draw(blank);
+  ASSERT_EQ(picture.frames, 1u);
+  EXPECT_EQ(picture.at(96u, 49u), kBlack);
 }
 
 }  // namespace

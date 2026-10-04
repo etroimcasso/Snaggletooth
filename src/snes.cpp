@@ -1569,22 +1569,24 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   if (state_.vpos == 0u || state_.inVblank) return;
 
   // The dots the span passed, by the same reckoning the line's events use: a dot is
-  // reached when the span covers the master cycle it begins on. The tile reads begin
-  // before the picture's first dot, and each falls before the pixel of its own dot.
+  // reached when the span covers the master cycle it begins on. The tile reads of
+  // those dots come first, in dot order, then each picture dot's pixel: a read
+  // later in the span writes no column an earlier pixel of it reads, and a
+  // register write lands between spans, so the order within one is not observable.
   const std::uint64_t first = (from - lineStart) / 4u + 1u;
   const std::uint64_t last = (to - lineStart) / 4u;
   const std::uint64_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
+  const std::uint64_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
   Ppu ppu{state_.ppu, derived_};
   const PpuInputs in = ppuInputs();
 
   // The tile reads, and what the chip carries from one position to the next, are
   // made whether or not anyone is watching, since both are part of the state a
   // snapshot holds.
+  ppu.tileReads(static_cast<std::uint16_t>(dot), static_cast<std::uint16_t>(stop), in);
   if (frameObserver_ == nullptr) {
-    for (std::uint64_t at = dot; at <= stop; ++at) {
-      ppu.tileReads(static_cast<std::uint16_t>(at), in);
-      if (at < kFirstPictureDot) continue;
+    for (std::uint64_t at = firstPixel; at <= stop; ++at) {
       ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
     }
     return;
@@ -1596,9 +1598,7 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   }
 
   const std::size_t line = state_.vpos - 1u;
-  for (std::uint64_t at = dot; at <= stop; ++at) {
-    ppu.tileReads(static_cast<std::uint16_t>(at), in);
-    if (at < kFirstPictureDot) continue;
+  for (std::uint64_t at = firstPixel; at <= stop; ++at) {
     const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
     const Ppu::Dot out = ppu.dot(x, in);
     if (out.hires && !frameWide_) widenFrame(line, x);

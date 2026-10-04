@@ -959,12 +959,13 @@ class Snes {
   void tickVideo(std::uint32_t cost);
 
   // Resolves the picture's pixels for the visible dots the master-cycle span
-  // (`from`, `to`] of a line beginning at `lineStart` passed: at each dot from
-  // kFirstTileReadDot on, the tile reads that fall on it, then from
-  // kFirstPictureDot on the pixel, from those reads and the registers as they stand
-  // at its own dot. With no frame observer set it makes the reads, draws nothing,
-  // and decides, at each of those dots, only what the chip carries to the next
-  // position.
+  // (`from`, `to`] of a line beginning at `lineStart` passed: the tile reads that
+  // fall on those dots, in dot order, then from kFirstPictureDot on each dot's
+  // pixel, from those reads and the registers as they stand at its own dot. A
+  // read later in the span writes no column an earlier pixel of it reads, so the
+  // reads come first. With no frame observer set it makes the reads, draws
+  // nothing, and decides, at each picture dot, only what the chip carries to the
+  // next position.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
   // Turns the frame in progress 512 wide at its first position drawn in
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn

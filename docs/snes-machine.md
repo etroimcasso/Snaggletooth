@@ -900,8 +900,11 @@ both: `peek` and `poke` reach memory, and a register's value is
 ### The memories the bus cannot name
 
 Video RAM, the palette, the sprite table and the audio machine's RAM are written by name, each the way
-the chip reads it: no port address steps, no latch moves, no increment happens. The picture path reads
-these at every dot, so a write shows at the next one.
+the chip reads it: no port address steps, no latch moves, no increment happens. A write shows where
+the chip next reads the byte: video RAM at [the next tile read](ppu.md#the-tile-reads) of a column
+that names it, the next sprite pass that loads it, or in Mode 7 the next pixel; the palette at the
+next pixel; the sprite table at the next line's passes over it; the audio machine's RAM at its next
+access.
 
 ```cpp
 machine.writeVram(0x1234, 0xAB);    // 64 KB

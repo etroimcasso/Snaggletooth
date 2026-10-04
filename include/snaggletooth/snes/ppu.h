@@ -415,19 +415,24 @@ class Ppu {
   // more line of the current row otherwise.
   void beginLine(std::uint16_t line) noexcept;
 
-  // The tile reads that fall on `dot` of the beam's line, for every background.
-  // At dot 8E + 3 (E = 0 … 32) each background the mode draws from a tilemap
-  // reads column E's entry: the line it reads the map at, the coarse horizontal
-  // scroll and the vertical scroll as they stand — through BG3's offset table in
-  // modes 2, 4 and 6 — the mode's depth and tile size, and the map's base and
-  // size. At dot 8E + 7 it reads the column's character rows under the character
-  // base as it stands. At dot 8E + 22 (E = 0 … 31), the dot position 8E is drawn
-  // on, it reads the fine horizontal scroll the column's positions are drawn
-  // with. A read under forced blank, when the CPU has the video memory, stores
-  // nothing for the column, and so does a read in Mode 7, whose field is read
-  // through the matrix at every pixel. The machine calls it for every dot from
-  // kFirstTileReadDot on, before that dot's pixel, watched or not.
-  void tileReads(std::uint16_t dot, const PpuInputs& in) noexcept;
+  // The tile reads whose dots fall in `first` to `last` of the beam's line, in dot
+  // order, for every background. At dot 8E + 3 (E = 0 … 32) each background the
+  // mode draws from a tilemap reads column E's entry: the line it reads the map
+  // at, the coarse horizontal scroll and the vertical scroll as they stand —
+  // through BG3's offset table in modes 2, 4 and 6 — the mode's depth and tile
+  // size, and the map's base and size. At dot 8E + 7 it reads the column's
+  // character rows under the character base as it stands. At dot 8E + 22
+  // (E = 0 … 31), the dot position 8E is drawn on, it reads the fine horizontal
+  // scroll the column's positions are drawn with. A read under forced blank, when
+  // the CPU has the video memory, stores nothing for the column, and so does a
+  // read in Mode 7, whose field is read through the matrix at every pixel. The
+  // machine calls it once for the dots a cycle covers, before those dots' pixels,
+  // watched or not; a dot past the line's last read — column 32's character at
+  // dot 263, column 31's fine scroll at 270 — makes none. A span whose reads can
+  // only store what the columns already hold is passed over at one test.
+  void tileReads(std::uint16_t first, std::uint16_t last, const PpuInputs& in) noexcept {
+    if (first <= last && !readsChangeNothing()) readTiles(first, last, in);
+  }
 
   // What the chip's converter drives at picture position (x, y), four bytes a
   // pixel — red, green, blue, then 255 — with x across a line's 256 positions and
@@ -551,8 +556,34 @@ class Ppu {
   [[nodiscard]] std::optional<Shown> sample(const Background& background, std::uint16_t x,
                                             bool half) const noexcept;
 
+  // Whether every read on this line stores what its column already holds, so a
+  // span's reads leave the state as it is: the screen forced blank or in Mode 7,
+  // where a read stores nothing; every column known to hold nothing; and every
+  // background's fine horizontal scroll zero, so the fine latch stores the zero
+  // the column holds. False while the columns are not known.
+  [[nodiscard]] bool readsChangeNothing() const noexcept {
+    return d_.allNothing && (s_.forcedBlank() || (s_.bgmode & 0x07u) == 7u) &&
+           ((s_.bg1hofs | s_.bg2hofs | s_.bg3hofs | s_.bg4hofs) & 0x07u) == 0u;
+  }
+
+  // The reads tileReads makes when a span's reads can change the state: the
+  // walk over the span's read dots.
+  void readTiles(std::uint16_t first, std::uint16_t last, const PpuInputs& in) noexcept;
+
+  // Which columns hold nothing, learned from the state: every column compared
+  // with TileRead{}. Made after a restore, which leaves the columns unknown.
+  void learnNothing() noexcept;
+
+  // A read that stores nothing for one background's column — TileRead{} — and
+  // marks the column as holding it; and a read that stores something, which
+  // marks the column as not known to hold nothing.
+  void storeNothing(unsigned layer, unsigned column) noexcept;
+  void storeSomething(unsigned layer, unsigned column) noexcept;
+
   // The two reads of one tile column for one background: the entry at dot
-  // 8E + 3 and the character rows at dot 8E + 7, described with tileReads.
+  // 8E + 3 and the character rows at dot 8E + 7, described with tileReads. The
+  // character read loads a character's row once, every bitplane's byte, and takes
+  // each of the column's pixels from those bytes.
   void readEntry(const Background& background, unsigned column, const PpuInputs& in) noexcept;
   void readCharacter(unsigned layer, unsigned column) noexcept;
 
@@ -641,10 +672,23 @@ class Ppu {
     };
     Descriptions descriptions{};
 
+    // Which tile columns are known to hold nothing — a TileRead equal to
+    // TileRead{} — one bit a column for each background, and whether every one of
+    // them is. A read that stores nothing sets a column's bit, a read that stores
+    // something clears it, and a restore makes them unknown until the next read
+    // looks at the state. Worked out from the state and no part of it.
+    std::array<std::uint64_t, 4> nothing{};
+    bool allNothing = false;
+    bool nothingKnown = false;
+
     // What a write to one of the registers a group is read from makes stale, and
     // what a restore — which replaces every register at once — makes stale.
     void dropDescriptions() noexcept { descriptions.valid = false; }
-    void dropAll() noexcept { dropDescriptions(); }
+    void dropAll() noexcept {
+      dropDescriptions();
+      nothingKnown = false;
+      allNothing = false;
+    }
   };
 
   // The descriptions as the registers stand, worked out here on the first dot after
@@ -698,11 +742,7 @@ class Ppu {
   // In modes 5 and 6 a block is counted in half-pixels, twice its size wide, from
   // the line's first half-pixel, so its corner is always a left half and a size of
   // 0 already covers a right half with its left one. Under $2133 bit 3 a block is
-  // counted in positions as on any other line.
-  //
-  // The line a tilemap is read at is the beam's, except in modes 5 and 6 with
-  // $2133 bit 0 set, where it is a half-line: 2 x line + field, or for a block
-  // 2 x its corner line in either field, which is the even field's half-line.
+  // counted in positions as on any other line. The line is readLine's.
   struct Position {
     std::uint16_t x;
     std::uint16_t line;
@@ -710,6 +750,14 @@ class Ppu {
   };
   [[nodiscard]] Position mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
                                         bool half) const noexcept;
+
+  // The line a layer's tilemap is read at on the beam's line: the beam's own, or
+  // where the layer's vertical mosaic is on, the line the current row of blocks
+  // began on. In modes 5 and 6 with $2133 bit 0 set it is a half-line: 2 x line +
+  // field, or for a block 2 x its corner line in either field, which is the even
+  // field's half-line. Each background has its own enable bit, except the second
+  // Mode 7 layer, which reads bit 0 as its vertical enable.
+  [[nodiscard]] std::uint16_t readLine(Layer layer, const PpuInputs& in) const noexcept;
 
   // How far a line is into the current row of mosaic blocks: 0 on the row's first.
   // The static form answers from `s`, for registerValue, which has no Ppu; the
