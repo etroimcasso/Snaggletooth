@@ -1404,20 +1404,14 @@ namespace {
 // master cycles of a four-cycle dot, the last three of one of the two six-cycle
 // dots. The short line keeps 340 even dots and has no six-cycle ones.
 [[nodiscard]] bool lateHalfOf(std::uint16_t hpos, bool shortLine) noexcept {
-  if (!shortLine) {
-    if (hpos >= kFirstLongDot && hpos < kAfterFirstLongDot) {
-      return static_cast<unsigned>(hpos - kFirstLongDot) >= 3u;
-    }
-    if (hpos >= kSecondLongDot && hpos < kAfterSecondLongDot) {
-      return static_cast<unsigned>(hpos - kSecondLongDot) >= 3u;
-    }
-    if (hpos >= kAfterFirstLongDot) {
-      // Past a long dot the four-cycle grid is offset by the two cycles it added.
-      const unsigned offset = hpos >= kAfterSecondLongDot ? 4u : 2u;
-      return ((static_cast<unsigned>(hpos) - offset) & 3u) >= 2u;
-    }
+  if (hpos < kFirstLongDot || shortLine) return (hpos & 3u) >= 2u;
+  if (hpos < kAfterFirstLongDot) return static_cast<unsigned>(hpos - kFirstLongDot) >= 3u;
+  if (hpos >= kSecondLongDot && hpos < kAfterSecondLongDot) {
+    return static_cast<unsigned>(hpos - kSecondLongDot) >= 3u;
   }
-  return (hpos & 3u) >= 2u;
+  // Past a long dot the four-cycle grid is offset by the two cycles it added.
+  const unsigned offset = hpos >= kAfterSecondLongDot ? 4u : 2u;
+  return ((static_cast<unsigned>(hpos) - offset) & 3u) >= 2u;
 }
 
 }  // namespace
@@ -1429,7 +1423,7 @@ std::uint16_t Snes::hdotAt(std::uint16_t h) const noexcept {
   // other dot is four, so past dot 322 the count falls behind a plain quarter of the
   // position and dot 340 is reached only on a line that runs 1368. The short line
   // keeps 340 even dots and none of this applies to it.
-  if (lineLength() == kShortLineMaster || h < kFirstLongDot) {
+  if (h < kFirstLongDot || lineLength() == kShortLineMaster) {
     return static_cast<std::uint16_t>(h >> 2);
   }
   if (h < kAfterFirstLongDot) return 323u;
@@ -1545,6 +1539,10 @@ void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
   // after it — so the frame's first line, which draws nothing, is the one that
   // finds the picture's first line its sprites.
   if (state_.inVblank) return;
+  // Forced blank walks nowhere, and a walk that has examined every sprite is done.
+  if (state_.ppu.forcedBlank() || static_cast<unsigned>(state_.ppu.sprites.scanned) >= kSprites) {
+    return;
+  }
 
   // The sprites whose dots the span passed: sprite N is examined at the picture's
   // first dot plus twice its place in the walk, so the 128 of them fill the 256
@@ -1578,6 +1576,16 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   const std::uint64_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
   const std::uint64_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
+
+  // A watched picture line starts the frame's raster, black, whichever of its dots
+  // the span covers.
+  if (frameObserver_ != nullptr && raster_.empty()) {
+    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
+    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
+  }
+  // The dots before the first read and past the last pixel hold neither.
+  if (dot > stop) return;
+
   Ppu ppu{state_.ppu, derived_};
   const PpuInputs in = ppuInputs();
 
@@ -1590,11 +1598,6 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
       ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
     }
     return;
-  }
-
-  if (raster_.empty()) {
-    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
-    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
   }
 
   const std::size_t line = state_.vpos - 1u;
@@ -1837,7 +1840,9 @@ PpuInputs Snes::ppuInputs() const noexcept {
       .vblank = state_.inVblank,
       .pal = region_ == Region::Pal,
       .extLatch = (state_.wrio & 0x80u) != 0u,
-      .lateHalf = lateHalfOf(state_.hpos, lineLength() == kShortLineMaster),
+      // A position short of the first long dot is placed alike on every line length.
+      .lateHalf = lateHalfOf(state_.hpos,
+                             state_.hpos >= kFirstLongDot && lineLength() == kShortLineMaster),
   };
 }
 

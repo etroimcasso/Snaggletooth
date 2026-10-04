@@ -902,6 +902,14 @@ TEST(SnesPpuMode7Multiplier, TheSecondHalfHoldsCTimesTheColumn) {
   EXPECT_EQ(readProduct(multiplying(), 100u, placedFor(430u)), 0xFFF300u);
 }
 
+TEST(SnesPpuMode7Multiplier, ASixCycleDotsFirstHalfIsItsFirstThreeCycles) {
+  // Dot 323 runs six master cycles from 1292, and its column is (323 - 3) & 255 = 64.
+  // Its third cycle is still the first half: $0100 x 64 >> 3 = 2048 = $000800. Its
+  // fourth is the second: -$0100 x 64 >> 3 = -2048 = $FFF800.
+  EXPECT_EQ(readProduct(multiplying(), 100u, placedFor(1294u)), 0x000800u);
+  EXPECT_EQ(readProduct(multiplying(), 100u, placedFor(1295u)), 0xFFF800u);
+}
+
 TEST(SnesPpuMode7Multiplier, TheHorizontalFlipInvertsTheColumn) {
   // 104 XOR 255 = 151: $0100 x 151 >> 3 = 4832 = $0012E0.
   PpuState ppu = multiplying();

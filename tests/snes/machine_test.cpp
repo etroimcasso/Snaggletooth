@@ -708,5 +708,30 @@ TEST(SnesMachine, ResetNeverDeliversThePictureTheBeamWasPartWayDown) {
   m.setFrameObserver(nullptr);
 }
 
+TEST(SnesMachine, AnObserverSetPastTheLastLinesLastPixelIsHandedThatFrameBlack) {
+  // A watched picture line starts the frame's raster wherever the beam is on it, so
+  // an observer set in the last picture line's horizontal blank is handed the frame
+  // that ends there. No line of it was drawn while watched, and a line nobody drew
+  // is black, whatever the backdrop.
+  Snes m = loopMachine();
+  std::unique_ptr<SnesState> st = copyOf(m);
+  st->vpos = 224u;      // the last picture line
+  st->hpos = 1200u;     // dot 300, past the line's last pixel
+  st->inVblank = false;
+  st->ppu.inidisp = 0x0Fu;
+  st->ppu.bgmode = 0x01u;
+  st->ppu.cgram[0] = 0xFFu;  // a backdrop that is not black
+  st->ppu.cgram[1] = 0x7Fu;
+  m.restore(*st);
+  FrameCount seen;
+  m.setFrameObserver(&seen);
+  m.run(60000u);  // the 38 lines to the next frame's first, and not a frame more
+  EXPECT_EQ(seen.frames, 1);
+  EXPECT_EQ(seen.width, 256u);
+  EXPECT_EQ(seen.height, 224u);
+  EXPECT_TRUE(seen.black);
+  m.setFrameObserver(nullptr);
+}
+
 }  // namespace
 }  // namespace snaggletooth
