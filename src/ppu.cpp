@@ -1,6 +1,8 @@
 #include "snaggletooth/snes/ppu.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <cstring>
 
 namespace snaggletooth {
 namespace {
@@ -25,6 +27,34 @@ constexpr unsigned kFullScale = 31u * 16u;
 // The character data's shape: eight rows of a bitplane fill eight words, so a pair
 // of bitplanes takes sixteen bytes and the next pair begins sixteen bytes on.
 constexpr std::size_t kPlanePairBytes = 16u;
+
+// Every tile column's bit set: a background all of whose columns hold nothing.
+constexpr std::uint64_t kAllColumns = (std::uint64_t{1} << kTileColumns) - 1u;
+
+// One bitplane's byte spread over the eight bytes of a word: bit 7, the row's
+// leftmost pixel, lands in bit 0 of byte 0, and bit 0 in bit 0 of byte 7. Shifted
+// left by its plane number and combined with the other planes', a row's bytes
+// give the eight pixels' color indices as the word's eight bytes.
+constexpr std::array<std::uint64_t, 256> kSpreadBits = [] {
+  std::array<std::uint64_t, 256> table{};
+  for (unsigned byte = 0u; byte < 256u; ++byte) {
+    std::uint64_t spread = 0u;
+    for (unsigned pixel = 0u; pixel < 8u; ++pixel) {
+      spread |= static_cast<std::uint64_t>((byte >> (7u - pixel)) & 1u) << (8u * pixel);
+    }
+    table[byte] = spread;
+  }
+  return table;
+}();
+
+// The word's eight bytes in the opposite order.
+[[nodiscard]] constexpr std::uint64_t reverseBytes(std::uint64_t word) noexcept {
+  std::uint64_t reversed = 0u;
+  for (unsigned byte = 0u; byte < 8u; ++byte) {
+    reversed = (reversed << 8) | ((word >> (8u * byte)) & 0xFFu);
+  }
+  return reversed;
+}
 
 // A sprite's character is always sixteen colours, so four bitplanes, and a
 // character is eight pixels on a side.
@@ -315,24 +345,29 @@ std::uint16_t Ppu::mosaicIndex(const PpuState& s, std::uint16_t line) noexcept {
 
 std::uint16_t Ppu::mosaicIndex(std::uint16_t line) const noexcept { return mosaicIndex(s_, line); }
 
+std::uint16_t Ppu::readLine(Layer layer, const PpuInputs& in) const noexcept {
+  const unsigned index = static_cast<unsigned>(layer);
+  const std::uint8_t mode = s_.bgmode & 0x07u;
+  const std::uint16_t line = in.vpos;
+  // The second Mode 7 layer's vertical axis has a bit of its own.
+  const bool down = mode == 7u && layer == Layer::Bg2 ? (s_.mosaic & 0x01u) != 0u
+                                                       : ((s_.mosaic >> index) & 0x01u) != 0u;
+  const bool halfLines = (mode == 5u || mode == 6u) && s_.interlace();
+  const unsigned corner = down ? static_cast<unsigned>(line) - mosaicIndex(line) : line;
+  unsigned at = corner;
+  if (halfLines) at = down ? 2u * corner : 2u * static_cast<unsigned>(line) + (in.field & 1u);
+  return static_cast<std::uint16_t>(at);
+}
+
 Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
                                   bool half) const noexcept {
   const unsigned index = static_cast<unsigned>(layer);
   const std::uint8_t mode = s_.bgmode & 0x07u;
-  const std::uint16_t line = in.vpos;
-  bool across = ((s_.mosaic >> index) & 0x01u) != 0u;
-  bool down = across;
-  if (mode == 7u && layer == Layer::Bg2) {
-    // The second Mode 7 layer's two axes each have a bit of their own.
-    down = (s_.mosaic & 0x01u) != 0u;
-    across = (s_.mosaic & 0x02u) != 0u;
-  }
+  // The second Mode 7 layer's horizontal axis has a bit of its own.
+  const bool across = mode == 7u && layer == Layer::Bg2 ? (s_.mosaic & 0x02u) != 0u
+                                                         : ((s_.mosaic >> index) & 0x01u) != 0u;
   const unsigned width = (s_.mosaic >> 4) + 1u;
-  const bool halfLines = (mode == 5u || mode == 6u) && s_.interlace();
-  const unsigned corner = down ? static_cast<unsigned>(line) - mosaicIndex(line) : line;
-  unsigned readLine = corner;
-  if (halfLines) readLine = down ? 2u * corner : 2u * static_cast<unsigned>(line) + (in.field & 1u);
-  const auto read = static_cast<std::uint16_t>(readLine);
+  const std::uint16_t read = readLine(layer, in);
   if (!across) return Position{.x = x, .line = read, .half = half};
   if (mode == 5u || mode == 6u) {
     // Counted in half-pixels: the corner is a multiple of twice the size, which is
@@ -682,52 +717,92 @@ Ppu::Offsets Ppu::offsetsFor(const Background& background, std::uint16_t x) cons
   return offsets;
 }
 
-void Ppu::tileReads(std::uint16_t dot, const PpuInputs& in) noexcept {
-  // The three reads fall on dots 3, 7 and 6 of every eight, so one dot holds at
-  // most one of them.
-  if (dot < kFirstTileReadDot) return;
-  switch (dot % 8u) {
-    case kEntryReadDot % 8u: {
-      const unsigned column = (dot - kEntryReadDot) / 8u;
-      if (column >= kTileColumns) return;
-      // The chip reads nothing while the CPU has the video memory, and a Mode 7
-      // line reads its field through the matrix instead: the column holds nothing.
-      const Derived::Descriptions& kept = descriptions();
-      const bool reads = !s_.forcedBlank() && !kept.field;
-      for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
-        const std::optional<Background>& described = kept.described[layer];
-        if (reads && described.has_value()) {
-          readEntry(*described, column, in);
-        } else {
-          s_.tiles[layer][column] = TileRead{};
+void Ppu::learnNothing() noexcept {
+  bool all = true;
+  for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
+    std::uint64_t bits = 0u;
+    for (unsigned column = 0u; column < kTileColumns; ++column) {
+      if (s_.tiles[layer][column] == TileRead{}) bits |= std::uint64_t{1} << column;
+    }
+    d_.nothing[layer] = bits;
+    all = all && bits == kAllColumns;
+  }
+  d_.nothingKnown = true;
+  d_.allNothing = all;
+}
+
+void Ppu::storeNothing(unsigned layer, unsigned column) noexcept {
+  s_.tiles[layer][column] = TileRead{};
+  d_.nothing[layer] |= std::uint64_t{1} << column;
+  d_.allNothing = d_.nothing[0] == kAllColumns && d_.nothing[1] == kAllColumns &&
+                  d_.nothing[2] == kAllColumns && d_.nothing[3] == kAllColumns;
+}
+
+void Ppu::storeSomething(unsigned layer, unsigned column) noexcept {
+  d_.nothing[layer] &= ~(std::uint64_t{1} << column);
+  d_.allNothing = false;
+}
+
+void Ppu::readTiles(std::uint16_t first, std::uint16_t last, const PpuInputs& in) noexcept {
+  if (!d_.nothingKnown) learnNothing();
+
+  // The three reads fall on dots 3, 6 and 7 of every eight, one read a dot, so the
+  // walk steps from each read dot to the next and passes the dots between. From a
+  // dot whose remainder is r: r up to 3 reaches dot 3 of its eight, r of 4 to 6
+  // reaches dot 6, and r of 7 is a read dot itself.
+  const auto nextReadDot = [](std::uint16_t dot) {
+    const std::uint16_t r = dot % 8u;
+    if (r <= 3u) return static_cast<std::uint16_t>(dot + 3u - r);
+    if (r <= 6u) return static_cast<std::uint16_t>(dot + 6u - r);
+    return dot;
+  };
+  std::uint16_t dot = nextReadDot(first < kFirstTileReadDot ? kFirstTileReadDot : first);
+  for (; dot <= last; dot = nextReadDot(static_cast<std::uint16_t>(dot + 1u))) {
+    switch (dot % 8u) {
+      case kEntryReadDot % 8u: {
+        const unsigned column = (dot - kEntryReadDot) / 8u;
+        if (column >= kTileColumns) break;
+        // The chip reads nothing while the CPU has the video memory, and a Mode 7
+        // line reads its field through the matrix instead: the column holds nothing.
+        const Derived::Descriptions& kept = descriptions();
+        const bool reads = !s_.forcedBlank() && !kept.field;
+        for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
+          const std::optional<Background>& described = kept.described[layer];
+          if (reads && described.has_value()) {
+            readEntry(*described, column, in);
+          } else {
+            storeNothing(layer, column);
+          }
         }
+        break;
       }
-      return;
-    }
-    case kCharacterReadDot % 8u: {
-      const unsigned column = (dot - kCharacterReadDot) / 8u;
-      if (column >= kTileColumns) return;
-      for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
-        if (s_.forcedBlank()) {
-          s_.tiles[layer][column] = TileRead{};
-        } else {
-          readCharacter(layer, column);
+      case kCharacterReadDot % 8u: {
+        const unsigned column = (dot - kCharacterReadDot) / 8u;
+        if (column >= kTileColumns) break;
+        for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
+          if (s_.forcedBlank()) {
+            storeNothing(layer, column);
+          } else {
+            readCharacter(layer, column);
+          }
         }
+        break;
       }
-      return;
-    }
-    case kFineReadDot % 8u: {
-      if (dot < kFineReadDot) return;
-      const unsigned column = (dot - kFineReadDot) / 8u;
-      if (column >= kTileColumns - 1u) return;
-      for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
-        s_.tiles[layer][column].fine =
-            static_cast<std::uint8_t>(scrollOf(static_cast<Layer>(layer)).horizontal & 0x07u);
+      case kFineReadDot % 8u: {
+        if (dot < kFineReadDot) break;
+        const unsigned column = (dot - kFineReadDot) / 8u;
+        if (column >= kTileColumns - 1u) break;
+        for (unsigned layer = 0u; layer < s_.tiles.size(); ++layer) {
+          const auto fine =
+              static_cast<std::uint8_t>(scrollOf(static_cast<Layer>(layer)).horizontal & 0x07u);
+          s_.tiles[layer][column].fine = fine;
+          if (fine != 0u) storeSomething(layer, column);
+        }
+        break;
       }
-      return;
+      default:
+        break;
     }
-    default:
-      return;
   }
 }
 
@@ -736,7 +811,7 @@ void Ppu::readEntry(const Background& background, unsigned column, const PpuInpu
   // blocks where the background's vertical mosaic is on, or a half-line in modes
   // 5 and 6 with $2133 bit 0 set.
   const auto x = static_cast<std::uint16_t>(column * 8u);
-  const std::uint16_t line = mosaicPosition(background.layer, x, in, false).line;
+  const std::uint16_t line = readLine(background.layer, in);
 
   // The column's tile in the background: the coarse scroll, and the vertical
   // scroll, as they stand at this dot, or as the offset table names them. The
@@ -746,13 +821,15 @@ void Ppu::readEntry(const Background& background, unsigned column, const PpuInpu
   const unsigned bgX = (x + (offsets.horizontal & ~0x07u)) & 0xFFFFu;
   const unsigned bgY = (line + offsets.vertical) & 0xFFFFu;
 
-  TileRead& read = s_.tiles[static_cast<unsigned>(background.layer)][column];
+  const auto layer = static_cast<unsigned>(background.layer);
+  TileRead& read = s_.tiles[layer][column];
   read.entry = entryAt(background, bgX, bgY);
   read.bgX = static_cast<std::uint16_t>(bgX);
   read.bgY = static_cast<std::uint16_t>(bgY);
   read.planes = static_cast<std::uint8_t>(background.planes);
   read.large = background.large;
   read.hires = background.hires;
+  storeSomething(layer, column);  // the depth stored is never zero
 }
 
 void Ppu::readCharacter(unsigned layer, unsigned column) noexcept {
@@ -762,12 +839,9 @@ void Ppu::readCharacter(unsigned layer, unsigned column) noexcept {
     return;
   }
 
-  // The tile's shape as the entry read found it. A two-character tile has sixteen
-  // pixels across its eight positions.
-  const unsigned width = read.hires || !read.large ? 8u : 16u;
-  const unsigned height = read.large ? 16u : 8u;
-  const unsigned across = read.hires ? 2u * width : width;
-  const unsigned pixels = read.hires ? 16u : 8u;
+  // The entry is vhopppcc cccccccc: the two flips, the tile's priority, its
+  // palette and its number. A flip reverses the whole tile, a 16x16 block and a
+  // two-character tile included.
   const bool flipX = (read.entry & 0x4000u) != 0u;
   const bool flipY = (read.entry & 0x8000u) != 0u;
 
@@ -776,50 +850,59 @@ void Ppu::readCharacter(unsigned layer, unsigned column) noexcept {
   const std::uint8_t bases = layer < 2u ? s_.bg12nba : s_.bg34nba;
   const unsigned characterBase = (layer & 1u) != 0u ? (bases >> 4) : (bases & 0x0Fu);
 
-  for (unsigned pixel = 0u; pixel < pixels; ++pixel) {
-    // The pixel within the tile: the entry was read at a multiple of eight, so a
-    // 16x16 block's column is its left or its right half.
-    unsigned inX = read.hires ? pixel : (read.bgX + pixel) % width;
-    unsigned inY = read.bgY % height;
-
-    // The entry is vhopppcc cccccccc: the two flips, the tile's priority, its
-    // palette and its number. A flip reverses the whole tile, a 16x16 block and a
-    // two-character tile included.
-    if (flipX) inX = across - 1u - inX;
-    if (flipY) inY = height - 1u - inY;
-
-    // A 16x16 block is Tile, Tile + 1, Tile + 16 and Tile + 17, and a two-character
-    // tile is Tile and Tile + 1. The numbers run on rather than wrapping within the
-    // block; only the ten-bit number itself wraps.
-    unsigned tile = read.entry & 0x03FFu;
-    if (inX >= 8u) {
-      ++tile;
-      inX -= 8u;
-    }
-    if (inY >= 8u) {
-      tile += 16u;
-      inY -= 8u;
-    }
-    tile &= 0x03FFu;
-
-    // The character the tile names, under the base: eight bytes a bitplane, so
-    // sixteen for a four-colour character and thirty-two for a sixteen-colour one.
-    const std::size_t character =
-        ((static_cast<std::size_t>(characterBase) << 13) + tile * 8u * read.planes) & 0xFFFFu;
-    const std::size_t row = (character + inY * 2u) & 0xFFFFu;
-
-    // The planes, low bit first: 0 and 1 in the low and high bytes of the row's
-    // word, then each further pair sixteen bytes on. The leftmost pixel of a row is
-    // bit 7.
-    const unsigned bit = 7u - inX;
-    unsigned index = 0u;
-    for (unsigned plane = 0u; plane < read.planes; ++plane) {
-      const std::size_t at = (row + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
-      index |= ((s_.vram[at] >> bit) & 1u) << plane;
-    }
-    read.pixel[pixel] = static_cast<std::uint8_t>(index);
+  // The row within the tile, under the vertical flip. A 16x16 block is Tile,
+  // Tile + 1, Tile + 16 and Tile + 17, so its lower half is sixteen characters
+  // on; the numbers run on rather than wrapping within the block, and only the
+  // ten-bit number itself wraps.
+  const unsigned height = read.large ? 16u : 8u;
+  unsigned inY = read.bgY % height;
+  if (flipY) inY = height - 1u - inY;
+  unsigned tile = read.entry & 0x03FFu;
+  if (inY >= 8u) {
+    tile += 16u;
+    inY -= 8u;
   }
-  for (unsigned pixel = pixels; pixel < read.pixel.size(); ++pixel) read.pixel[pixel] = 0u;
+
+  // The eight pixels of one character's row, left to right, as the eight bytes
+  // of a word: each bitplane's byte spread so its bit 7 is the first pixel's
+  // bit, then placed at the plane's bit of every pixel. The character the tile
+  // names sits under the base, eight bytes a bitplane, so sixteen for a
+  // four-colour character and thirty-two for a sixteen-colour one; the planes
+  // are 0 and 1 in the low and high bytes of the row's word, then each further
+  // pair sixteen bytes on.
+  const auto row = [&](unsigned character) {
+    character &= 0x03FFu;
+    const std::size_t at =
+        ((static_cast<std::size_t>(characterBase) << 13) + character * 8u * read.planes + inY * 2u) &
+        0xFFFFu;
+    std::uint64_t pixels = 0u;
+    for (unsigned plane = 0u; plane < read.planes; ++plane) {
+      const std::size_t byteAt = (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
+      pixels |= kSpreadBits[s_.vram[byteAt]] << plane;
+    }
+    return pixels;
+  };
+  const auto store = [&](unsigned first, std::uint64_t pixels, bool reversed) {
+    // The horizontal flip reads the row from its last pixel to its first.
+    if (reversed) pixels = reverseBytes(pixels);
+    std::memcpy(read.pixel.data() + first, &pixels, sizeof pixels);
+  };
+
+  if (read.hires) {
+    // A two-character tile: sixteen pixels across eight positions, Tile then
+    // Tile + 1, the flip reversing the pair as a whole.
+    store(0u, row(flipX ? tile + 1u : tile), flipX);
+    store(8u, row(flipX ? tile : tile + 1u), flipX);
+    return;
+  }
+
+  // One character's row: the tile's own, or for a 16x16 block the half the
+  // entry was read at — the entry is read at a multiple of eight, so the column
+  // is the block's left or its right half, and the flip exchanges the two.
+  const bool rightHalf = (read.bgX % 16u) >= 8u;
+  const bool second = read.large && (rightHalf != flipX);
+  store(0u, row(second ? tile + 1u : tile), flipX);
+  std::fill(read.pixel.begin() + 8, read.pixel.end(), std::uint8_t{0});
 }
 
 std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_t x,
