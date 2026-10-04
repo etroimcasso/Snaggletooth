@@ -1577,7 +1577,7 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   const std::uint64_t last = (to - lineStart) / 4u;
   const std::uint64_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
-  const std::uint64_t pixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
+  const std::uint64_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
   Ppu ppu{state_.ppu, derived_};
   const PpuInputs in = ppuInputs();
 
@@ -1586,7 +1586,7 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   // snapshot holds.
   ppu.tileReads(static_cast<std::uint16_t>(dot), static_cast<std::uint16_t>(stop), in);
   if (frameObserver_ == nullptr) {
-    for (std::uint64_t at = pixel; at <= stop; ++at) {
+    for (std::uint64_t at = firstPixel; at <= stop; ++at) {
       ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
     }
     return;
@@ -1598,7 +1598,7 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   }
 
   const std::size_t line = state_.vpos - 1u;
-  for (std::uint64_t at = pixel; at <= stop; ++at) {
+  for (std::uint64_t at = firstPixel; at <= stop; ++at) {
     const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
     const Ppu::Dot out = ppu.dot(x, in);
     if (out.hires && !frameWide_) widenFrame(line, x);
