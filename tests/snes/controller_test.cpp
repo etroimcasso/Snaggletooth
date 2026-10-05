@@ -168,6 +168,26 @@ TEST(SnesController, TheFirstReadBeginsAtDot74AndAHalf) {
   EXPECT_EQ(m.state().autoJoyClocked, 0u) << "begun, nothing clocked";
 }
 
+TEST(SnesController, AReadEnabledOnVblanksFirstLineBeforeItsStartBeginsThatFrame) {
+  // $4200's bit 0 set by a write resolving 196 master cycles into vertical blank's
+  // first line, short of H = 74.5, begins the frame's read at H = 74.5.
+  Snes m = machineWith({0xA9u, 0x01u,          // LDA #$01
+                        0x8Du, 0x00u, 0x42u,   // STA $4200
+                        0xDBu});               // STP
+  SnesState s = m.state();
+  s.master = kFirstVblankLine + 150u;
+  s.consumed = s.master;
+  s.hpos = 150u;
+  s.vpos = kVblankLine;
+  s.inVblank = true;
+  s.vblankBeginLine = kVblankLine;
+  m.restore(s);
+  runToStop(m);
+  EXPECT_EQ(m.state().autoJoyStart, 0u) << "not begun at the write";
+  m.run(200u);
+  EXPECT_EQ(m.state().autoJoyStart, kFirstStart);
+}
+
 TEST(SnesController, TheNextReadBeginsOnThe256CycleGridFromTheLast) {
   // fullsnes: "thereafter some multiple of 256 cycles after the start of the
   // previous read that falls within [H=32.5, H=95.5]". From 307,198 the grid's

@@ -364,6 +364,26 @@ TEST(SnesPpuBeam, TheNmiFlagFollowsTheVblankFlagByTwoMasterCycles) {
   EXPECT_EQ(readCrossing(0x4210u, line, kNmiFlag) & 0x80u, 0x80u);
 }
 
+TEST(SnesPpuBeam, TheNmiFlagRisesPastACycleThatEndsShortOfItsPoint) {
+  // A read whose cycle ends one master cycle into vertical blank's first line finds
+  // the flag down, and the flag rises at H = 0.5 all the same: a read 62 cycles
+  // later finds it up.
+  Placement at{.vpos = static_cast<std::uint16_t>(kVblankStartLine - 1u)};
+  at.hpos = static_cast<std::uint16_t>(kLine - kAbsoluteAccess + 1u);
+  std::vector<std::uint8_t> program = readProgram(0x4210u);
+  program.pop_back();  // the STP; a second read follows, stored at $0051
+  program.push_back(kLdaAbs);
+  program.push_back(0x10u);
+  program.push_back(0x42u);
+  program.push_back(kStaAbs);
+  program.push_back(0x51u);
+  program.push_back(0x00u);
+  program.push_back(kStp);
+  const Snes m = placed(std::move(program), at);
+  EXPECT_EQ(m.state().wram[0x50] & 0x80u, 0x00u);
+  EXPECT_EQ(m.state().wram[0x51] & 0x80u, 0x80u);
+}
+
 TEST(SnesPpuBeam, TheVblankFlagClearsAsTheFrameStarts) {
   const Placement first{.vpos = 0u, .inVblank = true};
   EXPECT_EQ(readCrossing(0x4212u, first, 8u) & 0x80u, 0x00u);
@@ -666,6 +686,32 @@ TEST(SnesPpuBeam, ATimerCrossingDisarmedInItsOwnCycleDoesNotFireLater) {
   EXPECT_FALSE(m.state().timeup);
 }
 
+TEST(SnesPpuBeam, AnHtimeWrittenMidLineMovesThatLinesPoint) {
+  // The line's point is HTIME as it stands when the beam reaches it. Placed 400 into
+  // the line, the write of 200 resolves at 446 and moves the point from 14 + 4 x 255
+  // = 1034 to 14 + 4 x 200 = 814; the line's pause, 538 cycles after the placement,
+  // lies past it at 938.
+  Placement at{.nmitimen = 0x10u, .htime = 0x00FFu};
+  at.hpos = 400u;
+  Snes m = placed(writeProgram(0x4207u, 200u), at);
+  EXPECT_FALSE(m.state().timeup);
+  m.run(400u);
+  ASSERT_GT(m.state().hpos, 814u);
+  ASSERT_LT(m.state().hpos, 938u);
+  EXPECT_TRUE(m.state().timeup);
+}
+
+TEST(SnesPpuBeam, AVtimeWrittenBeforeTheZeroPointNamesThatLine) {
+  // With no H position to compare, the point is ten cycles into VTIME's line. A write
+  // naming the line that resolves six cycles into it is in time for the point.
+  Placement at{.vpos = static_cast<std::uint16_t>(kPictureLine - 1u), .nmitimen = 0x20u,
+               .vtime = 0x00FFu};
+  at.hpos = static_cast<std::uint16_t>(kLine - (kImmediateLoad + kAbsoluteAccess) + 6u);
+  const Snes m = placed(writeProgram(0x4209u, static_cast<std::uint8_t>(kPictureLine)), at);
+  EXPECT_EQ(m.state().vpos, kPictureLine);
+  EXPECT_TRUE(m.state().timeup);
+}
+
 TEST(SnesPpuBeam, ReadingTheTimerFlagInTheCycleItRisesReturnsItSetAndLeavesItSet) {
   // fullsnes.txt 1781-1784: a read acknowledges the flag, except a read at the very
   // time the condition comes true, which receives bit 7 set and clears nothing. The
@@ -754,6 +800,22 @@ TEST(SnesPpuBeam, HtimeOneFiftyThreeRaisesNothingOnTheFramesLastLine) {
                                          .nmitimen = 0x30u, .htime = 153u, .vtime = 311u}));
   EXPECT_TRUE(firedAtItsPoint(Placement{.vpos = 310u, .region = Region::Pal, .field = 1u,
                                         .nmitimen = 0x30u, .htime = 153u, .vtime = 310u}));
+}
+
+TEST(SnesPpuBeam, InterlaceSetMidLineMakesTheShortLinesDotOneFiftyThreeFire) {
+  // Line 240 of an odd field is short only while interlace is off, and the timer's
+  // dot 153 is quiet only on the short line. Placed 300 into the line, interlace set
+  // by a write resolving at 346 lengthens the line before the point at 14 + 4 x 153
+  // = 626, and the point fires; the line's pause, 538 cycles after the placement,
+  // lies past it at 838.
+  Placement at{.vpos = 240u, .field = 1u, .nmitimen = 0x10u, .htime = 153u};
+  at.hpos = 300u;
+  Snes m = placed(writeProgram(0x2133u, 0x01u), at);
+  EXPECT_FALSE(m.state().timeup);
+  m.run(330u);
+  ASSERT_GT(m.state().hpos, 626u);
+  ASSERT_LT(m.state().hpos, 838u);
+  EXPECT_TRUE(m.state().timeup);
 }
 
 TEST(SnesPpuBeam, HtimeOneFiftyThreeFiresOnEveryOtherLine) {
