@@ -472,6 +472,38 @@ TEST(SnesPpuPicture, AMachineNobodyWatchesRunsExactlyAsOneBeingWatchedDoes) {
   EXPECT_EQ(unwatched.frameObserver(), nullptr);
 }
 
+TEST(SnesPpuPicture, AMachineNobodyWatchesMatchesOneBeingWatchedAtEveryCycleOfALine) {
+  // Not only at a frame's end: at every cycle boundary of the picture's lines. On
+  // the beam's lines 1 to 8, the map's first row, the first eight positions are a
+  // tile and the rest the backdrop, so a cycle that covers positions 7 and 8 leaves
+  // position 8's decision carried, watched or not. The idle core's six-cycle grid
+  // falls two cycles further along each line, so one of the eight lines has such a
+  // cycle.
+  const std::vector<std::uint8_t> rom = haltedCartridge();
+  Snes watched(SnesConfig{.rom = rom});
+  Snes unwatched(SnesConfig{.rom = rom});
+  PpuState ppu = screen();
+  putEntry(ppu, kBg1, 0u, 0x0001u);
+  putSolidTile(ppu, kBg1, 1u, 1u);
+  SnesState placed = watched.state();
+  placed.ppu = ppu;
+  watched.restore(placed);
+  unwatched.restore(placed);
+
+  Picture picture;
+  watched.setFrameObserver(&picture);
+  constexpr std::uint64_t kLineMaster = 1364u;
+  watched.run(kLineMaster);
+  unwatched.run(kLineMaster);
+  ASSERT_EQ(watched.state().vpos, 1u);
+  while (watched.state().vpos <= 8u) {
+    watched.run(6u);
+    unwatched.run(6u);
+    ASSERT_TRUE(sameState(watched.state(), unwatched.state()))
+        << "at master cycle " << watched.state().master;
+  }
+}
+
 TEST(SnesPpuPicture, ASnapshotDoesNotCarryTheFrameObserver) {
   const std::vector<std::uint8_t> rom = haltedCartridge();
   Snes machine(SnesConfig{.rom = rom});

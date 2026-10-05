@@ -964,9 +964,9 @@ class Snes {
   // pixel, from those reads and the registers as they stand at its own dot. A
   // read later in the span writes no column an earlier pixel of it reads, so the
   // reads come first. With no frame observer set it makes the reads, draws
-  // nothing, and decides, at each picture dot, only what the chip carries to the
-  // next position. A span whose dots all lie before the line's first read or past
-  // its last pixel reads and draws nothing.
+  // nothing, and decides only what the chip carries to the next position, once,
+  // at the span's last picture dot. A span whose dots all lie before the line's
+  // first read or past its last pixel reads and draws nothing.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
   // Turns the frame in progress 512 wide at its first position drawn in
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn

@@ -129,9 +129,10 @@ m.run(cycles);
 The span is the machine's own buffer and is valid for the call; a host that keeps a picture copies
 it. The observer is not part of the state — a snapshot does not carry it and `restore()` leaves it
 in place — and the chip draws pixels only while one is set. A machine nobody is watching still
-decides, at every visible dot, the one thing the chip carries from a position to the next
-([the main pixel's decision](#the-half-pixel-line)), so its state is exactly a watched machine's and a
-program cannot tell the difference.
+carries the one thing the chip takes from a position to the next
+([the main pixel's decision](#the-half-pixel-line)), decided at the last visible dot each cycle covers,
+so its state at the end of every cycle is exactly a watched machine's and a program cannot tell the
+difference.
 
 **One position per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical
 blank leaves below it — 256 positions, each one pixel, or two half-pixels on a line drawn

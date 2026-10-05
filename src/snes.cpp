@@ -1636,9 +1636,9 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   // snapshot holds.
   ppu.tileReads(static_cast<std::uint16_t>(dot), static_cast<std::uint16_t>(stop), in);
   if (frameObserver_ == nullptr) {
-    for (std::uint64_t at = firstPixel; at <= stop; ++at) {
-      ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
-    }
+    // What the chip carries to the next position is the span's last pixel's alone:
+    // each decision replaces the one before it and touches nothing else.
+    if (firstPixel <= stop) ppu.decide(static_cast<std::uint16_t>(stop - kFirstPictureDot), in);
     return;
   }
 
