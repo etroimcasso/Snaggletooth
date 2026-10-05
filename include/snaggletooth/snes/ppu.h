@@ -428,10 +428,11 @@ class Ppu {
   // read in Mode 7, whose field is read through the matrix at every pixel. The
   // machine calls it once for the dots a cycle covers, before those dots' pixels,
   // watched or not; a dot past the line's last read — column 32's character at
-  // dot 263, column 31's fine scroll at 270 — makes none. A span whose reads can
-  // only store what the columns already hold is passed over at one test.
+  // dot 263, column 31's fine scroll at 270 — makes none. A span holding no read
+  // dot, and a span whose reads can only store what the columns already hold, are
+  // each passed over at one test.
   void tileReads(std::uint16_t first, std::uint16_t last, const PpuInputs& in) noexcept {
-    if (first <= last && !readsChangeNothing()) readTiles(first, last, in);
+    if (nextReadDot(first) <= last && !readsChangeNothing()) readTiles(first, last, in);
   }
 
   // What the chip's converter drives at picture position (x, y), four bytes a
@@ -564,6 +565,17 @@ class Ppu {
   [[nodiscard]] bool readsChangeNothing() const noexcept {
     return d_.allNothing && (s_.forcedBlank() || (s_.bgmode & 0x07u) == 7u) &&
            ((s_.bg1hofs | s_.bg2hofs | s_.bg3hofs | s_.bg4hofs) & 0x07u) == 0u;
+  }
+
+  // The first read dot at or after `dot`. The three reads fall on dots 3, 6 and 7
+  // of every eight, one read a dot: from a dot whose remainder is r, r up to 3
+  // reaches dot 3 of its eight, r of 4 to 6 reaches dot 6, and r of 7 is a read
+  // dot itself. Dots 0 to 2 reach dot 3, the line's first read.
+  [[nodiscard]] static constexpr std::uint16_t nextReadDot(std::uint16_t dot) noexcept {
+    const std::uint16_t r = dot % 8u;
+    if (r <= 3u) return static_cast<std::uint16_t>(dot + 3u - r);
+    if (r <= 6u) return static_cast<std::uint16_t>(dot + 6u - r);
+    return dot;
   }
 
   // The reads tileReads makes when a span's reads can change the state: the

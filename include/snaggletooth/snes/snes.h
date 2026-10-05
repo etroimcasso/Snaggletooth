@@ -964,8 +964,9 @@ class Snes {
   // pixel, from those reads and the registers as they stand at its own dot. A
   // read later in the span writes no column an earlier pixel of it reads, so the
   // reads come first. With no frame observer set it makes the reads, draws
-  // nothing, and decides, at each picture dot, only what the chip carries to the
-  // next position.
+  // nothing, and decides only what the chip carries to the next position, once,
+  // at the span's last picture dot. A span whose dots all lie before the line's
+  // first read or past its last pixel reads and draws nothing.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
   // Turns the frame in progress 512 wide at its first position drawn in
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn
@@ -984,7 +985,8 @@ class Snes {
   // sprites the next line crosses. How far the pass has already walked is the
   // chip's own, so the span needs only its end. Unlike the picture, this runs
   // whether or not anyone is watching: a program can read what the pass found
-  // through $213E.
+  // through $213E. The pass stands under forced blank and once every sprite is
+  // examined.
   void rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept;
 
   // Makes the frame and save reports the cycle just closed owes, after writing
@@ -1002,8 +1004,23 @@ class Snes {
 
   // The events inside one line, for the master-cycle span (`from`, `to`] of a line
   // that began at `lineStart`: the frame's parity, vertical blank's NMI flag and the
-  // sprite table's reload, the H/V timer's points, and the refresh.
+  // sprite table's reload, the H/V timer's points, and the refresh. A span that ends
+  // before the earliest event the beam has not passed tests none of them.
   void crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
+  // The earliest master cycle past `to` at which an event of the line beginning at
+  // `lineStart` can act, from the state as it stands; the largest value when none can.
+  [[nodiscard]] std::uint64_t nextLineEvent(std::uint64_t lineStart, std::uint64_t to) const noexcept;
+  // The H/V timer's two points on the line beginning at `lineStart` — the zero point,
+  // 1374 master cycles after the previous line began, and the H point, 14 + 4 x HTIME
+  // master cycles into the line or the zero point when HTIME is 0 — whether the line
+  // is VTIME's, and whether HTIME names dot 153 on a line where it raises nothing.
+  struct TimerPoints {
+    std::uint64_t h = 0;
+    std::uint64_t zero = 0;
+    bool onTimerLine = false;
+    bool quietDot = false;
+  };
+  [[nodiscard]] TimerPoints timerPoints(std::uint64_t lineStart) const noexcept;
 
   // Whether the crossing this cycle's tick noted is the one the mode now selects, and
   // the raising of the timer flag when it is, which is part of closing a cycle. A read
@@ -1334,6 +1351,12 @@ class Snes {
   // so it lives on the machine and not in its state value; a restore drops all of
   // it, and the chip drops whatever a write makes stale.
   Ppu::Derived derived_;
+  // The master cycle of the earliest event on the beam's line that the beam has not
+  // passed: 0 while it is not known, the largest value when the line holds no more.
+  // Worked out from the state and no part of it, like the picture's derived view: a
+  // restore drops it, and so do the line's end and a write to $4200, $4201,
+  // $4207-$420A or $2133, the registers the line's events are dated from.
+  std::uint64_t lineEventsFrom_ = 0;
   bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
   bool frameWide_ = false;      // the frame in progress is 512 wide
   std::uint16_t framePictureLines_ = 0;  // the lines the finished picture holds

@@ -746,16 +746,7 @@ void Ppu::storeSomething(unsigned layer, unsigned column) noexcept {
 void Ppu::readTiles(std::uint16_t first, std::uint16_t last, const PpuInputs& in) noexcept {
   if (!d_.nothingKnown) learnNothing();
 
-  // The three reads fall on dots 3, 6 and 7 of every eight, one read a dot, so the
-  // walk steps from each read dot to the next and passes the dots between. From a
-  // dot whose remainder is r: r up to 3 reaches dot 3 of its eight, r of 4 to 6
-  // reaches dot 6, and r of 7 is a read dot itself.
-  const auto nextReadDot = [](std::uint16_t dot) {
-    const std::uint16_t r = dot % 8u;
-    if (r <= 3u) return static_cast<std::uint16_t>(dot + 3u - r);
-    if (r <= 6u) return static_cast<std::uint16_t>(dot + 6u - r);
-    return dot;
-  };
+  // The walk steps from each read dot to the next and passes the dots between.
   std::uint16_t dot = nextReadDot(first < kFirstTileReadDot ? kFirstTileReadDot : first);
   for (; dot <= last; dot = nextReadDot(static_cast<std::uint16_t>(dot + 1u))) {
     switch (dot % 8u) {

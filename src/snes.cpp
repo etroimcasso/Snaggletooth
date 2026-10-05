@@ -47,6 +47,9 @@ constexpr std::uint16_t kAfterFirstLongDot = 1298u;
 constexpr std::uint16_t kSecondLongDot = 1310u;
 constexpr std::uint16_t kAfterSecondLongDot = 1316u;
 
+// The horizon of a line whose remaining spans hold no event.
+constexpr std::uint64_t kNoLineEvent = ~std::uint64_t{0};
+
 // The per-line events, as master cycles into the line they belong to. The blank flag
 // is raised at H = 274 and lowered again at H = 1 of the line that follows, on every
 // line of the frame; the frame's parity toggles at H = 1 of its first line; vertical
@@ -170,6 +173,7 @@ Snes::Snes(Snes&& moved) noexcept
       frameObserver_(moved.frameObserver_),
       raster_(std::move(moved.raster_)),
       derived_(std::move(moved.derived_)),
+      lineEventsFrom_(moved.lineEventsFrom_),
       frameFinished_(moved.frameFinished_),
       frameWide_(moved.frameWide_),
       framePictureLines_(moved.framePictureLines_),
@@ -209,6 +213,7 @@ void Snes::load() {
   // replaced, so none of those answers stands: the first dot drawn after this works
   // them out from what the caller supplied.
   derived_.dropAll();
+  lineEventsFrom_ = 0u;
   // No host's call is on the stack of the machine that begins here, whatever a
   // throw from one left behind.
   insideCycle_ = false;
@@ -772,6 +777,9 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
     case PageKind::System: {
       const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
       if (offset >= 0x2100 && offset <= 0x213F) {
+        // $2133's interlace bit sets the line's length and the frame's, which the
+        // timer's dot 153 is dated from.
+        if (offset == 0x2133u) lineEventsFrom_ = 0u;
         portLanding_ = Ppu{state_.ppu, derived_}.write(offset, value, ppuInputs());
         return;
       }
@@ -1404,20 +1412,14 @@ namespace {
 // master cycles of a four-cycle dot, the last three of one of the two six-cycle
 // dots. The short line keeps 340 even dots and has no six-cycle ones.
 [[nodiscard]] bool lateHalfOf(std::uint16_t hpos, bool shortLine) noexcept {
-  if (!shortLine) {
-    if (hpos >= kFirstLongDot && hpos < kAfterFirstLongDot) {
-      return static_cast<unsigned>(hpos - kFirstLongDot) >= 3u;
-    }
-    if (hpos >= kSecondLongDot && hpos < kAfterSecondLongDot) {
-      return static_cast<unsigned>(hpos - kSecondLongDot) >= 3u;
-    }
-    if (hpos >= kAfterFirstLongDot) {
-      // Past a long dot the four-cycle grid is offset by the two cycles it added.
-      const unsigned offset = hpos >= kAfterSecondLongDot ? 4u : 2u;
-      return ((static_cast<unsigned>(hpos) - offset) & 3u) >= 2u;
-    }
+  if (hpos < kFirstLongDot || shortLine) return (hpos & 3u) >= 2u;
+  if (hpos < kAfterFirstLongDot) return static_cast<unsigned>(hpos - kFirstLongDot) >= 3u;
+  if (hpos >= kSecondLongDot && hpos < kAfterSecondLongDot) {
+    return static_cast<unsigned>(hpos - kSecondLongDot) >= 3u;
   }
-  return (hpos & 3u) >= 2u;
+  // Past a long dot the four-cycle grid is offset by the two cycles it added.
+  const unsigned offset = hpos >= kAfterSecondLongDot ? 4u : 2u;
+  return ((static_cast<unsigned>(hpos) - offset) & 3u) >= 2u;
 }
 
 }  // namespace
@@ -1429,7 +1431,7 @@ std::uint16_t Snes::hdotAt(std::uint16_t h) const noexcept {
   // other dot is four, so past dot 322 the count falls behind a plain quarter of the
   // position and dot 340 is reached only on a line that runs 1368. The short line
   // keeps 340 even dots and none of this applies to it.
-  if (lineLength() == kShortLineMaster || h < kFirstLongDot) {
+  if (h < kFirstLongDot || lineLength() == kShortLineMaster) {
     return static_cast<std::uint16_t>(h >> 2);
   }
   if (h < kAfterFirstLongDot) return 323u;
@@ -1470,11 +1472,52 @@ void Snes::settleTimer() noexcept {
   if (timerCrossed()) state_.timeup = true;
 }
 
+Snes::TimerPoints Snes::timerPoints(std::uint64_t lineStart) const noexcept {
+  const std::uint64_t zero = lineStart + kTimerLineSpan - state_.previousLineMaster;
+  return TimerPoints{
+      .h = state_.htime != 0u ? lineStart + kTimerHOrigin + 4ull * state_.htime : zero,
+      .zero = zero,
+      .onTimerLine = state_.vpos == state_.vtime,
+      // Dot 153 raises nothing on the short scanline, nor on the last scanline of a
+      // frame. The V-only point is a line's own and keeps its place: the exception is
+      // a dot.
+      .quietDot = state_.htime == kTimerQuietDot &&
+                  (lineLength() == kShortLineMaster ||
+                   state_.vpos == static_cast<std::uint16_t>(frameLines() - 1u)),
+  };
+}
+
+std::uint64_t Snes::nextLineEvent(std::uint64_t lineStart, std::uint64_t to) const noexcept {
+  // Every point crossLine tests, under the condition that lets it act, from the state
+  // as it stands; the earliest past `to` is the first the beam can still reach.
+  std::uint64_t next = kNoLineEvent;
+  const auto consider = [to, &next](std::uint64_t point) noexcept {
+    if (point > to && point < next) next = point;
+  };
+  if (state_.vpos == 0u) consider(lineStart + kFieldToggle);
+  if (state_.inVblank && state_.vpos == state_.vblankBeginLine) {
+    consider(lineStart + kNmiFlagOffset);
+    consider(lineStart + kOamReloadOffset);
+    if ((state_.nmitimen & 1u) != 0u && state_.autoJoyStart < lineStart) {
+      consider(autoJoypadStart(lineStart));
+    }
+  }
+  const TimerPoints timer = timerPoints(lineStart);
+  if (!timer.quietDot) consider(timer.h);
+  if (timer.onTimerLine) consider(timer.zero);
+  consider(state_.refreshAt);
+  if (state_.counterLatchAt != 0u) consider(state_.counterLatchAt);
+  return next;
+}
+
 void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
   // The events inside a line, each at its own master offset, for the span the cycle
   // just covered. A point is passed when the span reaches it, and a span never starts
   // before its own line — so an event at offset 0 can never be passed here and belongs
   // to advanceLine, which runs as the line begins. Everything below lies past it.
+  // A span that ends short of the earliest event still ahead passes none of them.
+  if (lineEventsFrom_ != 0u && to < lineEventsFrom_) return;
+
   const auto passed = [from, to](std::uint64_t point) noexcept {
     return from < point && point <= to;
   };
@@ -1505,21 +1548,12 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
     }
   }
 
-  const std::uint64_t zeroPoint = lineStart + kTimerLineSpan - state_.previousLineMaster;
-  const std::uint64_t hPoint = state_.htime != 0u
-      ? lineStart + kTimerHOrigin + 4ull * state_.htime
-      : zeroPoint;
-  const bool onTimerLine = state_.vpos == state_.vtime;
-  // Dot 153 raises nothing on the short scanline, nor on the last scanline of a frame.
-  // The V-only point is a line's own and keeps its place: the exception is a dot.
-  const bool quietDot = state_.htime == kTimerQuietDot &&
-                        (lineLength() == kShortLineMaster ||
-                         state_.vpos == static_cast<std::uint16_t>(frameLines() - 1u));
-  if (!quietDot && passed(hPoint)) {
+  const TimerPoints timer = timerPoints(lineStart);
+  if (!timer.quietDot && passed(timer.h)) {
     timerHPoint_ = true;
-    if (onTimerLine) timerHPointOnVLine_ = true;
+    if (timer.onTimerLine) timerHPointOnVLine_ = true;
   }
-  if (onTimerLine && passed(zeroPoint)) timerZeroOnVLine_ = true;
+  if (timer.onTimerLine && passed(timer.zero)) timerZeroOnVLine_ = true;
 
   // The refresh: the cycle whose tick reaches the point finishes on its own time, and
   // the pause runs before the next one. The pause holds the core whatever it is doing,
@@ -1538,6 +1572,8 @@ void Snes::crossLine(std::uint64_t lineStart, std::uint64_t from, std::uint64_t 
     Ppu{state_.ppu, derived_}.latchCounters(in);
     state_.counterLatchAt = 0u;
   }
+
+  lineEventsFrom_ = nextLineEvent(lineStart, to);
 }
 
 void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
@@ -1545,6 +1581,10 @@ void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
   // after it — so the frame's first line, which draws nothing, is the one that
   // finds the picture's first line its sprites.
   if (state_.inVblank) return;
+  // Forced blank walks nowhere, and a walk that has examined every sprite is done.
+  if (state_.ppu.forcedBlank() || static_cast<unsigned>(state_.ppu.sprites.scanned) >= kSprites) {
+    return;
+  }
 
   // The sprites whose dots the span passed: sprite N is examined at the picture's
   // first dot plus twice its place in the walk, so the 128 of them fill the 256
@@ -1578,6 +1618,16 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   const std::uint64_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
   const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
   const std::uint64_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
+
+  // A watched picture line starts the frame's raster, black, whichever of its dots
+  // the span covers.
+  if (frameObserver_ != nullptr && raster_.empty()) {
+    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
+    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
+  }
+  // The dots before the first read and past the last pixel hold neither.
+  if (dot > stop) return;
+
   Ppu ppu{state_.ppu, derived_};
   const PpuInputs in = ppuInputs();
 
@@ -1586,15 +1636,10 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   // snapshot holds.
   ppu.tileReads(static_cast<std::uint16_t>(dot), static_cast<std::uint16_t>(stop), in);
   if (frameObserver_ == nullptr) {
-    for (std::uint64_t at = firstPixel; at <= stop; ++at) {
-      ppu.decide(static_cast<std::uint16_t>(at - kFirstPictureDot), in);
-    }
+    // What the chip carries to the next position is the span's last pixel's alone:
+    // each decision replaces the one before it and touches nothing else.
+    if (firstPixel <= stop) ppu.decide(static_cast<std::uint16_t>(stop - kFirstPictureDot), in);
     return;
-  }
-
-  if (raster_.empty()) {
-    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
-    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
   }
 
   const std::size_t line = state_.vpos - 1u;
@@ -1776,6 +1821,7 @@ void Snes::tickVideo(std::uint32_t cost) {
     state_.hpos = static_cast<std::uint16_t>(at - lineStart);
     if (at == lineEnd) {
       state_.previousLineMaster = static_cast<std::uint16_t>(lineEnd - lineStart);
+      lineEventsFrom_ = 0u;  // the next line's events are its own
       lineStart = lineEnd;
       state_.hpos = 0u;
       advanceLine(lineStart);
@@ -1837,7 +1883,9 @@ PpuInputs Snes::ppuInputs() const noexcept {
       .vblank = state_.inVblank,
       .pal = region_ == Region::Pal,
       .extLatch = (state_.wrio & 0x80u) != 0u,
-      .lateHalf = lateHalfOf(state_.hpos, lineLength() == kShortLineMaster),
+      // A position short of the first long dot is placed alike on every line length.
+      .lateHalf = lateHalfOf(state_.hpos,
+                             state_.hpos >= kFirstLongDot && lineLength() == kShortLineMaster),
   };
 }
 
@@ -1879,6 +1927,11 @@ std::uint8_t Snes::readCpuReg(std::uint16_t offset) {
 }
 
 void Snes::writeCpuReg(std::uint16_t offset, std::uint8_t value) {
+  // The H/V timer's points, the auto-read's start and an owed counter latch are dated
+  // from these registers, so the line's earliest event is worked out again.
+  if (offset == 0x4200u || offset == 0x4201u || (offset >= 0x4207u && offset <= 0x420Au)) {
+    lineEventsFrom_ = 0u;
+  }
   switch (offset) {
     case 0x4200:  // NMITIMEN: NMI enable, H/V IRQ mode, auto-joypad enable
       if (((value >> 4) & 3u) == 0u) state_.timeup = false;  // disabling the IRQ acknowledges it
