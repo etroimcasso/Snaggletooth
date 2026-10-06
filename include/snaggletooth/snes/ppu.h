@@ -331,7 +331,8 @@ struct PpuState {
 // state for one call; it holds a reference and is never kept.
 class Ppu {
   // What the picture path works out from the registers and then reads at every dot
-  // it draws: what each of the four backgrounds is, and the chart the mode keeps.
+  // it draws: what each of the four backgrounds is, the chart the mode keeps, and
+  // where the windows cover the line.
   // Worked out from the state and no part of it — two machines holding the same
   // PpuState draw the same picture whatever either one has here — so the machine
   // owns one beside the picture and hands it to every Ppu, and the chip drops
@@ -634,8 +635,11 @@ class Ppu {
   // stands past the right, taken as written or inverted as the layer's own bits
   // direct. Where the layer enables both, they are combined by the logic its two
   // bits of $212A or $212B name; where it enables one, that window is the answer;
-  // where it enables neither, nothing is covered.
+  // where it enables neither, nothing is covered. The answer is the layer's bit in
+  // the derived view's masks, which buildWindows works out from the nine registers
+  // when a write or a restore has dropped them.
   [[nodiscard]] bool windowCovers(Layer layer, std::uint16_t x) const noexcept;
+  void buildWindows() const noexcept;
 
   // Whether a layer shows nothing at a picture position on the screen whose mask
   // register this is: the windows cover the position and that register names the
@@ -693,11 +697,24 @@ class Ppu {
     bool allNothing = false;
     bool nothingKnown = false;
 
+    // Where the windows cover the picture as $2123-$212B stand: one 256-bit mask a
+    // layer, in Layer's order — BG1 to BG4, the sprites, the color window — bit x
+    // of a mask set where windowCovers answers true for that layer at position x.
+    // Worked out from the nine registers at the first position after a write to
+    // one of them or a restore, and read from then on.
+    struct Windows {
+      std::array<std::array<std::uint64_t, 4>, 6> covers{};
+      bool valid = false;
+    };
+    Windows windows{};
+
     // What a write to one of the registers a group is read from makes stale, and
     // what a restore — which replaces every register at once — makes stale.
     void dropDescriptions() noexcept { descriptions.valid = false; }
+    void dropWindows() noexcept { windows.valid = false; }
     void dropAll() noexcept {
       dropDescriptions();
+      dropWindows();
       nothingKnown = false;
       allNothing = false;
     }

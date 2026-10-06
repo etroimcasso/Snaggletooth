@@ -1029,39 +1029,68 @@ std::int32_t Ppu::multiplierWhileDrawing(const PpuState& s, const PpuInputs& in)
 }
 
 bool Ppu::windowCovers(Layer layer, std::uint16_t x) const noexcept {
-  // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
-  // one, BG2, BG4 and the colour window in the high — and the two logic registers
-  // give every layer a pair of bits of its own, the four backgrounds filling one
-  // register and the sprites and the colour window the low half of the other.
-  const unsigned index = static_cast<unsigned>(layer);
-  const std::uint8_t selector =
-      index < 2u ? s_.w12sel : (index < 4u ? s_.w34sel : s_.wobjsel);
-  const unsigned bits = (selector >> ((index & 1u) * 4u)) & 0x0Fu;
-  const std::uint8_t logic = index < 4u ? s_.wbglog : s_.wobjlog;
-  const unsigned op = (logic >> ((index & 3u) * 2u)) & 0x03u;
+  if (!d_.windows.valid) buildWindows();
+  const std::array<std::uint64_t, 4>& covers = d_.windows.covers[static_cast<unsigned>(layer)];
+  return ((covers[x >> 6] >> (x & 63u)) & 1u) != 0u;
+}
 
+void Ppu::buildWindows() const noexcept {
   // A window runs from its left edge to its right, both ends inclusive — so edges
   // that meet are one pixel wide, and a left edge past the right is a window with
-  // no range at all. The layer's inversion bit replaces it with its inverse.
-  const auto spans = [x](std::uint8_t left, std::uint8_t right) {
-    return x >= left && x <= right;
+  // no range at all. Each is a 256-bit mask, filled a 64-bit word at a time.
+  const auto span = [](std::uint8_t left, std::uint8_t right) {
+    std::array<std::uint64_t, 4> mask{};
+    for (unsigned word = 0u; word < mask.size(); ++word) {
+      const unsigned first = std::max(static_cast<unsigned>(left), word * 64u);
+      const unsigned last = std::min(static_cast<unsigned>(right), word * 64u + 63u);
+      if (first > last) continue;
+      const unsigned width = last - first + 1u;
+      const std::uint64_t run = width == 64u ? ~std::uint64_t{0} : (std::uint64_t{1} << width) - 1u;
+      mask[word] = run << (first - word * 64u);
+    }
+    return mask;
   };
-  const bool window1 = spans(s_.wh0, s_.wh1) != ((bits & 0x01u) != 0u);
-  const bool window2 = spans(s_.wh2, s_.wh3) != ((bits & 0x04u) != 0u);
+  const std::array<std::uint64_t, 4> window1 = span(s_.wh0, s_.wh1);
+  const std::array<std::uint64_t, 4> window2 = span(s_.wh2, s_.wh3);
 
-  const bool enable1 = (bits & 0x02u) != 0u;
-  const bool enable2 = (bits & 0x08u) != 0u;
-  if (!enable1) return enable2 && window2;
-  if (!enable2) return window1;
+  for (unsigned index = 0u; index < d_.windows.covers.size(); ++index) {
+    // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
+    // one, BG2, BG4 and the color window in the high — and the two logic registers
+    // give every layer a pair of bits of its own, the four backgrounds filling one
+    // register and the sprites and the color window the low half of the other.
+    const std::uint8_t selector =
+        index < 2u ? s_.w12sel : (index < 4u ? s_.w34sel : s_.wobjsel);
+    const unsigned bits = (selector >> ((index & 1u) * 4u)) & 0x0Fu;
+    const std::uint8_t logic = index < 4u ? s_.wbglog : s_.wobjlog;
+    const unsigned op = (logic >> ((index & 3u) * 2u)) & 0x03u;
 
-  // Both enabled: the logic the layer's own pair of bits names. XNOR is the
-  // inverse of XOR, which is the two agreeing.
-  switch (op) {
-    case 0u: return window1 || window2;   // OR
-    case 1u: return window1 && window2;   // AND
-    case 2u: return window1 != window2;   // XOR
-    default: return window1 == window2;   // XNOR
+    // The layer's inversion bit replaces a window with its inverse.
+    const std::uint64_t invert1 = (bits & 0x01u) != 0u ? ~std::uint64_t{0} : 0u;
+    const std::uint64_t invert2 = (bits & 0x04u) != 0u ? ~std::uint64_t{0} : 0u;
+    const bool enable1 = (bits & 0x02u) != 0u;
+    const bool enable2 = (bits & 0x08u) != 0u;
+
+    std::array<std::uint64_t, 4>& covers = d_.windows.covers[index];
+    for (unsigned word = 0u; word < covers.size(); ++word) {
+      const std::uint64_t one = window1[word] ^ invert1;
+      const std::uint64_t two = window2[word] ^ invert2;
+      if (!enable1) {
+        covers[word] = enable2 ? two : 0u;
+      } else if (!enable2) {
+        covers[word] = one;
+      } else {
+        // Both enabled: the logic the layer's own pair of bits names. XNOR is the
+        // inverse of XOR, which is the two agreeing.
+        switch (op) {
+          case 0u: covers[word] = one | two; break;     // OR
+          case 1u: covers[word] = one & two; break;     // AND
+          case 2u: covers[word] = one ^ two; break;     // XOR
+          default: covers[word] = ~(one ^ two); break;  // XNOR
+        }
+      }
+    }
   }
+  d_.windows.valid = true;
 }
 
 bool Ppu::masked(Layer layer, std::uint8_t maskRegister, std::uint16_t x) const noexcept {
@@ -1085,10 +1114,10 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // not enable shows nothing here, and one the windows mask shows nothing at this
   // dot, so the chart below falls through to whatever stands behind it.
   //
-  // The window registers are read here, at the dot they shape, and nothing about
-  // them is carried from one dot to the next — which is what lets a program move an
-  // edge part-way along a line, and what lets a transfer shape a window down the
-  // picture a line at a time.
+  // The windows are taken here, at the dot they shape, from masks a write to any
+  // window register drops, so every position drawn after a write sees it and none
+  // drawn before does — which is what lets a program move an edge part-way along a
+  // line, and what lets a transfer shape a window down the picture a line at a time.
   //
   // A mosaiced layer is read at its block's corner, and only there: the windows and
   // the screens above are taken at the dot itself, so a window can cut a block.
@@ -1464,8 +1493,10 @@ std::optional<std::uint16_t> Ppu::write(std::uint16_t offset, std::uint8_t value
   // What each background is and where it stands in the chart the chip reads out of
   // $2105-$210C and $2133, so a write to one of those is what makes its answer
   // stale. $2106 stands inside that span and describes nothing, and dropping on it
-  // costs one reading of eleven registers.
+  // costs one reading of eleven registers. Where the windows cover is read out of
+  // $2123-$212B, so a write to one of those makes it stale.
   if ((offset >= 0x2105u && offset <= 0x210Cu) || offset == 0x2133u) d_.dropDescriptions();
+  if (offset >= 0x2123u && offset <= 0x212Bu) d_.dropWindows();
 
   switch (offset) {
     case 0x2100: {  // INIDISP: forced blank and brightness
