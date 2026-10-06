@@ -331,7 +331,8 @@ struct PpuState {
 // state for one call; it holds a reference and is never kept.
 class Ppu {
   // What the picture path works out from the registers and then reads at every dot
-  // it draws: what each of the four backgrounds is, and the chart the mode keeps.
+  // it draws: what each of the four backgrounds is, the chart the mode keeps, and
+  // where the windows cover the line.
   // Worked out from the state and no part of it — two machines holding the same
   // PpuState draw the same picture whatever either one has here — so the machine
   // owns one beside the picture and hands it to every Ppu, and the chip drops
@@ -634,8 +635,11 @@ class Ppu {
   // stands past the right, taken as written or inverted as the layer's own bits
   // direct. Where the layer enables both, they are combined by the logic its two
   // bits of $212A or $212B name; where it enables one, that window is the answer;
-  // where it enables neither, nothing is covered.
+  // where it enables neither, nothing is covered. The answer is the layer's bit in
+  // the derived view's masks, which buildWindows works out from the nine registers
+  // when a write or a restore has dropped them.
   [[nodiscard]] bool windowCovers(Layer layer, std::uint16_t x) const noexcept;
+  void buildWindows() const noexcept;
 
   // Whether a layer shows nothing at a picture position on the screen whose mask
   // register this is: the windows cover the position and that register names the
@@ -693,19 +697,36 @@ class Ppu {
     bool allNothing = false;
     bool nothingKnown = false;
 
+    // Where the windows cover the picture as $2123-$212B stand: one 256-bit mask a
+    // layer, in Layer's order — BG1 to BG4, the sprites, the color window — bit x
+    // of a mask set where windowCovers answers true for that layer at position x.
+    // Worked out from the nine registers at the first position after a write to
+    // one of them or a restore, and read from then on.
+    struct Windows {
+      std::array<std::array<std::uint64_t, 4>, 6> covers{};
+      bool valid = false;
+    };
+    Windows windows{};
+
     // What a write to one of the registers a group is read from makes stale, and
     // what a restore — which replaces every register at once — makes stale.
     void dropDescriptions() noexcept { descriptions.valid = false; }
+    void dropWindows() noexcept { windows.valid = false; }
     void dropAll() noexcept {
       dropDescriptions();
+      dropWindows();
       nothingKnown = false;
       allNothing = false;
     }
   };
 
-  // The descriptions as the registers stand, worked out here on the first dot after
-  // a write dropped them and read from then on.
-  [[nodiscard]] const Derived::Descriptions& descriptions() const noexcept;
+  // The descriptions as the registers stand: worked out by rebuildDescriptions on
+  // the first dot after a write or a restore dropped them, and read from then on.
+  [[nodiscard]] const Derived::Descriptions& descriptions() const noexcept {
+    if (d_.descriptions.valid) return d_.descriptions;
+    return rebuildDescriptions();
+  }
+  [[nodiscard]] const Derived::Descriptions& rebuildDescriptions() const noexcept;
 
   // How the mode reads one of the four backgrounds — its depth, its palette and
   // whether it is read through an offset table — or nothing where the mode does not
@@ -742,19 +763,28 @@ class Ppu {
   [[nodiscard]] std::optional<Shown> sampleField(Layer layer, std::uint16_t x,
                                                  std::uint16_t line) const noexcept;
 
-  // Where a layer is read from at a picture position under mosaic: the position
-  // itself, or the top-left corner of the block it stands in — the column taken
+  // The column a layer is read from at a picture position under mosaic: the
+  // position itself, or the left edge of the block it stands in — the column taken
   // back to a multiple of the block's width, counted from the picture's left edge
-  // at the size $2106 holds at this dot, and the line taken back to the one the
-  // current row of blocks began on. Each background has its own enable bit, except
-  // the second Mode 7 layer, which reads bit 0 as its vertical enable and bit 1 as
-  // its horizontal one. Mode 7's blocks stand in the picture, so the matrix reads
-  // their corners.
+  // at the size $2106 holds at this dot. Each background has its own enable bit,
+  // except the second Mode 7 layer, which reads bit 1 as its horizontal enable.
   //
   // In modes 5 and 6 a block is counted in half-pixels, twice its size wide, from
   // the line's first half-pixel, so its corner is always a left half and a size of
   // 0 already covers a right half with its left one. Under $2133 bit 3 a block is
-  // counted in positions as on any other line. The line is readLine's.
+  // counted in positions as on any other line.
+  struct BlockColumn {
+    std::uint16_t x;
+    bool half;  // which half of the position a two-character tile is read for
+  };
+  [[nodiscard]] BlockColumn mosaicColumn(Layer layer, std::uint16_t x, bool half) const noexcept;
+
+  // Where Mode 7's field is read from at a picture position under mosaic: the
+  // column mosaicColumn names, and readLine's line — the beam's own, or the line
+  // the current row of blocks began on, the second layer reading bit 0 as its
+  // vertical enable. Mode 7's blocks stand in the picture, so the matrix reads
+  // their corners. A tilemap background takes the column alone: its line is read
+  // with the tilemap entry, at the entry's own dot.
   struct Position {
     std::uint16_t x;
     std::uint16_t line;
@@ -799,13 +829,16 @@ class Ppu {
 
   // The main screen's pixel at a picture position under colour math, the colour
   // it had before the math, and what it decided: `half` as resolve takes it, the
-  // sub screen's addend being read for the left half.
+  // sub screen's addend being read for the left half. `subScreen` is the sub
+  // screen's front-most pixel at the position, read for the left half, where the
+  // caller has resolved it already; null, the sub screen is resolved here when the
+  // math takes its addend from it and not otherwise.
   struct MainPixel {
     std::uint16_t colour;
     PpuState::MainDecision decision;
   };
-  [[nodiscard]] MainPixel mainPixel(std::uint16_t x, const PpuInputs& in,
-                                    bool half) const noexcept;
+  [[nodiscard]] MainPixel mainPixel(std::uint16_t x, const PpuInputs& in, bool half,
+                                    const std::optional<Resolved>* subScreen) const noexcept;
 
   // A colour taken through colour math: added to or subtracted from `addend` five
   // bits a channel, halved first where asked, and held to the range a channel has.

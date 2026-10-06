@@ -1050,6 +1050,23 @@ TEST(SnesPpuHiresMath, TheMainHalfIsMathedAgainstTheSubScreenAsOnAnyLine) {
   }
 }
 
+TEST(SnesPpuHiresMath, TheMainHalfsAddendIsTheSubScreensLeftHalfPixel) {
+  // BG2's tile gives its even pixels, the left halves, kSub and its odd ones a
+  // second color. The main half at each position is mathed against the sub
+  // screen's pixel read for the left half of that position, its even pixel.
+  constexpr std::uint16_t kSubOdd = 0x0060u;  // green 3
+  PpuState ppu = mathPicture(kEvenMain, kOddMain, kSub);
+  putColour(ppu, 2u, kSubOdd);
+  putWideTile(ppu, kBg2Chars, 2u, 2u, [](unsigned p, unsigned) { return 1u + p % 2u; });
+  ppu.cgwsel = 0x02u;
+  ppu.cgadsub = 0x01u;
+  const Picture picture = draw(ppu);
+  ASSERT_EQ(picture.width, 512u);
+  for (unsigned x = 0u; x < 16u; ++x) {
+    EXPECT_EQ(picture.at(2u * x + 1u, 1u), out(combine(mainAt(x), kSub, false, false))) << "full pixel " << x;
+  }
+}
+
 TEST(SnesPpuHiresMath, TheSubHalfAddsTheMainPixelToItsLeft) {
   // Provisional until the hires calibration cartridge's band d is read.
   PpuState ppu = mathPicture(kEvenMain, kOddMain, kSub);

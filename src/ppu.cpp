@@ -19,10 +19,24 @@ namespace {
 // The byte the converter drives for one five-bit channel at brightness N: the
 // exact rational value * (N + 1) * 255 / (31 * 16), rounded once, in integers.
 constexpr unsigned kFullScale = 31u * 16u;
-[[nodiscard]] std::uint8_t channelByte(unsigned value, unsigned brightness) noexcept {
+[[nodiscard]] constexpr std::uint8_t channelByte(unsigned value, unsigned brightness) noexcept {
   return static_cast<std::uint8_t>((value * (brightness + 1u) * 255u + kFullScale / 2u) /
                                    kFullScale);
 }
+
+// channelByte for every brightness and every five-bit value, indexed [brightness][value].
+// Row 0 is not black: the converter answers brightness 0 before it reads the table.
+constexpr std::array<std::array<std::uint8_t, 32>, 16> kChannelBytes = [] {
+  std::array<std::array<std::uint8_t, 32>, 16> table{};
+  for (unsigned brightness = 0u; brightness < 16u; ++brightness) {
+    for (unsigned value = 0u; value < 32u; ++value) {
+      table[brightness][value] = channelByte(value, brightness);
+    }
+  }
+  return table;
+}();
+static_assert(kChannelBytes[15][31] == 255u && kChannelBytes[15][23] == 189u &&
+              kChannelBytes[7][16] == channelByte(16u, 7u));
 
 // The character data's shape: eight rows of a bitplane fill eight words, so a pair
 // of bitplanes takes sixteen bytes and the next pair begins sixteen bytes on.
@@ -359,24 +373,28 @@ std::uint16_t Ppu::readLine(Layer layer, const PpuInputs& in) const noexcept {
   return static_cast<std::uint16_t>(at);
 }
 
-Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
-                                  bool half) const noexcept {
+Ppu::BlockColumn Ppu::mosaicColumn(Layer layer, std::uint16_t x, bool half) const noexcept {
   const unsigned index = static_cast<unsigned>(layer);
   const std::uint8_t mode = s_.bgmode & 0x07u;
   // The second Mode 7 layer's horizontal axis has a bit of its own.
   const bool across = mode == 7u && layer == Layer::Bg2 ? (s_.mosaic & 0x02u) != 0u
                                                          : ((s_.mosaic >> index) & 0x01u) != 0u;
   const unsigned width = (s_.mosaic >> 4) + 1u;
-  const std::uint16_t read = readLine(layer, in);
-  if (!across) return Position{.x = x, .line = read, .half = half};
+  if (!across) return BlockColumn{.x = x, .half = half};
   if (mode == 5u || mode == 6u) {
     // Counted in half-pixels: the corner is a multiple of twice the size, which is
     // always a left half.
     const unsigned halfPixel = 2u * x + (half ? 1u : 0u);
     const unsigned blockCorner = halfPixel - halfPixel % (2u * width);
-    return Position{.x = static_cast<std::uint16_t>(blockCorner / 2u), .line = read, .half = false};
+    return BlockColumn{.x = static_cast<std::uint16_t>(blockCorner / 2u), .half = false};
   }
-  return Position{.x = static_cast<std::uint16_t>(x - x % width), .line = read, .half = half};
+  return BlockColumn{.x = static_cast<std::uint16_t>(x - x % width), .half = half};
+}
+
+Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
+                                  bool half) const noexcept {
+  const BlockColumn column = mosaicColumn(layer, x, half);
+  return Position{.x = column.x, .line = readLine(layer, in), .half = column.half};
 }
 
 void Ppu::rangeSprite(std::uint16_t line) noexcept {
@@ -485,9 +503,8 @@ std::array<std::uint8_t, 4> Ppu::convert(std::uint16_t colour) const noexcept {
   // brightness of zero is the screen off, which is black whatever the word holds.
   const unsigned brightness = s_.inidisp & 0x0Fu;
   if (brightness == 0u) return {0u, 0u, 0u, 255u};
-  return {channelByte(colour & 0x1Fu, brightness),
-          channelByte((colour >> 5) & 0x1Fu, brightness),
-          channelByte((colour >> 10) & 0x1Fu, brightness), 255u};
+  const std::array<std::uint8_t, 32>& bytes = kChannelBytes[brightness];
+  return {bytes[colour & 0x1Fu], bytes[(colour >> 5) & 0x1Fu], bytes[(colour >> 10) & 0x1Fu], 255u};
 }
 
 Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
@@ -526,12 +543,11 @@ Ppu::Offsets Ppu::scrollOf(Layer layer) const noexcept {
   return Offsets{.horizontal = s_.*kHorizontal[index], .vertical = s_.*kVertical[index]};
 }
 
-const Ppu::Derived::Descriptions& Ppu::descriptions() const noexcept {
+const Ppu::Derived::Descriptions& Ppu::rebuildDescriptions() const noexcept {
   // The four backgrounds and the chart as $2105-$210C and $2133 stand. Every write
   // to one of those drops this, so the first dot after such a write reads the
   // registers again and every dot until the next one reads what it found.
   Derived::Descriptions& kept = d_.descriptions;
-  if (kept.valid) return kept;
   for (unsigned index = 0u; index < kept.registers.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     kept.registers[index] = registersOf(layer);
@@ -1026,39 +1042,68 @@ std::int32_t Ppu::multiplierWhileDrawing(const PpuState& s, const PpuInputs& in)
 }
 
 bool Ppu::windowCovers(Layer layer, std::uint16_t x) const noexcept {
-  // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
-  // one, BG2, BG4 and the colour window in the high — and the two logic registers
-  // give every layer a pair of bits of its own, the four backgrounds filling one
-  // register and the sprites and the colour window the low half of the other.
-  const unsigned index = static_cast<unsigned>(layer);
-  const std::uint8_t selector =
-      index < 2u ? s_.w12sel : (index < 4u ? s_.w34sel : s_.wobjsel);
-  const unsigned bits = (selector >> ((index & 1u) * 4u)) & 0x0Fu;
-  const std::uint8_t logic = index < 4u ? s_.wbglog : s_.wobjlog;
-  const unsigned op = (logic >> ((index & 3u) * 2u)) & 0x03u;
+  if (!d_.windows.valid) buildWindows();
+  const std::array<std::uint64_t, 4>& covers = d_.windows.covers[static_cast<unsigned>(layer)];
+  return ((covers[x >> 6] >> (x & 63u)) & 1u) != 0u;
+}
 
+void Ppu::buildWindows() const noexcept {
   // A window runs from its left edge to its right, both ends inclusive — so edges
   // that meet are one pixel wide, and a left edge past the right is a window with
-  // no range at all. The layer's inversion bit replaces it with its inverse.
-  const auto spans = [x](std::uint8_t left, std::uint8_t right) {
-    return x >= left && x <= right;
+  // no range at all. Each is a 256-bit mask, filled a 64-bit word at a time.
+  const auto span = [](std::uint8_t left, std::uint8_t right) {
+    std::array<std::uint64_t, 4> mask{};
+    for (unsigned word = 0u; word < mask.size(); ++word) {
+      const unsigned first = std::max(static_cast<unsigned>(left), word * 64u);
+      const unsigned last = std::min(static_cast<unsigned>(right), word * 64u + 63u);
+      if (first > last) continue;
+      const unsigned width = last - first + 1u;
+      const std::uint64_t run = width == 64u ? ~std::uint64_t{0} : (std::uint64_t{1} << width) - 1u;
+      mask[word] = run << (first - word * 64u);
+    }
+    return mask;
   };
-  const bool window1 = spans(s_.wh0, s_.wh1) != ((bits & 0x01u) != 0u);
-  const bool window2 = spans(s_.wh2, s_.wh3) != ((bits & 0x04u) != 0u);
+  const std::array<std::uint64_t, 4> window1 = span(s_.wh0, s_.wh1);
+  const std::array<std::uint64_t, 4> window2 = span(s_.wh2, s_.wh3);
 
-  const bool enable1 = (bits & 0x02u) != 0u;
-  const bool enable2 = (bits & 0x08u) != 0u;
-  if (!enable1) return enable2 && window2;
-  if (!enable2) return window1;
+  for (unsigned index = 0u; index < d_.windows.covers.size(); ++index) {
+    // The three selectors hold a layer in each nibble — BG1, BG3 and OBJ in the low
+    // one, BG2, BG4 and the color window in the high — and the two logic registers
+    // give every layer a pair of bits of its own, the four backgrounds filling one
+    // register and the sprites and the color window the low half of the other.
+    const std::uint8_t selector =
+        index < 2u ? s_.w12sel : (index < 4u ? s_.w34sel : s_.wobjsel);
+    const unsigned bits = (selector >> ((index & 1u) * 4u)) & 0x0Fu;
+    const std::uint8_t logic = index < 4u ? s_.wbglog : s_.wobjlog;
+    const unsigned op = (logic >> ((index & 3u) * 2u)) & 0x03u;
 
-  // Both enabled: the logic the layer's own pair of bits names. XNOR is the
-  // inverse of XOR, which is the two agreeing.
-  switch (op) {
-    case 0u: return window1 || window2;   // OR
-    case 1u: return window1 && window2;   // AND
-    case 2u: return window1 != window2;   // XOR
-    default: return window1 == window2;   // XNOR
+    // The layer's inversion bit replaces a window with its inverse.
+    const std::uint64_t invert1 = (bits & 0x01u) != 0u ? ~std::uint64_t{0} : 0u;
+    const std::uint64_t invert2 = (bits & 0x04u) != 0u ? ~std::uint64_t{0} : 0u;
+    const bool enable1 = (bits & 0x02u) != 0u;
+    const bool enable2 = (bits & 0x08u) != 0u;
+
+    std::array<std::uint64_t, 4>& covers = d_.windows.covers[index];
+    for (unsigned word = 0u; word < covers.size(); ++word) {
+      const std::uint64_t one = window1[word] ^ invert1;
+      const std::uint64_t two = window2[word] ^ invert2;
+      if (!enable1) {
+        covers[word] = enable2 ? two : 0u;
+      } else if (!enable2) {
+        covers[word] = one;
+      } else {
+        // Both enabled: the logic the layer's own pair of bits names. XNOR is the
+        // inverse of XOR, which is the two agreeing.
+        switch (op) {
+          case 0u: covers[word] = one | two; break;     // OR
+          case 1u: covers[word] = one & two; break;     // AND
+          case 2u: covers[word] = one ^ two; break;     // XOR
+          default: covers[word] = ~(one ^ two); break;  // XNOR
+        }
+      }
+    }
   }
+  d_.windows.valid = true;
 }
 
 bool Ppu::masked(Layer layer, std::uint8_t maskRegister, std::uint16_t x) const noexcept {
@@ -1082,10 +1127,10 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   // not enable shows nothing here, and one the windows mask shows nothing at this
   // dot, so the chart below falls through to whatever stands behind it.
   //
-  // The window registers are read here, at the dot they shape, and nothing about
-  // them is carried from one dot to the next — which is what lets a program move an
-  // edge part-way along a line, and what lets a transfer shape a window down the
-  // picture a line at a time.
+  // The windows are taken here, at the dot they shape, from masks a write to any
+  // window register drops, so every position drawn after a write sees it and none
+  // drawn before does — which is what lets a program move an edge part-way along a
+  // line, and what lets a transfer shape a window down the picture a line at a time.
   //
   // A mosaiced layer is read at its block's corner, and only there: the windows and
   // the screens above are taken at the dot itself, so a window can cut a block.
@@ -1094,14 +1139,18 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   for (unsigned index = 0u; index < backgrounds.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
-    const Position read = mosaicPosition(layer, x, in, half);
-    // Mode 7's layers are the field, read through the matrix; every other mode's
-    // are tilemaps of characters.
+    // Mode 7's layers are the field, read through the matrix at the block's corner
+    // line; every other mode's are tilemaps of characters, whose line is read with
+    // the column's tilemap entry.
     if (kept.field) {
-      if (index < 2u) backgrounds[index] = sampleField(layer, read.x, read.line);
+      if (index < 2u) {
+        const Position read = mosaicPosition(layer, x, in, half);
+        backgrounds[index] = sampleField(layer, read.x, read.line);
+      }
       continue;
     }
     if (const std::optional<Background>& described = kept.described[index]) {
+      const BlockColumn read = mosaicColumn(layer, x, half);
       backgrounds[index] = sample(*described, read.x, read.half);
     }
   }
@@ -1189,7 +1238,7 @@ void Ppu::decide(std::uint16_t x, const PpuInputs& in) noexcept {
     s_.lastMain.present = false;
     return;
   }
-  s_.lastMain = mainPixel(x, in, hiresAt()).decision;
+  s_.lastMain = mainPixel(x, in, hiresAt(), nullptr).decision;
 }
 
 Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
@@ -1203,16 +1252,18 @@ Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
     return Dot{.left = kBlack, .right = kBlack, .hires = hires};
   }
 
-  const MainPixel main = mainPixel(x, in, hires);
   if (!hires) {
+    const MainPixel main = mainPixel(x, in, false, nullptr);
     s_.lastMain = main.decision;
     const std::array<std::uint8_t, 4> colour = convert(main.colour);
     return Dot{.left = colour, .right = colour, .hires = false};
   }
 
   // The left half: the sub screen's own front-most pixel, or colour 0 where it shows
-  // nothing, drawn under the decision the main pixel to its left made.
+  // nothing, drawn under the decision the main pixel to its left made. The same
+  // pixel is the main pixel's addend where its math takes one from the sub screen.
   const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
+  const MainPixel main = mainPixel(x, in, true, &sub);
   std::uint16_t left = paletteColour(0u);
   if (sub.has_value()) left = sub->direct.has_value() ? *sub->direct : paletteColour(sub->word);
   const PpuState::MainDecision& before = s_.lastMain;
@@ -1228,7 +1279,8 @@ Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
   return Dot{.left = leftBytes, .right = convert(main.colour), .hires = true};
 }
 
-Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half) const noexcept {
+Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half,
+                              const std::optional<Resolved>* subScreen) const noexcept {
   // The front-most pixel of the main screen, and the colour it stands for — unless
   // $2130's upper region covers this position, which replaces that colour with
   // black before any arithmetic and is remembered, because a pixel clipped this way
@@ -1272,7 +1324,8 @@ Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half) c
   std::uint16_t addend = fixedColour();
   bool subBackdrop = true;
   if (fromSubScreen) {
-    const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
+    const std::optional<Resolved> sub =
+        subScreen != nullptr ? *subScreen : resolve(Screen::Sub, x, in, false);
     subBackdrop = !sub.has_value();
     if (sub.has_value()) addend = colourOf(sub);
   }
@@ -1453,8 +1506,10 @@ std::optional<std::uint16_t> Ppu::write(std::uint16_t offset, std::uint8_t value
   // What each background is and where it stands in the chart the chip reads out of
   // $2105-$210C and $2133, so a write to one of those is what makes its answer
   // stale. $2106 stands inside that span and describes nothing, and dropping on it
-  // costs one reading of eleven registers.
+  // costs one reading of eleven registers. Where the windows cover is read out of
+  // $2123-$212B, so a write to one of those makes it stale.
   if ((offset >= 0x2105u && offset <= 0x210Cu) || offset == 0x2133u) d_.dropDescriptions();
+  if (offset >= 0x2123u && offset <= 0x212Bu) d_.dropWindows();
 
   switch (offset) {
     case 0x2100: {  // INIDISP: forced blank and brightness

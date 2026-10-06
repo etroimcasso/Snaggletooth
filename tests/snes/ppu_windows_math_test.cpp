@@ -587,6 +587,26 @@ TEST(WindowMask, EachLayerIsMaskedOnItsOwnSelectorAndItsOwnBit) {
   EXPECT_EQ(draw(ppu).at(102u, kSpriteRow), kGreenOut);
 }
 
+TEST(WindowLogic, TheSpritesTakeTheirLogicFromTheLowPairOfTheirOwnRegister) {
+  // Both of the sprites' windows enabled — window 1 over 0-63, window 2 over
+  // 32-127 — combined by AND through $212B's low pair, with $212A's low pair, BG1's,
+  // left at OR. The sprites are masked where the two overlap and nowhere else.
+  PpuState ppu = screenWithSprite();
+  ppu.wh0 = 0u;
+  ppu.wh1 = 63u;
+  ppu.wh2 = 32u;
+  ppu.wh3 = 127u;
+  ppu.wobjsel = selector(true, false, true, false);
+  ppu.wobjlog = kAnd;
+  ppu.wbglog = kOr;
+  ppu.tmw = 0x10u;
+
+  const Picture picture = draw(ppu);
+  EXPECT_EQ(picture.at(10u, kSpriteRow), kWhiteOut);  // window 1 alone
+  EXPECT_EQ(picture.at(48u, kSpriteRow), kRedOut);    // both, so masked, and BG1 shows
+  EXPECT_EQ(picture.at(100u, kSpriteRow), kWhiteOut); // window 2 alone
+}
+
 // ---- when a window is read ----------------------------------------------------
 
 TEST(Windows, AnEdgeWrittenPartWayAlongALineChangesTheRestOfThatLine) {
@@ -718,6 +738,85 @@ TEST(Windows, TheColourWindowsLogicWrittenPartWayAlongALineMovesTheBlackRegion) 
   EXPECT_EQ(picture.at(60u, kWrittenRow), never.at(60u, kWrittenRow));
   EXPECT_EQ(picture.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
   EXPECT_EQ(picture.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+}
+
+// The comparison the three cases above make, for `port` written to `value`
+// part-way along line 50, where `after` is `before` holding that value throughout.
+void expectDividedByTheWrite(const PpuState& before, const PpuState& after, std::uint8_t port,
+                             std::uint8_t value) {
+  const Picture never = draw(before);
+  const Picture always = draw(after);
+  const Picture picture = drawWith(before, storePort(port, value), 50u, 300u);
+
+  EXPECT_NE(never.at(60u, kWrittenRow), always.at(60u, kWrittenRow));
+  EXPECT_NE(never.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_NE(never.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+  EXPECT_EQ(picture.at(60u, kWrittenRow), never.at(60u, kWrittenRow));
+  EXPECT_EQ(picture.at(66u, kWrittenRow), always.at(66u, kWrittenRow));
+  EXPECT_EQ(picture.at(80u, kWrittenRow), always.at(80u, kWrittenRow));
+}
+
+TEST(Windows, TheFirstWindowsLeftEdgeWrittenPartWayAlongALineMasksTheRestOfThatLine) {
+  // $2126 <- 0 under BG1's window 1, which spans 200-255 before the write and the
+  // whole line after it.
+  PpuState before = bg1Window(200u, 255u);
+  PpuState after = before;
+  after.wh0 = 0u;
+  expectDividedByTheWrite(before, after, 0x26u, 0u);
+}
+
+TEST(Windows, TheSecondWindowsLeftEdgeWrittenPartWayAlongALineMasksTheRestOfThatLine) {
+  // $2128 <- 0 under BG1's window 2 alone, which spans 200-255 before the write and
+  // the whole line after it.
+  PpuState before = screen();
+  before.wh2 = 200u;
+  before.wh3 = 255u;
+  before.w12sel = selector(false, false, true, false);
+  before.tmw = 0x01u;
+  PpuState after = before;
+  after.wh2 = 0u;
+  expectDividedByTheWrite(before, after, 0x28u, 0u);
+}
+
+TEST(Windows, TheSecondWindowsRightEdgeWrittenPartWayAlongALineMasksTheRestOfThatLine) {
+  // $2129 <- 255 under BG1's window 2 alone, which covers position 0 before the
+  // write and the whole line after it.
+  PpuState before = screen();
+  before.wh2 = 0u;
+  before.wh3 = 0u;
+  before.w12sel = selector(false, false, true, false);
+  before.tmw = 0x01u;
+  PpuState after = before;
+  after.wh3 = 255u;
+  expectDividedByTheWrite(before, after, 0x29u, 255u);
+}
+
+TEST(Windows, TheThirdAndFourthBackgroundsSelectorWrittenPartWayAlongALineMasksTheRestOfThatLine) {
+  // $2124 <- BG3's window 1 enable, over a window spanning the whole line, with BG3
+  // alone on the main screen: the positions after the landing show the backdrop.
+  PpuState before = screen();
+  before.tm = 0x04u;
+  before.wh0 = 0u;
+  before.wh1 = 255u;
+  before.w34sel = 0u;
+  before.tmw = 0x04u;
+  PpuState after = before;
+  after.w34sel = selector(true, false, false, false);
+  expectDividedByTheWrite(before, after, 0x24u, after.w34sel);
+}
+
+TEST(Windows, TheSpritesAndColorWindowsSelectorWrittenPartWayAlongALineMovesTheBlackRegion) {
+  // $2125 <- the color window's window 1 enable, over a window spanning the whole
+  // line, with $2130's top field naming the color window as where the main screen
+  // stands as black: the positions after the landing are black.
+  PpuState before = screen();
+  before.cgwsel = 0x80u;
+  before.wh0 = 0u;
+  before.wh1 = 255u;
+  before.wobjsel = 0u;
+  PpuState after = before;
+  after.wobjsel = highLayer(selector(true, false, false, false));
+  expectDividedByTheWrite(before, after, 0x25u, after.wobjsel);
 }
 
 TEST(Windows, ASnapshotRestoredPartWayAlongALineMasksAsTheRestoredSelectorSays) {
