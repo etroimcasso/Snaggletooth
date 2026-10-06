@@ -19,10 +19,24 @@ namespace {
 // The byte the converter drives for one five-bit channel at brightness N: the
 // exact rational value * (N + 1) * 255 / (31 * 16), rounded once, in integers.
 constexpr unsigned kFullScale = 31u * 16u;
-[[nodiscard]] std::uint8_t channelByte(unsigned value, unsigned brightness) noexcept {
+[[nodiscard]] constexpr std::uint8_t channelByte(unsigned value, unsigned brightness) noexcept {
   return static_cast<std::uint8_t>((value * (brightness + 1u) * 255u + kFullScale / 2u) /
                                    kFullScale);
 }
+
+// channelByte for every brightness and every five-bit value, indexed [brightness][value].
+// Row 0 is not black: the converter answers brightness 0 before it reads the table.
+constexpr std::array<std::array<std::uint8_t, 32>, 16> kChannelBytes = [] {
+  std::array<std::array<std::uint8_t, 32>, 16> table{};
+  for (unsigned brightness = 0u; brightness < 16u; ++brightness) {
+    for (unsigned value = 0u; value < 32u; ++value) {
+      table[brightness][value] = channelByte(value, brightness);
+    }
+  }
+  return table;
+}();
+static_assert(kChannelBytes[15][31] == 255u && kChannelBytes[15][23] == 189u &&
+              kChannelBytes[7][16] == channelByte(16u, 7u));
 
 // The character data's shape: eight rows of a bitplane fill eight words, so a pair
 // of bitplanes takes sixteen bytes and the next pair begins sixteen bytes on.
@@ -489,9 +503,8 @@ std::array<std::uint8_t, 4> Ppu::convert(std::uint16_t colour) const noexcept {
   // brightness of zero is the screen off, which is black whatever the word holds.
   const unsigned brightness = s_.inidisp & 0x0Fu;
   if (brightness == 0u) return {0u, 0u, 0u, 255u};
-  return {channelByte(colour & 0x1Fu, brightness),
-          channelByte((colour >> 5) & 0x1Fu, brightness),
-          channelByte((colour >> 10) & 0x1Fu, brightness), 255u};
+  const std::array<std::uint8_t, 32>& bytes = kChannelBytes[brightness];
+  return {bytes[colour & 0x1Fu], bytes[(colour >> 5) & 0x1Fu], bytes[(colour >> 10) & 0x1Fu], 255u};
 }
 
 Ppu::Background Ppu::registersOf(Layer layer) const noexcept {
