@@ -359,24 +359,28 @@ std::uint16_t Ppu::readLine(Layer layer, const PpuInputs& in) const noexcept {
   return static_cast<std::uint16_t>(at);
 }
 
-Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
-                                  bool half) const noexcept {
+Ppu::BlockColumn Ppu::mosaicColumn(Layer layer, std::uint16_t x, bool half) const noexcept {
   const unsigned index = static_cast<unsigned>(layer);
   const std::uint8_t mode = s_.bgmode & 0x07u;
   // The second Mode 7 layer's horizontal axis has a bit of its own.
   const bool across = mode == 7u && layer == Layer::Bg2 ? (s_.mosaic & 0x02u) != 0u
                                                          : ((s_.mosaic >> index) & 0x01u) != 0u;
   const unsigned width = (s_.mosaic >> 4) + 1u;
-  const std::uint16_t read = readLine(layer, in);
-  if (!across) return Position{.x = x, .line = read, .half = half};
+  if (!across) return BlockColumn{.x = x, .half = half};
   if (mode == 5u || mode == 6u) {
     // Counted in half-pixels: the corner is a multiple of twice the size, which is
     // always a left half.
     const unsigned halfPixel = 2u * x + (half ? 1u : 0u);
     const unsigned blockCorner = halfPixel - halfPixel % (2u * width);
-    return Position{.x = static_cast<std::uint16_t>(blockCorner / 2u), .line = read, .half = false};
+    return BlockColumn{.x = static_cast<std::uint16_t>(blockCorner / 2u), .half = false};
   }
-  return Position{.x = static_cast<std::uint16_t>(x - x % width), .line = read, .half = half};
+  return BlockColumn{.x = static_cast<std::uint16_t>(x - x % width), .half = half};
+}
+
+Ppu::Position Ppu::mosaicPosition(Layer layer, std::uint16_t x, const PpuInputs& in,
+                                  bool half) const noexcept {
+  const BlockColumn column = mosaicColumn(layer, x, half);
+  return Position{.x = column.x, .line = readLine(layer, in), .half = column.half};
 }
 
 void Ppu::rangeSprite(std::uint16_t line) noexcept {
@@ -526,12 +530,11 @@ Ppu::Offsets Ppu::scrollOf(Layer layer) const noexcept {
   return Offsets{.horizontal = s_.*kHorizontal[index], .vertical = s_.*kVertical[index]};
 }
 
-const Ppu::Derived::Descriptions& Ppu::descriptions() const noexcept {
+const Ppu::Derived::Descriptions& Ppu::rebuildDescriptions() const noexcept {
   // The four backgrounds and the chart as $2105-$210C and $2133 stand. Every write
   // to one of those drops this, so the first dot after such a write reads the
   // registers again and every dot until the next one reads what it found.
   Derived::Descriptions& kept = d_.descriptions;
-  if (kept.valid) return kept;
   for (unsigned index = 0u; index < kept.registers.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     kept.registers[index] = registersOf(layer);
@@ -1094,14 +1097,18 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
   for (unsigned index = 0u; index < backgrounds.size(); ++index) {
     const auto layer = static_cast<Layer>(index);
     if ((enables & (1u << index)) == 0u || masked(layer, maskRegister, x)) continue;
-    const Position read = mosaicPosition(layer, x, in, half);
-    // Mode 7's layers are the field, read through the matrix; every other mode's
-    // are tilemaps of characters.
+    // Mode 7's layers are the field, read through the matrix at the block's corner
+    // line; every other mode's are tilemaps of characters, whose line is read with
+    // the column's tilemap entry.
     if (kept.field) {
-      if (index < 2u) backgrounds[index] = sampleField(layer, read.x, read.line);
+      if (index < 2u) {
+        const Position read = mosaicPosition(layer, x, in, half);
+        backgrounds[index] = sampleField(layer, read.x, read.line);
+      }
       continue;
     }
     if (const std::optional<Background>& described = kept.described[index]) {
+      const BlockColumn read = mosaicColumn(layer, x, half);
       backgrounds[index] = sample(*described, read.x, read.half);
     }
   }
@@ -1189,7 +1196,7 @@ void Ppu::decide(std::uint16_t x, const PpuInputs& in) noexcept {
     s_.lastMain.present = false;
     return;
   }
-  s_.lastMain = mainPixel(x, in, hiresAt()).decision;
+  s_.lastMain = mainPixel(x, in, hiresAt(), nullptr).decision;
 }
 
 Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
@@ -1203,16 +1210,18 @@ Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
     return Dot{.left = kBlack, .right = kBlack, .hires = hires};
   }
 
-  const MainPixel main = mainPixel(x, in, hires);
   if (!hires) {
+    const MainPixel main = mainPixel(x, in, false, nullptr);
     s_.lastMain = main.decision;
     const std::array<std::uint8_t, 4> colour = convert(main.colour);
     return Dot{.left = colour, .right = colour, .hires = false};
   }
 
   // The left half: the sub screen's own front-most pixel, or colour 0 where it shows
-  // nothing, drawn under the decision the main pixel to its left made.
+  // nothing, drawn under the decision the main pixel to its left made. The same
+  // pixel is the main pixel's addend where its math takes one from the sub screen.
   const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
+  const MainPixel main = mainPixel(x, in, true, &sub);
   std::uint16_t left = paletteColour(0u);
   if (sub.has_value()) left = sub->direct.has_value() ? *sub->direct : paletteColour(sub->word);
   const PpuState::MainDecision& before = s_.lastMain;
@@ -1228,7 +1237,8 @@ Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
   return Dot{.left = leftBytes, .right = convert(main.colour), .hires = true};
 }
 
-Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half) const noexcept {
+Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half,
+                              const std::optional<Resolved>* subScreen) const noexcept {
   // The front-most pixel of the main screen, and the colour it stands for — unless
   // $2130's upper region covers this position, which replaces that colour with
   // black before any arithmetic and is remembered, because a pixel clipped this way
@@ -1272,7 +1282,8 @@ Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half) c
   std::uint16_t addend = fixedColour();
   bool subBackdrop = true;
   if (fromSubScreen) {
-    const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
+    const std::optional<Resolved> sub =
+        subScreen != nullptr ? *subScreen : resolve(Screen::Sub, x, in, false);
     subBackdrop = !sub.has_value();
     if (sub.has_value()) addend = colourOf(sub);
   }
