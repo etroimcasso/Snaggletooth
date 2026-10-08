@@ -16,7 +16,10 @@
 // charges each cycle its region's cost as the CPU makes it. The APU keeps its own
 // slower clock: the machine advances it by the exact rational share of the master
 // cycles that have elapsed, computed in integer arithmetic so a run is
-// reproducible to the byte.
+// reproducible to the byte. Those cycles run inside the CPU's on the calling
+// thread, or, on a machine built with SnesConfig::apuThread on, on a thread the
+// machine owns while a call is in progress; when the call returns, the two machines
+// stand at one master time either way.
 //
 // step() runs one CPU instruction and returns the master cycles it took. run()
 // spends an exact master-cycle budget and may stop part-way through an
@@ -35,11 +38,15 @@
 // every internal CPU cycle, in the order they happen.
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "snaggletooth/apu/apu.h"
@@ -395,6 +402,16 @@ struct SnesConfig {
   // The image belongs to whoever supplies it and is never carried here. Ignored
   // when iplStub is off, which skips the boot sequence entirely.
   std::optional<std::array<std::uint8_t, kIplWindowBytes>> bootRom = std::nullopt;
+
+  // Where the audio machine's cycles run. Off, the default, they run inside the
+  // console's cycles on the calling thread. On, they run on a thread the machine
+  // owns, beside the calling thread, while step(), run() or a call into the guest is
+  // in progress: the calling thread does less work per emulated second, for a host
+  // whose cores are each too slow to run the whole machine at speed, and the process
+  // does more, since that thread spins on its core for as long as a call is in
+  // flight. The bytes are the same either way: the same state at every return, the
+  // same audio frames, the same byte from every read of a port.
+  bool apuThread = false;
 };
 
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM
@@ -551,16 +568,28 @@ class Snes {
   // runs in the machine's own state, and a move carries the machine after its
   // state to the new place. A copy would run two audio machines over one state.
   // The move names every member in `snes.cpp`; a member added to the machine
-  // joins that list.
+  // joins that list. On a machine built with SnesConfig::apuThread on, a move stops
+  // the moved machine's audio thread first, and the machine in the new place starts
+  // its own at its first call.
   Snes(const Snes&) = delete;
   Snes& operator=(const Snes&) = delete;
   Snes(Snes&& moved) noexcept;
   Snes& operator=(Snes&&) = delete;
 
+  // Stops the audio thread, where the machine runs one, and waits for it to end. A
+  // machine is destroyed between calls, never from inside one of its own observers.
+  ~Snes();
+
   // The whole machine as a value. state() is coherent at any cycle the machine has
   // stopped on, mid-instruction included, and answers the machine's own state
   // without copying it; restore() replaces the mutable machine and resumes exactly
-  // there, keeping the cartridge and clock rate in place.
+  // there, keeping the cartridge and clock rate in place. Between calls all of it
+  // is coherent. On a machine built with SnesConfig::apuThread on, the audio
+  // machine's part, `apu`, runs on the audio thread inside a call: it is coherent in
+  // the frame and save reports, which wait for the audio machine, and in the audio
+  // machine's observer's calls, which run on that thread. A bus observer, an access
+  // watcher or an instruction watcher there reads the audio machine through peekApu
+  // and peekApuRegister, which wait for it.
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
   // Takes the state by const reference rather than by value: a SnesState is a quarter
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
@@ -598,12 +627,23 @@ class Snes {
   // took. Called after run() stopped mid-instruction, it finishes the instruction
   // in progress. A halted core runs one idle cycle and returns its cost, so the
   // APU keeps going while the CPU sits.
+  //
+  // The audio machine's share of each cycle runs at the cycle's end on the calling
+  // thread. On a machine built with SnesConfig::apuThread on, it runs on the
+  // machine's audio thread during the call instead; a read of a port inside the call
+  // waits for the audio machine to reach the read's cycle, and a write lands at its
+  // own cycle. When step() returns, the audio machine stands at the same master time
+  // as the console either way, and nothing runs until the next call. The audio
+  // thread starts at a machine's first call and parks when no call has come for a
+  // while.
   std::uint32_t step();
 
   // Runs exactly `budget` master cycles and returns that count. A cycle is priced
   // by its region, so the machine may pass the budget part-way through a cycle; the
   // overshoot is carried into the next call, making run(a) then run(b) advance the
-  // machine exactly as run(a + b). run(0) runs nothing.
+  // machine exactly as run(a + b). run(0) runs nothing. The audio machine's cycles
+  // run as they do under step(), and it stands at the console's master time when
+  // run() returns.
   std::uint64_t run(std::uint64_t budget);
 
   // Drains the 32 kHz stereo frames the APU has produced since the last drain. The
@@ -657,26 +697,32 @@ class Snes {
   [[nodiscard]] SaveObserver* saveObserver() const noexcept { return saveObserver_; }
 
   // The audio machine's observer (ApuObserver, `apu/apu.h`), told every access
-  // the sound CPU makes and every instruction boundary it crosses, under the
-  // same terms as the bus observer: the host's object, not part of the state,
-  // none by default. The audio machine runs inside the CPU's cycles, so its
-  // report arrives from within step() and run().
-  void setApuObserver(ApuObserver* observer) noexcept { apu_.setObserver(observer); }
+  // the sound CPU makes and every instruction boundary it crosses: the host's
+  // object, not part of the state, none by default, set between calls. Its reports
+  // arrive from inside step(), run() and the calls into the guest, in the order the
+  // sound CPU made them, on the thread the audio machine's cycles run on: the
+  // calling thread, from inside the console's cycles, or on a machine built with
+  // SnesConfig::apuThread on, the machine's audio thread while the console runs on
+  // beside it. There the object must be safe to call on the audio thread and a
+  // report does not throw; inside a report, state().apu, peekApu and peekApuRegister
+  // answer the audio machine as it stands, and the rest of state() is the
+  // console's, moving on the calling thread, and is not read. A call into the guest
+  // from a report is refused on either thread.
+  void setApuObserver(ApuObserver* observer) noexcept;
   [[nodiscard]] ApuObserver* apuObserver() const noexcept { return apu_.observer(); }
 
   // The audio machine's byte at `address`, without a fetch: Apu::peek on the live
   // audio machine — the RAM, or the boot-ROM image where one is mapped, and at
-  // $00F0-$00FF the RAM beneath the registers.
-  [[nodiscard]] std::uint8_t peekApu(std::uint16_t address) const noexcept {
-    return apu_.peek(address);
-  }
+  // $00F0-$00FF the RAM beneath the registers. Called inside a step() or run() of a
+  // machine built with SnesConfig::apuThread on, from a bus observer's call say, it
+  // first waits for the audio machine to reach the console's master time.
+  [[nodiscard]] std::uint8_t peekApu(std::uint16_t address) const noexcept;
 
   // The byte the sound CPU's read of a register at `address` ($00F0-$00FF) would
   // return, with nothing moved: Apu::peekRegister on the live audio machine.
-  // std::nullopt for any other address.
-  [[nodiscard]] std::optional<std::uint8_t> peekApuRegister(std::uint16_t address) const noexcept {
-    return apu_.peekRegister(address);
-  }
+  // std::nullopt for any other address. It waits for the audio machine as peekApu
+  // does.
+  [[nodiscard]] std::optional<std::uint8_t> peekApuRegister(std::uint16_t address) const noexcept;
 
   // A host reaching into the machine's memory by 24-bit bus address, without
   // spending a cycle and without a register's side effect. peek answers the
@@ -817,7 +863,9 @@ class Snes {
   // machine running — its cycles are real and priced by region, the beam moves,
   // the audio machine is paced, a transfer the routine arms runs and a hardware
   // interrupt due is taken — and they are spent from the budget the host runs,
-  // so state().master moves and the next run() runs that much less.
+  // so state().master moves and the next run() runs that much less. The audio
+  // machine's cycles run where they run under step(), and it stands at the
+  // console's master time when the call returns.
   //
   // callInContext runs the routine in the guest's own context: the registers and
   // the stack pointer as they stand, the landing pushed where the guest's own
@@ -858,7 +906,8 @@ class Snes {
   // Standin::None, when the entry's own bank does not map it (addressable(entry,
   // 1)), or when it is made from inside a host's call the machine makes during a
   // cycle — an access watcher's, the bus observer's, or the audio machine's
-  // observer's. An instruction watcher is told between instructions, and a call
+  // observer's, which on a machine built with SnesConfig::apuThread on comes on the
+  // audio thread and is refused by the thread it comes on. An instruction watcher is told between instructions, and a call
   // from inside its call, at any depth, is the same call. The frame and save
   // observers are told at a cycle's end, and a call from inside their reports
   // runs the machine to its boundary first, as above; a frame the routine
@@ -870,6 +919,42 @@ class Snes {
                    std::size_t guard);
 
  private:
+  // The audio thread's side of a call: entered by step(), run(), callInContext and
+  // callOnStack, it starts the thread on a machine's first call, sets the flag the
+  // thread spins on while a call is in flight and wakes the thread if it parked;
+  // leaving, it waits for the audio machine to reach the console's master time, so
+  // a report that throws still leaves the two machines at one time. A call made
+  // from inside a call, a guest call from a frame report say, enters a flight
+  // already in progress and leaves it in progress.
+  struct Flight {
+    explicit Flight(Snes& machine);
+    ~Flight();
+    Flight(const Flight&) = delete;
+    Flight& operator=(const Flight&) = delete;
+    Snes& m;
+    bool outer = false;  // this flight set the flag and clears it
+  };
+
+  // The audio thread's loop, its park, and its start and stop (Flight above, the
+  // link below).
+  void apuThreadBody() noexcept;
+  void parkApuThread(std::uint64_t done, std::uint32_t tail);
+  void startApuThread();
+  void stopApuThread() noexcept;
+  // Waits until the audio machine has run every cycle the console has released and
+  // applied every port write it was handed, so it stands at the console's master
+  // time. A machine built with the thread off has nothing to wait for, and neither
+  // has a call made on the audio thread itself.
+  void waitApu() const noexcept;
+  // Whether the calling thread is the machine's audio thread.
+  [[nodiscard]] bool onApuThread() const noexcept;
+  // A write to a port from the bus, handed to the audio thread to land at the
+  // audio cycle the console has reached.
+  void pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept;
+  // step() and run() inside a flight, on a machine built with the audio thread.
+  std::uint32_t stepInFlight();
+  std::uint64_t runInFlight(std::uint64_t budget);
+
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
   // internal cycle drives an address without an access and costs the fast rate.
@@ -992,8 +1077,12 @@ class Snes {
   // Makes the frame and save reports the cycle just closed owes, after writing
   // the register file back. Called at the end of machineCycle, outside the
   // cycle, and from nowhere else: the line that finishes a frame cannot be left
-  // half done, and a host's report may throw.
-  void deliverFinished();
+  // half done, and a host's report may throw. The test is made here, in every
+  // cycle; the reports, owed once a frame, are made out of line by deliverReports.
+  void deliverFinished() {
+    if (frameFinished_ || saveFinished_) [[unlikely]] deliverReports();
+  }
+  void deliverReports();
   // Hands the finished picture to the frame observer: the rows the frame's own
   // vertical blank left below it, the frame's parity, and the raster the dots
   // wrote. Called at the end of the cycle in which the beam reaches the next
@@ -1314,12 +1403,16 @@ class Snes {
 
   Cpu65816 cpu_;                     // the live CPU while the machine runs
   SnesState state_;                  // the machine's state: work RAM, registers, counters and the audio machine's whole state are authoritative here
-  Apu apu_;                          // the live audio machine, paced by the interleave, running in state_.apu (declared after it: the storage exists before the machine built over it)
+  Apu apu_;                          // the live audio machine, running in state_.apu (declared after it: the storage exists before the machine built over it)
   std::vector<std::uint8_t> rom_;    // the cartridge image, fixed for the machine's life
   Region region_ = Region::Ntsc;     // the clock rate, fixed for the machine's life
   CartridgeBoard board_;             // the board the image is on: its map, its chip and its save, fixed with it
   std::array<Page, kPages> pages_{}; // what each page of the bus reaches, built from the two above and fixed with them
   bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
+  // The audio machine's cycles run on the audio thread (`link_`, below), fixed with the
+  // machine; in the bytes beside the flag above, ahead of the ratio every cycle's close
+  // reads with it.
+  bool apuThreaded_ = false;
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
@@ -1452,6 +1545,48 @@ class Snes {
   };
   InstructionWatcher* instructionWatcher_ = nullptr;  // told each armed instruction reached; none by default
   std::unique_ptr<StandinSet> standins_;              // the armed instructions; null until the first arm
+
+  // The audio thread and the cells it shares with the calling thread. The console
+  // releases audio cycles by adding them to `released`; the thread runs them and
+  // publishes the count it has run in `done`, and never runs past `released`. Both
+  // count from zero at the machine's construction and are equal whenever the two
+  // machines stand at one master time, so neither is state: a snapshot carries
+  // neither, and a restore leaves them equal. A write to a port from the bus joins
+  // the ring stamped with `released` as it stands, which is the audio cycle the
+  // write lands before; the thread applies it once `done` reaches the stamp and
+  // never runs past a stamp it has not applied. A read waits for `done` to reach
+  // `released` and the ring to drain. Each cell sits in a cache line of its own,
+  // held apart by padding written as an array.
+  struct PortWrite {
+    std::uint64_t at = 0;     // the audio cycle count the write lands at
+    std::uint8_t index = 0;   // the port, 0-3
+    std::uint8_t value = 0;
+  };
+  static constexpr std::uint32_t kPortRing = 1024u;  // writes in flight before the console waits for the thread
+  using LinePad = std::array<std::uint8_t, 128>;    // a cache line on the widest machine the library runs on
+  struct ApuLink {
+    std::atomic<std::uint64_t> released{0};  // audio cycles the console has released; written by the console
+    LinePad pad0{};
+    std::atomic<std::uint64_t> done{0};      // audio cycles the thread has run; written by the thread
+    LinePad pad1{};
+    std::atomic<bool> inFlight{false};       // a call is in progress; the thread spins rather than parks
+    LinePad pad2{};
+    std::atomic<bool> stop{false};           // the thread ends at its next look
+    LinePad pad3{};
+    std::atomic<bool> parked{false};         // the thread waits on `wake`
+    LinePad pad4{};
+    std::atomic<std::uint32_t> head{0};      // ring entries written; by the console
+    LinePad pad5{};
+    std::atomic<std::uint32_t> tail{0};      // ring entries applied; by the thread
+    LinePad pad6{};
+    std::array<PortWrite, kPortRing> ring{};
+    LinePad pad7{};
+    std::mutex mutex;                        // guards the park
+    std::condition_variable wake;
+    std::thread thread;
+    std::thread::id id;                      // the thread's id, set before its first cycle is released
+  };
+  ApuLink link_;
 
   // What a page reaches, for the watch: one 8 KB run of one space — the space
   // and the index of the run's first byte — no byte at all, or bytes the page

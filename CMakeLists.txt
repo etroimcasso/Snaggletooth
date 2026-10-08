@@ -49,6 +49,10 @@ set_target_properties(snaggletooth PROPERTIES CXX_EXTENSIONS OFF)
 target_include_directories(snaggletooth PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+# A machine built with SnesConfig::apuThread on runs the audio unit's cycles on a thread it
+# owns, so the library links the platform's thread library, and so does everything that links it.
+find_package(Threads REQUIRED)
+target_link_libraries(snaggletooth PUBLIC Threads::Threads)
 
 # Warnings are errors on Snaggletooth's own targets only — never imposed on a parent build or
 # on fetched dependencies.
@@ -656,6 +660,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/instruction_watch_test.cpp
     tests/snes/guest_call_test.cpp
     tests/snes/host_surface_test.cpp
+    tests/snes/apu_thread_test.cpp
     tests/snes/observer_test.cpp
     tests/snes/save_observer_test.cpp
     tests/snes/timing_test.cpp
@@ -756,5 +761,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   endif()
 
   include(GoogleTest)
-  gtest_discover_tests(snaggletooth_tests)
+  # Listing the suite's cases for ctest runs the binary once after each link; a build at
+  # low priority on a busy machine takes longer over five thousand cases than the default
+  # five seconds allows.
+  gtest_discover_tests(snaggletooth_tests DISCOVERY_TIMEOUT 60)
 endif()

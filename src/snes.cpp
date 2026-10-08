@@ -5,10 +5,39 @@
 #include <cstddef>
 #include <utility>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define SNAGGLETOOTH_NOINLINE __declspec(noinline)
+#else
+#define SNAGGLETOOTH_NOINLINE __attribute__((noinline))
+#endif
+
 #include "snes_ipl_stub.h"
 
 namespace snaggletooth {
 namespace {
+
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "the audio thread's counters are read and written without a lock");
+
+// One turn of a spin: tells the core the thread is waiting on another, which saves
+// power and gives a sibling hardware thread the core.
+inline void cpuRelax() noexcept {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+  _mm_pause();
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+  __yield();
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+  __builtin_ia32_pause();
+#elif (defined(__GNUC__) || defined(__clang__)) && defined(__aarch64__)
+  asm volatile("yield");
+#endif
+}
+
+// How many turns the audio thread spins once no call is in flight before it parks.
+// A host that calls again within it, a line or a frame later, finds the thread
+// awake; one that stops calling leaves no core busy.
+constexpr std::uint32_t kApuSpinGrace = 1u << 16;
 
 // The APU advances by an exact rational share of the master cycles that elapse.
 // The APU runs off a 24.576 MHz crystal divided by 24 — a 1,024,000 Hz cycle rate
@@ -119,7 +148,8 @@ constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 Snes::Snes(SnesConfig config)
     : apu_(&state_.apu),  // the audio machine runs in the snapshot's own storage, seeded at power-on
       rom_(config.rom.begin(), config.rom.end()),
-      region_(config.region) {
+      region_(config.region),
+      apuThreaded_(config.apuThread) {
   // The board is the header's, with the map and the save the caller overrides.
   board_ = cartridgeBoard(rom_);
   if (config.map.has_value()) board_.map = *config.map;
@@ -152,7 +182,9 @@ Snes::Snes(SnesConfig config)
 }
 
 Snes::Snes(Snes&& moved) noexcept
-    : cpu_(std::move(moved.cpu_)),
+    // The moved machine's audio thread holds that machine's address, so it ends
+    // before anything leaves; this machine starts its own at its first call.
+    : cpu_((moved.stopApuThread(), std::move(moved.cpu_))),
       state_(std::move(moved.state_)),
       apu_(std::move(moved.apu_), &state_.apu),  // the audio machine follows its state here
       rom_(std::move(moved.rom_)),
@@ -160,6 +192,7 @@ Snes::Snes(Snes&& moved) noexcept
       board_(moved.board_),
       pages_(moved.pages_),
       bootsAudio_(moved.bootsAudio_),
+      apuThreaded_(moved.apuThreaded_),
       apuNum_(moved.apuNum_),
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
@@ -178,13 +211,15 @@ Snes::Snes(Snes&& moved) noexcept
       frameWide_(moved.frameWide_),
       framePictureLines_(moved.framePictureLines_),
       frameWidth_(moved.frameWidth_),
+      frameField_(moved.frameField_),
       saveObserver_(moved.saveObserver_),
       saveChanged_(moved.saveChanged_),
       saveFinished_(moved.saveFinished_),
       accessWatcher_(moved.accessWatcher_),
       armed_(std::move(moved.armed_)),
       instructionWatcher_(moved.instructionWatcher_),
-      standins_(std::move(moved.standins_)) {
+      standins_(std::move(moved.standins_)),
+      link_() {
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.saveObserver_ = nullptr;
@@ -192,11 +227,14 @@ Snes::Snes(Snes&& moved) noexcept
   moved.instructionWatcher_ = nullptr;
 }
 
+Snes::~Snes() { stopApuThread(); }
+
 void Snes::setFrameObserver(FrameObserver* observer) noexcept {
   frameObserver_ = observer;
 }
 
 void Snes::restore(const SnesState& state) {
+  waitApu();  // the audio machine's state is replaced along with the rest
   state_ = state;
   // The caller replaced the save window along with everything else, which changes
   // it as surely as a store does — and a save left disagreeing with the machine is
@@ -241,6 +279,7 @@ std::uint16_t Snes::resetVector() const noexcept {
 }
 
 void Snes::reset() {
+  waitApu();  // the audio machine is reset along with the rest
   // The CPU: the registers its reset leaves, at the cartridge's vector.
   state_.cpu = afterReset(state_.cpu, resetVector());
 
@@ -325,7 +364,9 @@ void Snes::closeCycle() {
   // under the mode the cycle leaves behind, the interrupt lines take their levels from
   // the flags and enables as they now stand — so a register write this cycle is
   // settled for the next fetch to sample — and the master counter advances, paying the
-  // audio machine the share of it that its own crystal owes.
+  // audio machine the share of it that its own crystal owes. The share runs here, or,
+  // on a machine built with the audio thread, is released to that thread, which runs
+  // it beside the console.
   settleTimer();
   cpu_.setNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
   cpu_.setIrqLine(state_.timeup);
@@ -333,7 +374,14 @@ void Snes::closeCycle() {
   state_.apuPhase += lastCost_ * apuNum_;
   const std::uint64_t apuCycles = state_.apuPhase / apuDen_;
   state_.apuPhase %= apuDen_;
-  if (apuCycles != 0) apu_.run(apuCycles);
+  if (apuCycles != 0) {
+    if (apuThreaded_) [[unlikely]] {
+      link_.released.store(link_.released.load(std::memory_order_relaxed) + apuCycles,
+                           std::memory_order_release);
+    } else {
+      apu_.run(apuCycles);
+    }
+  }
 }
 
 void Snes::refreshCycle() {
@@ -351,8 +399,11 @@ void Snes::refreshCycle() {
 void Snes::machineCycle() {
   // Every host callback the cycle reaches — a watcher's, the bus observer's, the
   // audio machine's — runs inside it, and a call into the guest made from one is
-  // refused. The instruction watch runs between instructions and the frame and save
-  // reports after the cycle has closed, and both are outside it.
+  // refused. On a machine built with the audio thread, the audio machine's observer
+  // is told on that thread instead, and a call from it is refused by the thread's
+  // identity. The instruction watch runs between
+  // instructions and the frame and save reports after the cycle has closed, and both
+  // are outside it.
   insideCycle_ = true;
   if (state_.refreshLeft != 0u) {
     refreshCycle();
@@ -422,7 +473,7 @@ void Snes::machineCycle() {
   deliverFinished();
 }
 
-void Snes::deliverFinished() {
+void Snes::deliverReports() {
   // A picture the beam finished this cycle, and the save window that frame
   // changed, go to whoever is watching once the cycle has closed: the master
   // counter advanced, the audio machine paid, the interrupt lines settled. The
@@ -430,7 +481,6 @@ void Snes::deliverFinished() {
   // one that threw — is the machine at this cycle's end. Each flag clears before
   // its report, so a report that throws is not made again, and the one after it
   // is made at the end of the next cycle.
-  if (!frameFinished_ && !saveFinished_) return;
   sync();
   if (frameFinished_) {
     frameFinished_ = false;
@@ -443,6 +493,11 @@ void Snes::deliverFinished() {
 }
 
 std::uint32_t Snes::step() {
+  // A machine built with the audio thread runs the call inside a flight, entered here
+  // and the call made again from inside it; the default machine runs it as it stands.
+  if (apuThreaded_ && !link_.inFlight.load(std::memory_order_relaxed)) [[unlikely]] {
+    return stepInFlight();
+  }
   const std::uint64_t before = state_.master;
   // A refresh the last call left part-way through is spent first: it is not an
   // instruction, and the instruction this call owes is the one after it.
@@ -460,13 +515,20 @@ std::uint32_t Snes::step() {
 }
 
 std::uint64_t Snes::run(std::uint64_t budget) {
+  // A flight on a machine built with the audio thread, as step() enters one.
+  if (apuThreaded_ && !link_.inFlight.load(std::memory_order_relaxed)) [[unlikely]] {
+    return runInFlight(budget);
+  }
   state_.consumed += budget;
   while (state_.master < state_.consumed) machineCycle();
   sync();
   return budget;
 }
 
-std::vector<StereoFrame> Snes::takeFrames() { return apu_.takeFrames(); }
+std::vector<StereoFrame> Snes::takeFrames() {
+  waitApu();
+  return apu_.takeFrames();
+}
 
 std::uint32_t Snes::accessCost(std::uint32_t address) const noexcept {
   const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
@@ -632,14 +694,17 @@ void Snes::writeOam(std::uint16_t address, std::uint8_t value) noexcept {
 }
 
 void Snes::writeApuRam(std::uint16_t address, std::uint8_t value) noexcept {
+  waitApu();
   apu_.writeRam(address, value);
 }
 
 void Snes::writeApuPort(std::uint8_t index, std::uint8_t value) noexcept {
+  waitApu();
   apu_.writePort(static_cast<std::uint8_t>(index & 3u), value);
 }
 
 void Snes::writeApuDspRegister(std::uint8_t index, std::uint8_t value) noexcept {
+  waitApu();
   apu_.writeDspRegister(index, value);
 }
 
@@ -654,6 +719,7 @@ void Snes::setCpuState(const Cpu65816State& state) {
 }
 
 std::size_t Snes::takeFrames(std::span<StereoFrame> into) noexcept {
+  waitApu();
   return apu_.takeFrames(into);
 }
 
@@ -747,6 +813,9 @@ std::uint8_t Snes::routeReadRaw(std::uint32_t address, std::uint8_t cycle) {
         return v.has_value() ? latch(*v) : state_.mdr;
       }
       if (offset >= 0x2140 && offset <= 0x217F) {
+        // The latch as the audio machine has it at this cycle: every cycle the
+        // console released before this one run, every write before this one applied.
+        if (apuThreaded_) [[unlikely]] waitApu();
         return latch(apu_.readPort(static_cast<std::uint8_t>(offset & 3u)));
       }
       if (offset >= 0x2180 && offset <= 0x2183) return readWramPort(offset, cycle);
@@ -784,7 +853,13 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
         return;
       }
       if (offset >= 0x2140 && offset <= 0x217F) {
-        apu_.writePort(static_cast<std::uint8_t>(offset & 3u), value);
+        // The write lands before the audio machine runs this cycle's share, on the
+        // thread as here.
+        if (apuThreaded_) {
+          pushPortWrite(static_cast<std::uint8_t>(offset & 3u), value);
+        } else {
+          apu_.writePort(static_cast<std::uint8_t>(offset & 3u), value);
+        }
         return;
       }
       if (offset >= 0x2180 && offset <= 0x2183) {
@@ -893,6 +968,7 @@ std::optional<std::uint8_t> Snes::peekRegister(std::uint32_t address) const noex
     return Ppu::registerValue(state_.ppu, offset, ppuInputs()).value_or(state_.mdr);
   }
   if (offset >= 0x2140 && offset <= 0x217F) {
+    waitApu();
     return apu_.readPort(static_cast<std::uint8_t>(offset & 3u));
   }
   if (offset >= 0x2180 && offset <= 0x2183) return wramPortValue(offset);
@@ -1305,8 +1381,13 @@ bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard
   // an instruction — or inside a refresh, a transfer or an interrupt sequence —
   // then runs to the boundary exactly as step() would, those cycles the guest's
   // own, out of the budget the host runs next; the file taken there is the one
-  // the guest resumes at.
-  if (returns == Standin::None || insideCycle_ || !addressable(entry & 0xFFFFFFu, 1)) return false;
+  // the guest resumes at. A call from the audio thread is refused by the thread it
+  // comes on, before anything the console's own thread writes is read.
+  if (returns == Standin::None || onApuThread() || insideCycle_ ||
+      !addressable(entry & 0xFFFFFFu, 1)) {
+    return false;
+  }
+  const Flight flight{*this};
   while (!cpu_.atInstructionBoundary()) machineCycle();
   sync();
   const Cpu65816State before = state_.cpu;
@@ -1324,7 +1405,11 @@ bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard
 bool Snes::callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
                        std::size_t guard) {
   // Refused, or run to the boundary first, as callInContext is.
-  if (returns == Standin::None || insideCycle_ || !addressable(entry & 0xFFFFFFu, 1)) return false;
+  if (returns == Standin::None || onApuThread() || insideCycle_ ||
+      !addressable(entry & 0xFFFFFFu, 1)) {
+    return false;
+  }
+  const Flight flight{*this};
   while (!cpu_.atInstructionBoundary()) machineCycle();
   sync();
   Cpu65816State file = state_.cpu;
@@ -1708,6 +1793,9 @@ void Snes::redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore) {
 
 void Snes::deliverFrame() {
   if (frameObserver_ == nullptr || raster_.empty()) return;
+  // The audio machine at this cycle's end too, so state() inside the report is the
+  // whole machine there.
+  if (apuThreaded_) [[unlikely]] waitApu();
   const std::size_t bytes =
       static_cast<std::size_t>(framePictureLines_) * frameWidth_ * kPixelBytes;
   frameObserver_->frame(VideoFrame{
@@ -1720,6 +1808,7 @@ void Snes::deliverFrame() {
 
 void Snes::deliverSave() {
   if (saveObserver_ == nullptr) return;
+  if (apuThreaded_) [[unlikely]] waitApu();  // as deliverFrame waits
   saveObserver_->changed(std::span<const std::uint8_t>(state_.sram.data(), state_.sram.size()));
 }
 
@@ -2173,6 +2262,173 @@ void Snes::writeJoypadStrobe(std::uint8_t value) noexcept {
   const bool high = (value & 1u) != 0u;
   if (state_.joyStrobe && !high) latchJoypads();
   state_.joyStrobe = high;
+}
+
+// ---- the audio thread ---------------------------------------------------------
+// The flight, the thread and the waits. They sit after everything the console runs
+// each cycle, which keeps that code together whether or not a machine has the thread.
+
+// step() and run() inside a flight. Never inlined: step() and run() carry one test of
+// the flag on a machine without the thread, and none of this.
+SNAGGLETOOTH_NOINLINE std::uint32_t Snes::stepInFlight() {
+  const Flight flight{*this};
+  return step();
+}
+
+SNAGGLETOOTH_NOINLINE std::uint64_t Snes::runInFlight(std::uint64_t budget) {
+  const Flight flight{*this};
+  return run(budget);
+}
+
+Snes::Flight::Flight(Snes& machine) : m(machine) {
+  if (!m.apuThreaded_) return;
+  // Only the calling thread writes the flag, so a call inside a call reads its own
+  // store and leaves the flight to the call that began it.
+  if (m.link_.inFlight.load(std::memory_order_relaxed)) return;
+  outer = true;
+  if (!m.link_.thread.joinable()) m.startApuThread();
+  // The flag goes up before the parked flag is read, and the thread sets parked
+  // before it reads the flag again under the mutex: one of the two sees the other's
+  // store, so the thread is never left asleep through a flight.
+  m.link_.inFlight.store(true, std::memory_order_seq_cst);
+  if (m.link_.parked.load(std::memory_order_seq_cst)) {
+    const std::lock_guard<std::mutex> lock(m.link_.mutex);
+    m.link_.wake.notify_one();
+  }
+}
+
+Snes::Flight::~Flight() {
+  if (!m.apuThreaded_) return;
+  m.waitApu();
+  if (outer) m.link_.inFlight.store(false, std::memory_order_release);
+}
+
+void Snes::startApuThread() {
+  link_.thread = std::thread([this] { apuThreadBody(); });
+  // Set before the flight's flag goes up, so before the first audio cycle is
+  // released and before any report of the audio machine's observer.
+  link_.id = link_.thread.get_id();
+}
+
+void Snes::stopApuThread() noexcept {
+  if (!link_.thread.joinable()) return;
+  {
+    // Under the mutex, so a thread between its look at `stop` and its wait cannot
+    // miss it.
+    const std::lock_guard<std::mutex> lock(link_.mutex);
+    link_.stop.store(true, std::memory_order_seq_cst);
+  }
+  link_.wake.notify_one();
+  link_.thread.join();
+  link_.stop.store(false, std::memory_order_relaxed);
+  link_.id = std::thread::id{};
+}
+
+bool Snes::onApuThread() const noexcept {
+  return std::this_thread::get_id() == link_.id;
+}
+
+void Snes::waitApu() const noexcept {
+  if (!apuThreaded_) return;
+  const std::uint64_t released = link_.released.load(std::memory_order_relaxed);
+  const std::uint32_t head = link_.head.load(std::memory_order_relaxed);
+  if (link_.done.load(std::memory_order_acquire) == released &&
+      link_.tail.load(std::memory_order_acquire) == head) {
+    return;
+  }
+  // The audio thread asking from inside its own run stands where it stands.
+  if (onApuThread()) return;
+  while (link_.done.load(std::memory_order_acquire) != released ||
+         link_.tail.load(std::memory_order_acquire) != head) {
+    cpuRelax();
+  }
+}
+
+void Snes::pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept {
+  const std::uint32_t head = link_.head.load(std::memory_order_relaxed);
+  // A full ring waits for the thread to apply the oldest write, so none is lost.
+  while (head - link_.tail.load(std::memory_order_acquire) >= kPortRing) cpuRelax();
+  link_.ring[head % kPortRing] = PortWrite{
+      .at = link_.released.load(std::memory_order_relaxed),
+      .index = index,
+      .value = value,
+  };
+  // Published before the cycle's share is released, so the thread cannot run that
+  // share without seeing the write.
+  link_.head.store(head + 1u, std::memory_order_release);
+}
+
+void Snes::apuThreadBody() noexcept {
+  std::uint64_t done = link_.done.load(std::memory_order_relaxed);
+  std::uint32_t tail = link_.tail.load(std::memory_order_relaxed);
+  for (;;) {
+    // Wait for work: spin while a call is in flight and for the grace after it,
+    // then park until a call comes.
+    std::uint32_t spins = 0;
+    for (;;) {
+      if (link_.stop.load(std::memory_order_acquire)) return;
+      if (link_.released.load(std::memory_order_acquire) != done ||
+          link_.head.load(std::memory_order_acquire) != tail) {
+        break;
+      }
+      if (link_.inFlight.load(std::memory_order_relaxed)) {
+        spins = 0;
+      } else if (++spins >= kApuSpinGrace) {
+        parkApuThread(done, tail);
+        spins = 0;
+        continue;
+      }
+      cpuRelax();
+    }
+    // Run every released cycle, each port write applied when the count reaches its
+    // stamp and never run past. `released` is read before `head`: a write stamped
+    // below the count read is published before that count, so it is in the ring.
+    for (;;) {
+      const std::uint64_t released = link_.released.load(std::memory_order_acquire);
+      const std::uint32_t head = link_.head.load(std::memory_order_acquire);
+      while (tail != head && link_.ring[tail % kPortRing].at <= done) {
+        const PortWrite& write = link_.ring[tail % kPortRing];
+        apu_.writePort(write.index, write.value);
+        ++tail;
+        link_.tail.store(tail, std::memory_order_release);
+      }
+      if (done == released) break;
+      std::uint64_t cycles = released - done;
+      if (tail != head) cycles = std::min(cycles, link_.ring[tail % kPortRing].at - done);
+      apu_.run(cycles);
+      done += cycles;
+      link_.done.store(done, std::memory_order_release);
+    }
+  }
+}
+
+void Snes::parkApuThread(std::uint64_t done, std::uint32_t tail) {
+  std::unique_lock<std::mutex> lock(link_.mutex);
+  // Parked goes up before the look under the mutex; a flight that began before it
+  // is seen by the look, and one that begins after it sees parked and wakes it.
+  link_.parked.store(true, std::memory_order_seq_cst);
+  link_.wake.wait(lock, [&] {
+    return link_.stop.load(std::memory_order_seq_cst) ||
+           link_.inFlight.load(std::memory_order_seq_cst) ||
+           link_.released.load(std::memory_order_seq_cst) != done ||
+           link_.head.load(std::memory_order_seq_cst) != tail;
+  });
+  link_.parked.store(false, std::memory_order_seq_cst);
+}
+
+void Snes::setApuObserver(ApuObserver* observer) noexcept {
+  waitApu();
+  apu_.setObserver(observer);
+}
+
+std::uint8_t Snes::peekApu(std::uint16_t address) const noexcept {
+  waitApu();
+  return apu_.peek(address);
+}
+
+std::optional<std::uint8_t> Snes::peekApuRegister(std::uint16_t address) const noexcept {
+  waitApu();
+  return apu_.peekRegister(address);
 }
 
 }  // namespace snaggletooth

@@ -7,7 +7,7 @@ run when asked to.
 snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
                     [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
-                    [--interlace weave|bob|off] [--mute] [--quiet]
+                    [--interlace weave|bob|off] [--apu-thread] [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
 ```
@@ -58,6 +58,19 @@ unthrottled: no frame pacing, no vsync
 ```
 
 — and the mean rate is printed at exit, as for every run.
+
+## The audio unit on its own thread
+
+`--apu-thread` runs the audio unit on a thread of the machine's own, beside the one that steps the
+console ([The audio thread](../../docs/snes-machine.md#the-audio-thread)). It is for a host whose cores
+are each too slow to run the whole machine at speed: the thread that steps the console does less work
+per frame, and the run takes a second core for as long as it runs, so the process as a whole uses more
+CPU, not less. On a host that already runs the console at speed, leave it off. The picture and the sound
+are the same bytes either way, and the run says which way it took —
+
+```
+the audio unit on its own thread
+```
 
 ## Interlacing
 

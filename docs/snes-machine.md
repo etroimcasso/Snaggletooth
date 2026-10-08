@@ -26,6 +26,7 @@ finishes.
 - [The reset line](#the-reset-line)
 - [Memory speed](#memory-speed)
 - [The APU clock](#the-apu-clock)
+  - [The audio thread](#the-audio-thread)
 - [The audio upload stub](#the-audio-upload-stub)
   - [Running a console's own boot ROM](#running-a-consoles-own-boot-rom)
 - [The video counters and interrupts](#the-video-counters-and-interrupts)
@@ -89,6 +90,10 @@ life, like the cartridge, and `region()` reports it back.
 program that runs the upload handshake, the way the console does; with it off, the APU boots straight
 into its ready state and a host loads a program into audio RAM directly. See
 [The audio upload stub](#the-audio-upload-stub).
+
+`SnesConfig::apuThread` runs the audio machine's cycles on a thread the machine owns, off by default.
+With it off they run inside the console's cycles on the calling thread; the bytes are the same either
+way. See [The audio thread](#the-audio-thread).
 
 ## The memory map
 
@@ -301,8 +306,49 @@ auto frames = machine.takeFrames();           // 32000 stereo frames — the APU
 
 Communication with the APU is the CPU's job: a store to `$2140-$2143` reaches the APU's input latches,
 and a read returns its output latches — the two ready bytes `$AA` and `$BB` on ports 0 and 1 at
-power-on. The APU advances in step with the CPU, so a value written on one cycle is there for the APU
-on the next.
+power-on. The APU runs its share of each cycle at the cycle's end, so a value written on one cycle is
+in the latch before the APU runs that cycle's share, and a read answers the latch as the APU left it by
+the read's cycle. [The audio thread](#the-audio-thread) keeps both exact when the APU runs beside the
+console instead.
+
+### The audio thread
+
+A machine built with `apuThread` on runs the audio machine's cycles on a thread it owns:
+
+```cpp
+Snes machine(SnesConfig{.rom = rom, .apuThread = true});  // the APU runs beside the calling thread
+```
+
+While `step()`, `run()` or a call into the guest is in progress, the console releases the APU's share of
+each cycle to that thread and runs on, and the thread runs the audio machine beside it, never past the
+cycles the console has released. When the call returns, both machines stand at one master time and
+nothing runs until the next call: `state()`, `restore()`, `reset()`, `takeFrames()` and every face below
+see the whole machine at the cycle the call ended on.
+
+The two machines meet where the console's do, at the ports:
+
+- A read of `$2140-$217F` waits for the audio machine to reach the read's cycle, so it answers the
+  latch the sound CPU had written by then.
+- A write to `$2140-$217F`, the CPU's or a transfer engine's, lands in the input latch at its own cycle,
+  before the audio machine runs that cycle's share.
+- `peekApu`, `peekApuRegister` and `peekRegister` on a port wait the same way when a host calls them from
+  inside a call, from a bus observer say.
+- The frame and save reports wait for the audio machine before they are made, so `state()` and
+  `takeFrames()` inside a report see both machines at the report's cycle.
+
+The bytes are the same as on a machine built with it off, the default: the same state at every return,
+the same audio frames, the same byte from every read of a port.
+
+The thread starts at a machine's first call, spins on its core while calls keep coming, and parks once
+none has come for a while; the next call wakes it. Moving a machine stops the moved machine's thread,
+and the machine in its new place starts its own at its first call. Destroying a machine stops its thread
+and waits for it to end. The [audio machine's observer](#the-bus-observer) is told on this thread.
+
+The thread takes work off the calling thread and adds work to the process. The calling thread spends
+less time per emulated second, which is what a host needs whose cores are each too slow to run the whole
+machine at speed. The process spends more: the audio thread spins for as long as a call is in flight,
+and every port read and every call's return waits for the two threads to meet. A host whose one core
+runs the machine at speed leaves the thread off.
 
 ## The audio upload stub
 
@@ -779,10 +825,14 @@ set; the machine starts with none.
 
 The audio machine has an observer of its own, the [`ApuObserver`](apu-machine.md#the-observer), told
 every access the sound CPU makes and every instruction boundary it crosses. `setApuObserver` sets it
-on the audio machine inside the console, under the same terms — the host's object, not part of the
-state, none by default — and `apuObserver()` reads it back. Because the audio machine runs inside the
-CPU's cycles, its report arrives from within `step()` and `run()`, between the bus observer's
-accesses. `peekApu` answers the byte the sound CPU's memory holds at an address, without a fetch —
+on the audio machine inside the console — the host's object, not part of the state, none by default,
+set between calls — and `apuObserver()` reads it back. Its reports arrive from inside `step()`, `run()`
+and the calls into the guest, in the order the sound CPU made them, on the calling thread from inside
+the console's cycles. On a machine built with `apuThread` on they arrive on the
+[audio thread](#the-audio-thread) while the console runs on beside it: the object must be safe to call
+on that thread, a report does not throw, and inside a report `state().apu`, `peekApu` and
+`peekApuRegister` answer the audio machine as it stands, while the rest of `state()` is the console's,
+moving on the calling thread, and is not read there. `peekApu` answers the byte the sound CPU's memory holds at an address, without a fetch —
 the boot-ROM image while the window is mapped, the RAM byte otherwise, and at `$00F0`–`$00FF` the RAM
 beneath the registers — so a host can decode the instruction the sound CPU is about to run.
 
@@ -857,7 +907,10 @@ machine.restore(saved);   // back to the saved cycle, exactly
 `state()` returns the machine's own state, not a copy of it: the audio machine runs inside
 `state().apu` (the [APU machine](apu-machine.md#running-in-storage-you-hold) built over that
 object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
-moved, never copied; a moved machine carries its audio machine after its state.
+moved, never copied; a moved machine carries its audio machine after its state. On a machine built
+with [the audio thread](#the-audio-thread), `state()` is read between calls, when both machines stand at
+one master time, and inside the frame and save reports, which wait for the audio machine; a bus observer
+or a watcher there reads the audio machine through `peekApu` and `peekApuRegister`, which wait for it.
 
 The machine is deterministic: the same state and the same trace give the same bytes. The trace is
 everything that reaches the machine from outside — the pads presented before each run, and whatever a
@@ -1286,8 +1339,10 @@ touched — when:
 - The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's
   own act, and the call never does it on the guest's behalf.
 - It is made from inside a host's call that the machine makes during a cycle: an access watcher's —
-  an opcode fetch included — the bus observer's, or the observer set with `setApuObserver`. The
-  machine is part-way through the chip's work there, and a call cannot run until the cycle ends.
+  an opcode fetch included — the bus observer's, or the observer set with `setApuObserver`, which on a
+  machine built with [the audio thread](#the-audio-thread) is told on that thread and refused by the
+  thread it comes on. The machine is part-way through the chip's work there, and a call cannot run until
+  the cycle ends.
 
 A call whose landing would land where the memory face does not reach — a stack pointer in the register
 file, for instance — is refused too, after any finishing cycles, with those cycles spent and nothing
