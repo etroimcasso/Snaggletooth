@@ -120,8 +120,11 @@ target_link_libraries(your_program PRIVATE snaggletooth::snaggletooth)
 
 That is the whole of the build side. The library's include directory and its C++20 requirement
 travel with the target. No option needs setting: the suite, the tools and the player are off in a
-parent build, and the library itself links nothing but the standard library — no SDL, no PNG
-decoder, no test framework.
+parent build, and the library itself links nothing but the standard library and the platform's
+thread library — no SDL, no PNG decoder, no test framework. The thread library is
+`Threads::Threads`, which the target carries to every program that links it; a machine starts a
+thread only when it is built with `SnesConfig::apuThread` on
+([snes-machine.md](snes-machine.md#the-audio-thread)).
 
 ### What the library is
 
@@ -231,8 +234,8 @@ answered.
 - **[GoogleTest](https://github.com/google/googletest)** — fetched at configure time, version
   1.14.0, only when `SNAGGLETOOTH_BUILD_TESTS` is on. Never part of the library or the tools.
 
-A program that links the library alone ships the library's own objects and the standard library.
-There is no runtime dependency to install.
+A program that links the library alone ships the library's own objects, the standard library and
+the platform's thread library. There is no runtime dependency to install.
 
 ## The test data
 

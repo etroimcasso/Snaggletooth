@@ -4,7 +4,7 @@
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
 //               [--input <script> | --input-dir <directory>] [--config <file>]
 //               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
-//               [--interlace weave|bob|off] [--mute] [--quiet]
+//               [--interlace weave|bob|off] [--apu-thread] [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -50,6 +50,12 @@
 // --unthrottled turns the pacing off: no frame waits for its deadline and vsync is
 // off, so the machine runs as fast as the host allows. Its first line says so, and
 // the mean rate is printed at exit as for every run.
+//
+// --apu-thread builds the machine with SnesConfig::apuThread on: the audio unit runs
+// on a thread of the machine's own, beside the one that steps the console, for a host
+// whose cores are each too slow to run the whole machine at speed. The picture and the
+// sound are the same bytes either way; the run takes a second core for as long as it
+// runs, and its first lines say so.
 //
 // A cartridge that turns interlace on draws one field a frame, and the player weaves
 // the two into the full-height picture the console's signal carried. --interlace names
@@ -164,12 +170,30 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
 }
 
 [[noreturn]] void usage(const char* program) {
-  std::cerr << "usage: " << program
-            << " <image> [--out <directory>] [--seconds N] [--scale N]"
-               " [--input <script> | --input-dir <directory>] [--config <file>]"
-               " [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]\n"
-               "       [--interlace weave|bob|off] [--mute] [--quiet]\n       "
-            << program << " --default-config\n       " << program << " --user-files\n";
+  std::cerr
+      << "usage: " << program << " <image> [options]\n"
+         "\n"
+         "  --out <directory>           record the run there, named after the game: a video of\n"
+         "                              every frame, the sound, a timing table, and a script\n"
+         "                              that replays it\n"
+         "  --seconds N                 quit after N seconds of game time\n"
+         "  --scale N                   how big the window is, in multiples of the picture\n"
+         "                              (default 3)\n"
+         "  --input <script>            play back a recorded run instead of reading the controls\n"
+         "  --input-dir <directory>     the same, using the script in there named after the game\n"
+         "                              (or default.snaginput if there isn't one)\n"
+         "  --config <file>             use your own controller mapping (--default-config shows\n"
+         "                              the format)\n"
+         "  --region ntsc|pal           pick the console's region when the game doesn't say\n"
+         "  --vsync on|off|auto         sync to the display, run at the console's own rate, or let\n"
+         "                              the player choose based on your display (default auto)\n"
+         "  --unthrottled               run as fast as the machine can go, with no pacing or vsync\n"
+         "  --interlace weave|bob|off   how to show interlaced games (default weave)\n"
+         "  --apu-thread                run the sound chip on its own thread\n"
+         "  --mute                      don't play the sound\n"
+         "  --quiet                     don't print the run's status lines\n"
+         "  --default-config            print the built-in controller mapping and exit\n"
+         "  --user-files                print where the player keeps its files and exit\n";
   std::exit(2);
 }
 
@@ -784,6 +808,7 @@ int main(int argc, char** argv) {
   std::string regionName;
   player::Vsync vsync = player::Vsync::Auto;
   bool unthrottled = false;
+  bool apuThread = false;
   player::Interlace interlace = player::Interlace::Weave;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
@@ -855,6 +880,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--unthrottled") {
       unthrottled = true;
+    } else if (arg == "--apu-thread") {
+      apuThread = true;
     } else if (arg == "--interlace") {
       const std::optional<player::Interlace> mode = player::parseInterlace(next("--interlace"));
       if (!mode) {
@@ -1033,7 +1060,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  Snes machine(snaggletooth::SnesConfig{.rom = rom, .region = region});
+  snaggletooth::SnesConfig machineConfig{.rom = rom, .region = region};
+  machineConfig.apuThread = apuThread;
+  Snes machine(machineConfig);
 
   // A cartridge with a battery keeps what it writes. The file goes in with the rest
   // of a person's files, under the name other emulators read, and it is put into the
@@ -1078,6 +1107,7 @@ int main(int argc, char** argv) {
       std::cerr << (pacing.locked ? "held to the display at " : "the console's own ")
                 << rateText(milliFps(pacing.rate)) << " Hz\n";
     }
+    if (apuThread) std::cerr << "the audio unit on its own thread\n";
   }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);

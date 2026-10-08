@@ -452,7 +452,9 @@ leaves it in place, and it must outlive every cycle it is set for. `observer()` 
 set; the machine starts with none. Set it at an instruction boundary — the state the machine holds
 when it is set is the `before` of the first boundary reported. Through the [SNES machine](snes-machine.md#the-bus-observer)
 the same observer is set with `setApuObserver`, and its report arrives from inside the console's
-own steps, since the audio machine runs inside the CPU's cycles.
+own steps, since the audio machine runs inside the CPU's cycles; on a machine built with
+`SnesConfig::apuThread` on it arrives on the machine's
+[audio thread](snes-machine.md#the-audio-thread) instead.
 
 The [intermediate representation](ir.md#running-beside-the-machine) is its first consumer: the sound
 program replayed instruction by instruction with an interpreter beside the core, held to every
