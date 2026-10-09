@@ -36,6 +36,16 @@ constexpr std::array<Pattern, 8> kPatterns{{
     {4, {0, 0, 1, 1}},  // 7: as pattern 3
 }};
 
+// Every pattern is 1, 2 or 4 bytes, a power of two, so a mask of the length less one
+// steps the position within a unit as the remainder would.
+constexpr bool everyPatternLengthIsAPowerOfTwo() {
+  for (const Pattern& pattern : kPatterns) {
+    if (pattern.length == 0u || (pattern.length & (pattern.length - 1u)) != 0u) return false;
+  }
+  return true;
+}
+static_assert(everyPatternLengthIsAPowerOfTwo(), "a pattern's length is a power of two");
+
 constexpr std::uint32_t kDmaByte = 8u;            // every DMA-engine cycle is eight master cycles
 constexpr std::uint32_t kHdmaOverhead = 18u;      // the shared per-run HDMA overhead
 constexpr std::uint32_t kHdmaChannel = 8u;        // per active channel, per scanline
@@ -187,7 +197,9 @@ void Snes::dmaCycle() {
   } else if (adjust == 2u) {
     ch.a1t = static_cast<std::uint16_t>(ch.a1t - 1u);
   }
-  state_.dmaUnit = static_cast<std::uint8_t>((state_.dmaUnit + 1u) % pattern.length);
+  // The next byte of the unit, back to the first after the last: the length is a power
+  // of two, so the mask is the remainder.
+  state_.dmaUnit = static_cast<std::uint8_t>((state_.dmaUnit + 1u) & (pattern.length - 1u));
 
   // Count the byte down; a count of zero meant the whole 65536, so the channel is
   // done only when the decrement reaches zero.
