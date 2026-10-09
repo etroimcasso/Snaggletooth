@@ -366,14 +366,18 @@ void Snes::closeCycle() {
   // settled for the next fetch to sample — and the master counter advances, paying the
   // audio machine the share of it that its own crystal owes. The share runs here, or,
   // on a machine built with the audio thread, is released to that thread, which runs
-  // it beside the console.
+  // it beside the console. The share is counted by subtraction: a cycle owes at most
+  // one audio cycle, and an HDMA event, one cycle costing the whole event, a handful.
   settleTimer();
   cpu_.setNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
   cpu_.setIrqLine(state_.timeup);
   state_.master += lastCost_;
   state_.apuPhase += lastCost_ * apuNum_;
-  const std::uint64_t apuCycles = state_.apuPhase / apuDen_;
-  state_.apuPhase %= apuDen_;
+  std::uint64_t apuCycles = 0;
+  while (state_.apuPhase >= apuDen_) {
+    state_.apuPhase -= apuDen_;
+    ++apuCycles;
+  }
   if (apuCycles != 0) {
     if (apuThreaded_) [[unlikely]] {
       link_.released.store(link_.released.load(std::memory_order_relaxed) + apuCycles,

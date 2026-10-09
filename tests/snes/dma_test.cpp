@@ -3,11 +3,15 @@
 // hardware registers once per visible scanline. Transfers are set up by writing the
 // channel registers directly into the state, then triggered either by a program
 // writing $420B/$420C or by running the beam past the HDMA points, and observed by
-// the values that land in video memory, the register file, and work RAM. The timing
-// cases reproduce the four worked examples in the console's timing reference.
+// the values that land in video memory, the register file, and work RAM, or by the
+// writes a bus observer is told of. The timing cases reproduce the four worked
+// examples in the console's timing reference.
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -232,6 +236,52 @@ TEST(SnesDma, TwoChannelsRunLowestFirst) {
   EXPECT_EQ(m.state().wram[0x102], 0x03u);
   EXPECT_EQ(m.state().wram[0x103], 0x04u);
   EXPECT_EQ(m.state().mdmaen, 0u);  // both enable bits cleared
+}
+
+// Records the B-bus address and the byte of every write the DMA engine makes.
+struct DmaWrites final : BusObserver {
+  std::vector<std::pair<std::uint32_t, std::uint8_t>> writes;
+  void access(const BusAccess& access) override {
+    if (access.source == AccessSource::Dma && access.write) {
+      writes.emplace_back(access.address & 0xFFFFu, access.value);
+    }
+  }
+  void internal(std::uint32_t, std::optional<CycleKind>) override {}
+};
+
+TEST(SnesDma, FourRegisterPatternsWalkEveryOffset) {
+  // Patterns 3, 4, 5 and 7 are four bytes a unit, and their offsets from BBAD come
+  // round every four bytes: 3 and 7 write two registers twice each, 4 four registers
+  // once each, 5 two registers alternately, twice. Eight bytes from work RAM through
+  // $2180-$2183 make two whole units; the port refuses a work-RAM byte, so its
+  // address registers stay as they are, and every write is still reported.
+  struct Case {
+    std::uint8_t pattern;
+    std::array<std::uint8_t, 4> offset;
+  };
+  const std::array<Case, 4> cases = {{
+      {3u, {0u, 0u, 1u, 1u}},
+      {4u, {0u, 1u, 2u, 3u}},
+      {5u, {0u, 1u, 0u, 1u}},
+      {7u, {0u, 0u, 1u, 1u}},
+  }};
+  for (const Case& c : cases) {
+    SCOPED_TRACE(int{c.pattern});
+    Snes m = programMachine({kLdaImm, 0x01u, kStaAbs, 0x0Bu, 0x42u, kNop, kStp});
+    SnesState s = m.state();
+    s.dma[0] = DmaChannel{.dmap = c.pattern, .bbad = 0x80u, .a1t = 0x0010u, .a1b = 0x7Eu,
+                          .das = 0x0008u};
+    for (std::uint8_t i = 0; i < 8u; ++i) s.wram[0x10u + i] = i;
+    m.restore(s);
+    DmaWrites dma;
+    m.setObserver(&dma);
+    m.run(20000u);
+    ASSERT_EQ(dma.writes.size(), 8u);
+    for (std::size_t i = 0; i < 8u; ++i) {
+      EXPECT_EQ(dma.writes[i].first, 0x2180u + c.offset[i % 4u]) << "byte " << i;
+      EXPECT_EQ(dma.writes[i].second, i) << "byte " << i;
+    }
+  }
 }
 
 TEST(SnesDma, ReadingTheRegisterRegionReturnsOpenBus) {

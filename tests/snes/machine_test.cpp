@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -133,6 +134,113 @@ TEST(SnesMachine, OneSecondOfMasterCyclesDeliversTheSampleRate) {
   Snes m = loopMachine(Region::Ntsc);
   m.run(21'477'273);
   EXPECT_EQ(m.takeFrames().size(), 32'000u);
+}
+
+// A cartridge that points all eight HDMA channels at the palette data port, $2122,
+// with one direct table in the cartridge at $00:9000 — eight one-line entries, then
+// the end — enables them through $420C, and loops. Each of a picture's first eight
+// lines then carries one HDMA event that moves a byte on every channel, a single
+// machine cycle that owes the audio machine several of its cycles at once.
+//
+//   $8000  for each channel: LDA #$00 ; STA $43x0     direct, one register
+//                            LDA #$22 ; STA $43x1     $2122
+//                            LDA #$00 ; STA $43x2 ; LDA #$90 ; STA $43x3
+//                            LDA #$00 ; STA $43x4     the table, $00:9000
+//          LDA #$FF ; STA $420C ; NOP ; BRA -3
+std::vector<std::uint8_t> hdmaEveryChannelImage() {
+  std::vector<std::uint8_t> rom;
+  const auto store = [&rom](std::uint8_t value, std::uint8_t low, std::uint8_t high) {
+    rom.push_back(0xA9u);  // LDA #value
+    rom.push_back(value);
+    rom.push_back(0x8Du);  // STA $high:low
+    rom.push_back(low);
+    rom.push_back(high);
+  };
+  for (std::uint8_t channel = 0; channel < 8u; ++channel) {
+    const std::uint8_t base = static_cast<std::uint8_t>(channel << 4);
+    store(0x00u, static_cast<std::uint8_t>(base | 0x00u), 0x43u);
+    store(0x22u, static_cast<std::uint8_t>(base | 0x01u), 0x43u);
+    store(0x00u, static_cast<std::uint8_t>(base | 0x02u), 0x43u);
+    store(0x90u, static_cast<std::uint8_t>(base | 0x03u), 0x43u);
+    store(0x00u, static_cast<std::uint8_t>(base | 0x04u), 0x43u);
+  }
+  store(0xFFu, 0x0Cu, 0x42u);
+  rom.push_back(0xEAu);  // NOP
+  rom.push_back(0x80u);  // BRA -3
+  rom.push_back(0xFDu);
+  rom.resize(0x8000u, 0x00u);
+  const std::array<std::uint8_t, 17> table = {0x01u, 0x11u, 0x01u, 0x22u, 0x01u, 0x33u,
+                                               0x01u, 0x44u, 0x01u, 0x55u, 0x01u, 0x66u,
+                                               0x01u, 0x77u, 0x01u, 0x88u, 0x00u};
+  std::copy(table.begin(), table.end(), rom.begin() + 0x1000);  // $00:9000
+  rom[0x7FFCu] = 0x00u;  // reset vector -> $8000
+  rom[0x7FFDu] = 0x80u;
+  return rom;
+}
+
+// Counts the HDMA engine's writes to $2122.
+struct HdmaPaletteWrites final : BusObserver {
+  std::size_t count = 0;
+  void access(const BusAccess& access) override {
+    if (access.source == AccessSource::Hdma && access.write &&
+        (access.address & 0xFFFFu) == 0x2122u) {
+      ++count;
+    }
+  }
+  void internal(std::uint32_t, std::optional<CycleKind>) override {}
+};
+
+TEST(SnesMachine, TheApuCountIsExactAcrossAnHdmaLine) {
+  // The audio machine's count at any master time is floor(master * 5632 / 118125),
+  // whatever the cycles' sizes: an HDMA event's cycle pays its whole share at once,
+  // so the count holds at the return of every step, the steps across the HDMA lines
+  // among them. The 16-bit counter holds that count modulo 65536, on a machine with
+  // the audio thread off and on one with it on.
+  const std::vector<std::uint8_t> rom = hdmaEveryChannelImage();
+  constexpr std::uint64_t kFrame = 357366u;
+  const auto ratioCount = [](std::uint64_t master) {
+    return static_cast<std::uint16_t>((master * 5632u / 118125u) & 0xFFFFu);
+  };
+
+  const auto machine = [&rom](bool apuThread) {
+    return Snes(SnesConfig{.rom = rom,
+                           .region = Region::Ntsc,
+                           .iplStub = true,
+                           .map = std::nullopt,
+                           .saveRamBytes = std::nullopt,
+                           .bootRom = std::nullopt,
+                           .apuThread = apuThread});
+  };
+  Snes lockstep = machine(false);
+  Snes threaded = machine(true);
+  HdmaPaletteWrites writes;
+  lockstep.setObserver(&writes);
+  std::size_t lockstepOff = 0;
+  std::size_t threadedOff = 0;
+  while (lockstep.state().master < 3u * kFrame) {
+    lockstep.step();
+    threaded.step();
+    if (lockstep.state().apu.divider != ratioCount(lockstep.state().master)) ++lockstepOff;
+    if (threaded.state().apu.divider != ratioCount(threaded.state().master)) ++threadedOff;
+  }
+  ASSERT_GE(writes.count, 2u * 8u * 8u) << "two pictures' eight lines on eight channels";
+  EXPECT_EQ(lockstepOff, 0u) << "steps whose return found the count off the ratio";
+  EXPECT_EQ(threadedOff, 0u) << "steps whose return found the count off the ratio";
+  EXPECT_TRUE(threaded.state() == lockstep.state());
+}
+
+TEST(SnesMachine, TheApuIsPaidInTheCycleItsPhaseReachesTheDenominator) {
+  // The power-on NOP is an 8-cycle fetch and a 6-cycle internal cycle, 14 master
+  // cycles, which add 14 * 5632 to the phase. Started 14 * 5632 short of 118125, the
+  // phase reaches the denominator exactly as the instruction's last cycle closes: that
+  // cycle pays the audio machine its cycle and leaves the phase at zero.
+  Snes m = loopMachine(Region::Ntsc);
+  SnesState s = m.state();
+  s.apuPhase = 118125u - 14u * 5632u;
+  m.restore(s);
+  ASSERT_EQ(m.step(), 14u);
+  EXPECT_EQ(m.state().apu.divider, 1u);
+  EXPECT_EQ(m.state().apuPhase, 0u);
 }
 
 TEST(SnesMachine, TakeFramesDrainsTheQueue) {
