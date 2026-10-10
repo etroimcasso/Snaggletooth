@@ -1,5 +1,7 @@
 #include "snaggletooth/apu/dsp.h"
 
+#include <initializer_list>
+
 namespace snaggletooth {
 
 namespace {
@@ -1195,6 +1197,112 @@ constexpr std::array<std::uint8_t, 8> kVoiceS7Slot = {3, 6, 9, 12, 15, 18, 21, 2
 constexpr std::array<std::uint8_t, 8> kVoiceS8Slot = {4, 7, 10, 13, 16, 19, 22, 25};
 constexpr std::array<std::uint8_t, 8> kVoiceS9Slot = {5, 8, 11, 14, 17, 20, 23, 26};
 
+namespace {
+
+// What a voice does at a slot: its source-number read, its directory reads, its
+// pitch-high read, its BRR load, its compute (voices 1-7; voice 0 computes at T31
+// in the slot's own case), and its five S-steps: the left fold, the right fold,
+// the ENDX publish, the OUTX publish and the ENVX publish.
+enum class SlotAction : std::uint8_t {
+  SourceNumber,
+  Directory,
+  PitchHigh,
+  BrrLoad,
+  Compute,
+  FoldLeft,
+  FoldRight,
+  PublishEndx,
+  PublishOutx,
+  PublishEnvx,
+};
+
+struct SlotStep {
+  SlotAction action;
+  std::uint8_t voice;
+};
+
+// The most actions one slot carries: T5, T8, ..., T20 each hold a voice's
+// pitch-high read, BRR load and compute and another voice's ENVX publish.
+constexpr std::size_t kMostStepsInASlot = 4;
+
+struct SlotSteps {
+  std::uint8_t count;
+  std::array<SlotStep, kMostStepsInASlot> steps;
+};
+
+// Each slot's voice actions in the order they run: every voice's source read,
+// then every voice's directory reads, pitch-high read, BRR load and compute, then
+// by voice the S4, S5, S7, S8 and S9 steps. The list is built by walking the ten
+// tables above in that order, so it holds exactly what the walk finds at each
+// slot. A slot matches at most one voice per table; T27-T31 match none and run
+// their own case alone. A slot that collected more than kMostStepsInASlot actions
+// would index past its array and stop the build here.
+constexpr std::array<SlotSteps, 32> kSlotSchedule = [] {
+  std::array<SlotSteps, 32> schedule{};
+  const auto add = [&schedule](std::uint8_t slot, SlotAction action, std::size_t voice) {
+    SlotSteps& entry = schedule[slot];
+    entry.steps[entry.count] = SlotStep{action, static_cast<std::uint8_t>(voice)};
+    ++entry.count;
+  };
+  for (std::size_t v = 0; v < 8; ++v) add(kVoiceSrcnSlot[v], SlotAction::SourceNumber, v);
+  for (std::size_t v = 0; v < 8; ++v) add(kVoiceDirSlot[v], SlotAction::Directory, v);
+  for (std::size_t v = 0; v < 8; ++v) add(kVoicePitchHighSlot[v], SlotAction::PitchHigh, v);
+  for (std::size_t v = 0; v < 8; ++v) add(kVoiceBrrLoadSlot[v], SlotAction::BrrLoad, v);
+  for (std::size_t v = 1; v < 8; ++v) add(kVoiceS3Slot[v], SlotAction::Compute, v);
+  for (std::size_t v = 0; v < 8; ++v) {
+    add(kVoiceS4Slot[v], SlotAction::FoldLeft, v);
+    add(kVoiceS5Slot[v], SlotAction::FoldRight, v);
+    add(kVoiceS7Slot[v], SlotAction::PublishEndx, v);
+    add(kVoiceS8Slot[v], SlotAction::PublishOutx, v);
+    add(kVoiceS9Slot[v], SlotAction::PublishEnvx, v);
+  }
+  return schedule;
+}();
+
+// Whether slot `slot` lists exactly `expected`, in that order.
+constexpr bool slotLists(std::size_t slot, std::initializer_list<SlotStep> expected) {
+  const SlotSteps& entry = kSlotSchedule[slot];
+  if (entry.count != expected.size()) return false;
+  std::size_t n = 0;
+  for (const SlotStep& step : expected) {
+    if (entry.steps[n].action != step.action || entry.steps[n].voice != step.voice) return false;
+    ++n;
+  }
+  return true;
+}
+
+// Whether any slot lists voice 0's compute, which T31's case runs itself.
+constexpr bool anySlotComputesVoiceZero() {
+  for (const SlotSteps& entry : kSlotSchedule)
+    for (std::size_t n = 0; n < entry.count; ++n)
+      if (entry.steps[n].action == SlotAction::Compute && entry.steps[n].voice == 0) return true;
+  return false;
+}
+
+static_assert(slotLists(2, {{SlotAction::PitchHigh, 1}, {SlotAction::BrrLoad, 1},
+                            {SlotAction::Compute, 1}}),
+              "T2 loads voice 1's pitch-high byte and BRR bytes before its compute");
+static_assert(slotLists(3, {{SlotAction::SourceNumber, 3}, {SlotAction::PublishEndx, 0},
+                            {SlotAction::FoldLeft, 1}}),
+              "T3 publishes voice 0's ENDX bit before voice 1's left fold");
+static_assert(kSlotSchedule[5].count == 4, "T5 carries four actions");
+static_assert(kSlotSchedule[5].steps[3].action == SlotAction::PublishEnvx &&
+                  kSlotSchedule[5].steps[3].voice == 0,
+              "T5's last action is voice 0's ENVX publish");
+static_assert(slotLists(22, {{SlotAction::Directory, 0}, {SlotAction::PublishOutx, 6},
+                             {SlotAction::FoldRight, 7}}),
+              "T22 reads voice 0's directory entry, then voice 6's OUTX, then voice 7's fold");
+static_assert(slotLists(26, {{SlotAction::BrrLoad, 0}, {SlotAction::PublishEnvx, 7}}),
+              "T26 loads voice 0's BRR bytes, then publishes voice 7's ENVX");
+static_assert(kSlotSchedule[27].count == 0, "T27 carries no voice action");
+static_assert(kSlotSchedule[28].count == 0, "T28 carries no voice action");
+static_assert(kSlotSchedule[29].count == 0, "T29 carries no voice action");
+static_assert(kSlotSchedule[30].count == 0, "T30 carries no voice action");
+static_assert(kSlotSchedule[31].count == 0, "T31 carries no voice action");
+static_assert(!anySlotComputesVoiceZero(), "voice 0's compute runs in T31's case, never a list");
+
+}  // namespace
+
 // Computes voice `voice` at its S3 slot, storing the amplitude the S4/S5 slots
 // apply. voice n's pitch modulation reads voice n-1's amplitude from the
 // PREVIOUS sample — the value standing before voice n-1's compute three slots
@@ -1255,7 +1363,9 @@ static void finalizeRight(DspState& dsp) noexcept {
 // Runs one 32-clock slot of a primed sample. Each register read lands on its
 // documented slot, so a mid-frame DSPDATA write is seen only if it precedes its
 // consuming slot; every no-write sample reproduces the frame-at-once output for
-// voices 1-7, and voice 0 rides one update behind.
+// voices 1-7, and voice 0 rides one update behind. The slot's voice actions are
+// taken from kSlotSchedule, which lists for each slot the actions the tables
+// place there, in the order they run.
 static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ram,
                           std::uint8_t* echoRam, std::uint8_t slot) noexcept {
   const bool softReset = (dsp[kDspFlg] & kFlgSoftReset) != 0;
@@ -1288,74 +1398,84 @@ static void runPrimedSlot(DspState& dsp, std::span<const std::uint8_t, 65536> ra
     }
   }
 
-  // The source read at each voice's source slot: the `VxSRCN` the directory
-  // reads that follow select the entry with.
-  for (std::size_t voice = 0; voice < 8; ++voice)
-    if (kVoiceSrcnSlot[voice] == slot) loadSourceNumber(dsp, voice);
-
-  // The directory read at each voice's directory slot: the loop address the
-  // compute's loop jump takes, read ahead of it — and, for a voice whose
-  // key-on the previous compute applied, the entry's start pointer. The
-  // `VxPITCHL` and `VxADSR1` registers are read in the same slot.
-  for (std::size_t voice = 0; voice < 8; ++voice) {
-    if (kVoiceDirSlot[voice] != slot) continue;
-    if (dsp.voices[voice].startPending) loadStartPointer(dsp, ram, voice);
-    loadLoopPointer(dsp, ram, voice);
-    loadDirectorySlotRegisters(dsp, voice);
-  }
-
-  // The `VxPITCHH` read at each voice's pitch-high slot, one after the
-  // directory slot, completing the step the compute's advance takes.
-  for (std::size_t voice = 0; voice < 8; ++voice)
-    if (kVoicePitchHighSlot[voice] == slot) loadPitchHigh(dsp, voice);
-
-  // The BRR load at each voice's load slot: a keyed voice's prime, then the
-  // header and first data byte of the group decodes the voice's compute will
-  // perform, read ahead of it.
-  for (std::size_t voice = 0; voice < 8; ++voice) {
-    if (kVoiceBrrLoadSlot[voice] != slot) continue;
-    if (dsp.voices[voice].startPending) {
-      primeVoiceStream(dsp, ram, voice);
-      dsp.voices[voice].startPending = false;
-    }
-    loadScheduledGroupBytes(dsp.voices[voice], ram);
-  }
-
-  // Voice compute at each voice's S3 slot (voice 0's is T31, handled in the tail).
-  for (std::size_t voice = 1; voice < 8; ++voice)
-    if (kVoiceS3Slot[voice] == slot) computeVoiceSlot(dsp, ram, voice, softReset);
-
-  // Voice volume folds at the S4 (left) and S5 (right) slots, in voice order.
-  // The voice's ENDX bit is written at the S7 slot — a key-on's clear, or else
-  // a staged set; the computed OUTX byte becomes readable at the S8 slot; ENVX
-  // carries one further pipeline stage — its S9 slot writes the value computed
-  // one sample earlier and stages the fresh one (see DspState::envxStage).
-  // Each of those three register writes loses to a CPU write issued in the two
-  // cycles before it (see DspState::cycleCount): the register keeps the CPU's
-  // byte and the DSP's value for the slot is dropped.
-  for (std::size_t voice = 0; voice < 8; ++voice) {
-    const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
-    if (kVoiceS4Slot[voice] == slot) {
-      performLoadedDecodes(dsp, ram, voice);
-      applyVoiceLeft(dsp, voice);
-    }
-    if (kVoiceS5Slot[voice] == slot) applyVoiceRight(dsp, voice);
-    if (kVoiceS7Slot[voice] == slot) {
-      if ((dsp.pendingEndxClear & bit) != 0) {
-        dsp[kDspEndx] &= static_cast<std::uint8_t>(~bit);
-        dsp.pendingEndxClear = static_cast<std::uint8_t>(dsp.pendingEndxClear & ~bit);
-        dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
-      } else if ((dsp.preparedEndx & bit) != 0) {
-        if (!cpuWriteStands(dsp, dsp.endxWriteCycle)) dsp[kDspEndx] |= bit;
-        dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+  // The voice actions the tables place at this slot, in the order they run.
+  // Each of the three register publishes (S7, S8, S9) loses to a CPU write
+  // issued in the two cycles before it (see DspState::cycleCount): the register
+  // keeps the CPU's byte and the DSP's value for the slot is dropped.
+  const SlotSteps& steps = kSlotSchedule[slot];
+  for (std::size_t n = 0; n < steps.count; ++n) {
+    const std::size_t voice = steps.steps[n].voice;
+    switch (steps.steps[n].action) {
+      case SlotAction::SourceNumber:
+        // The source read at the voice's source slot: the `VxSRCN` the directory
+        // reads that follow select the entry with.
+        loadSourceNumber(dsp, voice);
+        break;
+      case SlotAction::Directory:
+        // The directory read at the voice's directory slot: the loop address the
+        // compute's loop jump takes, read ahead of it — and, for a voice whose
+        // key-on the previous compute applied, the entry's start pointer. The
+        // `VxPITCHL` and `VxADSR1` registers are read in the same slot.
+        if (dsp.voices[voice].startPending) loadStartPointer(dsp, ram, voice);
+        loadLoopPointer(dsp, ram, voice);
+        loadDirectorySlotRegisters(dsp, voice);
+        break;
+      case SlotAction::PitchHigh:
+        // The `VxPITCHH` read at the voice's pitch-high slot, one after the
+        // directory slot, completing the step the compute's advance takes.
+        loadPitchHigh(dsp, voice);
+        break;
+      case SlotAction::BrrLoad:
+        // The BRR load at the voice's load slot: a keyed voice's prime, then the
+        // header and first data byte of the group decodes the voice's compute
+        // will perform, read ahead of it.
+        if (dsp.voices[voice].startPending) {
+          primeVoiceStream(dsp, ram, voice);
+          dsp.voices[voice].startPending = false;
+        }
+        loadScheduledGroupBytes(dsp.voices[voice], ram);
+        break;
+      case SlotAction::Compute:
+        // Voice compute at the voice's S3 slot (voice 0's is T31, in the slot's
+        // own case below).
+        computeVoiceSlot(dsp, ram, voice, softReset);
+        break;
+      case SlotAction::FoldLeft:
+        // The left volume fold at the voice's S4 slot.
+        performLoadedDecodes(dsp, ram, voice);
+        applyVoiceLeft(dsp, voice);
+        break;
+      case SlotAction::FoldRight:
+        // The right volume fold at the voice's S5 slot.
+        applyVoiceRight(dsp, voice);
+        break;
+      case SlotAction::PublishEndx: {
+        // The voice's ENDX bit is written at the S7 slot: a key-on's clear, or
+        // else a staged set.
+        const std::uint8_t bit = static_cast<std::uint8_t>(1u << voice);
+        if ((dsp.pendingEndxClear & bit) != 0) {
+          dsp[kDspEndx] &= static_cast<std::uint8_t>(~bit);
+          dsp.pendingEndxClear = static_cast<std::uint8_t>(dsp.pendingEndxClear & ~bit);
+          dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+        } else if ((dsp.preparedEndx & bit) != 0) {
+          if (!cpuWriteStands(dsp, dsp.endxWriteCycle)) dsp[kDspEndx] |= bit;
+          dsp.preparedEndx = static_cast<std::uint8_t>(dsp.preparedEndx & ~bit);
+        }
+        break;
       }
-    }
-    if (kVoiceS8Slot[voice] == slot && !cpuWriteStands(dsp, dsp.outxWriteCycle[voice]))
-      dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
-    if (kVoiceS9Slot[voice] == slot) {
-      if (!cpuWriteStands(dsp, dsp.envxWriteCycle[voice]))
-        dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.envxStage[voice];
-      dsp.envxStage[voice] = dsp.preparedEnvx[voice];
+      case SlotAction::PublishOutx:
+        // The computed OUTX byte becomes readable at the S8 slot.
+        if (!cpuWriteStands(dsp, dsp.outxWriteCycle[voice]))
+          dsp[voiceRegister(voice, kVoiceOutx)] = dsp.preparedOutx[voice];
+        break;
+      case SlotAction::PublishEnvx:
+        // ENVX carries one further pipeline stage: its S9 slot writes the value
+        // computed one sample earlier and stages the fresh one (see
+        // DspState::envxStage).
+        if (!cpuWriteStands(dsp, dsp.envxWriteCycle[voice]))
+          dsp[voiceRegister(voice, kVoiceEnvx)] = dsp.envxStage[voice];
+        dsp.envxStage[voice] = dsp.preparedEnvx[voice];
+        break;
     }
   }
 
