@@ -48,8 +48,11 @@
 // rates it reports are the build's rather than the emulator's.
 //
 // --unthrottled turns the pacing off: no frame waits for its deadline and vsync is
-// off, so the machine runs as fast as the host allows. Its first line says so, and
-// the mean rate is printed at exit as for every run.
+// off, so the machine runs as fast as the host allows. The window is still drawn no
+// faster than its panel refreshes, because a present past that rate waits for the
+// display on macOS, which would hold the run to it: each refresh shows the frame
+// current at that moment, the frames between go by undrawn, and --out keeps every one.
+// Its first line says so, and the mean rate is printed at exit as for every run.
 //
 // --apu-thread builds the machine with SnesConfig::apuThread on: the audio unit runs
 // on a thread of the machine's own, beside the one that steps the console, for a host
@@ -187,7 +190,8 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
          "  --region ntsc|pal           pick the console's region when the game doesn't say\n"
          "  --vsync on|off|auto         sync to the display, run at the console's own rate, or let\n"
          "                              the player choose based on your display (default auto)\n"
-         "  --unthrottled               run as fast as the machine can go, with no pacing or vsync\n"
+         "  --unthrottled               run as fast as the machine can go, with no pacing or vsync;\n"
+         "                              the window shows the frame current at each refresh\n"
          "  --interlace weave|bob|off   how to show interlaced games (default weave)\n"
          "  --apu-thread                run the sound chip on its own thread\n"
          "  --mute                      don't play the sound\n"
@@ -503,10 +507,18 @@ class Player final : public snaggletooth::FrameObserver {
       return false;
     }
     SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
-    // An unthrottled run switches vsync off explicitly: the SDL_RENDER_VSYNC hint can
-    // open a renderer with it on.
     if (unthrottled_) {
+      // Vsync off explicitly, since the SDL_RENDER_VSYNC hint can open a renderer with
+      // it on; and the window presented no faster than the panel refreshes, because on
+      // macOS the Metal layer hands out a drawable once per refresh whether or not the
+      // present is asked to wait for one, so a present past that rate blocks until the
+      // next drawable and the run is held to the display by the very wait it asked not
+      // to make. The frames between presents are emulated, recorded and counted, and
+      // not drawn (`unthrottledShowRate`).
       SDL_SetRenderVSync(renderer_, 0);
+      showEvery_ = player::FramePace(player::unthrottledShowRate(
+                                         player::consoleFrameRate(clock_), panelRate()))
+                       .wholeNanos();
     } else {
       holdToPanel();
     }
@@ -560,9 +572,15 @@ class Player final : public snaggletooth::FrameObserver {
     const bool interlaced = machine_.state().ppu.interlace();
     const player::Shown shown = weaver_.present(picture.pixels.data(), picture.width,
                                                 picture.height, picture.field, interlaced);
-    show(shown);
-    // The window and the recording show the same picture: what --out keeps is what was
-    // on screen, woven and all.
+    // An unthrottled run draws the window only once the panel's interval has passed
+    // since it was last drawn; every other run draws every frame.
+    const std::uint64_t at = SDL_GetTicksNS();
+    if (!unthrottled_ || at - lastShown_ >= showEvery_) {
+      show(shown);
+      lastShown_ = at;
+    }
+    // The recording keeps every frame as the window shows it, woven and all, the ones an
+    // unthrottled run leaves undrawn included: what --out keeps is the machine's output.
     const snaggletooth::VideoFrame kept{
         .pixels = std::span<const std::uint8_t>(
             shown.pixels, static_cast<std::size_t>(shown.width) * shown.height * 4u),
@@ -590,7 +608,7 @@ class Player final : public snaggletooth::FrameObserver {
     // rate whether or not the present waits — a panel that will not wait, or a
     // compositor that hands back a present without one, then costs the run its phase
     // rather than its speed. An unthrottled run skips the wait, and the next frame
-    // begins as soon as this one is shown.
+    // begins as soon as this one is done.
     if (!unthrottled_) {
       const std::uint64_t due = started_ + owedAt(frames_);
       const std::uint64_t before = SDL_GetTicksNS();
@@ -675,15 +693,7 @@ class Player final : public snaggletooth::FrameObserver {
   // asked to wait for one; any other panel, or one that reports no rate at all, leaves
   // the run on the console's own with the present handed straight back.
   void holdToPanel() {
-    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
-    player::FrameRate panel;
-    if (mode != nullptr && mode->refresh_rate_numerator > 0 &&
-        mode->refresh_rate_denominator > 0) {
-      panel = player::FrameRate{
-          .numerator = static_cast<std::uint64_t>(mode->refresh_rate_numerator),
-          .denominator = static_cast<std::uint64_t>(mode->refresh_rate_denominator)};
-    }
-    pacing_ = player::paceRun(player::consoleFrameRate(clock_), panel, vsync_);
+    pacing_ = player::paceRun(player::consoleFrameRate(clock_), panelRate(), vsync_);
     if (!pacing_.locked) return;
     panel_.emplace(pacing_.rate);
     if (!SDL_SetRenderVSync(renderer_, 1)) {
@@ -691,6 +701,19 @@ class Player final : public snaggletooth::FrameObserver {
       // the phase within a refresh is lost, so the run goes on and says what it lost.
       std::cerr << "the picture will not wait for a refresh: " << SDL_GetError() << "\n";
     }
+  }
+
+  // The rate the panel the window is on reports, as the exact ratio; no rate at all
+  // where the panel reports none.
+  [[nodiscard]] player::FrameRate panelRate() const {
+    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
+    if (mode == nullptr || mode->refresh_rate_numerator <= 0 ||
+        mode->refresh_rate_denominator <= 0) {
+      return player::FrameRate{};
+    }
+    return player::FrameRate{
+        .numerator = static_cast<std::uint64_t>(mode->refresh_rate_numerator),
+        .denominator = static_cast<std::uint64_t>(mode->refresh_rate_denominator)};
   }
 
   // When the Nth frame is owed, and what one frame's interval is: the panel's where the
@@ -772,7 +795,9 @@ class Player final : public snaggletooth::FrameObserver {
   player::PadRecorder recorder_;
   unsigned scale_;
   player::Vsync vsync_;
-  bool unthrottled_;                        // no frame deadline and no vsync
+  bool unthrottled_;                        // no frame deadline and no vsync; the window drawn at the panel's rate
+  std::uint64_t showEvery_ = 0;             // an unthrottled run's least interval between presents, ns
+  std::uint64_t lastShown_ = 0;             // when the window was last drawn
   player::FieldWeaver weaver_;              // composes interlaced fields for the screen
   player::Pacing pacing_;                   // the rate the run is held to
   std::optional<player::FramePace> panel_;  // and its deadlines, where that is the panel's

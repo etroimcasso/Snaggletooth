@@ -631,6 +631,22 @@ TEST(PlayerDisplay, AnUnlockableDisplayKeepsTheConsolesRate) {
   EXPECT_EQ(paceRun(kNtsc, kPanel60, Vsync::Off).rate.numerator, kNtsc.numerator);
 }
 
+TEST(PlayerDisplay, AnUnthrottledWindowIsPresentedAtThePanelsRate) {
+  // The window of an unthrottled run is presented no faster than its panel refreshes,
+  // whatever the panel's rate and however far it is from the console's: a 144 Hz panel
+  // takes 144 presents a second, a 60.000 Hz one a present every 16,666,666 ns.
+  EXPECT_EQ(unthrottledShowRate(kNtsc, kPanel144).numerator, kPanel144.numerator);
+  EXPECT_EQ(unthrottledShowRate(kNtsc, kPanel144).denominator, kPanel144.denominator);
+  EXPECT_EQ(FramePace(unthrottledShowRate(kNtsc, kPanel60)).wholeNanos(), 16666666ull);
+  EXPECT_EQ(FramePace(unthrottledShowRate(kPal, kPanel60)).wholeNanos(), 16666666ull)
+      << "a 50 Hz machine on a 60 Hz panel presents at the panel's rate too";
+  // A panel that reports no rate leaves the window at the console's own.
+  EXPECT_EQ(unthrottledShowRate(kNtsc, FrameRate{}).numerator, kNtsc.numerator);
+  EXPECT_EQ(unthrottledShowRate(kNtsc, FrameRate{}).denominator, kNtsc.denominator);
+  EXPECT_EQ(FramePace(unthrottledShowRate(kPal, FrameRate{})).owedAt(1u),
+            FrameDeadline(Region::Pal).owedAt(1u));
+}
+
 TEST(PlayerDisplay, TheWindowIsTheFramesOwnPixelsTimesTheScale) {
   // A progressive frame, 256x224, at scale 5 is a 1280x1120 window.
   EXPECT_EQ(windowSize(256u, 224u, 5u), (WindowSize{.width = 1280u, .height = 1120u}));

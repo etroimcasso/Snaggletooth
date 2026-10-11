@@ -51,7 +51,12 @@ keeps the console's rate and hands every present straight back, and `auto`, the 
 the rule above.
 
 `--unthrottled` turns the pacing off: no frame waits for its deadline and vsync is off, so the
-machine runs as fast as the host allows. The run's first line says so —
+machine runs as fast as the host allows. The window is drawn no faster than the panel refreshes,
+because a present past that rate waits for the display — on macOS the Metal layer hands out one
+drawable per refresh whether or not the present is asked to wait — and that wait would hold the run
+to the display's rate, the very thing the flag turns off. So each refresh shows the frame current at
+that moment, the frames between are emulated and counted and not drawn, and `--out` keeps every one
+of them. The run's first line says so —
 
 ```
 unthrottled: no frame pacing, no vsync

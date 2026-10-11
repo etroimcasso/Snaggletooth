@@ -155,6 +155,19 @@ struct Pacing {
   return Pacing{.rate = locked ? panel : console, .locked = locked};
 }
 
+// The rate an unthrottled run's window is presented at: the panel's where the panel
+// reports one, and the console's own where it does not. An unthrottled run emulates
+// every frame as fast as the host allows and presents no faster than this. On macOS
+// the Metal layer hands out a drawable once per refresh of the display whether or not
+// the present is asked to wait for one, so a window presented faster than its display
+// blocks in the present until the next drawable comes free, and the run is held to the
+// display by the very wait it was asked not to make. A frame that falls inside the
+// interval since the last present is emulated, recorded and counted, and not drawn: the
+// display could not have shown it.
+[[nodiscard]] constexpr FrameRate unthrottledShowRate(FrameRate console, FrameRate panel) noexcept {
+  return isRate(panel) ? panel : console;
+}
+
 // ---- the window's size --------------------------------------------------------------
 //
 // The picture the machine draws comes in more than one shape: a progressive frame is 224
