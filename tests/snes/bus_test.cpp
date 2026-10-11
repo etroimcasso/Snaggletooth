@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -223,6 +224,86 @@ TEST(SnesBus, SecondRegionFollowsMemsel) {
   fast.step();  // LDA #$01
   fast.step();  // STA $420D
   EXPECT_EQ(fast.step(), 8u + 8u + 8u + 8u + 6u);
+}
+
+TEST(SnesBus, TheJoypadPortsEndAtFourOneFF) {
+  // The manual joypad ports are $4000-$41FF and cost twelve; the registers from
+  // $4200 cost six.
+  Snes m = machineWith({0xAD, 0xFF, 0x41,    // LDA $41FF
+                        0xAD, 0x00, 0x42});  // LDA $4200
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 12u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 6u);
+}
+
+TEST(SnesBus, TheMirrorBanksPriceAsBankZeroDoes) {
+  // Banks $80-$BF lay out their first 32 KB as banks $00-$3F do: the joypad ports
+  // at twelve, the registers on either side of them at six, the work-RAM mirror
+  // and the expansion region at eight.
+  Snes m = machineWith({0xAF, 0x00, 0x40, 0x80,    // LDA $804000
+                        0xAF, 0x00, 0x42, 0x80,    // LDA $804200
+                        0xAF, 0x40, 0x21, 0x80,    // LDA $802140
+                        0xAF, 0x10, 0x00, 0x80,    // LDA $800010
+                        0xAF, 0x00, 0x60, 0x80});  // LDA $806000
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 12u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 6u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 6u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+}
+
+TEST(SnesBus, WorkRamBanksCostEight) {
+  // Both work-RAM banks, $7E and $7F, cost eight.
+  Snes m = machineWith({0xAF, 0x10, 0x00, 0x7E,    // LDA $7E0010
+                        0xAF, 0x10, 0x00, 0x7F});  // LDA $7F0010
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+}
+
+TEST(SnesBus, TheFirstRegionsStaySlowUnderMemsel) {
+  // MEMSEL speeds the second waitstate region alone: banks $40-$7D, the first
+  // LoROM region, work RAM and the expansion region cost eight with it set, and
+  // $80-$BF:$8000-$FFFF costs six as $C0-$FF does.
+  Snes m = machineWith({0xA9, 0x01, 0x8D, 0x0D, 0x42,  // LDA #$01; STA $420D (MEMSEL)
+                        0xAF, 0x00, 0x80, 0x40,        // LDA $408000
+                        0xAF, 0x00, 0x80, 0x01,        // LDA $018000
+                        0xAF, 0x10, 0x00, 0x7E,        // LDA $7E0010
+                        0xAF, 0x00, 0x60, 0x00,        // LDA $006000
+                        0xAF, 0x00, 0x80, 0x80});      // LDA $808000
+  m.step();  // LDA #$01
+  m.step();  // STA $420D
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 6u);
+}
+
+TEST(SnesBus, ARestoredMemselPricesTheNextAccess) {
+  // A restored MEMSEL prices the next access to the second waitstate region, and
+  // only its bit 0 counts. A machine's state is a quarter of a megabyte, so the
+  // snapshot is kept off the stack.
+  Snes m = machineWith({0xAF, 0x00, 0x80, 0xC0});  // LDA $C08000
+  const std::unique_ptr<SnesState> powerOn = std::make_unique<SnesState>(m.state());
+  const auto stepRestoredWith = [&](std::uint8_t memsel) {
+    const std::unique_ptr<SnesState> st = std::make_unique<SnesState>(*powerOn);
+    st->memsel = memsel;
+    m.restore(*st);
+    return m.step();
+  };
+  EXPECT_EQ(stepRestoredWith(0x01u), 8u + 8u + 8u + 8u + 6u);
+  EXPECT_EQ(stepRestoredWith(0xFFu), 8u + 8u + 8u + 8u + 6u);
+  EXPECT_EQ(stepRestoredWith(0x02u), 8u + 8u + 8u + 8u + 8u);
+}
+
+TEST(SnesBus, AResetPricesTheSecondRegionSlowAgain) {
+  // A reset clears MEMSEL, so the second waitstate region costs eight again.
+  Snes m = machineWith({0xAF, 0x00, 0x80, 0xC0});  // LDA $C08000
+  const std::unique_ptr<SnesState> st = std::make_unique<SnesState>(m.state());
+  st->memsel = 1u;
+  m.restore(*st);
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 6u);
+  m.reset();
+  EXPECT_EQ(m.step(), 8u + 8u + 8u + 8u + 8u);
 }
 
 }  // namespace

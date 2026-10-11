@@ -119,7 +119,10 @@ behavior real hardware shows. The cartridge is read-only: a write to a ROM addre
 The machine reads the bus through a table of its 2048 pages, one entry per 8 KB, built once from the
 [cartridge functions](snes-cartridge.md) when the machine is constructed. Every window in the table
 above is whole pages, so an entry says which memory a page's bytes are in and where its first byte
-lands, and an access finds its byte with one load of the entry and an add. `peek`, `poke`, `physical`
+lands, and an access finds its byte with one load of the entry and an add. The entry also carries what
+an access to the page costs in master cycles, at either [MEMSEL](#memory-speed) setting, so the access
+reads its price from the same entry; the one page with two prices, a system bank's `$4000-$5FFF`, whose
+first 512 bytes are the manual joypad ports, is priced by the offset at the access. `peek`, `poke`, `physical`
 and the access watch read the same table, so every path agrees on what an address reaches. An image
 whose size is not a multiple of 8 KB carries a chip smaller than a page, whose repeat can begin inside
 one; its pages are found through `romOffset` at each access instead, so every image reads exactly. The

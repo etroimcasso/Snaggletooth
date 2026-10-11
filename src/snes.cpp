@@ -154,6 +154,71 @@ static_assert(kAutoJoyStrobe + kAutoJoyBits * kAutoJoyBit == 4224u,
 // The largest save a cartridge can address through any window.
 constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 
+// The master-cycle cost of reaching an address, by the documented region map,
+// with the second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) at its
+// MEMSEL rate: fast when `fast2` is set, slow otherwise. Every region but one
+// is whole 8 KB pages, so a page's first address prices the page; the manual
+// joypad ports, $4000-$41FF of a system bank, are the exception, priced inside
+// their page at the access.
+constexpr std::uint8_t regionCost(std::uint32_t address, bool fast2) noexcept {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+
+  // Work RAM and the first waitstate region span whole banks and always run slow.
+  if (bank >= 0x7E && bank <= 0x7F) return 8u;   // work RAM
+  if (bank >= 0x40 && bank <= 0x7D) return 8u;   // the first LoROM region
+  if (bank >= 0xC0) return fast2 ? 6u : 8u;      // the second LoROM region, under MEMSEL
+
+  // System banks $00-$3F and $80-$BF share one layout below $8000, then LoROM.
+  if (offset <= 0x1FFF) return 8u;               // work-RAM mirror
+  if (offset <= 0x3FFF) return 6u;               // registers and unused pages, fast
+  if (offset <= 0x41FF) return 12u;              // the manual joypad ports, extra slow
+  if (offset <= 0x5FFF) return 6u;               // more registers, fast
+  if (offset <= 0x7FFF) return 8u;               // the expansion region, slow
+  return (bank >= 0x80) ? (fast2 ? 6u : 8u)      // $80-$BF LoROM follows MEMSEL
+                        : 8u;                     // $00-$3F LoROM is always slow
+}
+
+// Whether the page starting at `address` is a system bank's $4000-$5FFF, where
+// the first 512 bytes cost 12 and the rest 6: the one page a single cost cannot
+// price. `address` is a page's first address.
+constexpr bool joypadPage(std::uint32_t address) noexcept {
+  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
+  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
+  return (bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF)) && offset == 0x4000u;
+}
+
+static_assert(regionCost(0x7E0000u, false) == 8u, "work RAM costs 8");
+static_assert(regionCost(0x7F0000u, true) == 8u, "work RAM costs 8 under MEMSEL");
+static_assert(regionCost(0x400000u, true) == 8u, "bank $40 costs 8 under MEMSEL");
+static_assert(regionCost(0x7D8000u, true) == 8u, "bank $7D costs 8 under MEMSEL");
+static_assert(regionCost(0xC00000u, false) == 8u, "bank $C0 costs 8 with MEMSEL clear");
+static_assert(regionCost(0xC00000u, true) == 6u, "bank $C0 costs 6 under MEMSEL");
+static_assert(regionCost(0xFF8000u, true) == 6u, "bank $FF costs 6 under MEMSEL");
+static_assert(regionCost(0x000000u, true) == 8u, "the work-RAM mirror costs 8");
+static_assert(regionCost(0x801FFFu, true) == 8u, "the mirror's last byte in bank $80 costs 8");
+static_assert(regionCost(0x002000u, false) == 6u, "the registers at $2000 cost 6");
+static_assert(regionCost(0x803FFFu, false) == 6u, "the registers' last byte below $4000 costs 6");
+static_assert(regionCost(0x004000u, false) == 12u, "the manual joypad ports cost 12");
+static_assert(regionCost(0x0041FFu, true) == 12u, "the joypad ports' last byte costs 12");
+static_assert(regionCost(0xBF4000u, false) == 12u, "the joypad ports in bank $BF cost 12");
+static_assert(regionCost(0x004200u, false) == 6u, "the registers at $4200 cost 6");
+static_assert(regionCost(0x005FFFu, false) == 6u, "the registers' last byte below $6000 costs 6");
+static_assert(regionCost(0x006000u, true) == 8u, "the expansion region costs 8");
+static_assert(regionCost(0x807FFFu, true) == 8u, "the expansion region's last byte in bank $80 costs 8");
+static_assert(regionCost(0x008000u, true) == 8u, "$00:8000 costs 8 under MEMSEL");
+static_assert(regionCost(0x3FFFFFu, true) == 8u, "$3F:FFFF costs 8 under MEMSEL");
+static_assert(regionCost(0x808000u, false) == 8u, "$80:8000 costs 8 with MEMSEL clear");
+static_assert(regionCost(0x808000u, true) == 6u, "$80:8000 costs 6 under MEMSEL");
+static_assert(regionCost(0xBFFFFFu, true) == 6u, "$BF:FFFF costs 6 under MEMSEL");
+static_assert(joypadPage(0x004000u), "bank $00's $4000 page holds the joypad ports");
+static_assert(joypadPage(0x804000u), "bank $80's $4000 page holds the joypad ports");
+static_assert(joypadPage(0xBF4000u), "bank $BF's $4000 page holds the joypad ports");
+static_assert(!joypadPage(0x404000u), "bank $40 is the cartridge's");
+static_assert(!joypadPage(0x002000u), "the $2000 page is registers alone");
+static_assert(!joypadPage(0x006000u), "the $6000 page is the expansion region");
+static_assert(!joypadPage(0x004200u), "the predicate answers a page's first address");
+
 }  // namespace
 
 Snes::Snes(SnesConfig config)
@@ -547,28 +612,19 @@ std::vector<StereoFrame> Snes::takeFrames() {
 }
 
 std::uint32_t Snes::accessCost(std::uint32_t address) const noexcept {
-  const std::uint8_t bank = static_cast<std::uint8_t>((address >> 16) & 0xFFu);
-  const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
-  const bool fast2 = (state_.memsel & 1u) != 0u;  // the second waitstate region under MEMSEL
-
-  // Work RAM and the first waitstate region span whole banks and always run slow.
-  if (bank >= 0x7E && bank <= 0x7F) return 8u;   // work RAM
-  if (bank >= 0x40 && bank <= 0x7D) return 8u;   // the first LoROM region
-  if (bank >= 0xC0) return fast2 ? 6u : 8u;      // the second LoROM region, under MEMSEL
-
-  // System banks $00-$3F and $80-$BF share one layout below $8000, then LoROM.
-  if (offset <= 0x1FFF) return 8u;               // work-RAM mirror
-  if (offset <= 0x3FFF) return 6u;               // registers and unused pages, fast
-  if (offset <= 0x41FF) return 12u;              // the manual joypad ports, extra slow
-  if (offset <= 0x5FFF) return 6u;               // more registers, fast
-  if (offset <= 0x7FFF) return 8u;               // the expansion region, slow
-  return (bank >= 0x80) ? (fast2 ? 6u : 8u)      // $80-$BF LoROM follows MEMSEL
-                        : 8u;                     // $00-$3F LoROM is always slow
+  const Page& page = pages_[(address >> 13) & (kPages - 1u)];
+  const std::uint32_t cost = page.cost[state_.memsel & 1u];  // MEMSEL's bit 0 alone
+  if (cost != 0u) [[likely]] return cost;
+  // The joypad page: the manual ports in its first 512 bytes, registers after.
+  return (address & (kPageBytes - 1u)) < 0x200u ? 12u : 6u;
 }
 
 Snes::Page Snes::imagePage(const CartridgeBoard& board, std::uint32_t address) const noexcept {
+  // The cost stays zero: buildPages copies a result's kind and base into the
+  // table, never its cost.
   Page page{.kind = PageKind::RomEmpty,
             .fallback = PageKind::OpenBus,
+            .cost = {std::uint8_t{0}, std::uint8_t{0}},
             .base = 0u,
             .fallbackBase = 0u};
   if (rom_.empty()) return page;
@@ -601,8 +657,10 @@ void Snes::buildPages() {
     Page& page = pages_[p];
     page = Page{.kind = PageKind::OpenBus,
                 .fallback = PageKind::OpenBus,
+                .cost = {regionCost(address, false), regionCost(address, true)},
                 .base = 0u,
                 .fallbackBase = 0u};
+    if (joypadPage(address)) page.cost = {std::uint8_t{0}, std::uint8_t{0}};
     if (bank >= 0x7E && bank <= 0x7F) {
       page.kind = PageKind::WorkRam;
       page.base = (static_cast<std::uint32_t>(bank - 0x7E) << 16) | offset;

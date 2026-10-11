@@ -1200,6 +1200,10 @@ class Snes {
   // the cartridge above $8000 and whole cartridge banks — so one entry per page
   // says which memory the page's bytes are in and where its first byte lands,
   // and an access finds its byte with one load of the entry and an add. The
+  // entry also holds the master cycles an access to the page costs, with MEMSEL
+  // clear and with it set, so an access reads its price and its byte from the
+  // same entry; the manual joypad ports' page is the one page priced at the
+  // access, since its first 512 bytes cost more than the rest of it. The
   // table is built once from the cartridge functions (`cartridge.h`) at
   // construction, from the map, the image's size and the board, and is fixed
   // with them; the router, peek and poke, the classification and the watch all
@@ -1218,9 +1222,11 @@ class Snes {
   struct Page {
     PageKind kind;
     PageKind fallback;           // a save window on a cartridge with no save: what the page is then (Rom, RomSlow, RomEmpty or OpenBus)
+    std::array<std::uint8_t, 2> cost;  // the master cycles an access to the page costs, with MEMSEL clear [0] and set [1]; 0 marks the joypad page, priced at the access
     std::uint32_t base;          // where the page's first byte lands in its space, as kind says
     std::uint32_t fallbackBase;  // the fallback's base, for Rom
   };
+  static_assert(sizeof(Page) == 12u, "the two cost bytes sit in the entry's padding");
   static constexpr std::size_t kPageBytes = 8192u;
   static constexpr std::size_t kPages = 2048u;
   // Fills pages_ from the cartridge functions, one page at a time: what the
@@ -1344,8 +1350,10 @@ class Snes {
   [[nodiscard]] std::uint8_t dmaRegValue(std::uint16_t offset) const noexcept;
   void writeDmaReg(std::uint16_t offset, std::uint8_t value);
 
-  // The master-cycle cost of reaching `address`, by the documented region map. The
-  // second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) follows MEMSEL.
+  // The master-cycle cost of reaching `address`, by the documented region map:
+  // the page entry's cost at the current MEMSEL setting, the second waitstate
+  // region ($80-$BF:$8000-$FFFF and $C0-$FF) fast under it. The manual joypad
+  // ports are priced inside their page.
   [[nodiscard]] std::uint32_t accessCost(std::uint32_t address) const noexcept;
 
   // The work-RAM data port: $2180 reads or writes work RAM at the port address and
