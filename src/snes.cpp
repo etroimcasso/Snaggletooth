@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <utility>
 
@@ -34,10 +35,20 @@ inline void cpuRelax() noexcept {
 #endif
 }
 
-// How many turns the audio thread spins once no call is in flight before it parks.
-// A host that calls again within it, a line or a frame later, finds the thread
-// awake; one that stops calling leaves no core busy.
-constexpr std::uint32_t kApuSpinGrace = 1u << 16;
+// How long the audio thread stays awake with nothing to run before it parks: long
+// enough to cover the gap from one line's port reads to the next line's at the
+// console's rate, and the gap between a host's calls inside one frame, so a thread
+// the console is about to need is awake; short enough that a host's sleep inside a
+// report, or between frames, leaves no core busy.
+constexpr std::chrono::microseconds kApuHotWindow{100};
+// Relaxed turns between two readings of the clock in the wait loop.
+constexpr std::uint32_t kApuClockEvery = 64u;
+// Audio cycles the console pays before it publishes the count to a sleeping thread:
+// a millisecond of the audio machine's time. The count is also published before
+// every point that depends on it — a port write's stamp, a read's or a report's
+// wait, a call's return — so what a sleeping thread has not run is never more than
+// this, and what it runs is the same count in the same order.
+constexpr std::uint64_t kApuBatch = 1024u;
 
 // The APU advances by an exact rational share of the master cycles that elapse.
 // The APU runs off a 24.576 MHz crystal divided by 24 — a 1,024,000 Hz cycle rate
@@ -365,9 +376,10 @@ void Snes::closeCycle() {
   // the flags and enables as they now stand — so a register write this cycle is
   // settled for the next fetch to sample — and the master counter advances, paying the
   // audio machine the share of it that its own crystal owes. The share runs here, or,
-  // on a machine built with the audio thread, is released to that thread, which runs
-  // it beside the console. The share is counted by subtraction: a cycle owes at most
-  // one audio cycle, and an HDMA event, one cycle costing the whole event, a handful.
+  // on a machine built with the audio thread, joins the count the console publishes
+  // to that thread, which runs it beside the console. The share is counted by
+  // subtraction: a cycle owes at most one audio cycle, and an HDMA event, one cycle
+  // costing the whole event, a handful.
   settleTimer();
   cpu_.setNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
   cpu_.setIrqLine(state_.timeup);
@@ -380,8 +392,8 @@ void Snes::closeCycle() {
   }
   if (apuCycles != 0) {
     if (apuThreaded_) [[unlikely]] {
-      link_.released.store(link_.released.load(std::memory_order_relaxed) + apuCycles,
-                           std::memory_order_release);
+      link_.pending += apuCycles;
+      if (link_.pending >= kApuBatch) [[unlikely]] publishApu();
     } else {
       apu_.run(apuCycles);
     }
@@ -2292,8 +2304,10 @@ Snes::Flight::Flight(Snes& machine) : m(machine) {
   outer = true;
   if (!m.link_.thread.joinable()) m.startApuThread();
   // The flag goes up before the parked flag is read, and the thread sets parked
-  // before it reads the flag again under the mutex: one of the two sees the other's
-  // store, so the thread is never left asleep through a flight.
+  // before it reads the flag under the mutex: one of the two sees the other's store,
+  // so a thread parked between calls wakes as the call begins. A thread that parked
+  // inside an earlier call is not woken by this one beginning but by its first
+  // release, so the notify here leaves parked up for that release to see.
   m.link_.inFlight.store(true, std::memory_order_seq_cst);
   if (m.link_.parked.load(std::memory_order_seq_cst)) {
     const std::lock_guard<std::mutex> lock(m.link_.mutex);
@@ -2334,24 +2348,63 @@ bool Snes::onApuThread() const noexcept {
 
 void Snes::waitApu() const noexcept {
   if (!apuThreaded_) return;
+  // The audio thread asking from inside its own run stands where it stands, and the
+  // count it would publish is the console's alone.
+  if (onApuThread()) return;
+  publishApu();
   const std::uint64_t released = link_.released.load(std::memory_order_relaxed);
   const std::uint32_t head = link_.head.load(std::memory_order_relaxed);
   if (link_.done.load(std::memory_order_acquire) == released &&
       link_.tail.load(std::memory_order_acquire) == head) {
     return;
   }
-  // The audio thread asking from inside its own run stands where it stands.
-  if (onApuThread()) return;
+  needApuThread();
   while (link_.done.load(std::memory_order_acquire) != released ||
          link_.tail.load(std::memory_order_acquire) != head) {
     cpuRelax();
   }
 }
 
+void Snes::needApuThread() const noexcept {
+  link_.needed.store(true, std::memory_order_relaxed);
+  // The console's stores come before its look at parked, and the thread sets parked
+  // before its looks under the mutex: either the thread's looks see the work and the
+  // need, or this look sees parked and the notify under the mutex finds it waiting.
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  if (link_.parked.load(std::memory_order_relaxed)) wakeApuThread();
+}
+
+void Snes::publishApu() const noexcept {
+  if (link_.pending == 0u) return;
+  link_.released.store(link_.released.load(std::memory_order_relaxed) + link_.pending,
+                       std::memory_order_release);
+  link_.pending = 0;
+  // A parked thread is woken by the publish. A look that misses a park just begun is
+  // followed by the next publish's look, or by a wait that cannot miss it.
+  if (link_.parked.load(std::memory_order_relaxed)) [[unlikely]] wakeApuThread();
+}
+
+void Snes::wakeApuThread() const noexcept {
+  const std::lock_guard<std::mutex> lock(link_.mutex);
+  // The caller made a release or a need before taking the mutex, so the thread's
+  // looks see it and it wakes. Parked comes down here rather than when the thread
+  // is next scheduled, so the cycles run meanwhile do not each wake it again. A wake
+  // that arrives late, for a release the thread has already run, finds the thread
+  // parking again; it puts parked back up before it waits.
+  link_.parked.store(false, std::memory_order_relaxed);
+  link_.wake.notify_one();
+}
+
 void Snes::pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept {
+  // The count is published first, so the stamp below is the true count and the full
+  // ring's wait gives the thread every cycle the writes in it are stamped with.
+  publishApu();
   const std::uint32_t head = link_.head.load(std::memory_order_relaxed);
   // A full ring waits for the thread to apply the oldest write, so none is lost.
-  while (head - link_.tail.load(std::memory_order_acquire) >= kPortRing) cpuRelax();
+  if (head - link_.tail.load(std::memory_order_acquire) >= kPortRing) [[unlikely]] {
+    needApuThread();
+    while (head - link_.tail.load(std::memory_order_acquire) >= kPortRing) cpuRelax();
+  }
   link_.ring[head % kPortRing] = PortWrite{
       .at = link_.released.load(std::memory_order_relaxed),
       .index = index,
@@ -2363,24 +2416,39 @@ void Snes::pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept {
 }
 
 void Snes::apuThreadBody() noexcept {
+  using Clock = std::chrono::steady_clock;
   std::uint64_t done = link_.done.load(std::memory_order_relaxed);
   std::uint32_t tail = link_.tail.load(std::memory_order_relaxed);
+  Clock::time_point hotUntil = Clock::now() + kApuHotWindow;
+  bool worked = false;  // work was run since the clock was last read
   for (;;) {
-    // Wait for work: spin while a call is in flight and for the grace after it,
-    // then park until a call comes.
-    std::uint32_t spins = 0;
+    // Wait for work. The console waiting for the thread opens the hot window; work
+    // run while it is open keeps it open; the thread reads the clock once every
+    // kApuClockEvery turns and parks once the window has passed with nothing to run.
+    // A batch that arrives with the window shut is run and the thread parks again.
+    std::uint32_t turns = 0;
     for (;;) {
       if (link_.stop.load(std::memory_order_acquire)) return;
       if (link_.released.load(std::memory_order_acquire) != done ||
           link_.head.load(std::memory_order_acquire) != tail) {
         break;
       }
-      if (link_.inFlight.load(std::memory_order_relaxed)) {
-        spins = 0;
-      } else if (++spins >= kApuSpinGrace) {
-        parkApuThread(done, tail);
-        spins = 0;
-        continue;
+      if (link_.needed.load(std::memory_order_relaxed) &&
+          link_.needed.exchange(false, std::memory_order_relaxed)) {
+        hotUntil = Clock::now() + kApuHotWindow;
+      }
+      if (++turns == kApuClockEvery) {
+        turns = 0;
+        const Clock::time_point now = Clock::now();
+        const bool keepOpen = worked && now < hotUntil;
+        worked = false;
+        if (keepOpen) {
+          hotUntil = now + kApuHotWindow;
+        } else if (now >= hotUntil) {
+          parkApuThread(done, tail);
+          hotUntil = Clock::time_point{};  // shut: a need opens it
+          continue;
+        }
       }
       cpuRelax();
     }
@@ -2403,20 +2471,31 @@ void Snes::apuThreadBody() noexcept {
       done += cycles;
       link_.done.store(done, std::memory_order_release);
     }
+    worked = true;
   }
 }
 
 void Snes::parkApuThread(std::uint64_t done, std::uint32_t tail) {
   std::unique_lock<std::mutex> lock(link_.mutex);
-  // Parked goes up before the look under the mutex; a flight that began before it
-  // is seen by the look, and one that begins after it sees parked and wakes it.
-  link_.parked.store(true, std::memory_order_seq_cst);
-  link_.wake.wait(lock, [&] {
-    return link_.stop.load(std::memory_order_seq_cst) ||
-           link_.inFlight.load(std::memory_order_seq_cst) ||
-           link_.released.load(std::memory_order_seq_cst) != done ||
-           link_.head.load(std::memory_order_seq_cst) != tail;
-  });
+  // A call already in progress is no reason to wake; a call that begins once the
+  // thread has parked is.
+  const bool flying = link_.inFlight.load(std::memory_order_seq_cst);
+  for (;;) {
+    // Parked goes up before the looks under the mutex, on every pass: a release, a
+    // need or a call that came before it is seen by the looks, and one that comes
+    // after it sees parked and wakes the thread. A waker takes parked down, and a
+    // wake can come late, for a release this thread has already run; parked goes up
+    // again before the thread waits again, so it never waits with parked down.
+    link_.parked.store(true, std::memory_order_seq_cst);
+    if (link_.stop.load(std::memory_order_seq_cst) ||
+        (!flying && link_.inFlight.load(std::memory_order_seq_cst)) ||
+        link_.needed.load(std::memory_order_seq_cst) ||
+        link_.released.load(std::memory_order_seq_cst) != done ||
+        link_.head.load(std::memory_order_seq_cst) != tail) {
+      break;
+    }
+    link_.wake.wait(lock);
+  }
   link_.parked.store(false, std::memory_order_seq_cst);
 }
 

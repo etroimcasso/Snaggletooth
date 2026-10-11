@@ -339,15 +339,20 @@ The two machines meet where the console's do, at the ports:
 The bytes are the same as on a machine built with it off, the default: the same state at every return,
 the same audio frames, the same byte from every read of a port.
 
-The thread starts at a machine's first call, spins on its core while calls keep coming, and parks once
-none has come for a while; the next call wakes it. Moving a machine stops the moved machine's thread,
+The thread starts at a machine's first call and runs whenever the console has released cycles it has not
+run. The console releases them in batches of about a millisecond of the audio machine's time, and at
+every point that depends on them: a port write, a port read, a report, a call's return. Once the thread
+has nothing to run, and the console has not waited for it in the last short while, it sleeps, through a
+host's sleep inside a report as between calls. The next batch, the next read that waits for it, or the
+start of the next call wakes it, so a read after a quiet stretch waits for the thread to wake and catch
+up. Moving a machine stops the moved machine's thread,
 and the machine in its new place starts its own at its first call. Destroying a machine stops its thread
 and waits for it to end. The [audio machine's observer](#the-bus-observer) is told on this thread.
 
 The thread takes work off the calling thread and adds work to the process. The calling thread spends
 less time per emulated second, which is what a host needs whose cores are each too slow to run the whole
-machine at speed. The process spends more: the audio thread spins for as long as a call is in flight,
-and every port read and every call's return waits for the two threads to meet. A host whose one core
+machine at speed. The process spends more: the audio thread's own work, its wakes, and the waits where
+the two threads meet, at every port read and every call's return. A host whose one core
 runs the machine at speed leaves the thread off.
 
 ## The audio upload stub

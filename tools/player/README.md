@@ -64,8 +64,8 @@ unthrottled: no frame pacing, no vsync
 `--apu-thread` runs the audio unit on a thread of the machine's own, beside the one that steps the
 console ([The audio thread](../../docs/snes-machine.md#the-audio-thread)). It is for a host whose cores
 are each too slow to run the whole machine at speed: the thread that steps the console does less work
-per frame, and the run takes a second core for as long as it runs, so the process as a whole uses more
-CPU, not less. On a host that already runs the console at speed, leave it off. The picture and the sound
+per frame, the audio unit's work moves to a second core, and the waits where the two threads meet add to
+it, so the process as a whole uses more CPU, not less. On a host that already runs the console at speed, leave it off. The picture and the sound
 are the same bytes either way, and the run says which way it took —
 
 ```

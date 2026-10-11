@@ -54,8 +54,8 @@
 // --apu-thread builds the machine with SnesConfig::apuThread on: the audio unit runs
 // on a thread of the machine's own, beside the one that steps the console, for a host
 // whose cores are each too slow to run the whole machine at speed. The picture and the
-// sound are the same bytes either way; the run takes a second core for as long as it
-// runs, and its first lines say so.
+// sound are the same bytes either way; the audio unit's work moves to a second core,
+// and the run's first lines say so.
 //
 // A cartridge that turns interlace on draws one field a frame, and the player weaves
 // the two into the full-height picture the console's signal carried. --interlace names

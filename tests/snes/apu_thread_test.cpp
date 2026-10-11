@@ -4,11 +4,12 @@
 // state and every audio frame — at the return of every call, over a cartridge that
 // talks to the audio machine through its ports on every frame: a CPU store and a DMA
 // to port 0, and a poll of port 0 until the audio CPU echoes the byte back. They pin
-// the faces that meet the thread: a port read, an engine's write, snapshot and
-// restore, the move, the reset line, the audio observer's thread and the refusal of a
-// call from it, a report that throws and what a report reads, a peek from a bus
-// observer, a guest call between calls, the thread's park and wake and its end with
-// the machine, and a burst of port writes the thread is behind on.
+// the faces that meet the thread: a port read, a read after a quiet stretch, an
+// engine's write, snapshot and restore, the move, the reset line, the audio
+// observer's thread and the refusal of a call from it, a report that throws and what
+// a report reads, a peek from a bus observer, a guest call between calls, the
+// thread's park and wake — between calls and inside a report that sleeps — and its
+// end with the machine, and a burst of port writes the thread is behind on.
 
 #include <array>
 #include <chrono>
@@ -406,12 +407,12 @@ TEST(SnesApuThread, TheMachineStopsItsThreadWhenItGoes) {
   }
   {
     Snes spinning(config(rom, true));
-    spinning.run(kFrame);  // destroyed while its thread spins after the call
+    spinning.run(kFrame);  // destroyed while its thread is awake after the call
   }
   {
     Snes parked(config(rom, true));
     parked.run(kFrame);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // past the spin grace
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // past the hot window
     parked.run(kQuarterFrame);  // a call wakes it
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }  // destroyed while its thread is parked
@@ -549,7 +550,7 @@ TEST(SnesApuThread, AGuestCallBetweenCallsWakesAParkedThreadAndJoinsIt) {
   loadPortReader(t.threaded);
   t.lockstep.run(kFrame);
   t.threaded.run(kFrame);
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));  // past the spin grace
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));  // past the hot window
   EXPECT_TRUE(t.lockstep.callInContext(kPortRoutine, Standin::Near, 100));
   EXPECT_TRUE(t.threaded.callInContext(kPortRoutine, Standin::Near, 100));
   ASSERT_TRUE(equal(t.lockstep, t.threaded)) << "after the call in context";
@@ -562,7 +563,7 @@ TEST(SnesApuThread, AGuestCallBetweenCallsWakesAParkedThreadAndJoinsIt) {
 
 TEST(SnesApuThread, AThreadParkingAsACallBeginsIsWokenByIt) {
   // Calls a line long, each after a pause of its own length: across the run the
-  // pauses pass the spin grace at every point of its end, so some call begins just
+  // pauses pass the hot window at every point of its end, so some call begins just
   // as the thread parks. A thread left parked through a call never returns from it.
   Twin t = twin(portWriter());
   loadPortReader(t.lockstep);
@@ -576,6 +577,129 @@ TEST(SnesApuThread, AThreadParkingAsACallBeginsIsWokenByIt) {
     }
   }
   EXPECT_TRUE(equal(t.lockstep, t.threaded));
+}
+
+// A frame observer that sleeps inside each of the first eight reports it is told, as
+// a host holding a run to the console's rate does.
+struct SleepsInReport final : FrameObserver {
+  int frames = 0;
+  void frame(const VideoFrame&) override {
+    if (++frames <= 8) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+};
+
+TEST(SnesApuThread, AThreadParkedInsideAReportIsWokenWhenTheConsoleRunsOn) {
+  // Each sleep is 200 times the thread's hot window, so the thread parks inside the
+  // report with the call still in progress; the console's next cycles must wake it.
+  Twin t = twin(handshake());
+  SleepsInReport onLockstep;
+  SleepsInReport onThreaded;
+  t.lockstep.setFrameObserver(&onLockstep);
+  t.threaded.setFrameObserver(&onThreaded);
+  for (int call = 0; call < 12; ++call) {
+    t.lockstep.run(kFrame);
+    t.threaded.run(kFrame);
+    ASSERT_TRUE(equal(t.lockstep, t.threaded)) << "after run " << call;
+  }
+  EXPECT_GE(onThreaded.frames, 11);
+  EXPECT_EQ(t.threaded.state().wram[kEcho], t.lockstep.state().wram[kEcho]);
+  EXPECT_EQ(t.threaded.state().wram[kIndex], t.lockstep.state().wram[kIndex]);
+}
+
+// A cartridge that touches no port for three frames and then reads port 1 once:
+//   $8000  LDA #$80 ; STA $4200           NMI on
+//   $8005  LDA $12 ; CMP #$03 ; BNE $8005 wait for the third frame
+//   $800B  LDA $2141 ; STA $14            the one read, kept in work RAM
+//   $8010  BRA $8010
+//   $8100  PHA ; LDA $4210 ; INC $12 ; PLA ; RTI          count the frame
+std::vector<std::uint8_t> quietThenRead() {
+  return image(
+      {
+          0xA9, 0x80, 0x8D, 0x00, 0x42,  // $8000
+          0xA5, 0x12, 0xC9, 0x03, 0xD0, 0xFA,  // $8005
+          0xAD, 0x41, 0x21, 0x85, 0x14,  // $800B
+          0x80, 0xFE,                    // $8010
+      },
+      {0x48, 0xAD, 0x10, 0x42, 0xE6, 0x12, 0x68, 0x40});
+}
+
+// An audio program in place of the upload stub, at $0200: it counts its own loop
+// passes and shows the count on port 1, so the byte a CPU read of $2141 answers
+// names the audio cycle the read landed at.
+//   $0200  INC $20 ; MOV $F5,$20 ; BRA $0200
+void loadPortCounter(Snes& machine) {
+  SnesState s = machine.state();
+  const std::array<std::uint8_t, 7> program = {0xAB, 0x20, 0xFA, 0x20, 0xF5, 0x2F, 0xF9};
+  for (std::size_t i = 0; i < program.size(); ++i) s.apu.ram[0x0200u + i] = program[i];
+  s.apu.cpu.pc = 0x0200u;
+  s.apu.cpu.psw = 0x00u;  // the direct page at $00xx, where $F5 is port 1
+  machine.restore(s);
+}
+
+TEST(SnesApuThread, AReadAfterAQuietStretchAnswersTheLockstepByte) {
+  // Three frames with no port touched are thousands of audio cycles the console pays
+  // with nothing asking for them, so the read is the first point in a long while
+  // that waits for the thread.
+  Twin t = twin(quietThenRead());
+  loadPortCounter(t.lockstep);
+  loadPortCounter(t.threaded);
+  t.lockstep.run(4u * kFrame);
+  t.threaded.run(4u * kFrame);
+  EXPECT_TRUE(equal(t.lockstep, t.threaded));
+  EXPECT_GE(t.lockstep.state().wram[kFrames], 3u) << "the program reached the read";
+  EXPECT_EQ(t.threaded.state().wram[kEcho], t.lockstep.state().wram[kEcho]);
+}
+
+// A bus observer that restores a snapshot at the Nth fetch of the opcode at `pc`.
+struct RestoreAtFetch final : BusObserver {
+  Snes* machine = nullptr;
+  const SnesState* snapshot = nullptr;
+  std::uint32_t pc = 0;
+  int at = 0;
+  int fetches = 0;
+  void access(const BusAccess& access) override {
+    if (access.source == AccessSource::Cpu && access.kind == CycleKind::OpcodeFetch &&
+        (access.address & 0xFFFFu) == pc && ++fetches == at) {
+      machine->restore(*snapshot);
+    }
+  }
+  void internal(std::uint32_t, std::optional<CycleKind>) override {}
+};
+
+TEST(SnesApuThread, ARestoreFromInsideACallReplacesTheAudioMachineAfterTheCyclesPaidBeforeIt) {
+  // The restore comes inside the quiet cartridge's wait for the third frame, with
+  // hundreds of audio cycles paid since the last point that waited for the thread:
+  // those cycles run on the machine being replaced, as the lockstep machine ran
+  // them, and the restored machine starts from the snapshot.
+  Twin t = twin(quietThenRead());
+  loadPortCounter(t.lockstep);
+  loadPortCounter(t.threaded);
+  t.lockstep.run(kQuarterFrame);
+  t.threaded.run(kQuarterFrame);
+  ASSERT_TRUE(equal(t.lockstep, t.threaded));
+  const SnesState snapshot = t.lockstep.state();
+  RestoreAtFetch onLockstep;
+  RestoreAtFetch onThreaded;
+  for (RestoreAtFetch* watch : {&onLockstep, &onThreaded}) {
+    watch->snapshot = &snapshot;
+    watch->pc = 0x8005u;  // LDA $12, the head of the wait loop
+    watch->at = 3000;
+  }
+  onLockstep.machine = &t.lockstep;
+  onThreaded.machine = &t.threaded;
+  t.lockstep.setObserver(&onLockstep);
+  t.threaded.setObserver(&onThreaded);
+  t.lockstep.run(kFrame);
+  t.threaded.run(kFrame);
+  ASSERT_GE(onLockstep.fetches, 3000) << "the restore came inside the run";
+  ASSERT_EQ(onThreaded.fetches, onLockstep.fetches);
+  EXPECT_TRUE(equal(t.lockstep, t.threaded)) << "after the run the restore came in";
+  t.lockstep.setObserver(nullptr);
+  t.threaded.setObserver(nullptr);
+  t.lockstep.run(4u * kFrame);
+  t.threaded.run(4u * kFrame);
+  EXPECT_TRUE(equal(t.lockstep, t.threaded)) << "past the read";
+  EXPECT_EQ(t.threaded.state().wram[kEcho], t.lockstep.state().wram[kEcho]);
 }
 
 }  // namespace

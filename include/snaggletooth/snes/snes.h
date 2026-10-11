@@ -408,9 +408,12 @@ struct SnesConfig {
   // owns, beside the calling thread, while step(), run() or a call into the guest is
   // in progress: the calling thread does less work per emulated second, for a host
   // whose cores are each too slow to run the whole machine at speed, and the process
-  // does more, since that thread spins on its core for as long as a call is in
-  // flight. The bytes are the same either way: the same state at every return, the
-  // same audio frames, the same byte from every read of a port.
+  // does more: the thread's own work, its wakes, and the waits where the two threads
+  // meet. The console hands the thread its cycles in batches of about a millisecond
+  // of the audio machine's time, and at every point that depends on them; the thread
+  // sleeps whenever it has nothing to run, through a host's sleep inside a report as
+  // between calls. The bytes are the same either way: the same state at every
+  // return, the same audio frames, the same byte from every read of a port.
   bool apuThread = false;
 };
 
@@ -634,8 +637,8 @@ class Snes {
   // waits for the audio machine to reach the read's cycle, and a write lands at its
   // own cycle. When step() returns, the audio machine stands at the same master time
   // as the console either way, and nothing runs until the next call. The audio
-  // thread starts at a machine's first call and parks when no call has come for a
-  // while.
+  // thread starts at a machine's first call and parks once it has had nothing to
+  // run for a short while, inside a call or between calls.
   std::uint32_t step();
 
   // Runs exactly `budget` master cycles and returns that count. A cycle is priced
@@ -920,12 +923,12 @@ class Snes {
 
  private:
   // The audio thread's side of a call: entered by step(), run(), callInContext and
-  // callOnStack, it starts the thread on a machine's first call, sets the flag the
-  // thread spins on while a call is in flight and wakes the thread if it parked;
-  // leaving, it waits for the audio machine to reach the console's master time, so
-  // a report that throws still leaves the two machines at one time. A call made
-  // from inside a call, a guest call from a frame report say, enters a flight
-  // already in progress and leaves it in progress.
+  // callOnStack, it starts the thread on a machine's first call, marks the call in
+  // progress and wakes the thread if it parked; leaving, it waits for the audio
+  // machine to reach the console's master time, so a report that throws still
+  // leaves the two machines at one time. A call made from inside a call, a guest
+  // call from a frame report say, enters a flight already in progress and leaves it
+  // in progress.
   struct Flight {
     explicit Flight(Snes& machine);
     ~Flight();
@@ -941,11 +944,20 @@ class Snes {
   void parkApuThread(std::uint64_t done, std::uint32_t tail);
   void startApuThread();
   void stopApuThread() noexcept;
-  // Waits until the audio machine has run every cycle the console has released and
-  // applied every port write it was handed, so it stands at the console's master
-  // time. A machine built with the thread off has nothing to wait for, and neither
-  // has a call made on the audio thread itself.
+  // Releases the cycles the console has paid, then waits until the audio machine
+  // has run every one and applied every port write it was handed, so it stands at
+  // the console's master time. A machine built with the thread off has nothing to
+  // wait for, and neither has a call made on the audio thread itself.
   void waitApu() const noexcept;
+  // Releases the audio cycles the console has paid and not yet released to the
+  // thread, and wakes the thread if it parked.
+  void publishApu() const noexcept;
+  // The console is about to wait for the thread: marks the need, which keeps the
+  // thread awake for its hot window, and wakes the thread if it parked.
+  void needApuThread() const noexcept;
+  // Wakes a parked thread for a release or a need the caller has just made, under
+  // the mutex it parks under, and takes the parked flag down.
+  void wakeApuThread() const noexcept;
   // Whether the calling thread is the machine's audio thread.
   [[nodiscard]] bool onApuThread() const noexcept;
   // A write to a port from the bus, handed to the audio thread to land at the
@@ -1547,16 +1559,20 @@ class Snes {
   std::unique_ptr<StandinSet> standins_;              // the armed instructions; null until the first arm
 
   // The audio thread and the cells it shares with the calling thread. The console
-  // releases audio cycles by adding them to `released`; the thread runs them and
-  // publishes the count it has run in `done`, and never runs past `released`. Both
-  // count from zero at the machine's construction and are equal whenever the two
-  // machines stand at one master time, so neither is state: a snapshot carries
-  // neither, and a restore leaves them equal. A write to a port from the bus joins
-  // the ring stamped with `released` as it stands, which is the audio cycle the
-  // write lands before; the thread applies it once `done` reaches the stamp and
-  // never runs past a stamp it has not applied. A read waits for `done` to reach
-  // `released` and the ring to drain. Each cell sits in a cache line of its own,
-  // held apart by padding written as an array.
+  // counts the audio cycles it pays in `pending` and releases them by adding them to
+  // `released` once `pending` reaches kApuBatch and before every point that depends
+  // on the count; the thread runs them and publishes the count it has run in `done`,
+  // and never runs past `released`. Both count from zero at the machine's
+  // construction and are equal whenever the two machines stand at one master time,
+  // with `pending` zero, so none of the three is state: a snapshot carries none of
+  // them, and a restore leaves them equal. A write to a port from the bus releases
+  // `pending` and joins the ring stamped with `released`, which is the audio cycle
+  // the write lands before; the thread applies it once `done` reaches the stamp and
+  // never runs past a stamp it has not applied. A read releases `pending`, waits for
+  // `done` to reach `released` and the ring to drain, and raises `needed` first,
+  // which keeps the thread awake for a short window after the wait. Neither
+  // `needed` nor `parked` is state. Each cell sits in a cache line of its own, held
+  // apart by padding written as an array.
   struct PortWrite {
     std::uint64_t at = 0;     // the audio cycle count the write lands at
     std::uint8_t index = 0;   // the port, 0-3
@@ -1569,24 +1585,30 @@ class Snes {
     LinePad pad0{};
     std::atomic<std::uint64_t> done{0};      // audio cycles the thread has run; written by the thread
     LinePad pad1{};
-    std::atomic<bool> inFlight{false};       // a call is in progress; the thread spins rather than parks
+    std::atomic<bool> inFlight{false};       // a call is in progress; one that begins wakes a parked thread
     LinePad pad2{};
     std::atomic<bool> stop{false};           // the thread ends at its next look
     LinePad pad3{};
     std::atomic<bool> parked{false};         // the thread waits on `wake`
     LinePad pad4{};
-    std::atomic<std::uint32_t> head{0};      // ring entries written; by the console
+    std::atomic<bool> needed{false};         // the console waited for the thread; cleared by the thread
     LinePad pad5{};
-    std::atomic<std::uint32_t> tail{0};      // ring entries applied; by the thread
+    std::uint64_t pending = 0;               // audio cycles paid and not yet published; the console's alone
     LinePad pad6{};
-    std::array<PortWrite, kPortRing> ring{};
+    std::atomic<std::uint32_t> head{0};      // ring entries written; by the console
     LinePad pad7{};
+    std::atomic<std::uint32_t> tail{0};      // ring entries applied; by the thread
+    LinePad pad8{};
+    std::array<PortWrite, kPortRing> ring{};
+    LinePad pad9{};
     std::mutex mutex;                        // guards the park
     std::condition_variable wake;
     std::thread thread;
     std::thread::id id;                      // the thread's id, set before its first cycle is released
   };
-  ApuLink link_;
+  // Mutable: a const read of the audio machine waits for the thread, which marks the
+  // need and may wake it.
+  mutable ApuLink link_;
 
   // What a page reaches, for the watch: one 8 KB run of one space — the space
   // and the index of the run's first byte — no byte at all, or bytes the page
