@@ -13,7 +13,9 @@
 // leaves it in place — the bus observer's terms exactly. The PPU draws pixels
 // only while one is set; with none, a machine keeps its registers, its memories
 // and what the chip carries from one position to the next exactly as a watched
-// machine does, and draws nothing.
+// machine does, and draws nothing. A machine built with SnesConfig::ppuThread on
+// draws the pixels on a thread of its own and hands the frame over on the thread
+// it is stepped on, the same frame.
 
 #include <cstdint>
 #include <span>
@@ -42,7 +44,8 @@ class FrameObserver {
 
   // A frame the PPU has finished. It arrives on the thread the machine is stepped
   // on, from inside step() or run(), at the end of the cycle in which the beam
-  // reaches the next frame's first line, after that cycle has closed. It may
+  // reaches the next frame's first line, after that cycle has closed, whichever
+  // thread drew it. It may
   // throw, on the terms SaveObserver::changed states (`snes.h`): the machine is
   // left at that cycle's end and the next run() finishes the interrupted budget.
   // A save report the same cycle owes is then made at the end of the next cycle.

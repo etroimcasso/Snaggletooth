@@ -7,7 +7,7 @@ run when asked to.
 snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
                     [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
-                    [--interlace weave|bob|off] [--apu-thread] [--mute] [--quiet]
+                    [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
 ```
@@ -70,11 +70,28 @@ unthrottled: no frame pacing, no vsync
 console ([The audio thread](../../docs/snes-machine.md#the-audio-thread)). It is for a host whose cores
 are each too slow to run the whole machine at speed: the thread that steps the console does less work
 per frame, the audio unit's work moves to a second core, and the waits where the two threads meet add to
-it, so the process as a whole uses more CPU, not less. On a host that already runs the console at speed, leave it off. The picture and the sound
-are the same bytes either way, and the run says which way it took —
+it. The process as a whole uses a little more CPU in total, and each thread has less to do, so each core
+carries a lighter load and a slower device keeps up by running the work in parallel. On a host that
+already runs the console at speed, leave it off. The picture and the sound are the same bytes either way,
+and the run says which way it took —
 
 ```
 the audio unit on its own thread
+```
+
+## The picture on its own thread
+
+`--ppu-thread` draws the picture on a thread of the machine's own, beside the one that steps the
+console ([The picture thread](../../docs/snes-machine.md#the-picture-thread)). It is for the same
+host as `--apu-thread`, and the two combine: the thread that steps the console keeps the chip's
+registers, its memories, the beam and the sprite passes, and the drawing moves to another core. The
+process as a whole uses a little more CPU in total, and each thread has less to do, so each core
+carries a lighter load and a slower device keeps up by running the work in parallel. The pixels are
+the same either way, each frame is whole before the window shows it, and the run says which way it
+took —
+
+```
+the picture on its own thread
 ```
 
 ## Interlacing

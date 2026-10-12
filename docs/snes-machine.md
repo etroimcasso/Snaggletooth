@@ -27,6 +27,7 @@ finishes.
 - [Memory speed](#memory-speed)
 - [The APU clock](#the-apu-clock)
   - [The audio thread](#the-audio-thread)
+  - [The picture thread](#the-picture-thread)
 - [The audio upload stub](#the-audio-upload-stub)
   - [Running a console's own boot ROM](#running-a-consoles-own-boot-rom)
 - [The video counters and interrupts](#the-video-counters-and-interrupts)
@@ -93,7 +94,8 @@ into its ready state and a host loads a program into audio RAM directly. See
 
 `SnesConfig::apuThread` runs the audio machine's cycles on a thread the machine owns, off by default.
 With it off they run inside the console's cycles on the calling thread; the bytes are the same either
-way. See [The audio thread](#the-audio-thread).
+way. See [The audio thread](#the-audio-thread). `SnesConfig::ppuThread` draws the picture on a second
+thread the machine owns the same way, off by default; see [The picture thread](#the-picture-thread).
 
 ## The memory map
 
@@ -357,6 +359,47 @@ less time per emulated second, which is what a host needs whose cores are each t
 machine at speed. The process spends more: the audio thread's own work, its wakes, and the waits where
 the two threads meet, at every port read and every call's return. A host whose one core
 runs the machine at speed leaves the thread off.
+
+### The picture thread
+
+A machine built with `ppuThread` on draws the picture on a thread it owns:
+
+```cpp
+Snes machine(SnesConfig{.rom = rom, .ppuThread = true});  // the picture is drawn beside the calling thread
+```
+
+While `step()`, `run()` or a call into the guest is in progress, the calling thread keeps the chip's
+registers, its three memories, the beam and the two sprite passes, and logs every access to the chip —
+each write and each read of `$2100-$213F`, with the beam position it was applied at — and the start of
+every line, with the sprites Time gathered for it. The thread keeps a second copy of the chip's state,
+replays each access on it with the same call, so the copy's registers, latches and memories are the
+console's by the same accesses, and draws the dots between one access and the next from that copy: a
+write lands at the dot it landed at on the console. The thread never draws past what the console has
+logged.
+
+The console waits for the thread, and sleeps while it waits, at four points: a call's return, the frame
+and save reports, and a restore or a reset. There the thread has drawn every dot the beam has passed,
+and the console copies the two fields of the chip's state the picture writes, the tile reads and the
+last main-screen decision, back into `state()`. So at every return both stand at one picture and
+`state()` is what the machine built with the thread off would hold; inside a call, from a bus observer
+or a watcher, those two fields are the thread's and are not read. The frame still arrives on the calling
+thread, from inside the call, and the raster it hands over is the finished frame: a frame is never shown
+half drawn.
+
+The thread starts at a machine's first call and parks, as the audio thread does, once it has had nothing
+to draw for a short while, inside a call — through a host's sleep in a frame report — or between calls;
+the next entry logged wakes it. Moving a machine stops the moved machine's thread, and the machine in its
+new place starts its own at its first call. Destroying a machine stops its thread and waits for it to
+end. The two switches combine: a machine built with both on runs the audio unit on one thread and draws
+the picture on another, beside the calling thread.
+
+The pixels are the same as on a machine built with it off, the default: every frame handed over is the
+frame the calling thread would have drawn, and every byte a program reads is the same, since nothing a
+program can read comes from a drawn pixel. The thread takes the drawing off the calling thread and adds
+work to the process: the thread's own, its wakes, and the waits where the two meet. The process as a
+whole spends a little more CPU in total, and each thread has less to do, so each core carries a lighter
+load; a host whose cores are each too slow to run the whole machine at speed keeps up by running the
+work in parallel. A host whose one core runs the machine at speed leaves the thread off.
 
 ## The audio upload stub
 
@@ -919,6 +962,10 @@ moved, never copied; a moved machine carries its audio machine after its state. 
 with [the audio thread](#the-audio-thread), `state()` is read between calls, when both machines stand at
 one master time, and inside the frame and save reports, which wait for the audio machine; a bus observer
 or a watcher there reads the audio machine through `peekApu` and `peekApuRegister`, which wait for it.
+On a machine built with [the picture thread](#the-picture-thread), the two fields of `state().ppu` the
+picture writes, `tiles` and `lastMain`, are the thread's inside a call and are read between calls and
+inside the reports, which wait for the picture; the rest of the chip's state is the calling thread's
+throughout.
 
 The machine is deterministic: the same state and the same trace give the same bytes. The trace is
 everything that reaches the machine from outside — the pads presented before each run, and whatever a

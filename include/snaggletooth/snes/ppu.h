@@ -34,11 +34,12 @@
 // chip runs across that line's dots, and what those passes leave is part of the
 // chip's state.
 //
-// The state is a plain value, PpuState, held once inside the machine's state
-// and nowhere else, so a snapshot of the machine carries the PPU whole and a
-// restore puts it back mid-latch. Ppu is the chip's behaviour applied to that
-// value: the machine builds one over its state for the length of a call and
-// never keeps it.
+// The state is a plain value, PpuState, held inside the machine's state, so a
+// snapshot of the machine carries the PPU whole and a restore puts it back
+// mid-latch. A machine drawing the picture on its picture thread holds a second
+// one the thread draws from, kept equal to the first in everything a pixel reads
+// by the same accesses. Ppu is the chip's behaviour applied to a value: the
+// machine builds one over its state for the length of a call and never keeps it.
 //
 // What the chip is told about the machine at an access is PpuInputs — its
 // input pins: where the beam is, the frame parity, the vertical-blank signal,
@@ -335,9 +336,9 @@ class Ppu {
   // where the windows cover the line.
   // Worked out from the state and no part of it — two machines holding the same
   // PpuState draw the same picture whatever either one has here — so the machine
-  // owns one beside the picture and hands it to every Ppu, and the chip drops
-  // whatever a write makes stale as it makes that write. Declared here and
-  // described below.
+  // owns one for each side that draws, beside the picture it draws, and hands it
+  // to every Ppu built over that side's state, and the chip drops whatever a write
+  // makes stale as it makes that write. Declared here and described below.
   struct Derived;
 
  public:

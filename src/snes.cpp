@@ -19,7 +19,7 @@ namespace snaggletooth {
 namespace {
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
-              "the audio thread's counters are read and written without a lock");
+              "the threads' counters are read and written without a lock");
 
 // One turn of a spin: tells the core the thread is waiting on another, which saves
 // power and gives a sibling hardware thread the core.
@@ -35,14 +35,17 @@ inline void cpuRelax() noexcept {
 #endif
 }
 
-// How long the audio thread stays awake with nothing to run before it parks: long
-// enough to cover the gap from one line's port reads to the next line's at the
-// console's rate, and the gap between a host's calls inside one frame, so a thread
-// the console is about to need is awake; short enough that a host's sleep inside a
-// report, or between frames, leaves no core busy.
-constexpr std::chrono::microseconds kApuHotWindow{100};
-// Relaxed turns between two readings of the clock in the wait loop.
-constexpr std::uint32_t kApuClockEvery = 64u;
+// How long a thread of the machine's stays awake with nothing to run before it
+// parks: long enough to cover the gap from one line's port reads, or one line's
+// entry, to the next line's at the console's rate, and the gap between a host's
+// calls inside one frame, so a thread the console is about to need is awake; short
+// enough that a host's sleep inside a report, or between frames, leaves no core busy.
+constexpr std::chrono::microseconds kHotWindow{100};
+// Relaxed turns between two readings of the clock in a thread's wait loop.
+constexpr std::uint32_t kClockEvery = 64u;
+// Relaxed turns the console makes before it sleeps for the picture thread: enough
+// for a thread a few entries behind to catch up without a wake.
+constexpr std::uint32_t kSleepAfterTurns = 256u;
 // Audio cycles the console pays before it publishes the count to a sleeping thread:
 // a millisecond of the audio machine's time. The count is also published before
 // every point that depends on it — a port write's stamp, a read's or a report's
@@ -225,7 +228,8 @@ Snes::Snes(SnesConfig config)
     : apu_(&state_.apu),  // the audio machine runs in the snapshot's own storage, seeded at power-on
       rom_(config.rom.begin(), config.rom.end()),
       region_(config.region),
-      apuThreaded_(config.apuThread) {
+      apuThreaded_(config.apuThread),
+      ppuThreaded_(config.ppuThread) {
   // The board is the header's, with the map and the save the caller overrides.
   board_ = cartridgeBoard(rom_);
   if (config.map.has_value()) board_.map = *config.map;
@@ -254,13 +258,16 @@ Snes::Snes(SnesConfig config)
     apu_.mapIplRom(image);
   }
   state_.cpu = powerOnCpu();  // emulation mode, the program counter at the reset vector
+  // The picture thread's link, ahead of the load that sets its view: the default
+  // machine holds none.
+  if (ppuThreaded_) picture_ = std::make_unique<PictureLink>();
   load();
 }
 
 Snes::Snes(Snes&& moved) noexcept
-    // The moved machine's audio thread holds that machine's address, so it ends
-    // before anything leaves; this machine starts its own at its first call.
-    : cpu_((moved.stopApuThread(), std::move(moved.cpu_))),
+    // The moved machine's threads hold that machine's address, so they end before
+    // anything leaves; this machine starts its own at its first call.
+    : cpu_((moved.stopThreads(), std::move(moved.cpu_))),
       state_(std::move(moved.state_)),
       apu_(std::move(moved.apu_), &state_.apu),  // the audio machine follows its state here
       rom_(std::move(moved.rom_)),
@@ -269,6 +276,7 @@ Snes::Snes(Snes&& moved) noexcept
       pages_(moved.pages_),
       bootsAudio_(moved.bootsAudio_),
       apuThreaded_(moved.apuThreaded_),
+      ppuThreaded_(moved.ppuThreaded_),
       apuNum_(moved.apuNum_),
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
@@ -285,8 +293,8 @@ Snes::Snes(Snes&& moved) noexcept
       lineEventsFrom_(moved.lineEventsFrom_),
       frameFinished_(moved.frameFinished_),
       frameWide_(moved.frameWide_),
-      framePictureLines_(moved.framePictureLines_),
       frameWidth_(moved.frameWidth_),
+      framePictureLines_(moved.framePictureLines_),
       frameField_(moved.frameField_),
       saveObserver_(moved.saveObserver_),
       saveChanged_(moved.saveChanged_),
@@ -295,7 +303,10 @@ Snes::Snes(Snes&& moved) noexcept
       armed_(std::move(moved.armed_)),
       instructionWatcher_(moved.instructionWatcher_),
       standins_(std::move(moved.standins_)),
-      link_() {
+      inFlight_(false),
+      inFlightPad_{},
+      link_(),
+      picture_(std::move(moved.picture_)) {
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.saveObserver_ = nullptr;
@@ -303,14 +314,16 @@ Snes::Snes(Snes&& moved) noexcept
   moved.instructionWatcher_ = nullptr;
 }
 
-Snes::~Snes() { stopApuThread(); }
+Snes::~Snes() { stopThreads(); }
 
 void Snes::setFrameObserver(FrameObserver* observer) noexcept {
   frameObserver_ = observer;
 }
 
 void Snes::restore(const SnesState& state) {
-  waitApu();  // the audio machine's state is replaced along with the rest
+  // The audio machine's state and the picture are replaced along with the rest.
+  waitApu();
+  waitPicture();
   state_ = state;
   // The caller replaced the save window along with everything else, which changes
   // it as surely as a store does — and a save left disagreeing with the machine is
@@ -327,6 +340,16 @@ void Snes::load() {
   // replaced, so none of those answers stands: the first dot drawn after this works
   // them out from what the caller supplied.
   derived_.dropAll();
+  // The picture thread's view is the chip's state as it now stands, its answers
+  // dropped the same way, and its line the beam's: the thread, idle here, draws on
+  // from the beam's position.
+  if (picture_) {
+    PictureLink& picture = *picture_;
+    picture.view = state_.ppu;
+    picture.derived.dropAll();
+    picture.in = pictureInputs();
+    picture.drawn = state_.hpos;
+  }
   lineEventsFrom_ = 0u;
   // No host's call is on the stack of the machine that begins here, whatever a
   // throw from one left behind.
@@ -355,7 +378,10 @@ std::uint16_t Snes::resetVector() const noexcept {
 }
 
 void Snes::reset() {
-  waitApu();  // the audio machine is reset along with the rest
+  // The audio machine is reset along with the rest, and the picture stands at the
+  // beam before the beam moves.
+  waitApu();
+  waitPicture();
   // The CPU: the registers its reset leaves, at the cartridge's vector.
   state_.cpu = afterReset(state_.cpu, resetVector());
 
@@ -574,9 +600,9 @@ void Snes::deliverReports() {
 }
 
 std::uint32_t Snes::step() {
-  // A machine built with the audio thread runs the call inside a flight, entered here
+  // A machine built with either thread runs the call inside a flight, entered here
   // and the call made again from inside it; the default machine runs it as it stands.
-  if (apuThreaded_ && !link_.inFlight.load(std::memory_order_relaxed)) [[unlikely]] {
+  if ((apuThreaded_ || ppuThreaded_) && !inFlight_.load(std::memory_order_relaxed)) [[unlikely]] {
     return stepInFlight();
   }
   const std::uint64_t before = state_.master;
@@ -596,8 +622,8 @@ std::uint32_t Snes::step() {
 }
 
 std::uint64_t Snes::run(std::uint64_t budget) {
-  // A flight on a machine built with the audio thread, as step() enters one.
-  if (apuThreaded_ && !link_.inFlight.load(std::memory_order_relaxed)) [[unlikely]] {
+  // A flight on a machine built with either thread, as step() enters one.
+  if ((apuThreaded_ || ppuThreaded_) && !inFlight_.load(std::memory_order_relaxed)) [[unlikely]] {
     return runInFlight(budget);
   }
   state_.consumed += budget;
@@ -755,16 +781,27 @@ bool Snes::addressable(std::uint32_t address, std::size_t bytes) const noexcept 
   return true;
 }
 
+// The three video memories are written on the picture thread's view too, the thread
+// idle for the write: between calls it has drawn to the beam already, and the wait
+// is one look.
 void Snes::writeVram(std::uint16_t address, std::uint8_t value) noexcept {
+  waitPicture();
   state_.ppu.vram[address] = value;  // 64 KB: every 16-bit address is in range
+  if (picture_) picture_->view.vram[address] = value;
 }
 
 void Snes::writeCgram(std::uint16_t address, std::uint8_t value) noexcept {
-  if (address < state_.ppu.cgram.size()) state_.ppu.cgram[address] = value;
+  if (address >= state_.ppu.cgram.size()) return;
+  waitPicture();
+  state_.ppu.cgram[address] = value;
+  if (picture_) picture_->view.cgram[address] = value;
 }
 
 void Snes::writeOam(std::uint16_t address, std::uint8_t value) noexcept {
-  if (address < state_.ppu.oam.size()) state_.ppu.oam[address] = value;
+  if (address >= state_.ppu.oam.size()) return;
+  waitPicture();
+  state_.ppu.oam[address] = value;
+  if (picture_) picture_->view.oam[address] = value;
 }
 
 void Snes::writeApuRam(std::uint16_t address, std::uint8_t value) noexcept {
@@ -882,8 +919,11 @@ std::uint8_t Snes::routeReadRaw(std::uint32_t address, std::uint8_t cycle) {
       const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
       if (offset >= 0x2100 && offset <= 0x213F) {
         // A byte the PPU drove goes onto the data bus; a register with nothing to
-        // say leaves the bus as it was, which is what the read returns.
-        const std::optional<std::uint8_t> v = Ppu{state_.ppu, derived_}.read(offset, ppuInputs());
+        // say leaves the bus as it was, which is what the read returns. The picture
+        // thread is handed the read too: what a read moves, a write can land on.
+        const PpuInputs pins = ppuInputs();
+        const std::optional<std::uint8_t> v = Ppu{state_.ppu, derived_}.read(offset, pins);
+        if (ppuThreaded_) [[unlikely]] pushAccess(PictureEventKind::Read, offset, 0u, pins);
         return v.has_value() ? latch(*v) : state_.mdr;
       }
       if (offset >= 0x2140 && offset <= 0x217F) {
@@ -921,9 +961,12 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
       const std::uint16_t offset = static_cast<std::uint16_t>(address & 0xFFFFu);
       if (offset >= 0x2100 && offset <= 0x213F) {
         // $2133's interlace bit sets the line's length and the frame's, which the
-        // timer's dot 153 is dated from.
+        // timer's dot 153 is dated from. The picture thread is handed the write at
+        // the position the beam holds here, every dot up to it drawn.
         if (offset == 0x2133u) lineEventsFrom_ = 0u;
-        portLanding_ = Ppu{state_.ppu, derived_}.write(offset, value, ppuInputs());
+        const PpuInputs pins = ppuInputs();
+        portLanding_ = Ppu{state_.ppu, derived_}.write(offset, value, pins);
+        if (ppuThreaded_) [[unlikely]] pushAccess(PictureEventKind::Write, offset, value, pins);
         return;
       }
       if (offset >= 0x2140 && offset <= 0x217F) {
@@ -1764,19 +1807,26 @@ void Snes::rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept {
 
 void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to) {
   // The first line of a frame draws nothing, and the lines from this frame's own
-  // vertical blank on are past the picture.
+  // vertical blank on are past the picture: tested here before the inputs are built.
   if (state_.vpos == 0u || state_.inVblank) return;
+  Ppu ppu{state_.ppu, derived_};
+  drawDots(ppu, pictureInputs(), static_cast<std::uint16_t>(from - lineStart),
+           static_cast<std::uint16_t>(to - lineStart));
+}
+
+void Snes::drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::uint16_t toHpos) {
+  if (in.vpos == 0u || in.vblank) return;
 
   // The dots the span passed, by the same reckoning the line's events use: a dot is
   // reached when the span covers the master cycle it begins on. The tile reads of
   // those dots come first, in dot order, then each picture dot's pixel: a read
   // later in the span writes no column an earlier pixel of it reads, and a
   // register write lands between spans, so the order within one is not observable.
-  const std::uint64_t first = (from - lineStart) / 4u + 1u;
-  const std::uint64_t last = (to - lineStart) / 4u;
-  const std::uint64_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
-  const std::uint64_t stop = last < kLastPictureDot ? last : kLastPictureDot;
-  const std::uint64_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
+  const std::uint32_t first = fromHpos / 4u + 1u;
+  const std::uint32_t last = toHpos / 4u;
+  const std::uint32_t dot = first < kFirstTileReadDot ? kFirstTileReadDot : first;
+  const std::uint32_t stop = last < kLastPictureDot ? last : kLastPictureDot;
+  const std::uint32_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
 
   // A watched picture line starts the frame's raster, black, whichever of its dots
   // the span covers.
@@ -1786,9 +1836,6 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
   }
   // The dots before the first read and past the last pixel hold neither.
   if (dot > stop) return;
-
-  Ppu ppu{state_.ppu, derived_};
-  const PpuInputs in = ppuInputs();
 
   // The tile reads, and what the chip carries from one position to the next, are
   // made whether or not anyone is watching, since both are part of the state a
@@ -1801,8 +1848,8 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
     return;
   }
 
-  const std::size_t line = state_.vpos - 1u;
-  for (std::uint64_t at = firstPixel; at <= stop; ++at) {
+  const std::size_t line = static_cast<std::size_t>(in.vpos) - 1u;
+  for (std::uint32_t at = firstPixel; at <= stop; ++at) {
     const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
     const Ppu::Dot out = ppu.dot(x, in);
     if (out.hires && !frameWide_) widenFrame(line, x);
@@ -1849,26 +1896,41 @@ void Snes::redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore) {
   const bool systemBank = bank <= 0x3F || (bank >= 0x80 && bank <= 0xBF);
   if (!systemBank || offset != 0x2100u || state_.inVblank) return;
   // The cycle drew its dots under the register as it stood; redraw only the last of
-  // them, under the byte the bus held before the write. Master is still the cycle's
-  // start here — closeCycle advances it — so the end is start + this cycle's cost.
+  // them, under the byte the bus held before the write. The beam stands at the
+  // cycle's end, the dot being the one that ends there.
   const std::uint16_t endHpos = state_.hpos;
   if (endHpos < lastCost_) return;  // the cycle crossed a line; its last dot is off the picture
-  const std::uint64_t beamEnd = state_.master + lastCost_;
-  const std::uint64_t lineStart = beamEnd - endHpos;
+  if (ppuThreaded_) [[unlikely]] {
+    // The thread redraws it, after the write it has been handed.
+    pushEvent(PictureEvent{.offset = 0u,
+                           .hpos = endHpos,
+                           .hdot = 0u,
+                           .vpos = 0u,
+                           .field = 0u,
+                           .vblank = false,
+                           .extLatch = false,
+                           .lateHalf = false,
+                           .kind = PictureEventKind::InidispEarly,
+                           .value = 0u,
+                           .busBefore = busBefore,
+                           .spare = 0u});
+    return;
+  }
   const std::uint8_t written = state_.ppu.inidisp;  // the value the write applied, restored after
-  // The dot resolves under the same beam position the cycle drew it from, which is
-  // the span's start, so the register is the only thing that differs.
-  state_.hpos = static_cast<std::uint16_t>(endHpos - lastCost_);
   state_.ppu.inidisp = busBefore;
-  drawSpan(lineStart, beamEnd - 4u, beamEnd);
+  Ppu ppu{state_.ppu, derived_};
+  drawDots(ppu, pictureInputs(), static_cast<std::uint16_t>(endHpos - 4u), endHpos);
   state_.ppu.inidisp = written;
-  state_.hpos = endHpos;
 }
 
 void Snes::deliverFrame() {
-  if (frameObserver_ == nullptr || raster_.empty()) return;
-  // The audio machine at this cycle's end too, so state() inside the report is the
-  // whole machine there.
+  if (frameObserver_ == nullptr) return;
+  // The picture drawn to the beam first, since the thread that draws it is the one
+  // that starts the raster; then the audio machine at this cycle's end too, so
+  // state() inside the report is the whole machine there and the raster the
+  // finished frame.
+  if (ppuThreaded_) [[unlikely]] waitPicture();
+  if (raster_.empty()) return;
   if (apuThreaded_) [[unlikely]] waitApu();
   const std::size_t bytes =
       static_cast<std::size_t>(framePictureLines_) * frameWidth_ * kPixelBytes;
@@ -1882,8 +1944,15 @@ void Snes::deliverFrame() {
 
 void Snes::deliverSave() {
   if (saveObserver_ == nullptr) return;
-  if (apuThreaded_) [[unlikely]] waitApu();  // as deliverFrame waits
+  // As deliverFrame waits.
+  if (apuThreaded_) [[unlikely]] waitApu();
+  if (ppuThreaded_) [[unlikely]] waitPicture();
   saveObserver_->changed(std::span<const std::uint8_t>(state_.sram.data(), state_.sram.size()));
+}
+
+void Snes::finishPicture() noexcept {
+  frameWidth_ = frameWide_ ? kHiresWidth : kPictureWidth;
+  frameWide_ = false;
 }
 
 void Snes::advanceLine(std::uint64_t lineStart) noexcept {
@@ -1904,12 +1973,13 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   if (state_.vpos == 0u) {
     // The picture the beam has just finished is as tall as its own vertical blank
     // left it, and carries the parity it ran under — both read here, before the
-    // frame beginning now changes either.
+    // frame beginning now changes either. Its width is the drawing side's to settle:
+    // here when the picture is drawn on this thread, on the picture thread at this
+    // line's entry when it is drawn there.
     if (frameObserver_ != nullptr) {
       frameFinished_ = true;
       frameField_ = state_.field;
-      frameWidth_ = frameWide_ ? kHiresWidth : kPictureWidth;
-      frameWide_ = false;
+      if (!ppuThreaded_) finishPicture();
       framePictureLines_ = state_.vblankBeginLine > 1u
           ? static_cast<std::uint16_t>(state_.vblankBeginLine - 1u)
           : static_cast<std::uint16_t>(state_.ppu.vblankStartLine() - 1u);
@@ -1936,19 +2006,20 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
     state_.hdmaEnded = 0u;
     state_.hdmaDoWrite = 0u;
     Ppu{state_.ppu, derived_}.beginFrame();  // the overflow flags belong to the picture just drawn
-    return;
+  } else if (!state_.inVblank && state_.vpos >= kVblankStartLine &&
+             (state_.vpos >= kOverscanVblankStartLine || !state_.ppu.overscan())) {
+    // Vertical blank begins at the line SETINI asks for, and the machine asks again
+    // at the start of every line until it has: the bit cleared between the two start
+    // lines begins the blank at the next line, and the bit set after it has begun
+    // changes nothing. Begun is begun; a later SETINI change re-fires nothing.
+    state_.inVblank = true;
+    state_.vblankBeginLine = state_.vpos;
+    state_.hdmaActive = 0u;  // every HDMA channel deactivates for the rest of the frame
   }
-  if (state_.inVblank) return;  // begun is begun; a later SETINI change re-fires nothing
 
-  // Vertical blank begins at the line SETINI asks for, and the machine asks again at
-  // the start of every line until it has: the bit cleared between the two start lines
-  // begins the blank at the next line, and the bit set after it has begun changes
-  // nothing.
-  if (state_.vpos < kVblankStartLine) return;
-  if (state_.vpos < kOverscanVblankStartLine && state_.ppu.overscan()) return;
-  state_.inVblank = true;
-  state_.vblankBeginLine = state_.vpos;
-  state_.hdmaActive = 0u;  // every HDMA channel deactivates for the rest of the frame
+  // The picture thread is handed the line as it now stands: its facts, the mosaic
+  // counter and the line buffer Time just filled, which the whole line is drawn from.
+  if (ppuThreaded_) [[unlikely]] pushLine();
 }
 
 void Snes::tickVideo(std::uint32_t cost) {
@@ -1978,8 +2049,10 @@ void Snes::tickVideo(std::uint32_t cost) {
     // The picture is drawn a dot at a time: each background's tile reads at their
     // own dots, and each pixel from those reads and the registers as they stand at
     // its dot. A machine nobody is watching makes the reads and resolves only what
-    // the chip carries from one position to the next.
-    drawSpan(lineStart, at, stop);
+    // the chip carries from one position to the next. A machine drawing on its
+    // picture thread draws nothing here: the thread draws the same dots from the
+    // accesses and the lines this thread logs.
+    if (!ppuThreaded_) drawSpan(lineStart, at, stop);
     at = stop;
     state_.hpos = static_cast<std::uint16_t>(at - lineStart);
     if (at == lineEnd) {
@@ -2049,6 +2122,20 @@ PpuInputs Snes::ppuInputs() const noexcept {
       // A position short of the first long dot is placed alike on every line length.
       .lateHalf = lateHalfOf(state_.hpos,
                              state_.hpos >= kFirstLongDot && lineLength() == kShortLineMaster),
+  };
+}
+
+PpuInputs Snes::pictureInputs() const noexcept {
+  // The dot, the latch line and the half of the dot are read by no dot drawn; the
+  // pins the picture reads are these.
+  return PpuInputs{
+      .hdot = 0u,
+      .vpos = state_.vpos,
+      .field = state_.field,
+      .vblank = state_.inVblank,
+      .pal = region_ == Region::Pal,
+      .extLatch = true,
+      .lateHalf = false,
   };
 }
 
@@ -2338,12 +2425,13 @@ void Snes::writeJoypadStrobe(std::uint8_t value) noexcept {
   state_.joyStrobe = high;
 }
 
-// ---- the audio thread ---------------------------------------------------------
-// The flight, the thread and the waits. They sit after everything the console runs
-// each cycle, which keeps that code together whether or not a machine has the thread.
+// ---- the threads ----------------------------------------------------------------
+// The flight, the worker both threads share, the audio thread, the picture thread
+// and the waits. They sit after everything the console runs each cycle, which keeps
+// that code together whether or not a machine has a thread.
 
 // step() and run() inside a flight. Never inlined: step() and run() carry one test of
-// the flag on a machine without the thread, and none of this.
+// the flags on a machine without a thread, and none of this.
 SNAGGLETOOTH_NOINLINE std::uint32_t Snes::stepInFlight() {
   const Flight flight{*this};
   return step();
@@ -2355,54 +2443,174 @@ SNAGGLETOOTH_NOINLINE std::uint64_t Snes::runInFlight(std::uint64_t budget) {
 }
 
 Snes::Flight::Flight(Snes& machine) : m(machine) {
-  if (!m.apuThreaded_) return;
+  if (!m.apuThreaded_ && !m.ppuThreaded_) return;
   // Only the calling thread writes the flag, so a call inside a call reads its own
   // store and leaves the flight to the call that began it.
-  if (m.link_.inFlight.load(std::memory_order_relaxed)) return;
+  if (m.inFlight_.load(std::memory_order_relaxed)) return;
   outer = true;
-  if (!m.link_.thread.joinable()) m.startApuThread();
-  // The flag goes up before the parked flag is read, and the thread sets parked
+  if (m.apuThreaded_ && !m.link_.worker.thread.joinable()) m.startApuThread();
+  if (m.ppuThreaded_ && !m.picture_->worker.thread.joinable()) m.startPictureThread();
+  // The flag goes up before the parked flags are read, and a thread sets parked
   // before it reads the flag under the mutex: one of the two sees the other's store,
   // so a thread parked between calls wakes as the call begins. A thread that parked
-  // inside an earlier call is not woken by this one beginning but by its first
-  // release, so the notify here leaves parked up for that release to see.
-  m.link_.inFlight.store(true, std::memory_order_seq_cst);
-  if (m.link_.parked.load(std::memory_order_seq_cst)) {
-    const std::lock_guard<std::mutex> lock(m.link_.mutex);
-    m.link_.wake.notify_one();
-  }
+  // inside an earlier call is not woken by this one beginning but by the first thing
+  // handed to it, so the nudge leaves parked up for that hand-over to see.
+  m.inFlight_.store(true, std::memory_order_seq_cst);
+  if (m.apuThreaded_) m.link_.worker.nudge();
+  if (m.ppuThreaded_) m.picture_->worker.nudge();
 }
 
 Snes::Flight::~Flight() {
-  if (!m.apuThreaded_) return;
+  if (!m.apuThreaded_ && !m.ppuThreaded_) return;
   m.waitApu();
-  if (outer) m.link_.inFlight.store(false, std::memory_order_release);
+  m.waitPicture();
+  if (outer) m.inFlight_.store(false, std::memory_order_release);
 }
 
-void Snes::startApuThread() {
-  link_.thread = std::thread([this] { apuThreadBody(); });
-  // Set before the flight's flag goes up, so before the first audio cycle is
-  // released and before any report of the audio machine's observer.
-  link_.id = link_.thread.get_id();
-}
+// ---- the worker ----
 
-void Snes::stopApuThread() noexcept {
-  if (!link_.thread.joinable()) return;
+void Snes::Worker::stopAndJoin() noexcept {
+  if (!thread.joinable()) return;
   {
     // Under the mutex, so a thread between its look at `stop` and its wait cannot
     // miss it.
-    const std::lock_guard<std::mutex> lock(link_.mutex);
-    link_.stop.store(true, std::memory_order_seq_cst);
+    const std::lock_guard<std::mutex> lock(mutex);
+    stop.store(true, std::memory_order_seq_cst);
   }
-  link_.wake.notify_one();
-  link_.thread.join();
-  link_.stop.store(false, std::memory_order_relaxed);
-  link_.id = std::thread::id{};
+  wake.notify_one();
+  thread.join();
+  stop.store(false, std::memory_order_relaxed);
+  id = std::thread::id{};
 }
 
-bool Snes::onApuThread() const noexcept {
-  return std::this_thread::get_id() == link_.id;
+bool Snes::Worker::onThread() const noexcept { return std::this_thread::get_id() == id; }
+
+void Snes::Worker::release(std::uint64_t count) noexcept {
+  released.store(released.load(std::memory_order_relaxed) + count, std::memory_order_release);
+  if (parked.load(std::memory_order_relaxed)) [[unlikely]] wakeUnderMutex();
 }
+
+void Snes::Worker::need() noexcept {
+  needed.store(true, std::memory_order_relaxed);
+  // The console's stores come before its look at parked, and the thread sets parked
+  // before its looks under the mutex: either the thread's looks see the work and the
+  // need, or this look sees parked and the notify under the mutex finds it waiting.
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  if (parked.load(std::memory_order_relaxed)) wakeUnderMutex();
+}
+
+void Snes::Worker::wakeUnderMutex() noexcept {
+  const std::lock_guard<std::mutex> lock(mutex);
+  // The caller made a release or a need before taking the mutex, so the thread's
+  // looks see it and it wakes. Parked comes down here rather than when the thread
+  // is next scheduled, so the work handed over meanwhile does not each wake it again.
+  // A wake that arrives late, for work the thread has already run, finds the thread
+  // parking again; it puts parked back up before it waits.
+  parked.store(false, std::memory_order_relaxed);
+  wake.notify_one();
+}
+
+void Snes::Worker::nudge() noexcept {
+  if (parked.load(std::memory_order_seq_cst)) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    wake.notify_one();
+  }
+}
+
+void Snes::Worker::beginThread() noexcept {
+  hotUntil = std::chrono::steady_clock::now() + kHotWindow;
+  worked = false;
+}
+
+template <class HasWork>
+bool Snes::Worker::awaitWork(const std::atomic<bool>& inFlight, HasWork hasWork) noexcept {
+  using Clock = std::chrono::steady_clock;
+  // The console waiting for the thread opens the window; work run while it is open
+  // keeps it open; the thread reads the clock once every kClockEvery turns and parks
+  // once the window has passed with nothing to run. Work that arrives with the
+  // window shut is run and the thread parks again.
+  std::uint32_t turns = 0;
+  for (;;) {
+    if (stop.load(std::memory_order_acquire)) return false;
+    if (hasWork(std::memory_order_acquire)) return true;
+    if (needed.load(std::memory_order_relaxed) && needed.exchange(false, std::memory_order_relaxed)) {
+      hotUntil = Clock::now() + kHotWindow;
+    }
+    if (++turns == kClockEvery) {
+      turns = 0;
+      const Clock::time_point now = Clock::now();
+      const bool keepOpen = worked && now < hotUntil;
+      worked = false;
+      if (keepOpen) {
+        hotUntil = now + kHotWindow;
+      } else if (now >= hotUntil) {
+        park(inFlight, hasWork);
+        hotUntil = Clock::time_point{};  // shut: a need opens it
+        continue;
+      }
+    }
+    cpuRelax();
+  }
+}
+
+template <class HasWork>
+void Snes::Worker::park(const std::atomic<bool>& inFlight, HasWork hasWork) {
+  std::unique_lock<std::mutex> lock(mutex);
+  // A call already in progress is no reason to wake; a call that begins once the
+  // thread has parked is.
+  const bool flying = inFlight.load(std::memory_order_seq_cst);
+  for (;;) {
+    // Parked goes up before the looks under the mutex, on every pass: work, a need
+    // or a call that came before it is seen by the looks, and one that comes after
+    // it sees parked and wakes the thread. A waker takes parked down, and a wake can
+    // come late, for work this thread has already run; parked goes up again before
+    // the thread waits again, so it never waits with parked down.
+    parked.store(true, std::memory_order_seq_cst);
+    if (stop.load(std::memory_order_seq_cst) ||
+        (!flying && inFlight.load(std::memory_order_seq_cst)) ||
+        needed.load(std::memory_order_seq_cst) || hasWork(std::memory_order_seq_cst)) {
+      break;
+    }
+    wake.wait(lock);
+  }
+  parked.store(false, std::memory_order_seq_cst);
+}
+
+void Snes::Worker::notifyCaughtUp() noexcept {
+  // The thread's store of `done` and this load, and the console's store of `awaited`
+  // and its load of `done`, are all sequentially consistent, so one side sees the
+  // other's store: either this look sees the console waiting and the notify under
+  // the mutex reaches it, or the console's look sees the count and it does not wait.
+  if (awaited.load(std::memory_order_seq_cst)) [[unlikely]] {
+    const std::lock_guard<std::mutex> lock(mutex);
+    caughtUp.notify_all();
+  }
+}
+
+void Snes::Worker::waitSleeping(std::uint64_t target) noexcept {
+  if (done.load(std::memory_order_acquire) >= target) return;
+  need();
+  for (std::uint32_t turn = 0; turn < kSleepAfterTurns; ++turn) {
+    if (done.load(std::memory_order_acquire) >= target) return;
+    cpuRelax();
+  }
+  std::unique_lock<std::mutex> lock(mutex);
+  awaited.store(true, std::memory_order_seq_cst);
+  while (done.load(std::memory_order_seq_cst) < target) caughtUp.wait(lock);
+  awaited.store(false, std::memory_order_seq_cst);
+}
+
+// ---- the audio thread ----
+
+void Snes::startApuThread() {
+  // The id is set before the flight's flag goes up, so before the first audio cycle
+  // is released and before any report of the audio machine's observer.
+  link_.worker.start([this] { apuThreadBody(); });
+}
+
+void Snes::stopApuThread() noexcept { link_.worker.stopAndJoin(); }
+
+bool Snes::onApuThread() const noexcept { return link_.worker.onThread(); }
 
 void Snes::waitApu() const noexcept {
   if (!apuThreaded_) return;
@@ -2410,47 +2618,23 @@ void Snes::waitApu() const noexcept {
   // count it would publish is the console's alone.
   if (onApuThread()) return;
   publishApu();
-  const std::uint64_t released = link_.released.load(std::memory_order_relaxed);
+  const std::uint64_t released = link_.worker.released.load(std::memory_order_relaxed);
   const std::uint32_t head = link_.head.load(std::memory_order_relaxed);
-  if (link_.done.load(std::memory_order_acquire) == released &&
+  if (link_.worker.done.load(std::memory_order_acquire) == released &&
       link_.tail.load(std::memory_order_acquire) == head) {
     return;
   }
-  needApuThread();
-  while (link_.done.load(std::memory_order_acquire) != released ||
+  link_.worker.need();
+  while (link_.worker.done.load(std::memory_order_acquire) != released ||
          link_.tail.load(std::memory_order_acquire) != head) {
     cpuRelax();
   }
 }
 
-void Snes::needApuThread() const noexcept {
-  link_.needed.store(true, std::memory_order_relaxed);
-  // The console's stores come before its look at parked, and the thread sets parked
-  // before its looks under the mutex: either the thread's looks see the work and the
-  // need, or this look sees parked and the notify under the mutex finds it waiting.
-  std::atomic_thread_fence(std::memory_order_seq_cst);
-  if (link_.parked.load(std::memory_order_relaxed)) wakeApuThread();
-}
-
 void Snes::publishApu() const noexcept {
   if (link_.pending == 0u) return;
-  link_.released.store(link_.released.load(std::memory_order_relaxed) + link_.pending,
-                       std::memory_order_release);
+  link_.worker.release(link_.pending);
   link_.pending = 0;
-  // A parked thread is woken by the publish. A look that misses a park just begun is
-  // followed by the next publish's look, or by a wait that cannot miss it.
-  if (link_.parked.load(std::memory_order_relaxed)) [[unlikely]] wakeApuThread();
-}
-
-void Snes::wakeApuThread() const noexcept {
-  const std::lock_guard<std::mutex> lock(link_.mutex);
-  // The caller made a release or a need before taking the mutex, so the thread's
-  // looks see it and it wakes. Parked comes down here rather than when the thread
-  // is next scheduled, so the cycles run meanwhile do not each wake it again. A wake
-  // that arrives late, for a release the thread has already run, finds the thread
-  // parking again; it puts parked back up before it waits.
-  link_.parked.store(false, std::memory_order_relaxed);
-  link_.wake.notify_one();
 }
 
 void Snes::pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept {
@@ -2460,11 +2644,11 @@ void Snes::pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept {
   const std::uint32_t head = link_.head.load(std::memory_order_relaxed);
   // A full ring waits for the thread to apply the oldest write, so none is lost.
   if (head - link_.tail.load(std::memory_order_acquire) >= kPortRing) [[unlikely]] {
-    needApuThread();
+    link_.worker.need();
     while (head - link_.tail.load(std::memory_order_acquire) >= kPortRing) cpuRelax();
   }
   link_.ring[head % kPortRing] = PortWrite{
-      .at = link_.released.load(std::memory_order_relaxed),
+      .at = link_.worker.released.load(std::memory_order_relaxed),
       .index = index,
       .value = value,
   };
@@ -2474,47 +2658,22 @@ void Snes::pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept {
 }
 
 void Snes::apuThreadBody() noexcept {
-  using Clock = std::chrono::steady_clock;
-  std::uint64_t done = link_.done.load(std::memory_order_relaxed);
+  Worker& worker = link_.worker;
+  std::uint64_t done = worker.done.load(std::memory_order_relaxed);
   std::uint32_t tail = link_.tail.load(std::memory_order_relaxed);
-  Clock::time_point hotUntil = Clock::now() + kApuHotWindow;
-  bool worked = false;  // work was run since the clock was last read
+  worker.beginThread();
   for (;;) {
-    // Wait for work. The console waiting for the thread opens the hot window; work
-    // run while it is open keeps it open; the thread reads the clock once every
-    // kApuClockEvery turns and parks once the window has passed with nothing to run.
-    // A batch that arrives with the window shut is run and the thread parks again.
-    std::uint32_t turns = 0;
-    for (;;) {
-      if (link_.stop.load(std::memory_order_acquire)) return;
-      if (link_.released.load(std::memory_order_acquire) != done ||
-          link_.head.load(std::memory_order_acquire) != tail) {
-        break;
-      }
-      if (link_.needed.load(std::memory_order_relaxed) &&
-          link_.needed.exchange(false, std::memory_order_relaxed)) {
-        hotUntil = Clock::now() + kApuHotWindow;
-      }
-      if (++turns == kApuClockEvery) {
-        turns = 0;
-        const Clock::time_point now = Clock::now();
-        const bool keepOpen = worked && now < hotUntil;
-        worked = false;
-        if (keepOpen) {
-          hotUntil = now + kApuHotWindow;
-        } else if (now >= hotUntil) {
-          parkApuThread(done, tail);
-          hotUntil = Clock::time_point{};  // shut: a need opens it
-          continue;
-        }
-      }
-      cpuRelax();
+    // Wait for work: released cycles, or a port write in the ring.
+    if (!worker.awaitWork(inFlight_, [&](std::memory_order order) noexcept {
+          return worker.released.load(order) != done || link_.head.load(order) != tail;
+        })) {
+      return;
     }
     // Run every released cycle, each port write applied when the count reaches its
     // stamp and never run past. `released` is read before `head`: a write stamped
     // below the count read is published before that count, so it is in the ring.
     for (;;) {
-      const std::uint64_t released = link_.released.load(std::memory_order_acquire);
+      const std::uint64_t released = worker.released.load(std::memory_order_acquire);
       const std::uint32_t head = link_.head.load(std::memory_order_acquire);
       while (tail != head && link_.ring[tail % kPortRing].at <= done) {
         const PortWrite& write = link_.ring[tail % kPortRing];
@@ -2527,34 +2686,196 @@ void Snes::apuThreadBody() noexcept {
       if (tail != head) cycles = std::min(cycles, link_.ring[tail % kPortRing].at - done);
       apu_.run(cycles);
       done += cycles;
-      link_.done.store(done, std::memory_order_release);
+      worker.done.store(done, std::memory_order_release);
+      worker.notifyCaughtUp();
     }
-    worked = true;
+    worker.ran();
   }
 }
 
-void Snes::parkApuThread(std::uint64_t done, std::uint32_t tail) {
-  std::unique_lock<std::mutex> lock(link_.mutex);
-  // A call already in progress is no reason to wake; a call that begins once the
-  // thread has parked is.
-  const bool flying = link_.inFlight.load(std::memory_order_seq_cst);
-  for (;;) {
-    // Parked goes up before the looks under the mutex, on every pass: a release, a
-    // need or a call that came before it is seen by the looks, and one that comes
-    // after it sees parked and wakes the thread. A waker takes parked down, and a
-    // wake can come late, for a release this thread has already run; parked goes up
-    // again before the thread waits again, so it never waits with parked down.
-    link_.parked.store(true, std::memory_order_seq_cst);
-    if (link_.stop.load(std::memory_order_seq_cst) ||
-        (!flying && link_.inFlight.load(std::memory_order_seq_cst)) ||
-        link_.needed.load(std::memory_order_seq_cst) ||
-        link_.released.load(std::memory_order_seq_cst) != done ||
-        link_.head.load(std::memory_order_seq_cst) != tail) {
-      break;
+// ---- the picture thread ----
+
+void Snes::startPictureThread() {
+  picture_->worker.start([this] { pictureThreadBody(); });
+}
+
+void Snes::stopPictureThread() noexcept {
+  if (picture_) picture_->worker.stopAndJoin();
+}
+
+void Snes::stopThreads() noexcept {
+  stopApuThread();
+  stopPictureThread();
+}
+
+void Snes::pushEvent(const PictureEvent& event) noexcept {
+  // A watched machine waits for the thread at every frame report, so the thread is
+  // never more than a frame of entries behind it. The most a frame can log is a
+  // transfer writing the chip every eight master cycles of the longest frame, plus
+  // its lines and the beam's entry, and the ring holds more: a watched machine never
+  // waits on a slot. The wait below is for an unwatched machine whose thread the
+  // host starves.
+  static_assert(kEventRing > kLongLineMaster * (kPalLines + 1u) / 8u + kPalLines + 2u,
+                "the event ring holds more entries than the longest frame can log");
+  PictureLink& picture = *picture_;
+  const std::uint64_t index = picture.worker.released.load(std::memory_order_relaxed);
+  // A full ring waits, sleeping, for the thread to apply the entry this one takes
+  // the slot of, so none is lost.
+  if (index >= kEventRing) [[unlikely]] picture.worker.waitSleeping(index + 1u - kEventRing);
+  picture.events[static_cast<std::size_t>(index % kEventRing)] = event;
+  picture.worker.release(1u);
+}
+
+void Snes::pushAccess(PictureEventKind kind, std::uint16_t offset, std::uint8_t value,
+                      const PpuInputs& in) noexcept {
+  pushEvent(PictureEvent{.offset = offset,
+                         .hpos = state_.hpos,
+                         .hdot = in.hdot,
+                         .vpos = in.vpos,
+                         .field = in.field,
+                         .vblank = in.vblank,
+                         .extLatch = in.extLatch,
+                         .lateHalf = in.lateHalf,
+                         .kind = kind,
+                         .value = value,
+                         .busBefore = 0u,
+                         .spare = 0u});
+}
+
+void Snes::pushLine() noexcept {
+  // A watched machine waits for the thread at every frame report, so the thread is
+  // never more than a frame of lines behind it, and the ring holds more than the
+  // longest frame: a watched machine never waits on a slot.
+  static_assert(kLineRing > kPalLines + 1u, "the line ring holds more lines than the longest frame");
+  PictureLink& picture = *picture_;
+  const std::size_t slot = static_cast<std::size_t>(picture.linesPushed % kLineRing);
+  ++picture.linesPushed;
+  // A slot whose last line the thread has not taken yet waits, sleeping, for it.
+  if (picture.lineEvent[slot] != 0u) picture.worker.waitSleeping(picture.lineEvent[slot]);
+  picture.lines[slot] = state_.ppu.sprites;
+  picture.lineEvent[slot] = picture.worker.released.load(std::memory_order_relaxed) + 1u;
+  pushEvent(PictureEvent{.offset = state_.ppu.mosaicBlockLine,
+                         .hpos = static_cast<std::uint16_t>(slot),
+                         .hdot = 0u,
+                         .vpos = state_.vpos,
+                         .field = state_.field,
+                         .vblank = state_.inVblank,
+                         .extLatch = false,
+                         .lateHalf = false,
+                         .kind = PictureEventKind::Line,
+                         .value = state_.ppu.mosaicBlockSize,
+                         .busBefore = 0u,
+                         .spare = 0u});
+}
+
+void Snes::waitPicture() noexcept {
+  if (!ppuThreaded_) return;
+  PictureLink& picture = *picture_;
+  // Before the machine's first call, and after a move until the next, there is no
+  // thread: nothing has been logged, the view is the state's, and there is nothing
+  // to wait for.
+  if (!picture.worker.thread.joinable()) return;
+  // The thread draws to the beam before the console looks at the picture.
+  pushEvent(PictureEvent{.offset = 0u,
+                         .hpos = state_.hpos,
+                         .hdot = 0u,
+                         .vpos = 0u,
+                         .field = 0u,
+                         .vblank = false,
+                         .extLatch = false,
+                         .lateHalf = false,
+                         .kind = PictureEventKind::Beam,
+                         .value = 0u,
+                         .busBefore = 0u,
+                         .spare = 0u});
+  picture.worker.waitSleeping(picture.worker.released.load(std::memory_order_relaxed));
+  // The two fields the picture writes, which nothing on this thread writes.
+  state_.ppu.tiles = picture.view.tiles;
+  state_.ppu.lastMain = picture.view.lastMain;
+}
+
+void Snes::drawTo(std::uint16_t hpos) {
+  PictureLink& picture = *picture_;
+  if (hpos <= picture.drawn) return;
+  Ppu ppu{picture.view, picture.derived};
+  drawDots(ppu, picture.in, picture.drawn, hpos);
+  picture.drawn = hpos;
+}
+
+void Snes::applyPictureEvent(const PictureEvent& event) {
+  PictureLink& picture = *picture_;
+  switch (event.kind) {
+    case PictureEventKind::Line:
+      // The rest of the line the thread is on, then the new line's facts: a frame's
+      // first line settles the finished picture's width.
+      drawTo(kLineMaster);
+      picture.in.vpos = event.vpos;
+      picture.in.field = event.field;
+      picture.in.vblank = event.vblank;
+      picture.view.sprites = picture.lines[event.hpos];
+      picture.view.mosaicBlockLine = event.offset;
+      picture.view.mosaicBlockSize = event.value;
+      picture.drawn = 0u;
+      if (event.vpos == 0u) finishPicture();
+      return;
+    case PictureEventKind::Write:
+    case PictureEventKind::Read: {
+      // The access replayed on the view with the pins it took, every dot up to its
+      // position drawn first, as the console drew them.
+      drawTo(event.hpos);
+      const PpuInputs in{.hdot = event.hdot,
+                         .vpos = event.vpos,
+                         .field = event.field,
+                         .vblank = event.vblank,
+                         .pal = picture.in.pal,
+                         .extLatch = event.extLatch,
+                         .lateHalf = event.lateHalf};
+      Ppu ppu{picture.view, picture.derived};
+      if (event.kind == PictureEventKind::Write) {
+        static_cast<void>(ppu.write(event.offset, event.value, in));
+      } else {
+        static_cast<void>(ppu.read(event.offset, in));
+      }
+      return;
     }
-    link_.wake.wait(lock);
+    case PictureEventKind::InidispEarly: {
+      // The one dot the write's cycle ended on, drawn again under the bus byte.
+      drawTo(event.hpos);
+      const std::uint8_t written = picture.view.inidisp;
+      picture.view.inidisp = event.busBefore;
+      Ppu ppu{picture.view, picture.derived};
+      drawDots(ppu, picture.in, static_cast<std::uint16_t>(event.hpos - 4u), event.hpos);
+      picture.view.inidisp = written;
+      return;
+    }
+    case PictureEventKind::Beam:
+      drawTo(event.hpos);
+      return;
   }
-  link_.parked.store(false, std::memory_order_seq_cst);
+}
+
+void Snes::pictureThreadBody() noexcept {
+  Worker& worker = picture_->worker;
+  std::uint64_t done = worker.done.load(std::memory_order_relaxed);
+  worker.beginThread();
+  for (;;) {
+    if (!worker.awaitWork(inFlight_, [&](std::memory_order order) noexcept {
+          return worker.released.load(order) != done;
+        })) {
+      return;
+    }
+    // Every entry logged, in order, the count published after each so a console
+    // waiting on a ring, or sleeping for the picture, sees it move.
+    std::uint64_t released = worker.released.load(std::memory_order_acquire);
+    while (done != released) {
+      applyPictureEvent(picture_->events[static_cast<std::size_t>(done % kEventRing)]);
+      ++done;
+      worker.done.store(done, std::memory_order_seq_cst);
+      worker.notifyCaughtUp();
+      if (done == released) released = worker.released.load(std::memory_order_acquire);
+    }
+    worker.ran();
+  }
 }
 
 void Snes::setApuObserver(ApuObserver* observer) noexcept {

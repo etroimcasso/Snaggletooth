@@ -19,7 +19,11 @@
 // reproducible to the byte. Those cycles run inside the CPU's on the calling
 // thread, or, on a machine built with SnesConfig::apuThread on, on a thread the
 // machine owns while a call is in progress; when the call returns, the two machines
-// stand at one master time either way.
+// stand at one master time either way. The picture's dots are drawn inside the
+// cycles that pass them on the calling thread, or, on a machine built with
+// SnesConfig::ppuThread on, on a second thread the machine owns, from the accesses to
+// the chip the console logs for it; when the call returns, the picture stands at the
+// beam either way.
 //
 // step() runs one CPU instruction and returns the master cycles it took. run()
 // spends an exact master-cycle budget and may stop part-way through an
@@ -39,6 +43,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -415,6 +420,23 @@ struct SnesConfig {
   // between calls. The bytes are the same either way: the same state at every
   // return, the same audio frames, the same byte from every read of a port.
   bool apuThread = false;
+
+  // Where the picture is drawn. Off, the default, each dot is drawn inside the
+  // console's cycles on the calling thread. On, the dots are drawn on a thread the
+  // machine owns while step(), run() or a call into the guest is in progress: the
+  // calling thread keeps the chip's registers, its memories, the beam and the two
+  // sprite passes, and logs every access to the chip and every line's start for the
+  // thread, which draws the dots between them from a copy of the chip's state it
+  // keeps equal to the console's by the same accesses. The console waits for the
+  // thread, sleeping, at a call's return, before a frame or save report, and before a
+  // restore or a reset, so both stand at one picture there; the thread parks whenever
+  // it has nothing to draw. As with the audio thread, the process spends a little
+  // more CPU in total and each thread has less to do, so each core carries a lighter
+  // load and a host whose cores are each too slow keeps up by running the work in
+  // parallel. The pixels and the state are the same either way: every frame handed
+  // over is the frame the calling thread would have drawn, and state() at every
+  // return is the state it would hold.
+  bool ppuThread = false;
 };
 
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM
@@ -571,16 +593,17 @@ class Snes {
   // runs in the machine's own state, and a move carries the machine after its
   // state to the new place. A copy would run two audio machines over one state.
   // The move names every member in `snes.cpp`; a member added to the machine
-  // joins that list. On a machine built with SnesConfig::apuThread on, a move stops
-  // the moved machine's audio thread first, and the machine in the new place starts
-  // its own at its first call.
+  // joins that list. On a machine built with SnesConfig::apuThread or
+  // SnesConfig::ppuThread on, a move stops the moved machine's threads first, and the
+  // machine in the new place starts its own at its first call.
   Snes(const Snes&) = delete;
   Snes& operator=(const Snes&) = delete;
   Snes(Snes&& moved) noexcept;
   Snes& operator=(Snes&&) = delete;
 
-  // Stops the audio thread, where the machine runs one, and waits for it to end. A
-  // machine is destroyed between calls, never from inside one of its own observers.
+  // Stops the audio thread and the picture thread, where the machine runs either,
+  // and waits for them to end. A machine is destroyed between calls, never from
+  // inside one of its own observers.
   ~Snes();
 
   // The whole machine as a value. state() is coherent at any cycle the machine has
@@ -592,7 +615,12 @@ class Snes {
   // the frame and save reports, which wait for the audio machine, and in the audio
   // machine's observer's calls, which run on that thread. A bus observer, an access
   // watcher or an instruction watcher there reads the audio machine through peekApu
-  // and peekApuRegister, which wait for it.
+  // and peekApuRegister, which wait for it. On a machine built with
+  // SnesConfig::ppuThread on, the two fields of `ppu` the picture writes, `tiles` and
+  // `lastMain`, are the picture thread's inside a call: they are coherent in the
+  // frame and save reports, which wait for the picture, and at every return, where
+  // the console copies them back; a bus observer or a watcher inside a call does not
+  // read them.
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
   // Takes the state by const reference rather than by value: a SnesState is a quarter
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
@@ -639,14 +667,22 @@ class Snes {
   // as the console either way, and nothing runs until the next call. The audio
   // thread starts at a machine's first call and parks once it has had nothing to
   // run for a short while, inside a call or between calls.
+  //
+  // The picture's dots are drawn inside the cycles that pass them, on the calling
+  // thread. On a machine built with SnesConfig::ppuThread on, they are drawn on the
+  // machine's picture thread during the call instead, from the accesses to the chip
+  // the console logs for it; when step() returns, the thread has drawn every dot the
+  // beam passed and both stand at one picture. The picture thread starts and parks
+  // as the audio thread does.
   std::uint32_t step();
 
   // Runs exactly `budget` master cycles and returns that count. A cycle is priced
   // by its region, so the machine may pass the budget part-way through a cycle; the
   // overshoot is carried into the next call, making run(a) then run(b) advance the
   // machine exactly as run(a + b). run(0) runs nothing. The audio machine's cycles
-  // run as they do under step(), and it stands at the console's master time when
-  // run() returns.
+  // run and the picture's dots are drawn as they are under step(): the audio machine
+  // stands at the console's master time and the picture at the beam when run()
+  // returns.
   std::uint64_t run(std::uint64_t budget);
 
   // Drains the 32 kHz stereo frames the APU has produced since the last drain. The
@@ -683,9 +719,12 @@ class Snes {
   // `video_frame.h`), or none, which is how the machine starts. The machine
   // draws each visible dot only while one is set, so a machine nobody is watching
   // draws nothing; its state, and what a program can observe, are the same either
-  // way.
+  // way. The dots are drawn on the calling thread, or on the machine's picture
+  // thread on a machine built with SnesConfig::ppuThread on; the frame arrives on
+  // the calling thread either way.
   // Like the bus observer it is the host's object and not part of the state: a
-  // snapshot does not carry it and restore() leaves it in place.
+  // snapshot does not carry it and restore() leaves it in place. Set it between
+  // calls.
   void setFrameObserver(FrameObserver* observer) noexcept;
   [[nodiscard]] FrameObserver* frameObserver() const noexcept { return frameObserver_; }
 
@@ -922,13 +961,42 @@ class Snes {
                    std::size_t guard);
 
  private:
-  // The audio thread's side of a call: entered by step(), run(), callInContext and
-  // callOnStack, it starts the thread on a machine's first call, marks the call in
-  // progress and wakes the thread if it parked; leaving, it waits for the audio
-  // machine to reach the console's master time, so a report that throws still
-  // leaves the two machines at one time. A call made from inside a call, a guest
-  // call from a frame report say, enters a flight already in progress and leaves it
-  // in progress.
+  // One entry of the picture thread's log. A Write or a Read is an access to the
+  // chip: its register, a write's value, the beam position `hpos` the console
+  // applied it at — master cycles into the line, after the cycle's tick for a CPU or
+  // DMA access and before it for an HDMA write — and the input pins the chip was
+  // handed, so the thread replays it on its view with the same call. A Line is the
+  // start of a line: the line, the parity, the blank, the mosaic counter in `offset`
+  // and `value`, and in `hpos` the slot of the line ring holding the sprite line
+  // buffer Time filled for it. An InidispEarly is the one-dot redraw a write to
+  // $2100 outside vertical blank owes, at `hpos` under `busBefore`. A Beam says the
+  // beam stands at `hpos`, and nothing else happened. The thread draws every dot up
+  // to an entry's position before it applies the entry, so a write lands at the dot
+  // it landed at on the console.
+  enum class PictureEventKind : std::uint8_t { Line, Write, Read, InidispEarly, Beam };
+  struct PictureEvent {
+    std::uint16_t offset;      // the register, $2100-$213F; a Line's mosaic block line
+    std::uint16_t hpos;        // the beam position applied at; a Line's slot
+    std::uint16_t hdot;        // the input pins the access took
+    std::uint16_t vpos;
+    std::uint8_t field;
+    bool vblank;
+    bool extLatch;
+    bool lateHalf;
+    PictureEventKind kind;
+    std::uint8_t value;        // a write's value; a Line's mosaic block size
+    std::uint8_t busBefore;    // an InidispEarly's byte
+    std::uint8_t spare;
+  };
+  static_assert(sizeof(PictureEvent) == 16u, "an entry is one sixteen-byte store");
+
+  // The threads' side of a call: entered by step(), run(), callInContext and
+  // callOnStack, it starts each thread the machine was built with on the machine's
+  // first call, marks the call in progress and wakes a thread that parked; leaving,
+  // it waits for the audio machine to reach the console's master time and for the
+  // picture to reach the beam, so a report that throws still leaves the machine at
+  // one time and one picture. A call made from inside a call, a guest call from a
+  // frame report say, enters a flight already in progress and leaves it in progress.
   struct Flight {
     explicit Flight(Snes& machine);
     ~Flight();
@@ -938,10 +1006,8 @@ class Snes {
     bool outer = false;  // this flight set the flag and clears it
   };
 
-  // The audio thread's loop, its park, and its start and stop (Flight above, the
-  // link below).
+  // The audio thread's loop and its start and stop (Flight above, the link below).
   void apuThreadBody() noexcept;
-  void parkApuThread(std::uint64_t done, std::uint32_t tail);
   void startApuThread();
   void stopApuThread() noexcept;
   // Releases the cycles the console has paid, then waits until the audio machine
@@ -952,20 +1018,48 @@ class Snes {
   // Releases the audio cycles the console has paid and not yet released to the
   // thread, and wakes the thread if it parked.
   void publishApu() const noexcept;
-  // The console is about to wait for the thread: marks the need, which keeps the
-  // thread awake for its hot window, and wakes the thread if it parked.
-  void needApuThread() const noexcept;
-  // Wakes a parked thread for a release or a need the caller has just made, under
-  // the mutex it parks under, and takes the parked flag down.
-  void wakeApuThread() const noexcept;
   // Whether the calling thread is the machine's audio thread.
   [[nodiscard]] bool onApuThread() const noexcept;
   // A write to a port from the bus, handed to the audio thread to land at the
   // audio cycle the console has reached.
   void pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept;
-  // step() and run() inside a flight, on a machine built with the audio thread.
+  // step() and run() inside a flight, on a machine built with either thread.
   std::uint32_t stepInFlight();
   std::uint64_t runInFlight(std::uint64_t budget);
+
+  // The picture thread's loop, its start and stop, and both threads' stop.
+  void pictureThreadBody() noexcept;
+  void startPictureThread();
+  void stopPictureThread() noexcept;
+  void stopThreads() noexcept;
+  // Logs that the beam stands where it does, then waits, sleeping, until the thread
+  // has applied every entry logged and so drawn every dot the beam has passed, and
+  // copies the two fields the picture writes, `tiles` and `lastMain`, from the
+  // thread's view into the state. Nothing on a machine built with the thread off.
+  void waitPicture() noexcept;
+  // Logs one entry for the thread, waiting, sleeping, for a slot when the ring is
+  // full; an access to the chip at the beam position it was applied at, with the
+  // inputs it took.
+  void pushEvent(const PictureEvent& event) noexcept;
+  void pushAccess(PictureEventKind kind, std::uint16_t offset, std::uint8_t value,
+                  const PpuInputs& in) noexcept;
+  // Logs the start of the line the beam has reached: the line's facts, the mosaic
+  // counter and a copy of the sprite line buffer Time filled for it.
+  void pushLine() noexcept;
+  // One entry applied on the picture thread: the dots up to its position drawn,
+  // then the access replayed on the view, or the line's facts taken.
+  void applyPictureEvent(const PictureEvent& event);
+  // Draws the view's dots from the position drawn so far up to master cycle `hpos`
+  // of the thread's line.
+  void drawTo(std::uint16_t hpos);
+  // Settles the finished picture's width from whether a line of it was drawn in
+  // half-pixels, and begins the next frame narrow. The drawing side's: the calling
+  // thread's with the picture drawn there, the picture thread's at a frame's first
+  // line with the picture drawn on it.
+  void finishPicture() noexcept;
+  // The picture's inputs as the beam stands: the line, the parity, the blank and
+  // the clock rate, which are all the dots read of the machine.
+  [[nodiscard]] PpuInputs pictureInputs() const noexcept;
 
   // The mapped bus the CPU runs over. Each access records its region's master cost
   // on the machine and routes to work RAM, the cartridge, or a register; an
@@ -1056,14 +1150,21 @@ class Snes {
   void tickVideo(std::uint32_t cost);
 
   // Resolves the picture's pixels for the visible dots the master-cycle span
-  // (`from`, `to`] of a line beginning at `lineStart` passed: the tile reads that
-  // fall on those dots, in dot order, then from kFirstPictureDot on each dot's
-  // pixel, from those reads and the registers as they stand at its own dot. A
-  // read later in the span writes no column an earlier pixel of it reads, so the
-  // reads come first. With no frame observer set it makes the reads, draws
-  // nothing, and decides only what the chip carries to the next position, once,
-  // at the span's last picture dot. A span whose dots all lie before the line's
-  // first read or past its last pixel reads and draws nothing.
+  // (`fromHpos`, `toHpos`] of the line `in` names passed, over the chip `ppu`: the
+  // tile reads that fall on those dots, in dot order, then from kFirstPictureDot on
+  // each dot's pixel, from those reads and the registers as they stand at its own
+  // dot. A read later in the span writes no column an earlier pixel of it reads, so
+  // the reads come first. With no frame observer set it makes the reads, draws
+  // nothing, and decides only what the chip carries to the next position, once, at
+  // the span's last picture dot. A span whose dots all lie before the line's first
+  // read or past its last pixel reads and draws nothing, and so does a span of the
+  // frame's first line or of vertical blank. Runs on whichever thread draws: over
+  // the machine's own chip state on the calling thread, over the picture thread's
+  // view on it.
+  void drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::uint16_t toHpos);
+  // drawDots over the machine's own chip state for the master-cycle span (`from`,
+  // `to`] of a line beginning at `lineStart`: the calling thread's drawing, on a
+  // machine built with the picture thread off.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
   // Turns the frame in progress 512 wide at its first position drawn in
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn
@@ -1074,7 +1175,8 @@ class Snes {
   // write's own cycle covered is drawn under the byte the bus held before the
   // write — the whole byte, forced blank and brightness both. Redraws that one dot
   // under `busBefore` after the cycle has drawn it under the old register, then the
-  // written value stands for every dot after. A no-op for any other write.
+  // written value stands for every dot after; with the picture drawn on the picture
+  // thread, logs the redraw for it. A no-op for any other write.
   void redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore);
 
   // Walks the PPU's Range pass as far as master cycle `to` of a line beginning at
@@ -1429,10 +1531,12 @@ class Snes {
   CartridgeBoard board_;             // the board the image is on: its map, its chip and its save, fixed with it
   std::array<Page, kPages> pages_{}; // what each page of the bus reaches, built from the two above and fixed with them
   bool bootsAudio_ = false;          // the audio CPU runs a boot image when it starts, fixed with them
-  // The audio machine's cycles run on the audio thread (`link_`, below), fixed with the
-  // machine; in the bytes beside the flag above, ahead of the ratio every cycle's close
-  // reads with it.
+  // The audio machine's cycles run on the audio thread (`link_`, below), and the
+  // picture's dots are drawn on the picture thread (`picture_`, below), each fixed
+  // with the machine; in the bytes beside the flag above, ahead of the ratio every
+  // cycle's close reads with them.
   bool apuThreaded_ = false;
+  bool ppuThreaded_ = false;
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
@@ -1457,12 +1561,16 @@ class Snes {
   // output rather than state, so it lives on the machine and not in its state
   // value, and it exists only while someone is watching. A frame's rows are 256
   // pixels until its first position drawn in half-pixels and 512 from then on; the
-  // frame's own width and height say how much of the buffer it is.
+  // frame's own width and height say how much of the buffer it is. Written by
+  // whichever thread draws, and read by the calling thread at the frame report,
+  // after it has waited for the picture.
   std::vector<std::uint8_t> raster_;
   // What the picture path works out from the chip's registers and reads at every
   // dot. Like the picture it is worked out from the state rather than part of it,
   // so it lives on the machine and not in its state value; a restore drops all of
-  // it, and the chip drops whatever a write makes stale.
+  // it, and the chip drops whatever a write makes stale. On a machine drawing on
+  // its picture thread, that thread works out its own over its view, and this one
+  // is dropped by every write and read by nothing.
   Ppu::Derived derived_;
   // The master cycle of the earliest event on the beam's line that the beam has not
   // passed: 0 while it is not known, the largest value when the line holds no more.
@@ -1471,9 +1579,12 @@ class Snes {
   // $4207-$420A or $2133, the registers the line's events are dated from.
   std::uint64_t lineEventsFrom_ = 0;
   bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
-  bool frameWide_ = false;      // the frame in progress is 512 wide
+  // The frame in progress is 512 wide, and how wide the finished picture is: the
+  // drawing side's, written by the thread that draws and read by the calling thread
+  // at the frame report, after it has waited for the picture.
+  bool frameWide_ = false;
+  std::uint16_t frameWidth_ = 0;
   std::uint16_t framePictureLines_ = 0;  // the lines the finished picture holds
-  std::uint16_t frameWidth_ = 0;         // and how wide it is
   std::uint8_t frameField_ = 0;          // the parity that picture ran under
   SaveObserver* saveObserver_ = nullptr;  // told a frame changed the save window; none by default
   // Whether anything has stored into the save window since it was last reported.
@@ -1566,57 +1677,149 @@ class Snes {
   InstructionWatcher* instructionWatcher_ = nullptr;  // told each armed instruction reached; none by default
   std::unique_ptr<StandinSet> standins_;              // the armed instructions; null until the first arm
 
-  // The audio thread and the cells it shares with the calling thread. The console
-  // counts the audio cycles it pays in `pending` and releases them by adding them to
-  // `released` once `pending` reaches kApuBatch and before every point that depends
-  // on the count; the thread runs them and publishes the count it has run in `done`,
-  // and never runs past `released`. Both count from zero at the machine's
-  // construction and are equal whenever the two machines stand at one master time,
-  // with `pending` zero, so none of the three is state: a snapshot carries none of
-  // them, and a restore leaves them equal. A write to a port from the bus releases
+  // A thread the machine owns and the cells it shares with the calling thread: the
+  // audio thread and the picture thread are each one of these. The console counts
+  // what it has handed the thread in `released` — audio cycles for the one, picture
+  // entries for the other — and the thread counts what it has run in `done`, never
+  // running past `released`. Both count from zero at the machine's construction and
+  // are equal whenever the two stand at one point, so neither is state: a snapshot
+  // carries neither, and a restore leaves them equal. The thread stays awake for a
+  // short window after it last ran work or the console last waited for it, and
+  // parks on `wake` otherwise: `parked` says it has, `needed` that the console is
+  // waiting for it, `stop` that it ends at its next look. A console that sleeps
+  // while it waits raises `awaited` and sleeps on `caughtUp`, which the thread
+  // signals after each advance of `done` while the flag is up. Each cell sits in a
+  // cache line of its own, held apart by padding written as an array; `hotUntil`
+  // and `worked` are the thread's alone.
+  using LinePad = std::array<std::uint8_t, 128>;    // a cache line on the widest machine the library runs on
+  struct Worker {
+    std::atomic<std::uint64_t> released{0};  // what the console has handed over; written by the console
+    LinePad pad0{};
+    std::atomic<std::uint64_t> done{0};      // what the thread has run; written by the thread
+    LinePad pad1{};
+    std::atomic<bool> stop{false};           // the thread ends at its next look
+    LinePad pad2{};
+    std::atomic<bool> parked{false};         // the thread waits on `wake`
+    LinePad pad3{};
+    std::atomic<bool> needed{false};         // the console waited for the thread; cleared by the thread
+    LinePad pad4{};
+    std::atomic<bool> awaited{false};        // the console sleeps on `caughtUp`
+    LinePad pad5{};
+    std::mutex mutex;                        // guards the park and the console's sleep
+    std::condition_variable wake;            // the thread's park
+    std::condition_variable caughtUp;        // the console's sleep
+    std::thread thread;
+    std::thread::id id;                      // the thread's id, set before the first thing it is handed
+    std::chrono::steady_clock::time_point hotUntil{};  // the end of the thread's awake window
+    bool worked = false;                     // the thread ran work since it last read the clock
+
+    // Starts the thread on `body` and records its id; ends it and waits for it,
+    // leaving the cells ready to start it again; whether the calling thread is it.
+    template <class Body>
+    void start(Body body) {
+      thread = std::thread(std::move(body));
+      id = thread.get_id();
+    }
+    void stopAndJoin() noexcept;
+    [[nodiscard]] bool onThread() const noexcept;
+    // The console handing over `count` more: the count published, and a parked
+    // thread woken. A look that misses a park just begun is followed by the next
+    // hand-over's look, or by a wait, which cannot miss it.
+    void release(std::uint64_t count) noexcept;
+    // The console is about to wait for the thread: marks the need, which keeps the
+    // thread awake for its window, and wakes the thread if it parked.
+    void need() noexcept;
+    // Wakes a parked thread for a release or a need the caller has just made, under
+    // the mutex it parks under, and takes the parked flag down.
+    void wakeUnderMutex() noexcept;
+    // Wakes a thread parked between calls as a call begins, leaving the parked flag
+    // up for the first hand-over inside the call to see.
+    void nudge() noexcept;
+    // The thread's wait for work, `hasWork(order)` answering whether any is
+    // published, at the memory order the look is made with: awake while its window
+    // is open, parked once the window has passed, and back the moment work or a need
+    // arrives. False when the thread is to stop. `inFlight` is the machine's flag
+    // that a call is in progress, which a park begun between calls wakes on.
+    template <class HasWork>
+    [[nodiscard]] bool awaitWork(const std::atomic<bool>& inFlight, HasWork hasWork) noexcept;
+    template <class HasWork>
+    void park(const std::atomic<bool>& inFlight, HasWork hasWork);
+    // The thread's own bookkeeping: its window opened as it starts, and work noted
+    // as run.
+    void beginThread() noexcept;
+    void ran() noexcept { worked = true; }
+    // The thread has advanced `done`: a console sleeping for it is woken.
+    void notifyCaughtUp() noexcept;
+    // The console's wait for `done` to reach `target`, which sleeps: a bounded
+    // handful of relaxed turns, then the mutex and `caughtUp` until the thread has
+    // caught up. Nothing when it already has.
+    void waitSleeping(std::uint64_t target) noexcept;
+  };
+
+  // The audio thread's link. The console counts the audio cycles it pays in
+  // `pending` and releases them by adding them to the worker's `released` once
+  // `pending` reaches kApuBatch and before every point that depends on the count;
+  // the thread runs them, and `pending` is zero whenever the two machines stand at
+  // one master time, so it is not state. A write to a port from the bus releases
   // `pending` and joins the ring stamped with `released`, which is the audio cycle
   // the write lands before; the thread applies it once `done` reaches the stamp and
   // never runs past a stamp it has not applied. A read releases `pending`, waits for
-  // `done` to reach `released` and the ring to drain, and raises `needed` first,
-  // which keeps the thread awake for a short window after the wait. Neither
-  // `needed` nor `parked` is state. Each cell sits in a cache line of its own, held
-  // apart by padding written as an array.
+  // `done` to reach `released` and the ring to drain, and raises the worker's
+  // `needed` first. The console's waits for this thread spin; nothing sleeps on its
+  // worker.
   struct PortWrite {
     std::uint64_t at = 0;     // the audio cycle count the write lands at
     std::uint8_t index = 0;   // the port, 0-3
     std::uint8_t value = 0;
   };
   static constexpr std::uint32_t kPortRing = 1024u;  // writes in flight before the console waits for the thread
-  using LinePad = std::array<std::uint8_t, 128>;    // a cache line on the widest machine the library runs on
   struct ApuLink {
-    std::atomic<std::uint64_t> released{0};  // audio cycles the console has released; written by the console
+    Worker worker;                           // `released` and `done` count audio cycles
     LinePad pad0{};
-    std::atomic<std::uint64_t> done{0};      // audio cycles the thread has run; written by the thread
-    LinePad pad1{};
-    std::atomic<bool> inFlight{false};       // a call is in progress; one that begins wakes a parked thread
-    LinePad pad2{};
-    std::atomic<bool> stop{false};           // the thread ends at its next look
-    LinePad pad3{};
-    std::atomic<bool> parked{false};         // the thread waits on `wake`
-    LinePad pad4{};
-    std::atomic<bool> needed{false};         // the console waited for the thread; cleared by the thread
-    LinePad pad5{};
     std::uint64_t pending = 0;               // audio cycles paid and not yet published; the console's alone
-    LinePad pad6{};
+    LinePad pad1{};
     std::atomic<std::uint32_t> head{0};      // ring entries written; by the console
-    LinePad pad7{};
+    LinePad pad2{};
     std::atomic<std::uint32_t> tail{0};      // ring entries applied; by the thread
-    LinePad pad8{};
+    LinePad pad3{};
     std::array<PortWrite, kPortRing> ring{};
-    LinePad pad9{};
-    std::mutex mutex;                        // guards the park
-    std::condition_variable wake;
-    std::thread thread;
-    std::thread::id id;                      // the thread's id, set before its first cycle is released
+    LinePad pad4{};
   };
+  // A call is in progress; one that begins wakes each parked thread. Only the
+  // calling thread writes it. Not state.
+  std::atomic<bool> inFlight_{false};
+  LinePad inFlightPad_{};
   // Mutable: a const read of the audio machine waits for the thread, which marks the
   // need and may wake it.
   mutable ApuLink link_;
+
+  static constexpr std::uint32_t kEventRing = 65536u;  // entries logged before the console waits for the thread
+  static constexpr std::uint32_t kLineRing = 512u;     // sprite line buffers logged before the console waits
+  // The picture thread's link, held only on a machine built with the thread: its
+  // worker, whose `released` counts entries logged and `done` entries applied; the
+  // view, a second chip state the thread keeps equal to the console's register file,
+  // latches and memories by replaying every access, and draws from, writing the two
+  // fields the picture writes, `tiles` and `lastMain`, which the console copies back
+  // whenever it waits; the thread's own derived answers over the view; the line facts
+  // the thread draws under and how far along the line it has drawn; the entry ring;
+  // and the ring of sprite line buffers, one a line, each slot marked with one more
+  // than the index of the Line entry that last filled it, so the console waits for
+  // that entry before it fills the slot again. `linesPushed` is the console's alone;
+  // `in` and `drawn` are the thread's between a load and the next, when the console
+  // sets them with the thread idle.
+  struct PictureLink {
+    Worker worker;
+    LinePad pad0{};
+    PpuState view{};
+    Ppu::Derived derived{};
+    PpuInputs in{};
+    std::uint16_t drawn = 0;
+    std::uint64_t linesPushed = 0;
+    std::array<std::uint64_t, kLineRing> lineEvent{};
+    std::array<PictureEvent, kEventRing> events{};
+    std::array<SpriteLine, kLineRing> lines{};
+  };
+  std::unique_ptr<PictureLink> picture_;
 
   // What a page reaches, for the watch: one 8 KB run of one space — the space
   // and the index of the run's first byte — no byte at all, or bytes the page

@@ -661,6 +661,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/guest_call_test.cpp
     tests/snes/host_surface_test.cpp
     tests/snes/apu_thread_test.cpp
+    tests/snes/ppu_thread_test.cpp
     tests/snes/observer_test.cpp
     tests/snes/save_observer_test.cpp
     tests/snes/timing_test.cpp

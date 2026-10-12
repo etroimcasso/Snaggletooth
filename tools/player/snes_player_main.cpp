@@ -4,7 +4,7 @@
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
 //               [--input <script> | --input-dir <directory>] [--config <file>]
 //               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
-//               [--interlace weave|bob|off] [--apu-thread] [--mute] [--quiet]
+//               [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -56,9 +56,10 @@
 //
 // --apu-thread builds the machine with SnesConfig::apuThread on: the audio unit runs
 // on a thread of the machine's own, beside the one that steps the console, for a host
-// whose cores are each too slow to run the whole machine at speed. The picture and the
-// sound are the same bytes either way; the audio unit's work moves to a second core,
-// and the run's first lines say so.
+// whose cores are each too slow to run the whole machine at speed. --ppu-thread builds
+// it with SnesConfig::ppuThread on: the picture is drawn on a thread of the machine's
+// own the same way. The picture and the sound are the same bytes either way; the work
+// moves to another core, and the run's first lines say so.
 //
 // A cartridge that turns interlace on draws one field a frame, and the player weaves
 // the two into the full-height picture the console's signal carried. --interlace names
@@ -194,6 +195,7 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
          "                              the window shows the frame current at each refresh\n"
          "  --interlace weave|bob|off   how to show interlaced games (default weave)\n"
          "  --apu-thread                run the sound chip on its own thread\n"
+         "  --ppu-thread                draw the picture on its own thread\n"
          "  --mute                      don't play the sound\n"
          "  --quiet                     don't print the run's status lines\n"
          "  --default-config            print the built-in controller mapping and exit\n"
@@ -834,6 +836,7 @@ int main(int argc, char** argv) {
   player::Vsync vsync = player::Vsync::Auto;
   bool unthrottled = false;
   bool apuThread = false;
+  bool ppuThread = false;
   player::Interlace interlace = player::Interlace::Weave;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
@@ -907,6 +910,8 @@ int main(int argc, char** argv) {
       unthrottled = true;
     } else if (arg == "--apu-thread") {
       apuThread = true;
+    } else if (arg == "--ppu-thread") {
+      ppuThread = true;
     } else if (arg == "--interlace") {
       const std::optional<player::Interlace> mode = player::parseInterlace(next("--interlace"));
       if (!mode) {
@@ -1087,6 +1092,7 @@ int main(int argc, char** argv) {
 
   snaggletooth::SnesConfig machineConfig{.rom = rom, .region = region};
   machineConfig.apuThread = apuThread;
+  machineConfig.ppuThread = ppuThread;
   Snes machine(machineConfig);
 
   // A cartridge with a battery keeps what it writes. The file goes in with the rest
@@ -1133,6 +1139,7 @@ int main(int argc, char** argv) {
                 << rateText(milliFps(pacing.rate)) << " Hz\n";
     }
     if (apuThread) std::cerr << "the audio unit on its own thread\n";
+    if (ppuThread) std::cerr << "the picture on its own thread\n";
   }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);

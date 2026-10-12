@@ -123,7 +123,7 @@ travel with the target. No option needs setting: the suite, the tools and the pl
 parent build, and the library itself links nothing but the standard library and the platform's
 thread library — no SDL, no PNG decoder, no test framework. The thread library is
 `Threads::Threads`, which the target carries to every program that links it; a machine starts a
-thread only when it is built with `SnesConfig::apuThread` on
+thread only when it is built with `SnesConfig::apuThread` or `SnesConfig::ppuThread` on
 ([snes-machine.md](snes-machine.md#the-audio-thread)).
 
 ### What the library is
