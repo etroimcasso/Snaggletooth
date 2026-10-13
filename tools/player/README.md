@@ -71,9 +71,11 @@ console ([The audio thread](../../docs/snes-machine.md#the-audio-thread)). It is
 are each too slow to run the whole machine at speed: the thread that steps the console does less work
 per frame, the audio unit's work moves to a second core, and the waits where the two threads meet add to
 it. The process as a whole uses a little more CPU in total, and each thread has less to do, so each core
-carries a lighter load and a slower device keeps up by running the work in parallel. On a host that
-already runs the console at speed, leave it off. The picture and the sound are the same bytes either way,
-and the run says which way it took —
+carries a lighter load and a slower device keeps up by running the work in parallel. Turn on
+[`--ppu-thread`](#the-picture-on-its-own-thread) first, which takes the larger share of the work off the
+thread that steps the console, and add `--apu-thread` only where `--ppu-thread` alone does not hold the
+console's frame rate; on a host that already runs the console at speed, leave it off. The picture and
+the sound are the same bytes either way, and the run says which way it took —
 
 ```
 the audio unit on its own thread
@@ -83,7 +85,8 @@ the audio unit on its own thread
 
 `--ppu-thread` draws the picture on a thread of the machine's own, beside the one that steps the
 console ([The picture thread](../../docs/snes-machine.md#the-picture-thread)). It is for the same
-host as `--apu-thread`, and the two combine: the thread that steps the console keeps the chip's
+host as `--apu-thread` and is the one to turn on first; `--apu-thread` joins it only where it alone does
+not hold the console's frame rate. With it on the thread that steps the console keeps the chip's
 registers, its memories, the beam and the sprite passes, and the drawing moves to another core. The
 process as a whole uses a little more CPU in total, and each thread has less to do, so each core
 carries a lighter load and a slower device keeps up by running the work in parallel. The pixels are
