@@ -58,8 +58,10 @@
 // on a thread of the machine's own, beside the one that steps the console, for a host
 // whose cores are each too slow to run the whole machine at speed. --ppu-thread builds
 // it with SnesConfig::ppuThread on: the picture is drawn on a thread of the machine's
-// own the same way. The picture and the sound are the same bytes either way; the work
-// moves to another core, and the run's first lines say so.
+// own the same way. --ppu-thread is the one to turn on first; --apu-thread joins it
+// only where it alone does not hold the console's frame rate. The picture and the
+// sound are the same bytes either way; the work moves to another core, and the run's
+// first lines say so.
 //
 // A cartridge that turns interlace on draws one field a frame, and the player weaves
 // the two into the full-height picture the console's signal carried. --interlace names
@@ -194,7 +196,8 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
          "  --unthrottled               run as fast as the machine can go, with no pacing or vsync;\n"
          "                              the window shows the frame current at each refresh\n"
          "  --interlace weave|bob|off   how to show interlaced games (default weave)\n"
-         "  --apu-thread                run the sound chip on its own thread\n"
+         "  --apu-thread                run the sound chip on its own thread; only where\n"
+         "                              --ppu-thread alone cannot hold full speed\n"
          "  --ppu-thread                draw the picture on its own thread\n"
          "  --mute                      don't play the sound\n"
          "  --quiet                     don't print the run's status lines\n"

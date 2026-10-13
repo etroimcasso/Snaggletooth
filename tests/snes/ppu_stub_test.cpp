@@ -72,6 +72,106 @@ TEST(SnesPpuStub, VramAddressTranslationRotatesTheLowBits) {
   EXPECT_EQ(m.state().ppu.vmadd, 0x0002u);  // the raw address steps; translation is only applied to the access
 }
 
+TEST(SnesPpuStub, TheNineBitTranslationRotatesTheLowNineBits) {
+  // The 9-bit translation left-rotates the low nine bits of the word address by
+  // three: $0040 reaches word $0001, and $0100, whose bit 8 is inside the field,
+  // reaches word $0004.
+  Snes m = run({
+      0xA9, 0x88, 0x8D, 0x15, 0x21,  // VMAIN = inc-after-high, step 1, 9-bit translation
+      0xA9, 0x40, 0x8D, 0x16, 0x21,  // VMADDL = $40
+      0xA9, 0x00, 0x8D, 0x17, 0x21,  // VMADDH = $00 -> address $0040
+      0xA9, 0xAA, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0xBB, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xA9, 0x00, 0x8D, 0x16, 0x21,  // VMADDL = $00
+      0xA9, 0x01, 0x8D, 0x17, 0x21,  // VMADDH = $01 -> address $0100
+      0xA9, 0xCC, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0xDD, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xDB,
+  });
+  EXPECT_EQ(m.vram()[0x02], 0xAAu);  // word $0001 -> bytes $02/$03
+  EXPECT_EQ(m.vram()[0x03], 0xBBu);
+  EXPECT_EQ(m.vram()[0x08], 0xCCu);  // word $0004 -> bytes $08/$09
+  EXPECT_EQ(m.vram()[0x09], 0xDDu);
+  EXPECT_EQ(m.state().ppu.vmadd, 0x0101u);
+}
+
+TEST(SnesPpuStub, TheTenBitTranslationRotatesTheLowTenBits) {
+  // The 10-bit translation left-rotates the low ten bits by three: $0080 reaches
+  // word $0001, and $0200, whose bit 9 is inside the field, reaches word $0004.
+  Snes m = run({
+      0xA9, 0x8C, 0x8D, 0x15, 0x21,  // VMAIN = inc-after-high, step 1, 10-bit translation
+      0xA9, 0x80, 0x8D, 0x16, 0x21,  // VMADDL = $80
+      0xA9, 0x00, 0x8D, 0x17, 0x21,  // VMADDH = $00 -> address $0080
+      0xA9, 0xAA, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0xBB, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xA9, 0x00, 0x8D, 0x16, 0x21,  // VMADDL = $00
+      0xA9, 0x02, 0x8D, 0x17, 0x21,  // VMADDH = $02 -> address $0200
+      0xA9, 0xCC, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0xDD, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xDB,
+  });
+  EXPECT_EQ(m.vram()[0x02], 0xAAu);  // word $0001 -> bytes $02/$03
+  EXPECT_EQ(m.vram()[0x03], 0xBBu);
+  EXPECT_EQ(m.vram()[0x08], 0xCCu);  // word $0004 -> bytes $08/$09
+  EXPECT_EQ(m.vram()[0x09], 0xDDu);
+  EXPECT_EQ(m.state().ppu.vmadd, 0x0201u);
+}
+
+TEST(SnesPpuStub, TheTranslationKeepsTheAddressBitsAboveItsField) {
+  // One address, $5701, under each translation in turn: the bits above the
+  // rotated field pass through, so each width reaches its own word.
+  Snes m = run({
+      0xA9, 0x84, 0x8D, 0x15, 0x21,  // VMAIN: 8-bit translation
+      0xA9, 0x01, 0x8D, 0x16, 0x21,  // VMADDL = $01
+      0xA9, 0x57, 0x8D, 0x17, 0x21,  // VMADDH = $57 -> address $5701
+      0xA9, 0x11, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0x12, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xA9, 0x88, 0x8D, 0x15, 0x21,  // VMAIN: 9-bit translation
+      0xA9, 0x01, 0x8D, 0x16, 0x21,  // VMADDL = $01
+      0xA9, 0x57, 0x8D, 0x17, 0x21,  // VMADDH = $57 -> address $5701
+      0xA9, 0x21, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0x22, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xA9, 0x8C, 0x8D, 0x15, 0x21,  // VMAIN: 10-bit translation
+      0xA9, 0x01, 0x8D, 0x16, 0x21,  // VMADDL = $01
+      0xA9, 0x57, 0x8D, 0x17, 0x21,  // VMADDH = $57 -> address $5701
+      0xA9, 0x31, 0x8D, 0x18, 0x21,  // VMDATAL
+      0xA9, 0x32, 0x8D, 0x19, 0x21,  // VMDATAH
+      0xDB,
+  });
+  // 8 bits: $57 kept, the low byte $01 rotated to $08 -> word $5708.
+  EXPECT_EQ(m.vram()[0xAE10], 0x11u);
+  EXPECT_EQ(m.vram()[0xAE11], 0x12u);
+  // 9 bits: bits 15-9 kept, the low nine bits $101 rotated to $00C -> word $560C.
+  EXPECT_EQ(m.vram()[0xAC18], 0x21u);
+  EXPECT_EQ(m.vram()[0xAC19], 0x22u);
+  // 10 bits: bits 15-10 kept, the low ten bits $301 rotated to $00E -> word $540E.
+  EXPECT_EQ(m.vram()[0xA81C], 0x31u);
+  EXPECT_EQ(m.vram()[0xA81D], 0x32u);
+}
+
+TEST(SnesPpuStub, AReadUnderTheTranslationPrefetchesTheRotatedWord) {
+  // The read port prefetches through the same translation as the write port:
+  // under the 10-bit translation address $0001 reaches word $0008, and the
+  // prefetch glitch hands its low byte back twice.
+  Snes m = run({
+      0xA9, 0x80, 0x8D, 0x15, 0x21,  // VMAIN = inc-after-high, no translation
+      0xA9, 0x08, 0x8D, 0x16, 0x21,  // VMADDL = $08
+      0xA9, 0x00, 0x8D, 0x17, 0x21,  // VMADDH = $00 -> word $0008
+      0xA9, 0x34, 0x8D, 0x18, 0x21,  // word $0008 low  = $34
+      0xA9, 0x12, 0x8D, 0x19, 0x21,  // word $0008 high = $12
+      0xA9, 0x78, 0x8D, 0x18, 0x21,  // word $0009 low  = $78
+      0xA9, 0x56, 0x8D, 0x19, 0x21,  // word $0009 high = $56
+      0xA9, 0x0C, 0x8D, 0x15, 0x21,  // VMAIN = inc-after-low, step 1, 10-bit translation
+      0xA9, 0x01, 0x8D, 0x16, 0x21,  // VMADDL = $01
+      0xA9, 0x00, 0x8D, 0x17, 0x21,  // VMADDH = $00 -> address $0001 (prefetch loads word $0008)
+      0xAD, 0x39, 0x21, 0x85, 0x50,  // LDA $2139; STA $50  (read #1)
+      0xAD, 0x39, 0x21, 0x85, 0x51,  // LDA $2139; STA $51  (read #2)
+      0xDB,
+  });
+  EXPECT_EQ(m.state().wram[0x50], 0x34u);  // word $0008 low
+  EXPECT_EQ(m.state().wram[0x51], 0x34u);  // word $0008 low again — the glitch
+}
+
 TEST(SnesPpuStub, VramReadPrefetchReturnsTheFirstWordTwice) {
   // Fill two words, then read the low byte three times from address zero. The
   // documented prefetch glitch hands back the first word twice before advancing.

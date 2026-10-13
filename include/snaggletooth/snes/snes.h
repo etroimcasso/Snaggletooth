@@ -418,7 +418,10 @@ struct SnesConfig {
   // of the audio machine's time, and at every point that depends on them; the thread
   // sleeps whenever it has nothing to run, through a host's sleep inside a report as
   // between calls. The bytes are the same either way: the same state at every
-  // return, the same audio frames, the same byte from every read of a port.
+  // return, the same audio frames, the same byte from every read of a port. Turn it
+  // on only where ppuThread alone does not hold the console's frame rate: the
+  // picture is the larger share of the calling thread's work, so ppuThread is the
+  // one to turn on first.
   bool apuThread = false;
 
   // Where the picture is drawn. Off, the default, each dot is drawn inside the
@@ -435,7 +438,9 @@ struct SnesConfig {
   // load and a host whose cores are each too slow keeps up by running the work in
   // parallel. The pixels and the state are the same either way: every frame handed
   // over is the frame the calling thread would have drawn, and state() at every
-  // return is the state it would hold.
+  // return is the state it would hold. This is the first thread to turn on for such
+  // a host; apuThread joins it only where it alone does not hold the console's frame
+  // rate.
   bool ppuThread = false;
 };
 

@@ -96,6 +96,8 @@ into its ready state and a host loads a program into audio RAM directly. See
 With it off they run inside the console's cycles on the calling thread; the bytes are the same either
 way. See [The audio thread](#the-audio-thread). `SnesConfig::ppuThread` draws the picture on a second
 thread the machine owns the same way, off by default; see [The picture thread](#the-picture-thread).
+The picture thread is the one to turn on first; the audio thread joins it only where the picture thread
+alone does not hold the console's frame rate.
 
 ## The memory map
 
@@ -358,7 +360,9 @@ The thread takes work off the calling thread and adds work to the process. The c
 less time per emulated second, which is what a host needs whose cores are each too slow to run the whole
 machine at speed. The process spends more: the audio thread's own work, its wakes, and the waits where
 the two threads meet, at every port read and every call's return. A host whose one core
-runs the machine at speed leaves the thread off.
+runs the machine at speed leaves the thread off. A host whose calling thread falls behind turns on
+[the picture thread](#the-picture-thread) first, which takes the larger share of the work off it, and
+this one beside it only where the picture thread alone does not hold the console's frame rate.
 
 ### The picture thread
 

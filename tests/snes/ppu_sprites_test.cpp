@@ -1,10 +1,10 @@
 // The sprites the PPU draws, and the two passes that find them: both OAM tables
 // decoded, the eight size pairs, the character table and the wrap that is its own
-// and not a background's, both flips and the rule a rectangular sprite keeps, the
-// palettes above the backgrounds', the four sprite places in Mode 1's priority
-// chart, index order and the rule that only the topmost sprite answers the
-// backgrounds, the main screen's own bit, and the pass across a line's dots that
-// reads $2101 as it stands at each.
+// and not a background's, each pixel of a character read from its own column and
+// row, both flips and the rule a rectangular sprite keeps, the palettes above the
+// backgrounds', the four sprite places in Mode 1's priority chart, index order and
+// the rule that only the topmost sprite answers the backgrounds, the main screen's
+// own bit, and the pass across a line's dots that reads $2101 as it stands at each.
 //
 // Then what the chip can afford and where the walk begins: the sprites Range
 // keeps and the tiles Time loads, in the opposite directions they run in, the two
@@ -69,6 +69,7 @@ constexpr std::uint16_t kWhite = 0x7FFFu;
 constexpr std::uint16_t kYellow = 0x03FFu;
 constexpr std::uint16_t kCyan = 0x7FE0u;
 constexpr std::uint16_t kMagenta = 0x7C1Fu;
+constexpr std::uint16_t kBlack = 0x0000u;
 
 using Rgba = std::array<std::uint8_t, 4>;
 
@@ -83,6 +84,7 @@ constexpr Rgba kWhiteOut{255u, 255u, 255u, 255u};
 constexpr Rgba kYellowOut{255u, 255u, 0u, 255u};
 constexpr Rgba kCyanOut{0u, 255u, 255u, 255u};
 constexpr Rgba kMagentaOut{255u, 0u, 255u, 255u};
+constexpr Rgba kBlackOut{0u, 0u, 0u, 255u};
 
 // The first palette a sprite can name, and the words its eight palettes occupy:
 // sixteen colours each from CGRAM word 128 up.
@@ -477,6 +479,76 @@ TEST(Sprites, ASpritesCharactersWrapInsideTheTableWhereABackgroundsBlockRunsOn) 
   EXPECT_EQ(picture.at(8u, 0u), kCyanOut);    // $300
   EXPECT_EQ(picture.at(0u, 8u), kYellowOut);  // $30F
   EXPECT_EQ(picture.at(8u, 8u), kCyanOut);    // $310
+}
+
+// Eight colors for sprite palette 0's indices 1 to 8, each output distinct from
+// the others and from the backdrop, so a pixel's index reads straight off the
+// picture.
+struct IndexColor {
+  std::uint16_t word;
+  Rgba out;
+};
+constexpr std::array<IndexColor, 8> kIndexColors{{
+    {.word = kRed, .out = kRedOut},
+    {.word = kGreen, .out = kGreenOut},
+    {.word = kBlue, .out = kBlueOut},
+    {.word = kWhite, .out = kWhiteOut},
+    {.word = kYellow, .out = kYellowOut},
+    {.word = kCyan, .out = kCyanOut},
+    {.word = kMagenta, .out = kMagentaOut},
+    {.word = kBlack, .out = kBlackOut},
+}};
+
+// screen() with indices 1 to 8 of sprite palette 0 set to kIndexColors.
+PpuState screenWithEightIndices() {
+  PpuState ppu = screen();
+  for (unsigned index = 1u; index <= kIndexColors.size(); ++index) {
+    putSpriteColour(ppu, 0u, index, kIndexColors[index - 1u].word);
+  }
+  return ppu;
+}
+
+TEST(Sprites, EachColumnOfACharacterReadsItsOwnPixel) {
+  // A character's row holds one color index a column, its four bits one from
+  // each bitplane, the leftmost pixel in each plane's bit 7. Indices 1 to 8
+  // across take every plane's bit at least once, and a horizontal flip reads the
+  // same row from its last pixel to its first.
+  PpuState ppu = screenWithEightIndices();
+  TileRows rows{};
+  for (auto& row : rows) {
+    for (unsigned column = 0u; column < 8u; ++column) {
+      row[column] = static_cast<std::uint8_t>(column + 1u);
+    }
+  }
+  putSpriteTile(ppu, 0u, rows);
+  putSprite(ppu, 0u, 40, 40u, 0u, attributes(false, false, 3u, 0u, false), false);
+  putSprite(ppu, 1u, 80, 40u, 0u, attributes(false, true, 3u, 0u, false), false);
+
+  const Picture picture = draw(ppu);
+  for (unsigned column = 0u; column < 8u; ++column) {
+    EXPECT_EQ(picture.at(40u + column, 40u), kIndexColors[column].out)
+        << "unflipped, column " << column;
+    EXPECT_EQ(picture.at(80u + column, 40u), kIndexColors[7u - column].out)
+        << "flipped, column " << column;
+  }
+}
+
+TEST(Sprites, EachRowOfACharacterReadsItsOwnPixels) {
+  // A character's eight rows are eight words of planes 0 and 1 and eight more of
+  // planes 2 and 3, one word a row. Row r solid in index r + 1 shows each row
+  // where it stands, and a vertical flip shows them bottom to top.
+  PpuState ppu = screenWithEightIndices();
+  TileRows rows{};
+  for (unsigned row = 0u; row < 8u; ++row) rows[row].fill(static_cast<std::uint8_t>(row + 1u));
+  putSpriteTile(ppu, 0u, rows);
+  putSprite(ppu, 0u, 40, 60u, 0u, attributes(false, false, 3u, 0u, false), false);
+  putSprite(ppu, 1u, 80, 60u, 0u, attributes(true, false, 3u, 0u, false), false);
+
+  const Picture picture = draw(ppu);
+  for (unsigned row = 0u; row < 8u; ++row) {
+    EXPECT_EQ(picture.at(40u, 60u + row), kIndexColors[row].out) << "unflipped, row " << row;
+    EXPECT_EQ(picture.at(80u, 60u + row), kIndexColors[7u - row].out) << "flipped, row " << row;
+  }
 }
 
 // ---- the flips ---------------------------------------------------------------

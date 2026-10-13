@@ -73,7 +73,8 @@ SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
   without; whole-machine state snapshots and restores as a value. A thread takes its work off the
   stepping thread for a host whose cores are each too slow to run the whole machine at speed: the
   process spends a little more CPU in total and each thread has less to do, so a slower device keeps
-  up by running the work in parallel.
+  up by running the work in parallel. The picture thread comes first; the audio thread joins it only
+  where the picture thread alone does not hold the console's frame rate.
 - **Embeddable.** A C++20 static library with a declarative API: no UI, no audio device, no file
   formats required at the boundary. The host owns time, I/O, and the output samples.
 - **Accurate.** Behavior is held to public hardware documentation and validated against real
