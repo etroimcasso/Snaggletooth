@@ -61,6 +61,52 @@ constexpr std::array<std::uint64_t, 256> kSpreadBits = [] {
   return table;
 }();
 
+// The VRAM word an address reaches under $2115's translation: mode 0 is the
+// address itself; modes 1, 2 and 3 keep the bits above the low 8, 9 or 10 and
+// left-rotate those low bits by three, so a bitmap laid out by increasing tile
+// number reads back as rows.
+[[nodiscard]] constexpr std::uint16_t translatedWord(std::uint16_t addr, unsigned mode) noexcept {
+  switch (mode) {
+    case 1: return static_cast<std::uint16_t>((addr & 0xFF00u) | ((addr << 3) & 0x00F8u) | ((addr >> 5) & 0x0007u));
+    case 2: return static_cast<std::uint16_t>((addr & 0xFE00u) | ((addr << 3) & 0x01F8u) | ((addr >> 6) & 0x0007u));
+    case 3: return static_cast<std::uint16_t>((addr & 0xFC00u) | ((addr << 3) & 0x03F8u) | ((addr >> 7) & 0x0007u));
+    default: return addr;
+  }
+}
+
+// translatedWord over the low ten bits of an address, one row a rotating mode
+// (row 0 is mode 1). The bits above the ten pass through every mode, so the word
+// an address reaches is its bits above the ten with its row's entry ORed in; a
+// row's entry carries the bits of its index above that mode's own field.
+constexpr std::array<std::array<std::uint16_t, 1024>, 3> kVramRotated = [] {
+  std::array<std::array<std::uint16_t, 1024>, 3> table{};
+  for (unsigned mode = 1u; mode <= 3u; ++mode) {
+    for (unsigned low = 0u; low < 1024u; ++low) {
+      table[mode - 1u][low] = translatedWord(static_cast<std::uint16_t>(low), mode);
+    }
+  }
+  return table;
+}();
+static_assert(kVramRotated[0][0x001] == 0x0008u && kVramRotated[1][0x040] == 0x0001u &&
+              kVramRotated[2][0x080] == 0x0001u && kVramRotated[0][0x3FF] == translatedWord(0x3FFu, 1u));
+
+// The lookup's answer is translatedWord's, under every rotating mode, at
+// addresses that reach into each field's top bit, across the bits above it, and
+// at both ends of the address space.
+[[nodiscard]] constexpr bool vramRotatedMatchesTranslation() noexcept {
+  constexpr std::array<std::uint16_t, 12> kAddresses{0x0001u, 0x0040u, 0x0080u, 0x00E0u,
+                                                     0x0100u, 0x0200u, 0x03FFu, 0x5601u,
+                                                     0x5701u, 0x7C1Fu, 0x8000u, 0xFFFFu};
+  for (const std::uint16_t addr : kAddresses) {
+    for (unsigned mode = 1u; mode <= 3u; ++mode) {
+      const auto looked = static_cast<std::uint16_t>((addr & 0xFC00u) | kVramRotated[mode - 1u][addr & 0x3FFu]);
+      if (looked != translatedWord(addr, mode)) return false;
+    }
+  }
+  return true;
+}
+static_assert(vramRotatedMatchesTranslation());
+
 // The word's eight bytes in the opposite order.
 [[nodiscard]] constexpr std::uint64_t reverseBytes(std::uint64_t word) noexcept {
   std::uint64_t reversed = 0u;
@@ -228,13 +274,11 @@ bool Ppu::cgramReachable(const PpuInputs& in) const noexcept { return cgramReach
 std::uint16_t Ppu::vramWordAddress() const noexcept {
   // The address translation left-rotates the low 8, 9 or 10 bits of the word address
   // by three, so a bitmap laid out by increasing tile number reads back as rows.
+  // kVramRotated holds each rotating mode's answer for the low ten bits.
+  const unsigned mode = (s_.vmain >> 2) & 3u;
   const std::uint16_t addr = s_.vmadd;
-  switch ((s_.vmain >> 2) & 3u) {
-    case 1: return static_cast<std::uint16_t>((addr & 0xFF00u) | ((addr << 3) & 0x00F8u) | ((addr >> 5) & 0x0007u));
-    case 2: return static_cast<std::uint16_t>((addr & 0xFE00u) | ((addr << 3) & 0x01F8u) | ((addr >> 6) & 0x0007u));
-    case 3: return static_cast<std::uint16_t>((addr & 0xFC00u) | ((addr << 3) & 0x03F8u) | ((addr >> 7) & 0x0007u));
-    default: return addr;
-  }
+  if (mode == 0u) return addr;
+  return static_cast<std::uint16_t>((addr & 0xFC00u) | kVramRotated[mode - 1u][addr & 0x3FFu]);
 }
 
 std::uint16_t Ppu::readVramWord() const noexcept {
