@@ -468,6 +468,19 @@ void Ppu::timeSprites(std::uint16_t line, std::uint8_t field) noexcept {
       }
       ++tiles;
 
+      // The eight columns read one row of one character, so its address and its
+      // four plane bytes are read once for them, from the character the tile's
+      // first column names. The row's eight color indices stand in one word,
+      // leftmost pixel in byte 0, as readCharacter keeps a background's.
+      const unsigned first = flipHorizontal ? sprite.width - 1u - across : across;
+      const std::size_t character = spriteCharacter(sprite, first, row);
+      const std::size_t at = (character + (row % kCharacterSide) * 2u) & 0xFFFFu;
+      std::uint64_t pixels = 0u;
+      for (unsigned plane = 0u; plane < kSpritePlanes; ++plane) {
+        const std::size_t byteAt = (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
+        pixels |= kSpreadBits[s_.vram[byteAt]] << plane;
+      }
+
       for (unsigned column = across; column < across + kCharacterSide; ++column) {
         const int x = sprite.x + static_cast<int>(column);
         if (x < 0 || x >= static_cast<int>(kPictureWidth)) continue;
@@ -475,16 +488,9 @@ void Ppu::timeSprites(std::uint16_t line, std::uint8_t field) noexcept {
         // A horizontal flip reverses the whole sprite, so the leftmost position
         // takes the rightmost of its pixels.
         const unsigned source = flipHorizontal ? sprite.width - 1u - column : column;
-        const std::size_t character = spriteCharacter(sprite, source, row);
-        const std::size_t at = (character + (row % kCharacterSide) * 2u) & 0xFFFFu;
-        const unsigned bit = kCharacterSide - 1u - source % kCharacterSide;
-        unsigned index = 0u;
-        for (unsigned plane = 0u; plane < kSpritePlanes; ++plane) {
-          const std::size_t byteAt =
-              (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
-          index |= ((s_.vram[byteAt] >> bit) & 1u) << plane;
-        }
-        if (index == 0u) continue;  // colour 0 of a sprite's palette is transparent too
+        const unsigned index =
+            static_cast<unsigned>(pixels >> (8u * (source % kCharacterSide))) & 0xFFu;
+        if (index == 0u) continue;  // color 0 of a sprite's palette is transparent too
 
         // Eight sixteen-colour palettes, beginning at CGRAM word 128.
         s_.sprites.word[static_cast<std::size_t>(x)] =
