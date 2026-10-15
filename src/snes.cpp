@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <utility>
@@ -229,7 +230,8 @@ Snes::Snes(SnesConfig config)
       rom_(config.rom.begin(), config.rom.end()),
       region_(config.region),
       apuThreaded_(config.apuThread),
-      ppuThreaded_(config.ppuThread) {
+      ppuThreaded_(config.ppuThread),
+      ppuVerify_(config.ppuVerify) {
   // The board is the header's, with the map and the save the caller overrides.
   board_ = cartridgeBoard(rom_);
   if (config.map.has_value()) board_.map = *config.map;
@@ -261,6 +263,9 @@ Snes::Snes(SnesConfig config)
   // The picture thread's link, ahead of the load that sets its view: the default
   // machine holds none.
   if (ppuThreaded_) picture_ = std::make_unique<PictureLink>();
+  // The record of what each picture line read and produced, which every machine
+  // keeps and the load below empties.
+  cache_ = std::make_unique<LineCache>();
   load();
 }
 
@@ -277,6 +282,7 @@ Snes::Snes(Snes&& moved) noexcept
       bootsAudio_(moved.bootsAudio_),
       apuThreaded_(moved.apuThreaded_),
       ppuThreaded_(moved.ppuThreaded_),
+      ppuVerify_(moved.ppuVerify_),
       apuNum_(moved.apuNum_),
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
@@ -306,7 +312,8 @@ Snes::Snes(Snes&& moved) noexcept
       inFlight_(false),
       inFlightPad_{},
       link_(),
-      picture_(std::move(moved.picture_)) {
+      picture_(std::move(moved.picture_)),
+      cache_(std::move(moved.cache_)) {
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.saveObserver_ = nullptr;
@@ -350,6 +357,9 @@ void Snes::load() {
     picture.in = pictureInputs();
     picture.drawn = state_.hpos;
   }
+  // Every record of a picture line was made from a state this one replaces: the
+  // next frame draws every line and records it afresh.
+  dropLines();
   lineEventsFrom_ = 0u;
   // No host's call is on the stack of the machine that begins here, whatever a
   // throw from one left behind.
@@ -786,6 +796,9 @@ bool Snes::addressable(std::uint32_t address, std::size_t bytes) const noexcept 
 // is one look.
 void Snes::writeVram(std::uint16_t address, std::uint8_t value) noexcept {
   waitPicture();
+  // A page whose byte changes takes the count, as a write through the port would
+  // give it: a line that read the page is drawn again in the next frame.
+  if (state_.ppu.vram[address] != value) cache_->vramStamp[address >> 10] = ++cache_->writes;
   state_.ppu.vram[address] = value;  // 64 KB: every 16-bit address is in range
   if (picture_) picture_->view.vram[address] = value;
 }
@@ -793,6 +806,9 @@ void Snes::writeVram(std::uint16_t address, std::uint8_t value) noexcept {
 void Snes::writeCgram(std::uint16_t address, std::uint8_t value) noexcept {
   if (address >= state_.ppu.cgram.size()) return;
   waitPicture();
+  if (state_.ppu.cgram[address] != value) {
+    cache_->cgramStamp[address >> 5] = ++cache_->writes;  // the byte's word is address / 2, its group that / 16
+  }
   state_.ppu.cgram[address] = value;
   if (picture_) picture_->view.cgram[address] = value;
 }
@@ -965,8 +981,24 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
         // the position the beam holds here, every dot up to it drawn.
         if (offset == 0x2133u) lineEventsFrom_ = 0u;
         const PpuInputs pins = ppuInputs();
-        portLanding_ = Ppu{state_.ppu, derived_}.write(offset, value, pins);
-        if (ppuThreaded_) [[unlikely]] pushAccess(PictureEventKind::Write, offset, value, pins);
+        // A write inside the line's picture dots to something they read is what the
+        // line being drawn here depends on; the picture thread marks its own as it
+        // replays the write.
+        Ppu chip{state_.ppu, derived_};
+        bool changes = false;
+        if (!ppuThreaded_) {
+          settleLine(chip, pictureInputs(), state_.hpos,
+                     writeDisturbs(offset, state_.hpos, state_.ppu, pins));
+          changes = videoWriteChanges(chip, offset, value);
+        }
+        portLanding_ = chip.write(offset, value, pins);
+        // The drawing side counts the write where it landed: this thread when the
+        // picture is drawn here, the picture thread as it replays the write.
+        if (ppuThreaded_) [[unlikely]] {
+          pushAccess(PictureEventKind::Write, offset, value, pins);
+        } else {
+          noteVideoWrite(offset, portLanding_, changes);
+        }
         return;
       }
       if (offset >= 0x2140 && offset <= 0x217F) {
@@ -1828,6 +1860,10 @@ void Snes::drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::
   const std::uint32_t stop = last < kLastPictureDot ? last : kLastPictureDot;
   const std::uint32_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
 
+  // The span that reaches the line's first read dot compares what the line reads
+  // with what the frame before recorded for it, and counts the answer.
+  if (!cache_->decided && dot <= stop) decideLine(ppu, in, fromHpos);
+
   // A watched picture line starts the frame's raster, black, whichever of its dots
   // the span covers.
   if (frameObserver_ != nullptr && raster_.empty()) {
@@ -1956,6 +1992,13 @@ void Snes::finishPicture() noexcept {
 }
 
 void Snes::advanceLine(std::uint64_t lineStart) noexcept {
+  // The line ending is recorded for the next frame's same line, or counted, before
+  // the beam leaves it — here when the picture is drawn on this thread, on the
+  // picture thread as it takes the next line's facts when it is drawn there.
+  if (!ppuThreaded_) {
+    Ppu ending{state_.ppu, derived_};
+    completeLine(ending, pictureInputs());
+  }
   state_.vpos = static_cast<std::uint16_t>(state_.vpos + 1u);
   if (state_.vpos >= frameLines()) state_.vpos = 0u;
   state_.hdmaLineFired = false;  // each scanline may trigger its own HDMA delivery
@@ -1976,6 +2019,11 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
     // frame beginning now changes either. Its width is the drawing side's to settle:
     // here when the picture is drawn on this thread, on the picture thread at this
     // line's entry when it is drawn there.
+    // The frame's line counts are finished with it, by the side that drew it.
+    if (!ppuThreaded_) {
+      cache_->last = cache_->frame;
+      cache_->frame = LineReuse{};
+    }
     if (frameObserver_ != nullptr) {
       frameFinished_ = true;
       frameField_ = state_.field;
@@ -2805,10 +2853,13 @@ void Snes::drawTo(std::uint16_t hpos) {
 void Snes::applyPictureEvent(const PictureEvent& event) {
   PictureLink& picture = *picture_;
   switch (event.kind) {
-    case PictureEventKind::Line:
-      // The rest of the line the thread is on, then the new line's facts: a frame's
-      // first line settles the finished picture's width.
+    case PictureEventKind::Line: {
+      // The rest of the line the thread is on and the line's record, then the new
+      // line's facts: a frame's first line settles the finished picture's width and
+      // its line counts.
       drawTo(kLineMaster);
+      Ppu ending{picture.view, picture.derived};
+      completeLine(ending, picture.in);
       picture.in.vpos = event.vpos;
       picture.in.field = event.field;
       picture.in.vblank = event.vblank;
@@ -2816,8 +2867,13 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
       picture.view.mosaicBlockLine = event.offset;
       picture.view.mosaicBlockSize = event.value;
       picture.drawn = 0u;
-      if (event.vpos == 0u) finishPicture();
+      if (event.vpos == 0u) {
+        finishPicture();
+        cache_->last = cache_->frame;
+        cache_->frame = LineReuse{};
+      }
       return;
+    }
     case PictureEventKind::Write:
     case PictureEventKind::Read: {
       // The access replayed on the view with the pins it took, every dot up to its
@@ -2832,14 +2888,18 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
                          .lateHalf = event.lateHalf};
       Ppu ppu{picture.view, picture.derived};
       if (event.kind == PictureEventKind::Write) {
-        static_cast<void>(ppu.write(event.offset, event.value, in));
+        settleLine(ppu, picture.in, event.hpos,
+                   writeDisturbs(event.offset, event.hpos, picture.view, in));
+        const bool changes = videoWriteChanges(ppu, event.offset, event.value);
+        noteVideoWrite(event.offset, ppu.write(event.offset, event.value, in), changes);
       } else {
         static_cast<void>(ppu.read(event.offset, in));
       }
       return;
     }
     case PictureEventKind::InidispEarly: {
-      // The one dot the write's cycle ended on, drawn again under the bus byte.
+      // The one dot the write's cycle ended on, drawn again under the bus byte; the
+      // write that owes it has marked the line.
       drawTo(event.hpos);
       const std::uint8_t written = picture.view.inidisp;
       picture.view.inidisp = event.busBefore;
@@ -2881,6 +2941,283 @@ void Snes::pictureThreadBody() noexcept {
 void Snes::setApuObserver(ApuObserver* observer) noexcept {
   waitApu();
   apu_.setObserver(observer);
+}
+
+// ---- a line taken from the frame before --------------------------------------
+
+Snes::LineKey Snes::lineKeyOf(const PpuState& s, const PpuInputs& in) noexcept {
+  LineKey key;
+  key.inidisp = s.inidisp;
+  key.bgmode = s.bgmode;
+  key.mosaic = s.mosaic;
+  key.bg1sc = s.bg1sc;
+  key.bg2sc = s.bg2sc;
+  key.bg3sc = s.bg3sc;
+  key.bg4sc = s.bg4sc;
+  key.bg12nba = s.bg12nba;
+  key.bg34nba = s.bg34nba;
+  key.setini = s.setini;
+  key.bg1hofs = s.bg1hofs;
+  key.bg1vofs = s.bg1vofs;
+  key.bg2hofs = s.bg2hofs;
+  key.bg2vofs = s.bg2vofs;
+  key.bg3hofs = s.bg3hofs;
+  key.bg3vofs = s.bg3vofs;
+  key.bg4hofs = s.bg4hofs;
+  key.bg4vofs = s.bg4vofs;
+  key.m7sel = s.m7sel;
+  key.m7a = s.m7a;
+  key.m7b = s.m7b;
+  key.m7c = s.m7c;
+  key.m7d = s.m7d;
+  key.m7x = s.m7x;
+  key.m7y = s.m7y;
+  key.m7hofs = s.m7hofs;
+  key.m7vofs = s.m7vofs;
+  key.w12sel = s.w12sel;
+  key.w34sel = s.w34sel;
+  key.wobjsel = s.wobjsel;
+  key.wh0 = s.wh0;
+  key.wh1 = s.wh1;
+  key.wh2 = s.wh2;
+  key.wh3 = s.wh3;
+  key.wbglog = s.wbglog;
+  key.wobjlog = s.wobjlog;
+  key.tm = s.tm;
+  key.ts = s.ts;
+  key.tmw = s.tmw;
+  key.tsw = s.tsw;
+  key.cgwsel = s.cgwsel;
+  key.cgadsub = s.cgadsub;
+  key.fixedRed = s.fixedRed;
+  key.fixedGreen = s.fixedGreen;
+  key.fixedBlue = s.fixedBlue;
+  key.mosaicBlockLine = s.mosaicBlockLine;
+  key.mosaicBlockSize = s.mosaicBlockSize;
+  const std::uint8_t mode = s.bgmode & 0x07u;
+  key.field = (mode == 5u || mode == 6u) && s.interlace() ? in.field : std::uint8_t{0};
+  if (s.forcedBlank()) {
+    key.lastMainIn = s.lastMain;
+    key.lastMainIn.present = false;  // the blank dots clear it whatever it was
+  }
+  return key;
+}
+
+namespace {
+
+// Whether a page or group in `mask` was written after `drawnAt`: its stamp is past
+// the count the line was read under.
+template <std::size_t N>
+[[nodiscard]] bool writtenSince(std::uint64_t mask, const std::array<std::uint64_t, N>& stamps,
+                                std::uint64_t drawnAt) noexcept {
+  while (mask != 0u) {
+    const unsigned bit = static_cast<unsigned>(std::countr_zero(mask));
+    if (stamps[bit] > drawnAt) return true;
+    mask &= mask - 1u;
+  }
+  return false;
+}
+
+}  // namespace
+
+void Snes::decideLine(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos) noexcept {
+  LineCache& cache = *cache_;
+  const PpuState& s = ppu.s_;
+  cache.decided = true;
+  cache.pending = false;
+  cache.disturbed = false;
+  cache.predicted = false;
+  cache.scrollOnly = false;
+  // A span that begins past the first read dot is a line this side did not draw
+  // from its start — a restore put the beam part-way along it — so what it leaves
+  // is not kept, and nothing stands in for it.
+  cache.recordable = fromHpos / 4u + 1u <= kFirstTileReadDot;
+  cache.key = lineKeyOf(s, in);
+  cache.drawnAt = cache.writes;
+  const LineRecord& record = cache.lines[static_cast<std::size_t>(in.vpos) - 1u];
+
+  bool hit = false;
+  if (!cache.recordable || !record.valid) {
+    cache.reason = LineReason::FirstDrawn;
+  } else if (record.key != cache.key) {
+    cache.reason = LineReason::Registers;
+    // Whether the ten scroll words are the whole of the difference.
+    LineKey moved = record.key;
+    moved.bg1hofs = cache.key.bg1hofs;
+    moved.bg1vofs = cache.key.bg1vofs;
+    moved.bg2hofs = cache.key.bg2hofs;
+    moved.bg2vofs = cache.key.bg2vofs;
+    moved.bg3hofs = cache.key.bg3hofs;
+    moved.bg3vofs = cache.key.bg3vofs;
+    moved.bg4hofs = cache.key.bg4hofs;
+    moved.bg4vofs = cache.key.bg4vofs;
+    moved.m7hofs = cache.key.m7hofs;
+    moved.m7vofs = cache.key.m7vofs;
+    cache.scrollOnly = moved == cache.key;
+  } else if (record.spriteLine != s.sprites.line || record.spriteWord != s.sprites.word ||
+             record.spritePriority != s.sprites.priority) {
+    cache.reason = LineReason::Sprites;
+  } else if (writtenSince(record.vramPages, cache.vramStamp, record.drawnAt)) {
+    cache.reason = LineReason::Vram;
+  } else if (writtenSince(record.cgramGroups, cache.cgramStamp, record.drawnAt)) {
+    cache.reason = LineReason::Cgram;
+  } else if (frameObserver_ != nullptr && !record.watched) {
+    cache.reason = LineReason::FirstDrawn;  // the record has no pixels to give a watched machine
+  } else {
+    hit = true;
+  }
+  // The line's own reads are recorded afresh.
+  ppu.d_.vramPages = 0u;
+  ppu.d_.cgramGroups = 0u;
+  if (!hit) return;
+  // The record stands for the line: the line is drawn and the two compared.
+  cache.predicted = true;
+}
+
+bool Snes::writeDisturbs(std::uint16_t offset, std::uint16_t hpos, const PpuState& s,
+                         const PpuInputs& pins) noexcept {
+  // The first dot the write reaches, and whether a dot of the line's reads or pixels
+  // lies at or after it.
+  const unsigned reaches = hpos / 4u + (offset == 0x2100u ? 0u : 1u);
+  if (reaches < kFirstTileReadDot || reaches > kLastPictureDot) return false;
+  if (offset == 0x2100u || (offset >= 0x2105u && offset <= 0x2114u) ||
+      (offset >= 0x211Au && offset <= 0x2120u) || (offset >= 0x2123u && offset <= 0x2133u)) {
+    return true;
+  }
+  if (offset == 0x2122u) return !s.forcedBlank() && Ppu::cgramReachable(s, pins);
+  return false;
+}
+
+void Snes::settleLine(Ppu&, const PpuInputs&, std::uint16_t, bool disturbing) noexcept {
+  LineCache& cache = *cache_;
+  if (disturbing && cache.decided) cache.disturbed = true;
+}
+
+void Snes::completeLine(Ppu& ppu, const PpuInputs& in) noexcept {
+  LineCache& cache = *cache_;
+  if (!cache.decided) return;
+  PpuState& s = ppu.s_;
+  Ppu::Derived& d = ppu.d_;
+  LineRecord& record = cache.lines[static_cast<std::size_t>(in.vpos) - 1u];
+  const std::size_t line = static_cast<std::size_t>(in.vpos) - 1u;
+  LineReuse& counts = cache.frame;
+
+  if (cache.disturbed) {
+    // Drawn to its end from a write that landed inside it: not what the line's key
+    // alone produces, so not kept. The record of an earlier frame's undisturbed
+    // line stands: what it read and produced is as true as it was, and the next
+    // frame's comparison says whether it still applies.
+    ++counts.drawn;
+    ++counts.midLine;
+  } else if (!cache.recordable) {
+    ++counts.drawn;
+    ++counts.firstDrawn;
+  } else {
+    if (cache.predicted) {
+      // The frame before could have stood in for the line: what the line drew is held
+      // to what that frame recorded.
+      bool same = s.tiles == record.tiles && d.nothing == record.nothing &&
+                  d.allNothing == record.allNothing && s.lastMain == record.lastMain;
+      if (same && frameObserver_ != nullptr) {
+        for (std::size_t x = 0; x < kPictureWidth && same; ++x) {
+          const std::uint8_t* const kept = record.pixels.data() + x * 2u * kPixelBytes;
+          if (frameWide_) {
+            const std::uint8_t* const drawn = raster_.data() + (line * kHiresWidth + x * 2u) * kPixelBytes;
+            same = std::equal(drawn, drawn + 2u * kPixelBytes, kept);
+          } else {
+            const std::uint8_t* const drawn = raster_.data() + (line * kPictureWidth + x) * kPixelBytes;
+            same = std::equal(drawn, drawn + kPixelBytes, kept + kPixelBytes);
+          }
+        }
+      }
+      ++counts.reused;
+      if (!same) ++counts.mismatches;
+    } else {
+      ++counts.drawn;
+      switch (cache.reason) {
+        case LineReason::FirstDrawn: ++counts.firstDrawn; break;
+        case LineReason::Registers:
+          ++counts.registers;
+          if (cache.scrollOnly) ++counts.scrollOnly;
+          break;
+        case LineReason::Sprites: ++counts.sprites; break;
+        case LineReason::Vram: ++counts.vram; break;
+        case LineReason::Cgram: ++counts.cgram; break;
+      }
+    }
+    // The line as drawn, for the next frame's same line.
+    record.key = cache.key;
+    record.spriteWord = s.sprites.word;
+    record.spritePriority = s.sprites.priority;
+    record.spriteLine = s.sprites.line;
+    record.vramPages = d.vramPages;
+    record.cgramGroups = d.cgramGroups;
+    record.drawnAt = cache.drawnAt;
+    record.tiles = s.tiles;
+    record.nothing = d.nothing;
+    record.allNothing = d.allNothing;
+    record.lastMain = s.lastMain;
+    record.hires = ppu.hiresAt();
+    record.watched = frameObserver_ != nullptr;
+    if (record.watched) {
+      // Both halves of every position: a narrow line's pixel fills both.
+      for (std::size_t x = 0; x < kPictureWidth; ++x) {
+        std::uint8_t* const kept = record.pixels.data() + x * 2u * kPixelBytes;
+        if (frameWide_) {
+          const std::uint8_t* const drawn = raster_.data() + (line * kHiresWidth + x * 2u) * kPixelBytes;
+          std::copy(drawn, drawn + 2u * kPixelBytes, kept);
+        } else {
+          const std::uint8_t* const drawn = raster_.data() + (line * kPictureWidth + x) * kPixelBytes;
+          std::copy(drawn, drawn + kPixelBytes, kept);
+          std::copy(drawn, drawn + kPixelBytes, kept + kPixelBytes);
+        }
+      }
+    }
+    record.valid = true;
+  }
+  cache.decided = false;
+  cache.pending = false;
+  cache.disturbed = false;
+  cache.predicted = false;
+}
+
+bool Snes::videoWriteChanges(Ppu& ppu, std::uint16_t offset, std::uint8_t value) noexcept {
+  const PpuState& s = ppu.s_;
+  if (offset == 0x2118u || offset == 0x2119u) {
+    const std::size_t byte = (static_cast<std::size_t>(ppu.vramWordAddress() & 0x7FFFu) << 1) +
+                             (offset == 0x2119u ? 1u : 0u);
+    return s.vram[byte] != value;
+  }
+  if (offset == 0x2122u && s.cgLatchHigh) {
+    const std::size_t byte = static_cast<std::size_t>(s.cgadd) << 1;
+    return s.cgram[byte] != s.cgLatch || s.cgram[byte + 1u] != (value & 0x7Fu);
+  }
+  return false;
+}
+
+void Snes::noteVideoWrite(std::uint16_t offset, std::optional<std::uint16_t> landed,
+                          bool changes) noexcept {
+  if (!landed.has_value() || !changes) return;
+  LineCache& cache = *cache_;
+  if (offset == 0x2118u || offset == 0x2119u) {
+    cache.vramStamp[*landed >> 9] = ++cache.writes;  // the word's byte address is twice the word, its page that / 1024
+  } else if (offset == 0x2122u) {
+    cache.cgramStamp[*landed >> 4] = ++cache.writes;
+  }
+}
+
+void Snes::dropLines() noexcept {
+  LineCache& cache = *cache_;
+  for (LineRecord& record : cache.lines) record.valid = false;
+  cache.decided = false;
+  cache.pending = false;
+  cache.disturbed = false;
+  cache.predicted = false;
+}
+
+Snes::LineReuse Snes::lineReuse() noexcept {
+  waitPicture();
+  return cache_->last;
 }
 
 std::uint8_t Snes::peekApu(std::uint16_t address) const noexcept {

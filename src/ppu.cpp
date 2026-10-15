@@ -45,6 +45,12 @@ constexpr std::size_t kPlanePairBytes = 16u;
 // Every tile column's bit set: a background all of whose columns hold nothing.
 constexpr std::uint64_t kAllColumns = (std::uint64_t{1} << kTileColumns) - 1u;
 
+// The bit of the 1 KB page of VRAM a byte address falls in, for the record of
+// the pages a line's reads touch.
+[[nodiscard]] constexpr std::uint64_t pageBit(std::size_t byte) noexcept {
+  return std::uint64_t{1} << ((byte & 0xFFFFu) >> 10);
+}
+
 // One bitplane's byte spread over the eight bytes of a word: bit 7, the row's
 // leftmost pixel, lands in bit 0 of byte 0, and bit 0 in bit 0 of byte 7. Shifted
 // left by its plane number and combined with the other planes', a row's bytes
@@ -738,6 +744,7 @@ std::uint16_t Ppu::entryAt(const Background& background, unsigned bgX,
   if (tall) word += (tileY & 0x20u) << (wide ? 6u : 5u);
   if (wide) word += (tileX & 0x20u) << 5;
   const std::size_t at = (static_cast<std::size_t>(word) << 1) & 0xFFFFu;
+  d_.vramPages |= pageBit(at) | pageBit(at + 1u);
   return static_cast<std::uint16_t>(s_.vram[at] | (s_.vram[(at + 1u) & 0xFFFFu] << 8));
 }
 
@@ -932,6 +939,7 @@ void Ppu::readCharacter(unsigned layer, unsigned column) noexcept {
     const std::size_t at =
         ((static_cast<std::size_t>(characterBase) << 13) + character * 8u * read.planes + inY * 2u) &
         0xFFFFu;
+    d_.vramPages |= pageBit(at) | pageBit(at + ((read.planes - 1u) / 2u) * kPlanePairBytes + 1u);
     std::uint64_t pixels = 0u;
     for (unsigned plane = 0u; plane < read.planes; ++plane) {
       const std::size_t byteAt = (at + (plane / 2u) * kPlanePairBytes + (plane % 2u)) & 0xFFFFu;
@@ -1034,6 +1042,7 @@ std::uint8_t Ppu::fieldPixel(FieldPoint at) const noexcept {
     // entries a row.
     const std::size_t entryAt =
         static_cast<std::size_t>(((fieldY >> 3) << 7) | (fieldX >> 3)) << 1;
+    d_.vramPages |= pageBit(entryAt);
     character = s_.vram[entryAt];
   } else if ((s_.m7sel & 0x40u) == 0u) {
     return 0u;
@@ -1042,6 +1051,7 @@ std::uint8_t Ppu::fieldPixel(FieldPoint at) const noexcept {
   // sixty-four words a character.
   const std::size_t pixelAt =
       (static_cast<std::size_t>((character << 6) | ((fieldY & 7) << 3) | (fieldX & 7)) << 1) | 1u;
+  d_.vramPages |= pageBit(pixelAt);
   return s_.vram[pixelAt];
 }
 
@@ -1254,6 +1264,7 @@ bool Ppu::regionCovers(unsigned region, std::uint16_t x) const noexcept {
 
 std::uint16_t Ppu::paletteColour(std::uint8_t word) const noexcept {
   const std::size_t at = static_cast<std::size_t>(word) << 1;
+  d_.cgramGroups |= static_cast<std::uint16_t>(1u << (word >> 4));
   return static_cast<std::uint16_t>(s_.cgram[at] | (s_.cgram[at + 1u] << 8));
 }
 

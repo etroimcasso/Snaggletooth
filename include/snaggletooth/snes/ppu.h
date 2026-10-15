@@ -709,8 +709,15 @@ class Ppu {
     };
     Windows windows{};
 
+    // Which 1 KB pages of VRAM and which 16-word groups of the palette the reads of
+    // the line being drawn have touched: a bit a page, a bit a group, set at each
+    // read and cleared by the machine as a line's first read dot is reached.
+    std::uint64_t vramPages = 0;
+    std::uint16_t cgramGroups = 0;
+
     // What a write to one of the registers a group is read from makes stale, and
-    // what a restore — which replaces every register at once — makes stale.
+    // what a restore — which replaces every register at once — makes stale. The
+    // two masks above are a line's, not the state's, and stay.
     void dropDescriptions() noexcept { descriptions.valid = false; }
     void dropWindows() noexcept { windows.valid = false; }
     void dropAll() noexcept {
