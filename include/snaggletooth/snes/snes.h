@@ -442,6 +442,17 @@ struct SnesConfig {
   // a host; apuThread joins it only where it alone does not hold the console's frame
   // rate.
   bool ppuThread = false;
+
+  // Whether every picture line is drawn and checked against the frame before. Off,
+  // the default, a picture line is taken from the frame before when everything it
+  // reads is what it read then, and drawn otherwise (Snes::lineReuse). On, every
+  // line is drawn whether or not the frame before could stand in for it, and where
+  // it could, the drawn line is compared with what that frame recorded — the tile
+  // reads, the last main-screen decision and, on a watched machine, the pixels —
+  // and a disagreement counts in lineReuse().mismatches; nothing is thrown, and the
+  // picture is the drawn one. It costs the reuse, so it is for proving the machine
+  // and never for running it.
+  bool ppuVerify = false;
 };
 
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM
@@ -732,6 +743,31 @@ class Snes {
   // calls.
   void setFrameObserver(FrameObserver* observer) noexcept;
   [[nodiscard]] FrameObserver* frameObserver() const noexcept { return frameObserver_; }
+
+  // How the picture lines of the last finished frame were drawn. A line is taken
+  // from the frame before when the registers the picture reads, the sprites Time
+  // gathered for it, every video-memory page and palette group its reads touch and
+  // the field, where the picture reads it, are the ones it drew from then, and no
+  // access to the chip landed inside its picture dots; otherwise it is drawn dot by
+  // dot, and the counts below say why. The reasons sum to `drawn`.
+  struct LineReuse {
+    unsigned reused = 0;      // taken from the frame before, nothing drawn
+    unsigned drawn = 0;       // drawn dot by dot
+    unsigned firstDrawn = 0;  // nothing to take: the first frame, a restore or a reset since, or a line last drawn by a machine nobody watched
+    unsigned registers = 0;   // a register the picture reads changed
+    unsigned scrollOnly = 0;  // of `registers`: the ten scroll words alone changed
+    unsigned sprites = 0;     // the sprites gathered for the line changed
+    unsigned vram = 0;        // a VRAM page the line reads was written
+    unsigned cgram = 0;       // a palette group the line reads was written
+    unsigned midLine = 0;     // a write the line's dots read landed inside its picture dots, so it was drawn to its end and not kept
+    unsigned returned = 0;    // the frame before could stand in, but a call returned inside the line, so it was drawn up to the beam there and on to its end
+    unsigned mismatches = 0;  // under ppuVerify: lines drawn that disagree with what the frame before recorded
+    [[nodiscard]] bool operator==(const LineReuse&) const noexcept = default;
+  };
+  // The counts of the last finished frame, read between calls or inside a frame
+  // report. On a machine built with SnesConfig::ppuThread on it waits for the
+  // picture thread, as a report does.
+  [[nodiscard]] LineReuse lineReuse() noexcept;
 
   // The observer told that a frame changed the cartridge's save window
   // (SaveObserver, above), or none, which is how the machine starts. A host
@@ -1163,14 +1199,22 @@ class Snes {
   // nothing, and decides only what the chip carries to the next position, once, at
   // the span's last picture dot. A span whose dots all lie before the line's first
   // read or past its last pixel reads and draws nothing, and so does a span of the
-  // frame's first line or of vertical blank. Runs on whichever thread draws: over
-  // the machine's own chip state on the calling thread, over the picture thread's
-  // view on it.
+  // frame's first line, of vertical blank, or of a line past the tallest picture's
+  // last, which a restored state may stand on with its blank flag down. The span
+  // reaching the line's first read
+  // dot compares what the line reads with what the frame before recorded for it,
+  // and a line that frame can stand in for is not drawn: it takes its outputs from
+  // the record at its end (completeLine), or is drawn up to the beam when a write
+  // its dots read lands inside it or a call returns there (settleLine). Runs on
+  // whichever thread draws: over the machine's own chip state on the calling
+  // thread, over the picture thread's view on it.
   void drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::uint16_t toHpos);
   // drawDots over the machine's own chip state for the master-cycle span (`from`,
   // `to`] of a line beginning at `lineStart`: the calling thread's drawing, on a
   // machine built with the picture thread off.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
+  // Starts the frame's raster: black and opaque, so a line nobody drew is black.
+  void startRaster();
   // Turns the frame in progress 512 wide at its first position drawn in
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn
   // before it is doubled into both halves of its position.
@@ -1542,6 +1586,7 @@ class Snes {
   // cycle's close reads with them.
   bool apuThreaded_ = false;
   bool ppuThreaded_ = false;
+  bool ppuVerify_ = false;           // every picture line drawn and checked against the frame before (SnesConfig::ppuVerify)
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
@@ -1825,6 +1870,177 @@ class Snes {
     std::array<SpriteLine, kLineRing> lines{};
   };
   std::unique_ptr<PictureLink> picture_;
+
+  // What a picture line read, and what it produced, kept so the next frame's same
+  // line is taken from it when it reads the same: the registers the picture reads
+  // at the line's first read dot, the line buffer Time filled, the video-memory
+  // pages and palette groups its reads touched and the write count they were
+  // read under, and the line's three outputs — the tile reads and the last main
+  // decision as the line left them and, on a watched machine, its pixels.
+  //
+  // The registers, as PpuState holds them, one by one, so two keys compare member
+  // by member and never over padding.
+  struct LineKey {
+    std::uint8_t inidisp = 0;
+    std::uint8_t bgmode = 0;
+    std::uint8_t mosaic = 0;
+    std::uint8_t bg1sc = 0;
+    std::uint8_t bg2sc = 0;
+    std::uint8_t bg3sc = 0;
+    std::uint8_t bg4sc = 0;
+    std::uint8_t bg12nba = 0;
+    std::uint8_t bg34nba = 0;
+    std::uint8_t setini = 0;
+    std::uint16_t bg1hofs = 0;
+    std::uint16_t bg1vofs = 0;
+    std::uint16_t bg2hofs = 0;
+    std::uint16_t bg2vofs = 0;
+    std::uint16_t bg3hofs = 0;
+    std::uint16_t bg3vofs = 0;
+    std::uint16_t bg4hofs = 0;
+    std::uint16_t bg4vofs = 0;
+    std::uint8_t m7sel = 0;
+    std::uint16_t m7a = 0;
+    std::uint16_t m7b = 0;
+    std::uint16_t m7c = 0;
+    std::uint16_t m7d = 0;
+    std::uint16_t m7x = 0;
+    std::uint16_t m7y = 0;
+    std::uint16_t m7hofs = 0;
+    std::uint16_t m7vofs = 0;
+    std::uint8_t w12sel = 0;
+    std::uint8_t w34sel = 0;
+    std::uint8_t wobjsel = 0;
+    std::uint8_t wh0 = 0;
+    std::uint8_t wh1 = 0;
+    std::uint8_t wh2 = 0;
+    std::uint8_t wh3 = 0;
+    std::uint8_t wbglog = 0;
+    std::uint8_t wobjlog = 0;
+    std::uint8_t tm = 0;
+    std::uint8_t ts = 0;
+    std::uint8_t tmw = 0;
+    std::uint8_t tsw = 0;
+    std::uint8_t cgwsel = 0;
+    std::uint8_t cgadsub = 0;
+    std::uint8_t fixedRed = 0;
+    std::uint8_t fixedGreen = 0;
+    std::uint8_t fixedBlue = 0;
+    std::uint16_t mosaicBlockLine = 0;
+    std::uint8_t mosaicBlockSize = 0;
+    // The frame parity where the picture reads it — modes 5 and 6 with $2133 bit 0
+    // set, whose tilemaps are read in half-lines — and 0 everywhere else.
+    std::uint8_t field = 0;
+    // The last main decision as the line begins, where the screen is forced blank:
+    // a blank dot clears the decision's `present` bit and leaves its other fields
+    // as the last lit dot set them, so a blank line hands on what it was handed.
+    // Nothing with the screen on, where the line's first dot decides afresh.
+    PpuState::MainDecision lastMainIn{};
+    [[nodiscard]] bool operator==(const LineKey&) const noexcept = default;
+  };
+  struct LineRecord {
+    LineKey key{};
+    std::array<std::uint8_t, kPictureWidth> spriteWord{};
+    std::array<std::uint8_t, kPictureWidth> spritePriority{};
+    std::uint16_t spriteLine = 0;
+    std::uint64_t vramPages = 0;    // the 1 KB pages of VRAM the line's reads touched, a bit a page
+    std::uint16_t cgramGroups = 0;  // the 16-word palette groups they touched, a bit a group
+    std::uint64_t drawnAt = 0;      // the drawing side's count of video-memory writes as the line's first read dot was reached
+    std::array<std::array<TileRead, kTileColumns>, 4> tiles{};
+    std::array<std::uint64_t, 4> nothing{};  // which columns the chip's derived view knew to hold nothing at the line's end
+    bool allNothing = false;
+    PpuState::MainDecision lastMain{};
+    // Position x's left half at x * 2 and its right half at x * 2 + 1, four bytes
+    // each, both halves always filled: a line drawn whole fills both with the one
+    // pixel.
+    std::array<std::uint8_t, kHiresWidth * 4u> pixels{};
+    bool hires = false;    // the line's dots were drawn in half-pixels
+    bool watched = false;  // the pixels are the line's
+    bool valid = false;
+  };
+  // Why a line is drawn rather than taken from the frame before, as decideLine
+  // finds it and completeLine counts it; Returned is a line the frame before could
+  // stand in for, which is counted drawn only where a call's return drew it.
+  enum class LineReason : std::uint8_t { FirstDrawn, Registers, Sprites, Vram, Cgram, Returned };
+  struct LineCache {
+    std::array<LineRecord, kOverscanVblankStartLine - 1u> lines{};
+    std::array<std::uint64_t, 64> vramStamp{};   // the write count at the last write to each 1 KB page
+    std::array<std::uint64_t, 16> cgramStamp{};  // the same for each 16-word palette group
+    std::uint64_t writes = 0;                    // writes to the two memories on the drawing side, counted
+    LineReuse frame{};                           // the frame in progress
+    LineReuse last{};                            // the last finished frame, lineReuse()'s answer
+    // The line the drawing side is on: whether its first read dot has been reached
+    // and the key compared, the key as compared and the write count then, the
+    // reason the comparison found, whether the ten scroll words alone differed,
+    // whether this side drew the line from its first read dot (a line the beam was
+    // put part-way along by a restore is not kept), whether it is pending (taken
+    // from the record, nothing drawn), where drawing resumes from if an access
+    // lands, whether an access landed inside its picture dots, and whether the
+    // verification mode predicted it reused.
+    LineKey key{};
+    std::uint64_t drawnAt = 0;
+    LineReason reason = LineReason::FirstDrawn;
+    bool scrollOnly = false;
+    bool recordable = false;
+    bool decided = false;
+    bool pending = false;
+    bool disturbed = false;
+    bool predicted = false;
+    std::uint16_t pendingFrom = 0;
+  };
+  std::unique_ptr<LineCache> cache_;
+
+  // The key of the line the beam is on, from the registers as they stand and the
+  // pins the picture reads: the one place the list of what a line reads lives.
+  [[nodiscard]] static LineKey lineKeyOf(const PpuState& s, const PpuInputs& in) noexcept;
+  // The line's first read dot reached by the span beginning at `fromHpos`: the key
+  // built and compared with the record of the frame before, the reason noted where
+  // they differ, and the reads' masks cleared for the line's own reads.
+  void decideLine(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos) noexcept;
+  // Whether a write to the register at `offset`, landing at master cycle `hpos` of
+  // the line being drawn with the chip's state `s` under the pins `pins`, changes
+  // something a picture dot of that line reads: a register the line's key carries,
+  // or a palette word through $2122 while the palette is open to the port and the
+  // screen is on — and a dot of the line's reads or pixels, 3 to 277, comes at or
+  // after the first dot the write reaches, which is the dot after the write's
+  // cycle, or for $2100 the last dot of the cycle, which the chip reads a dot
+  // early. A write to the VRAM port inside a picture line reaches the memory only
+  // under forced blank, where the line reads none of it; a write to any other port
+  // moves a latch, an address or the sprite table, which the dots of the line being
+  // drawn do not read. The memory a write reaches is stamped either way, for the
+  // next frame's comparison.
+  [[nodiscard]] static bool writeDisturbs(std::uint16_t offset, std::uint16_t hpos, const PpuState& s,
+                                          const PpuInputs& pins) noexcept;
+  // The beam at master cycle `hpos` of the line being drawn, where the line must
+  // stand drawn: a line pending on the frame before is drawn from its first read
+  // dot up to `hpos`, from the state as it stands, and draws on from there. Where
+  // the call is for a write that disturbs the line (`disturbing`, writeDisturbs's
+  // answer) the line is marked disturbed as well, drawn to its end and not kept,
+  // since its outputs depend on the write. A line whose first read dot has not been
+  // reached cannot be disturbed: its key, built there, sees the write.
+  void settleLine(Ppu& ppu, const PpuInputs& in, std::uint16_t hpos, bool disturbing) noexcept;
+  // The line's end: a pending line takes its outputs from the record — the tile
+  // reads, the last decision and, on a watched machine, its pixels — a line drawn
+  // whole and undisturbed is recorded for the next frame's same line, and the
+  // frame's counts take the line.
+  void completeLine(Ppu& ppu, const PpuInputs& in) noexcept;
+  // Whether a write of `value` to the register at `offset` would change a byte of
+  // VRAM or the palette if it reached the memory, read from the chip before the
+  // write: the byte the VRAM port stands at against `value`, or on the second half
+  // of a palette write the two bytes of the word against the held low byte and
+  // `value`. A write that stores what the memory already holds changes nothing a
+  // line reads. False for every other register, and for a palette write's first
+  // half, which stores nothing in the memory.
+  [[nodiscard]] static bool videoWriteChanges(Ppu& ppu, std::uint16_t offset,
+                                              std::uint8_t value) noexcept;
+  // A write that reached VRAM or the palette on the drawing side and changed a byte
+  // there: the page or group it landed in takes the write count. `landed` is what
+  // Ppu::write answered for the register at `offset`, `changes` videoWriteChanges's
+  // answer before it.
+  void noteVideoWrite(std::uint16_t offset, std::optional<std::uint16_t> landed,
+                      bool changes) noexcept;
+  // Every record dropped, and the line in progress forgotten: a restore or a reset.
+  void dropLines() noexcept;
 
   // What a page reaches, for the watch: one 8 KB run of one space — the space
   // and the index of the run's first byte — no byte at all, or bytes the page

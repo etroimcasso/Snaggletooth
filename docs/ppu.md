@@ -143,7 +143,9 @@ blank leaves below it — 256 positions, each one pixel, or two half-pixels on a
 −1 is what puts a tilemap's first row on the picture's first line. Each background reads its tiles
 ahead of the beam, a column at a time, and each pixel is drawn from those reads and from the registers
 as they stand at its own dot — [the tile reads](#the-tile-reads) give the dots, and with them what a
-write that lands mid-line reaches.
+write that lands mid-line reaches. The machine draws a line again only when something it reads has
+changed since the frame before, and takes it from that frame otherwise; the picture is the same either
+way ([A line drawn again only when it changes](snes-machine.md#a-line-drawn-again-only-when-it-changes)).
 
 **Every mode is drawn**, each background on the screen its own bit of `$212C` or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
 are and how deep each one is:

@@ -7,7 +7,8 @@ run when asked to.
 snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
                     [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
-                    [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--mute] [--quiet]
+                    [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--ppu-verify]
+                    [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
 ```
@@ -95,6 +96,27 @@ took —
 
 ```
 the picture on its own thread
+```
+
+## The lines it draws
+
+The machine draws a picture line only when something the line reads has changed since the frame
+before — a register the picture reads, the sprites on the line, a page of video memory or a group
+of palette words the line reads, or a write landing inside the line — and takes the line from that
+frame otherwise ([A line drawn again only when it changes](../../docs/snes-machine.md#a-line-drawn-again-only-when-it-changes)).
+The picture is the same either way. The run's last line says how many lines it took and how many it
+drew —
+
+```
+lines: 76188 taken from the frame before, 23436 drawn (76 % taken)
+```
+
+`--ppu-verify` draws every line and compares it with what the frame before would have stood in
+with, and the last line adds the count of lines that disagreed, which is 0 on a machine that reuses
+exactly. It costs the reuse, so it is for proving a run, not for playing one; the run says so —
+
+```
+every line drawn and checked against the frame before
 ```
 
 ## Interlacing
