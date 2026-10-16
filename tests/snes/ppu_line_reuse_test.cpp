@@ -217,9 +217,9 @@ Bytes hiresTable() {
 // picture-time part, run once the picture has begun and a line has gone by; and an
 // interrupt at dot `htime` of line `vtime` whose handler runs `irqBody`.
 struct Variant {
-  Bytes inBlank;
-  Bytes inPicture;
-  Bytes irqBody;
+  Bytes inBlank{};
+  Bytes inPicture{};
+  Bytes irqBody{};
   std::uint16_t htime = 0;
   std::uint16_t vtime = 0;
   bool irq = false;
@@ -788,7 +788,9 @@ TEST(SnesLineReuse, AReturnInAHorizontalBlankAfterAWriteThereLeavesTheLineAsDraw
     EXPECT_EQ(t.counts(4).reused, kLines) << describe(t.counts(4));
     for (int call = 0; call < 12000; ++call) {
       t.run(1360u);
-      if (call % 400 == 0) ASSERT_TRUE(t.same()) << "after run " << call;
+      if (call % 400 == 0) {
+        ASSERT_TRUE(t.same()) << "after run " << call;
+      }
     }
     ASSERT_TRUE(t.same());
     const Snes::LineReuse& c = t.reusingReports.reports.back().counts;
@@ -808,12 +810,16 @@ TEST(SnesLineReuse, AReturnInsideTheLineDrawsItUpToTheBeam) {
   for (int call = 0; call < 30000; ++call) {
     t.reusing.step();
     t.verifying.step();
-    if (call % 500 == 0) ASSERT_TRUE(t.same()) << "after step " << call;
+    if (call % 500 == 0) {
+      ASSERT_TRUE(t.same()) << "after step " << call;
+    }
   }
   ASSERT_TRUE(t.same());
   for (int call = 0; call < 800; ++call) {
     t.run(1001u);
-    if (call % 50 == 0) ASSERT_TRUE(t.same()) << "after run " << call;
+    if (call % 50 == 0) {
+      ASSERT_TRUE(t.same()) << "after run " << call;
+    }
   }
   ASSERT_TRUE(t.same());
   // The lines a return fell inside were drawn and are counted so; the rest taken.
@@ -957,7 +963,9 @@ TEST(SnesLineReuse, TheThreadedMachineReusesAsTheLockstepMachineDoes) {
     ASSERT_TRUE(t.runTo(2));
     for (int call = 0; call < 800; ++call) {
       t.run(1001u);
-      if (call % 50 == 0) ASSERT_TRUE(t.same()) << "after run " << call;
+      if (call % 50 == 0) {
+        ASSERT_TRUE(t.same()) << "after run " << call;
+      }
     }
     ASSERT_TRUE(t.same());
     const Snes::LineReuse& c = t.reusingReports.reports.back().counts;

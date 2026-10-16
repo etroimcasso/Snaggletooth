@@ -1199,7 +1199,9 @@ class Snes {
   // nothing, and decides only what the chip carries to the next position, once, at
   // the span's last picture dot. A span whose dots all lie before the line's first
   // read or past its last pixel reads and draws nothing, and so does a span of the
-  // frame's first line or of vertical blank. The span reaching the line's first read
+  // frame's first line, of vertical blank, or of a line past the tallest picture's
+  // last, which a restored state may stand on with its blank flag down. The span
+  // reaching the line's first read
   // dot compares what the line reads with what the frame before recorded for it,
   // and a line that frame can stand in for is not drawn: it takes its outputs from
   // the record at its end (completeLine), or is drawn up to the beam when a write

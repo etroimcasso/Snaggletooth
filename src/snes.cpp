@@ -1857,7 +1857,11 @@ void Snes::drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t t
 }
 
 void Snes::drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::uint16_t toHpos) {
-  if (in.vpos == 0u || in.vblank) return;
+  // Nothing is drawn on the frame's first line, in vertical blank, or on a line past
+  // the tallest picture's last: the beam's blank begins there at the latest, and a
+  // restored state that stands on such a line with its blank flag down has no raster
+  // row and no line record to draw into.
+  if (in.vpos == 0u || in.vblank || in.vpos > kTallestPicture) return;
 
   // The dots the span passed, by the same reckoning the line's events use: a dot is
   // reached when the span covers the master cycle it begins on. The tile reads of
