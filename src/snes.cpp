@@ -377,8 +377,15 @@ void Snes::load() {
 
 void Snes::sync() {
   // The audio machine's state is already in state_.apu; only the live CPU's
-  // register set has a copy to write back.
+  // register set has a copy to write back. A picture line pending on this thread
+  // is drawn up to the beam, so the tile reads and the last decision a host reads
+  // at the return are the beam's; on the threaded machine the flight's wait does
+  // the same.
   state_.cpu = cpu_.state();
+  if (!ppuThreaded_ && cache_->pending) {
+    Ppu drawing{state_.ppu, derived_};
+    settleLine(drawing, pictureInputs(), state_.hpos, false);
+  }
 }
 
 std::uint16_t Snes::resetVector() const noexcept {
@@ -987,8 +994,11 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
         Ppu chip{state_.ppu, derived_};
         bool changes = false;
         if (!ppuThreaded_) {
-          settleLine(chip, pictureInputs(), state_.hpos,
-                     writeDisturbs(offset, state_.hpos, state_.ppu, pins));
+          // A write the line's remaining dots read draws a pending line up to here
+          // first, from the state the write has not yet changed.
+          if (writeDisturbs(offset, state_.hpos, state_.ppu, pins)) {
+            settleLine(chip, pictureInputs(), state_.hpos, true);
+          }
           changes = videoWriteChanges(chip, offset, value);
         }
         portLanding_ = chip.write(offset, value, pins);
@@ -1861,15 +1871,15 @@ void Snes::drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::
   const std::uint32_t firstPixel = dot < kFirstPictureDot ? kFirstPictureDot : dot;
 
   // The span that reaches the line's first read dot compares what the line reads
-  // with what the frame before recorded for it, and counts the answer.
+  // with what the frame before recorded for it: a line the frame before can stand
+  // in for is not drawn, and takes its outputs from the record at its end; a write
+  // landing inside it draws it up to the beam first (settleLine).
   if (!cache_->decided && dot <= stop) decideLine(ppu, in, fromHpos);
+  if (cache_->pending) return;
 
   // A watched picture line starts the frame's raster, black, whichever of its dots
   // the span covers.
-  if (frameObserver_ != nullptr && raster_.empty()) {
-    raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
-    for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
-  }
+  if (frameObserver_ != nullptr && raster_.empty()) startRaster();
   // The dots before the first read and past the last pixel hold neither.
   if (dot > stop) return;
 
@@ -1903,6 +1913,11 @@ void Snes::drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::
       std::copy(out.right.begin(), out.right.end(), pixel);
     }
   }
+}
+
+void Snes::startRaster() {
+  raster_.assign(kRasterBytes, 0u);  // black, and opaque: a line nobody drew is black
+  for (std::size_t alpha = 3u; alpha < kRasterBytes; alpha += kPixelBytes) raster_[alpha] = 255u;
 }
 
 void Snes::widenFrame(std::size_t line, std::uint16_t x) noexcept {
@@ -2099,8 +2114,9 @@ void Snes::tickVideo(std::uint32_t cost) {
     // its dot. A machine nobody is watching makes the reads and resolves only what
     // the chip carries from one position to the next. A machine drawing on its
     // picture thread draws nothing here: the thread draws the same dots from the
-    // accesses and the lines this thread logs.
-    if (!ppuThreaded_) drawSpan(lineStart, at, stop);
+    // accesses and the lines this thread logs. A line the frame before stands in
+    // for has nothing to draw until a write or a return settles it.
+    if (!ppuThreaded_ && !cache_->pending) drawSpan(lineStart, at, stop);
     at = stop;
     state_.hpos = static_cast<std::uint16_t>(at - lineStart);
     if (at == lineEnd) {
@@ -2844,20 +2860,25 @@ void Snes::waitPicture() noexcept {
 
 void Snes::drawTo(std::uint16_t hpos) {
   PictureLink& picture = *picture_;
-  if (hpos <= picture.drawn) return;
   Ppu ppu{picture.view, picture.derived};
-  drawDots(ppu, picture.in, picture.drawn, hpos);
-  picture.drawn = hpos;
+  // A pending line is drawn from its first read dot to `hpos`, whichever of its
+  // dots have gone by undrawn; any other line draws on from where it stands.
+  if (cache_->pending) {
+    settleLine(ppu, picture.in, hpos > picture.drawn ? hpos : picture.drawn, false);
+  } else if (hpos > picture.drawn) {
+    drawDots(ppu, picture.in, picture.drawn, hpos);
+  }
+  if (hpos > picture.drawn) picture.drawn = hpos;
 }
 
 void Snes::applyPictureEvent(const PictureEvent& event) {
   PictureLink& picture = *picture_;
   switch (event.kind) {
     case PictureEventKind::Line: {
-      // The rest of the line the thread is on and the line's record, then the new
-      // line's facts: a frame's first line settles the finished picture's width and
-      // its line counts.
-      drawTo(kLineMaster);
+      // The rest of the line the thread is on, unless the frame before stands in for
+      // it, and the line's record or completion; then the new line's facts: a
+      // frame's first line settles the finished picture's width and its line counts.
+      if (!cache_->pending) drawTo(kLineMaster);
       Ppu ending{picture.view, picture.derived};
       completeLine(ending, picture.in);
       picture.in.vpos = event.vpos;
@@ -2877,8 +2898,8 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
     case PictureEventKind::Write:
     case PictureEventKind::Read: {
       // The access replayed on the view with the pins it took, every dot up to its
-      // position drawn first, as the console drew them.
-      drawTo(event.hpos);
+      // position drawn first, as the console drew them — unless the line is pending
+      // and the access changes nothing its dots read, where it stays pending.
       const PpuInputs in{.hdot = event.hdot,
                          .vpos = event.vpos,
                          .field = event.field,
@@ -2888,19 +2909,22 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
                          .lateHalf = event.lateHalf};
       Ppu ppu{picture.view, picture.derived};
       if (event.kind == PictureEventKind::Write) {
-        settleLine(ppu, picture.in, event.hpos,
-                   writeDisturbs(event.offset, event.hpos, picture.view, in));
+        const bool disturbs = writeDisturbs(event.offset, event.hpos, picture.view, in);
+        if (disturbs || !cache_->pending) drawTo(event.hpos);
+        if (disturbs) settleLine(ppu, picture.in, event.hpos, true);
         const bool changes = videoWriteChanges(ppu, event.offset, event.value);
         noteVideoWrite(event.offset, ppu.write(event.offset, event.value, in), changes);
       } else {
+        if (!cache_->pending) drawTo(event.hpos);
         static_cast<void>(ppu.read(event.offset, in));
       }
       return;
     }
     case PictureEventKind::InidispEarly: {
       // The one dot the write's cycle ended on, drawn again under the bus byte; the
-      // write that owes it has marked the line.
-      drawTo(event.hpos);
+      // write that owes it has drawn and marked the line where the dot is one of
+      // the line's, and a line still pending has no dot of its own to draw again.
+      if (!cache_->pending) drawTo(event.hpos);
       const std::uint8_t written = picture.view.inidisp;
       picture.view.inidisp = event.busBefore;
       Ppu ppu{picture.view, picture.derived};
@@ -2908,9 +2932,17 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
       picture.view.inidisp = written;
       return;
     }
-    case PictureEventKind::Beam:
+    case PictureEventKind::Beam: {
+      // The console is about to read the picture's fields: the line stands drawn to
+      // the beam, a line this draw found the frame before could stand in for
+      // included.
       drawTo(event.hpos);
+      if (cache_->pending) {
+        Ppu drawing{picture.view, picture.derived};
+        settleLine(drawing, picture.in, picture.drawn, false);
+      }
       return;
+    }
   }
 }
 
@@ -3065,13 +3097,21 @@ void Snes::decideLine(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos) noe
     cache.reason = LineReason::FirstDrawn;  // the record has no pixels to give a watched machine
   } else {
     hit = true;
+    cache.reason = LineReason::Returned;
   }
   // The line's own reads are recorded afresh.
   ppu.d_.vramPages = 0u;
   ppu.d_.cgramGroups = 0u;
   if (!hit) return;
-  // The record stands for the line: the line is drawn and the two compared.
-  cache.predicted = true;
+  // The record stands for the line. Under the verification mode the line is drawn
+  // and the two compared; otherwise nothing is drawn, and the line takes its
+  // outputs from the record at its end unless a write disturbs it first.
+  if (ppuVerify_) {
+    cache.predicted = true;
+    return;
+  }
+  cache.pending = true;
+  cache.pendingFrom = fromHpos;
 }
 
 bool Snes::writeDisturbs(std::uint16_t offset, std::uint16_t hpos, const PpuState& s,
@@ -3088,8 +3128,21 @@ bool Snes::writeDisturbs(std::uint16_t offset, std::uint16_t hpos, const PpuStat
   return false;
 }
 
-void Snes::settleLine(Ppu&, const PpuInputs&, std::uint16_t, bool disturbing) noexcept {
+void Snes::settleLine(Ppu& ppu, const PpuInputs& in, std::uint16_t hpos, bool disturbing) noexcept {
   LineCache& cache = *cache_;
+  if (cache.pending) {
+    // Past the last picture dot nothing of the line is left to draw, and a write
+    // landing there may already have changed a register the line's dots read, so
+    // the line is complete, from the record, as at its end. Before it, or for the
+    // write that reaches its last dot, the line is drawn from its first read dot up
+    // to the beam, from the state as it still stands, and draws on dot by dot.
+    if (!disturbing && hpos >= 4u * kLastPictureDot) {
+      completeLine(ppu, in);
+      return;
+    }
+    cache.pending = false;
+    drawDots(ppu, in, cache.pendingFrom, hpos);
+  }
   if (disturbing && cache.decided) cache.disturbed = true;
 }
 
@@ -3102,7 +3155,30 @@ void Snes::completeLine(Ppu& ppu, const PpuInputs& in) noexcept {
   const std::size_t line = static_cast<std::size_t>(in.vpos) - 1u;
   LineReuse& counts = cache.frame;
 
-  if (cache.disturbed) {
+  if (cache.pending) {
+    // Taken whole from the frame before: the tile reads and the last decision as
+    // that line left them, with the derived view's knowledge of the columns, and on
+    // a watched machine its pixels, at the frame's current width.
+    s.tiles = record.tiles;
+    d.nothing = record.nothing;
+    d.allNothing = record.allNothing;
+    d.nothingKnown = true;
+    s.lastMain = record.lastMain;
+    if (frameObserver_ != nullptr) {
+      if (raster_.empty()) startRaster();
+      if (record.hires && !frameWide_) widenFrame(line, 0u);
+      if (frameWide_) {
+        std::copy(record.pixels.begin(), record.pixels.end(),
+                  raster_.data() + line * kHiresWidth * kPixelBytes);
+      } else {
+        for (std::size_t x = 0; x < kPictureWidth; ++x) {
+          const std::uint8_t* const kept = record.pixels.data() + (x * 2u + 1u) * kPixelBytes;
+          std::copy(kept, kept + kPixelBytes, raster_.data() + (line * kPictureWidth + x) * kPixelBytes);
+        }
+      }
+    }
+    ++counts.reused;
+  } else if (cache.disturbed) {
     // Drawn to its end from a write that landed inside it: not what the line's key
     // alone produces, so not kept. The record of an earlier frame's undisturbed
     // line stands: what it read and produced is as true as it was, and the next
@@ -3112,6 +3188,11 @@ void Snes::completeLine(Ppu& ppu, const PpuInputs& in) noexcept {
   } else if (!cache.recordable) {
     ++counts.drawn;
     ++counts.firstDrawn;
+  } else if (cache.reason == LineReason::Returned) {
+    // The frame before stood in for the line and a call's return drew it: what it
+    // drew is what the record holds, so the record stands as it is.
+    ++counts.drawn;
+    ++counts.returned;
   } else {
     if (cache.predicted) {
       // The frame before could have stood in for the line: what the line drew is held
@@ -3143,6 +3224,7 @@ void Snes::completeLine(Ppu& ppu, const PpuInputs& in) noexcept {
         case LineReason::Sprites: ++counts.sprites; break;
         case LineReason::Vram: ++counts.vram; break;
         case LineReason::Cgram: ++counts.cgram; break;
+        case LineReason::Returned: break;  // counted above, the record kept
       }
     }
     // The line as drawn, for the next frame's same line.

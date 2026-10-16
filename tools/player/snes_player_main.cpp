@@ -4,7 +4,8 @@
 //   snes_player <image> [--out <directory>] [--seconds N] [--scale N]
 //               [--input <script> | --input-dir <directory>] [--config <file>]
 //               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
-//               [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--mute] [--quiet]
+//               [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--ppu-verify]
+//               [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -62,6 +63,14 @@
 // only where it alone does not hold the console's frame rate. The picture and the
 // sound are the same bytes either way; the work moves to another core, and the run's
 // first lines say so.
+//
+// The machine draws a picture line only when something it reads has changed since
+// the frame before, and takes it from that frame otherwise; the run's last line says
+// how many lines it took and how many it drew. --ppu-verify builds the machine with
+// SnesConfig::ppuVerify on: every line is drawn and compared with what the frame
+// before would have stood in with, and the last line adds the count of disagreements,
+// which is 0 on a machine that reuses exactly. It costs the reuse, so it is for
+// proving a run and never for playing one.
 //
 // A cartridge that turns interlace on draws one field a frame, and the player weaves
 // the two into the full-height picture the console's signal carried. --interlace names
@@ -199,6 +208,8 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
          "  --apu-thread                run the sound chip on its own thread; only where\n"
          "                              --ppu-thread alone cannot hold full speed\n"
          "  --ppu-thread                draw the picture on its own thread\n"
+         "  --ppu-verify                draw every line and check it against the frame before;\n"
+         "                              for proving a run, not for playing one\n"
          "  --mute                      don't play the sound\n"
          "  --quiet                     don't print the run's status lines\n"
          "  --default-config            print the built-in controller mapping and exit\n"
@@ -559,6 +570,12 @@ class Player final : public snaggletooth::FrameObserver {
   // Whether the reset button was pressed since this last said so.
   [[nodiscard]] bool takeReset() noexcept { return std::exchange(resetAsked_, false); }
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
+  // The picture lines over the run, as the machine counted them in each frame
+  // report: taken from the frame before, drawn, and the drawn lines that disagreed
+  // with the record under the verification mode.
+  [[nodiscard]] std::uint64_t linesReused() const noexcept { return linesReused_; }
+  [[nodiscard]] std::uint64_t linesDrawn() const noexcept { return linesDrawn_; }
+  [[nodiscard]] std::uint64_t mismatches() const noexcept { return mismatches_; }
   // The rate the run actually held, measured from the end of the first frame: that
   // first one carries opening a window, a device and a cartridge, and a mean that
   // includes it describes the startup rather than the run.
@@ -570,6 +587,11 @@ class Player final : public snaggletooth::FrameObserver {
   void frame(const VideoFrame& picture) override {
     const std::uint64_t emulated = SDL_GetTicksNS() - resumed_;
     ++frames_;
+    // The finished frame's line counts, valid inside the report.
+    const snaggletooth::Snes::LineReuse lines = machine_.lineReuse();
+    linesReused_ += lines.reused;
+    linesDrawn_ += lines.drawn;
+    mismatches_ += lines.mismatches;
 
     // A cartridge running interlaced hands over one field a frame; the weaver composes
     // the two into the full-height picture the console's signal carried, the way the
@@ -816,6 +838,9 @@ class Player final : public snaggletooth::FrameObserver {
   std::unique_ptr<snaggletooth::video::AviRecording> recording_;
   std::ofstream table_;
   std::uint64_t frames_ = 0;
+  std::uint64_t linesReused_ = 0;  // picture lines taken from the frame before, over the run
+  std::uint64_t linesDrawn_ = 0;   // and drawn dot by dot
+  std::uint64_t mismatches_ = 0;   // under the verification mode, drawn lines that disagreed with the record
   std::uint64_t started_ = 0;
   std::uint64_t lastFrame_ = 0;
   std::uint64_t resumed_ = 0;
@@ -840,6 +865,7 @@ int main(int argc, char** argv) {
   bool unthrottled = false;
   bool apuThread = false;
   bool ppuThread = false;
+  bool ppuVerify = false;
   player::Interlace interlace = player::Interlace::Weave;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
@@ -915,6 +941,8 @@ int main(int argc, char** argv) {
       apuThread = true;
     } else if (arg == "--ppu-thread") {
       ppuThread = true;
+    } else if (arg == "--ppu-verify") {
+      ppuVerify = true;
     } else if (arg == "--interlace") {
       const std::optional<player::Interlace> mode = player::parseInterlace(next("--interlace"));
       if (!mode) {
@@ -1096,6 +1124,7 @@ int main(int argc, char** argv) {
   snaggletooth::SnesConfig machineConfig{.rom = rom, .region = region};
   machineConfig.apuThread = apuThread;
   machineConfig.ppuThread = ppuThread;
+  machineConfig.ppuVerify = ppuVerify;
   Snes machine(machineConfig);
 
   // A cartridge with a battery keeps what it writes. The file goes in with the rest
@@ -1143,6 +1172,7 @@ int main(int argc, char** argv) {
     }
     if (apuThread) std::cerr << "the audio unit on its own thread\n";
     if (ppuThread) std::cerr << "the picture on its own thread\n";
+    if (ppuVerify) std::cerr << "every line drawn and checked against the frame before\n";
   }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);
@@ -1214,6 +1244,14 @@ int main(int argc, char** argv) {
   }
   if (!quiet) {
     std::cerr << player.frames() << " frames at " << rateText(player.meanMilliFps()) << " fps\n";
+    // How the picture lines were drawn over the run: taken from the frame before or
+    // drawn, and under --ppu-verify how many drawn lines disagreed with the record.
+    const std::uint64_t lines = player.linesReused() + player.linesDrawn();
+    std::cerr << "lines: " << player.linesReused() << " taken from the frame before, " << player.linesDrawn()
+              << " drawn";
+    if (lines != 0u) std::cerr << " (" << (player.linesReused() * 1000u / lines + 5u) / 10u << " % taken)";
+    if (ppuVerify) std::cerr << ", " << player.mismatches() << " mismatches";
+    std::cerr << "\n";
   }
   return 0;
 }

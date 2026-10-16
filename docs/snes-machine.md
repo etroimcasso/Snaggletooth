@@ -28,6 +28,7 @@ finishes.
 - [The APU clock](#the-apu-clock)
   - [The audio thread](#the-audio-thread)
   - [The picture thread](#the-picture-thread)
+  - [A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes)
 - [The audio upload stub](#the-audio-upload-stub)
   - [Running a console's own boot ROM](#running-a-consoles-own-boot-rom)
 - [The video counters and interrupts](#the-video-counters-and-interrupts)
@@ -97,7 +98,10 @@ With it off they run inside the console's cycles on the calling thread; the byte
 way. See [The audio thread](#the-audio-thread). `SnesConfig::ppuThread` draws the picture on a second
 thread the machine owns the same way, off by default; see [The picture thread](#the-picture-thread).
 The picture thread is the one to turn on first; the audio thread joins it only where the picture thread
-alone does not hold the console's frame rate.
+alone does not hold the console's frame rate. `SnesConfig::ppuVerify`, off by default, makes the machine
+draw every picture line and check it against the frame before, which it otherwise takes a line from
+when nothing the line reads has changed; see
+[A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes).
 
 ## The memory map
 
@@ -404,6 +408,81 @@ work to the process: the thread's own, its wakes, and the waits where the two me
 whole spends a little more CPU in total, and each thread has less to do, so each core carries a lighter
 load; a host whose cores are each too slow to run the whole machine at speed keeps up by running the
 work in parallel. A host whose one core runs the machine at speed leaves the thread off.
+
+### A line drawn again only when it changes
+
+A picture line's pixels, and the two things the chip carries out of a line, the tile reads and the
+last main-screen decision, are a function of what the line reads: the registers the picture reads as
+they stand at the line's first read dot, the sprites Time gathered for the line, the pages of VRAM
+and the groups of palette words the line's reads touch, the frame parity where the picture reads it
+(modes 5 and 6 under `$2133` bit 0), under forced blank the decision the line is handed, and every
+write to the chip that lands inside the line's picture dots. The machine records each of these for
+every picture line it draws, with the line's outputs, and when the next frame's same line reads the
+same it takes the line from the record and draws nothing: the pixels, the tile reads and the decision
+are the record's. A page or group counts as changed when a write through the port, or a host's
+`writeVram` or `writeCgram`, changed a byte in it since the line read it; a write that stores the byte
+already there changes nothing. A write landing inside the line's picture dots to a register the line
+reads, or to a palette word while the palette is open and the screen is on, draws the line from its
+first read dot up to the beam, from the state the write has not yet changed, and on to its end, and
+the line is not kept for the next frame. Where a call returns inside a line the frame before could
+stand in for, the line is drawn up to the beam there too, so `state()` at the return holds the tile
+reads and the decision the beam's dots left, and it draws on to its end. The picture is the same as
+with every line drawn, and so is every byte a program reads.
+
+`lineReuse()` answers how the lines of the last finished frame were drawn:
+
+```cpp
+struct Snes::LineReuse {
+  unsigned reused;      // taken from the frame before, nothing drawn
+  unsigned drawn;       // drawn dot by dot; the counts below say why and sum to it
+  unsigned firstDrawn;  // nothing to take: the first frame, a restore or a reset since, or a line last drawn unwatched
+  unsigned registers;   // a register the picture reads changed
+  unsigned scrollOnly;  // of `registers`: the ten scroll words alone changed
+  unsigned sprites;     // the sprites gathered for the line changed
+  unsigned vram;        // a VRAM page the line reads was written
+  unsigned cgram;       // a palette group the line reads was written
+  unsigned midLine;     // a write the line's dots read landed inside its picture dots
+  unsigned returned;    // a call returned inside the line, which drew it up to the beam and on
+  unsigned mismatches;  // under ppuVerify: lines drawn that disagree with what the frame before recorded
+};
+```
+
+A host reads it between calls, or inside its frame report, where it is the frame just handed over:
+
+```cpp
+struct Counting final : FrameObserver {
+  Snes* machine;
+  void frame(const VideoFrame&) override {
+    const Snes::LineReuse lines = machine->lineReuse();
+    std::printf("%u lines taken, %u drawn\n", lines.reused, lines.drawn);
+  }
+};
+```
+
+`SnesConfig::ppuVerify`, off by default, draws every line whether or not the frame before could stand
+in for it, and where it could, compares the drawn line with the record — the tile reads, the decision
+and, on a watched machine, the pixels — counting a disagreement in `mismatches`; nothing is thrown and
+the picture is the drawn one. It costs the reuse, so it is for proving the machine over a library of
+cartridges and never for running it: on a machine that reuses exactly, `mismatches` is 0 on every
+frame of every cartridge.
+
+Gotchas:
+
+- Inside a call, on a machine built with the picture thread, the tile reads and the decision are the
+  thread's, as [the picture thread](#the-picture-thread) says; a line pending on the frame before is
+  drawn up to the beam at every wait the console makes, so a bus observer or a watcher reading them
+  there reads what the beam's dots left.
+- A host that steps the machine an instruction at a time, or runs it in budgets that end inside a
+  line, draws the line each return falls inside; `returned` counts them. A host that runs whole
+  frames, or quarter frames as the player does, draws almost none.
+- A line recorded by a machine nobody watched holds no pixels, so a frame observer set afterwards
+  draws every line of its first frame; a line recorded watched serves an unwatched machine.
+- A restore or a reset drops every record: the next frame draws every line.
+- The record is about 1.5 MB a machine, held beside the state and never in a snapshot.
+- `lineReuse()` waits for the picture thread, as a report does.
+
+See [the picture](ppu.md#the-picture) for what a line is drawn from, and
+[Snapshot and restore](#snapshot-and-restore).
 
 ## The audio upload stub
 
@@ -969,7 +1048,9 @@ or a watcher there reads the audio machine through `peekApu` and `peekApuRegiste
 On a machine built with [the picture thread](#the-picture-thread), the two fields of `state().ppu` the
 picture writes, `tiles` and `lastMain`, are the thread's inside a call and are read between calls and
 inside the reports, which wait for the picture; the rest of the chip's state is the calling thread's
-throughout.
+throughout. A restore drops the machine's record of what each picture line read
+([A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes)), so the next
+frame draws every line.
 
 The machine is deterministic: the same state and the same trace give the same bytes. The trace is
 everything that reaches the machine from outside — the pads presented before each run, and whatever a

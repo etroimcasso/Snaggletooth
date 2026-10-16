@@ -759,7 +759,8 @@ class Snes {
     unsigned sprites = 0;     // the sprites gathered for the line changed
     unsigned vram = 0;        // a VRAM page the line reads was written
     unsigned cgram = 0;       // a palette group the line reads was written
-    unsigned midLine = 0;     // an access landed inside the line's picture dots, so it was drawn to its end and not kept
+    unsigned midLine = 0;     // a write the line's dots read landed inside its picture dots, so it was drawn to its end and not kept
+    unsigned returned = 0;    // the frame before could stand in, but a call returned inside the line, so it was drawn up to the beam there and on to its end
     unsigned mismatches = 0;  // under ppuVerify: lines drawn that disagree with what the frame before recorded
     [[nodiscard]] bool operator==(const LineReuse&) const noexcept = default;
   };
@@ -1198,14 +1199,20 @@ class Snes {
   // nothing, and decides only what the chip carries to the next position, once, at
   // the span's last picture dot. A span whose dots all lie before the line's first
   // read or past its last pixel reads and draws nothing, and so does a span of the
-  // frame's first line or of vertical blank. Runs on whichever thread draws: over
-  // the machine's own chip state on the calling thread, over the picture thread's
-  // view on it.
+  // frame's first line or of vertical blank. The span reaching the line's first read
+  // dot compares what the line reads with what the frame before recorded for it,
+  // and a line that frame can stand in for is not drawn: it takes its outputs from
+  // the record at its end (completeLine), or is drawn up to the beam when a write
+  // its dots read lands inside it or a call returns there (settleLine). Runs on
+  // whichever thread draws: over the machine's own chip state on the calling
+  // thread, over the picture thread's view on it.
   void drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::uint16_t toHpos);
   // drawDots over the machine's own chip state for the master-cycle span (`from`,
   // `to`] of a line beginning at `lineStart`: the calling thread's drawing, on a
   // machine built with the picture thread off.
   void drawSpan(std::uint64_t lineStart, std::uint64_t from, std::uint64_t to);
+  // Starts the frame's raster: black and opaque, so a line nobody drew is black.
+  void startRaster();
   // Turns the frame in progress 512 wide at its first position drawn in
   // half-pixels, which is position `x` of picture row `line`: every pixel drawn
   // before it is doubled into both halves of its position.
@@ -1950,8 +1957,9 @@ class Snes {
     bool valid = false;
   };
   // Why a line is drawn rather than taken from the frame before, as decideLine
-  // finds it and completeLine counts it.
-  enum class LineReason : std::uint8_t { FirstDrawn, Registers, Sprites, Vram, Cgram };
+  // finds it and completeLine counts it; Returned is a line the frame before could
+  // stand in for, which is counted drawn only where a call's return drew it.
+  enum class LineReason : std::uint8_t { FirstDrawn, Registers, Sprites, Vram, Cgram, Returned };
   struct LineCache {
     std::array<LineRecord, kOverscanVblankStartLine - 1u> lines{};
     std::array<std::uint64_t, 64> vramStamp{};   // the write count at the last write to each 1 KB page
@@ -2001,14 +2009,18 @@ class Snes {
   // next frame's comparison.
   [[nodiscard]] static bool writeDisturbs(std::uint16_t offset, std::uint16_t hpos, const PpuState& s,
                                           const PpuInputs& pins) noexcept;
-  // An access landing at master cycle `hpos` of the line being drawn: where it is a
-  // write that disturbs the line (`disturbing`, writeDisturbs's answer) the line is
-  // marked disturbed, drawn to its end and not kept, since its outputs depend on the
-  // write. A line whose first read dot has not been reached cannot be disturbed:
-  // its key, built there, sees the write.
+  // The beam at master cycle `hpos` of the line being drawn, where the line must
+  // stand drawn: a line pending on the frame before is drawn from its first read
+  // dot up to `hpos`, from the state as it stands, and draws on from there. Where
+  // the call is for a write that disturbs the line (`disturbing`, writeDisturbs's
+  // answer) the line is marked disturbed as well, drawn to its end and not kept,
+  // since its outputs depend on the write. A line whose first read dot has not been
+  // reached cannot be disturbed: its key, built there, sees the write.
   void settleLine(Ppu& ppu, const PpuInputs& in, std::uint16_t hpos, bool disturbing) noexcept;
-  // The line's end: a line drawn whole and undisturbed is recorded for the next
-  // frame's same line, and the frame's counts take the line.
+  // The line's end: a pending line takes its outputs from the record — the tile
+  // reads, the last decision and, on a watched machine, its pixels — a line drawn
+  // whole and undisturbed is recorded for the next frame's same line, and the
+  // frame's counts take the line.
   void completeLine(Ppu& ppu, const PpuInputs& in) noexcept;
   // Whether a write of `value` to the register at `offset` would change a byte of
   // VRAM or the palette if it reached the memory, read from the chip before the
