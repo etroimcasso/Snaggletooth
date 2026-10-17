@@ -5,6 +5,8 @@
 #include <memory>
 #include <utility>
 
+#include "bytes.h"
+
 namespace snaggletooth {
 
 namespace {
@@ -545,6 +547,67 @@ void Apu::writeRegister(std::uint8_t reg, std::uint8_t value) {
       state_->ram[reg] = value;
       return;
   }
+}
+
+// ---- the machine as bytes -------------------------------------------------
+// The layout is ApuState's own fields in the order they are declared, then cpu,
+// dsp and the three timers; a timer is its three counters in the order they are
+// declared.
+
+namespace bytes {
+
+void putPart(std::uint8_t*& at, const ApuState& state) noexcept {
+  putBytes(at, state.ram);
+  put8(at, state.test);
+  put8(at, state.control);
+  put8(at, state.dspAddr);
+  putBytes(at, state.inputPorts);
+  putBytes(at, state.outputPorts);
+  putBytes(at, state.auxPorts);
+  put16(at, state.divider);
+  putPart(at, state.cpu);
+  putPart(at, state.dsp);
+  for (const TimerState& timer : state.timers) {
+    put8(at, timer.stage2);
+    put8(at, timer.stage3);
+    put8(at, timer.target);
+  }
+}
+
+void readPart(Reader& in, ApuState& state) noexcept {
+  in.bytes(state.ram);
+  in.u8(state.test);
+  in.u8(state.control);
+  in.u8(state.dspAddr);
+  in.bytes(state.inputPorts);
+  in.bytes(state.outputPorts);
+  in.bytes(state.auxPorts);
+  in.u16(state.divider);
+  readPart(in, state.cpu);
+  readPart(in, state.dsp);
+  for (TimerState& timer : state.timers) {
+    in.u8(timer.stage2);
+    in.u8(timer.stage3);
+    in.u8(timer.target);
+  }
+}
+
+}  // namespace bytes
+
+std::vector<std::uint8_t> ApuState::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t ApuState::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<ApuState> ApuState::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<ApuState>(bytes);
+}
+
+bool ApuState::fromBytes(std::span<const std::uint8_t> bytes, ApuState& into) noexcept {
+  return bytes::decodeInto(bytes, into);
 }
 
 }  // namespace snaggletooth

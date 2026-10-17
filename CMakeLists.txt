@@ -687,6 +687,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/boot_rom_test.cpp
     tests/snes/blargg_test.cpp
     tests/snes/state_bytes_test.cpp
+    tests/snes/ppu_state_bytes_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/host_memory_test.cpp
     tests/apu/access_watch_test.cpp
@@ -697,6 +698,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/apu/timer_test.cpp
     tests/apu/cycle_timing_test.cpp
     tests/apu/ipl_rom_test.cpp
+    tests/apu/state_bytes_test.cpp
     tests/dsp/brr_test.cpp
     tests/dsp/dsp_state_test.cpp
     tests/dsp/pitch_gauss_test.cpp

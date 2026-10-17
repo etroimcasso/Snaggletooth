@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace snaggletooth {
 
@@ -321,6 +322,23 @@ struct PpuState {
   [[nodiscard]] std::uint16_t vblankStartLine() const noexcept {
     return overscan() ? kOverscanVblankStartLine : kVblankStartLine;
   }
+
+  // The chip as bytes and back: byteSize() bytes, the struct's own fields in the
+  // order they are declared — the three memories first — then sprites, lastMain
+  // and the tile reads, background by background and each background's columns in
+  // order, each laid out by the same rule, every value at its fixed little-endian
+  // width (SnesState's byte form in `snes/snes.h` gives the terms every part
+  // shares). asBytes(out) writes nothing and answers 0 when `out` is shorter than
+  // byteSize(). fromBytes refuses bytes of another length or a `bool` byte other
+  // than 0 or 1, and leaves `into` as it was when it refuses. A field added to this
+  // struct or to one of its parts joins the byte form in the same change, and the
+  // layout's new version is SnesState::kBytesVersion's next value.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 70672u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<PpuState> fromBytes(std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      PpuState& into) noexcept;
 
   // Two are the same when every register, latch and counter is, and every byte of
   // the three memories — the whole of what a program put into the chip, in one
