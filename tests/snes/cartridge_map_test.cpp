@@ -346,10 +346,10 @@ TEST(CartridgeMap, AnExplicitSaveSizeOverridesTheHeader) {
   EXPECT_TRUE(m.state().sram.empty());
 }
 
-// The save's size is the size it has now. A restore replaces the save whole and
-// can make it larger, smaller or empty; the window reduces every access to the
-// size that stands, and with none reads the image there.
-TEST(CartridgeMap, TheWindowReducesToTheSaveARestoreNowHolds) {
+// The save's size is the one the machine is built with, fixed for its life like
+// the cartridge: the window reduces every access to that size, and with none reads
+// the image there. A restore of a state with another size is refused.
+TEST(CartridgeMap, TheWindowReducesToTheSaveTheMachineHolds) {
   std::vector<std::uint8_t> rom = authoredCartridge(512u * 1024u, false, 0x20u, /*8 KB*/ 3u);
   // Stores $77 at $70:2100 — 8 KB and a bit into the window — and reads it back
   // into work RAM.
@@ -363,33 +363,35 @@ TEST(CartridgeMap, TheWindowReducesToTheSaveARestoreNowHolds) {
   put24(p, p.size() - 3, 0x7E0000u);
   p.push_back(0xDBu);
   placeProgram(rom, false, p);
-  Snes m(SnesConfig{.rom = rom, .iplStub = false});
-  const SnesState fresh = m.state();  // at power-on, the program not yet run
 
-  runToStop(m);
-  ASSERT_EQ(m.state().sram.size(), 8192u);
-  EXPECT_EQ(m.state().sram[0x100u], 0x77u);  // reduced to the 8 KB
-  EXPECT_EQ(m.state().wram[0], 0x77u);
+  Snes header(SnesConfig{.rom = rom, .iplStub = false});
+  runToStop(header);
+  ASSERT_EQ(header.state().sram.size(), 8192u);
+  EXPECT_EQ(header.state().sram[0x100u], 0x77u);  // reduced to the 8 KB
+  EXPECT_EQ(header.state().wram[0], 0x77u);
 
-  SnesState larger = fresh;
-  larger.sram.assign(32768u, 0u);
-  m.restore(larger);
-  runToStop(m);
-  ASSERT_EQ(m.state().sram.size(), 32768u);
-  EXPECT_EQ(m.state().sram[0x2100u], 0x77u);  // no longer folded
-  EXPECT_EQ(m.state().sram[0x100u], 0x00u);
-  EXPECT_EQ(m.state().wram[0], 0x77u);
-  EXPECT_EQ(m.peek(0x702100u), std::optional<std::uint8_t>{0x77u});
-  EXPECT_TRUE(m.poke(0x70A100u, 0x11u));  // the bank's upper half is the image still
-  EXPECT_EQ(m.peek(0x702100u), std::optional<std::uint8_t>{0x77u});  // and the save answers below it
+  Snes larger(SnesConfig{.rom = rom, .iplStub = false, .saveRamBytes = std::size_t{32768u}});
+  runToStop(larger);
+  ASSERT_EQ(larger.state().sram.size(), 32768u);
+  EXPECT_EQ(larger.state().sram[0x2100u], 0x77u);  // no longer folded
+  EXPECT_EQ(larger.state().sram[0x100u], 0x00u);
+  EXPECT_EQ(larger.state().wram[0], 0x77u);
+  EXPECT_EQ(larger.peek(0x702100u), std::optional<std::uint8_t>{0x77u});
+  EXPECT_TRUE(larger.poke(0x70A100u, 0x11u));  // the bank's upper half is the image still
+  EXPECT_EQ(larger.peek(0x702100u), std::optional<std::uint8_t>{0x77u});  // and the save answers below it
 
-  SnesState none = fresh;
-  none.sram.clear();
-  m.restore(none);
-  runToStop(m);
-  EXPECT_TRUE(m.state().sram.empty());
-  EXPECT_EQ(m.state().wram[0], 0x11u);  // the image, which the store left alone and the poke above changed
-  EXPECT_EQ(m.peek(0x702100u), std::optional<std::uint8_t>{0x11u});
+  Snes none(SnesConfig{.rom = rom, .iplStub = false, .saveRamBytes = std::size_t{0u}});
+  EXPECT_TRUE(none.poke(0x70A100u, 0x11u));
+  runToStop(none);
+  EXPECT_TRUE(none.state().sram.empty());
+  EXPECT_EQ(none.state().wram[0], 0x11u);  // the image, which the store left alone and the poke changed
+  EXPECT_EQ(none.peek(0x702100u), std::optional<std::uint8_t>{0x11u});
+
+  // Neither of the other two states restores into the 8 KB machine.
+  const SnesState before = header.state();
+  EXPECT_FALSE(header.restore(larger.state()));
+  EXPECT_FALSE(header.restore(none.state()));
+  EXPECT_EQ(header.state(), before);
 }
 
 // The table holds no bytes: a byte poked into the image is read back through

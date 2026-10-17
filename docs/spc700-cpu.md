@@ -93,13 +93,29 @@ struct Spc700State {
   std::uint16_t ea = 0;   // effective-address scratch
   std::uint16_t ptr = 0;  // pointer / second-address scratch
   std::uint16_t tmp = 0;  // data scratch
+  bool taken = false;     // a branch condition, settled before the cycles it prices
 };
 ```
 
-The five fields after `run` are how far into an instruction the core is. They carry no
+The six fields after `run` are how far into an instruction the core is. They carry no
 architectural meaning — no program can read them — but they are part of the value, which is what
 makes a snapshot legal *between two cycles of one instruction* rather than only between
 instructions.
+
+The state also travels as bytes, the same on every platform: 17 bytes, the fields in the order above,
+each at its fixed little-endian width, `run` and `taken` one byte each.
+
+```cpp
+static constexpr std::size_t byteSize() noexcept;                    // 17
+std::vector<std::uint8_t> asBytes() const;
+std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;    // byteSize(), or 0 for a short buffer
+static std::optional<Spc700State> fromBytes(std::span<const std::uint8_t> bytes);
+static bool fromBytes(std::span<const std::uint8_t> bytes, Spc700State& into) noexcept;
+```
+
+`fromBytes` refuses bytes of another length, a `taken` byte other than 0 or 1, or a `run` byte past
+`Stopped`, and leaves `into` as it was when it refuses. The terms are the machine's, in
+[snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes).
 
 `psw` is the packed status byte. Named masks read and write its flags:
 

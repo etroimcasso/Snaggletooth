@@ -168,7 +168,7 @@ copier header is not stripped for you: `readCopierHeader` in
 A picture arrives through a `FrameObserver` set with `setFrameObserver`, each finished frame as
 it completes; a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given
 whole; a snapshot is `state()`, a reference to the machine's own value, and goes back with
-`restore()`. [snes-machine.md](snes-machine.md) covers each of these, the
+`restore()`, and travels as bytes with `asBytes()` and `fromBytes()`. [snes-machine.md](snes-machine.md) covers each of these, the
 save observer that tells you when the battery save changed, and the host face — reading and
 writing any place the machine holds, answering an access before it takes effect, and calling a
 routine the cartridge holds.

@@ -46,6 +46,7 @@ finishes.
 - [The bus observer](#the-bus-observer)
 - [The save observer](#the-save-observer)
 - [Snapshot and restore](#snapshot-and-restore)
+  - [The state as bytes](#the-state-as-bytes)
 - [Reaching into the machine](#reaching-into-the-machine)
   - [Memory by bus address](#memory-by-bus-address)
   - [The memories the bus cannot name](#the-memories-the-bus-cannot-name)
@@ -134,7 +135,7 @@ first 512 bytes are the manual joypad ports, is priced by the offset at the acce
 and the access watch read the same table, so every path agrees on what an address reaches. An image
 whose size is not a multiple of 8 KB carries a chip smaller than a page, whose repeat can begin inside
 one; its pages are found through `romOffset` at each access instead, so every image reads exactly. The
-save's size is not in the table, since a restore can change it, and is applied at each access.
+save's size is not in the table and is applied at each access.
 
 ### How a cartridge lays across the bus
 
@@ -170,7 +171,9 @@ megabyte above it repeats **the second** chip, not the image.
 
 `SnesState::sram` is the cartridge's save, as large as its header declares and empty when it declares
 none. It is machine state rather than configuration: a snapshot carries the save and `restore()` puts
-it back, so a game persists one by reading it out.
+it back, so a game persists one by reading it out. The save travels in [the state's bytes](#the-state-as-bytes)
+too, last. Its size is the cartridge's, fixed for the machine's life, and `restore()` refuses a state
+whose save is another size.
 
 The size comes from the header, and it matters that it is exact — an address past the end of the save
 repeats it from the start, and a game that writes twice and reads back once is measuring how much save
@@ -194,8 +197,8 @@ A cartridge with no save answers in the window as its board does. HiROM's and Ex
 the expansion area and read open bus. LoROM's sits in cartridge banks, where a board with no save RAM
 decodes nothing, so the window's lower halves repeat their upper halves like every other cartridge
 bank's: on a LoROM cartridge with no save, `$70:1234` reads the byte at `$70:9234`, and a store there
-changes nothing. The save's presence is read at each access, not when the table is built, so a
-restore that fills or empties the save changes what the window answers without rebuilding anything.
+changes nothing. Whether there is a save is settled when the machine is built, by the header or by
+`SnesConfig::saveRamBytes`, and no restore changes it.
 
 Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
 the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address
@@ -1038,6 +1041,11 @@ machine.run(100'000);
 machine.restore(saved);   // back to the saved cycle, exactly
 ```
 
+`restore()` answers `true` once the state is in place. It answers `false`, and leaves the machine
+exactly as it was, when the state's save is another size than the machine's: the save's size is the
+cartridge's, fixed for the machine's life like the cartridge, so a state with another is not a state
+of this machine. A state taken from a machine built from the same cartridge always has the size.
+
 `state()` returns the machine's own state, not a copy of it: the audio machine runs inside
 `state().apu` (the [APU machine](apu-machine.md#running-in-storage-you-hold) built over that
 object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
@@ -1064,6 +1072,80 @@ What a host sets up is its own and not part of the state: the observers, the wat
 armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
 leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set —
 the routine a stand-in held off runs there.
+
+### The state as bytes
+
+A host that keeps a state past the process, or carries it to another machine, takes it as bytes. The
+bytes are the same for the same state on every platform, and come back as the same state.
+
+```cpp
+// Taken between calls, into a buffer the host sizes once: the size is fixed for the machine's life.
+std::vector<std::uint8_t> buffer(machine.state().byteSize());
+const std::size_t written = machine.state().asBytes(buffer);  // byteSize(), or 0 for a short buffer
+
+// Read back into a state the host keeps, then put into the machine.
+auto kept = std::make_unique<SnesState>();
+if (written != 0 && SnesState::fromBytes(buffer, *kept) && machine.restore(*kept)) {
+  // the machine stands where the bytes were taken
+}
+
+// The same in the allocating forms.
+const std::vector<std::uint8_t> bytes = machine.state().asBytes();
+const std::optional<SnesState> state = SnesState::fromBytes(bytes);
+```
+
+`byteSize()` is 268858 plus the save's size: 268858 for a cartridge with no save, 399930 for one with
+the largest, `kMaxSaveRamBytes`. The save's size is the cartridge's, so a machine's `byteSize()` is one
+value from construction on, through every run and every restore. `asBytes(out)` writes `byteSize()`
+bytes from the start of `out` and answers how many it wrote; given a shorter buffer it writes nothing
+and answers 0. `asBytes()` answers the bytes in a vector of their own. Take them between calls, where
+`state()` is coherent with either thread on.
+
+The bytes begin with a header: `SnesState::kBytesVersion` as two bytes, then the save's length as four.
+`SnesState`'s own fields follow in the order the struct declares them, work RAM first, then its parts
+in the order it declares them, each laid out by the same rule, and the save comes last. Every value is
+little-endian at its fixed width. A `bool` is one byte, 0 or 1; an enum is one byte, its value; an
+`int` is four bytes. Nothing is taken from the host's own representation of a value, so no padding,
+byte order or size of a type reaches the bytes. A controller port is one byte, 1 with a pad in it and
+0 without, then the pad's twelve buttons, or twelve zeros.
+
+| Offset | Bytes | What |
+|---|---|---|
+| 0 | 2 | `kBytesVersion` |
+| 2 | 4 | the save's length |
+| 6 | 131194 | `SnesState`'s own fields: work RAM, then every register and counter |
+| 131200 | 31 | `cpu` |
+| 131231 | 66833 | `apu`: sound RAM and the audio registers, then the SPC700, the DSP and the three timers |
+| 198064 | 26 | the two controller ports, 13 each |
+| 198090 | 70672 | `ppu`: VRAM, the palette, the sprite table and the registers, then the sprite line, the last main decision and the tile reads |
+| 268762 | 96 | `dma`: eight channels of 12 |
+| 268858 | the save's length | the save |
+
+`fromBytes(bytes, into)` reads the bytes into a state the host holds and answers whether it did. It
+allocates nothing when `into`'s save already has the length the bytes carry. `fromBytes(bytes)` answers
+a new state, or nothing. Both refuse any bytes `asBytes()` could not have written:
+
+- another `kBytesVersion`;
+- a save longer than `kMaxSaveRamBytes`;
+- a length that disagrees with the save's length in the header;
+- a `bool` byte other than 0 or 1, or an enum byte past its type's last value, anywhere in the state;
+- a port marked empty with a button byte set.
+
+A refusal leaves `into` exactly as it was: every byte is checked before the first is written. Bytes
+that are accepted are the bytes `asBytes()` gives back for the state they build, so two equal states
+have equal bytes and the bytes can be compared or hashed in place of the state. A later layout takes
+the next `kBytesVersion`, and bytes of any other version are refused rather than read forward.
+
+Decoding never touches a machine. The host hands the state it built to `restore()`, which refuses one
+whose save is another size than the machine's.
+
+Every part of the state has the same functions: `Cpu65816State`, `Spc700State`, `DspState`, `ApuState`,
+`PpuState`, `DmaChannel` and `Joypad` each carry a `static constexpr byteSize()`, both `asBytes()` forms
+and both `fromBytes()` forms, on the same terms, so a host can carry one part alone. A part has no
+header of its own; its bytes are the slice the table above gives it. Each part's layout is held by the
+`state_bytes_test.cpp` beside its other tests, and `tests/snes/state_bytes_test.cpp` holds the
+machine's, restoring the bytes into a second machine that then runs on to the same state and the same
+audio frames with each thread off and on.
 
 ## Reaching into the machine
 
@@ -1506,6 +1588,11 @@ machine that calls.
 - `run()`'s budget is in *master* cycles, not CPU cycles; a single CPU cycle is 6, 8, or 12 of them.
 - MEMSEL is slow at power-on. Code that wants the fast second region sets `$420D` bit 0 itself.
 - Frames are output, not state: a snapshot does not carry pending frames, and `restore()` discards any.
+- A `SnesState` is a quarter of a megabyte. Decode one where it is meant to live, in a member or a
+  `std::unique_ptr`, rather than on the stack of a deep call; `fromBytes(bytes, into)` fills a state
+  the host already holds in place.
+- `restore()` answers `false` and changes nothing for a state whose save is another size than the
+  machine's. A host restoring bytes from elsewhere checks the answer.
 - A multiply or divide result is not there immediately; read it after the documented cycles. Reading
   early returns the old value, not a partial one.
 - The first VRAM read after setting the address returns the same word twice — the documented prefetch

@@ -550,7 +550,9 @@ given read-only RAM it still reads, filters, and outputs echo but cannot write, 
 holding echo writes disabled. Below them, `decodeBrrBlock` decodes a block, `gaussInterpolate` runs
 the kernel, `stepVoice` advances one voice's stream, `stepVoiceEnvelope` advances one envelope, and
 `keyOnVoice` / `keyOffVoice` / `pollKeying` drive keying. The `DspState` is a value: copy it to
-snapshot, assign it to restore.
+snapshot, assign it to restore. It also travels as its 1256 bytes, the same on every platform, through
+`asBytes()` and `fromBytes()`, on the terms in
+[snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes).
 
 ## Gotchas
 

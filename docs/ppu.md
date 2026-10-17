@@ -31,7 +31,9 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 
 The PPU's state is one value, `PpuState`, held inside the machine's state as `SnesState::ppu`
 (`include/snaggletooth/snes/ppu.h`). A snapshot of the machine carries it whole and a restore puts
-it back, mid-latch included. Every register that is stored as written keeps the name the hardware
+it back, mid-latch included. It also travels as its 70672 bytes, the same on every platform, through
+`asBytes()` and `fromBytes()`, on the terms in
+[snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes). Every register that is stored as written keeps the name the hardware
 gives it (`objsel`, `bgmode`, `w12sel`, `cgadsub`, …); the three memories are `vram`, `cgram` and
 `oam`, and the machine's `vram()`, `cgram()` and `oam()` faces read them.
 

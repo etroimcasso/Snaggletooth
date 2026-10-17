@@ -480,6 +480,25 @@ inline constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM
 // is fixed configuration rather than state and lives in the machine, not here, so
 // restore() replaces the mutable machine and keeps the cartridge in place.
+//
+// The state also travels as bytes, for a host that keeps it or carries it to
+// another machine. asBytes() answers byteSize() bytes, and asBytes(out) writes them
+// into a buffer the host holds and answers how many it wrote, or writes nothing and
+// answers 0 when the buffer is shorter. fromBytes() reads them back, into a new
+// value or into one the host holds, and refuses any bytes asBytes() could not have
+// written: another kBytesVersion, a save longer than kMaxSaveRamBytes, a length that
+// disagrees with the save's length in the header, a `bool` byte other than 0 or 1,
+// an enum byte past its type's last value, or an empty port with a button byte
+// set. A refusal leaves the host's value as it was, and bytes fromBytes() accepts
+// are the ones asBytes() gives back for the value it built.
+//
+// The bytes begin with kBytesVersion and the save's length, then this struct's own
+// fields in the order they are declared, then cpu, apu, the two ports, ppu and the
+// eight DMA channels, each laid out by its own byte form, and end with the save. A
+// port is one byte, 1 with a pad in it and 0 without, then the pad's twelve bytes,
+// or twelve zeros. Every value is at its fixed little-endian width — a `bool` one
+// byte, an enum one byte, nothing taken from the host's representation — so a state
+// gives the same bytes on every platform. byteSize() is 268858 plus the save's size.
 struct SnesState {
   Cpu65816State cpu{};
   std::array<std::uint8_t, 131072> wram{};  // 128 KB work RAM (banks $7E-$7F)
@@ -617,6 +636,22 @@ struct SnesState {
   bool hdmaRunPending = false;   // an HDMA event is due on the next machine cycle
   bool hdmaIniting = false;      // that pending event is the start-of-frame init (rather than a delivery)
 
+  // The layout version the bytes begin with. A change to the layout of this struct
+  // or of any of its parts — a field added, removed, moved or widened — takes the
+  // next value, and fromBytes() refuses every value but this one. A field added to
+  // this struct joins the byte form in the same change.
+  static constexpr std::uint16_t kBytesVersion = 1u;
+
+  [[nodiscard]] std::size_t byteSize() const noexcept;
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  // A SnesState is a quarter of a megabyte. The value answered here is built in
+  // the optional the call returns; the form below fills a state the host already
+  // holds, and allocates nothing when its save is already the length the bytes
+  // carry.
+  [[nodiscard]] static std::optional<SnesState> fromBytes(std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes, SnesState& into);
+
   [[nodiscard]] bool operator==(const SnesState&) const noexcept = default;
 };
 
@@ -662,7 +697,11 @@ class Snes {
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
   // Takes the state by const reference rather than by value: a SnesState is a quarter
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
-  void restore(const SnesState& state);
+  // Answers true once the state is in place. Answers false, and leaves the machine
+  // exactly as it was, when the state's save is another size than this machine's:
+  // the save's size is the cartridge's, fixed for the machine's life like the
+  // cartridge, so a state with another is not a state of this machine.
+  bool restore(const SnesState& state);
 
   // The console's reset line, pulled and let go: what the button on the console
   // does. The machine starts again where construction starts it in time — the CPU
@@ -1380,9 +1419,9 @@ class Snes {
   // table is built once from the cartridge functions (`cartridge.h`) at
   // construction, from the map, the image's size and the board, and is fixed
   // with them; the router, peek and poke, the classification and the watch all
-  // read it, so one map answers every path. What can change afterwards is not
-  // in it: the save's size, which a restore replaces, is read at each access,
-  // and the image's bytes, which poke writes in place.
+  // read it, so one map answers every path. Two things are not in it and are
+  // read at each access: the save's size, and the image's bytes, which poke
+  // writes in place.
   enum class PageKind : std::uint8_t {
     WorkRam,     // base is the offset into the 128 KB
     System,      // a system bank's $2000-$5FFF: the register windows at their offsets, open bus between them
@@ -1447,8 +1486,7 @@ class Snes {
   [[nodiscard]] std::optional<Physical> classify(std::uint32_t address,
                                                  std::uint8_t spaces) const noexcept;
   // The armed table's slot for the chunk holding the byte `place`, or nothing
-  // for a byte past its space's size — which a save enlarged by a restore after
-  // the first arm can reach.
+  // for a byte past its space's size.
   [[nodiscard]] std::optional<std::size_t> armedSlot(Physical place) const noexcept;
   // Sets or clears the armed bit for the byte `place`, in either direction,
   // allocating its chunk on its first arm and freeing it when its last bit
@@ -2067,8 +2105,8 @@ class Snes {
   // What a page reaches, for the watch: one 8 KB run of one space — the space
   // and the index of the run's first byte — no byte at all, or bytes the page
   // does not reach linearly, which the classification settles per access. A
-  // save window is read as the save now stands, so a restore can change the
-  // answer. For Slow, `run.space` names the space whose armed bytes matter.
+  // save window is read as the save stands. For Slow, `run.space` names the
+  // space whose armed bytes matter.
   struct PageRun {
     Space space;
     std::uint32_t start;
