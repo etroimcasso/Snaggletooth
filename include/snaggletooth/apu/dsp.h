@@ -46,7 +46,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <vector>
 
 namespace snaggletooth {
 
@@ -543,6 +545,23 @@ struct DspState {
   }
   [[nodiscard]] auto begin() const noexcept { return regs.begin(); }
   [[nodiscard]] auto end() const noexcept { return regs.end(); }
+
+  // The state as bytes and back: byteSize() bytes, the struct's own fields in the
+  // order they are declared, then the eight voices and slotFrame, each laid out the
+  // same way, every value at its fixed little-endian width and each `int` as four
+  // bytes (SnesState's byte form in `snes/snes.h` gives the terms every part
+  // shares). asBytes(out) writes nothing and answers 0 when `out` is shorter than
+  // byteSize(). fromBytes refuses bytes of another length, a `bool` byte other than
+  // 0 or 1, or an envelope phase past Release, and leaves `into` as it was when it
+  // refuses. A field added to this struct or to a voice joins the byte form in the
+  // same change, and the layout's new version is SnesState::kBytesVersion's next
+  // value.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 1256u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<DspState> fromBytes(std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      DspState& into) noexcept;
 
   [[nodiscard]] bool operator==(const DspState&) const noexcept = default;
 };

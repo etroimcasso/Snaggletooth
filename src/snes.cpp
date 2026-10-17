@@ -14,6 +14,7 @@
 #define SNAGGLETOOTH_NOINLINE __attribute__((noinline))
 #endif
 
+#include "bytes.h"
 #include "snes_ipl_stub.h"
 
 namespace snaggletooth {
@@ -154,9 +155,6 @@ constexpr std::uint16_t kAutoJoyBit = 256u;
 constexpr std::uint8_t kAutoJoyBits = 16u;
 static_assert(kAutoJoyStrobe + kAutoJoyBits * kAutoJoyBit == 4224u,
               "the auto-read's busy window is the documented 4224 master cycles");
-
-// The largest save a cartridge can address through any window.
-constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 
 // The master-cycle cost of reaching an address, by the documented region map,
 // with the second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) at its
@@ -327,7 +325,9 @@ void Snes::setFrameObserver(FrameObserver* observer) noexcept {
   frameObserver_ = observer;
 }
 
-void Snes::restore(const SnesState& state) {
+bool Snes::restore(const SnesState& state) {
+  // A state whose save is another size is refused before anything is touched.
+  if (state.sram.size() != state_.sram.size()) return false;
   // The audio machine's state and the picture are replaced along with the rest.
   waitApu();
   waitPicture();
@@ -337,9 +337,9 @@ void Snes::restore(const SnesState& state) {
   // worse than one written again.
   saveChanged_ = true;
   load();
-  // The save the caller supplied may be another size, or none, which moves
-  // what its window's pages reach.
+  // The pages the watches reach are worked out again from the state now in place.
   if (armed_ || standins_) refreshWatchPages();
+  return true;
 }
 
 void Snes::load() {
@@ -684,11 +684,10 @@ Snes::Page Snes::imagePage(const CartridgeBoard& board, std::uint32_t address) c
 }
 
 void Snes::buildPages() {
-  // The table is fixed while the save's presence is not: a restore can fill or
-  // empty the save, and resolve reads which at each access. So the window's
-  // pages are built for the board with a save — any size, the functions ask
-  // only whether there is one — and each carries as its fallback what the board
-  // answers there with none.
+  // The table does not say whether there is a save: resolve reads that at each
+  // access. So the window's pages are built for the board with a save — any
+  // size, the functions ask only whether there is one — and each carries as its
+  // fallback what the board answers there with none.
   CartridgeBoard windowed = board_;
   windowed.saveRamBytes = kMaxSaveRamBytes;
   CartridgeBoard bare = board_;
@@ -2387,6 +2386,313 @@ std::uint16_t Joypad::bits() const noexcept {
     if (order[i]) word = static_cast<std::uint16_t>(word | (0x8000u >> i));
   }
   return word;
+}
+
+// ---- the channel and the pad as bytes -------------------------------------
+// Each is its fields in the order they are declared.
+
+namespace bytes {
+
+void putPart(std::uint8_t*& at, const DmaChannel& state) noexcept {
+  put8(at, state.dmap);
+  put8(at, state.bbad);
+  put16(at, state.a1t);
+  put8(at, state.a1b);
+  put16(at, state.das);
+  put8(at, state.dasb);
+  put16(at, state.a2a);
+  put8(at, state.nltr);
+  put8(at, state.unused);
+}
+
+void readPart(Reader& in, DmaChannel& state) noexcept {
+  in.u8(state.dmap);
+  in.u8(state.bbad);
+  in.u16(state.a1t);
+  in.u8(state.a1b);
+  in.u16(state.das);
+  in.u8(state.dasb);
+  in.u16(state.a2a);
+  in.u8(state.nltr);
+  in.u8(state.unused);
+}
+
+void putPart(std::uint8_t*& at, const Joypad& state) noexcept {
+  putBool(at, state.b);
+  putBool(at, state.y);
+  putBool(at, state.select);
+  putBool(at, state.start);
+  putBool(at, state.up);
+  putBool(at, state.down);
+  putBool(at, state.left);
+  putBool(at, state.right);
+  putBool(at, state.a);
+  putBool(at, state.x);
+  putBool(at, state.l);
+  putBool(at, state.r);
+}
+
+void readPart(Reader& in, Joypad& state) noexcept {
+  in.boolean(state.b);
+  in.boolean(state.y);
+  in.boolean(state.select);
+  in.boolean(state.start);
+  in.boolean(state.up);
+  in.boolean(state.down);
+  in.boolean(state.left);
+  in.boolean(state.right);
+  in.boolean(state.a);
+  in.boolean(state.x);
+  in.boolean(state.l);
+  in.boolean(state.r);
+}
+
+}  // namespace bytes
+
+std::vector<std::uint8_t> DmaChannel::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t DmaChannel::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<DmaChannel> DmaChannel::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<DmaChannel>(bytes);
+}
+
+bool DmaChannel::fromBytes(std::span<const std::uint8_t> bytes, DmaChannel& into) noexcept {
+  return bytes::decodeInto(bytes, into);
+}
+
+std::vector<std::uint8_t> Joypad::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t Joypad::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<Joypad> Joypad::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<Joypad>(bytes);
+}
+
+bool Joypad::fromBytes(std::span<const std::uint8_t> bytes, Joypad& into) noexcept {
+  return bytes::decodeInto(bytes, into);
+}
+
+// ---- the machine as bytes -------------------------------------------------
+// The version and the save's length, SnesState's own fields in the order they are
+// declared, the parts — cpu, apu, the two ports, ppu, the eight channels — and the
+// save last.
+
+namespace bytes {
+namespace {
+
+// The version and the save's length.
+constexpr std::size_t kHeaderBytes = 6u;
+// Every byte before the save: the header, the state's own 131194 and its parts.
+constexpr std::size_t kBytesBeforeSave = 268858u;
+
+// A port: 1 and the pad's twelve bytes, or 0 and twelve zeros.
+void putPort(std::uint8_t*& at, const std::optional<Joypad>& pad) noexcept {
+  putBool(at, pad.has_value());
+  if (pad.has_value()) {
+    putPart(at, *pad);
+    return;
+  }
+  for (std::size_t i = 0u; i < Joypad::byteSize(); ++i) put8(at, 0u);
+}
+
+void readPort(Reader& in, std::optional<Joypad>& pad) noexcept {
+  const std::uint8_t present = in.take();
+  if (!checkBool(present)) {
+    in.refuse();
+    in.zeros(Joypad::byteSize());
+    return;
+  }
+  if (present == 0u) {
+    in.zeros(Joypad::byteSize());
+    if (in.fills()) pad.reset();
+    return;
+  }
+  if (!in.fills()) {
+    Joypad checked;
+    readPart(in, checked);
+    return;
+  }
+  if (!pad.has_value()) pad.emplace();
+  readPart(in, *pad);
+}
+
+void putMachine(std::uint8_t*& at, const SnesState& state) noexcept {
+  putBytes(at, state.wram);
+  put32(at, state.wmadd);
+  put8(at, state.memsel);
+  put8(at, state.mdr);
+  put64(at, state.master);
+  put64(at, state.consumed);
+  put32(at, state.apuPhase);
+  put16(at, state.hpos);
+  put16(at, state.vpos);
+  put8(at, state.field);
+  putBool(at, state.inVblank);
+  put16(at, state.vblankBeginLine);
+  put16(at, state.previousLineMaster);
+  put64(at, state.refreshAt);
+  put8(at, state.refreshLeft);
+  put8(at, state.nmitimen);
+  putBool(at, state.vblankNmi);
+  putBool(at, state.timeup);
+  put16(at, state.htime);
+  put16(at, state.vtime);
+  put8(at, state.wrmpya);
+  put8(at, state.wrmpyb);
+  put16(at, state.wrdiv);
+  put8(at, state.wrdivb);
+  put16(at, state.rddiv);
+  put16(at, state.rdmpy);
+  put8(at, state.mathClocks);
+  putEnum(at, state.mathOp);
+  put16(at, state.mathLeft);
+  put8(at, state.mathRight);
+  putBool(at, state.joyStrobe);
+  for (const std::uint16_t latched : state.joyLatch) put16(at, latched);
+  putBytes(at, state.joyClocks);
+  put64(at, state.autoJoyStart);
+  put8(at, state.autoJoyClocked);
+  putBytes(at, state.joy);
+  put8(at, state.wrio);
+  put64(at, state.counterLatchAt);
+  put8(at, state.mdmaen);
+  put8(at, state.hdmaen);
+  put8(at, state.dmaArm);
+  putBool(at, state.dmaRunning);
+  putBool(at, state.dmaOpened);
+  putBool(at, state.dmaChannelOpened);
+  put8(at, state.dmaUnit);
+  put64(at, state.dmaPauseMaster);
+  putBool(at, state.dmaResumePad);
+  put8(at, state.hdmaActive);
+  put8(at, state.hdmaEnded);
+  put8(at, state.hdmaDoWrite);
+  putBool(at, state.hdmaInited);
+  putBool(at, state.hdmaLineFired);
+  putBool(at, state.hdmaRunPending);
+  putBool(at, state.hdmaIniting);
+  putPart(at, state.cpu);
+  putPart(at, state.apu);
+  for (const std::optional<Joypad>& pad : state.pads) putPort(at, pad);
+  putPart(at, state.ppu);
+  for (const DmaChannel& channel : state.dma) putPart(at, channel);
+}
+
+void readMachine(Reader& in, SnesState& state) noexcept {
+  in.bytes(state.wram);
+  in.u32(state.wmadd);
+  in.u8(state.memsel);
+  in.u8(state.mdr);
+  in.u64(state.master);
+  in.u64(state.consumed);
+  in.u32(state.apuPhase);
+  in.u16(state.hpos);
+  in.u16(state.vpos);
+  in.u8(state.field);
+  in.boolean(state.inVblank);
+  in.u16(state.vblankBeginLine);
+  in.u16(state.previousLineMaster);
+  in.u64(state.refreshAt);
+  in.u8(state.refreshLeft);
+  in.u8(state.nmitimen);
+  in.boolean(state.vblankNmi);
+  in.boolean(state.timeup);
+  in.u16(state.htime);
+  in.u16(state.vtime);
+  in.u8(state.wrmpya);
+  in.u8(state.wrmpyb);
+  in.u16(state.wrdiv);
+  in.u8(state.wrdivb);
+  in.u16(state.rddiv);
+  in.u16(state.rdmpy);
+  in.u8(state.mathClocks);
+  in.enumeration(state.mathOp, MathOp::Divide);
+  in.u16(state.mathLeft);
+  in.u8(state.mathRight);
+  in.boolean(state.joyStrobe);
+  for (std::uint16_t& latched : state.joyLatch) in.u16(latched);
+  in.bytes(state.joyClocks);
+  in.u64(state.autoJoyStart);
+  in.u8(state.autoJoyClocked);
+  in.bytes(state.joy);
+  in.u8(state.wrio);
+  in.u64(state.counterLatchAt);
+  in.u8(state.mdmaen);
+  in.u8(state.hdmaen);
+  in.u8(state.dmaArm);
+  in.boolean(state.dmaRunning);
+  in.boolean(state.dmaOpened);
+  in.boolean(state.dmaChannelOpened);
+  in.u8(state.dmaUnit);
+  in.u64(state.dmaPauseMaster);
+  in.boolean(state.dmaResumePad);
+  in.u8(state.hdmaActive);
+  in.u8(state.hdmaEnded);
+  in.u8(state.hdmaDoWrite);
+  in.boolean(state.hdmaInited);
+  in.boolean(state.hdmaLineFired);
+  in.boolean(state.hdmaRunPending);
+  in.boolean(state.hdmaIniting);
+  readPart(in, state.cpu);
+  readPart(in, state.apu);
+  for (std::optional<Joypad>& pad : state.pads) readPort(in, pad);
+  readPart(in, state.ppu);
+  for (DmaChannel& channel : state.dma) readPart(in, channel);
+}
+
+}  // namespace
+}  // namespace bytes
+
+std::size_t SnesState::byteSize() const noexcept {
+  return bytes::kBytesBeforeSave + sram.size();
+}
+
+std::size_t SnesState::asBytes(std::span<std::uint8_t> out) const noexcept {
+  if (out.size() < byteSize()) return 0u;
+  std::uint8_t* at = out.data();
+  bytes::put16(at, kBytesVersion);
+  bytes::put32(at, static_cast<std::uint32_t>(sram.size()));
+  bytes::putMachine(at, *this);
+  at = std::copy(sram.begin(), sram.end(), at);
+  return static_cast<std::size_t>(at - out.data());
+}
+
+std::vector<std::uint8_t> SnesState::asBytes() const {
+  std::vector<std::uint8_t> out(byteSize());
+  const std::size_t written = asBytes(std::span<std::uint8_t>(out));
+  out.resize(written);
+  return out;
+}
+
+bool SnesState::fromBytes(std::span<const std::uint8_t> bytes, SnesState& into) {
+  if (bytes.size() < bytes::kHeaderBytes) return false;
+  const std::uint8_t* at = bytes.data();
+  if (bytes::get16(at) != kBytesVersion) return false;
+  const std::uint32_t saveBytes = bytes::get32(at);
+  if (saveBytes > kMaxSaveRamBytes) return false;
+  if (bytes.size() != bytes::kBytesBeforeSave + saveBytes) return false;
+  bytes::Reader check(at, bytes::Reader::Pass::Check);
+  bytes::readMachine(check, into);
+  if (!check.ok()) return false;
+  bytes::Reader fill(at, bytes::Reader::Pass::Fill);
+  bytes::readMachine(fill, into);
+  into.sram.assign(fill.at(), fill.at() + saveBytes);
+  return true;
+}
+
+std::optional<SnesState> SnesState::fromBytes(std::span<const std::uint8_t> bytes) {
+  std::optional<SnesState> value{std::in_place};
+  if (!fromBytes(bytes, *value)) value.reset();
+  return value;
 }
 
 void Snes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {

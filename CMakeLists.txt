@@ -34,6 +34,8 @@ option(SNAGGLETOOTH_BUILD_PLAYER "Build the player, which needs SDL3" ${PROJECT_
 
 add_library(snaggletooth STATIC
   src/version.cpp
+  src/cpu65816.cpp
+  src/spc700.cpp
   src/apu.cpp
   src/dsp.cpp
   src/cartridge.cpp
@@ -619,6 +621,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/disasm/framework_test.cpp
     tests/assembler/assembler_test.cpp
     tests/spc700/asm_test.cpp
+    tests/spc700/state_bytes_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp
@@ -633,6 +636,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/cpu65816/vector_test.cpp
     tests/cpu65816/disasm_test.cpp
     tests/cpu65816/asm_test.cpp
+    tests/cpu65816/state_bytes_test.cpp
     tests/snes/bus_test.cpp
     tests/snes/cartridge_map_test.cpp
     tests/snes/cartridge_header_test.cpp
@@ -682,6 +686,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/ipl_stub_test.cpp
     tests/snes/boot_rom_test.cpp
     tests/snes/blargg_test.cpp
+    tests/snes/state_bytes_test.cpp
+    tests/snes/ppu_state_bytes_test.cpp
     tests/apu/machine_test.cpp
     tests/apu/host_memory_test.cpp
     tests/apu/access_watch_test.cpp
@@ -692,6 +698,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/apu/timer_test.cpp
     tests/apu/cycle_timing_test.cpp
     tests/apu/ipl_rom_test.cpp
+    tests/apu/state_bytes_test.cpp
     tests/dsp/brr_test.cpp
     tests/dsp/dsp_state_test.cpp
     tests/dsp/pitch_gauss_test.cpp
@@ -701,6 +708,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/dsp/echo_test.cpp
     tests/dsp/sample_schedule_test.cpp
     tests/dsp/filter_history_test.cpp
+    tests/dsp/state_bytes_test.cpp
     tests/spc/loader_test.cpp
     tests/spc/wav_test.cpp
     tests/spc/render_test.cpp

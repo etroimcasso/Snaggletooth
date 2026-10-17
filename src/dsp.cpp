@@ -2,6 +2,8 @@
 
 #include <initializer_list>
 
+#include "bytes.h"
+
 namespace snaggletooth {
 
 namespace {
@@ -1967,6 +1969,245 @@ static void runEnvelopeMode(DspState& dsp, std::size_t voice) noexcept {
   v.bentGainRef = static_cast<std::uint16_t>(newLevel);
   if (decayToSustain || alreadySustaining) v.phase = EnvPhase::Sustain;
   if (attackToDecay) v.phase = EnvPhase::Decay;
+}
+
+// ---- the state as bytes ---------------------------------------------------
+// The layout is DspState's own fields in the order they are declared, then the
+// eight voices, then slotFrame. A voice is its own fields in the order they are
+// declared, then its sample window, then its three scheduled group decodes.
+
+namespace {
+
+void putWindow(std::uint8_t*& at, const SampleWindow& window) noexcept {
+  bytes::putI16(at, window.newest);
+  bytes::putI16(at, window.old);
+  bytes::putI16(at, window.older);
+  bytes::putI16(at, window.oldest);
+}
+
+void readWindow(bytes::Reader& in, SampleWindow& window) noexcept {
+  in.i16(window.newest);
+  in.i16(window.old);
+  in.i16(window.older);
+  in.i16(window.oldest);
+}
+
+void putGroup(std::uint8_t*& at, const VoiceState::GroupDecode& group) noexcept {
+  bytes::put16(at, group.address);
+  bytes::put8(at, group.offset);
+  bytes::put8(at, group.header);
+  bytes::put8(at, group.firstByte);
+  bytes::putBool(at, group.bytesLoaded);
+  bytes::put8(at, group.decodedSamples);
+  bytes::putBool(at, group.headerCaptured);
+}
+
+void readGroup(bytes::Reader& in, VoiceState::GroupDecode& group) noexcept {
+  in.u16(group.address);
+  in.u8(group.offset);
+  in.u8(group.header);
+  in.u8(group.firstByte);
+  in.boolean(group.bytesLoaded);
+  in.u8(group.decodedSamples);
+  in.boolean(group.headerCaptured);
+}
+
+void putVoice(std::uint8_t*& at, const VoiceState& voice) noexcept {
+  bytes::put16(at, voice.brrAddress);
+  bytes::put16(at, voice.decoderAddress);
+  bytes::put16(at, voice.headerAddress);
+  bytes::put8(at, voice.brrSampleIndex);
+  bytes::put16(at, voice.pitchCounter);
+  for (const std::int16_t sample : voice.pending) bytes::putI16(at, sample);
+  bytes::put8(at, voice.pendingHead);
+  bytes::put8(at, voice.pendingCount);
+  bytes::put8(at, voice.scheduledDecodeCount);
+  bytes::put8(at, voice.loadedHeader);
+  bytes::putBool(at, voice.headerLoaded);
+  bytes::put16(at, voice.loopPointer);
+  bytes::putBool(at, voice.loopPointerLoaded);
+  bytes::put8(at, voice.srcn);
+  bytes::putBool(at, voice.srcnLoaded);
+  bytes::put8(at, voice.pitchLow);
+  bytes::put16(at, voice.pitchPending);
+  bytes::putBool(at, voice.pitchPendingValid);
+  bytes::put8(at, voice.adsr1);
+  bytes::putBool(at, voice.adsr1Loaded);
+  bytes::putI16(at, voice.decodePrev1);
+  bytes::putI16(at, voice.decodePrev2);
+  bytes::put16(at, voice.envelope);
+  bytes::putEnum(at, voice.phase);
+  bytes::put8(at, voice.konDelay);
+  bytes::put8(at, voice.computesSinceKeyOn);
+  bytes::put8(at, voice.pitchCaptureHold);
+  bytes::putBool(at, voice.restartPending);
+  bytes::putBool(at, voice.startPending);
+  bytes::putBool(at, voice.startupWalks);
+  bytes::put16(at, voice.bentGainRef);
+  putWindow(at, voice.window);
+  for (const VoiceState::GroupDecode& group : voice.scheduledDecodes) putGroup(at, group);
+}
+
+void readVoice(bytes::Reader& in, VoiceState& voice) noexcept {
+  in.u16(voice.brrAddress);
+  in.u16(voice.decoderAddress);
+  in.u16(voice.headerAddress);
+  in.u8(voice.brrSampleIndex);
+  in.u16(voice.pitchCounter);
+  for (std::int16_t& sample : voice.pending) in.i16(sample);
+  in.u8(voice.pendingHead);
+  in.u8(voice.pendingCount);
+  in.u8(voice.scheduledDecodeCount);
+  in.u8(voice.loadedHeader);
+  in.boolean(voice.headerLoaded);
+  in.u16(voice.loopPointer);
+  in.boolean(voice.loopPointerLoaded);
+  in.u8(voice.srcn);
+  in.boolean(voice.srcnLoaded);
+  in.u8(voice.pitchLow);
+  in.u16(voice.pitchPending);
+  in.boolean(voice.pitchPendingValid);
+  in.u8(voice.adsr1);
+  in.boolean(voice.adsr1Loaded);
+  in.i16(voice.decodePrev1);
+  in.i16(voice.decodePrev2);
+  in.u16(voice.envelope);
+  in.enumeration(voice.phase, EnvPhase::Release);
+  in.u8(voice.konDelay);
+  in.u8(voice.computesSinceKeyOn);
+  in.u8(voice.pitchCaptureHold);
+  in.boolean(voice.restartPending);
+  in.boolean(voice.startPending);
+  in.boolean(voice.startupWalks);
+  in.u16(voice.bentGainRef);
+  readWindow(in, voice.window);
+  for (VoiceState::GroupDecode& group : voice.scheduledDecodes) readGroup(in, group);
+}
+
+}  // namespace
+
+namespace bytes {
+
+void putPart(std::uint8_t*& at, const DspState& state) noexcept {
+  putBytes(at, state.regs);
+  put16(at, state.globalCounter);
+  put32(at, state.sampleIndex);
+  put8(at, state.internalKon);
+  put8(at, state.consumedKon);
+  put8(at, state.latchedPmon);
+  put8(at, state.latchedNon);
+  put8(at, state.latchedEon);
+  put8(at, state.latchedDir);
+  putBytes(at, state.envxStage);
+  put8(at, state.preparedEndx);
+  put8(at, state.pendingEndxClear);
+  put64(at, state.cycleCount);
+  for (const std::uint64_t stamp : state.outxWriteCycle) put64(at, stamp);
+  for (const std::uint64_t stamp : state.envxWriteCycle) put64(at, stamp);
+  put64(at, state.endxWriteCycle);
+  put64(at, state.konWriteCycle);
+  putI16(at, state.noiseLevel);
+  put16(at, state.echoIndex);
+  put16(at, state.echoLength);
+  put8(at, state.echoAppliedEsa);
+  for (const std::int16_t sample : state.echoFirLeft) putI16(at, sample);
+  for (const std::int16_t sample : state.echoFirRight) putI16(at, sample);
+  for (const std::int8_t coefficient : state.echoFirCoeff) putI8(at, coefficient);
+  put8(at, state.echoFirPos);
+  put8(at, state.slotCursor);
+  putBool(at, state.primed);
+  putI32(at, state.mixLeft);
+  putI32(at, state.mixRight);
+  putI32(at, state.echoSendLeft);
+  putI32(at, state.echoSendRight);
+  putBool(at, state.echoWritePending);
+  put16(at, state.echoWriteEntry);
+  putBytes(at, state.echoWriteBytes);
+  for (const int amplitude : state.voiceAmplitude) putI32(at, amplitude);
+  for (const int amplitude : state.modulatorAmplitude) putI32(at, amplitude);
+  putBytes(at, state.preparedOutx);
+  putBytes(at, state.preparedEnvx);
+  for (const std::uint16_t step : state.pitchLatch) put16(at, step);
+  put8(at, state.pitchReloadPending);
+  putI32(at, state.echoFirOutLeft);
+  putI32(at, state.echoFirOutRight);
+  putBool(at, state.echoGateLeft);
+  putBool(at, state.echoGateRight);
+  put8(at, state.echoLatchedEsa);
+  put8(at, state.echoLatchedEdl);
+  for (const VoiceState& voice : state.voices) putVoice(at, voice);
+  putI16(at, state.slotFrame.left);
+  putI16(at, state.slotFrame.right);
+}
+
+void readPart(Reader& in, DspState& state) noexcept {
+  in.bytes(state.regs);
+  in.u16(state.globalCounter);
+  in.u32(state.sampleIndex);
+  in.u8(state.internalKon);
+  in.u8(state.consumedKon);
+  in.u8(state.latchedPmon);
+  in.u8(state.latchedNon);
+  in.u8(state.latchedEon);
+  in.u8(state.latchedDir);
+  in.bytes(state.envxStage);
+  in.u8(state.preparedEndx);
+  in.u8(state.pendingEndxClear);
+  in.u64(state.cycleCount);
+  for (std::uint64_t& stamp : state.outxWriteCycle) in.u64(stamp);
+  for (std::uint64_t& stamp : state.envxWriteCycle) in.u64(stamp);
+  in.u64(state.endxWriteCycle);
+  in.u64(state.konWriteCycle);
+  in.i16(state.noiseLevel);
+  in.u16(state.echoIndex);
+  in.u16(state.echoLength);
+  in.u8(state.echoAppliedEsa);
+  for (std::int16_t& sample : state.echoFirLeft) in.i16(sample);
+  for (std::int16_t& sample : state.echoFirRight) in.i16(sample);
+  for (std::int8_t& coefficient : state.echoFirCoeff) in.i8(coefficient);
+  in.u8(state.echoFirPos);
+  in.u8(state.slotCursor);
+  in.boolean(state.primed);
+  in.i32(state.mixLeft);
+  in.i32(state.mixRight);
+  in.i32(state.echoSendLeft);
+  in.i32(state.echoSendRight);
+  in.boolean(state.echoWritePending);
+  in.u16(state.echoWriteEntry);
+  in.bytes(state.echoWriteBytes);
+  for (int& amplitude : state.voiceAmplitude) in.i32(amplitude);
+  for (int& amplitude : state.modulatorAmplitude) in.i32(amplitude);
+  in.bytes(state.preparedOutx);
+  in.bytes(state.preparedEnvx);
+  for (std::uint16_t& step : state.pitchLatch) in.u16(step);
+  in.u8(state.pitchReloadPending);
+  in.i32(state.echoFirOutLeft);
+  in.i32(state.echoFirOutRight);
+  in.boolean(state.echoGateLeft);
+  in.boolean(state.echoGateRight);
+  in.u8(state.echoLatchedEsa);
+  in.u8(state.echoLatchedEdl);
+  for (VoiceState& voice : state.voices) readVoice(in, voice);
+  in.i16(state.slotFrame.left);
+  in.i16(state.slotFrame.right);
+}
+
+}  // namespace bytes
+
+std::vector<std::uint8_t> DspState::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t DspState::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<DspState> DspState::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<DspState>(bytes);
+}
+
+bool DspState::fromBytes(std::span<const std::uint8_t> bytes, DspState& into) noexcept {
+  return bytes::decodeInto(bytes, into);
 }
 
 }  // namespace snaggletooth

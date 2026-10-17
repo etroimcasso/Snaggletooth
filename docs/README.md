@@ -30,6 +30,7 @@ what is unstarted.
 | Plug in a controller and play a cartridge, or write an input mapping of your own | [pad-config.md](pad-config.md) |
 | Find where your configs and saves are kept, or keep them somewhere else | [user-files.md](user-files.md) |
 | Keep a cartridge's battery save from a program of your own | [snes-machine.md §The save observer](snes-machine.md#the-save-observer) |
+| Carry a machine's state as bytes, and bring it back | [snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes) |
 | Take the picture the machine draws | [ppu.md §The picture](ppu.md#the-picture) |
 | See how a line is drawn in half-pixels, and how an interlaced frame reads its half-lines | [ppu.md §The half-pixel line](ppu.md#the-half-pixel-line), [ppu.md §The interlaced picture](ppu.md#the-interlaced-picture), [ppu-behavior.md §Hires](ppu-behavior.md#hires) |
 | See how a line's sprites are found and drawn, what a mid-line write to `$2101` reaches, and what a crowded line loses | [ppu.md §The sprites](ppu.md#the-sprites), [ppu-behavior.md §The sprites](ppu-behavior.md#the-sprites) |

@@ -34,6 +34,9 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
 
 namespace snaggletooth {
 
@@ -131,6 +134,22 @@ struct Cpu65816State {
   InterruptRequest servicing = InterruptRequest::None;
 
   CpuRunState run = CpuRunState::Running;
+
+  // The state as bytes and back: byteSize() bytes, the fields in the order they
+  // are declared, each at its fixed little-endian width (SnesState's byte form in
+  // `snes/snes.h` gives the terms every part shares). asBytes(out) writes nothing
+  // and answers 0 when `out` is shorter than byteSize(). fromBytes refuses bytes
+  // of another length, a `bool` byte other than 0 or 1, or an enum byte past its
+  // type's last value, and leaves `into` as it was when it refuses. A field added
+  // to this struct joins its byte form in the same change, and the layout's new
+  // version is SnesState::kBytesVersion's next value.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 31u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<Cpu65816State> fromBytes(
+      std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      Cpu65816State& into) noexcept;
 
   [[nodiscard]] bool operator==(const Cpu65816State&) const noexcept = default;
 };

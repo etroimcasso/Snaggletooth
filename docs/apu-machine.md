@@ -338,6 +338,25 @@ What a host sets up is its own and not part of the state: the observer, the watc
 armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
 leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set.
 
+The state also travels as bytes, the same on every platform, for a host that keeps a sound program's
+state or carries it to another machine. `ApuState::byteSize()` is 66833: sound RAM and the audio
+registers in the order the struct declares them, then the SPC700's 17 bytes, the DSP's 1256 and the
+three timers'.
+
+```cpp
+const std::vector<std::uint8_t> bytes = apu.state().asBytes();   // 66833 bytes
+auto kept = std::make_unique<snaggletooth::ApuState>();
+if (snaggletooth::ApuState::fromBytes(bytes, *kept)) {
+  apu.restore(*kept);                                         // the machine resumes where the bytes were taken
+}
+```
+
+`asBytes(out)` writes into a buffer the host holds, or writes nothing and answers 0 when the buffer is
+short, and `fromBytes(bytes)` answers a new state or nothing. Decoding refuses bytes of another length
+and any byte the encoder could not have written, and a refusal leaves `into` as it was. The layout's
+terms — the widths, the order, the version a change to it takes — are the machine's, in
+[snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes).
+
 ## Host RAM access
 
 For loading images and inspecting memory, the machine exposes RAM directly:

@@ -1,8 +1,11 @@
 #include "snaggletooth/snes/cartridge.h"
 
 #include <bit>
+#include <cstddef>
 #include <string>
 #include <string_view>
+
+#include "snaggletooth/snes/snes.h"
 
 namespace snaggletooth {
 namespace {
@@ -56,9 +59,6 @@ constexpr std::size_t kExtendedChipsetSubtype = 0x0Fu;
 constexpr std::uint8_t kMapModeFast = 0x10u;
 constexpr std::uint8_t kMapModeExHiRom = 0x05u;  // the low nibble that names ExHiROM
 constexpr std::uint8_t kDeveloperExtended = 0x33u;  // the developer byte that says an extended header follows
-
-// The largest save a cartridge can address through any window.
-constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 
 // The largest image a map can address: ExHiROM's two halves.
 constexpr std::size_t kMaxRomBytes = 8u * 1024u * 1024u;

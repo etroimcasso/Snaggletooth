@@ -84,6 +84,22 @@ struct ApuState {
   std::uint16_t divider = 0;                  // the master cycle counter: timer ticks and sample boundaries
   std::array<TimerState, 3> timers{};
 
+  // The machine as bytes and back: byteSize() bytes, the struct's own fields in
+  // the order they are declared — the RAM first — then cpu, dsp and the three
+  // timers, each laid out by its own byte form, every value at its fixed
+  // little-endian width (SnesState's byte form in `snes/snes.h` gives the terms
+  // every part shares). asBytes(out) writes nothing and answers 0 when `out` is
+  // shorter than byteSize(). fromBytes refuses bytes of another length or any byte
+  // a part refuses, and leaves `into` as it was when it refuses. A field added to
+  // this struct or to a timer joins the byte form in the same change, and the
+  // layout's new version is SnesState::kBytesVersion's next value.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 66833u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<ApuState> fromBytes(std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      ApuState& into) noexcept;
+
   [[nodiscard]] bool operator==(const ApuState&) const noexcept = default;
 };
 

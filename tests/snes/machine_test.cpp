@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -321,6 +322,42 @@ TEST(SnesMachine, RestoreReloadsTheAudioMachinesLiveCore) {
   EXPECT_EQ(m.state().apu.cpu.pc, after.pc);
   EXPECT_EQ(m.state().apu.cpu.tcu, after.tcu);
   EXPECT_EQ(m.state().apu.cpu.a, after.a);
+}
+
+// The loop cartridge on a machine built with a save of `saveBytes`.
+Snes loopMachineWithSave(std::size_t saveBytes) {
+  std::vector<std::uint8_t> rom(0x8000u, 0x00u);
+  rom[0] = 0xEAu;  // NOP
+  rom[1] = 0x80u;  // BRA
+  rom[2] = 0xFDu;  // -3 -> back to $8000
+  rom[0x7FFCu] = 0x00u;  // reset vector -> $8000
+  rom[0x7FFDu] = 0x80u;
+  return Snes(SnesConfig{.rom = rom, .saveRamBytes = saveBytes});
+}
+
+TEST(SnesMachine, RestoreRefusesAStateWhoseSaveSizeDiffers) {
+  // The save's size is the cartridge's: a state from a machine with no save, or
+  // with a smaller one, is not a state of this machine, and nothing is touched.
+  Snes m = loopMachineWithSave(8192u);
+  m.run(500);
+  const SnesState before = m.state();
+  for (const std::size_t other : {std::size_t{0u}, std::size_t{2048u}}) {
+    Snes donor = loopMachineWithSave(other);
+    donor.run(1500);
+    EXPECT_FALSE(m.restore(donor.state())) << other;
+    EXPECT_TRUE(m.state() == before) << other;
+    EXPECT_EQ(m.state().master, before.master) << other;
+  }
+}
+
+TEST(SnesMachine, RestoreAcceptsAStateOfItsOwnSaveSize) {
+  Snes m = loopMachineWithSave(8192u);
+  Snes donor = loopMachineWithSave(8192u);
+  donor.run(1500);
+  donor.poke(0x700010u, 0x5Au);  // a byte of the save the restore carries
+  EXPECT_TRUE(m.restore(donor.state()));
+  EXPECT_TRUE(m.state() == donor.state());
+  EXPECT_EQ(m.state().sram[0x10u], 0x5Au);
 }
 
 TEST(SnesMachine, TheSnapshotIsTheStorageTheAudioMachineRunsIn) {

@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstring>
 
+#include "bytes.h"
+
 namespace snaggletooth {
 namespace {
 
@@ -1712,6 +1714,255 @@ std::optional<std::uint16_t> Ppu::write(std::uint16_t offset, std::uint8_t value
     case 0x2133: s_.setini = value; return std::nullopt;
     default: return std::nullopt;  // the read-only ports ignore writes
   }
+}
+
+// ---- the chip as bytes ----------------------------------------------------
+// The layout is PpuState's own fields in the order they are declared, then
+// sprites, lastMain and the 132 tile reads — BG1's 33 columns, then BG2's, BG3's
+// and BG4's. Each part is its fields in the order they are declared.
+
+namespace {
+
+void putSprites(std::uint8_t*& at, const SpriteLine& sprites) noexcept {
+  bytes::putBytes(at, sprites.word);
+  bytes::putBytes(at, sprites.priority);
+  bytes::put16(at, sprites.line);
+  bytes::putBytes(at, sprites.inRange);
+  bytes::put8(at, sprites.found);
+  bytes::put8(at, sprites.scanned);
+  bytes::put8(at, sprites.first);
+}
+
+void readSprites(bytes::Reader& in, SpriteLine& sprites) noexcept {
+  in.bytes(sprites.word);
+  in.bytes(sprites.priority);
+  in.u16(sprites.line);
+  in.bytes(sprites.inRange);
+  in.u8(sprites.found);
+  in.u8(sprites.scanned);
+  in.u8(sprites.first);
+}
+
+void putMain(std::uint8_t*& at, const PpuState::MainDecision& decision) noexcept {
+  bytes::putBool(at, decision.present);
+  bytes::putBool(at, decision.clipped);
+  bytes::put8(at, decision.addend);
+  bytes::putBool(at, decision.subtract);
+  bytes::putBool(at, decision.halved);
+  bytes::put16(at, decision.colour);
+}
+
+void readMain(bytes::Reader& in, PpuState::MainDecision& decision) noexcept {
+  in.boolean(decision.present);
+  in.boolean(decision.clipped);
+  in.u8(decision.addend);
+  in.boolean(decision.subtract);
+  in.boolean(decision.halved);
+  in.u16(decision.colour);
+}
+
+void putTile(std::uint8_t*& at, const TileRead& tile) noexcept {
+  bytes::putBytes(at, tile.pixel);
+  bytes::put16(at, tile.entry);
+  bytes::put16(at, tile.bgX);
+  bytes::put16(at, tile.bgY);
+  bytes::put8(at, tile.planes);
+  bytes::put8(at, tile.fine);
+  bytes::putBool(at, tile.large);
+  bytes::putBool(at, tile.hires);
+}
+
+void readTile(bytes::Reader& in, TileRead& tile) noexcept {
+  in.bytes(tile.pixel);
+  in.u16(tile.entry);
+  in.u16(tile.bgX);
+  in.u16(tile.bgY);
+  in.u8(tile.planes);
+  in.u8(tile.fine);
+  in.boolean(tile.large);
+  in.boolean(tile.hires);
+}
+
+}  // namespace
+
+namespace bytes {
+
+void putPart(std::uint8_t*& at, const PpuState& state) noexcept {
+  putBytes(at, state.vram);
+  putBytes(at, state.cgram);
+  putBytes(at, state.oam);
+  put8(at, state.inidisp);
+  put8(at, state.objsel);
+  put8(at, state.bgmode);
+  put8(at, state.mosaic);
+  put8(at, state.bg1sc);
+  put8(at, state.bg2sc);
+  put8(at, state.bg3sc);
+  put8(at, state.bg4sc);
+  put8(at, state.bg12nba);
+  put8(at, state.bg34nba);
+  put8(at, state.setini);
+  put16(at, state.bg1hofs);
+  put16(at, state.bg1vofs);
+  put16(at, state.bg2hofs);
+  put16(at, state.bg2vofs);
+  put16(at, state.bg3hofs);
+  put16(at, state.bg3vofs);
+  put16(at, state.bg4hofs);
+  put16(at, state.bg4vofs);
+  put8(at, state.bgLatch);
+  put8(at, state.m7sel);
+  put16(at, state.m7a);
+  put16(at, state.m7b);
+  put16(at, state.m7c);
+  put16(at, state.m7d);
+  put16(at, state.m7x);
+  put16(at, state.m7y);
+  put16(at, state.m7hofs);
+  put16(at, state.m7vofs);
+  put8(at, state.m7Latch);
+  put8(at, state.m7bByte);
+  put8(at, state.vmain);
+  put16(at, state.vmadd);
+  put16(at, state.vramLatch);
+  put8(at, state.cgadd);
+  putBool(at, state.cgLatchHigh);
+  put8(at, state.cgLatch);
+  put16(at, state.oamadd);
+  put16(at, state.oamAddress);
+  put8(at, state.oamLatch);
+  put8(at, state.w12sel);
+  put8(at, state.w34sel);
+  put8(at, state.wobjsel);
+  put8(at, state.wh0);
+  put8(at, state.wh1);
+  put8(at, state.wh2);
+  put8(at, state.wh3);
+  put8(at, state.wbglog);
+  put8(at, state.wobjlog);
+  put8(at, state.tm);
+  put8(at, state.ts);
+  put8(at, state.tmw);
+  put8(at, state.tsw);
+  put8(at, state.cgwsel);
+  put8(at, state.cgadsub);
+  put8(at, state.fixedRed);
+  put8(at, state.fixedGreen);
+  put8(at, state.fixedBlue);
+  put16(at, state.ophct);
+  put16(at, state.opvct);
+  putBool(at, state.ophctHigh);
+  putBool(at, state.opvctHigh);
+  putBool(at, state.countersLatched);
+  put16(at, state.mosaicBlockLine);
+  put8(at, state.mosaicBlockSize);
+  putBool(at, state.rangeOver);
+  putBool(at, state.timeOver);
+  put8(at, state.ppu1Bus);
+  put8(at, state.ppu2Bus);
+  putSprites(at, state.sprites);
+  putMain(at, state.lastMain);
+  for (const std::array<TileRead, kTileColumns>& background : state.tiles) {
+    for (const TileRead& tile : background) putTile(at, tile);
+  }
+}
+
+void readPart(Reader& in, PpuState& state) noexcept {
+  in.bytes(state.vram);
+  in.bytes(state.cgram);
+  in.bytes(state.oam);
+  in.u8(state.inidisp);
+  in.u8(state.objsel);
+  in.u8(state.bgmode);
+  in.u8(state.mosaic);
+  in.u8(state.bg1sc);
+  in.u8(state.bg2sc);
+  in.u8(state.bg3sc);
+  in.u8(state.bg4sc);
+  in.u8(state.bg12nba);
+  in.u8(state.bg34nba);
+  in.u8(state.setini);
+  in.u16(state.bg1hofs);
+  in.u16(state.bg1vofs);
+  in.u16(state.bg2hofs);
+  in.u16(state.bg2vofs);
+  in.u16(state.bg3hofs);
+  in.u16(state.bg3vofs);
+  in.u16(state.bg4hofs);
+  in.u16(state.bg4vofs);
+  in.u8(state.bgLatch);
+  in.u8(state.m7sel);
+  in.u16(state.m7a);
+  in.u16(state.m7b);
+  in.u16(state.m7c);
+  in.u16(state.m7d);
+  in.u16(state.m7x);
+  in.u16(state.m7y);
+  in.u16(state.m7hofs);
+  in.u16(state.m7vofs);
+  in.u8(state.m7Latch);
+  in.u8(state.m7bByte);
+  in.u8(state.vmain);
+  in.u16(state.vmadd);
+  in.u16(state.vramLatch);
+  in.u8(state.cgadd);
+  in.boolean(state.cgLatchHigh);
+  in.u8(state.cgLatch);
+  in.u16(state.oamadd);
+  in.u16(state.oamAddress);
+  in.u8(state.oamLatch);
+  in.u8(state.w12sel);
+  in.u8(state.w34sel);
+  in.u8(state.wobjsel);
+  in.u8(state.wh0);
+  in.u8(state.wh1);
+  in.u8(state.wh2);
+  in.u8(state.wh3);
+  in.u8(state.wbglog);
+  in.u8(state.wobjlog);
+  in.u8(state.tm);
+  in.u8(state.ts);
+  in.u8(state.tmw);
+  in.u8(state.tsw);
+  in.u8(state.cgwsel);
+  in.u8(state.cgadsub);
+  in.u8(state.fixedRed);
+  in.u8(state.fixedGreen);
+  in.u8(state.fixedBlue);
+  in.u16(state.ophct);
+  in.u16(state.opvct);
+  in.boolean(state.ophctHigh);
+  in.boolean(state.opvctHigh);
+  in.boolean(state.countersLatched);
+  in.u16(state.mosaicBlockLine);
+  in.u8(state.mosaicBlockSize);
+  in.boolean(state.rangeOver);
+  in.boolean(state.timeOver);
+  in.u8(state.ppu1Bus);
+  in.u8(state.ppu2Bus);
+  readSprites(in, state.sprites);
+  readMain(in, state.lastMain);
+  for (std::array<TileRead, kTileColumns>& background : state.tiles) {
+    for (TileRead& tile : background) readTile(in, tile);
+  }
+}
+
+}  // namespace bytes
+
+std::vector<std::uint8_t> PpuState::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t PpuState::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<PpuState> PpuState::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<PpuState>(bytes);
+}
+
+bool PpuState::fromBytes(std::span<const std::uint8_t> bytes, PpuState& into) noexcept {
+  return bytes::decodeInto(bytes, into);
 }
 
 }  // namespace snaggletooth
