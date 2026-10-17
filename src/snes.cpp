@@ -14,6 +14,7 @@
 #define SNAGGLETOOTH_NOINLINE __attribute__((noinline))
 #endif
 
+#include "bytes.h"
 #include "snes_ipl_stub.h"
 
 namespace snaggletooth {
@@ -154,9 +155,6 @@ constexpr std::uint16_t kAutoJoyBit = 256u;
 constexpr std::uint8_t kAutoJoyBits = 16u;
 static_assert(kAutoJoyStrobe + kAutoJoyBits * kAutoJoyBit == 4224u,
               "the auto-read's busy window is the documented 4224 master cycles");
-
-// The largest save a cartridge can address through any window.
-constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 
 // The master-cycle cost of reaching an address, by the documented region map,
 // with the second waitstate region ($80-$BF:$8000-$FFFF and $C0-$FF) at its
@@ -2387,6 +2385,99 @@ std::uint16_t Joypad::bits() const noexcept {
     if (order[i]) word = static_cast<std::uint16_t>(word | (0x8000u >> i));
   }
   return word;
+}
+
+// ---- the channel and the pad as bytes -------------------------------------
+// Each is its fields in the order they are declared.
+
+namespace bytes {
+
+void putPart(std::uint8_t*& at, const DmaChannel& state) noexcept {
+  put8(at, state.dmap);
+  put8(at, state.bbad);
+  put16(at, state.a1t);
+  put8(at, state.a1b);
+  put16(at, state.das);
+  put8(at, state.dasb);
+  put16(at, state.a2a);
+  put8(at, state.nltr);
+  put8(at, state.unused);
+}
+
+void readPart(Reader& in, DmaChannel& state) noexcept {
+  in.u8(state.dmap);
+  in.u8(state.bbad);
+  in.u16(state.a1t);
+  in.u8(state.a1b);
+  in.u16(state.das);
+  in.u8(state.dasb);
+  in.u16(state.a2a);
+  in.u8(state.nltr);
+  in.u8(state.unused);
+}
+
+void putPart(std::uint8_t*& at, const Joypad& state) noexcept {
+  putBool(at, state.b);
+  putBool(at, state.y);
+  putBool(at, state.select);
+  putBool(at, state.start);
+  putBool(at, state.up);
+  putBool(at, state.down);
+  putBool(at, state.left);
+  putBool(at, state.right);
+  putBool(at, state.a);
+  putBool(at, state.x);
+  putBool(at, state.l);
+  putBool(at, state.r);
+}
+
+void readPart(Reader& in, Joypad& state) noexcept {
+  in.boolean(state.b);
+  in.boolean(state.y);
+  in.boolean(state.select);
+  in.boolean(state.start);
+  in.boolean(state.up);
+  in.boolean(state.down);
+  in.boolean(state.left);
+  in.boolean(state.right);
+  in.boolean(state.a);
+  in.boolean(state.x);
+  in.boolean(state.l);
+  in.boolean(state.r);
+}
+
+}  // namespace bytes
+
+std::vector<std::uint8_t> DmaChannel::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t DmaChannel::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<DmaChannel> DmaChannel::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<DmaChannel>(bytes);
+}
+
+bool DmaChannel::fromBytes(std::span<const std::uint8_t> bytes, DmaChannel& into) noexcept {
+  return bytes::decodeInto(bytes, into);
+}
+
+std::vector<std::uint8_t> Joypad::asBytes() const {
+  return bytes::encode(*this);
+}
+
+std::size_t Joypad::asBytes(std::span<std::uint8_t> out) const noexcept {
+  return bytes::encodeInto(*this, out);
+}
+
+std::optional<Joypad> Joypad::fromBytes(std::span<const std::uint8_t> bytes) {
+  return bytes::decode<Joypad>(bytes);
+}
+
+bool Joypad::fromBytes(std::span<const std::uint8_t> bytes, Joypad& into) noexcept {
+  return bytes::decodeInto(bytes, into);
 }
 
 void Snes::setJoypad(JoypadPort port, std::optional<Joypad> pad) noexcept {

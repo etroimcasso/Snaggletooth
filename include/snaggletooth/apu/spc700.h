@@ -23,7 +23,11 @@
 // effects on real hardware, so the core issues every documented memory access.
 
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
 
 namespace snaggletooth {
 
@@ -66,6 +70,22 @@ struct Spc700State {
   std::uint16_t ptr = 0;  // pointer / second-address scratch
   std::uint16_t tmp = 0;  // data scratch (an operand byte, or a value in flight)
   bool taken = false;     // a branch condition, settled before the cycles it prices
+
+  // The state as bytes and back: byteSize() bytes, the fields in the order they
+  // are declared, each at its fixed little-endian width (SnesState's byte form in
+  // `snes/snes.h` gives the terms every part shares). asBytes(out) writes nothing
+  // and answers 0 when `out` is shorter than byteSize(). fromBytes refuses bytes
+  // of another length, a `bool` byte other than 0 or 1, or a run-state byte past
+  // Stopped, and leaves `into` as it was when it refuses. A field added to this
+  // struct joins its byte form in the same change, and the layout's new version
+  // is SnesState::kBytesVersion's next value.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 17u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<Spc700State> fromBytes(
+      std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      Spc700State& into) noexcept;
 
   [[nodiscard]] bool operator==(const Spc700State&) const noexcept = default;
 };

@@ -159,6 +159,15 @@ struct DmaChannel {
   std::uint8_t nltr = 0xFF;    // $43nA: the HDMA line counter (bits6-0) and the repeat flag (bit7)
   std::uint8_t unused = 0xFF;  // $43nB/$43nF: one unused byte, readable and writable through two addresses
 
+  // The channel as its byteSize() bytes and back, the fields in the order they are
+  // declared, on the terms of SnesState's byte form below.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 12u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<DmaChannel> fromBytes(std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      DmaChannel& into) noexcept;
+
   [[nodiscard]] bool operator==(const DmaChannel&) const noexcept = default;
 };
 
@@ -213,6 +222,15 @@ struct Joypad {
   // 3-0 are the standard pad's identity code, all zero. The high byte is what
   // $4219 reads, the low byte $4218.
   [[nodiscard]] std::uint16_t bits() const noexcept;
+
+  // The pad as its byteSize() bytes and back, one byte a button in the order the
+  // fields are declared, on the terms of SnesState's byte form below.
+  [[nodiscard]] static constexpr std::size_t byteSize() noexcept { return 12u; }
+  [[nodiscard]] std::vector<std::uint8_t> asBytes() const;
+  [[nodiscard]] std::size_t asBytes(std::span<std::uint8_t> out) const noexcept;
+  [[nodiscard]] static std::optional<Joypad> fromBytes(std::span<const std::uint8_t> bytes);
+  [[nodiscard]] static bool fromBytes(std::span<const std::uint8_t> bytes,
+                                      Joypad& into) noexcept;
 
   [[nodiscard]] bool operator==(const Joypad&) const noexcept = default;
 };
@@ -454,6 +472,10 @@ struct SnesConfig {
   // and never for running it.
   bool ppuVerify = false;
 };
+
+// The largest save a cartridge can address through any window. A machine's save is
+// never larger: a header or a SnesConfig::saveRamBytes asking for more is held to it.
+inline constexpr std::size_t kMaxSaveRamBytes = 128u * 1024u;
 
 // The whole machine as a value: snapshot by copy, restore by assignment. The ROM
 // is fixed configuration rather than state and lives in the machine, not here, so
