@@ -202,7 +202,7 @@ class PortAssignment {
 //
 // It is told what each port holds every frame and keeps a line only where that
 // changed from the frame before — a button, a controller arriving, or a controller
-// leaving. Both ports are written at frame 0 whatever they hold, so a replay's ports
+// leaving. A frame told twice keeps what it was told last, in one line a port. Both ports are written at frame 0 whatever they hold, so a replay's ports
 // are the live run's ports from power-on and a program that looks for a controller
 // before one arrived sees on replay what it saw live.
 class PadRecorder {

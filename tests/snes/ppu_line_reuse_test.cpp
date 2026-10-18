@@ -373,14 +373,16 @@ struct Reports final : FrameObserver {
                                             .field = picture.field,
                                             .pixels = Bytes(picture.pixels.begin(), picture.pixels.end())}});
   }
-  // The report of the picture drawn before the vertical blank in which the handler
-  // counted `counter`; a write the handler makes at count N is in the picture of
-  // report N + 1. The handler counts 1 in the blank that lights the screen, so report
-  // 1 is the last blank picture, 2 the first lit one and 3 the first a still scene
-  // takes whole.
+  // The report of the picture drawn after the vertical blank in which the handler
+  // counted `counter`. A report is made as the next blank begins, before the handler
+  // counts again, so a write the handler makes at count N is in the picture of
+  // report N. The handler counts 1 in the blank that lights the screen, so the last
+  // report at count 0 is the last blank picture, report 1 the first lit one and 2
+  // the first a still scene takes whole. Every report before that blank reads 0, and
+  // the last of them is the one answered.
   [[nodiscard]] const Report& at(std::uint8_t counter) const {
-    for (const Report& report : reports) {
-      if (report.counter == counter) return report;
+    for (auto report = reports.rbegin(); report != reports.rend(); ++report) {
+      if (report->counter == counter) return *report;
     }
     throw std::out_of_range("no report with that count");
   }
@@ -489,28 +491,28 @@ bool lit(const Frame& frame) {
 
 TEST(SnesLineReuse, ASecondFrameOfAStillPictureIsTakenWholeFromTheFirst) {
   // The handler counts 1 in the vertical blank that lights the screen, so the first
-  // lit picture is report 2 and the first that can be taken whole is report 3.
+  // lit picture is report 1 and the first that can be taken whole is report 2.
   Pair t(scene());
-  ASSERT_TRUE(t.runTo(4));
+  ASSERT_TRUE(t.runTo(3));
   const Report& first = t.reusingReports.reports.front();
   EXPECT_EQ(first.counts.drawn, kLines) << "the very first picture has nothing to take";
   EXPECT_EQ(first.counts.reused, 0u);
-  EXPECT_FALSE(lit(t.reusingReports.at(1).frame));
-  EXPECT_TRUE(lit(t.reusingReports.at(2).frame)) << "the scene is lit from the second counted frame";
+  EXPECT_FALSE(lit(t.reusingReports.at(0).frame));
+  EXPECT_TRUE(lit(t.reusingReports.at(1).frame)) << "the scene is lit from the first counted frame";
   // The screen came on, so every line's key changed; the one line the setup wrote
   // the chip inside of, in the blank frame, was never recorded and is drawn for that.
-  EXPECT_EQ(t.counts(2).drawn, kLines) << describe(t.counts(2));
-  EXPECT_EQ(t.counts(2).registers + t.counts(2).firstDrawn, kLines) << describe(t.counts(2));
-  EXPECT_GE(t.counts(2).registers, kLines - 1u);
-  EXPECT_EQ(t.counts(3).reused, kLines) << describe(t.counts(3));
-  EXPECT_EQ(t.counts(3).drawn, 0u);
-  EXPECT_EQ(t.reusingReports.at(3).frame.pixels, t.reusingReports.at(2).frame.pixels);
-  EXPECT_EQ(t.reusingReports.at(3).frame.width, t.reusingReports.at(2).frame.width);
-  EXPECT_EQ(t.counts(4).reused, kLines);
+  EXPECT_EQ(t.counts(1).drawn, kLines) << describe(t.counts(1));
+  EXPECT_EQ(t.counts(1).registers + t.counts(1).firstDrawn, kLines) << describe(t.counts(1));
+  EXPECT_GE(t.counts(1).registers, kLines - 1u);
+  EXPECT_EQ(t.counts(2).reused, kLines) << describe(t.counts(2));
+  EXPECT_EQ(t.counts(2).drawn, 0u);
+  EXPECT_EQ(t.reusingReports.at(2).frame.pixels, t.reusingReports.at(1).frame.pixels);
+  EXPECT_EQ(t.reusingReports.at(2).frame.width, t.reusingReports.at(1).frame.width);
+  EXPECT_EQ(t.counts(3).reused, kLines);
 }
 
-// A write made once, in the vertical blank after frame 3's picture, to one register
-// the key carries: frame 4 draws every line and frame 5 takes every line again.
+// A write made once, in the vertical blank before frame 3's picture, to one register
+// the key carries: frame 3 draws every line and frame 4 takes every line again.
 struct RegisterWrite {
   std::uint16_t address;
   std::uint8_t value;
@@ -529,34 +531,34 @@ TEST(SnesLineReuse, AChangedRegisterDrawsEveryLineOfTheNextFrame) {
   for (const RegisterWrite& write : writes) {
     SCOPED_TRACE(::testing::Message() << "register $" << std::hex << write.address);
     Pair t(scene(Variant{.inBlank = onFrame(3u, store(write.address, write.value))}));
-    ASSERT_TRUE(t.runTo(5));
-    EXPECT_EQ(t.counts(3).reused, kLines) << "before the write";
-    EXPECT_EQ(t.counts(4).registers, kLines) << "the frame after the write";
-    EXPECT_EQ(t.counts(4).scrollOnly, write.scrollOnly ? kLines : 0u);
-    EXPECT_EQ(t.counts(5).reused, kLines) << "the frame after that";
+    ASSERT_TRUE(t.runTo(4));
+    EXPECT_EQ(t.counts(2).reused, kLines) << "before the write";
+    EXPECT_EQ(t.counts(3).registers, kLines) << "the frame after the write";
+    EXPECT_EQ(t.counts(3).scrollOnly, write.scrollOnly ? kLines : 0u);
+    EXPECT_EQ(t.counts(4).reused, kLines) << "the frame after that";
   }
 }
 
 TEST(SnesLineReuse, AMosaicRowBeginningOnAnotherLineDrawsTheLinesItReaches) {
-  // Channel 1 on for frame 4's picture alone: its row beginning on line 53 runs six
+  // Channel 1 on for frame 3's picture alone: its row beginning on line 53 runs six
   // lines, so every row after it begins two lines later than the frame before's, and
-  // lines 53 to 224 are drawn; frame 5, back on the frame-3 phase, draws the same 172
-  // against frame 4's records; frame 6 takes every line again.
+  // lines 53 to 224 are drawn; frame 4, back on the frame-2 phase, draws the same 172
+  // against frame 3's records; frame 5 takes every line again.
   Pair t(scene(Variant{.inBlank = joined({onFrame(3u, store(0x420Cu, 0x02u)), onFrame(4u, clear(0x420Cu))})}));
-  ASSERT_TRUE(t.runTo(6));
-  EXPECT_EQ(t.counts(3).reused, kLines);
+  ASSERT_TRUE(t.runTo(5));
+  EXPECT_EQ(t.counts(2).reused, kLines);
+  EXPECT_EQ(t.counts(3).registers, 172u);
+  EXPECT_EQ(t.counts(3).reused, 52u);
   EXPECT_EQ(t.counts(4).registers, 172u);
   EXPECT_EQ(t.counts(4).reused, 52u);
-  EXPECT_EQ(t.counts(5).registers, 172u);
-  EXPECT_EQ(t.counts(5).reused, 52u);
-  EXPECT_EQ(t.counts(6).reused, kLines);
+  EXPECT_EQ(t.counts(5).reused, kLines);
 }
 
 TEST(SnesLineReuse, AVramWriteDrawsTheLinesThatReadItsPage) {
-  // One word of BG1's map, in page 4, rewritten after frame 3: BG1's blocks whose
+  // One word of BG1's map, in page 4, rewritten before frame 3: BG1's blocks whose
   // corner line falls in map rows 0 to 15 read the page, which is lines 1 to 128;
-  // then a word of page 32, which no line reads, after frame 5, and the first word
-  // again, unchanged, after frame 7. (BG3 is not shown but is read, over a map the
+  // then a word of page 32, which no line reads, before frame 5, and the first word
+  // again, unchanged, before frame 7. (BG3 is not shown but is read, over a map the
   // characters' bytes make, so its reads reach pages the scene never filled, up to
   // page 15.)
   const Bytes write = joined({store(0x2115u, 0x80u), store(0x2116u, static_cast<std::uint8_t>(kBg1MapWord & 0xFFu)),
@@ -564,63 +566,63 @@ TEST(SnesLineReuse, AVramWriteDrawsTheLinesThatReadItsPage) {
                               store(0x2119u, 0x03u)});
   const Bytes unread = joined({store(0x2115u, 0x80u), clear(0x2116u), store(0x2117u, 0x40u), store(0x2118u, 0x55u)});
   Pair t(scene(Variant{.inBlank = joined({onFrame(3u, write), onFrame(5u, unread), onFrame(7u, write)})}));
-  ASSERT_TRUE(t.runTo(8));
-  EXPECT_EQ(t.counts(3).reused, kLines);
-  EXPECT_EQ(t.counts(4).vram, 128u);
-  EXPECT_EQ(t.counts(4).reused, 96u);
-  EXPECT_EQ(t.counts(5).reused, kLines);
-  EXPECT_EQ(t.counts(6).reused, kLines) << "a page no line reads";
-  EXPECT_EQ(t.counts(8).reused, kLines) << "the same word written through the port again changes no byte";
+  ASSERT_TRUE(t.runTo(7));
+  EXPECT_EQ(t.counts(2).reused, kLines);
+  EXPECT_EQ(t.counts(3).vram, 128u);
+  EXPECT_EQ(t.counts(3).reused, 96u);
+  EXPECT_EQ(t.counts(4).reused, kLines);
+  EXPECT_EQ(t.counts(5).reused, kLines) << "a page no line reads";
+  EXPECT_EQ(t.counts(7).reused, kLines) << "the same word written through the port again changes no byte";
 }
 
 TEST(SnesLineReuse, APaletteWriteDrawsTheLinesThatReadItsGroup) {
-  // The sprites' color, word 146 of group 9, rewritten after frame 3: the eight lines
+  // The sprites' color, word 146 of group 9, rewritten before frame 3: the eight lines
   // each of the four sprites stands on read it; then word 0, in group 0, which every
-  // line reads through the backgrounds' palette 0, after frame 5.
+  // line reads through the backgrounds' palette 0, before frame 5.
   const Bytes sprites = joined({store(0x2121u, kSpritePaletteWord), store(0x2122u, 0x1Fu), store(0x2122u, 0x00u)});
   const Bytes backdrop = joined({clear(0x2121u), store(0x2122u, 0x00u), store(0x2122u, 0x7Cu)});
   Pair t(scene(Variant{.inBlank = joined({onFrame(3u, sprites), onFrame(5u, backdrop)})}));
-  ASSERT_TRUE(t.runTo(6));
-  EXPECT_EQ(t.counts(3).reused, kLines);
-  EXPECT_EQ(t.counts(4).cgram, 32u);
-  EXPECT_EQ(t.counts(4).reused, kLines - 32u);
-  EXPECT_EQ(t.counts(5).reused, kLines);
-  EXPECT_EQ(t.counts(6).cgram, kLines);
+  ASSERT_TRUE(t.runTo(5));
+  EXPECT_EQ(t.counts(2).reused, kLines);
+  EXPECT_EQ(t.counts(3).cgram, 32u);
+  EXPECT_EQ(t.counts(3).reused, kLines - 32u);
+  EXPECT_EQ(t.counts(4).reused, kLines);
+  EXPECT_EQ(t.counts(5).cgram, kLines);
 }
 
 TEST(SnesLineReuse, AMovedSpriteDrawsTheLinesItCrossesAndCrossed) {
-  // Sprite 0's Y from 30 to 50 after frame 3: lines 31 to 38 lose it and 51 to 58 gain
+  // Sprite 0's Y from 30 to 50 before frame 3: lines 31 to 38 lose it and 51 to 58 gain
   // it.
   const Bytes move = joined({clear(0x2102u), clear(0x2103u), store(0x2104u, 40u), store(0x2104u, 50u)});
   Pair t(scene(Variant{.inBlank = onFrame(3u, move)}));
-  ASSERT_TRUE(t.runTo(5));
-  EXPECT_EQ(t.counts(3).reused, kLines);
-  EXPECT_EQ(t.counts(4).sprites, 16u);
-  EXPECT_EQ(t.counts(4).reused, kLines - 16u);
-  EXPECT_EQ(t.counts(5).reused, kLines);
+  ASSERT_TRUE(t.runTo(4));
+  EXPECT_EQ(t.counts(2).reused, kLines);
+  EXPECT_EQ(t.counts(3).sprites, 16u);
+  EXPECT_EQ(t.counts(3).reused, kLines - 16u);
+  EXPECT_EQ(t.counts(4).reused, kLines);
 }
 
 TEST(SnesLineReuse, ASpritesPriorityBitsAloneDrawItsLines) {
-  // Sprite 0's priority from 3 to 0 after frame 3, its word unchanged: the buffer's
+  // Sprite 0's priority from 3 to 0 before frame 3, its word unchanged: the buffer's
   // priority differs on its eight lines, and the sprite falls behind BG1's tiles.
   const Bytes lower = joined({store(0x2102u, 1u), clear(0x2103u), store(0x2104u, 1u), store(0x2104u, 0x02u)});
   Pair t(scene(Variant{.inBlank = onFrame(3u, lower)}));
-  ASSERT_TRUE(t.runTo(5));
-  EXPECT_EQ(t.counts(4).sprites, 8u);
-  EXPECT_EQ(t.counts(4).reused, kLines - 8u);
-  EXPECT_EQ(t.counts(5).reused, kLines);
+  ASSERT_TRUE(t.runTo(4));
+  EXPECT_EQ(t.counts(3).sprites, 8u);
+  EXPECT_EQ(t.counts(3).reused, kLines - 8u);
+  EXPECT_EQ(t.counts(4).reused, kLines);
 }
 
 TEST(SnesLineReuse, AWriteInsideTheLineDrawsItAndItIsNotKeptForTheNextFrame) {
   // A transfer of 64 bytes to BG1's scroll register begins a line into each picture
-  // through frame 4's: its writes land inside one or two lines' picture dots, and
+  // through frame 3's: its writes land inside one or two lines' picture dots, and
   // leave the scroll where it was. Those lines are drawn and the rest taken; once
   // the transfers stop, the lines' records from before them stand and every line is
   // taken again.
   Pair t(scene(Variant{.inPicture = beforeFrame(4u, dma(3u, 0x00u, 0x0Du, kZeros, 64u))}));
-  ASSERT_TRUE(t.runTo(6));
-  EXPECT_GE(t.counts(2).midLine, 1u);
-  for (std::uint8_t counter = 3u; counter <= 4u; ++counter) {
+  ASSERT_TRUE(t.runTo(5));
+  EXPECT_GE(t.counts(1).midLine, 1u);
+  for (std::uint8_t counter = 2u; counter <= 3u; ++counter) {
     SCOPED_TRACE(::testing::Message() << "count " << unsigned{counter});
     const Snes::LineReuse& c = t.counts(counter);
     EXPECT_GE(c.midLine, 1u);
@@ -628,11 +630,11 @@ TEST(SnesLineReuse, AWriteInsideTheLineDrawsItAndItIsNotKeptForTheNextFrame) {
     EXPECT_EQ(c.drawn, c.midLine);
     EXPECT_EQ(c.reused, kLines - c.midLine);
   }
-  // The transfers' lines were never recorded lit: frame 5 draws them against the
-  // blank frame's record, and frame 6 takes every line.
-  EXPECT_EQ(t.counts(5).drawn, t.counts(5).registers);
-  EXPECT_LE(t.counts(5).drawn, 2u);
-  EXPECT_EQ(t.counts(6).reused, kLines);
+  // The transfers' lines were never recorded lit: frame 4 draws them against the
+  // blank frame's record, and frame 5 takes every line.
+  EXPECT_EQ(t.counts(4).drawn, t.counts(4).registers);
+  EXPECT_LE(t.counts(4).drawn, 2u);
+  EXPECT_EQ(t.counts(5).reused, kLines);
 }
 
 // Where the interrupt's first write to the watched register landed on the verifying
@@ -663,24 +665,24 @@ TEST(SnesLineReuse, AWriteBeforeTheFirstReadLeavesTheLineReusable) {
     WriteSite site;
     site.machine = &t.verifying;
     t.verifying.setObserver(&site);
-    ASSERT_TRUE(t.runTo(4));
+    ASSERT_TRUE(t.runTo(3));
     ASSERT_TRUE(site.hpos.has_value());
     EXPECT_LT(*site.hpos, 12u) << "the write lands before the line's first read dot, on line " << site.vpos;
+    EXPECT_EQ(t.counts(2).reused, kLines);
     EXPECT_EQ(t.counts(3).reused, kLines);
-    EXPECT_EQ(t.counts(4).reused, kLines);
   }
   {
     Pair t(scene(Variant{.irqBody = store(0x2100u, 0x0Fu), .htime = 316u, .vtime = 100u, .irq = true}));
     WriteSite site;
     site.machine = &t.verifying;
     t.verifying.setObserver(&site);
-    ASSERT_TRUE(t.runTo(4));
+    ASSERT_TRUE(t.runTo(3));
     ASSERT_TRUE(site.hpos.has_value());
     EXPECT_GE(*site.hpos, 12u) << "the write lands inside the picture dots, on line " << site.vpos;
     EXPECT_LT(*site.hpos, 1112u);
+    EXPECT_EQ(t.counts(2).midLine, 1u);
+    EXPECT_EQ(t.counts(2).reused, kLines - 1u);
     EXPECT_EQ(t.counts(3).midLine, 1u);
-    EXPECT_EQ(t.counts(3).reused, kLines - 1u);
-    EXPECT_EQ(t.counts(4).midLine, 1u);
   }
 }
 
@@ -688,9 +690,9 @@ TEST(SnesLineReuse, AReadInsideTheLineLeavesItReused) {
   // The interrupt reads $213F and $2137 inside line 100 every frame: a read moves
   // nothing a pixel reads, and every line is taken.
   Pair t(scene(Variant{.irqBody = {0xADu, 0x3Fu, 0x21u, 0xADu, 0x37u, 0x21u}, .htime = 100u, .vtime = 100u, .irq = true}));
-  ASSERT_TRUE(t.runTo(4));
+  ASSERT_TRUE(t.runTo(3));
+  EXPECT_EQ(t.counts(2).reused, kLines);
   EXPECT_EQ(t.counts(3).reused, kLines);
-  EXPECT_EQ(t.counts(4).reused, kLines);
 }
 
 TEST(SnesLineReuse, APaletteWriteInALinesHorizontalBlankDrawsThatLineTheNextFrame) {
@@ -707,25 +709,25 @@ TEST(SnesLineReuse, APaletteWriteInALinesHorizontalBlankDrawsThatLineTheNextFram
   site.machine = &t.verifying;
   site.watched = 0x2122u;
   t.verifying.setObserver(&site);
-  ASSERT_TRUE(t.runTo(4));
+  ASSERT_TRUE(t.runTo(3));
   ASSERT_TRUE(site.hpos.has_value());
   EXPECT_EQ(site.vpos, 84u);
   EXPECT_GE(*site.hpos, 1112u) << "the write lands in the line's horizontal blank";
-  EXPECT_EQ(t.counts(3).cgram, 12u) << describe(t.counts(3));
-  EXPECT_EQ(t.counts(3).reused, kLines - 12u);
-  EXPECT_EQ(t.counts(4).reused, kLines);
+  EXPECT_EQ(t.counts(2).cgram, 12u) << describe(t.counts(2));
+  EXPECT_EQ(t.counts(2).reused, kLines - 12u);
+  EXPECT_EQ(t.counts(3).reused, kLines);
 }
 
 TEST(SnesLineReuse, ABlankLineHandsOnTheDecisionItWasGiven) {
-  // The screen forced blank after frame 3, and in frame 5's picture the interrupt on
+  // The screen forced blank before frame 3, and in frame 4's picture the interrupt on
   // line 100 writes $2100 with the blank value, timed so the write's cycle ends in
   // dot 277: the chip reads the new value a dot early, so that dot is drawn lit,
   // under the byte the bus held before the write, and leaves a decision on the
   // line. A blank line clears only the `present` bit of the last main decision and
-  // keeps the rest, so lines 101 to 224 of frame 5 are handed that decision where
+  // keeps the rest, so lines 101 to 224 of frame 4 are handed that decision where
   // their records, made blank, hold the one the lit frames left, and are drawn;
-  // line 100 is drawn for the write. Frame 6 hands the new decision to lines 1 to
-  // 100, whose records hold the old one, and takes the rest; frame 7 takes every
+  // line 100 is drawn for the write. Frame 5 hands the new decision to lines 1 to
+  // 100, whose records hold the old one, and takes the rest; frame 6 takes every
   // line.
   Pair t(scene(Variant{.inBlank = onFrame(3u, store(0x2100u, 0x80u)),
                        .irqBody = onFrame(4u, store(0x2100u, 0x80u)),
@@ -735,42 +737,42 @@ TEST(SnesLineReuse, ABlankLineHandsOnTheDecisionItWasGiven) {
   WriteSite site;
   site.machine = &t.verifying;
   t.verifying.setObserver(&site);
-  ASSERT_TRUE(t.runTo(7));
+  ASSERT_TRUE(t.runTo(6));
   ASSERT_TRUE(site.hpos.has_value());
   EXPECT_EQ(site.vpos, 100u);
   EXPECT_GE(*site.hpos, 1108u) << "the write's cycle ends inside dot 277";
   EXPECT_LT(*site.hpos, 1112u);
-  EXPECT_EQ(t.counts(4).registers, kLines) << describe(t.counts(4));
-  EXPECT_EQ(t.counts(5).midLine, 1u) << describe(t.counts(5));
-  EXPECT_EQ(t.counts(5).registers, 124u) << describe(t.counts(5));
-  EXPECT_EQ(t.counts(5).reused, 99u);
-  EXPECT_EQ(t.counts(6).registers, 100u) << describe(t.counts(6));
-  EXPECT_EQ(t.counts(6).reused, 124u);
-  EXPECT_EQ(t.counts(7).reused, kLines) << describe(t.counts(7));
-  EXPECT_NE(t.reusingReports.at(5).lastMain.colour, t.reusingReports.at(4).lastMain.colour)
+  EXPECT_EQ(t.counts(3).registers, kLines) << describe(t.counts(3));
+  EXPECT_EQ(t.counts(4).midLine, 1u) << describe(t.counts(4));
+  EXPECT_EQ(t.counts(4).registers, 124u) << describe(t.counts(4));
+  EXPECT_EQ(t.counts(4).reused, 99u);
+  EXPECT_EQ(t.counts(5).registers, 100u) << describe(t.counts(5));
+  EXPECT_EQ(t.counts(5).reused, 124u);
+  EXPECT_EQ(t.counts(6).reused, kLines) << describe(t.counts(6));
+  EXPECT_NE(t.reusingReports.at(4).lastMain.colour, t.reusingReports.at(3).lastMain.colour)
       << "the dot drawn lit left another decision";
-  EXPECT_FALSE(t.reusingReports.at(5).lastMain.present);
-  EXPECT_FALSE(lit(t.reusingReports.at(6).frame));
+  EXPECT_FALSE(t.reusingReports.at(4).lastMain.present);
+  EXPECT_FALSE(lit(t.reusingReports.at(5).frame));
 }
 
 TEST(SnesLineReuse, AWriteToInidispEndingInTheLastPictureDotDrawsTheLine) {
   // The interrupt on line 100 writes $2100 with the value it holds, once, in frame
-  // 3's picture, timed so the write's cycle ends inside dot 277: the chip reads the
+  // 2's picture, timed so the write's cycle ends inside dot 277: the chip reads the
   // new value a dot early, so that dot is drawn under the byte the bus held before
-  // the write, and the line is drawn for it; frame 4's line, without the write, is
-  // taken from frame 2's record.
+  // the write, and the line is drawn for it; frame 3's line, without the write, is
+  // taken from frame 1's record.
   Pair t(scene(Variant{.irqBody = onFrame(2u, store(0x2100u, 0x0Fu)), .htime = 227u, .vtime = 100u, .irq = true}));
   WriteSite site;
   site.machine = &t.verifying;
   t.verifying.setObserver(&site);
-  ASSERT_TRUE(t.runTo(4));
+  ASSERT_TRUE(t.runTo(3));
   ASSERT_TRUE(site.hpos.has_value());
   EXPECT_EQ(site.vpos, 100u);
   EXPECT_GE(*site.hpos, 1108u) << "the write's cycle ends inside dot 277";
   EXPECT_LT(*site.hpos, 1112u);
-  EXPECT_EQ(t.counts(3).midLine, 1u) << describe(t.counts(3));
-  EXPECT_EQ(t.counts(3).reused, kLines - 1u);
-  EXPECT_EQ(t.counts(4).reused, kLines) << describe(t.counts(4));
+  EXPECT_EQ(t.counts(2).midLine, 1u) << describe(t.counts(2));
+  EXPECT_EQ(t.counts(2).reused, kLines - 1u);
+  EXPECT_EQ(t.counts(3).reused, kLines) << describe(t.counts(3));
 }
 
 TEST(SnesLineReuse, AReturnInAHorizontalBlankAfterAWriteThereLeavesTheLineAsDrawn) {
@@ -784,8 +786,8 @@ TEST(SnesLineReuse, AReturnInAHorizontalBlankAfterAWriteThereLeavesTheLineAsDraw
   for (const bool pictureThread : {false, true}) {
     SCOPED_TRACE(::testing::Message() << (pictureThread ? "the picture thread" : "the calling thread"));
     Pair t(scene(Variant{.inBlank = onFrame(2u, store(0x420Cu, 0x04u))}), true, pictureThread);
-    ASSERT_TRUE(t.runTo(4));
-    EXPECT_EQ(t.counts(4).reused, kLines) << describe(t.counts(4));
+    ASSERT_TRUE(t.runTo(3));
+    EXPECT_EQ(t.counts(3).reused, kLines) << describe(t.counts(3));
     for (int call = 0; call < 12000; ++call) {
       t.run(1360u);
       if (call % 400 == 0) {
@@ -806,7 +808,7 @@ TEST(SnesLineReuse, AReturnInsideTheLineDrawsItUpToTheBeam) {
   // is drawn up to the beam, so the tile reads and the last decision a host reads
   // there are the beam's.
   Pair t(scene());
-  ASSERT_TRUE(t.runTo(2));
+  ASSERT_TRUE(t.runTo(1));
   for (int call = 0; call < 30000; ++call) {
     t.reusing.step();
     t.verifying.step();
@@ -830,18 +832,18 @@ TEST(SnesLineReuse, AReturnInsideTheLineDrawsItUpToTheBeam) {
 
 TEST(SnesLineReuse, ARestoreDrawsEveryLineOfTheNextFrame) {
   Pair t(scene());
-  ASSERT_TRUE(t.runTo(3));
+  ASSERT_TRUE(t.runTo(2));
   const SnesState saved = t.reusing.state();
-  ASSERT_TRUE(t.runTo(5));
+  ASSERT_TRUE(t.runTo(4));
   t.reusing.restore(saved);
   t.verifying.restore(saved);
   t.forget();
   ASSERT_TRUE(t.same());
   // The count runs again from the snapshot's 3: the first picture after the restore
   // draws every line, the one after takes them.
-  ASSERT_TRUE(t.runTo(5));
-  EXPECT_EQ(t.counts(4).firstDrawn, kLines);
-  EXPECT_EQ(t.counts(5).reused, kLines);
+  ASSERT_TRUE(t.runTo(4));
+  EXPECT_EQ(t.counts(3).firstDrawn, kLines);
+  EXPECT_EQ(t.counts(4).reused, kLines);
   // A reset keeps work RAM, so the count runs on from where it stood; the program
   // sets the scene up again under forced blank and lights it at the next blank,
   // where the handler counts once more. The first picture after the reset draws
@@ -852,59 +854,59 @@ TEST(SnesLineReuse, ARestoreDrawsEveryLineOfTheNextFrame) {
   t.verifying.reset();
   t.forget();
   ASSERT_TRUE(t.same());
-  ASSERT_TRUE(t.runTo(static_cast<std::uint8_t>(before + 3u), 60));
+  ASSERT_TRUE(t.runTo(static_cast<std::uint8_t>(before + 2u), 60));
   EXPECT_EQ(t.reusingReports.reports.front().counts.drawn, kLines) << describe(t.reusingReports.reports.front().counts);
   EXPECT_EQ(t.reusingReports.reports.front().counts.reused, 0u);
-  EXPECT_EQ(t.counts(static_cast<std::uint8_t>(before + 2u)).drawn, kLines);
-  EXPECT_EQ(t.counts(static_cast<std::uint8_t>(before + 3u)).reused, kLines);
+  EXPECT_EQ(t.counts(static_cast<std::uint8_t>(before + 1u)).drawn, kLines);
+  EXPECT_EQ(t.counts(static_cast<std::uint8_t>(before + 2u)).reused, kLines);
 }
 
 TEST(SnesLineReuse, AHostWriteToAVideoMemoryDrawsTheLinesThatReadIt) {
   Pair t(scene());
-  ASSERT_TRUE(t.runTo(3));
+  ASSERT_TRUE(t.runTo(2));
   // BG1's map, page 4: lines 1 to 128 read it.
   t.reusing.writeVram(0x1000u, 0xFFu);
   t.verifying.writeVram(0x1000u, 0xFFu);
-  ASSERT_TRUE(t.runTo(4));
-  EXPECT_EQ(t.counts(4).vram, 128u);
-  EXPECT_EQ(t.counts(4).reused, 96u);
+  ASSERT_TRUE(t.runTo(3));
+  EXPECT_EQ(t.counts(3).vram, 128u);
+  EXPECT_EQ(t.counts(3).reused, 96u);
   // The same byte again: nothing changed, every line taken.
   t.reusing.writeVram(0x1000u, 0xFFu);
   t.verifying.writeVram(0x1000u, 0xFFu);
-  ASSERT_TRUE(t.runTo(5));
-  EXPECT_EQ(t.counts(5).reused, kLines);
+  ASSERT_TRUE(t.runTo(4));
+  EXPECT_EQ(t.counts(4).reused, kLines);
   // The sprites' color: their 32 lines.
   t.reusing.writeCgram(kSpritePaletteWord * 2u, 0x1Fu);
   t.verifying.writeCgram(kSpritePaletteWord * 2u, 0x1Fu);
-  ASSERT_TRUE(t.runTo(6));
-  EXPECT_EQ(t.counts(6).cgram, 32u);
-  EXPECT_EQ(t.counts(6).reused, kLines - 32u);
+  ASSERT_TRUE(t.runTo(5));
+  EXPECT_EQ(t.counts(5).cgram, 32u);
+  EXPECT_EQ(t.counts(5).reused, kLines - 32u);
   // Sprite 0's Y: the lines it leaves and the lines it reaches.
   t.reusing.writeOam(1u, 50u);
   t.verifying.writeOam(1u, 50u);
+  ASSERT_TRUE(t.runTo(6));
+  EXPECT_EQ(t.counts(6).sprites, 16u);
+  EXPECT_EQ(t.counts(6).reused, kLines - 16u);
   ASSERT_TRUE(t.runTo(7));
-  EXPECT_EQ(t.counts(7).sprites, 16u);
-  EXPECT_EQ(t.counts(7).reused, kLines - 16u);
-  ASSERT_TRUE(t.runTo(8));
-  EXPECT_EQ(t.counts(8).reused, kLines);
+  EXPECT_EQ(t.counts(7).reused, kLines);
 }
 
 TEST(SnesLineReuse, ALineTakenFromTheFrameBeforeIsCopiedAtTheFramesWidth) {
-  // Channel 2 sets $2133 bit 3 on lines 101 to 111 of frame 4's picture, off again
-  // for frame 5's, on again for frame 6's: the eleven lines are drawn each time and
+  // Channel 2 sets $2133 bit 3 on lines 101 to 111 of frame 3's picture, off again
+  // for frame 4's, on again for frame 5's: the eleven lines are drawn each time and
   // the rest taken, into a frame 512 wide, then 256, then 512.
   Pair t(scene(Variant{.inBlank = joined({onFrame(3u, store(0x420Cu, 0x04u)), onFrame(4u, clear(0x420Cu)),
                                            onFrame(5u, store(0x420Cu, 0x04u))})}));
-  ASSERT_TRUE(t.runTo(7));
-  EXPECT_EQ(t.counts(3).reused, kLines);
-  for (std::uint8_t counter = 4u; counter <= 6u; ++counter) {
+  ASSERT_TRUE(t.runTo(6));
+  EXPECT_EQ(t.counts(2).reused, kLines);
+  for (std::uint8_t counter = 3u; counter <= 5u; ++counter) {
     SCOPED_TRACE(::testing::Message() << "count " << unsigned{counter});
     EXPECT_EQ(t.counts(counter).registers, 11u);
     EXPECT_EQ(t.counts(counter).reused, kLines - 11u);
-    EXPECT_EQ(t.reusingReports.at(counter).frame.width, counter == 5u ? 256u : 512u);
+    EXPECT_EQ(t.reusingReports.at(counter).frame.width, counter == 4u ? 256u : 512u);
   }
-  EXPECT_EQ(t.counts(7).reused, kLines);
-  EXPECT_EQ(t.reusingReports.at(7).frame.width, 512u);
+  EXPECT_EQ(t.counts(6).reused, kLines);
+  EXPECT_EQ(t.reusingReports.at(6).frame.width, 512u);
 }
 
 TEST(SnesLineReuse, AMachineNobodyWatchesTakesItsTileReadsAndItsDecisionFromTheFrameBefore) {
@@ -920,16 +922,18 @@ TEST(SnesLineReuse, AMachineNobodyWatchesTakesItsTileReadsAndItsDecisionFromTheF
 }
 
 TEST(SnesLineReuse, AnObserverSetAfterAFrameDrawsTheNextFrameWhole) {
-  // Unwatched through count 2, watched from there: the records made unwatched hold no
-  // pixels, so the first watched picture draws every line; cleared after count 4, the
-  // record's pixels go unread and every line is still taken.
+  // Unwatched for six frames, watched from the picture after them: the records made
+  // unwatched hold no pixels, so the first watched picture draws every line; cleared
+  // after the one that follows it, the record's pixels go unread and every line is
+  // still taken. The six frames end at the next one's first line, so the first watched
+  // picture is reported at the count the handler has reached.
   Pair t(scene(), /*watch=*/false);
   for (int frame = 0; frame < 6; ++frame) t.run(kFrame);
   ASSERT_TRUE(t.reusing.state() == t.verifying.state());
   ASSERT_GE(t.reusing.state().wram[kFrameCounter], 2u);
   t.reusing.setFrameObserver(&t.reusingReports);
   t.verifying.setFrameObserver(&t.verifyingReports);
-  const std::uint8_t from = static_cast<std::uint8_t>(t.reusing.state().wram[kFrameCounter] + 1u);
+  const std::uint8_t from = t.reusing.state().wram[kFrameCounter];
   ASSERT_TRUE(t.runTo(static_cast<std::uint8_t>(from + 1u)));
   EXPECT_EQ(t.counts(from).firstDrawn, kLines);
   EXPECT_EQ(t.counts(static_cast<std::uint8_t>(from + 1u)).reused, kLines);
@@ -944,23 +948,23 @@ TEST(SnesLineReuse, AnObserverSetAfterAFrameDrawsTheNextFrameWhole) {
 TEST(SnesLineReuse, TheThreadedMachineReusesAsTheLockstepMachineDoes) {
   {
     Pair t(scene(), /*watch=*/true, /*pictureThread=*/true);
-    ASSERT_TRUE(t.runTo(4));
-    EXPECT_EQ(t.counts(2).drawn, kLines);
+    ASSERT_TRUE(t.runTo(3));
+    EXPECT_EQ(t.counts(1).drawn, kLines);
+    EXPECT_EQ(t.counts(2).reused, kLines);
     EXPECT_EQ(t.counts(3).reused, kLines);
-    EXPECT_EQ(t.counts(4).reused, kLines);
   }
   {
     Pair t(scene(Variant{.inPicture = beforeFrame(4u, dma(3u, 0x00u, 0x0Du, kZeros, 64u))}), true, true);
-    ASSERT_TRUE(t.runTo(6));
-    for (std::uint8_t counter = 3u; counter <= 4u; ++counter) {
+    ASSERT_TRUE(t.runTo(5));
+    for (std::uint8_t counter = 2u; counter <= 3u; ++counter) {
       EXPECT_GE(t.counts(counter).midLine, 1u) << "count " << unsigned{counter};
       EXPECT_EQ(t.counts(counter).drawn, t.counts(counter).midLine);
     }
-    EXPECT_EQ(t.counts(6).reused, kLines);
+    EXPECT_EQ(t.counts(5).reused, kLines);
   }
   {
     Pair t(scene(), true, true);
-    ASSERT_TRUE(t.runTo(2));
+    ASSERT_TRUE(t.runTo(1));
     for (int call = 0; call < 800; ++call) {
       t.run(1001u);
       if (call % 50 == 0) {
@@ -976,23 +980,48 @@ TEST(SnesLineReuse, TheThreadedMachineReusesAsTheLockstepMachineDoes) {
     Pair t(scene(Variant{.inBlank = joined({onFrame(3u, store(0x420Cu, 0x04u)), onFrame(4u, clear(0x420Cu)),
                                              onFrame(5u, store(0x420Cu, 0x04u))})}),
            true, true);
-    ASSERT_TRUE(t.runTo(7));
-    for (std::uint8_t counter = 4u; counter <= 6u; ++counter) {
+    ASSERT_TRUE(t.runTo(6));
+    for (std::uint8_t counter = 3u; counter <= 5u; ++counter) {
       EXPECT_EQ(t.counts(counter).registers, 11u) << "count " << unsigned{counter};
-      EXPECT_EQ(t.reusingReports.at(counter).frame.width, counter == 5u ? 256u : 512u);
+      EXPECT_EQ(t.reusingReports.at(counter).frame.width, counter == 4u ? 256u : 512u);
     }
   }
 }
 
 TEST(SnesLineReuse, TheCountsAreTheLastFinishedFrames) {
   Pair t(scene());
-  ASSERT_TRUE(t.runTo(3));
-  const Snes::LineReuse inReport = t.counts(3);
+  ASSERT_TRUE(t.runTo(2));
+  const Snes::LineReuse inReport = t.counts(2);
   EXPECT_EQ(inReport.reused, kLines);
-  // A budget ending inside the next picture: the counts are still frame 3's.
+  // A budget ending inside the next picture, past its first line: the counts are
+  // still frame 2's.
   t.run(kFrame / 2u);
+  ASSERT_GT(t.reusing.state().vpos, 0u);
+  ASSERT_FALSE(t.reusing.state().inVblank);
   EXPECT_EQ(t.reusing.lineReuse(), inReport);
   ASSERT_TRUE(t.same());
+}
+
+TEST(SnesLineReuse, TheCountsRollAsTheBlankBegins) {
+  // A register written before frame 3 makes frame 3's counts differ from frame 2's.
+  // Frame 2's counts are the answer from its report, across the next frame's first
+  // line and into its picture, and frame 3's from its own report on, on both
+  // machines, with the picture drawn on either thread.
+  for (const bool pictureThread : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << (pictureThread ? "the picture thread" : "the calling thread"));
+    Pair t(scene(Variant{.inBlank = onFrame(3u, store(0x210Du, 0x05u))}), true, pictureThread);
+    ASSERT_TRUE(t.runTo(2));
+    ASSERT_NE(t.counts(2), t.reusingReports.at(1).counts);
+    while (t.reusing.state().inVblank || t.reusing.state().vpos == 0u) t.run(kFrame / 8u);
+    ASSERT_FALSE(t.reusingReports.has(3));
+    EXPECT_EQ(t.reusing.lineReuse(), t.counts(2)) << "inside frame 3's picture";
+    EXPECT_EQ(t.verifying.lineReuse(), t.verifyingReports.at(2).counts);
+    while (!t.reusingReports.has(3)) t.run(kFrame / 8u);
+    ASSERT_TRUE(t.same());
+    EXPECT_EQ(t.counts(3).registers, kLines) << describe(t.counts(3));
+    EXPECT_EQ(t.reusing.lineReuse(), t.counts(3)) << "from frame 3's report on";
+    EXPECT_EQ(t.verifying.lineReuse(), t.verifyingReports.at(3).counts);
+  }
 }
 
 }  // namespace

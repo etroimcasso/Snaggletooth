@@ -306,7 +306,7 @@ class SaveObserver {
   // valid for the call.
   //
   // It arrives from inside step() or run(), at the end of the cycle in which the
-  // beam reaches the next frame's first line, after that cycle has closed. It may
+  // frame's vertical blank begins, after that cycle has closed. It may
   // throw: step() or run() then returns through the throw with the machine at
   // that cycle's end, state() coherent there, and the report not made again. The
   // next run() finishes the budget the throw interrupted before it spends its
@@ -1309,8 +1309,8 @@ class Snes {
   void deliverReports();
   // Hands the finished picture to the frame observer: the rows the frame's own
   // vertical blank left below it, the frame's parity, and the raster the dots
-  // wrote. Called at the end of the cycle in which the beam reaches the next
-  // frame's first line, which draws nothing, so the raster is the finished frame.
+  // wrote. Called at the end of the cycle in which the frame's vertical blank
+  // begins, whose line draws nothing, so the raster is the finished frame.
   void deliverFrame();
   // Hands the save window to the observer, at the end of the same cycle.
   void deliverSave();
@@ -1688,7 +1688,7 @@ class Snes {
   // restore drops it, and so do the line's end and a write to $4200, $4201,
   // $4207-$420A or $2133, the registers the line's events are dated from.
   std::uint64_t lineEventsFrom_ = 0;
-  bool frameFinished_ = false;  // the beam reached a new frame's first line this cycle
+  bool frameFinished_ = false;  // the frame's vertical blank began this cycle
   // The frame in progress is 512 wide, and how wide the finished picture is: the
   // drawing side's, written by the thread that draws and read by the calling thread
   // at the frame report, after it has waited for the picture.
@@ -1702,7 +1702,7 @@ class Snes {
   // one site, so the machine already knows. It belongs to the report and not to
   // the console, so a snapshot does not carry it.
   bool saveChanged_ = false;
-  bool saveFinished_ = false;  // a frame that changed the window ended this cycle
+  bool saveFinished_ = false;  // a frame that changed the window began its vertical blank this cycle
   // The bytes a host has armed for a watch, one bit per byte per direction,
   // keyed by the byte an address reaches (physical) and held behind one owning
   // pointer null until the first arm — which is also the access path's "is

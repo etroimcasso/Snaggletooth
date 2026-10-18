@@ -213,9 +213,12 @@ canonical form.
 ## What it is built on
 
 The library draws only while a frame observer is set (`snaggletooth/snes/video_frame.h`), so the
-tool sets one, and each finished frame goes to the window, the recording and the table in turn
-before the next frame is allowed to begin. The controllers are read after that frame's wait rather
-than before it, so what you are holding is sampled immediately ahead of the frame that latches it.
+tool sets one. The library hands each finished frame over as the frame's vertical blank begins, and
+the frame goes to the window, the recording and the table in turn before the machine runs on. The
+controllers are read after that frame's wait rather than before it and presented there, ahead of
+the frame's auto-read, so what you are holding is sampled immediately ahead of the moment the
+console latches it, and the script records it as that frame's line
+([input-script.md §2](../../docs/input-script.md#2-frames)).
 The sound is taken from the machine between frames, a quarter of a frame at a time, and handed
 straight to the device.
 

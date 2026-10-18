@@ -532,6 +532,28 @@ TEST(PlayerRecorder, ARecorderWritesOnlyChanges) {
             "frame 6 1 unplugged\n");
 }
 
+TEST(PlayerRecorder, AFrameToldAgainKeepsWhatItWasToldLast) {
+  // The player tells frame 0 what the ports hold before the first step and again as
+  // frame 0's vertical blank begins; a pad pressed or plugged in between replaces
+  // frame 0's line, and the script still reads back.
+  PadRecorder recorder;
+  recorder.frame(0u, Joypad{}, std::nullopt);
+  recorder.frame(0u, Joypad{.a = true}, Joypad{});
+  recorder.frame(1u, Joypad{.a = true}, Joypad{});
+  recorder.frame(2u, Joypad{}, Joypad{});
+  recorder.frame(2u, Joypad{.b = true}, Joypad{});
+  const std::string text = writeInputScript(recorder.script());
+  EXPECT_EQ(text,
+            "frame 0 1 a\n"
+            "frame 0 2 none\n"
+            "frame 2 1 b\n");
+  std::string error;
+  const std::optional<InputScript> replay = parseInputScript(text, error);
+  ASSERT_TRUE(replay.has_value()) << error << "\n" << text;
+  EXPECT_EQ(replay->padAt(JoypadPort::One, 0u), std::optional<Joypad>(Joypad{.a = true}));
+  EXPECT_EQ(replay->padAt(JoypadPort::Two, 0u), std::optional<Joypad>(Joypad{}));
+}
+
 TEST(PlayerRecorder, ARecordedRunReplaysItself) {
   const std::vector<std::pair<std::optional<Joypad>, std::optional<Joypad>>> run{
       {Joypad{}, std::nullopt},

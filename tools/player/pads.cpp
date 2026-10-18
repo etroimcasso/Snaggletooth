@@ -269,10 +269,19 @@ void PadRecorder::frame(std::uint32_t at, const std::optional<Joypad>& one,
 }
 
 void PadRecorder::port(std::uint32_t at, JoypadPort which, const std::optional<Joypad>& held) {
-  script_.events.push_back(disasm::InputEvent{.frame = at,
-                                              .port = which,
-                                              .plugged = held.has_value(),
-                                              .pad = held.value_or(Joypad{})});
+  const disasm::InputEvent event{.frame = at,
+                                 .port = which,
+                                 .plugged = held.has_value(),
+                                 .pad = held.value_or(Joypad{})};
+  // The script carries one line a port a frame, so a frame told again replaces the
+  // line it already holds for the port: what a frame holds is what it was told last.
+  for (auto e = script_.events.rbegin(); e != script_.events.rend() && e->frame == at; ++e) {
+    if (e->port == which) {
+      *e = event;
+      return;
+    }
+  }
+  script_.events.push_back(event);
 }
 
 }  // namespace snaggletooth::player

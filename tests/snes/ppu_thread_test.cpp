@@ -872,5 +872,95 @@ TEST(SnesPpuThread, TheConsoleSleepsWhileItWaitsForThePicture) {
       << " s cpu over " << sleeping.wall << " s";
 }
 
+// Where the machine stands at each frame report, the count the handler had reached,
+// and the frame's shape.
+struct ReportPoint final : FrameObserver {
+  struct At {
+    std::uint16_t vpos = 0;
+    std::uint16_t hpos = 0;
+    std::uint16_t vblankBeginLine = 0;
+    bool inVblank = false;
+    std::uint8_t counter = 0;
+    unsigned width = 0;
+    unsigned height = 0;
+    [[nodiscard]] bool operator==(const At&) const = default;
+  };
+  const Snes* machine = nullptr;
+  std::vector<At> reports;
+  void frame(const VideoFrame& picture) override {
+    const SnesState& s = machine->state();
+    reports.push_back(At{.vpos = s.vpos,
+                         .hpos = s.hpos,
+                         .vblankBeginLine = s.vblankBeginLine,
+                         .inVblank = s.inVblank,
+                         .counter = s.wram[kFrameCounter],
+                         .width = picture.width,
+                         .height = picture.height});
+  }
+};
+
+TEST(SnesPpuThread, BothMachinesReportAtTheBlanksCycle) {
+  // Each frame is reported at the end of the cycle its vertical blank begins, on the
+  // threaded machine as on the lockstep one: the same line, the same position on it.
+  Pair t(scene(), /*watch=*/false);
+  ReportPoint lockstep;
+  ReportPoint threaded;
+  lockstep.machine = &t.lockstep;
+  threaded.machine = &t.threaded;
+  t.lockstep.setFrameObserver(&lockstep);
+  t.threaded.setFrameObserver(&threaded);
+  for (int call = 0; call < 12; ++call) {
+    t.run(kFrame);
+    ASSERT_TRUE(t.lockstep.state() == t.threaded.state()) << "after frame " << call;
+  }
+  EXPECT_GE(lockstep.reports.size(), 11u);
+  EXPECT_EQ(lockstep.reports, threaded.reports);
+  for (const ReportPoint::At& at : threaded.reports) {
+    EXPECT_TRUE(at.inVblank);
+    EXPECT_EQ(at.vpos, at.vblankBeginLine);
+    EXPECT_EQ(at.vpos, 225u);
+    EXPECT_LE(at.hpos, 12u);
+  }
+}
+
+TEST(SnesPpuThread, TheWidthIsSettledAtTheBlankOnEitherThread) {
+  // The scene in mode 5 for one frame in sixteen and, from the blank that lights
+  // it, under SETINI's taller picture: each machine settles a frame's width as its
+  // blank begins, at line 240, so the report after the handler chose mode 5 at a
+  // count of 16 is 512 wide and every other lit report 256, 239 lines tall.
+  const Bytes tallWidening = scene(
+      Variant{.inBlank = joined({{0xA5u, kFrameCounter, 0x29u, 0x0Fu, 0xD0u, 0x04u,  // LDA $10 ; AND #$0F ; BNE +4
+                                  0xA9u, 0x05u, 0x80u, 0x02u,                          // LDA #$05 ; BRA +2
+                                  0xA9u, 0x01u,                                        // LDA #$01
+                                  0x8Du, 0x05u, 0x21u},                                // STA $2105
+                                 store(0x2133u, 0x04u)}),
+              .inPicture = {}});
+  Pair t(tallWidening, /*watch=*/false);
+  ReportPoint lockstep;
+  ReportPoint threaded;
+  lockstep.machine = &t.lockstep;
+  threaded.machine = &t.threaded;
+  t.lockstep.setFrameObserver(&lockstep);
+  t.threaded.setFrameObserver(&threaded);
+  for (int call = 0; call < 40; ++call) {
+    t.run(kFrame);
+    ASSERT_TRUE(t.lockstep.state() == t.threaded.state()) << "after frame " << call;
+  }
+  EXPECT_EQ(lockstep.reports, threaded.reports);
+  unsigned wide = 0;
+  unsigned lit = 0;
+  for (const ReportPoint::At& at : threaded.reports) {
+    if (at.counter == 0u) continue;  // before the blank that lights the scene
+    ++lit;
+    SCOPED_TRACE(::testing::Message() << "count " << unsigned{at.counter});
+    EXPECT_EQ(at.vpos, 240u);
+    EXPECT_EQ(at.height, 239u);
+    EXPECT_EQ(at.width, at.counter % 16u == 0u ? 512u : 256u);
+    if (at.width == 512u) ++wide;
+  }
+  EXPECT_GE(lit, 30u);
+  EXPECT_EQ(wide, 2u) << "counts 16 and 32";
+}
+
 }  // namespace
 }  // namespace snaggletooth

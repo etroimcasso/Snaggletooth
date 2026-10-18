@@ -5,8 +5,10 @@
 // A host that wants to see what a cartridge draws, rather than read the video
 // memories and work out the picture itself, sets a FrameObserver on the machine.
 // It is told every frame the PPU finishes, at the end of the cycle in which the
-// beam wraps to the next frame's first line: the raster the chip's converter
-// drove, its size, and the frame's parity.
+// frame's vertical blank begins: the raster the chip's converter drove, its size,
+// and the frame's parity. The report comes before the frame's NMI handler runs
+// and before its controller auto-read begins, so a pad a host sets inside it is
+// what that frame's auto-read latches.
 //
 // The observer is the host's object and outlives every step it is set for. It is
 // not part of the machine's state, so a snapshot does not carry it and restore()
@@ -43,11 +45,11 @@ class FrameObserver {
   virtual ~FrameObserver() = default;
 
   // A frame the PPU has finished. It arrives on the thread the machine is stepped
-  // on, from inside step() or run(), at the end of the cycle in which the beam
-  // reaches the next frame's first line, after that cycle has closed, whichever
-  // thread drew it. It may
-  // throw, on the terms SaveObserver::changed states (`snes.h`): the machine is
-  // left at that cycle's end and the next run() finishes the interrupted budget.
+  // on, from inside step() or run(), at the end of the cycle in which the frame's
+  // vertical blank begins, after that cycle has closed, whichever thread drew it.
+  // It may throw, on the terms SaveObserver::changed states (`snes.h`): the
+  // machine is left at that cycle's end and the next run() finishes the
+  // interrupted budget.
   // A save report the same cycle owes is then made at the end of the next cycle.
   virtual void frame(const VideoFrame& frame) = 0;
 };

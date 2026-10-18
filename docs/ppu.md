@@ -111,9 +111,12 @@ Three events belong to the chip rather than the machine:
 
 A host that wants to see what a program draws sets a frame observer on the machine
 (`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, at the end of
-the cycle in which the beam reaches the next frame's first line, on the thread the machine is stepped
-on; a machine built with `SnesConfig::ppuThread` on draws the dots on a thread of its own and hands over
-the same frame ([the picture thread](snes-machine.md#the-picture-thread)):
+the cycle in which the frame's vertical blank begins, on the thread the machine is stepped on; a machine
+built with `SnesConfig::ppuThread` on draws the dots on a thread of its own and hands over the same frame
+([the picture thread](snes-machine.md#the-picture-thread)). No dot is drawn in vertical blank, so the
+picture is complete there, and the report comes before the frame's NMI handler runs and before its
+controller auto-read begins: a pad a host sets inside the report is what that frame's auto-read
+latches ([vertical blank](snes-machine.md#vertical-blank)):
 
 ```cpp
 struct Watcher final : FrameObserver {

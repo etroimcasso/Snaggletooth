@@ -653,12 +653,13 @@ class Player final : public snaggletooth::FrameObserver {
       }
     }
 
-    // The controllers are read after that wait rather than before it. The frame that
-    // latches what is read begins the moment this returns, so a sample taken ahead of
-    // the wait would already be a whole frame old by the time the machine could see
-    // it — a frame of delay bought for nothing.
-    pump();         // the plugs, the pulls and the keys, before anything reads them
-    presentPads(static_cast<std::uint32_t>(frames_));  // the frame beginning now takes what is held for it
+    // The controllers are read after that wait rather than before it. The report stands
+    // at the start of the vertical blank of frame `frames_ - 1`, whose auto-read has not
+    // begun, so what is read here is what that frame's auto-read latches the moment this
+    // returns; a sample taken ahead of the wait would already be a frame's wait old by
+    // then — a frame of delay bought for nothing.
+    pump();  // the plugs, the pulls and the keys, before anything reads them
+    presentPads(static_cast<std::uint32_t>(frames_ - 1u));  // the frame whose blank begins now takes what is held for it
 
     const std::uint64_t now = SDL_GetTicksNS();
     if (table_) {

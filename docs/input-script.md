@@ -66,10 +66,17 @@ that the last line did not name.
 ## 2. Frames
 
 Frames are counted from power-on, the first being frame 0, and a frame begins as
-the beam wraps to the top of the picture. A line's buttons are presented to the
-machine as its frame begins, ahead of the vertical blank in which the console's
-auto-read latches the pads — so a button named on frame `n` is what the program
-reads on frame `n`, through either path.
+the beam wraps to the top of the picture. A line's buttons are what that frame's
+auto-read latches, in the vertical blank at the frame's end: a button named on
+frame `n` is what the program reads on frame `n` through the auto-read.
+
+Where in the frame a line is presented depends on the tool, and only a program
+that reads the serial ports inside the picture sees the difference.
+`snes_disasm` presents a line as its frame begins, so a serial read anywhere in
+frame `n` reads frame `n`'s buttons. `snes_player`, replaying a script or
+recording one, presents a line as the frame's vertical blank begins, the latest
+point ahead of the auto-read, so a serial read in frame `n`'s vertical blank
+reads frame `n`'s buttons and one inside its picture reads frame `n − 1`'s.
 
 Lines run in frame order. One frame may carry a line for each port.
 

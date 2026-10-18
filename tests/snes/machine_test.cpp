@@ -797,10 +797,10 @@ struct ThrowsOnFirstFrame final : FrameObserver {
 };
 
 TEST(SnesMachine, AFrameReportThatThrowsLeavesTheMachineAtTheCyclesEnd) {
-  // The frame is reported after the cycle in which the beam reached the next
-  // frame's first line has closed, so a throw leaves the machine there, at that
-  // line. The next run() finishes the interrupted budget: the two runs land
-  // where one run of the budget does, and the frame is not reported again.
+  // The frame is reported after the cycle in which its vertical blank began has
+  // closed, so a throw leaves the machine there, at the blank's first line. The
+  // next run() finishes the interrupted budget: the two runs land where one run of
+  // the budget does, and the frame is not reported again.
   const std::uint64_t kTwoFrames = 2u * consoleClock(Region::Ntsc).masterCyclesPerFrame + 20000u;
   Snes a = loopMachine();
   Snes b = loopMachine();
@@ -810,7 +810,8 @@ TEST(SnesMachine, AFrameReportThatThrowsLeavesTheMachineAtTheCyclesEnd) {
   b.setFrameObserver(&throws);
   EXPECT_THROW(b.run(kTwoFrames), ThrowsOnFirstFrame::Thrown);
   ASSERT_EQ(throws.frames, 1);
-  EXPECT_EQ(b.state().vpos, 0u) << "at the first line of the next frame";
+  EXPECT_TRUE(b.state().inVblank);
+  EXPECT_EQ(b.state().vpos, b.state().vblankBeginLine) << "at the first line of the vertical blank";
   EXPECT_LE(b.state().hpos, 12u) << "within the one cycle that reached it";
   b.run(0u);
   a.run(kTwoFrames);
@@ -843,8 +844,11 @@ TEST(SnesMachine, ResetNeverDeliversThePictureTheBeamWasPartWayDown) {
   std::unique_ptr<SnesState> whole = copyOf(m);
   whole->ppu.bgmode = 0x01u;
   m.restore(*whole);
-  m.run(frame - 2000u);
-  EXPECT_EQ(seen.frames, 0);  // half a frame and most of one make no picture between them
+  // The first picture after the reset is reported as its vertical blank begins, at
+  // line 225, 225 lines of 1364 master cycles from the reset.
+  const std::uint64_t firstBlank = 225u * 1364u;
+  m.run(firstBlank - 2000u);
+  EXPECT_EQ(seen.frames, 0);  // half a frame and most of a picture make no picture between them
   m.run(4000u);
   EXPECT_EQ(seen.frames, 1);
   EXPECT_EQ(seen.width, 256u);  // the half-drawn picture's width went with it
@@ -856,8 +860,8 @@ TEST(SnesMachine, ResetNeverDeliversThePictureTheBeamWasPartWayDown) {
 TEST(SnesMachine, AnObserverSetPastTheLastLinesLastPixelIsHandedThatFrameBlack) {
   // A watched picture line starts the frame's raster wherever the beam is on it, so
   // an observer set in the last picture line's horizontal blank is handed the frame
-  // that ends there. No line of it was drawn while watched, and a line nobody drew
-  // is black, whatever the backdrop.
+  // that ends there, as the vertical blank begins one line on. No line of it was
+  // drawn while watched, and a line nobody drew is black, whatever the backdrop.
   Snes m = loopMachine();
   std::unique_ptr<SnesState> st = copyOf(m);
   st->vpos = 224u;      // the last picture line
@@ -870,12 +874,193 @@ TEST(SnesMachine, AnObserverSetPastTheLastLinesLastPixelIsHandedThatFrameBlack) 
   m.restore(*st);
   FrameCount seen;
   m.setFrameObserver(&seen);
-  m.run(60000u);  // the 38 lines to the next frame's first, and not a frame more
+  m.run(60000u);  // the line to the vertical blank, and not a frame more
   EXPECT_EQ(seen.frames, 1);
   EXPECT_EQ(seen.width, 256u);
   EXPECT_EQ(seen.height, 224u);
   EXPECT_TRUE(seen.black);
   m.setFrameObserver(nullptr);
+}
+
+// ---- where the frame is reported ------------------------------------------------
+
+constexpr std::uint64_t kLineMaster = 1364u;  // one line of the beam, in master cycles
+
+// Where the machine stands at each frame report, and the frame's shape. A host may
+// set a pad inside a report: `pad`, when set, goes to port one inside report
+// `padAt` (counted from 1).
+struct ReportPoint final : FrameObserver {
+  struct At {
+    std::uint64_t lineStart = 0;     // the master cycle the beam's line began on
+    std::uint64_t autoJoyStart = 0;  // the master cycle the latest auto-read began on
+    std::uint16_t vpos = 0;
+    std::uint16_t hpos = 0;
+    std::uint16_t vblankBeginLine = 0;
+    bool inVblank = false;
+    unsigned width = 0;
+    unsigned height = 0;
+    std::uint8_t field = 0;
+  };
+  Snes* machine = nullptr;
+  std::vector<At> reports;
+  std::optional<Joypad> pad;
+  std::size_t padAt = 0;
+  void frame(const VideoFrame& picture) override {
+    const SnesState& s = machine->state();
+    reports.push_back(At{.lineStart = s.master - s.hpos,
+                         .autoJoyStart = s.autoJoyStart,
+                         .vpos = s.vpos,
+                         .hpos = s.hpos,
+                         .vblankBeginLine = s.vblankBeginLine,
+                         .inVblank = s.inVblank,
+                         .width = picture.width,
+                         .height = picture.height,
+                         .field = picture.field});
+    if (pad.has_value() && reports.size() == padAt) machine->setJoypad(JoypadPort::One, pad);
+  }
+};
+
+// A cartridge with NMI and the controller auto-read on ($4200 = $81), looping. Its
+// NMI handler waits for the frame's auto-read to begin and to end, then stores
+// JOY1L ($4218) to work-RAM byte $10.
+constexpr std::uint8_t kPadByte = 0x10u;
+Snes padReadingMachine() {
+  std::vector<std::uint8_t> rom(0x8000u, 0x00u);
+  const std::array<std::uint8_t, 7> program{
+      0xA9u, 0x81u, 0x8Du, 0x00u, 0x42u,  // LDA #$81 ; STA $4200
+      0x80u, 0xFEu,                       // BRA to itself
+  };
+  const std::array<std::uint8_t, 23> handler{
+      0xADu, 0x12u, 0x42u, 0x29u, 0x01u, 0xF0u, 0xF9u,  // LDA $4212 ; AND #$01 ; BEQ back: the read begins
+      0xADu, 0x12u, 0x42u, 0x29u, 0x01u, 0xD0u, 0xF9u,  // LDA $4212 ; AND #$01 ; BNE back: the read ends
+      0xADu, 0x18u, 0x42u, 0x85u, kPadByte,             // LDA $4218 ; STA $10
+      0xADu, 0x10u, 0x42u,                              // LDA $4210
+      0x40u,                                            // RTI
+  };
+  std::copy(program.begin(), program.end(), rom.begin());
+  std::copy(handler.begin(), handler.end(), rom.begin() + 0x10);
+  rom[0x7FFAu] = 0x10u;  // emulation-mode NMI -> $8010
+  rom[0x7FFBu] = 0x80u;
+  rom[0x7FFCu] = 0x00u;  // reset -> $8000
+  rom[0x7FFDu] = 0x80u;
+  Snes m(SnesConfig{.rom = rom, .region = Region::Ntsc});
+  m.setJoypad(JoypadPort::One, Joypad{});
+  return m;
+}
+
+TEST(SnesMachine, TheFrameIsReportedAsItsVerticalBlankBegins) {
+  // The first frame from power-on is reported at the end of the cycle that begins
+  // line 225, where its vertical blank begins: before the NMI handler has run and
+  // before the auto-read, which begins later on the same line, so a pad set there
+  // is read by this frame's auto-read. The console leaves reset with the parity
+  // flag clear, and the first frame takes it at its first line.
+  Snes m = padReadingMachine();
+  ReportPoint seen;
+  seen.machine = &m;
+  m.setFrameObserver(&seen);
+  m.run(224u * kLineMaster);
+  EXPECT_TRUE(seen.reports.empty()) << "the picture's last line is not the report's";
+  m.run(kLineMaster);
+  ASSERT_EQ(seen.reports.size(), 1u);
+  const ReportPoint::At& at = seen.reports.front();
+  EXPECT_TRUE(at.inVblank);
+  EXPECT_EQ(at.vpos, 225u);
+  EXPECT_EQ(at.vblankBeginLine, 225u);
+  EXPECT_LE(at.hpos, 12u) << "within the one cycle that began the line";
+  EXPECT_EQ(at.lineStart, 225u * kLineMaster);
+  EXPECT_LT(at.autoJoyStart, at.lineStart) << "the frame's auto-read has not begun";
+  EXPECT_EQ(at.height, 224u);
+  EXPECT_EQ(at.width, 256u);
+  EXPECT_EQ(at.field, 1u);
+}
+
+TEST(SnesMachine, TheReportIsAtTheLineTheBlankBeginsOn) {
+  // SETINI bit 2 begins the blank at line 240, and the report with it, the picture
+  // 239 lines tall. The bit cleared between lines 225 and 240 begins the blank at
+  // the next line, and the report there, the picture as tall as the lines before it.
+  {
+    Snes m = loopMachine();
+    std::unique_ptr<SnesState> st = copyOf(m);
+    st->ppu.setini = 0x04u;
+    m.restore(*st);
+    ReportPoint seen;
+    seen.machine = &m;
+    m.setFrameObserver(&seen);
+    m.run(239u * kLineMaster);
+    EXPECT_TRUE(seen.reports.empty());
+    m.run(kLineMaster);
+    ASSERT_EQ(seen.reports.size(), 1u);
+    EXPECT_EQ(seen.reports.front().vpos, 240u);
+    EXPECT_EQ(seen.reports.front().vblankBeginLine, 240u);
+    EXPECT_EQ(seen.reports.front().height, 239u);
+  }
+  {
+    Snes m = loopMachine();
+    std::unique_ptr<SnesState> st = copyOf(m);
+    st->ppu.setini = 0x04u;
+    m.restore(*st);
+    ReportPoint seen;
+    seen.machine = &m;
+    m.setFrameObserver(&seen);
+    m.run(230u * kLineMaster + 200u);
+    ASSERT_EQ(m.state().vpos, 230u);
+    ASSERT_FALSE(m.state().inVblank);
+    EXPECT_TRUE(seen.reports.empty());
+    std::unique_ptr<SnesState> cleared = copyOf(m);
+    cleared->ppu.setini = 0x00u;
+    m.restore(*cleared);
+    m.run(kLineMaster);
+    ASSERT_EQ(seen.reports.size(), 1u);
+    EXPECT_EQ(seen.reports.front().vpos, 231u);
+    EXPECT_EQ(seen.reports.front().vblankBeginLine, 231u);
+    EXPECT_EQ(seen.reports.front().height, 230u);
+  }
+}
+
+TEST(SnesMachine, APadSetInsideTheReportIsLatchedByThatFramesAutoRead) {
+  // A pad set inside a frame's report is latched by the auto-read that frame's
+  // vertical blank begins, and the program has read it before the next frame's
+  // first line, a frame before the next report.
+  Snes m = padReadingMachine();
+  ReportPoint seen;
+  seen.machine = &m;
+  Joypad pressed;
+  pressed.a = true;  // JOY1L bit 7
+  seen.pad = pressed;
+  seen.padAt = 3u;
+  m.setFrameObserver(&seen);
+  while (seen.reports.size() < 3u) m.run(kLineMaster);
+  EXPECT_EQ(m.state().wram[kPadByte], 0x00u) << "the frames before read the pad with nothing held";
+  while (m.state().vpos != 0u) m.run(kLineMaster);
+  EXPECT_EQ(seen.reports.size(), 3u) << "the next frame's first line comes before its report";
+  EXPECT_EQ(m.state().wram[kPadByte], 0x80u) << "this frame's auto-read latched the pad";
+}
+
+TEST(SnesMachine, ARestoreIntoTheBlankIsHandedNoPictureUntilAFrameIsDrawnWhole) {
+  // A state standing in vertical blank owes no report: the raster holds nothing the
+  // restored machine drew. The next frame's picture is drawn whole and reported as
+  // its own blank begins.
+  Snes m = loopMachine();
+  ReportPoint seen;
+  seen.machine = &m;
+  m.setFrameObserver(&seen);
+  std::unique_ptr<SnesState> st = copyOf(m);
+  st->vpos = 230u;
+  st->hpos = 0u;
+  st->inVblank = true;
+  st->vblankBeginLine = 225u;
+  st->ppu.inidisp = 0x0Fu;  // the screen on
+  st->ppu.bgmode = 0x01u;
+  m.restore(*st);
+  m.run(32u * kLineMaster);  // to the next frame's first line
+  ASSERT_EQ(m.state().vpos, 0u);
+  EXPECT_TRUE(seen.reports.empty());
+  m.run(224u * kLineMaster);  // through the picture
+  EXPECT_TRUE(seen.reports.empty());
+  m.run(kLineMaster);
+  ASSERT_EQ(seen.reports.size(), 1u);
+  EXPECT_EQ(seen.reports.front().vpos, 225u);
+  EXPECT_EQ(seen.reports.front().height, 224u);
 }
 
 }  // namespace
