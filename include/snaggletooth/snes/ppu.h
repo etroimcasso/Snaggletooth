@@ -361,8 +361,11 @@ class Ppu {
 
  public:
   // The machine builds every Ppu and owns the value the constructor's second
-  // argument names, so it is the machine, and nothing else, that reaches the type.
+  // argument names, so it is the machine that reaches the type, and PpuTimeline,
+  // which builds one over a state of its own to draw a frame from its timeline
+  // (`snes/ppu_timeline.h`).
   friend class Snes;
+  friend struct PpuTimeline;
 
   Ppu(PpuState& state, Derived& derived) noexcept : s_(state), d_(derived) {}
 
