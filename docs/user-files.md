@@ -62,8 +62,8 @@ there opens here.
 
 The file is read into the cartridge before its first instruction and written
 while you play, each time the machine reports that the save changed — which it
-does at the end of a frame that changed it, and not at all in a frame that did
-not. Closing the window writes whatever the last moments left.
+does once a frame, as the frame's picture is finished, when that frame changed
+it, and not at all in a frame that did not. Closing the window writes whatever the last moments left.
 
 Two things it will not do. A file whose size is not the size the cartridge
 declares is **left exactly as it is** — the cartridge boots on its own power-on

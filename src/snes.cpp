@@ -2032,34 +2032,6 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   ppu.beginLine(state_.vpos);
 
   if (state_.vpos == 0u) {
-    // The picture the beam has just finished is as tall as its own vertical blank
-    // left it, and carries the parity it ran under — both read here, before the
-    // frame beginning now changes either. Its width is the drawing side's to settle:
-    // here when the picture is drawn on this thread, on the picture thread at this
-    // line's entry when it is drawn there.
-    // The frame's line counts are finished with it, by the side that drew it.
-    if (!ppuThreaded_) {
-      cache_->last = cache_->frame;
-      cache_->frame = LineReuse{};
-    }
-    if (frameObserver_ != nullptr) {
-      frameFinished_ = true;
-      frameField_ = state_.field;
-      if (!ppuThreaded_) finishPicture();
-      framePictureLines_ = state_.vblankBeginLine > 1u
-          ? static_cast<std::uint16_t>(state_.vblankBeginLine - 1u)
-          : static_cast<std::uint16_t>(state_.ppu.vblankStartLine() - 1u);
-    }
-    // A frame that changed the save window is owed a report. Both reports are made
-    // at the end of this cycle, by deliverFinished, and not from here: the line's
-    // own work cannot be left half done, and what a host does with a picture or a
-    // save — writing a file, most plainly — may throw. The beam reaches this line
-    // whether or not anyone is watching the picture, so a save is reported to a
-    // host that asked for nothing else.
-    if (saveObserver_ != nullptr && saveChanged_) {
-      saveChanged_ = false;
-      saveFinished_ = true;
-    }
     state_.inVblank = false;     // the frame begins in the picture
     state_.vblankNmi = false;    // and the NMI flag clears with it
     // The new frame re-initialises HDMA at line 0, and everything the last frame's
@@ -2081,6 +2053,36 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
     state_.inVblank = true;
     state_.vblankBeginLine = state_.vpos;
     state_.hdmaActive = 0u;  // every HDMA channel deactivates for the rest of the frame
+
+    // The picture is finished as the blank begins: no dot is drawn in vertical blank,
+    // and the last picture line was completed above. It is as tall as the lines
+    // before this one and carries the parity it ran under, which turns at the next
+    // frame's first line. Its width is the drawing side's to settle: here when the
+    // picture is drawn on this thread, on the picture thread at this line's entry
+    // when it is drawn there. The frame's line counts are finished with it, by the
+    // side that drew it.
+    if (!ppuThreaded_) {
+      cache_->last = cache_->frame;
+      cache_->frame = LineReuse{};
+    }
+    if (frameObserver_ != nullptr) {
+      frameFinished_ = true;
+      frameField_ = state_.field;
+      if (!ppuThreaded_) finishPicture();
+      framePictureLines_ = static_cast<std::uint16_t>(state_.vpos - 1u);
+    }
+    // A frame that changed the save window is owed a report. Both reports are made
+    // at the end of this cycle, by deliverFinished, and not from here: the line's
+    // own work cannot be left half done, and what a host does with a picture or a
+    // save — writing a file, most plainly — may throw. The report lands before the
+    // NMI handler runs and before the frame's controller auto-read begins, so a pad
+    // a host sets inside it is what this frame's auto-read latches. The beam reaches
+    // this line whether or not anyone is watching the picture, so a save is reported
+    // to a host that asked for nothing else.
+    if (saveObserver_ != nullptr && saveChanged_) {
+      saveChanged_ = false;
+      saveFinished_ = true;
+    }
   }
 
   // The picture thread is handed the line as it now stands: its facts, the mosaic
@@ -3186,11 +3188,13 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
   switch (event.kind) {
     case PictureEventKind::Line: {
       // The rest of the line the thread is on, unless the frame before stands in for
-      // it, and the line's record or completion; then the new line's facts: a
-      // frame's first line settles the finished picture's width and its line counts.
+      // it, and the line's record or completion; then the new line's facts: the line
+      // vertical blank begins on settles the finished picture's width and its line
+      // counts.
       if (!cache_->pending) drawTo(kLineMaster);
       Ppu ending{picture.view, picture.derived};
       completeLine(ending, picture.in);
+      const bool blankBegins = event.vblank && !picture.in.vblank;
       picture.in.vpos = event.vpos;
       picture.in.field = event.field;
       picture.in.vblank = event.vblank;
@@ -3198,7 +3202,7 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
       picture.view.mosaicBlockLine = event.offset;
       picture.view.mosaicBlockSize = event.value;
       picture.drawn = 0u;
-      if (event.vpos == 0u) {
+      if (blankBegins) {
         finishPicture();
         cache_->last = cache_->frame;
         cache_->frame = LineReuse{};

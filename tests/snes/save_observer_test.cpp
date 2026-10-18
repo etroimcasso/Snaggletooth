@@ -67,8 +67,9 @@ std::vector<std::uint8_t> storesForever() {
 // nothing stores.
 std::vector<std::uint8_t> stopsAtOnce() { return cartridge({kStp}); }
 
-// A frame is 262 lines of 1364 master cycles less the four its short line drops;
-// past that is where a finished frame is handed over.
+// A frame is 262 lines of 1364 master cycles less the four its short line drops. A
+// frame's save is reported as its vertical blank begins, at line 225, so a run of
+// one frame and a little more holds the first report, and of two the first two.
 constexpr std::uint64_t kFrameMaster = 357364u;
 constexpr std::uint64_t kOneFrame = kFrameMaster + 20000u;
 constexpr std::uint64_t kTwoFrames = 2u * kFrameMaster + 20000u;
@@ -282,6 +283,59 @@ TEST(SaveObserver, ClearingItStopsTheCalls) {
   EXPECT_EQ(saves.reports.size(), 1u) << "nothing is told after it is cleared";
   EXPECT_EQ(machine.saveObserver(), nullptr);
   EXPECT_NE(machine.state().sram[0], 0x00u) << "and the machine went on storing into the window";
+}
+
+// ---- when in the frame it is told ------------------------------------------------
+
+constexpr std::uint64_t kLineMaster = 1364u;  // one line of the beam, in master cycles
+
+// The line the beam was on at every report, and the line the frame's vertical blank
+// began on.
+struct SaveLines final : SaveObserver {
+  const Snes* machine = nullptr;
+  std::vector<std::uint16_t> vpos;
+  std::vector<std::uint16_t> blankBegan;
+  void changed(std::span<const std::uint8_t>) override {
+    vpos.push_back(machine->state().vpos);
+    blankBegan.push_back(machine->state().vblankBeginLine);
+  }
+};
+
+TEST(SaveObserver, AStoreInThePictureIsReportedAsTheFramesBlankBegins) {
+  // The two stores land on the frame's first line; the report waits for the frame's
+  // vertical blank, at line 225.
+  const std::vector<std::uint8_t> rom = storesTwoBytes();
+  Snes machine = machineWithSave(rom);
+  SaveLines saves;
+  saves.machine = &machine;
+  machine.setSaveObserver(&saves);
+  machine.run(224u * kLineMaster + 1000u);
+  EXPECT_TRUE(saves.vpos.empty()) << "through the picture's last line";
+  machine.run(kLineMaster);
+  ASSERT_EQ(saves.vpos.size(), 1u);
+  EXPECT_EQ(saves.vpos.front(), 225u);
+  EXPECT_EQ(saves.vpos.front(), saves.blankBegan.front());
+}
+
+TEST(SaveObserver, AStoreInVerticalBlankIsReportedAtTheNextBlank) {
+  // The program waits for vertical blank, then stores once: the store lands after
+  // that blank's report, so it is reported as the next frame's blank begins, once.
+  const std::vector<std::uint8_t> rom = cartridge({0xADu, 0x12u, 0x42u, 0x10u, 0xFBu,  // LDA $4212 ; BPL back
+                                                   kLdaImm, 0x5Au, kStaLong, 0x00u, 0x00u, 0x70u, kStp});
+  Snes machine = machineWithSave(rom);
+  SaveLines saves;
+  saves.machine = &machine;
+  machine.setSaveObserver(&saves);
+  machine.run(kFrameMaster);
+  ASSERT_EQ(machine.state().sram[0], 0x5Au) << "the store landed in the first frame's blank";
+  EXPECT_TRUE(saves.vpos.empty()) << "through the frame's end";
+  machine.run(224u * kLineMaster);
+  EXPECT_TRUE(saves.vpos.empty()) << "through the next frame's picture";
+  machine.run(kLineMaster);
+  ASSERT_EQ(saves.vpos.size(), 1u);
+  EXPECT_EQ(saves.vpos.front(), 225u);
+  machine.run(kTwoFrames);
+  EXPECT_EQ(saves.vpos.size(), 1u) << "and once";
 }
 
 }  // namespace

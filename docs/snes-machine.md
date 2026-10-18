@@ -594,6 +594,11 @@ master cycles later, the HDMA channels deactivating for the rest of the frame, t
 returning to its reload value at dot 10, and the [auto-read](#the-controller-ports) of the controllers
 beginning between H = 32.5 and H = 95.5. A later change to `$2133` re-fires none of them.
 
+The finished picture and a changed save are reported at the end of the cycle this line begins
+([the picture](ppu.md#the-picture), [the save observer](#the-save-observer)). No instruction of the NMI
+handler has run there and the auto-read has not begun, so a pad a host sets inside either report is
+what this frame's auto-read latches.
+
 ### The blank flags
 
 `$4212` reports the beam directly. Bit 7 is the vertical-blank fact above. **Bit 6 is raised when the beam
@@ -1008,13 +1013,14 @@ Keeper keeper;
 machine.setSaveObserver(&keeper);
 ```
 
-It is told once at the end of a frame that changed the window, however many stores landed in it, and
-not at all in a frame where none did — and again after `restore()`, a caller replacing the window
-having changed it as surely as a store would. The span is the machine's own storage, valid for the
-call.
+It is told once as the vertical blank of a frame that changed the window begins, however many stores
+landed in it, and not at all in a frame where none did — and again after `restore()`, a caller
+replacing the window having changed it as surely as a store would. A store that lands in vertical blank,
+after that blank's report, is told as the next frame's blank begins. The span is the machine's own
+storage, valid for the call.
 
-The report is made at the end of the cycle in which the beam reaches the next frame's first line,
-after that cycle has closed and after the frame observer's report of the same frame. What a host does
+The report is made at the end of the cycle in which the frame's vertical blank begins, after that
+cycle has closed and after the frame observer's report of the same frame. What a host does
 with a save — writing a file, most plainly — may fail, and the report may throw: `step()` or `run()`
 returns through the throw with the machine at that cycle's end and `state()` coherent there, and the
 report is not made again. The next `run()` finishes the budget the throw interrupted before it spends
