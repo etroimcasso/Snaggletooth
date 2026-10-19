@@ -16,6 +16,7 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 - [What the chip is told](#what-the-chip-is-told)
 - [The frame](#the-frame)
 - [The picture](#the-picture)
+- [The picture as a timeline](#the-picture-as-a-timeline)
 - [The sprites](#the-sprites)
 - [The masking windows](#the-masking-windows)
 - [Writes and their latches](#writes-and-their-latches)
@@ -50,7 +51,9 @@ m.vram()[0x20];      // the low byte of VRAM word $0010
 `Ppu` is the chip's behaviour over that state: `read`, `write`, `latchCounters`, and the verbs the
 machine calls as the beam reaches a line or a frame. The machine builds one over its own state for
 each access and never keeps it — and, drawing on its picture thread, one over the thread's own copy
-of the state for each dot; a host that runs the machine never needs to touch it.
+of the state for each dot; a host that runs the machine never needs to touch it. The machine and
+`PpuTimeline` are its two friends: `PpuTimeline::draw()` builds one over a state of its own to draw a
+frame from [its timeline](#the-picture-as-a-timeline).
 `Ppu::registerValue` is `read`'s byte without its effects, computed from a `PpuState` and the inputs
 alone; the machine's `peekRegister` answers the PPU's registers through it.
 
@@ -508,6 +511,120 @@ shows each as it comes.
   alone. A vertical flip reverses the row a field picks.
 
 The taller picture is 239 lines a field under interlace as it is without.
+
+## The picture as a timeline
+
+A host that draws the picture itself — on a GPU, one thread a pixel — sets a timeline observer on the
+machine instead of, or beside, a frame observer (`include/snaggletooth/snes/ppu_timeline.h`). Each
+frame is handed over as a `PpuTimeline`: everything its pixels are made of, and nothing else. For
+every picture line it holds the registers the picture reads as they stood at the line's first read
+dot, dot 3, and the inputs [Time](#the-sprites) read as the line began; every write to a register a
+line's dots read, placed at the first dot it reaches; the palette and the sprite table as each line
+read them; and VRAM as it stood before the frame's first write inside its picture lines, with every
+such write at its position. The frame drawn from the timeline alone is the frame the chip drew, and
+`PpuTimeline::draw()` draws it that way, through the chip's own dot code, as the reference a host's
+drawing is held to:
+
+```cpp
+struct Timelines final : PpuTimelineObserver {
+  std::vector<std::uint8_t> pixels = std::vector<std::uint8_t>(PpuTimeline::kDrawBytes);
+  void frame(const PpuTimeline& timeline) override {
+    timeline.lines;       // one record a picture line, from timeline.firstLine to timeline.height
+    timeline.events;      // the writes inside the lines' dots, in position order
+    timeline.vramWrites;  // the writes that reached VRAM inside the picture lines
+    timeline.draw(pixels);  // 512 half-pixels a row, row `line - 1` for picture line `line`
+  }
+};
+
+Snes m(SnesConfig{.rom = rom});
+Timelines timelines;
+m.setPpuTimelineObserver(&timelines);
+m.run(cycles);
+```
+
+The report is made on the calling thread at the end of the cycle in which the frame's vertical blank
+begins, after the frame report where a frame observer is set too, on the terms of
+[the timeline observer](snes-machine.md#the-timeline-observer). The spans are the machine's own
+storage and are valid for the call. Every record is a whole number of 32-bit words with no padding,
+so a host uploads each span's bytes as they stand and a shader reads them as 32-bit words.
+
+**The frame.** `height` and `field` are the frame's, as a `VideoFrame` carries them. `width` is 512
+when a picture dot of a recorded line is drawn in half-pixels — modes 5 and 6, or `$2133` bit 3, at
+that dot — and 256 otherwise. `firstLine` is 1 for a frame recorded whole. A restore, a reset or the
+observer being set drops the frame in progress, and the timeline begins at the first line whose first
+read dot the beam then reaches: a state restored at line 100, dot 40 gives a frame whose first line is
+101.
+
+**A line**, `PpuTimeline::Line`, is 32 words:
+
+| Word | Holds |
+|---|---|
+| 0 | `$2100` \| `$2105` << 8 \| `$2106` << 16 \| `$2133` << 24 |
+| 1 | `$2107` \| `$2108` << 8 \| `$2109` << 16 \| `$210A` << 24 |
+| 2 | `$210B` \| `$210C` << 8 \| `$211A` << 16 \| `$2130` << 24 |
+| 3–6 | BG1's to BG4's horizontal offset \| vertical offset << 16 |
+| 7 | Mode 7's matrix A \| B << 16 |
+| 8 | C \| D << 16 |
+| 9 | the center's X \| its Y << 16 |
+| 10 | Mode 7's horizontal offset \| its vertical offset << 16 |
+| 11 | `$2123` \| `$2124` << 8 \| `$2125` << 16 \| `$212A` << 24 |
+| 12 | `$212B` \| `$2126` << 8 \| `$2127` << 16 \| `$2128` << 24 |
+| 13 | `$2129` \| `$212C` << 8 \| `$212D` << 16 \| `$212E` << 24 |
+| 14 | `$212F` \| `$2131` << 8 \| fixed red << 16 \| fixed green << 24 |
+| 15 | fixed blue \| the mosaic row's size << 8 \| the line the row began on << 16 |
+| 16 | the parity \| `$2101` << 8 \| `$2133` << 16 \| the sprites Range kept << 24 |
+| 17 | the sprite Range's walk began at \| the palette version << 16 |
+| 18 | the sprite table version |
+| 19 | the line's first event, an index into `events` |
+| 20 | how many events the line has |
+| 21 | the picture line, 1 to 239 |
+| 22 | the line's `SpriteSource` |
+| 23 | the line's entry in `spriteBuffers` for a Carried line, 0 otherwise |
+| 24–31 | the sprites Range kept, four to a word, the first in word 24's low byte |
+
+Words 0 to 15 hold each register exactly as `PpuState` holds it — a scroll or Mode 7 word as its two
+writes assembled it — since the chip masks what it reads. `Line::value(Field)` reads one back, and
+the accessors name the rest. `$2101`, `$2133`, the count, the first sprite and the kept sprites in
+words 16, 17 and 24 to 31 are what Time read as the line began, which a write between the line's
+start and its first read dot leaves apart from words 0 to 15.
+
+**A line's sprites** come from one of three places, word 22:
+
+- `Gathered` — Time gathered them as the line began, from the line's own inputs: the sprite table
+  version, `$2101`, `$2133` bit 1, the parity and the sprites Range kept. A reader runs Time over
+  those.
+- `None` — the screen was forced blank as the line began, so Time gathered nothing, and the buffer it
+  left is another line's: the line shows no sprite, even where the screen is lit later in the line.
+- `Carried` — the line is drawn with a buffer no Time of the recording gathered: an earlier frame's
+  for this line, or the one a restore put in place. It is in `spriteBuffers`, 512 bytes — the palette
+  word at each of the 256 positions, then the priority at each, `kNoSprite` where no sprite claims it.
+
+**An event**, `PpuTimeline::Event`, is two words. `at` is the picture line in its low half and the
+first dot the write reaches in its high half: the dot after the dot its cycle ends on. `change` is
+the `Field` in the low byte and the value the register holds after the write in the high half. A
+write to `$210D` or `$210E` is two events at one dot, BG1's offset then Mode 7's, and a write to
+`$2132` one event for each channel it names. A write by the CPU to `$2100` is two events at
+successive dots, since the chip reads the register a dot early off the data bus: the byte the bus
+held before the write, then the written value. A `PaletteWord` event is a palette write that landed
+inside the line's dots — under forced blank, or at dots 3 to 21 — and holds the word's index in bits
+8 to 15 and its color in the high half. Only writes reaching dots 3 to 277 are events. One that
+reaches earlier is in the line's words, and one that reaches later is in the next line's.
+
+**The palette and the sprite table** are versions a line names, 512 and 544 bytes each. Version 0 is
+the palette as the first recorded line's first read dot found it, and the table as Time read it for
+that line. A new version is made only when a line finds a byte changed, so a frame whose HDMA writes
+the backdrop on every line holds a version a line, and a still frame holds one of each.
+
+**VRAM** changes inside the picture only under forced blank. `vram` is the 64 KB as the frame's first
+write inside its picture lines found it, or as the picture lines left it where none landed there.
+`vramWrites` holds every such write, horizontal blanks included, at its position: the byte's address
+in the low half of `change` and the byte in the high half.
+
+**`draw()`** fills `kDrawBytes` — 512 half-pixels across, 239 rows, four bytes each — and leaves the
+rows before `firstLine - 1` and from `height` on as they were. Position `x`'s left half is column
+`2x` and its right half `2x + 1`, a position drawn whole filling both with its one pixel. A frame 512
+wide is these rows column for column; one 256 wide is them with each pixel taken once from its
+position's two equal halves.
 
 ## The sprites
 

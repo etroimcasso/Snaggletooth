@@ -14,7 +14,8 @@ them, and the audio machine running underneath — enough to load a cartridge, r
 interrupts, play it, watch it and hear it. A host that wants to watch the bus rather than the state
 sets an [observer](#the-bus-observer), and is told every access in order; one that wants the picture
 sets a frame observer ([ppu.md §The picture](ppu.md#the-picture)) and is handed every frame the PPU
-finishes.
+finishes; one that draws the picture itself sets a [timeline observer](#the-timeline-observer) and is
+handed each frame as what it is drawn from.
 
 ## Contents
 
@@ -45,6 +46,7 @@ finishes.
   - [HDMA](#hdma)
 - [The bus observer](#the-bus-observer)
 - [The save observer](#the-save-observer)
+- [The timeline observer](#the-timeline-observer)
 - [Snapshot and restore](#snapshot-and-restore)
   - [The state as bytes](#the-state-as-bytes)
 - [Reaching into the machine](#reaching-into-the-machine)
@@ -347,8 +349,8 @@ The two machines meet where the console's do, at the ports:
   before the audio machine runs that cycle's share.
 - `peekApu`, `peekApuRegister` and `peekRegister` on a port wait the same way when a host calls them from
   inside a call, from a bus observer say.
-- The frame and save reports wait for the audio machine before they are made, so `state()` and
-  `takeFrames()` inside a report see both machines at the report's cycle.
+- The frame, timeline and save reports wait for the audio machine before they are made, so `state()`
+  and `takeFrames()` inside a report see both machines at the report's cycle.
 
 The bytes are the same as on a machine built with it off, the default: the same state at every return,
 the same audio frames, the same byte from every read of a port.
@@ -388,10 +390,11 @@ console's by the same accesses, and draws the dots between one access and the ne
 write lands at the dot it landed at on the console. The thread never draws past what the console has
 logged.
 
-The console waits for the thread, and sleeps while it waits, at four points: a call's return, the frame
-and save reports, and a restore or a reset. There the thread has drawn every dot the beam has passed,
-and the console copies the two fields of the chip's state the picture writes, the tile reads and the
-last main-screen decision, back into `state()`. So at every return both stand at one picture and
+The console waits for the thread, and sleeps while it waits, at a call's return, before the frame,
+timeline and save reports, and before a restore or a reset. There the thread has drawn every dot the
+beam has passed, and recorded every line of the frame's timeline where a timeline observer is set, and
+the console copies the two fields of the chip's state the picture writes, the tile reads and the last
+main-screen decision, back into `state()`. So at every return both stand at one picture and
 `state()` is what the machine built with the thread off would hold; inside a call, from a bus observer
 or a watcher, those two fields are the thread's and are not read. The frame still arrives on the calling
 thread, from inside the call, and the raster it hands over is the finished frame: a frame is never shown
@@ -1020,12 +1023,14 @@ after that blank's report, is told as the next frame's blank begins. The span is
 storage, valid for the call.
 
 The report is made at the end of the cycle in which the frame's vertical blank begins, after that
-cycle has closed and after the frame observer's report of the same frame. What a host does
+cycle has closed and after the frame observer's and [the timeline observer's](#the-timeline-observer)
+reports of the same frame. What a host does
 with a save — writing a file, most plainly — may fail, and the report may throw: `step()` or `run()`
 returns through the throw with the machine at that cycle's end and `state()` coherent there, and the
 report is not made again. The next `run()` finishes the budget the throw interrupted before it spends
-its own, so `run(a)` then `run(b)` lands where `run(a + b)` does. A frame observer's report may throw on
-the same terms; a save report the same cycle owes is then made at the end of the next cycle.
+its own, so `run(a)` then `run(b)` lands where `run(a + b)` does. A frame observer's report and a
+timeline observer's may throw on the same terms; a report the same cycle owes after the one that threw
+is then made at the end of the next cycle.
 
 On the same terms as the others: the host's object, not part of the state, so a snapshot does not
 carry it and `restore()` leaves it in place; `saveObserver()` reads back what is set; the machine
@@ -1033,6 +1038,41 @@ starts with none, and one that has none runs exactly as it would have.
 
 Nothing here knows where a save goes. `snes_player` keeps one as the file other emulators read —
 [user-files.md](user-files.md) — which is the whole of what a tool built on this has to decide.
+
+## The timeline observer
+
+A host that draws the picture itself sets a timeline observer, and is handed every finished frame as
+a `PpuTimeline` — the registers, memories and writes the frame is drawn from, laid out for a GPU
+([ppu.md §The picture as a timeline](ppu.md#the-picture-as-a-timeline)).
+
+```cpp
+struct Drawer final : PpuTimelineObserver {
+  void frame(const PpuTimeline& timeline) override {
+    // upload timeline.lines, events, vramWrites, vram, palettes, oams and spriteBuffers
+  }
+};
+
+Drawer drawer;
+machine.setPpuTimelineObserver(&drawer);
+```
+
+The machine records the timeline only while one is set, on the side that draws: the calling thread,
+or the picture thread on a machine built with `SnesConfig::ppuThread` on. It records whether or not a
+frame observer is set, and draws pixels only while a frame observer is set, whether or not this one
+is; with neither, a machine draws nothing and records nothing. Its state, and everything a program can
+observe, are the same either way.
+
+The report is made on the calling thread at the end of the cycle in which the frame's vertical blank
+begins, after that cycle has closed, after the frame observer's report of the same frame and before
+the save observer's. It waits for the picture thread and the audio thread first, so `state()` inside
+it is the whole machine at that cycle's end. It is made for a frame of which at least one line was
+recorded. The spans are the machine's own storage and are valid for the call, and the report may
+throw, on the save observer's terms above.
+
+On the same terms as the others: the host's object, not part of the state, so a snapshot does not
+carry it and `restore()` leaves it in place; `ppuTimelineObserver()` reads back what is set; the
+machine starts with none. Set it between calls. Setting it, a restore and a reset each drop the frame
+in progress, which is then recorded from the first line whose first read dot the beam reaches.
 
 ## Snapshot and restore
 
@@ -1057,14 +1097,16 @@ of this machine. A state taken from a machine built from the same cartridge alwa
 object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
 moved, never copied; a moved machine carries its audio machine after its state. On a machine built
 with [the audio thread](#the-audio-thread), `state()` is read between calls, when both machines stand at
-one master time, and inside the frame and save reports, which wait for the audio machine; a bus observer
+one master time, and inside the frame, timeline and save reports, which wait for the audio machine; a bus observer
 or a watcher there reads the audio machine through `peekApu` and `peekApuRegister`, which wait for it.
 On a machine built with [the picture thread](#the-picture-thread), the two fields of `state().ppu` the
 picture writes, `tiles` and `lastMain`, are the thread's inside a call and are read between calls and
 inside the reports, which wait for the picture; the rest of the chip's state is the calling thread's
 throughout. A restore drops the machine's record of what each picture line read
 ([A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes)), so the next
-frame draws every line.
+frame draws every line, and the timeline of the frame in progress
+([the timeline observer](#the-timeline-observer)), which is recorded again from the next line drawn
+from its start.
 
 The machine is deterministic: the same state and the same trace give the same bytes. The trace is
 everything that reaches the machine from outside — the pads presented before each run, and whatever a
@@ -1579,7 +1621,7 @@ pushed.
 An instruction watcher is told between instructions, so a call made from inside its call is the same
 call, at any depth: a watcher told inside one call may make another.
 
-The frame and save observers are told at the end of a cycle, after it has closed, so a call from
+The frame, timeline and save observers are told at the end of a cycle, after it has closed, so a call from
 inside their reports proceeds: it runs the machine to the next instruction boundary first, as a call
 after a `run()` does, and then calls. A frame the routine finishes is reported inside the call.
 

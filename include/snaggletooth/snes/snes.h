@@ -39,7 +39,9 @@
 // A host that wants to see the bus rather than the state sets an observer: it is
 // told every access the machine makes — the CPU's with the kind the core drove,
 // the transfer engines' bytes, the work-RAM port's own reads and writes — and
-// every internal CPU cycle, in the order they happen.
+// every internal CPU cycle, in the order they happen. A host that draws the
+// picture itself sets a timeline observer, and is handed each frame as the
+// registers, memories and writes it is drawn from (`ppu_timeline.h`).
 
 #include <array>
 #include <atomic>
@@ -58,6 +60,7 @@
 #include "snaggletooth/cpu/cpu65816.h"
 #include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/ppu.h"
+#include "snaggletooth/snes/ppu_timeline.h"
 #include "snaggletooth/snes/video_frame.h"
 
 namespace snaggletooth {
@@ -449,7 +452,7 @@ struct SnesConfig {
   // sprite passes, and logs every access to the chip and every line's start for the
   // thread, which draws the dots between them from a copy of the chip's state it
   // keeps equal to the console's by the same accesses. The console waits for the
-  // thread, sleeping, at a call's return, before a frame or save report, and before a
+  // thread, sleeping, at a call's return, before a frame, timeline or save report, and before a
   // restore or a reset, so both stand at one picture there; the thread parks whenever
   // it has nothing to draw. As with the audio thread, the process spends a little
   // more CPU in total and each thread has less to do, so each core carries a lighter
@@ -685,13 +688,13 @@ class Snes {
   // there, keeping the cartridge and clock rate in place. Between calls all of it
   // is coherent. On a machine built with SnesConfig::apuThread on, the audio
   // machine's part, `apu`, runs on the audio thread inside a call: it is coherent in
-  // the frame and save reports, which wait for the audio machine, and in the audio
+  // the frame, timeline and save reports, which wait for the audio machine, and in the audio
   // machine's observer's calls, which run on that thread. A bus observer, an access
   // watcher or an instruction watcher there reads the audio machine through peekApu
   // and peekApuRegister, which wait for it. On a machine built with
   // SnesConfig::ppuThread on, the two fields of `ppu` the picture writes, `tiles` and
   // `lastMain`, are the picture thread's inside a call: they are coherent in the
-  // frame and save reports, which wait for the picture, and at every return, where
+  // frame, timeline and save reports, which wait for the picture, and at every return, where
   // the console copies them back; a bus observer or a watcher inside a call does not
   // read them.
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
@@ -804,6 +807,22 @@ class Snes {
   // calls.
   void setFrameObserver(FrameObserver* observer) noexcept;
   [[nodiscard]] FrameObserver* frameObserver() const noexcept { return frameObserver_; }
+
+  // The observer handed every finished frame as a timeline of what it is drawn
+  // from (PpuTimelineObserver, `ppu_timeline.h`), or none, which is how the machine
+  // starts. The machine records the timeline only while one is set, on the side
+  // that draws — the calling thread, or the picture thread on a machine built with
+  // SnesConfig::ppuThread on — whether or not a frame observer is set too, and draws
+  // pixels only while a frame observer is set, whether or not this one is; its
+  // state, and what a program can observe, are the same either way. The report is
+  // made on the calling thread at the end of the cycle in which the frame's vertical
+  // blank begins, after the frame report, for a frame of which at least one line was
+  // recorded. On the observers' terms: the host's object, not part of the state, so
+  // a snapshot does not carry it and restore() leaves it in place. Set it between
+  // calls. Setting it, a restore and a reset each drop the frame in progress, which
+  // is then recorded from the first line whose first read dot the beam reaches.
+  void setPpuTimelineObserver(PpuTimelineObserver* observer);
+  [[nodiscard]] PpuTimelineObserver* ppuTimelineObserver() const noexcept { return timelineObserver_; }
 
   // How the picture lines of the last finished frame were drawn. A line is taken
   // from the frame before when the registers the picture reads, the sprites Time
@@ -1069,12 +1088,13 @@ class Snes {
   // DMA access and before it for an HDMA write — and the input pins the chip was
   // handed, so the thread replays it on its view with the same call. A Line is the
   // start of a line: the line, the parity, the blank, the mosaic counter in `offset`
-  // and `value`, and in `hpos` the slot of the line ring holding the sprite line
-  // buffer Time filled for it. An InidispEarly is the one-dot redraw a write to
-  // $2100 outside vertical blank owes, at `hpos` under `busBefore`. A Beam says the
-  // beam stands at `hpos`, and nothing else happened. The thread draws every dot up
-  // to an entry's position before it applies the entry, so a write lands at the dot
-  // it landed at on the console.
+  // and `value`, in `hpos` the slot of the line ring holding the sprite line buffer
+  // Time filled for it with the sprites Range kept for Time, and in `byte0` and
+  // `byte1` the $2101 and $2133 Time read. An InidispEarly is the one-dot redraw a
+  // write to $2100 outside vertical blank owes, at `hpos` under the bus byte in
+  // `byte0`. A Beam says the beam stands at `hpos`, and nothing else happened. The
+  // thread draws every dot up to an entry's position before it applies the entry,
+  // so a write lands at the dot it landed at on the console.
   enum class PictureEventKind : std::uint8_t { Line, Write, Read, InidispEarly, Beam };
   struct PictureEvent {
     std::uint16_t offset;      // the register, $2100-$213F; a Line's mosaic block line
@@ -1087,8 +1107,8 @@ class Snes {
     bool lateHalf;
     PictureEventKind kind;
     std::uint8_t value;        // a write's value; a Line's mosaic block size
-    std::uint8_t busBefore;    // an InidispEarly's byte
-    std::uint8_t spare;
+    std::uint8_t byte0;        // a Line's $2101; an InidispEarly's bus byte
+    std::uint8_t byte1;        // a Line's $2133
   };
   static_assert(sizeof(PictureEvent) == 16u, "an entry is one sixteen-byte store");
 
@@ -1145,8 +1165,12 @@ class Snes {
   void pushEvent(const PictureEvent& event) noexcept;
   void pushAccess(PictureEventKind kind, std::uint16_t offset, std::uint8_t value,
                   const PpuInputs& in) noexcept;
-  // Logs the start of the line the beam has reached: the line's facts, the mosaic
-  // counter and a copy of the sprite line buffer Time filled for it.
+  // The start of the line the beam has reached, logged in two steps: the sprite
+  // line buffer Time has just filled for it copied into the line ring, with the
+  // sprites Range kept that Time read, before the next Range pass begins; then the
+  // line's facts, the mosaic counter and the slot logged once the line's start is
+  // done.
+  void stageLine() noexcept;
   void pushLine() noexcept;
   // One entry applied on the picture thread: the dots up to its position drawn,
   // then the access replayed on the view, or the line's facts taken.
@@ -1234,8 +1258,8 @@ class Snes {
 
   // One master-cycle group: the CPU makes its single access (which prices the
   // cycle), the master counter advances by that cost, and the APU is paced forward
-  // by the master cycles it now owes. A frame or save report the cycle owes is
-  // made after it closes.
+  // by the master cycles it now owes. A frame, timeline or save report the cycle
+  // owes is made after it closes.
   void machineCycle();
 
   // The master cycles the refresh holds the CPU off the bus, spent a fast cycle at a
@@ -1298,13 +1322,13 @@ class Snes {
   // examined.
   void rangeSpan(std::uint64_t lineStart, std::uint64_t to) noexcept;
 
-  // Makes the frame and save reports the cycle just closed owes, after writing
+  // Makes the frame, timeline and save reports the cycle just closed owes, after writing
   // the register file back. Called at the end of machineCycle, outside the
   // cycle, and from nowhere else: the line that finishes a frame cannot be left
   // half done, and a host's report may throw. The test is made here, in every
   // cycle; the reports, owed once a frame, are made out of line by deliverReports.
   void deliverFinished() {
-    if (frameFinished_ || saveFinished_) [[unlikely]] deliverReports();
+    if (frameFinished_ || timelineFinished_ || saveFinished_) [[unlikely]] deliverReports();
   }
   void deliverReports();
   // Hands the finished picture to the frame observer: the rows the frame's own
@@ -1312,6 +1336,9 @@ class Snes {
   // wrote. Called at the end of the cycle in which the frame's vertical blank
   // begins, whose line draws nothing, so the raster is the finished frame.
   void deliverFrame();
+  // Hands the finished frame's timeline to the timeline observer, at the end of the
+  // same cycle, once the picture and the audio machine stand there.
+  void deliverTimeline();
   // Hands the save window to the observer, at the end of the same cycle.
   void deliverSave();
 
@@ -1659,7 +1686,7 @@ class Snes {
   bool timerZeroOnVLine_ = false;    // the H = 0 point, on that line
   // Whether the machine is inside a cycle, where a host's callback runs part-way
   // through the chip's work: set for the whole cycle but the instruction watch at
-  // its start; the frame and save reports come after it clears. A call into the
+  // its start; the frame, timeline and save reports come after it clears. A call into the
   // guest made while it is set is refused. It belongs to the cycle, not to the
   // machine, so a snapshot does not carry it, and restore() and reset() clear it.
   bool insideCycle_ = false;
@@ -1688,7 +1715,9 @@ class Snes {
   // restore drops it, and so do the line's end and a write to $4200, $4201,
   // $4207-$420A or $2133, the registers the line's events are dated from.
   std::uint64_t lineEventsFrom_ = 0;
-  bool frameFinished_ = false;  // the frame's vertical blank began this cycle
+  bool frameFinished_ = false;     // the frame's vertical blank began this cycle
+  bool timelineFinished_ = false;  // and the frame's timeline is owed its report
+  PpuTimelineObserver* timelineObserver_ = nullptr;  // handed every finished frame's timeline; none by default
   // The frame in progress is 512 wide, and how wide the finished picture is: the
   // drawing side's, written by the thread that draws and read by the calling thread
   // at the frame report, after it has waited for the picture.
@@ -2101,6 +2130,83 @@ class Snes {
                       bool changes) noexcept;
   // Every record dropped, and the line in progress forgotten: a restore or a reset.
   void dropLines() noexcept;
+
+  // The timeline of the frame in progress, recorded on the side that draws while a
+  // timeline observer is set, and the last frame it finished, which the report hands
+  // over: what PpuTimeline's spans are, in the machine's own storage, grown as a
+  // frame needs and never shrunk. Output, not state, so a snapshot carries none of
+  // it. `events` stand in the order they were made, which is position order, and a
+  // line's are found at the frame's end; an event for a line that was not recorded
+  // is dropped there. `vram` is empty until the frame's base is taken.
+  struct TimelineFrame {
+    std::vector<PpuTimeline::Line> lines;
+    std::vector<PpuTimeline::Event> events;
+    std::vector<PpuTimeline::VramWrite> vramWrites;
+    std::vector<std::uint8_t> vram;
+    std::vector<std::uint8_t> palettes;
+    std::vector<std::uint8_t> oams;
+    std::vector<std::uint8_t> spriteBuffers;
+    unsigned height = 0;
+    unsigned width = 0;
+    std::uint8_t field = 0;
+    void clear() noexcept {
+      lines.clear();
+      events.clear();
+      vramWrites.clear();
+      vram.clear();
+      palettes.clear();
+      oams.clear();
+      spriteBuffers.clear();
+      height = 0;
+      width = 0;
+      field = 0;
+    }
+  };
+  // What Time read as a line began, kept until that line's first read dot: the
+  // line, whether the screen was on so that Time gathered, the parity, $2101, $2133,
+  // the sprites Range kept and the sprite it began at, and the sprite table.
+  struct TimeInputs {
+    bool valid = false;
+    std::uint16_t line = 0;
+    bool gathered = false;
+    std::uint8_t field = 0;
+    std::uint8_t objsel = 0;
+    std::uint8_t setini = 0;
+    std::uint8_t found = 0;
+    std::uint8_t first = 0;
+    std::array<std::uint8_t, kSpritesPerLine> inRange{};
+    std::array<std::uint8_t, PpuTimeline::kOamBytes> oam{};
+  };
+  struct TimelineRecorder {
+    TimelineFrame recording;
+    TimelineFrame finished;
+    TimeInputs time;
+    bool baseTaken = false;    // `recording.vram` holds the frame's base
+    bool paletteHalf = false;  // the write in progress is a palette word's second half
+  };
+  std::unique_ptr<TimelineRecorder> timeline_;
+
+  // The recorder's points, each reached on the side that draws only while a
+  // timeline observer is set, `s` being that side's chip state: Time's inputs as a
+  // line begins (`objsel` and `setini` the $2101 and $2133 Time read); a line's
+  // record at its first read dot, for a line drawn from its start; the frame's base
+  // copied before the first VRAM write of its picture lines, and a palette write's
+  // half noted, before a write lands; the events and the VRAM write a landed write
+  // makes, `hpos` the master cycle it was applied at and `landed` what Ppu::write
+  // answered; the two events the early read of $2100 makes, `inidisp` the register
+  // as the write left it; and the frame finished as its vertical blank begins on
+  // `blankLine`.
+  void recordTime(const PpuState& s, std::uint16_t line, std::uint8_t field, std::uint8_t objsel,
+                  std::uint8_t setini) noexcept;
+  void recordLine(const PpuState& s, const PpuInputs& in) noexcept;
+  void recordBeforeWrite(std::uint16_t offset, const PpuState& s, const PpuInputs& pins) noexcept;
+  void recordWrite(std::uint16_t offset, std::uint8_t value, std::uint16_t hpos, const PpuState& s,
+                   const PpuInputs& pins, std::optional<std::uint16_t> landed) noexcept;
+  void recordInidispEarly(std::uint16_t line, std::uint16_t hpos, std::uint8_t busBefore,
+                          std::uint8_t inidisp) noexcept;
+  void finishTimeline(const PpuState& s, std::uint16_t blankLine, std::uint8_t field) noexcept;
+  // The frame in progress dropped: a restore, a reset, or the observer being set.
+  void dropTimeline() noexcept;
 
   // What a page reaches, for the watch: one 8 KB run of one space — the space
   // and the index of the run's first byte — no byte at all, or bytes the page

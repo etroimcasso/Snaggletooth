@@ -131,7 +131,8 @@ thread only when it is built with `SnesConfig::apuThread` or `SnesConfig::ppuThr
 The library is the console and its parts as values a program holds and drives. A machine is
 built from a configuration value, advanced by a cycle budget or one instruction at a time, and
 snapshotted and restored whole. What it produces reaches you through observers you set — stereo
-frames, each finished picture, every bus access, each change to the save window — and what you
+frames, each finished picture, each frame's timeline, every bus access, each change to the save
+window — and what you
 hand it is a controller state, a snapshot, or a place to write. It opens no window, no audio
 device and no file, and it keeps no clock: the program that links it owns time, I/O and the
 files, and decides what the machine's output becomes. The same machine run twice from the same
@@ -166,7 +167,9 @@ copier header is not stripped for you: `readCopierHeader` in
 [snes-cartridge.md](snes-cartridge.md) says whether one is there and how long it is.
 
 A picture arrives through a `FrameObserver` set with `setFrameObserver`, each finished frame as
-it completes; a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given
+it completes, and a host that draws the picture itself takes each frame as the `PpuTimeline` it
+is drawn from through a `PpuTimelineObserver` set with `setPpuTimelineObserver`
+([ppu.md](ppu.md#the-picture-as-a-timeline)); a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given
 whole; a snapshot is `state()`, a reference to the machine's own value, and goes back with
 `restore()`, and travels as bytes with `asBytes()` and `fromBytes()`. [snes-machine.md](snes-machine.md) covers each of these, the
 save observer that tells you when the battery save changed, and the host face — reading and

@@ -43,6 +43,7 @@ add_library(snaggletooth STATIC
   src/snes_dma.cpp
   src/snes_ipl_stub.cpp
   src/ppu.cpp
+  src/ppu_timeline.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -667,6 +668,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/apu_thread_test.cpp
     tests/snes/ppu_thread_test.cpp
     tests/snes/ppu_line_reuse_test.cpp
+    tests/snes/ppu_timeline_test.cpp
     tests/snes/observer_test.cpp
     tests/snes/save_observer_test.cpp
     tests/snes/timing_test.cpp
