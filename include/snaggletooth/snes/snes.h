@@ -41,7 +41,10 @@
 // the transfer engines' bytes, the work-RAM port's own reads and writes — and
 // every internal CPU cycle, in the order they happen. A host that draws the
 // picture itself sets a timeline observer, and is handed each frame as the
-// registers, memories and writes it is drawn from (`ppu_timeline.h`).
+// registers, memories and writes it is drawn from (`ppu_timeline.h`). A host with
+// a GPU hands the machine a device through SnesConfig::gpuPpu, and the machine
+// draws each frame on it from that same timeline with the core's own compute
+// shader (`gpu/gpu_ppu.h`).
 
 #include <array>
 #include <atomic>
@@ -58,6 +61,7 @@
 
 #include "snaggletooth/apu/apu.h"
 #include "snaggletooth/cpu/cpu65816.h"
+#include "snaggletooth/gpu/gpu_ppu.h"
 #include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/ppu.h"
 #include "snaggletooth/snes/ppu_timeline.h"
@@ -474,6 +478,24 @@ struct SnesConfig {
   // picture is the drawn one. It costs the reuse, so it is for proving the machine
   // and never for running it.
   bool ppuVerify = false;
+
+  // The GPU PPU: a device the host implements over its GPU API (gpu::Device,
+  // `gpu/gpu_ppu.h`), or none, the default. With one, the machine records every
+  // frame's timeline and, at the end of the cycle in which the frame's vertical
+  // blank begins, packs it into the device's buffer and has the device draw the
+  // frame with the core's compute shader, before the timeline observer, if one is
+  // set, is told of the frame; the device's texture then holds the picture, every
+  // half-pixel the one the dot renderer draws, and the host presents it. The
+  // machine draws pixels on the CPU only while a frame observer is set, so a host
+  // that sets none and takes the picture from the device has the whole of the
+  // drawing on the GPU; the chip's state, the timeline and everything a program
+  // can observe are the same either way. The constructor throws std::runtime_error
+  // when the device takes no format the shader was built in, when the device
+  // cannot make the pipeline, or when the library was built without the shader.
+  // The device is the host's object, not part of the state: a snapshot does not
+  // carry it, restore() leaves it in place, and the machine calls it only from
+  // inside step() and run(), on the calling thread.
+  gpu::Device* gpuPpu = nullptr;
 };
 
 // The largest save a cartridge can address through any window. A machine's save is
@@ -810,19 +832,24 @@ class Snes {
 
   // The observer handed every finished frame as a timeline of what it is drawn
   // from (PpuTimelineObserver, `ppu_timeline.h`), or none, which is how the machine
-  // starts. The machine records the timeline only while one is set, on the side
-  // that draws — the calling thread, or the picture thread on a machine built with
-  // SnesConfig::ppuThread on — whether or not a frame observer is set too, and draws
-  // pixels only while a frame observer is set, whether or not this one is; its
-  // state, and what a program can observe, are the same either way. The report is
-  // made on the calling thread at the end of the cycle in which the frame's vertical
-  // blank begins, after the frame report, for a frame of which at least one line was
-  // recorded. On the observers' terms: the host's object, not part of the state, so
-  // a snapshot does not carry it and restore() leaves it in place. Set it between
-  // calls. Setting it, a restore and a reset each drop the frame in progress, which
-  // is then recorded from the first line whose first read dot the beam reaches.
+  // starts. The machine records the timeline only while one is set or the GPU PPU
+  // is on, on the side that draws — the calling thread, or the picture thread on a
+  // machine built with SnesConfig::ppuThread on — whether or not a frame observer
+  // is set too, and draws pixels only while a frame observer is set, whether or not
+  // this one is; its state, and what a program can observe, are the same either
+  // way. The report is made on the calling thread at the end of the cycle in which
+  // the frame's vertical blank begins, after the frame report and after the GPU
+  // PPU, where it is on, has drawn the frame, for a frame of which at least one
+  // line was recorded. On the observers' terms: the host's object, not part of the
+  // state, so a snapshot does not carry it and restore() leaves it in place. Set it
+  // between calls. Setting it, a restore and a reset each drop the frame in
+  // progress, which is then recorded from the first line whose first read dot the
+  // beam reaches.
   void setPpuTimelineObserver(PpuTimelineObserver* observer);
   [[nodiscard]] PpuTimelineObserver* ppuTimelineObserver() const noexcept { return timelineObserver_; }
+
+  // The device the GPU PPU draws on, as SnesConfig::gpuPpu gave it, or none.
+  [[nodiscard]] gpu::Device* gpuPpu() const noexcept { return gpuPpu_; }
 
   // How the picture lines of the last finished frame were drawn. A line is taken
   // from the frame before when the registers the picture reads, the sprites Time
@@ -1336,9 +1363,12 @@ class Snes {
   // wrote. Called at the end of the cycle in which the frame's vertical blank
   // begins, whose line draws nothing, so the raster is the finished frame.
   void deliverFrame();
-  // Hands the finished frame's timeline to the timeline observer, at the end of the
-  // same cycle, once the picture and the audio machine stand there.
+  // Hands the finished frame's timeline to the GPU PPU's device and then to the
+  // timeline observer, at the end of the same cycle, once the picture and the audio
+  // machine stand there.
   void deliverTimeline();
+  // The timeline packed into the device's buffer and drawn by it.
+  void drawOnGpu(const PpuTimeline& timeline);
   // Hands the save window to the observer, at the end of the same cycle.
   void deliverSave();
 
@@ -1718,6 +1748,8 @@ class Snes {
   bool frameFinished_ = false;     // the frame's vertical blank began this cycle
   bool timelineFinished_ = false;  // and the frame's timeline is owed its report
   PpuTimelineObserver* timelineObserver_ = nullptr;  // handed every finished frame's timeline; none by default
+  gpu::Device* gpuPpu_ = nullptr;   // the GPU PPU's device, as SnesConfig::gpuPpu gave it; none by default
+  bool recordsTimeline_ = false;    // the timeline is recorded: an observer is set or the GPU PPU is on
   // The frame in progress is 512 wide, and how wide the finished picture is: the
   // drawing side's, written by the thread that draws and read by the calling thread
   // at the frame report, after it has waited for the picture.

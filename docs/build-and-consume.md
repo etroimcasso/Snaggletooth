@@ -28,6 +28,13 @@ library and drives a machine.
   errors on the project's own targets.
 - Git. SDL3 is a submodule, needed by the player alone; clone with `--recurse-submodules` when
   you want the player, and plainly when you do not.
+- The shader tools for the GPU PPU, which the library compiles into itself at build time
+  ([gpu-ppu.md §Compiling the shader](gpu-ppu.md#compiling-the-shader)): glslang on Linux
+  (`apt install glslang-tools`); glslang, spirv-cross (`brew install glslang spirv-cross`) and
+  the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) on macOS; dxc from the
+  Windows SDK on Windows. The configure stops and names the one it cannot find;
+  `-DSNAGGLETOOTH_GPU_PPU=OFF` builds without the shader, and a machine given a GPU device then
+  throws.
 
 ### Building a Release build
 
@@ -68,8 +75,10 @@ configure a new directory rather than reusing the old one.
 | `snaggletooth` | `snaggletooth::snaggletooth` | The library: both machines, both CPU cores, the S-DSP, the PPU and the cartridge functions. This is what a program of your own links. |
 | `snaggletooth_spc`, `snaggletooth_video`, `snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_formats`, `snaggletooth_spc700`, `snaggletooth_cpu65816`, `snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential`, `snaggletooth_rom_render`, `snaggletooth_rom`, `snaggletooth_player_pads` | — | The tool libraries. Each command-line tool is a thin `main` over one of them, and a program that wants a tool's capability links the library rather than running the tool. [tools/README.md](../tools/README.md) lists which library carries what. |
 | `snes_disasm`, `snes_render`, `snes_verify`, `snes_lift`, `snes_differential`, `snes_examples`, `cpu65816_disasm`, `cpu65816_asm`, `spc700_disasm`, `spc700_asm`, `rom_render`, `spc_render` | — | The command-line tools. They land in `build/`, or in `build\Release\` under Visual Studio (see [Building a Release build](#building-a-release-build)). |
-| `snes_player` | — | The player: a cartridge in a window, driven by a keyboard, a controller or an input script, recorded as it runs. The one target that links SDL. |
+| `snes_player` | — | The player: a cartridge in a window, driven by a keyboard, a controller or an input script, recorded as it runs, on the CPU or on the GPU. Links SDL. |
+| `snes_gpu_verify` | — | A cartridge run headless on the GPU PPU with the machine's own frames drawn beside it and every frame compared ([tools/player/README.md](../tools/player/README.md#the-picture-on-the-gpu)). Links SDL. |
 | `snaggletooth_tests` | — | The suite, one GoogleTest binary registered with `ctest`. |
+| `snaggletooth_gpu_tests` | — | The GPU PPU's cases, a second GoogleTest binary registered with `ctest`, built wherever the player is; on a machine with no GPU device every case skips with a visible reason. Links SDL. |
 
 The library ships as source. Everything public is in the `snaggletooth` namespace under
 [`include/snaggletooth/`](../include/snaggletooth): the console in `snes/`, the audio unit in
@@ -98,7 +107,8 @@ One source tree supports three configurations:
 |---|---|---|
 | `SNAGGLETOOTH_BUILD_TESTS` | ON when top-level, OFF as a subproject | Build the suite. Fetches GoogleTest 1.14.0 at configure time. |
 | `SNAGGLETOOTH_BUILD_TOOLS` | ON when top-level, OFF as a subproject | Build the tool libraries and the command-line tools. The suite needs the tool libraries, so it builds them whether or not this is on. |
-| `SNAGGLETOOTH_BUILD_PLAYER` | ON when top-level, OFF as a subproject | Build the player. Takes effect only when the tools are built too. A build that already defines `SDL3::SDL3` supplies it; otherwise the submodule under `third_party/sdl` is built statically, with the subsystems a window does not need switched off. |
+| `SNAGGLETOOTH_BUILD_PLAYER` | ON when top-level, OFF as a subproject | Build the player, the GPU verify tool and the GPU suite. Takes effect only when the tools are built too. A build that already defines `SDL3::SDL3` supplies it; otherwise the submodule under `third_party/sdl` is built statically, with the subsystems a window does not need switched off. |
+| `SNAGGLETOOTH_GPU_PPU` | ON | Compile the GPU PPU's three shader passes into the library for this platform's format, which needs the shader tools under [Requirements](#requirements). Off, the library carries no shader and a machine given a GPU device throws. |
 | `SNAGGLETOOTH_SPC700_VECTORS` | empty | See [The test data](#the-test-data). |
 | `SNAGGLETOOTH_65816_VECTORS` | empty | See [The test data](#the-test-data). |
 | `SNAGGLETOOTH_BLARGG_ROMS` | empty | See [The test data](#the-test-data). |
@@ -169,7 +179,9 @@ copier header is not stripped for you: `readCopierHeader` in
 A picture arrives through a `FrameObserver` set with `setFrameObserver`, each finished frame as
 it completes, and a host that draws the picture itself takes each frame as the `PpuTimeline` it
 is drawn from through a `PpuTimelineObserver` set with `setPpuTimelineObserver`
-([ppu.md](ppu.md#the-picture-as-a-timeline)); a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given
+([ppu.md](ppu.md#the-picture-as-a-timeline)), or hands the machine a GPU device through
+`SnesConfig::gpuPpu` and the core draws every frame on it with its own shader
+([gpu-ppu.md](gpu-ppu.md)); a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given
 whole; a snapshot is `state()`, a reference to the machine's own value, and goes back with
 `restore()`, and travels as bytes with `asBytes()` and `fromBytes()`. [snes-machine.md](snes-machine.md) covers each of these, the
 save observer that tells you when the battery save changed, and the host face — reading and
@@ -224,8 +236,8 @@ answered.
 
 ## Dependencies
 
-- **[SDL3](https://github.com/libsdl-org/SDL)** — the window, the audio device and the
-  controllers of the player, and nothing else. A submodule at `third_party/sdl/`, pinned to
+- **[SDL3](https://github.com/libsdl-org/SDL)** — the window, the audio device, the
+  controllers and the GPU device of the player, and nothing else. A submodule at `third_party/sdl/`, pinned to
   release 3.4.16, built statically with `SDL_SHARED` off and the camera, haptic, power and
   dialog subsystems off. A parent build that already defines `SDL3::SDL3` supplies its own and
   the submodule is left unconfigured. The library never links it. zlib license.

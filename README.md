@@ -10,7 +10,7 @@ Three things live in this repository:
   and the main machine (65816, cartridge, work RAM, DMA, timers, the audio handshake, and the
   PPU), each stepped by a cycle budget the host supplies. The PPU resolves each visible dot
   — one pixel, or two half-pixels on a line drawn in half-pixels — and hands each finished frame
-  to a frame observer.
+  to a frame observer, or draws it on a GPU the host hands it with the core's own compute shader.
 - **The tools**, under [`tools/`](tools/README.md): a player that shows a cartridge running in a
   window and records the same run, two tracing disassemblers and two assemblers, a
   whole-cartridge disassembler and its verifier, an intermediate representation with an
@@ -18,6 +18,11 @@ Three things live in this repository:
   a front end can link instead.
 - **The documentation**, under [`docs/`](docs/README.md): a page per component, every value
   in it derived from public hardware documentation and validated against it.
+
+The library also runs inside RetroArch and every other libretro frontend through
+[Snaggletooth for libretro](https://github.com/etroimcasso/Snaggletooth-libretro), a core built
+on it in a repository of its own: the console's behavior is entirely this library's, and the core
+is the application around it.
 
 > [!IMPORTANT]
 > **Build and run Snaggletooth as a Release build.** A Debug build of the core runs
@@ -107,7 +112,8 @@ not do. Each row links to the page that describes the component in full.
 | [65816 CPU core](docs/65816-cpu.md) | **complete** — 256 opcodes, cycle-stepped, both operand widths and emulation mode, every cycle checked against recorded hardware traces |
 | [SNES machine](docs/snes-machine.md) | **in progress** — the bus and its region pricing, the complete beam with every per-line event at its own master offset, eight DMA/HDMA channels, the controller and APU ports, the boot handshake, the reset line, the audio unit on a thread of the machine's own and the picture on another when a host asks for them; no [coprocessor](#the-coprocessors) |
 | [Cartridge](docs/snes-cartridge.md) | **complete** — the header, LoROM, HiROM and ExHiROM, a copier's header read and dropped, the board — its map, its chip and its save — and where every bus address lands on it: the save windows, the lower halves a plain LoROM board repeats and the ones a coprocessor's board keeps for the chip |
-| [PPU](docs/ppu.md) | **complete** — each background's tiles read ahead of the beam on the console's own schedule and each pixel drawn from them at its own dot, each frame handed to an observer; the backgrounds of all eight modes at their depths, the offset table modes 2, 4 and 6 read their backgrounds through, Mode 7's field through its matrix with EXTBG's second layer and direct colour, the 512-half-pixel line of modes 5 and 6 and of `$2133` bit 3 with colour math reaching both halves, the interlaced picture and sprites at half height, mosaic on every background they draw, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; frames 256 or 512 wide, one field a frame; the register file complete beneath them; the dots drawn on the stepping thread or, when a host asks, on a thread of the machine's own, a line drawn again only when something it reads changed since the frame before, the same pixels either way; and each frame handed over as a timeline of what it was drawn from, for a host that draws it on a GPU. Verified against hand-built cartridges and the staged test ROMs; verification against the library of commercial cartridges is ahead |
+| [PPU](docs/ppu.md) | **complete** — each background's tiles read ahead of the beam on the console's own schedule and each pixel drawn from them at its own dot, each frame handed to an observer; the backgrounds of all eight modes at their depths, the offset table modes 2, 4 and 6 read their backgrounds through, Mode 7's field through its matrix with EXTBG's second layer and direct colour, the 512-half-pixel line of modes 5 and 6 and of `$2133` bit 3 with colour math reaching both halves, the interlaced picture and sprites at half height, mosaic on every background they draw, the sprites under the counts the chip can afford, the two windows, the sub screen and colour math; frames 256 or 512 wide, one field a frame; the register file complete beneath them; the dots drawn on the stepping thread or, when a host asks, on a thread of the machine's own, a line drawn again only when something it reads changed since the frame before, the same pixels either way; and each frame handed over as a timeline of what it was drawn from, for a host that draws it on a GPU, and drawn on a GPU by the core's own compute shader, held equal to the dot renderer over the library. Verified against hand-built cartridges and the staged test ROMs; verification against the library of commercial cartridges is ahead |
+| [GPU PPU](docs/gpu-ppu.md) | **complete** — the picture drawn on a GPU by the core's own compute shader from each frame's timeline, every pixel the dot renderer's, on a device the host hands the machine through a four-function interface over its own GPU API; three passes the way the chip divides the work, compiled at build time for Metal, Vulkan and Direct3D 12; held to the dot renderer frame for frame in the suite and over every cartridge of the library |
 | Public embedding API | **in progress** — a machine is built from one value, with its audio unit and its picture each on the calling thread or on a thread of its own, run to a cycle budget or a single access at a time, and snapshotted and restored whole, and carried as bytes the same on every platform; it hands over stereo frames, each finished picture, each frame's timeline, every bus access and each change to the save window through observers of their own, takes a whole controller state at once, lets a host reach into any place it holds — reading or writing the bus, the three video memories, the palette, the sprite table, the audio machine's RAM and its registers, and the register file of both processors, without spending a cycle — answers any access to a watched place before it takes effect, letting it through, preventing it, or standing a byte in its place, tells a host before a chosen instruction runs and stands a return in for the routine there, calls a routine the machine holds — in the guest's own context with its register file put back, or in a frame of the host's own — and drains audio into the caller's own buffer without allocating; the whole face is exercised together on one running cartridge and on one running sound program, and a machine with a host in the loop stays deterministic — the same state and the same trace give the same bytes. The surface is not settled and may still change |
 
 ### The coprocessors
@@ -139,7 +145,7 @@ it; none of them runs. A cartridge that needs one does not boot.
 | [Cartridge verifier](docs/snes-disassembler.md#verifying-the-tree) | **complete** — reassembles a tree and reports every difference from the image; thirty-one cartridges across all three maps rebuild byte for byte |
 | [Assemblers](docs/assemblers.md) | **complete** — both dialects over one [common layer](docs/assembly-lexicon.md), each built from its disassembler's own table so every opcode round-trips |
 | [Intermediate representation](docs/ir.md) | **complete** — both instruction sets lifted into one form with no bytes in it, with an interpreter per chip, a renderer back to source, and a dataflow that proves the registers, the stored values and the bounded jump tables over every path |
-| [Player](tools/player/README.md) | **complete** — a cartridge in a window, held to the display where the display is close enough to the console and to the console's own rate where it is not, with its sound at the rate the run delivers, driven by a keyboard, a controller or an input script, and recorded as it runs |
+| [Player](tools/player/README.md) | **complete** — a cartridge in a window, held to the display where the display is close enough to the console and to the console's own rate where it is not, with its sound at the rate the run delivers, driven by a keyboard, a controller or an input script, recorded as it runs, and drawn on the GPU when asked |
 
 ### Validation
 
@@ -238,7 +244,9 @@ tool libraries and command-line tools without the suite.
 The public headers are under [`include/snaggletooth/`](include/snaggletooth); the pages under
 [`docs/`](docs/README.md) describe each component's surface and how to drive it, and
 [docs/build-and-consume.md](docs/build-and-consume.md) covers the build, the targets, the
-options and what a program that links the library owns.
+options and what a program that links the library owns. A host with a GPU hands the machine a
+device and the core draws the picture there ([docs/gpu-ppu.md](docs/gpu-ppu.md)); the
+[libretro core](https://github.com/etroimcasso/Snaggletooth-libretro) is one such host, complete.
 
 ### Running the tools
 
@@ -288,7 +296,8 @@ start for a given task. By subject:
   the build options, linking the library or a tool library from a program of your own, the
   dependencies and the test data.
 - **The machine** — [snes-machine.md](docs/snes-machine.md),
-  [snes-cartridge.md](docs/snes-cartridge.md), [65816-cpu.md](docs/65816-cpu.md).
+  [snes-cartridge.md](docs/snes-cartridge.md), [65816-cpu.md](docs/65816-cpu.md),
+  [ppu.md](docs/ppu.md), [gpu-ppu.md](docs/gpu-ppu.md).
 - **The audio unit** — [apu-machine.md](docs/apu-machine.md),
   [spc700-cpu.md](docs/spc700-cpu.md), [dsp.md](docs/dsp.md),
   [s-dsp-behavior.md](docs/s-dsp-behavior.md), [spc-rendering.md](docs/spc-rendering.md).

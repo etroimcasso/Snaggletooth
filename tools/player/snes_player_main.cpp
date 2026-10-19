@@ -5,7 +5,7 @@
 //               [--input <script> | --input-dir <directory>] [--config <file>]
 //               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
 //               [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--ppu-verify]
-//               [--mute] [--quiet]
+//               [--gpu-ppu] [--gpu-verify] [--mute] [--quiet]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
@@ -78,6 +78,17 @@
 // drew, and the default; bob, each field on its own doubled to full height, no combing
 // under motion; off, the field as the machine made it, half height. A run the cartridge
 // did not interlace is untouched whatever the mode, and --out keeps whatever is shown.
+//
+// --gpu-ppu hands the machine a GPU device (SnesConfig::gpuPpu): the picture is drawn
+// on the GPU by the core's own compute shader from each frame's timeline, every pixel
+// the one the dot renderer draws, and the window shows the texture the shader left.
+// The machine draws no pixel on the CPU then; the pads, the sound, the pacing, the
+// recording and the rest of the run are as they are without it. The run's first lines
+// say which shader format and driver the device took and how the window is presented.
+// --gpu-verify turns it on and keeps the CPU drawing too, so every frame is drawn both
+// ways and compared pixel for pixel, the last line saying how many differed; it is
+// for proving a run, not for playing one. The player's device over SDL's GPU API is
+// `sdl_gpu_device.h`; `docs/gpu-ppu.md` is the GPU PPU itself.
 
 #include <algorithm>
 #include <cstddef>
@@ -101,6 +112,7 @@
 #include "player/interlace.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
+#include "player/sdl_gpu_device.h"
 #include "player/user_files.h"
 #include "rom/input_script.h"
 #include "snaggletooth/apu/dsp.h"
@@ -210,6 +222,9 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
          "  --ppu-thread                draw the picture on its own thread\n"
          "  --ppu-verify                draw every line and check it against the frame before;\n"
          "                              for proving a run, not for playing one\n"
+         "  --gpu-ppu                   draw the picture on the GPU with the core's own shader\n"
+         "  --gpu-verify                draw every frame on the GPU and on the CPU and compare\n"
+         "                              them; for proving a run, not for playing one\n"
          "  --mute                      don't play the sound\n"
          "  --quiet                     don't print the run's status lines\n"
          "  --default-config            print the built-in controller mapping and exit\n"
@@ -469,11 +484,14 @@ class Sound {
 // The window, the recording and the table, all fed by the frames the machine
 // finishes. It is the machine's frame observer, so every one of them arrives here as
 // the beam wraps, and the run is held to the console's rate before the next begins.
-class Player final : public snaggletooth::FrameObserver {
+// Under --gpu-ppu it is the machine's timeline observer instead, told of each frame
+// once the device has drawn it, and the window shows the device's texture; under
+// --gpu-verify it is both, and compares the two pictures of each frame.
+class Player final : public snaggletooth::FrameObserver, public snaggletooth::PpuTimelineObserver {
  public:
   Player(Snes& machine, snaggletooth::Region region, const snaggletooth::disasm::InputScript& script,
          bool scripted, Devices& devices, unsigned scale, player::Vsync vsync, bool unthrottled,
-         player::Interlace interlace, const std::string& title)
+         player::Interlace interlace, player::SdlGpuDevice* gpu, bool gpuVerify, const std::string& title)
       : machine_(machine),
         deadline_(region),
         clock_(snaggletooth::consoleClock(region)),
@@ -484,12 +502,16 @@ class Player final : public snaggletooth::FrameObserver {
         vsync_(vsync),
         unthrottled_(unthrottled),
         weaver_(interlace),
+        interlace_(interlace),
+        gpu_(gpu),
+        gpuVerify_(gpuVerify),
         pacing_{.rate = player::consoleFrameRate(clock_), .locked = false},
         title_(title) {}
 
   ~Player() override {
     if (texture_ != nullptr) SDL_DestroyTexture(texture_);
     if (renderer_ != nullptr) SDL_DestroyRenderer(renderer_);
+    if (gpu_ != nullptr) gpu_->releaseWindow();
     if (window_ != nullptr) SDL_DestroyWindow(window_);
   }
 
@@ -500,12 +522,18 @@ class Player final : public snaggletooth::FrameObserver {
   // each frame's own shape as frames arrive, so the first interlaced or hi-res frame grows
   // the window to fit. The texture is as large as the largest picture and each frame fills
   // the part it has; the window is always the frame's own pixels times the scale, so the
-  // present scales by a whole number and never combs.
+  // present scales by a whole number and never combs. Under --gpu-ppu the window is the
+  // GPU device's, claimed for its presents, and there is no renderer or texture here.
   [[nodiscard]] bool open() {
     const player::WindowSize initial = player::windowSize(kWidth, kShortHeight, scale_);
-    if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(initial.width),
-                                     static_cast<int>(initial.height), 0, &window_,
-                                     &renderer_)) {
+    if (gpu_ != nullptr) {
+      window_ = SDL_CreateWindow(title_.c_str(), static_cast<int>(initial.width), static_cast<int>(initial.height), 0);
+      if (window_ == nullptr) {
+        std::cerr << "cannot open a window: " << SDL_GetError() << "\n";
+        return false;
+      }
+    } else if (!SDL_CreateWindowAndRenderer(title_.c_str(), static_cast<int>(initial.width),
+                                            static_cast<int>(initial.height), 0, &window_, &renderer_)) {
       std::cerr << "cannot open a window: " << SDL_GetError() << "\n";
       return false;
     }
@@ -514,15 +542,17 @@ class Player final : public snaggletooth::FrameObserver {
     // and a run nobody can press a button on is not a run. Asking for it is one call
     // and costs nothing where it was already focused.
     SDL_RaiseWindow(window_);
-    // Tall enough for a woven interlaced frame, which is twice a field's height; a
-    // progressive frame uses the top rows and leaves the rest.
-    texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
-                                 static_cast<int>(kTextureWidth), static_cast<int>(kTextureHeight));
-    if (texture_ == nullptr) {
-      std::cerr << "cannot make a texture: " << SDL_GetError() << "\n";
-      return false;
+    if (gpu_ == nullptr) {
+      // Tall enough for a woven interlaced frame, which is twice a field's height; a
+      // progressive frame uses the top rows and leaves the rest.
+      texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
+                                   static_cast<int>(kTextureWidth), static_cast<int>(kTextureHeight));
+      if (texture_ == nullptr) {
+        std::cerr << "cannot make a texture: " << SDL_GetError() << "\n";
+        return false;
+      }
+      SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
     }
-    SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
     if (unthrottled_) {
       // Vsync off explicitly, since the SDL_RENDER_VSYNC hint can open a renderer with
       // it on; and the window presented no faster than the panel refreshes, because on
@@ -531,12 +561,19 @@ class Player final : public snaggletooth::FrameObserver {
       // next drawable and the run is held to the display by the very wait it asked not
       // to make. The frames between presents are emulated, recorded and counted, and
       // not drawn (`unthrottledShowRate`).
-      SDL_SetRenderVSync(renderer_, 0);
+      if (renderer_ != nullptr) SDL_SetRenderVSync(renderer_, 0);
       showEvery_ = player::FramePace(player::unthrottledShowRate(
                                          player::consoleFrameRate(clock_), panelRate()))
                        .wholeNanos();
     } else {
       holdToPanel();
+    }
+    if (gpu_ != nullptr) {
+      std::string error;
+      if (!gpu_->claim(window_, pacing_.locked && !unthrottled_, error)) {
+        std::cerr << "the GPU device cannot present to the window: " << error << "\n";
+        return false;
+      }
     }
     started_ = SDL_GetTicksNS();
     lastFrame_ = started_;
@@ -556,7 +593,7 @@ class Player final : public snaggletooth::FrameObserver {
     scriptAt_ = script;
     table_.open(directory / (stem + ".csv"));
     if (table_) {
-      table_ << "frame,wall_ns,emulated_ns,master,dots,milli_fps,mean_milli_fps\n";
+      table_ << "frame,wall_ns,emulated_ns,master,dots,milli_fps,mean_milli_fps,gpu_ns\n";
     } else {
       std::cerr << "cannot write the table; the run goes on without one\n";
     }
@@ -576,6 +613,12 @@ class Player final : public snaggletooth::FrameObserver {
   [[nodiscard]] std::uint64_t linesReused() const noexcept { return linesReused_; }
   [[nodiscard]] std::uint64_t linesDrawn() const noexcept { return linesDrawn_; }
   [[nodiscard]] std::uint64_t mismatches() const noexcept { return mismatches_; }
+  // Under --gpu-verify: the frames compared, the frames whose pixels differed, the
+  // frames whose shape differed, and the first pixel that differed as frame:line:x.
+  [[nodiscard]] std::uint64_t gpuCompared() const noexcept { return gpuCompared_; }
+  [[nodiscard]] std::uint64_t gpuDiffered() const noexcept { return gpuDiffered_; }
+  [[nodiscard]] std::uint64_t gpuShapesDiffered() const noexcept { return gpuShapesDiffered_; }
+  [[nodiscard]] const std::string& gpuFirstDifference() const noexcept { return gpuFirst_; }
   // The rate the run actually held, measured from the end of the first frame: that
   // first one carries opening a window, a device and a cartridge, and a mean that
   // includes it describes the startup rather than the run.
@@ -585,14 +628,18 @@ class Player final : public snaggletooth::FrameObserver {
   }
 
   void frame(const VideoFrame& picture) override {
+    if (gpu_ != nullptr) {
+      // Under --gpu-verify the machine's own frame is kept until the timeline report of
+      // the same cycle, where the device's picture is compared with it.
+      verifyPixels_.assign(picture.pixels.begin(), picture.pixels.end());
+      verifyWidth_ = picture.width;
+      verifyHeight_ = picture.height;
+      verifyField_ = picture.field;
+      verifyAt_ = machine_.state().master;
+      verifyPending_ = true;
+      return;
+    }
     const std::uint64_t emulated = SDL_GetTicksNS() - resumed_;
-    ++frames_;
-    // The finished frame's line counts, valid inside the report.
-    const snaggletooth::Snes::LineReuse lines = machine_.lineReuse();
-    linesReused_ += lines.reused;
-    linesDrawn_ += lines.drawn;
-    mismatches_ += lines.mismatches;
-
     // A cartridge running interlaced hands over one field a frame; the weaver composes
     // the two into the full-height picture the console's signal carried, the way the
     // run asked for. A progressive run, or --interlace off, passes straight through.
@@ -606,15 +653,57 @@ class Player final : public snaggletooth::FrameObserver {
       show(shown);
       lastShown_ = at;
     }
+    endFrame(shown.pixels, shown.width, shown.height, picture.field, emulated, 0u);
+  }
+
+  // Under --gpu-ppu: the frame the device has just drawn, shown from its texture. Under
+  // --gpu-verify the texture, drawn line for line, is first compared with the machine's
+  // frame of the same cycle, and then drawn again under the run's field placement.
+  void frame(const snaggletooth::PpuTimeline& timeline) override {
+    const std::uint64_t emulated = SDL_GetTicksNS() - resumed_;
+    if (gpuVerify_) verify(timeline);
+    const snaggletooth::gpu::RowMap rows = gpu_->lastRows();
+    const unsigned shownRows = snaggletooth::gpu::rowsUnder(rows, timeline.height);
+    const player::WindowSize want = player::windowSize(timeline.width, shownRows, scale_);
+    if (want != windowSize_) {
+      SDL_SetWindowSize(window_, static_cast<int>(want.width), static_cast<int>(want.height));
+      windowSize_ = want;
+    }
+    const std::uint64_t at = SDL_GetTicksNS();
+    if (!unthrottled_ || at - lastShown_ >= showEvery_) {
+      if (!gpu_->present(timeline.width, shownRows) && !presentRefused_) {
+        std::cerr << "the GPU device cannot present: " << SDL_GetError() << "\n";
+        presentRefused_ = true;
+      }
+      lastShown_ = at;
+    }
+    // A recording takes the shown picture back from the texture.
+    const std::uint8_t* pixels = nullptr;
+    if (!recordAt_.empty() && gpu_->readBack(timeline.width, shownRows, shownPixels_)) pixels = shownPixels_.data();
+    endFrame(pixels, timeline.width, shownRows, timeline.field, emulated, gpu_->lastDrawNanos());
+  }
+
+  // The frame-end work every frame does, whichever side drew it: the line counts, the
+  // recording, the wait for the frame's share of the run, the pads, the table and the
+  // title. `pixels` is the shown picture, `width` by `height`, or null where there is
+  // nothing to record.
+  void endFrame(const std::uint8_t* pixels, unsigned width, unsigned height, std::uint8_t field,
+                std::uint64_t emulated, std::uint64_t gpuNanos) {
+    ++frames_;
+    // The finished frame's line counts, valid inside the report.
+    const snaggletooth::Snes::LineReuse lines = machine_.lineReuse();
+    linesReused_ += lines.reused;
+    linesDrawn_ += lines.drawn;
+    mismatches_ += lines.mismatches;
+
     // The recording keeps every frame as the window shows it, woven and all, the ones an
     // unthrottled run leaves undrawn included: what --out keeps is the machine's output.
     const snaggletooth::VideoFrame kept{
-        .pixels = std::span<const std::uint8_t>(
-            shown.pixels, static_cast<std::size_t>(shown.width) * shown.height * 4u),
-        .width = shown.width,
-        .height = shown.height,
-        .field = picture.field};
-    if (!recordAt_.empty() && !recording_) {
+        .pixels = std::span<const std::uint8_t>(pixels, pixels == nullptr ? 0u : static_cast<std::size_t>(width) * height * 4u),
+        .width = width,
+        .height = height,
+        .field = field};
+    if (!recordAt_.empty() && !recording_ && pixels != nullptr) {
       recording_ = std::make_unique<snaggletooth::video::AviRecording>(
           recordAt_, kept.width, kept.height,
           snaggletooth::video::FrameRate{
@@ -627,7 +716,7 @@ class Player final : public snaggletooth::FrameObserver {
         recording_.reset();
       }
     }
-    if (recording_) recording_->add(kept);
+    if (recording_ && pixels != nullptr) recording_->add(kept);
 
     // Each frame is held until its share of the run has passed, so a machine that
     // emulates faster than the console runs is watchable. The share is the panel's
@@ -664,8 +753,9 @@ class Player final : public snaggletooth::FrameObserver {
     const std::uint64_t now = SDL_GetTicksNS();
     if (table_) {
       table_ << frames_ << ',' << (now - lastFrame_) << ',' << emulated << ','
-             << machine_.state().master << ',' << (picture.width * picture.height) << ','
-             << milliFps(now - lastFrame_, 1u) << ',' << milliFps(now - started_, frames_) << '\n';
+             << machine_.state().master << ',' << (width * height) << ','
+             << milliFps(now - lastFrame_, 1u) << ',' << milliFps(now - started_, frames_) << ','
+             << gpuNanos << '\n';
     }
     lastFrame_ = now;
     resumed_ = now;
@@ -724,6 +814,7 @@ class Player final : public snaggletooth::FrameObserver {
     pacing_ = player::paceRun(player::consoleFrameRate(clock_), panelRate(), vsync_);
     if (!pacing_.locked) return;
     panel_.emplace(pacing_.rate);
+    if (renderer_ == nullptr) return;  // the GPU device's swapchain waits for the refresh instead
     if (!SDL_SetRenderVSync(renderer_, 1)) {
       // The rate still holds — the frame interval is the panel's either way — and only
       // the phase within a refresh is lost, so the run goes on and says what it lost.
@@ -770,6 +861,51 @@ class Player final : public snaggletooth::FrameObserver {
     SDL_RenderClear(renderer_);
     SDL_RenderTexture(renderer_, texture_, &source, nullptr);
     SDL_RenderPresent(renderer_);
+  }
+
+  // Under --gpu-verify: the device's texture, drawn line for line, against the machine's
+  // frame of the same cycle — a 512-wide frame column for column, a 256-wide one position
+  // for position — then the texture drawn again under the run's field placement.
+  void verify(const snaggletooth::PpuTimeline& timeline) {
+    if (!verifyPending_ || verifyAt_ != machine_.state().master) return;
+    verifyPending_ = false;
+    ++gpuCompared_;
+    if (verifyWidth_ != timeline.width || verifyHeight_ != timeline.height || verifyField_ != timeline.field) {
+      ++gpuShapesDiffered_;
+      if (gpuFirst_.empty()) gpuFirst_ = std::to_string(frames_) + ":shape";
+    } else if (!gpu_->readBack(timeline.width, timeline.height, verifyGpu_)) {
+      ++gpuDiffered_;
+      if (gpuFirst_.empty()) gpuFirst_ = std::to_string(frames_) + ":read-back";
+    } else {
+      bool differed = false;
+      for (unsigned row = timeline.firstLine - 1u; row < timeline.height && !differed; ++row) {
+        for (unsigned x = 0u; x < timeline.width; ++x) {
+          const std::size_t at = (static_cast<std::size_t>(row) * timeline.width + x) * 4u;
+          if (!std::equal(verifyPixels_.begin() + static_cast<std::ptrdiff_t>(at),
+                          verifyPixels_.begin() + static_cast<std::ptrdiff_t>(at + 4u),
+                          verifyGpu_.begin() + static_cast<std::ptrdiff_t>(at))) {
+            differed = true;
+            if (gpuFirst_.empty()) {
+              gpuFirst_ = std::to_string(frames_) + ":" + std::to_string(row + 1u) + ":" + std::to_string(x);
+            }
+            break;
+          }
+        }
+      }
+      if (differed) ++gpuDiffered_;
+    }
+    const bool interlaced = machine_.state().ppu.interlace();
+    if (interlaced && interlace_ != player::Interlace::Off) {
+      gpu_->redraw(snaggletooth::gpu::rowMapFor(placementOf(interlace_), true, timeline.field));
+    }
+  }
+
+  [[nodiscard]] static snaggletooth::gpu::FieldPlacement placementOf(player::Interlace mode) noexcept {
+    switch (mode) {
+      case player::Interlace::Weave: return snaggletooth::gpu::FieldPlacement::Weave;
+      case player::Interlace::Bob: return snaggletooth::gpu::FieldPlacement::Bob;
+      default: return snaggletooth::gpu::FieldPlacement::Field;
+    }
   }
 
   void presentPads(std::uint32_t at) {
@@ -827,6 +963,22 @@ class Player final : public snaggletooth::FrameObserver {
   std::uint64_t showEvery_ = 0;             // an unthrottled run's least interval between presents, ns
   std::uint64_t lastShown_ = 0;             // when the window was last drawn
   player::FieldWeaver weaver_;              // composes interlaced fields for the screen
+  player::Interlace interlace_;             // how an interlaced run's fields are shown
+  player::SdlGpuDevice* gpu_;               // the GPU PPU's device under --gpu-ppu, else null
+  bool gpuVerify_;                          // every frame drawn both ways and compared
+  std::vector<std::uint8_t> shownPixels_;   // the device's texture read back for the recording
+  std::vector<std::uint8_t> verifyPixels_;  // the machine's frame kept for the comparison
+  std::vector<std::uint8_t> verifyGpu_;     // the device's texture read back for it
+  unsigned verifyWidth_ = 0;
+  unsigned verifyHeight_ = 0;
+  std::uint8_t verifyField_ = 0;
+  std::uint64_t verifyAt_ = 0;              // the master cycle the kept frame was reported at
+  bool verifyPending_ = false;
+  std::uint64_t gpuCompared_ = 0;
+  std::uint64_t gpuDiffered_ = 0;
+  std::uint64_t gpuShapesDiffered_ = 0;
+  std::string gpuFirst_;
+  bool presentRefused_ = false;             // the device refused a present and the run said so
   player::Pacing pacing_;                   // the rate the run is held to
   std::optional<player::FramePace> panel_;  // and its deadlines, where that is the panel's
   std::string title_;
@@ -867,6 +1019,8 @@ int main(int argc, char** argv) {
   bool apuThread = false;
   bool ppuThread = false;
   bool ppuVerify = false;
+  bool gpuPpu = false;
+  bool gpuVerify = false;
   player::Interlace interlace = player::Interlace::Weave;
   std::uint64_t seconds = 0;
   unsigned scale = 3u;
@@ -944,6 +1098,11 @@ int main(int argc, char** argv) {
       ppuThread = true;
     } else if (arg == "--ppu-verify") {
       ppuVerify = true;
+    } else if (arg == "--gpu-ppu") {
+      gpuPpu = true;
+    } else if (arg == "--gpu-verify") {
+      gpuPpu = true;
+      gpuVerify = true;
     } else if (arg == "--interlace") {
       const std::optional<player::Interlace> mode = player::parseInterlace(next("--interlace"));
       if (!mode) {
@@ -1122,11 +1281,35 @@ int main(int argc, char** argv) {
     }
   }
 
+  // The GPU PPU's device, opened before the machine that takes it and outliving the
+  // machine and the player; under --gpu-verify the fields are placed line for line so
+  // the texture compares with the machine's frame, and woven again for the window.
+  player::SdlGpuDevice gpuDevice;
+  if (gpuPpu) {
+    std::string error;
+    if (!gpuDevice.open(error)) {
+      std::cerr << "no GPU device: " << error << "\n";
+      return 1;
+    }
+    gpuDevice.setPlacement(gpuVerify ? snaggletooth::gpu::FieldPlacement::Field
+                                     : (interlace == player::Interlace::Weave ? snaggletooth::gpu::FieldPlacement::Weave
+                                        : interlace == player::Interlace::Bob ? snaggletooth::gpu::FieldPlacement::Bob
+                                                                              : snaggletooth::gpu::FieldPlacement::Field));
+  }
+
   snaggletooth::SnesConfig machineConfig{.rom = rom, .region = region};
   machineConfig.apuThread = apuThread;
   machineConfig.ppuThread = ppuThread;
   machineConfig.ppuVerify = ppuVerify;
-  Snes machine(machineConfig);
+  machineConfig.gpuPpu = gpuPpu ? &gpuDevice : nullptr;
+  std::optional<Snes> built;
+  try {
+    built.emplace(machineConfig);
+  } catch (const std::exception& e) {
+    std::cerr << "the machine cannot be built: " << e.what() << "\n";
+    return 1;
+  }
+  Snes& machine = *built;
 
   // A cartridge with a battery keeps what it writes. The file goes in with the rest
   // of a person's files, under the name other emulators read, and it is put into the
@@ -1159,7 +1342,7 @@ int main(int argc, char** argv) {
 
   const std::string stem = std::filesystem::path(imagePath).stem().string();
   Player player(machine, region, script, scripted, devices, scale, vsync, unthrottled, interlace,
-                stem);
+                gpuPpu ? &gpuDevice : nullptr, gpuVerify, stem);
   if (!player.open()) return 1;
   // Which of the two arrangements the run took, before anything else it does: a run
   // that feels wrong is asked this first, and nobody should have to guess at it.
@@ -1174,13 +1357,21 @@ int main(int argc, char** argv) {
     if (apuThread) std::cerr << "the audio unit on its own thread\n";
     if (ppuThread) std::cerr << "the picture on its own thread\n";
     if (ppuVerify) std::cerr << "every line drawn and checked against the frame before\n";
+    if (gpuPpu) {
+      std::cerr << "the picture drawn on the GPU (" << gpuDevice.formatName() << ", " << gpuDevice.driverName()
+                << "), presented " << gpuDevice.presentModeName() << "\n";
+    }
+    if (gpuVerify) std::cerr << "every frame drawn on the GPU and on the CPU and compared\n";
   }
   if (!outDir.empty()) {
     std::filesystem::create_directories(outDir);
     // The script takes the name every replay looks for, so the directory replays the run.
     player.record(outDir, stem, snaggletooth::disasm::scriptPathFor(outDir, imagePath));
   }
-  machine.setFrameObserver(&player);
+  // The frame observer draws the picture on the CPU, so a run on the GPU sets none
+  // unless it is verifying; the timeline observer is how the GPU run is told its frames.
+  if (!gpuPpu || gpuVerify) machine.setFrameObserver(&player);
+  if (gpuPpu) machine.setPpuTimelineObserver(&player);
   player.beginRun();
 
   Sound speakers;
@@ -1220,6 +1411,7 @@ int main(int argc, char** argv) {
     }
   }
   machine.setFrameObserver(nullptr);
+  machine.setPpuTimelineObserver(nullptr);
   player.finish();
 
   // Whatever the last frames left in the save window, on its way out: the machine
@@ -1253,6 +1445,17 @@ int main(int argc, char** argv) {
     if (lines != 0u) std::cerr << " (" << (player.linesReused() * 1000u / lines + 5u) / 10u << " % taken)";
     if (ppuVerify) std::cerr << ", " << player.mismatches() << " mismatches";
     std::cerr << "\n";
+    // What the GPU cost a frame, and under --gpu-verify what the comparison found.
+    if (gpuPpu && gpuDevice.drawCount() != 0u) {
+      std::cerr << "gpu: " << (gpuDevice.drawNanos() / gpuDevice.drawCount() + 500u) / 1000u
+                << " µs a frame to upload and draw (" << (gpuDevice.drawNanosLeast() + 500u) / 1000u << "–"
+                << (gpuDevice.drawNanosMost() + 500u) / 1000u << ")\n";
+    }
+    if (gpuVerify) {
+      std::cerr << "gpu-verify: " << player.gpuCompared() << " frames, " << player.gpuDiffered() << " differed, "
+                << player.gpuShapesDiffered() << " shapes differed, first at "
+                << (player.gpuFirstDifference().empty() ? "-" : player.gpuFirstDifference()) << "\n";
+    }
   }
   return 0;
 }

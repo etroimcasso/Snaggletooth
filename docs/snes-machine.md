@@ -105,6 +105,9 @@ alone does not hold the console's frame rate. `SnesConfig::ppuVerify`, off by de
 draw every picture line and check it against the frame before, which it otherwise takes a line from
 when nothing the line reads has changed; see
 [A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes).
+`SnesConfig::gpuPpu`, null by default, takes a GPU device the host implements, and the machine then
+draws every frame on it with the core's own compute shader, its own option beside the two threads;
+see [gpu-ppu.md](gpu-ppu.md).
 
 ## The memory map
 
@@ -1056,15 +1059,16 @@ Drawer drawer;
 machine.setPpuTimelineObserver(&drawer);
 ```
 
-The machine records the timeline only while one is set, on the side that draws: the calling thread,
-or the picture thread on a machine built with `SnesConfig::ppuThread` on. It records whether or not a
-frame observer is set, and draws pixels only while a frame observer is set, whether or not this one
-is; with neither, a machine draws nothing and records nothing. Its state, and everything a program can
-observe, are the same either way.
+The machine records the timeline only while one is set or the GPU PPU is on (`SnesConfig::gpuPpu`,
+[gpu-ppu.md](gpu-ppu.md)), on the side that draws: the calling thread, or the picture thread on a
+machine built with `SnesConfig::ppuThread` on. It records whether or not a frame observer is set, and
+draws pixels only while a frame observer is set, whether or not this one is; with neither and no GPU
+device, a machine draws nothing and records nothing. Its state, and everything a program can observe,
+are the same either way.
 
 The report is made on the calling thread at the end of the cycle in which the frame's vertical blank
-begins, after that cycle has closed, after the frame observer's report of the same frame and before
-the save observer's. It waits for the picture thread and the audio thread first, so `state()` inside
+begins, after that cycle has closed, after the frame observer's report of the same frame, after the
+GPU PPU, where it is on, has drawn the frame, and before the save observer's. It waits for the picture thread and the audio thread first, so `state()` inside
 it is the whole machine at that cycle's end. It is made for a frame of which at least one line was
 recorded. The spans are the machine's own storage and are valid for the call, and the report may
 throw, on the save observer's terms above.

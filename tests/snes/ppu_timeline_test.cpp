@@ -1410,5 +1410,131 @@ TEST(SnesPpuTimeline, ALineTheFrameBeforeStandsInForIsRecordedWhole) {
   }
 }
 
+// A 32-bit word of a packed frame.
+std::uint32_t packedWord(const Bytes& packed, std::size_t word) {
+  const std::size_t at = word * 4u;
+  return static_cast<std::uint32_t>(packed[at]) | (static_cast<std::uint32_t>(packed[at + 1u]) << 8) |
+         (static_cast<std::uint32_t>(packed[at + 2u]) << 16) | (static_cast<std::uint32_t>(packed[at + 3u]) << 24);
+}
+
+TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
+  // A frame with sixty-four VRAM writes inside it, packed: the header names each
+  // section where the sections stand, the writes sorted by address keep their
+  // ordinals ascending within an address, the page table and the line table count
+  // them, a short span takes nothing, and the bytes are pinned.
+  const Bytes body = joined({store(0x2100u, 0x80u), vramTransfer(), store(0x2100u, 0x0Fu)});
+  Watched t(scene(Variant{.irqBody = body, .htime = 60u, .vtime = 100u, .irq = true}));
+  for (int call = 0; call < 6; ++call) t.machine.run(kFrame);
+  const Kept& kept = t.recorder.timelines.back();
+  const PpuTimeline timeline = kept.view();
+  ASSERT_EQ(kept.vramWrites.size(), 64u);
+  ASSERT_GT(kept.events.size(), 0u);
+
+  const std::size_t size = timeline.packedSize();
+  Bytes packed(size, 0xA5u);
+  EXPECT_EQ(timeline.pack(std::span<std::uint8_t>(packed).first(size - 1u)), 0u);
+  EXPECT_TRUE(std::all_of(packed.begin(), packed.end(), [](std::uint8_t byte) { return byte == 0xA5u; }));
+  ASSERT_EQ(timeline.pack(packed), size);
+
+  // The header, word by word, against where the sections stand.
+  std::size_t next = PpuTimeline::kHeaderWords;
+  const auto section = [&next](std::size_t words) {
+    const std::size_t at = next;
+    next += words;
+    return at;
+  };
+  const std::size_t linesAt = section(kept.lines.size() * 32u);
+  const std::size_t eventsAt = section(kept.events.size() * 2u);
+  const std::size_t vramAt = section(PpuTimeline::kVramBytes / 4u);
+  const std::size_t palettesAt = section(kept.palettes.size() / 4u);
+  const std::size_t oamsAt = section(kept.oams.size() / 4u);
+  const std::size_t buffersAt = section(kept.spriteBuffers.size() / 4u);
+  const std::size_t writesAt = section(kept.vramWrites.size() * 2u);
+  const std::size_t sortedAt = section(kept.vramWrites.size() * 2u);
+  const std::size_t pagesAt = section(PpuTimeline::kPageTableWords);
+  const std::size_t lineTableAt = section(PpuTimeline::kLineTableWords);
+  EXPECT_EQ(next * 4u, size);
+  EXPECT_EQ(packedWord(packed, 0u), kept.height);
+  EXPECT_EQ(packedWord(packed, 1u), kept.width);
+  EXPECT_EQ(packedWord(packed, 2u), kept.firstLine);
+  EXPECT_EQ(packedWord(packed, 3u), kept.field);
+  EXPECT_EQ(packedWord(packed, 4u), linesAt);
+  EXPECT_EQ(packedWord(packed, 5u), kept.lines.size());
+  EXPECT_EQ(packedWord(packed, 6u), eventsAt);
+  EXPECT_EQ(packedWord(packed, 7u), kept.events.size());
+  EXPECT_EQ(packedWord(packed, 8u), vramAt);
+  EXPECT_EQ(packedWord(packed, 9u), palettesAt);
+  EXPECT_EQ(packedWord(packed, 10u), kept.palettes.size() / PpuTimeline::kPaletteBytes);
+  EXPECT_EQ(packedWord(packed, 11u), oamsAt);
+  EXPECT_EQ(packedWord(packed, 12u), kept.oams.size() / PpuTimeline::kOamBytes);
+  EXPECT_EQ(packedWord(packed, 13u), buffersAt);
+  EXPECT_EQ(packedWord(packed, 14u), kept.spriteBuffers.size() / PpuTimeline::kSpriteBufferBytes);
+  EXPECT_EQ(packedWord(packed, 15u), writesAt);
+  EXPECT_EQ(packedWord(packed, 16u), kept.vramWrites.size());
+  EXPECT_EQ(packedWord(packed, 17u), sortedAt);
+  EXPECT_EQ(packedWord(packed, 18u), pagesAt);
+  EXPECT_EQ(packedWord(packed, 19u), lineTableAt);
+  for (std::size_t word = 20u; word < PpuTimeline::kHeaderWords; ++word) EXPECT_EQ(packedWord(packed, word), 0u);
+
+  // The sections as they stand.
+  for (std::size_t i = 0u; i < kept.lines.size(); ++i) {
+    for (std::size_t word = 0u; word < 32u; ++word) {
+      ASSERT_EQ(packedWord(packed, linesAt + i * 32u + word), kept.lines[i].words[word]) << "line " << i << " word " << word;
+    }
+  }
+  for (std::size_t i = 0u; i < kept.events.size(); ++i) {
+    ASSERT_EQ(packedWord(packed, eventsAt + i * 2u), kept.events[i].at);
+    ASSERT_EQ(packedWord(packed, eventsAt + i * 2u + 1u), kept.events[i].change);
+  }
+  EXPECT_TRUE(std::equal(kept.vram.begin(), kept.vram.end(), packed.begin() + static_cast<std::ptrdiff_t>(vramAt * 4u)));
+  EXPECT_TRUE(std::equal(kept.palettes.begin(), kept.palettes.end(),
+                         packed.begin() + static_cast<std::ptrdiff_t>(palettesAt * 4u)));
+  EXPECT_TRUE(std::equal(kept.oams.begin(), kept.oams.end(), packed.begin() + static_cast<std::ptrdiff_t>(oamsAt * 4u)));
+  for (std::size_t i = 0u; i < kept.vramWrites.size(); ++i) {
+    ASSERT_EQ(packedWord(packed, writesAt + i * 2u), kept.vramWrites[i].at);
+    ASSERT_EQ(packedWord(packed, writesAt + i * 2u + 1u), kept.vramWrites[i].change);
+  }
+
+  // The sorted writes: every write once, by address and then by ordinal, each entry
+  // the write its ordinal names.
+  std::vector<bool> seen(kept.vramWrites.size(), false);
+  for (std::size_t i = 0u; i < kept.vramWrites.size(); ++i) {
+    const std::uint32_t entry = packedWord(packed, sortedAt + i * 2u);
+    const std::uint32_t address = entry & 0xFFFFu;
+    const std::uint32_t ordinal = entry >> 16;
+    ASSERT_LT(ordinal, kept.vramWrites.size());
+    EXPECT_FALSE(seen[ordinal]);
+    seen[ordinal] = true;
+    EXPECT_EQ(address, kept.vramWrites[ordinal].address());
+    EXPECT_EQ(packedWord(packed, sortedAt + i * 2u + 1u), kept.vramWrites[ordinal].value());
+    if (i > 0u) {
+      const std::uint32_t before = packedWord(packed, sortedAt + (i - 1u) * 2u);
+      EXPECT_TRUE((before & 0xFFFFu) < address || ((before & 0xFFFFu) == address && (before >> 16) < ordinal));
+    }
+  }
+  // The page table: page p's run holds exactly the writes to its addresses.
+  for (std::size_t page = 0u; page < 256u; ++page) {
+    const std::uint32_t from = packedWord(packed, pagesAt + page);
+    const std::uint32_t to = packedWord(packed, pagesAt + page + 1u);
+    ASSERT_LE(from, to);
+    std::size_t expected = 0u;
+    for (const PpuTimeline::VramWrite& write : kept.vramWrites) expected += (write.address() >> 8) == page ? 1u : 0u;
+    EXPECT_EQ(to - from, expected) << "page " << page;
+    for (std::uint32_t i = from; i < to; ++i) EXPECT_EQ((packedWord(packed, sortedAt + i * 2u) >> 8) & 0xFFu, page);
+  }
+  EXPECT_EQ(packedWord(packed, pagesAt + 256u), kept.vramWrites.size());
+  // The line table: how many writes stand on lines below each.
+  for (std::size_t line = 0u; line < PpuTimeline::kLineTableWords; ++line) {
+    std::size_t below = 0u;
+    for (const PpuTimeline::VramWrite& write : kept.vramWrites) below += write.line() < line ? 1u : 0u;
+    ASSERT_EQ(packedWord(packed, lineTableAt + line), below) << "line " << line;
+  }
+
+  // The bytes, pinned.
+  std::uint64_t digest = 1469598103934665603ull;
+  for (const std::uint8_t byte : packed) digest = (digest ^ byte) * 1099511628211ull;
+  EXPECT_EQ(digest, 0x10C79FD6A5B5BB63ull);
+}
+
 }  // namespace
 }  // namespace snaggletooth

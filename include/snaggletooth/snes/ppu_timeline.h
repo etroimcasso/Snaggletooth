@@ -216,6 +216,44 @@ struct PpuTimeline {
   // column for column; one 256 wide is them with each pixel taken once from its
   // position's two equal halves.
   void draw(std::span<std::uint8_t> pixels) const;
+
+  // The frame as one buffer a shader reads as 32-bit words, for a host that draws
+  // it on a GPU: `shaders/ppu.comp.hlsl` reads this layout and `docs/gpu-ppu.md`
+  // gives it as a table. pack(out) writes packedSize() bytes into `out` and answers
+  // that size, or writes nothing and answers 0 when `out` is shorter. The buffer
+  // begins with kHeaderWords words, every offset in words from the buffer's start
+  // and every count in entries:
+  //
+  //   word  holds
+  //   0     height          1   width           2   firstLine        3   field
+  //   4     the lines' offset, 5 their count (32 words each, `lines` as they stand)
+  //   6     the events' offset, 7 their count (2 words each, `events` as they stand)
+  //   8     VRAM's offset (16384 words: kVramBytes, `vram` as it stands)
+  //   9     the palettes' offset, 10 the version count (128 words each)
+  //   11    the sprite tables' offset, 12 the version count (136 words each)
+  //   13    the sprite buffers' offset, 14 their count (128 words each)
+  //   15    the VRAM writes' offset, 16 their count (2 words each, `vramWrites`
+  //         as they stand, in position order)
+  //   17    the same writes sorted by address, then by ordinal: 2 words each,
+  //         `address | ordinal << 16` then the byte, the ordinal being the write's
+  //         index in the position-ordered list
+  //   18    the page table's offset: 257 words, word p the index in the sorted
+  //         list where the writes to addresses p * 256 to p * 256 + 255 begin, and
+  //         word 256 the list's length
+  //   19    the line table's offset: 240 words, word L the number of writes whose
+  //         line is below L, so the ordinal of line L's first write
+  //   20-31 zero
+  //
+  // Every section begins on a word boundary. A reader finds the byte at an address
+  // as of a line and dot by counting the writes placed at or before that point — the
+  // line table's entry for the line, stepped past the line's own writes at or before
+  // the dot — and taking, from the address's run in the sorted list, the last write
+  // whose ordinal is below that count, or VRAM's byte where there is none.
+  static constexpr std::size_t kHeaderWords = 32u;
+  static constexpr std::size_t kPageTableWords = 257u;
+  static constexpr std::size_t kLineTableWords = 240u;
+  [[nodiscard]] std::size_t packedSize() const noexcept;
+  std::size_t pack(std::span<std::uint8_t> out) const noexcept;
 };
 
 // What a host that draws the picture itself is told: the timeline of every frame

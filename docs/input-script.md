@@ -76,7 +76,8 @@ that reads the serial ports inside the picture sees the difference.
 frame `n` reads frame `n`'s buttons. `snes_player`, replaying a script or
 recording one, presents a line as the frame's vertical blank begins, the latest
 point ahead of the auto-read, so a serial read in frame `n`'s vertical blank
-reads frame `n`'s buttons and one inside its picture reads frame `n − 1`'s.
+reads frame `n`'s buttons and one inside its picture reads frame `n − 1`'s. `snes_gpu_verify`
+presents a line as its frame begins, as `snes_disasm` does.
 
 Lines run in frame order. One frame may carry a line for each port.
 

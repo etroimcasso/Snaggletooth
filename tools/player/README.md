@@ -8,9 +8,10 @@ snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--input <script> | --input-dir <directory>] [--config <file>]
                     [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
                     [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--ppu-verify]
-                    [--mute] [--quiet]
+                    [--gpu-ppu] [--gpu-verify] [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
+snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread]
 ```
 
 The window shows the picture the machine draws, frame by frame, at the rate the run is held to —
@@ -119,6 +120,55 @@ exactly. It costs the reuse, so it is for proving a run, not for playing one; th
 every line drawn and checked against the frame before
 ```
 
+## The picture on the GPU
+
+`--gpu-ppu` hands the machine a GPU device and the picture is drawn there, by the core's own
+compute shader from each frame's timeline ([gpu-ppu.md](../../docs/gpu-ppu.md)): every pixel the
+one the dot renderer draws, and nothing drawn on the CPU. The window shows the texture the shader
+leaves, scaled by a whole number as before; an interlaced run is placed in it the way `--interlace`
+asks. The pads, the sound, the pacing, `--out` and the rest of the run are as they are without the
+flag. The run says which shader format and driver the device took and how the window is presented
+— at the display's refresh where the run is held to the display, and handed straight back where it
+is not —
+
+```
+the picture drawn on the GPU (metallib, metal), presented vsync
+```
+
+and the last lines add what the GPU cost: the microseconds the thread that steps the console spent
+uploading, dispatching and submitting a frame, mean, least and most —
+
+```
+gpu: 29 µs a frame to upload and draw (22–1096)
+```
+
+`--gpu-verify` turns the GPU on and keeps the CPU drawing too: every frame is drawn both ways and
+compared pixel for pixel, a 512-wide frame column for column and a 256-wide one position for
+position, and the last line says how many frames differed and where the first difference stood,
+as `frame:line:x` —
+
+```
+gpu-verify: 3606 frames, 0 differed, 0 shapes differed, first at -
+```
+
+It costs the CPU's drawing and a read-back a frame, so it is for proving a run, not for playing
+one; the run says so. A shape that differs is a frame whose width, height or parity the two sides
+disagree on.
+
+`snes_gpu_verify` is the same comparison with no window, for a whole library: one cartridge run for
+N seconds under its input script, as the sweep harness runs it, and one tab-separated row — the
+image, the frame digest, the frames, the timelines, the frames whose pixels differed, the frames
+whose shape differed, the frames with no timeline in their cycle, the first difference as
+`frame:line:x` or `-`, the median and the largest nanoseconds the stepping thread spent on a frame's
+upload and dispatch, the median and the largest nanoseconds from that entry until the device had
+finished drawing the frame, and the median packed frame in bytes. With `frames` the digest folds
+only the first that many frames, as the sweep harness's does; `--ppu-thread` draws on the picture
+thread. A machine with no GPU device prints `<image>	NO GPU	<reason>` and exits 0.
+
+The device is the player's own code over SDL's GPU API, `sdl_gpu_device.h`: it is what the core's
+`gpu::Device` interface looks like implemented, with the present and the read-back a host adds for
+itself, and the GPU suite (`snaggletooth_gpu_tests`) opens it with no window.
+
 ## Interlacing
 
 A cartridge that turns interlace on (SETINI bit 0) draws one field a frame — half the picture's
@@ -202,7 +252,7 @@ asked for:
 | File | What it holds |
 |---|---|
 | `<image>.avi` | every frame exactly as the machine drove it, uncompressed, at the largest shape the run produced (`../video/README.md`) |
-| `<image>.csv` | a row a frame: wall and emulation time in nanoseconds, master cycles, dots drawn, and the rate instantaneous and mean |
+| `<image>.csv` | a row a frame: wall and emulation time in nanoseconds, master cycles, dots drawn, the rate instantaneous and mean, and under `--gpu-ppu` the nanoseconds the frame's upload and dispatch took, 0 otherwise |
 | `<image>.wav` | the sound the run produced, 32 kHz stereo — the chip's own rate, whatever the panel showing it runs at |
 | `<image>.snaginput` | the buttons, as a script that replays the run — under the name every replay looks for, so `--input-dir` on this directory, here or in the toolkit, replays the run |
 
@@ -212,9 +262,11 @@ canonical form.
 
 ## What it is built on
 
-The library draws only while a frame observer is set (`snaggletooth/snes/video_frame.h`), so the
-tool sets one. The library hands each finished frame over as the frame's vertical blank begins, and
-the frame goes to the window, the recording and the table in turn before the machine runs on. The
+The library draws on the CPU only while a frame observer is set (`snaggletooth/snes/video_frame.h`),
+so the tool sets one, or under `--gpu-ppu` hands the machine its GPU device and sets a timeline
+observer instead, which is told of each frame once the device has drawn it. The library hands each
+finished frame over as the frame's vertical blank begins, and the frame goes to the window, the
+recording and the table in turn before the machine runs on. The
 controllers are read after that frame's wait rather than before it and presented there, ahead of
 the frame's auto-read, so what you are holding is sampled immediately ahead of the moment the
 console latches it, and the script records it as that frame's line
@@ -229,7 +281,7 @@ answers with the rate to pace by, when each frame of that pacing is owed, and th
 device at, so all of it is checked by the suite. Every call that touches a real device is in this
 tool.
 
-This is the only target that links SDL. It is built when `SNAGGLETOOTH_BUILD_PLAYER` and
+The player, `snes_gpu_verify` and the GPU suite are the targets that link SDL. They are built when `SNAGGLETOOTH_BUILD_PLAYER` and
 `SNAGGLETOOTH_BUILD_TOOLS` are both on — the default for a top-level build — and takes SDL from a
 parent build that already defines `SDL3::SDL3`, or from the pinned submodule at `third_party/sdl`,
 built statically with the subsystems a window, a speaker and a gamepad do not need switched off. The
