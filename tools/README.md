@@ -16,16 +16,17 @@ shelling out to the tool.
 | [`examples/`](examples/README.md) | — (header-only) | `snes_examples` | one README per cartridge |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 | [`video/`](video/README.md) | `snaggletooth_video` | — | [ppu.md](../docs/ppu.md) |
-| [`player/`](player/README.md) | `snaggletooth_player_pads` | `snes_player` | [ppu.md](../docs/ppu.md), [pad-config.md](../docs/pad-config.md), [input-script.md](../docs/input-script.md) |
+| [`player/`](player/README.md) | `snaggletooth_player_pads` | `snes_player`, `snes_gpu_verify` | [ppu.md](../docs/ppu.md), [gpu-ppu.md](../docs/gpu-ppu.md), [pad-config.md](../docs/pad-config.md), [input-script.md](../docs/input-script.md) |
 | [`inputs/`](inputs/README.md) | — (data) | — | [input-script.md](../docs/input-script.md) |
 
 `inputs/` is the one directory here that holds no code: the recorded runs the
 tools replay, and the `default.snaginput` that plays a cartridge with no run of
 its own, so `--input-dir tools/inputs` plays a whole library.
 
-`player/` carries a library as well as its command: `snaggletooth_player_pads`
+`player/` carries a library as well as its commands: `snaggletooth_player_pads`
 turns a keyboard and a controller into the buttons a port holds, and opens no
-device of its own, so it is tested wherever the suite is.
+device of its own, so it is tested wherever the suite is. `snes_gpu_verify` runs a
+cartridge headless on the GPU PPU and holds every frame to the machine's own.
 
 Two scripts sit beside the libraries. `corpus.py` runs a directory of
 cartridges through four commands, one image at a time or `--jobs` of them at
@@ -67,7 +68,7 @@ vendors the library sets the first to have them without the suite. Each is its o
 target:
 
 ```
-cmake --build build --config Release --target snes_disasm snes_render snes_verify snes_lift snes_differential snes_examples cpu65816_disasm spc700_disasm cpu65816_asm spc700_asm rom_render spc_render
+cmake --build build --config Release --target snes_disasm snes_render snes_verify snes_lift snes_differential snes_examples cpu65816_disasm spc700_disasm cpu65816_asm spc700_asm rom_render spc_render snes_player snes_gpu_verify
 ```
 
 The binaries land in `build/`, or in `build\Release\` on Windows. Keep `--config Release`: on

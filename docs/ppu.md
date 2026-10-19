@@ -626,6 +626,12 @@ rows before `firstLine - 1` and from `height` on as they were. Position `x`'s le
 wide is these rows column for column; one 256 wide is them with each pixel taken once from its
 position's two equal halves.
 
+**The core draws the frame on a GPU itself** with its own compute shader, from this timeline, when a
+host hands the machine a device through `SnesConfig::gpuPpu`: `pack()` lays the timeline out as one
+buffer the shader reads, and the texture the shader leaves is `draw()`'s rows. [gpu-ppu.md](gpu-ppu.md)
+is the whole of it — the device a host implements, the three passes, the packed frame's layout and
+the texture.
+
 ## The sprites
 
 A sprite is a record in the sprite table, and 128 of them describe the whole of what the chip can

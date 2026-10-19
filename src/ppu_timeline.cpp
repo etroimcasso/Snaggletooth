@@ -1,14 +1,46 @@
-// PpuTimeline: a line's register words read back, and the frame drawn from the
-// timeline alone through the chip's own dot code.
+// PpuTimeline: a line's register words read back, the frame drawn from the
+// timeline alone through the chip's own dot code, and the frame packed into one
+// buffer for a shader.
 
 #include "snaggletooth/snes/ppu_timeline.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <memory>
 
 #include "ppu_timeline_words.h"
 
 namespace snaggletooth {
+namespace {
+
+// A span's length in whole words, the last word padded.
+[[nodiscard]] constexpr std::size_t wordsOf(std::size_t bytes) noexcept { return (bytes + 3u) / 4u; }
+
+// A 32-bit word stored little-endian at a word index of the packed buffer.
+void putWord(std::span<std::uint8_t> out, std::size_t word, std::uint32_t value) noexcept {
+  const std::size_t at = word * 4u;
+  out[at] = static_cast<std::uint8_t>(value & 0xFFu);
+  out[at + 1u] = static_cast<std::uint8_t>((value >> 8) & 0xFFu);
+  out[at + 2u] = static_cast<std::uint8_t>((value >> 16) & 0xFFu);
+  out[at + 3u] = static_cast<std::uint8_t>(value >> 24);
+}
+
+[[nodiscard]] std::uint32_t getWord(std::span<const std::uint8_t> in, std::size_t word) noexcept {
+  const std::size_t at = word * 4u;
+  return static_cast<std::uint32_t>(in[at]) | (static_cast<std::uint32_t>(in[at + 1u]) << 8) |
+         (static_cast<std::uint32_t>(in[at + 2u]) << 16) | (static_cast<std::uint32_t>(in[at + 3u]) << 24);
+}
+
+// A byte span copied to a word index, the padding of its last word zero.
+void putBytes(std::span<std::uint8_t> out, std::size_t word, std::span<const std::uint8_t> bytes) noexcept {
+  const std::size_t at = word * 4u;
+  if (!bytes.empty()) std::memcpy(out.data() + at, bytes.data(), bytes.size());
+  const std::size_t padded = wordsOf(bytes.size()) * 4u;
+  if (padded > bytes.size()) std::memset(out.data() + at + bytes.size(), 0, padded - bytes.size());
+}
+
+}  // namespace
 
 std::uint32_t PpuTimeline::Line::value(Field which) const noexcept {
   const auto index = static_cast<std::size_t>(which);
@@ -130,6 +162,117 @@ void PpuTimeline::draw(std::span<std::uint8_t> pixels) const {
       std::copy(out.right.begin(), out.right.end(), pixel + 4);
     }
   }
+}
+
+std::size_t PpuTimeline::packedSize() const noexcept {
+  const std::size_t words = kHeaderWords + lines.size() * 32u + events.size() * 2u + kVramBytes / 4u +
+                            wordsOf(palettes.size()) + wordsOf(oams.size()) + wordsOf(spriteBuffers.size()) +
+                            vramWrites.size() * 2u * 2u + kPageTableWords + kLineTableWords;
+  return words * 4u;
+}
+
+std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
+  const std::size_t size = packedSize();
+  if (out.size() < size) return 0u;
+  out = out.first(size);
+
+  // The sections, one after another behind the header.
+  std::size_t next = kHeaderWords;
+  const auto section = [&next](std::size_t words) {
+    const std::size_t at = next;
+    next += words;
+    return at;
+  };
+  const std::size_t linesAt = section(lines.size() * 32u);
+  const std::size_t eventsAt = section(events.size() * 2u);
+  const std::size_t vramAt = section(kVramBytes / 4u);
+  const std::size_t palettesAt = section(wordsOf(palettes.size()));
+  const std::size_t oamsAt = section(wordsOf(oams.size()));
+  const std::size_t buffersAt = section(wordsOf(spriteBuffers.size()));
+  const std::size_t writesAt = section(vramWrites.size() * 2u);
+  const std::size_t sortedAt = section(vramWrites.size() * 2u);
+  const std::size_t pagesAt = section(kPageTableWords);
+  const std::size_t lineTableAt = section(kLineTableWords);
+
+  std::memset(out.data(), 0, kHeaderWords * 4u);
+  putWord(out, 0u, height);
+  putWord(out, 1u, width);
+  putWord(out, 2u, firstLine);
+  putWord(out, 3u, field);
+  putWord(out, 4u, static_cast<std::uint32_t>(linesAt));
+  putWord(out, 5u, static_cast<std::uint32_t>(lines.size()));
+  putWord(out, 6u, static_cast<std::uint32_t>(eventsAt));
+  putWord(out, 7u, static_cast<std::uint32_t>(events.size()));
+  putWord(out, 8u, static_cast<std::uint32_t>(vramAt));
+  putWord(out, 9u, static_cast<std::uint32_t>(palettesAt));
+  putWord(out, 10u, static_cast<std::uint32_t>(palettes.size() / kPaletteBytes));
+  putWord(out, 11u, static_cast<std::uint32_t>(oamsAt));
+  putWord(out, 12u, static_cast<std::uint32_t>(oams.size() / kOamBytes));
+  putWord(out, 13u, static_cast<std::uint32_t>(buffersAt));
+  putWord(out, 14u, static_cast<std::uint32_t>(spriteBuffers.size() / kSpriteBufferBytes));
+  putWord(out, 15u, static_cast<std::uint32_t>(writesAt));
+  putWord(out, 16u, static_cast<std::uint32_t>(vramWrites.size()));
+  putWord(out, 17u, static_cast<std::uint32_t>(sortedAt));
+  putWord(out, 18u, static_cast<std::uint32_t>(pagesAt));
+  putWord(out, 19u, static_cast<std::uint32_t>(lineTableAt));
+
+  for (std::size_t i = 0u; i < lines.size(); ++i) {
+    for (std::size_t word = 0u; word < 32u; ++word) putWord(out, linesAt + i * 32u + word, lines[i].words[word]);
+  }
+  for (std::size_t i = 0u; i < events.size(); ++i) {
+    putWord(out, eventsAt + i * 2u, events[i].at);
+    putWord(out, eventsAt + i * 2u + 1u, events[i].change);
+  }
+  putBytes(out, vramAt, vram.first(std::min(vram.size(), kVramBytes)));
+  if (vram.size() < kVramBytes) std::memset(out.data() + vramAt * 4u + vram.size(), 0, kVramBytes - vram.size());
+  putBytes(out, palettesAt, palettes);
+  putBytes(out, oamsAt, oams);
+  putBytes(out, buffersAt, spriteBuffers);
+
+  // The writes sorted by address and then by ordinal: a stable counting sort on the
+  // address's low byte, into the position section as scratch, then one on its high
+  // byte into the sorted section. The position section then takes the originals.
+  const std::size_t count = vramWrites.size();
+  std::array<std::uint32_t, 257> starts{};
+  const auto entryOf = [this](std::size_t ordinal) {
+    const VramWrite& write = vramWrites[ordinal];
+    return std::pair<std::uint32_t, std::uint32_t>{write.address() | (static_cast<std::uint32_t>(ordinal & 0xFFFFu) << 16),
+                                                    write.value()};
+  };
+  starts.fill(0u);
+  for (std::size_t i = 0u; i < count; ++i) ++starts[(vramWrites[i].address() & 0xFFu) + 1u];
+  for (std::size_t bucket = 0u; bucket < 256u; ++bucket) starts[bucket + 1u] += starts[bucket];
+  for (std::size_t i = 0u; i < count; ++i) {
+    const std::size_t to = starts[vramWrites[i].address() & 0xFFu]++;
+    const auto [first, second] = entryOf(i);
+    putWord(out, writesAt + to * 2u, first);
+    putWord(out, writesAt + to * 2u + 1u, second);
+  }
+  starts.fill(0u);
+  for (std::size_t i = 0u; i < count; ++i) ++starts[(vramWrites[i].address() >> 8) + 1u];
+  for (std::size_t bucket = 0u; bucket < 256u; ++bucket) starts[bucket + 1u] += starts[bucket];
+  for (std::size_t page = 0u; page < kPageTableWords; ++page) putWord(out, pagesAt + page, starts[page]);
+  for (std::size_t i = 0u; i < count; ++i) {
+    const std::uint32_t first = getWord(out, writesAt + i * 2u);
+    const std::uint32_t second = getWord(out, writesAt + i * 2u + 1u);
+    const std::size_t to = starts[(first & 0xFFFFu) >> 8]++;
+    putWord(out, sortedAt + to * 2u, first);
+    putWord(out, sortedAt + to * 2u + 1u, second);
+  }
+  for (std::size_t i = 0u; i < count; ++i) {
+    putWord(out, writesAt + i * 2u, vramWrites[i].at);
+    putWord(out, writesAt + i * 2u + 1u, vramWrites[i].change);
+  }
+
+  // The line table: how many writes stand on lines below each line.
+  std::array<std::uint32_t, kLineTableWords> below{};
+  below.fill(0u);
+  for (std::size_t i = 0u; i < count; ++i) {
+    const std::size_t line = std::min<std::size_t>(vramWrites[i].line(), kLineTableWords - 1u);
+    for (std::size_t after = line + 1u; after < kLineTableWords; ++after) ++below[after];
+  }
+  for (std::size_t line = 0u; line < kLineTableWords; ++line) putWord(out, lineTableAt + line, below[line]);
+  return size;
 }
 
 }  // namespace snaggletooth

@@ -5,6 +5,8 @@
 #include <bit>
 #include <chrono>
 #include <cstddef>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #if defined(_MSC_VER)
@@ -231,6 +233,7 @@ Snes::Snes(SnesConfig config)
       apuThreaded_(config.apuThread),
       ppuThreaded_(config.ppuThread),
       ppuVerify_(config.ppuVerify) {
+  gpuPpu_ = config.gpuPpu;
   // The board is the header's, with the map and the save the caller overrides.
   board_ = cartridgeBoard(rom_);
   if (config.map.has_value()) board_.map = *config.map;
@@ -265,6 +268,27 @@ Snes::Snes(SnesConfig config)
   // The record of what each picture line read and produced, which every machine
   // keeps and the load below empties.
   cache_ = std::make_unique<LineCache>();
+  // The GPU PPU: the device is given the shader in a format it takes, and the
+  // timeline is recorded for it from the first frame.
+  if (gpuPpu_ != nullptr) {
+    for (const gpu::Pass pass : {gpu::Pass::Sprites, gpu::Pass::Tiles, gpu::Pass::Pixels}) {
+      const gpu::ShaderVariants& variants = gpu::ppuShader(pass);
+      const std::optional<std::pair<gpu::ShaderBytecode, gpu::ShaderFormat>> shader =
+          gpu::selectShader(gpuPpu_->formats(), variants);
+      if (!shader.has_value()) {
+        throw std::runtime_error(variants.spirv.data == nullptr && variants.dxil.data == nullptr &&
+                                         variants.metallib.data == nullptr
+                                     ? "the GPU PPU: this library was built without its shader"
+                                     : "the GPU PPU: the device takes no format the shader was built in");
+      }
+      std::string error;
+      if (!gpuPpu_->makePipeline(pass, shader->first, shader->second, error)) {
+        throw std::runtime_error("the GPU PPU: the device did not make a pipeline: " + error);
+      }
+    }
+    timeline_ = std::make_unique<TimelineRecorder>();
+    recordsTimeline_ = true;
+  }
   load();
 }
 
@@ -299,6 +323,8 @@ Snes::Snes(Snes&& moved) noexcept
       frameFinished_(moved.frameFinished_),
       timelineFinished_(moved.timelineFinished_),
       timelineObserver_(moved.timelineObserver_),
+      gpuPpu_(moved.gpuPpu_),
+      recordsTimeline_(moved.recordsTimeline_),
       frameWide_(moved.frameWide_),
       frameWidth_(moved.frameWidth_),
       framePictureLines_(moved.framePictureLines_),
@@ -319,6 +345,8 @@ Snes::Snes(Snes&& moved) noexcept
   moved.observer_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.timelineObserver_ = nullptr;
+  moved.gpuPpu_ = nullptr;
+  moved.recordsTimeline_ = false;
   moved.saveObserver_ = nullptr;
   moved.accessWatcher_ = nullptr;
   moved.instructionWatcher_ = nullptr;
@@ -332,9 +360,11 @@ void Snes::setFrameObserver(FrameObserver* observer) noexcept {
 
 void Snes::setPpuTimelineObserver(PpuTimelineObserver* observer) {
   // The buffers are made the first time an observer is set and kept from then on;
-  // the frame in progress, recorded or not, is dropped.
+  // the frame in progress, recorded or not, is dropped. The machine records while an
+  // observer is set or the GPU PPU is on.
   timelineObserver_ = observer;
   if (observer != nullptr && !timeline_) timeline_ = std::make_unique<TimelineRecorder>();
+  recordsTimeline_ = observer != nullptr || gpuPpu_ != nullptr;
   if (timeline_) dropTimeline();
 }
 
@@ -1019,7 +1049,7 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
             settleLine(chip, pictureInputs(), state_.hpos, true);
           }
           changes = videoWriteChanges(chip, offset, value);
-          if (timelineObserver_ != nullptr) [[unlikely]] recordBeforeWrite(offset, state_.ppu, pins);
+          if (recordsTimeline_) [[unlikely]] recordBeforeWrite(offset, state_.ppu, pins);
         }
         portLanding_ = chip.write(offset, value, pins);
         // The drawing side counts the write where it landed, and records it in the
@@ -1029,7 +1059,7 @@ void Snes::routeWriteRaw(std::uint32_t address, std::uint8_t value, std::uint8_t
           pushAccess(PictureEventKind::Write, offset, value, pins);
         } else {
           noteVideoWrite(offset, portLanding_, changes);
-          if (timelineObserver_ != nullptr) [[unlikely]] {
+          if (recordsTimeline_) [[unlikely]] {
             recordWrite(offset, value, state_.hpos, state_.ppu, pins, portLanding_);
           }
         }
@@ -2000,7 +2030,7 @@ void Snes::redrawInidispEarly(std::uint32_t address, std::uint8_t busBefore) {
   Ppu ppu{state_.ppu, derived_};
   drawDots(ppu, pictureInputs(), static_cast<std::uint16_t>(endHpos - 4u), endHpos);
   state_.ppu.inidisp = written;
-  if (timelineObserver_ != nullptr) [[unlikely]] recordInidispEarly(state_.vpos, endHpos, busBefore, written);
+  if (recordsTimeline_) [[unlikely]] recordInidispEarly(state_.vpos, endHpos, busBefore, written);
 }
 
 void Snes::deliverFrame() {
@@ -2023,7 +2053,7 @@ void Snes::deliverFrame() {
 }
 
 void Snes::deliverTimeline() {
-  if (timelineObserver_ == nullptr || !timeline_) return;
+  if (!recordsTimeline_ || !timeline_) return;
   // As deliverFrame waits: the picture thread finishes the frame's timeline as it
   // reaches the blank's line.
   if (ppuThreaded_) [[unlikely]] waitPicture();
@@ -2042,7 +2072,24 @@ void Snes::deliverTimeline() {
   timeline.palettes = frame.palettes;
   timeline.oams = frame.oams;
   timeline.spriteBuffers = frame.spriteBuffers;
-  timelineObserver_->frame(timeline);
+  // The GPU draws the frame before the observer is told of it, so a host that
+  // presents the device's texture from its observer finds the frame drawn.
+  if (gpuPpu_ != nullptr) drawOnGpu(timeline);
+  if (timelineObserver_ != nullptr) timelineObserver_->frame(timeline);
+}
+
+void Snes::drawOnGpu(const PpuTimeline& timeline) {
+  const std::size_t bytes = timeline.packedSize();
+  const std::span<std::uint8_t> out = gpuPpu_->frameBytes(bytes);
+  if (timeline.pack(out) != bytes) return;  // the device gave less than the frame needs
+  gpuPpu_->draw(gpu::Frame{
+      .width = timeline.width,
+      .height = timeline.height,
+      .firstLine = timeline.firstLine,
+      .field = timeline.field,
+      .interlaced = state_.ppu.interlace(),
+      .bytes = bytes,
+  });
 }
 
 void Snes::deliverSave() {
@@ -2081,7 +2128,7 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   ppu.timeSprites(state_.vpos, state_.field);
   if (ppuThreaded_) [[unlikely]] {
     stageLine();
-  } else if (timelineObserver_ != nullptr) [[unlikely]] {
+  } else if (recordsTimeline_) [[unlikely]] {
     recordTime(state_.ppu, state_.vpos, state_.field, state_.ppu.objsel, state_.ppu.setini);
   }
   ppu.beginRange(static_cast<std::uint16_t>(state_.vpos + 1u));
@@ -2128,7 +2175,7 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
       framePictureLines_ = static_cast<std::uint16_t>(state_.vpos - 1u);
     }
     // The frame's timeline is finished here by the side that draws, as its width is.
-    if (timelineObserver_ != nullptr) [[unlikely]] {
+    if (recordsTimeline_) [[unlikely]] {
       timelineFinished_ = true;
       if (!ppuThreaded_) finishTimeline(state_.ppu, state_.vpos, state_.field);
     }
@@ -3271,7 +3318,7 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
       // The timeline takes Time's inputs for the new line, or finishes the frame as
       // its blank begins. The view holds every register as Time read it: each write
       // before the line's start is replayed on it before this entry.
-      if (timelineObserver_ != nullptr) [[unlikely]] {
+      if (recordsTimeline_) [[unlikely]] {
         if (blankBegins) {
           finishTimeline(picture.view, event.vpos, event.field);
         } else if (!event.vblank) {
@@ -3303,10 +3350,10 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
         if (disturbs || !cache_->pending) drawTo(event.hpos);
         if (disturbs) settleLine(ppu, picture.in, event.hpos, true);
         const bool changes = videoWriteChanges(ppu, event.offset, event.value);
-        if (timelineObserver_ != nullptr) [[unlikely]] recordBeforeWrite(event.offset, picture.view, in);
+        if (recordsTimeline_) [[unlikely]] recordBeforeWrite(event.offset, picture.view, in);
         const std::optional<std::uint16_t> landed = ppu.write(event.offset, event.value, in);
         noteVideoWrite(event.offset, landed, changes);
-        if (timelineObserver_ != nullptr) [[unlikely]] {
+        if (recordsTimeline_) [[unlikely]] {
           recordWrite(event.offset, event.value, event.hpos, picture.view, in, landed);
         }
       } else {
@@ -3325,7 +3372,7 @@ void Snes::applyPictureEvent(const PictureEvent& event) {
       Ppu ppu{picture.view, picture.derived};
       drawDots(ppu, picture.in, static_cast<std::uint16_t>(event.hpos - 4u), event.hpos);
       picture.view.inidisp = written;
-      if (timelineObserver_ != nullptr) [[unlikely]] {
+      if (recordsTimeline_) [[unlikely]] {
         recordInidispEarly(picture.in.vpos, event.hpos, event.byte0, written);
       }
       return;
@@ -3465,7 +3512,7 @@ void Snes::decideLine(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos) noe
   cache.key = lineKeyOf(s, in);
   // The timeline records the line as its first read dot finds it, when this side
   // draws it from its start.
-  if (timelineObserver_ != nullptr && cache.recordable) [[unlikely]] recordLine(s, in);
+  if (recordsTimeline_ && cache.recordable) [[unlikely]] recordLine(s, in);
   cache.drawnAt = cache.writes;
   const LineRecord& record = cache.lines[static_cast<std::size_t>(in.vpos) - 1u];
 

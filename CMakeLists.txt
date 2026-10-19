@@ -32,6 +32,13 @@ option(SNAGGLETOOTH_BUILD_TOOLS "Build the tool libraries and command-line tools
 # which never links SDL at all — exactly as it was.
 option(SNAGGLETOOTH_BUILD_PLAYER "Build the player, which needs SDL3" ${PROJECT_IS_TOP_LEVEL})
 
+# The GPU PPU's compute shader (shaders/ppu_*.comp.hlsl, three passes) is compiled at build time for this
+# platform's shader format and carried in the library, so a host that hands the machine a
+# GPU device (SnesConfig::gpuPpu) gets the picture drawn there. It needs the shader tools
+# shaders/SnaggletoothShaders.cmake finds; switching it off builds the library without the
+# shader, and a machine given a device then throws.
+option(SNAGGLETOOTH_GPU_PPU "Compile the GPU PPU's shader into the library (needs the shader tools)" ON)
+
 add_library(snaggletooth STATIC
   src/version.cpp
   src/cpu65816.cpp
@@ -44,6 +51,7 @@ add_library(snaggletooth STATIC
   src/snes_ipl_stub.cpp
   src/ppu.cpp
   src/ppu_timeline.cpp
+  src/gpu_ppu.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -52,6 +60,21 @@ set_target_properties(snaggletooth PROPERTIES CXX_EXTENSIONS OFF)
 target_include_directories(snaggletooth PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+if(SNAGGLETOOTH_GPU_PPU)
+  include(shaders/SnaggletoothShaders.cmake)
+  snaggletooth_find_shader_tools()
+  # The three passes, each with the bindings its file declares.
+  snaggletooth_compile_shader(snaggletooth STEM ppu_sprites.comp
+    SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ppu_sprites.comp.hlsl" STAGE comp
+    INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shaders" READONLY_BUFFERS 1)
+  snaggletooth_compile_shader(snaggletooth STEM ppu_tiles.comp
+    SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ppu_tiles.comp.hlsl" STAGE comp
+    INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shaders" READONLY_BUFFERS 1)
+  snaggletooth_compile_shader(snaggletooth STEM ppu_pixels.comp
+    SRC "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ppu_pixels.comp.hlsl" STAGE comp
+    INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/shaders" UNIFORMS 1 READONLY_BUFFERS 1 READWRITE_TEXTURES 1)
+  target_compile_definitions(snaggletooth PRIVATE SNAGGLETOOTH_GPU_PPU=1)
+endif()
 # A machine built with SnesConfig::apuThread on runs the audio unit's cycles on a thread it
 # owns, so the library links the platform's thread library, and so does everything that links it.
 find_package(Threads REQUIRED)
@@ -542,7 +565,11 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
   # The store the player keeps a person's files in is the player's own code rather
   # than a library of its own: one tool uses it, and the suite compiles the same
   # source directly so it is tested without a window or a device anywhere near it.
-  add_executable(snes_player tools/player/snes_player_main.cpp tools/player/user_files.cpp)
+  # The GPU PPU's device over SDL's GPU API is the player's own code, as the store is: the
+  # player hands it to the machine, and the verify tool and the GPU suite compile the same
+  # source.
+  add_executable(snes_player tools/player/snes_player_main.cpp tools/player/user_files.cpp
+    tools/player/sdl_gpu_device.cpp)
   # The pad library reaches the cartridge tools publicly, which reach the .spc tooling
   # and so the WAV writer; the player takes all of it through that one link. Naming any
   # of them again is a duplicate the Apple linker reports.
@@ -555,6 +582,17 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
     target_compile_options(snes_player PRIVATE /W4 /WX)
   else()
     target_compile_options(snes_player PRIVATE -Wall -Wextra -Werror)
+  endif()
+
+  # The GPU PPU held to the machine's own frame over a whole run, headless: one row a
+  # cartridge, which the sweep driver runs over the library.
+  add_executable(snes_gpu_verify tools/player/snes_gpu_verify_main.cpp tools/player/sdl_gpu_device.cpp)
+  target_link_libraries(snes_gpu_verify PRIVATE snaggletooth_player_pads SDL3::SDL3)
+  target_compile_definitions(snes_gpu_verify PRIVATE SDL_MAIN_HANDLED)
+  if(MSVC)
+    target_compile_options(snes_gpu_verify PRIVATE /W4 /WX)
+  else()
+    target_compile_options(snes_gpu_verify PRIVATE -Wall -Wextra -Werror)
   endif()
 endif()
 
@@ -777,4 +815,27 @@ if(SNAGGLETOOTH_BUILD_TESTS)
   # low priority on a busy machine takes longer over five thousand cases than the default
   # five seconds allows.
   gtest_discover_tests(snaggletooth_tests DISCOVERY_TIMEOUT 60)
+
+  # The GPU PPU's cases need a GPU device, which the player's SDL device opens, so they
+  # are a second executable built wherever the player is. On a runner with no device
+  # every case skips, visibly, and is counted.
+  if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
+    add_executable(snaggletooth_gpu_tests
+      tests/gpu/gpu_ppu_test.cpp
+      tools/player/sdl_gpu_device.cpp
+    )
+    target_link_libraries(snaggletooth_gpu_tests PRIVATE
+      snaggletooth_player_pads
+      SDL3::SDL3
+      GTest::gtest_main
+    )
+    target_compile_definitions(snaggletooth_gpu_tests PRIVATE SDL_MAIN_HANDLED)
+    if(MSVC)
+      target_compile_options(snaggletooth_gpu_tests PRIVATE /W4 /WX)
+      target_link_options(snaggletooth_gpu_tests PRIVATE /STACK:8388608)
+    else()
+      target_compile_options(snaggletooth_gpu_tests PRIVATE -Wall -Wextra -Werror)
+    endif()
+    gtest_discover_tests(snaggletooth_gpu_tests DISCOVERY_TIMEOUT 60)
+  endif()
 endif()
