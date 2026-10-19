@@ -476,7 +476,7 @@ Kept keep(const PpuTimeline& t) {
 struct Checker final : FrameObserver, PpuTimelineObserver {
   Snes* machine = nullptr;
   player::SdlGpuDevice* device = nullptr;
-  std::optional<Frame> picture;
+  std::optional<Frame> kept;
   std::uint64_t frameAt = 0;
   unsigned reports = 0;
   unsigned checked = 0;
@@ -489,7 +489,7 @@ struct Checker final : FrameObserver, PpuTimelineObserver {
   Bytes gpu;
 
   void frame(const VideoFrame& picture) override {
-    this->picture = Frame{.width = picture.width,
+    kept = Frame{.width = picture.width,
                           .height = picture.height,
                           .field = picture.field,
                           .pixels = Bytes(picture.pixels.begin(), picture.pixels.end())};
@@ -530,8 +530,8 @@ struct Checker final : FrameObserver, PpuTimelineObserver {
       }
     }
     if (gpuDiffered) ++gpuDiffers;
-    if (!picture.has_value() || frameAt != machine->state().master) return;
-    if (picture->width != t.width || picture->height != t.height || picture->field != t.field) {
+    if (!kept.has_value() || frameAt != machine->state().master) return;
+    if (kept->width != t.width || kept->height != t.height || kept->field != t.field) {
       ++frameDiffers;
       if (first.empty()) first = "report " + std::to_string(reports) + ": the frame's shape differs";
       return;
@@ -540,7 +540,7 @@ struct Checker final : FrameObserver, PpuTimelineObserver {
     for (unsigned row = t.firstLine - 1u; row < t.height; ++row) {
       for (unsigned x = 0u; x < t.width; ++x) {
         const std::uint8_t* got = gpu.data() + (static_cast<std::size_t>(row) * t.width + x) * 4u;
-        const std::uint8_t* want = picture->pixels.data() + (static_cast<std::size_t>(row) * t.width + x) * 4u;
+        const std::uint8_t* want = kept->pixels.data() + (static_cast<std::size_t>(row) * t.width + x) * 4u;
         if (!std::equal(got, got + 4, want)) {
           note("frame", row, x, got, want);
           frameDiffered = true;
@@ -627,9 +627,9 @@ Scene fieldScene(std::uint8_t m7sel, bool extbg, bool directColor) {
 }
 
 TEST_F(GpuCase, ModeSevenEachWay) {
-  for (const std::uint8_t over : {0x00u, 0x40u, 0x80u, 0xC0u}) {
-    SCOPED_TRACE(::testing::Message() << "screen-over " << unsigned{over});
-    EXPECT_TRUE(drawsAlike(run(fieldScene(over, false, false), 4u), 3u));
+  for (const unsigned over : {0x00u, 0x40u, 0x80u, 0xC0u}) {
+    SCOPED_TRACE(::testing::Message() << "screen-over " << over);
+    EXPECT_TRUE(drawsAlike(run(fieldScene(static_cast<std::uint8_t>(over), false, false), 4u), 3u));
   }
   EXPECT_TRUE(drawsAlike(run(fieldScene(0x80u, true, false), 4u), 3u)) << "EXTBG";
   EXPECT_TRUE(drawsAlike(run(fieldScene(0x00u, false, true), 4u), 3u)) << "direct color";
@@ -749,15 +749,15 @@ TEST_F(GpuCase, MosaicSizeChangedByHdmaHoldsTheRowsSize) {
 TEST_F(GpuCase, TheWindowsAndTheColorRegions) {
   // Both windows, each background inverting or not, the four logic operations,
   // the sprites masked, and $2130's regions at every value.
-  for (const std::uint8_t logic : {0xE4u, 0x0Eu, 0xB1u}) {
-    for (const std::uint8_t regions : {0x00u, 0x10u, 0x20u, 0x30u, 0x40u, 0x80u, 0xC0u, 0xF0u}) {
-      SCOPED_TRACE(::testing::Message() << "logic " << unsigned{logic} << " regions " << unsigned{regions});
+  for (const unsigned logic : {0xE4u, 0x0Eu, 0xB1u}) {
+    for (const unsigned regions : {0x00u, 0x10u, 0x20u, 0x30u, 0x40u, 0x80u, 0xC0u, 0xF0u}) {
+      SCOPED_TRACE(::testing::Message() << "logic " << logic << " regions " << regions);
       Scene scene = baseScene();
       scene.registers.insert(scene.registers.end(),
                              {{0x2126u, 40u}, {0x2127u, 120u}, {0x2128u, 90u}, {0x2129u, 200u},
                               {0x2123u, 0x3Bu}, {0x2124u, 0xA0u}, {0x2125u, 0xAAu},
-                              {0x212Au, logic}, {0x212Bu, 0x0Du}, {0x212Eu, 0x17u}, {0x212Fu, 0x00u},
-                              {0x2130u, regions}});
+                              {0x212Au, static_cast<std::uint8_t>(logic)}, {0x212Bu, 0x0Du}, {0x212Eu, 0x17u}, {0x212Fu, 0x00u},
+                              {0x2130u, static_cast<std::uint8_t>(regions)}});
       EXPECT_TRUE(drawsAlike(run(scene, 4u), 3u));
     }
   }
@@ -850,7 +850,7 @@ TEST_F(GpuCase, TheInterlacedAndTallerPicture) {
   // The row mapping against the player's weaver, over four fields in each
   // placement: a field placed by rowMapFor into a persisting picture is the
   // picture the weaver composes.
-  for (const auto [placement, mode] : {std::pair{gpu::FieldPlacement::Weave, player::Interlace::Weave},
+  for (const auto& [placement, mode] : {std::pair{gpu::FieldPlacement::Weave, player::Interlace::Weave},
                                        std::pair{gpu::FieldPlacement::Bob, player::Interlace::Bob},
                                        std::pair{gpu::FieldPlacement::Field, player::Interlace::Off}}) {
     player::FieldWeaver weaver(mode);
