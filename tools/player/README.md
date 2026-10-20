@@ -11,7 +11,7 @@ snes_player <image> [--out <directory>] [--seconds N] [--scale N]
                     [--gpu-ppu] [--gpu-verify] [--mute] [--quiet]
 snes_player --default-config
 snes_player --user-files
-snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread]
+snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread] [--pass-times]
 ```
 
 The window shows the picture the machine draws, frame by frame, at the rate the run is held to —
@@ -165,9 +165,21 @@ finished drawing the frame, and the median packed frame in bytes. With `frames` 
 only the first that many frames, as the sweep harness's does; `--ppu-thread` draws on the picture
 thread. A machine with no GPU device prints `<image>	NO GPU	<reason>` and exits 0.
 
+`--pass-times` divides a frame's device time between its parts: the device submits the upload and
+each of the three passes on a command buffer of its own and waits for each on a fence, and the row
+gains ten columns — the median and the largest nanoseconds of the upload, the sprite pass, the tile
+pass and the pixel pass, then the register events and the palette events of the frame whose device
+time was the largest. Each part carries a fence's round trip of its own, so under the flag the
+device columns say where a frame's time goes, not what the frame costs; the row without the flag
+says that.
+
 The device is the player's own code over SDL's GPU API, `sdl_gpu_device.h`: it is what the core's
 `gpu::Device` interface looks like implemented, with the present and the read-back a host adds for
-itself, and the GPU suite (`snaggletooth_gpu_tests`) opens it with no window.
+itself, and the GPU suite (`snaggletooth_gpu_tests`) opens it with no window. It records a frame's
+upload and its three passes on one command buffer and submits it once. Once its three pipelines
+are made it clears the texture and runs the three passes over a frame header that draws nothing,
+waited for, inside the machine's constructor: a GPU's first use of a texture and of each pipeline
+costs milliseconds, and paid there the first frame costs what any frame does.
 
 ## Interlacing
 

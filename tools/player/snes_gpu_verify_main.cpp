@@ -10,16 +10,23 @@
 //   the timelines, the frames whose pixels differ from the texture's, the frames
 //   whose width, height or parity differ from the timeline's, the frames with no
 //   timeline in their cycle, for the first frame whose pixels differ its index,
-//   line and position or `-`, the median and the largest nanoseconds the device
-//   spent uploading, dispatching and submitting a frame, and the median packed
-//   frame in bytes.
+//   line and position or `-`, the median nanoseconds the stepping thread spent in
+//   the device's draw() a frame, uploading, dispatching and submitting, and the
+//   most of any frame, the median and the largest nanoseconds from a frame's
+//   draw() to the device finishing it, and the median packed frame in bytes.
 //
 // With `frames`, the digest folds only the first that many frames, as the sweep
 // harness's does, and the frame count is still every frame reported; `--ppu-thread`
-// builds the machine with the picture thread on. A machine that cannot open a
-// device prints `<image>	NO GPU	<reason>` and exits 0.
+// builds the machine with the picture thread on. `--pass-times` submits each
+// frame's upload and each of its three passes alone and times each to its fence
+// (SdlGpuDevice::setTimesPasses), and appends ten columns: the median and the
+// largest nanoseconds of the upload, the sprite pass, the tile pass and the pixel
+// pass, then the register events and the palette events of the frame whose device
+// time was the largest. Under it the device columns carry a fence round trip for
+// each part, so they apportion a frame's time and are not its cost. A machine that cannot open a device
+// prints `<image>	NO GPU	<reason>` and exits 0.
 //
-//   snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread]
+//   snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread] [--pass-times]
 
 #include <algorithm>
 #include <cstdint>
@@ -58,6 +65,10 @@ struct Verify final : FrameObserver, PpuTimelineObserver {
   std::vector<std::uint64_t> nanos;
   std::vector<std::uint64_t> gpuNanos;
   std::vector<std::size_t> packed;
+  bool timesPasses = false;
+  std::vector<std::uint64_t> uploadNanos, spriteNanos, tileNanos, pixelNanos;
+  std::uint64_t worstNanos = 0;
+  std::size_t worstRegisterEvents = 0, worstPaletteEvents = 0;
 
   void frame(const VideoFrame& picture) override {
     if (pending) ++unmatched;
@@ -82,6 +93,20 @@ struct Verify final : FrameObserver, PpuTimelineObserver {
     nanos.push_back(device->lastDrawNanos());
     gpuNanos.push_back(device->waitForDrawn());
     packed.push_back(t.packedSize());
+    if (timesPasses) {
+      uploadNanos.push_back(device->uploadNanos());
+      spriteNanos.push_back(device->passNanos(gpu::Pass::Sprites));
+      tileNanos.push_back(device->passNanos(gpu::Pass::Tiles));
+      pixelNanos.push_back(device->passNanos(gpu::Pass::Pixels));
+      if (gpuNanos.back() >= worstNanos) {
+        worstNanos = gpuNanos.back();
+        worstPaletteEvents = static_cast<std::size_t>(
+            std::count_if(t.events.begin(), t.events.end(), [](const PpuTimeline::Event& event) {
+              return event.field() == PpuTimeline::Field::PaletteWord;
+            }));
+        worstRegisterEvents = t.events.size() - worstPaletteEvents;
+      }
+    }
     if (!pending || at != machine->state().master) return;
     pending = false;
     if (t.width != width || t.height != height || t.field != field) {
@@ -117,19 +142,28 @@ T median(std::vector<T> values) {
   return values[values.size() / 2u];
 }
 
+template <typename T>
+T largest(const std::vector<T>& values) {
+  return values.empty() ? T{} : *std::max_element(values.begin(), values.end());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 4 || argc > 6) {
-    std::fprintf(stderr, "usage: snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread]\n");
+  if (argc < 4 || argc > 7) {
+    std::fprintf(stderr,
+                 "usage: snes_gpu_verify <image> <seconds> <input-dir|-> [frames] [--ppu-thread] [--pass-times]\n");
     return 2;
   }
   bool pictureThread = false;
+  bool timesPasses = false;
   unsigned folded = 0xFFFFFFFFu;
   for (int at = 4; at < argc; ++at) {
     const std::string arg = argv[at];
     if (arg == "--ppu-thread") {
       pictureThread = true;
+    } else if (arg == "--pass-times") {
+      timesPasses = true;
     } else {
       folded = static_cast<unsigned>(std::stoul(arg));
     }
@@ -175,6 +209,7 @@ int main(int argc, char** argv) {
     }
   }
   device.setPlacement(gpu::FieldPlacement::Field);
+  device.setTimesPasses(timesPasses);
 
   try {
     SnesConfig config{.rom = rom};
@@ -185,6 +220,7 @@ int main(int argc, char** argv) {
     verify.folded = folded;
     verify.machine = &machine;
     verify.device = &device;
+    verify.timesPasses = timesPasses;
     machine.setFrameObserver(&verify);
     machine.setPpuTimelineObserver(&verify);
 
@@ -204,14 +240,23 @@ int main(int argc, char** argv) {
       }
     }
     if (verify.pending) ++verify.unmatched;
-    std::printf("%s\t%016llX\t%u\t%u\t%u\t%u\t%u\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\n", name.c_str(),
+    std::printf("%s\t%016llX\t%u\t%u\t%u\t%u\t%u\t%s\t%llu\t%llu\t%llu\t%llu\t%llu", name.c_str(),
                 static_cast<unsigned long long>(verify.value), verify.frames, verify.timelines, verify.pixelMismatches,
                 verify.shapeMismatches, verify.unmatched, verify.first.c_str(),
                 static_cast<unsigned long long>(median(verify.nanos)),
                 static_cast<unsigned long long>(device.drawNanosMost()),
                 static_cast<unsigned long long>(median(verify.gpuNanos)),
-                static_cast<unsigned long long>(verify.gpuNanos.empty() ? 0u : *std::max_element(verify.gpuNanos.begin(), verify.gpuNanos.end())),
+                static_cast<unsigned long long>(largest(verify.gpuNanos)),
                 static_cast<unsigned long long>(median(verify.packed)));
+    if (timesPasses) {
+      for (const std::vector<std::uint64_t>* part :
+           {&verify.uploadNanos, &verify.spriteNanos, &verify.tileNanos, &verify.pixelNanos}) {
+        std::printf("\t%llu\t%llu", static_cast<unsigned long long>(median(*part)),
+                    static_cast<unsigned long long>(largest(*part)));
+      }
+      std::printf("\t%zu\t%zu", verify.worstRegisterEvents, verify.worstPaletteEvents);
+    }
+    std::printf("\n");
   } catch (const std::exception& e) {
     std::printf("%s\tFAILED\t%s\n", name.c_str(), e.what());
   }

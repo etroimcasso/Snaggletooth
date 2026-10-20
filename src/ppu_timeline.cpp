@@ -167,7 +167,8 @@ void PpuTimeline::draw(std::span<std::uint8_t> pixels) const {
 std::size_t PpuTimeline::packedSize() const noexcept {
   const std::size_t words = kHeaderWords + lines.size() * 32u + events.size() * 2u + kVramBytes / 4u +
                             wordsOf(palettes.size()) + wordsOf(oams.size()) + wordsOf(spriteBuffers.size()) +
-                            vramWrites.size() * 2u * 2u + kPageTableWords + kLineTableWords;
+                            vramWrites.size() * 2u * 2u + kPageTableWords + kLineTableWords +
+                            2u * kEventLineTableWords;
   return words * 4u;
 }
 
@@ -175,6 +176,25 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
   const std::size_t size = packedSize();
   if (out.size() < size) return 0u;
   out = out.first(size);
+
+  // The events' line tables: entry L + 1 counts a kind's events on line L, then each
+  // entry becomes the count on the lines below it, entry 240 the kind's whole count.
+  std::array<std::uint32_t, kEventLineTableWords> registerBelow{};
+  std::array<std::uint32_t, kEventLineTableWords> paletteBelow{};
+  const auto tableLine = [](const Event& event) {
+    return std::min<std::size_t>(event.line(), kEventLineTableWords - 2u);
+  };
+  for (const Event& event : events) {
+    std::array<std::uint32_t, kEventLineTableWords>& below =
+        event.field() == Field::PaletteWord ? paletteBelow : registerBelow;
+    ++below[tableLine(event) + 1u];
+  }
+  for (std::size_t line = 1u; line < kEventLineTableWords; ++line) {
+    registerBelow[line] += registerBelow[line - 1u];
+    paletteBelow[line] += paletteBelow[line - 1u];
+  }
+  const std::size_t registerCount = registerBelow[kEventLineTableWords - 1u];
+  const std::size_t paletteCount = paletteBelow[kEventLineTableWords - 1u];
 
   // The sections, one after another behind the header.
   std::size_t next = kHeaderWords;
@@ -184,7 +204,8 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
     return at;
   };
   const std::size_t linesAt = section(lines.size() * 32u);
-  const std::size_t eventsAt = section(events.size() * 2u);
+  const std::size_t registersAt = section(registerCount * 2u);
+  const std::size_t paletteEventsAt = section(paletteCount * 2u);
   const std::size_t vramAt = section(kVramBytes / 4u);
   const std::size_t palettesAt = section(wordsOf(palettes.size()));
   const std::size_t oamsAt = section(wordsOf(oams.size()));
@@ -193,6 +214,8 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
   const std::size_t sortedAt = section(vramWrites.size() * 2u);
   const std::size_t pagesAt = section(kPageTableWords);
   const std::size_t lineTableAt = section(kLineTableWords);
+  const std::size_t registerTableAt = section(kEventLineTableWords);
+  const std::size_t paletteTableAt = section(kEventLineTableWords);
 
   std::memset(out.data(), 0, kHeaderWords * 4u);
   putWord(out, 0u, height);
@@ -201,8 +224,8 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
   putWord(out, 3u, field);
   putWord(out, 4u, static_cast<std::uint32_t>(linesAt));
   putWord(out, 5u, static_cast<std::uint32_t>(lines.size()));
-  putWord(out, 6u, static_cast<std::uint32_t>(eventsAt));
-  putWord(out, 7u, static_cast<std::uint32_t>(events.size()));
+  putWord(out, 6u, static_cast<std::uint32_t>(registersAt));
+  putWord(out, 7u, static_cast<std::uint32_t>(registerCount));
   putWord(out, 8u, static_cast<std::uint32_t>(vramAt));
   putWord(out, 9u, static_cast<std::uint32_t>(palettesAt));
   putWord(out, 10u, static_cast<std::uint32_t>(palettes.size() / kPaletteBytes));
@@ -215,13 +238,44 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
   putWord(out, 17u, static_cast<std::uint32_t>(sortedAt));
   putWord(out, 18u, static_cast<std::uint32_t>(pagesAt));
   putWord(out, 19u, static_cast<std::uint32_t>(lineTableAt));
+  putWord(out, 20u, static_cast<std::uint32_t>(registerTableAt));
+  putWord(out, 21u, static_cast<std::uint32_t>(paletteEventsAt));
+  putWord(out, 22u, static_cast<std::uint32_t>(paletteCount));
+  putWord(out, 23u, static_cast<std::uint32_t>(paletteTableAt));
 
   for (std::size_t i = 0u; i < lines.size(); ++i) {
     for (std::size_t word = 0u; word < 32u; ++word) putWord(out, linesAt + i * 32u + word, lines[i].words[word]);
   }
-  for (std::size_t i = 0u; i < events.size(); ++i) {
-    putWord(out, eventsAt + i * 2u, events[i].at);
-    putWord(out, eventsAt + i * 2u + 1u, events[i].change);
+
+  // The register events in the recorded order, which is by line and then by dot.
+  std::array<std::uint32_t, kEventLineTableWords> placed = registerBelow;
+  for (const Event& event : events) {
+    if (event.field() == Field::PaletteWord) continue;
+    const std::size_t to = placed[tableLine(event)]++;
+    putWord(out, registersAt + to * 2u, event.at);
+    putWord(out, registersAt + to * 2u + 1u, event.change);
+  }
+  // The palette writes of each line, whose events stand together, by palette index
+  // and then by dot: a stable counting sort on the index over the line's recorded
+  // order.
+  std::array<std::uint32_t, 257> starts{};
+  for (std::size_t first = 0u; first < events.size();) {
+    const std::uint32_t line = events[first].line();
+    std::size_t end = first;
+    while (end < events.size() && events[end].line() == line) ++end;
+    starts.fill(0u);
+    for (std::size_t i = first; i < end; ++i) {
+      if (events[i].field() == Field::PaletteWord) ++starts[events[i].paletteIndex() + 1u];
+    }
+    for (std::size_t index = 0u; index < 256u; ++index) starts[index + 1u] += starts[index];
+    const std::size_t base = paletteBelow[tableLine(events[first])];
+    for (std::size_t i = first; i < end; ++i) {
+      if (events[i].field() != Field::PaletteWord) continue;
+      const std::size_t to = base + starts[events[i].paletteIndex()]++;
+      putWord(out, paletteEventsAt + to * 2u, events[i].at);
+      putWord(out, paletteEventsAt + to * 2u + 1u, events[i].change);
+    }
+    first = end;
   }
   putBytes(out, vramAt, vram.first(std::min(vram.size(), kVramBytes)));
   if (vram.size() < kVramBytes) std::memset(out.data() + vramAt * 4u + vram.size(), 0, kVramBytes - vram.size());
@@ -233,7 +287,6 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
   // address's low byte, into the position section as scratch, then one on its high
   // byte into the sorted section. The position section then takes the originals.
   const std::size_t count = vramWrites.size();
-  std::array<std::uint32_t, 257> starts{};
   const auto entryOf = [this](std::size_t ordinal) {
     const VramWrite& write = vramWrites[ordinal];
     return std::pair<std::uint32_t, std::uint32_t>{write.address() | (static_cast<std::uint32_t>(ordinal & 0xFFFFu) << 16),
@@ -272,6 +325,10 @@ std::size_t PpuTimeline::pack(std::span<std::uint8_t> out) const noexcept {
     for (std::size_t after = line + 1u; after < kLineTableWords; ++after) ++below[after];
   }
   for (std::size_t line = 0u; line < kLineTableWords; ++line) putWord(out, lineTableAt + line, below[line]);
+  for (std::size_t line = 0u; line < kEventLineTableWords; ++line) {
+    putWord(out, registerTableAt + line, registerBelow[line]);
+    putWord(out, paletteTableAt + line, paletteBelow[line]);
+  }
   return size;
 }
 

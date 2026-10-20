@@ -1,8 +1,10 @@
 // The GPU PPU's second pass: the tile reads, once a tile column a background a
 // recorded line. One thread a column reads the column as the chip does — the
 // tilemap entry at dot 8E + 3, the character rows at 8E + 7 and the fine scroll at
-// 8E + 22, each under the registers and VRAM as they stand at that dot — and writes
-// the column's record into the scratch buffer for the pixels to draw from.
+// 8E + 22, each under the registers and VRAM as they stand at that dot, the
+// registers carried from one read's dot to the next over the line's register
+// events — and writes the column's record into the scratch buffer for the pixels
+// to draw from.
 //
 // Bound as SDL's compute convention has it: the frame at t0 of space 0 and the
 // scratch buffer at u0 of space 1.
@@ -30,11 +32,16 @@ void main(uint3 id : SV_DispatchThreadID) {
   uint layer = id.z;
   if (column >= 33u || lineIndex + gFirstLine > gHeight || layer >= 4u) return;
   readLine(lineIndex);
-  Tile t = entryRead(layer, column);
+  Regs r = lineRegs();
+  uint cursor = gRegisterFirst;
+  regsOn(r, cursor, column * 8u + 3u);
+  Tile t = entryRead(r, layer, column);
+  regsOn(r, cursor, column * 8u + 7u);
   uint2 first;
   uint2 second;
-  characterRows(layer, column, t, first, second);
-  uint fine = fineOf(layer, column);
+  characterRows(r, layer, column, t, first, second);
+  regsOn(r, cursor, column * 8u + 22u);
+  uint fine = fineOf(r, layer, column);
   uint at = tileRecord(lineIndex, layer, column);
   scratch.Store(at, (t.entry & 0xFFFFu) | (t.planes << 16) | ((t.large ? 1u : 0u) << 24) | ((t.hires ? 1u : 0u) << 25) | (fine << 26));
   scratch.Store(at + 4u, (t.bgX & 0xFFFFu) | ((t.bgY & 0xFFFFu) << 16));

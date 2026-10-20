@@ -1419,9 +1419,10 @@ std::uint32_t packedWord(const Bytes& packed, std::size_t word) {
 
 TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
   // A frame with sixty-four VRAM writes inside it, packed: the header names each
-  // section where the sections stand, the writes sorted by address keep their
-  // ordinals ascending within an address, the page table and the line table count
-  // them, a short span takes nothing, and the bytes are pinned.
+  // section where the sections stand, the register events and the palette events
+  // stand in sections of their own with a line table each, the writes sorted by
+  // address keep their ordinals ascending within an address, the page table and the
+  // line table count them, a short span takes nothing, and the bytes are pinned.
   const Bytes body = joined({store(0x2100u, 0x80u), vramTransfer(), store(0x2100u, 0x0Fu)});
   Watched t(scene(Variant{.irqBody = body, .htime = 60u, .vtime = 100u, .irq = true}));
   for (int call = 0; call < 6; ++call) t.machine.run(kFrame);
@@ -1436,6 +1437,13 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
   EXPECT_TRUE(std::all_of(packed.begin(), packed.end(), [](std::uint8_t byte) { return byte == 0xA5u; }));
   ASSERT_EQ(timeline.pack(packed), size);
 
+  // The events by kind, each in the order `events` holds them.
+  std::vector<PpuTimeline::Event> registerEvents;
+  std::vector<PpuTimeline::Event> paletteEvents;
+  for (const PpuTimeline::Event& event : kept.events) {
+    (event.field() == PpuTimeline::Field::PaletteWord ? paletteEvents : registerEvents).push_back(event);
+  }
+
   // The header, word by word, against where the sections stand.
   std::size_t next = PpuTimeline::kHeaderWords;
   const auto section = [&next](std::size_t words) {
@@ -1444,7 +1452,8 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
     return at;
   };
   const std::size_t linesAt = section(kept.lines.size() * 32u);
-  const std::size_t eventsAt = section(kept.events.size() * 2u);
+  const std::size_t registersAt = section(registerEvents.size() * 2u);
+  const std::size_t paletteEventsAt = section(paletteEvents.size() * 2u);
   const std::size_t vramAt = section(PpuTimeline::kVramBytes / 4u);
   const std::size_t palettesAt = section(kept.palettes.size() / 4u);
   const std::size_t oamsAt = section(kept.oams.size() / 4u);
@@ -1453,6 +1462,8 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
   const std::size_t sortedAt = section(kept.vramWrites.size() * 2u);
   const std::size_t pagesAt = section(PpuTimeline::kPageTableWords);
   const std::size_t lineTableAt = section(PpuTimeline::kLineTableWords);
+  const std::size_t registerTableAt = section(PpuTimeline::kEventLineTableWords);
+  const std::size_t paletteTableAt = section(PpuTimeline::kEventLineTableWords);
   EXPECT_EQ(next * 4u, size);
   EXPECT_EQ(packedWord(packed, 0u), kept.height);
   EXPECT_EQ(packedWord(packed, 1u), kept.width);
@@ -1460,8 +1471,8 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
   EXPECT_EQ(packedWord(packed, 3u), kept.field);
   EXPECT_EQ(packedWord(packed, 4u), linesAt);
   EXPECT_EQ(packedWord(packed, 5u), kept.lines.size());
-  EXPECT_EQ(packedWord(packed, 6u), eventsAt);
-  EXPECT_EQ(packedWord(packed, 7u), kept.events.size());
+  EXPECT_EQ(packedWord(packed, 6u), registersAt);
+  EXPECT_EQ(packedWord(packed, 7u), registerEvents.size());
   EXPECT_EQ(packedWord(packed, 8u), vramAt);
   EXPECT_EQ(packedWord(packed, 9u), palettesAt);
   EXPECT_EQ(packedWord(packed, 10u), kept.palettes.size() / PpuTimeline::kPaletteBytes);
@@ -1474,7 +1485,11 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
   EXPECT_EQ(packedWord(packed, 17u), sortedAt);
   EXPECT_EQ(packedWord(packed, 18u), pagesAt);
   EXPECT_EQ(packedWord(packed, 19u), lineTableAt);
-  for (std::size_t word = 20u; word < PpuTimeline::kHeaderWords; ++word) EXPECT_EQ(packedWord(packed, word), 0u);
+  EXPECT_EQ(packedWord(packed, 20u), registerTableAt);
+  EXPECT_EQ(packedWord(packed, 21u), paletteEventsAt);
+  EXPECT_EQ(packedWord(packed, 22u), paletteEvents.size());
+  EXPECT_EQ(packedWord(packed, 23u), paletteTableAt);
+  for (std::size_t word = 24u; word < PpuTimeline::kHeaderWords; ++word) EXPECT_EQ(packedWord(packed, word), 0u);
 
   // The sections as they stand.
   for (std::size_t i = 0u; i < kept.lines.size(); ++i) {
@@ -1482,10 +1497,34 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
       ASSERT_EQ(packedWord(packed, linesAt + i * 32u + word), kept.lines[i].words[word]) << "line " << i << " word " << word;
     }
   }
-  for (std::size_t i = 0u; i < kept.events.size(); ++i) {
-    ASSERT_EQ(packedWord(packed, eventsAt + i * 2u), kept.events[i].at);
-    ASSERT_EQ(packedWord(packed, eventsAt + i * 2u + 1u), kept.events[i].change);
+  for (std::size_t i = 0u; i < registerEvents.size(); ++i) {
+    ASSERT_EQ(packedWord(packed, registersAt + i * 2u), registerEvents[i].at);
+    ASSERT_EQ(packedWord(packed, registersAt + i * 2u + 1u), registerEvents[i].change);
   }
+  // The palette events: each once, by line, then by index, then by dot.
+  std::vector<PpuTimeline::Event> paletteSorted = paletteEvents;
+  std::stable_sort(paletteSorted.begin(), paletteSorted.end(),
+                   [](const PpuTimeline::Event& a, const PpuTimeline::Event& b) {
+                     if (a.line() != b.line()) return a.line() < b.line();
+                     return a.paletteIndex() < b.paletteIndex();
+                   });
+  for (std::size_t i = 0u; i < paletteSorted.size(); ++i) {
+    ASSERT_EQ(packedWord(packed, paletteEventsAt + i * 2u), paletteSorted[i].at);
+    ASSERT_EQ(packedWord(packed, paletteEventsAt + i * 2u + 1u), paletteSorted[i].change);
+  }
+  // The two events' line tables: word L the kind's events on lines below L, word 240
+  // the kind's count.
+  for (std::size_t line = 0u; line < PpuTimeline::kEventLineTableWords; ++line) {
+    std::size_t registersBelow = 0u;
+    for (const PpuTimeline::Event& event : registerEvents) registersBelow += event.line() < line ? 1u : 0u;
+    std::size_t palettesBelow = 0u;
+    for (const PpuTimeline::Event& event : paletteEvents) palettesBelow += event.line() < line ? 1u : 0u;
+    ASSERT_EQ(packedWord(packed, registerTableAt + line), registersBelow) << "line " << line;
+    ASSERT_EQ(packedWord(packed, paletteTableAt + line), palettesBelow) << "line " << line;
+  }
+  EXPECT_EQ(packedWord(packed, registerTableAt), 0u);
+  EXPECT_EQ(packedWord(packed, registerTableAt + 240u), registerEvents.size());
+  EXPECT_EQ(packedWord(packed, paletteTableAt + 240u), paletteEvents.size());
   EXPECT_TRUE(std::equal(kept.vram.begin(), kept.vram.end(), packed.begin() + static_cast<std::ptrdiff_t>(vramAt * 4u)));
   EXPECT_TRUE(std::equal(kept.palettes.begin(), kept.palettes.end(),
                          packed.begin() + static_cast<std::ptrdiff_t>(palettesAt * 4u)));
@@ -1533,7 +1572,81 @@ TEST(SnesPpuTimeline, ThePackedFrameIsTheLayout) {
   // The bytes, pinned.
   std::uint64_t digest = 1469598103934665603ull;
   for (const std::uint8_t byte : packed) digest = (digest ^ byte) * 1099511628211ull;
-  EXPECT_EQ(digest, 0x10C79FD6A5B5BB63ull);
+  EXPECT_EQ(digest, 0x2E1B78629EF7E98Full);
+}
+
+// A palette word written through $2121 and $2122: the word's index, then its low and
+// high bytes.
+Bytes paletteWrite(std::uint8_t index, std::uint16_t color) {
+  return joined({store(0x2121u, index), store(0x2122u, static_cast<std::uint8_t>(color & 0xFFu)),
+                 store(0x2122u, static_cast<std::uint8_t>(color >> 8))});
+}
+
+TEST(SnesPpuTimeline, ThePackedPaletteEventsAreSortedByIndexThenDot) {
+  // On line 100 the interrupt sets forced blank, writes palette words 7, 3, 7, 3 and
+  // 200 at rising dots with a write to $212D between the second and the third, and
+  // lets the screen go. Packed, the line's palette events stand by index and then by
+  // dot — 3, 3, 7, 7, 200 — and its register events in the order they were made; each
+  // line table gives the line's bounds, and a line with no event of a kind an empty
+  // run of it.
+  const Bytes body = joined({store(0x2100u, 0x80u), paletteWrite(7u, 0x1111u), paletteWrite(3u, 0x2222u),
+                             store(0x212Du, 0x02u), paletteWrite(7u, 0x3333u), paletteWrite(3u, 0x4444u),
+                             paletteWrite(200u, 0x5555u), store(0x2100u, 0x0Fu)});
+  Watched t(scene(Variant{.irqBody = body, .htime = 10u, .vtime = 100u, .irq = true}));
+  for (int call = 0; call < 6; ++call) t.machine.run(kFrame);
+  const Kept& kept = t.recorder.timelines.back();
+  const std::vector<PpuTimeline::Event> line = eventsOf(kept, 100u);
+  std::vector<PpuTimeline::Event> recordedPalette;
+  std::vector<PpuTimeline::Event> recordedRegisters;
+  for (const PpuTimeline::Event& event : line) {
+    (event.field() == PpuTimeline::Field::PaletteWord ? recordedPalette : recordedRegisters).push_back(event);
+  }
+  ASSERT_EQ(recordedPalette.size(), 5u);
+  ASSERT_GE(recordedRegisters.size(), 3u);
+  const std::array<unsigned, 5> recordedIndices = {7u, 3u, 7u, 3u, 200u};
+  for (std::size_t i = 0u; i < recordedPalette.size(); ++i) {
+    ASSERT_EQ(recordedPalette[i].paletteIndex(), recordedIndices[i]);
+    if (i > 0u) ASSERT_GT(recordedPalette[i].dot(), recordedPalette[i - 1u].dot());
+  }
+  ASSERT_LE(recordedPalette.back().dot(), kLastPictureDot);
+
+  const PpuTimeline timeline = kept.view();
+  Bytes packed(timeline.packedSize(), 0u);
+  ASSERT_EQ(timeline.pack(packed), packed.size());
+  const std::uint32_t registersAt = packedWord(packed, 6u);
+  const std::uint32_t registerTableAt = packedWord(packed, 20u);
+  const std::uint32_t paletteEventsAt = packedWord(packed, 21u);
+  const std::uint32_t paletteTableAt = packedWord(packed, 23u);
+
+  // The palette run of line 100: the first write to 3, the second, the two to 7,
+  // then 200.
+  const std::uint32_t paletteFirst = packedWord(packed, paletteTableAt + 100u);
+  const std::uint32_t paletteEnd = packedWord(packed, paletteTableAt + 101u);
+  ASSERT_EQ(paletteEnd - paletteFirst, 5u);
+  const std::array<std::size_t, 5> order = {1u, 3u, 0u, 2u, 4u};
+  for (std::size_t i = 0u; i < order.size(); ++i) {
+    EXPECT_EQ(packedWord(packed, paletteEventsAt + (paletteFirst + i) * 2u), recordedPalette[order[i]].at) << i;
+    EXPECT_EQ(packedWord(packed, paletteEventsAt + (paletteFirst + i) * 2u + 1u), recordedPalette[order[i]].change)
+        << i;
+  }
+  // The register run of line 100: the line's register events as made.
+  const std::uint32_t registerFirst = packedWord(packed, registerTableAt + 100u);
+  const std::uint32_t registerEnd = packedWord(packed, registerTableAt + 101u);
+  ASSERT_EQ(registerEnd - registerFirst, recordedRegisters.size());
+  for (std::size_t i = 0u; i < recordedRegisters.size(); ++i) {
+    EXPECT_EQ(packedWord(packed, registersAt + (registerFirst + i) * 2u), recordedRegisters[i].at) << i;
+    EXPECT_EQ(packedWord(packed, registersAt + (registerFirst + i) * 2u + 1u), recordedRegisters[i].change) << i;
+  }
+  // Line 99 holds no event of either kind, nor does line 150.
+  ASSERT_TRUE(eventsOf(kept, 99u).empty());
+  ASSERT_TRUE(eventsOf(kept, 150u).empty());
+  for (const std::uint32_t empty : {99u, 150u}) {
+    EXPECT_EQ(packedWord(packed, paletteTableAt + empty), packedWord(packed, paletteTableAt + empty + 1u)) << empty;
+    EXPECT_EQ(packedWord(packed, registerTableAt + empty), packedWord(packed, registerTableAt + empty + 1u)) << empty;
+  }
+  EXPECT_EQ(packedWord(packed, paletteTableAt + 99u), paletteFirst);
+  EXPECT_EQ(packedWord(packed, registerTableAt + 99u), registerFirst);
+  EXPECT_TRUE(everyFrameDrawn(t.recorder));
 }
 
 }  // namespace

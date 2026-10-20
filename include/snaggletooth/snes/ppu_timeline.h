@@ -218,8 +218,8 @@ struct PpuTimeline {
   void draw(std::span<std::uint8_t> pixels) const;
 
   // The frame as one buffer a shader reads as 32-bit words, for a host that draws
-  // it on a GPU: `shaders/ppu.comp.hlsl` reads this layout and `docs/gpu-ppu.md`
-  // gives it as a table. pack(out) writes packedSize() bytes into `out` and answers
+  // it on a GPU: the GPU PPU's shaders (`shaders/ppu_common.hlsl`) read this layout
+  // and `docs/gpu-ppu.md` gives it as a table. pack(out) writes packedSize() bytes into `out` and answers
   // that size, or writes nothing and answers 0 when `out` is shorter. The buffer
   // begins with kHeaderWords words, every offset in words from the buffer's start
   // and every count in entries:
@@ -227,7 +227,8 @@ struct PpuTimeline {
   //   word  holds
   //   0     height          1   width           2   firstLine        3   field
   //   4     the lines' offset, 5 their count (32 words each, `lines` as they stand)
-  //   6     the events' offset, 7 their count (2 words each, `events` as they stand)
+  //   6     the register events' offset, 7 their count: 2 words each, every event
+  //         of `events` but a palette word's, in the order `events` holds them
   //   8     VRAM's offset (16384 words: kVramBytes, `vram` as it stands)
   //   9     the palettes' offset, 10 the version count (128 words each)
   //   11    the sprite tables' offset, 12 the version count (136 words each)
@@ -242,16 +243,26 @@ struct PpuTimeline {
   //         word 256 the list's length
   //   19    the line table's offset: 240 words, word L the number of writes whose
   //         line is below L, so the ordinal of line L's first write
-  //   20-31 zero
+  //   20    the register events' line table's offset: 241 words, word L the number
+  //         of register events whose line is below L and word 240 their count, so
+  //         line L's register events are the entries from word L to word L + 1
+  //   21    the palette events' offset, 22 their count: 2 words each, every palette
+  //         word's event of `events`, by line, then by palette index, then by dot
+  //   23    the palette events' line table's offset: 241 words, as word 20's
+  //   24-31 zero
   //
   // Every section begins on a word boundary. A reader finds the byte at an address
   // as of a line and dot by counting the writes placed at or before that point — the
   // line table's entry for the line, stepped past the line's own writes at or before
   // the dot — and taking, from the address's run in the sorted list, the last write
-  // whose ordinal is below that count, or VRAM's byte where there is none.
+  // whose ordinal is below that count, or VRAM's byte where there is none. It finds
+  // a palette word as of a dot by a binary search over the line's palette events
+  // for the last write to that index at or before the dot, or the line's palette
+  // version's word where there is none.
   static constexpr std::size_t kHeaderWords = 32u;
   static constexpr std::size_t kPageTableWords = 257u;
   static constexpr std::size_t kLineTableWords = 240u;
+  static constexpr std::size_t kEventLineTableWords = 241u;
   [[nodiscard]] std::size_t packedSize() const noexcept;
   std::size_t pack(std::span<std::uint8_t> out) const noexcept;
 };

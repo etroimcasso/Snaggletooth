@@ -15,6 +15,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <initializer_list>
 #include <optional>
 #include <stdexcept>
@@ -414,9 +415,10 @@ Scene baseScene() {
   return scene;
 }
 
-SnesConfig config(const Bytes& rom, gpu::Device* device) {
+SnesConfig config(const Bytes& rom, gpu::Device* device, bool pictureThread = false) {
   SnesConfig c{.rom = rom};
   c.gpuPpu = device;
+  c.ppuThread = pictureThread;
   return c;
 }
 
@@ -487,6 +489,9 @@ struct Checker final : FrameObserver, PpuTimelineObserver {
   bool keepTimelines = false;
   Bytes drawn = Bytes(PpuTimeline::kDrawBytes);
   Bytes gpu;
+  // The nanoseconds from each frame's draw() to the device finishing it, fence
+  // included.
+  std::vector<std::uint64_t> deviceNanos;
 
   void frame(const VideoFrame& picture) override {
     kept = Frame{.width = picture.width,
@@ -498,6 +503,7 @@ struct Checker final : FrameObserver, PpuTimelineObserver {
   void frame(const PpuTimeline& t) override {
     ++reports;
     if (keepTimelines) timelines.push_back(keep(t));
+    deviceNanos.push_back(device->waitForDrawn());
     if (!device->readBack(t.width, t.height, gpu)) {
       if (first.empty()) first = "report " + std::to_string(reports) + ": no read-back";
       ++gpuDiffers;
@@ -566,10 +572,10 @@ class GpuCase : public ::testing::Test {
 
   // The scene run for `frames` frames on a machine with the device, every report
   // checked; the checker is returned for what a case asks of the reports.
-  Checker run(const Scene& scene, unsigned frames, bool keepTimelines = false) {
+  Checker run(const Scene& scene, unsigned frames, bool keepTimelines = false, bool pictureThread = false) {
     Checker checker;
     checker.keepTimelines = keepTimelines;
-    Snes machine(config(image(scene), &device_));
+    Snes machine(config(image(scene), &device_, pictureThread));
     checker.machine = &machine;
     checker.device = &device_;
     machine.setFrameObserver(&checker);
@@ -929,6 +935,179 @@ TEST_F(GpuCase, AnEventInsideTheLineReachesTheDotsAfterIt) {
     }
     EXPECT_TRUE(landed) << "no interrupt dot placed the write between the two reads";
   }
+}
+
+// A palette word written through $2121 and $2122: the word's index, then its low and
+// high bytes. Inside a line's picture dots the chip takes it only under forced blank.
+Bytes paletteWrite(std::uint8_t index, std::uint16_t color) {
+  return joined({store(0x2121u, index), store(0x2122u, static_cast<std::uint8_t>(color & 0xFFu)),
+                 store(0x2122u, static_cast<std::uint8_t>(color >> 8))});
+}
+
+// 256 palette words for a transfer to read, none of them the scene's own.
+Bytes secondPalette() {
+  Bytes out;
+  for (unsigned word = 0u; word < 256u; ++word) {
+    const unsigned color = ((word * 0x2E5u) ^ 0x1A6Bu) & 0x7FFFu;
+    out.push_back(static_cast<std::uint8_t>(color & 0xFFu));
+    out.push_back(static_cast<std::uint8_t>(color >> 8));
+  }
+  return out;
+}
+
+// The palette events of a timeline's line, in the order they were made.
+std::vector<PpuTimeline::Event> paletteEventsOf(const Kept& kept, unsigned line) {
+  std::vector<PpuTimeline::Event> out;
+  for (const PpuTimeline::Event& event : kept.events) {
+    if (event.line() == line && event.field() == PpuTimeline::Field::PaletteWord) out.push_back(event);
+  }
+  return out;
+}
+
+std::uint64_t medianOf(std::vector<std::uint64_t> values) {
+  if (values.empty()) return 0u;
+  std::sort(values.begin(), values.end());
+  return values[values.size() / 2u];
+}
+
+TEST_F(GpuCase, HundredsOfPaletteWritesInsideALineDrawAlike) {
+  // From line 100 the interrupt sets forced blank and transfers 256 palette words to
+  // $2122, as a per-line palette transfer does, over three lines and more; then, on
+  // the line after, writes the backdrop's word, lets the screen go, sets forced blank
+  // again, writes the backdrop's word a second time, lets the screen go and writes the
+  // character base. The interrupt's dot is moved until one run holds the shape on one
+  // line: both backdrop writes with the screen shown between them, and the character
+  // base written between a column's entry read and its character read. Every frame of
+  // every run drawn alike, on both threads; the frame's device time is printed.
+  bool held = false;
+  for (std::uint16_t htime = 20u; htime < 120u && !held; htime = static_cast<std::uint16_t>(htime + 4u)) {
+    for (const bool pictureThread : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "htime " << htime << (pictureThread ? ", the picture thread" : ""));
+      Scene scene = baseScene();
+      scene.data = secondPalette();
+      scene.inBlank = joined({scene.inBlank, clear(0x210Bu)});
+      scene.irqBody = joined({store(0x2100u, 0x80u), clear(0x2121u), dma(0x00u, 0x22u, kTables, 512u), wait(3u),
+                              paletteWrite(0u, 0x0123u), store(0x2100u, 0x0Fu), wait(4u), store(0x2100u, 0x80u),
+                              paletteWrite(0u, 0x3210u), store(0x2100u, 0x0Fu), store(0x210Bu, 0x22u)});
+      scene.htime = htime;
+      scene.vtime = 100u;
+      scene.irq = true;
+      const Checker checker = run(scene, 6u, true, pictureThread);
+      ASSERT_TRUE(drawsAlike(checker, 5u));
+      const Kept& kept = checker.timelines.back();
+      std::size_t palette = 0u;
+      unsigned lastLine = 0u;
+      for (const PpuTimeline::Event& event : kept.events) {
+        if (event.field() != PpuTimeline::Field::PaletteWord) continue;
+        ++palette;
+        lastLine = std::max(lastLine, event.line());
+      }
+      ASSERT_GE(palette, 200u);
+      std::printf("[ device   ] htime %u, %s: %zu palette events, the device's median %llu ns a frame\n",
+                  unsigned{htime}, pictureThread ? "picture thread" : "calling thread", palette,
+                  static_cast<unsigned long long>(medianOf(checker.deviceNanos)));
+      // The shape on the last line holding a palette event: the two backdrop writes,
+      // a release to a lit screen between them and forced blank set again after it
+      // with a picture dot between the two, and the character base written between a
+      // column's two reads.
+      std::vector<unsigned> backdrop;
+      for (const PpuTimeline::Event& event : paletteEventsOf(kept, lastLine)) {
+        if (event.paletteIndex() == 0u) backdrop.push_back(event.dot());
+      }
+      if (backdrop.size() != 2u) continue;
+      unsigned shown = 0u;
+      unsigned blanked = 0u;
+      bool between = false;
+      for (const PpuTimeline::Event& event : kept.events) {
+        if (event.line() != lastLine) continue;
+        const unsigned dot = event.dot();
+        if (event.field() == PpuTimeline::Field::Inidisp && dot > backdrop[0] && dot <= backdrop[1]) {
+          if ((event.value() & 0x80u) == 0u && shown == 0u) shown = dot;
+          if ((event.value() & 0x80u) != 0u && shown != 0u) blanked = dot;
+        }
+        if (event.field() == PpuTimeline::Field::Bg12nba) {
+          const unsigned remainder = (dot - kEntryReadDot) % 8u;
+          between = remainder >= 1u && remainder <= 4u;
+        }
+      }
+      const bool lit = shown != 0u && blanked > std::max<unsigned>(shown, kFirstPictureDot);
+      held = held || (lit && between);
+    }
+  }
+  EXPECT_TRUE(held) << "no interrupt dot held the shape on one line";
+}
+
+TEST_F(GpuCase, APaletteWordWrittenTwiceInALineReadsEachInTurn) {
+  // On line 100 the backdrop's word and word 5, which BG1's palette 0 reads, are each
+  // written under forced blank, shown, written again under a second forced blank and
+  // shown again: the positions between the blanks read the first writes and the
+  // positions after the second the second writes.
+  Scene scene = baseScene();
+  scene.irqBody = joined({store(0x2100u, 0x80u), paletteWrite(0u, 0x0123u), paletteWrite(5u, 0x0456u),
+                          store(0x2100u, 0x0Fu), wait(6u), store(0x2100u, 0x80u), paletteWrite(0u, 0x7654u),
+                          paletteWrite(5u, 0x3210u), store(0x2100u, 0x0Fu)});
+  scene.htime = 10u;
+  scene.vtime = 100u;
+  scene.irq = true;
+  const Checker checker = run(scene, 6u, true);
+  EXPECT_TRUE(drawsAlike(checker, 5u));
+  const std::vector<PpuTimeline::Event> line = paletteEventsOf(checker.timelines.back(), 100u);
+  ASSERT_EQ(line.size(), 4u);
+  EXPECT_EQ(line[0].paletteIndex(), 0u);
+  EXPECT_EQ(line[2].paletteIndex(), 0u);
+  EXPECT_EQ(line[1].paletteIndex(), 5u);
+  EXPECT_EQ(line[3].paletteIndex(), 5u);
+  EXPECT_LE(line[3].dot(), kLastPictureDot);
+}
+
+TEST_F(GpuCase, ALayerOnOneScreenOnlyIsDrawnOnThatScreen) {
+  {
+    // Mode 1: BG1 on the main screen alone, BG2 on the sub screen alone, BG3 on both
+    // and masked by window 1 on the main screen alone, the sub screen added to the
+    // main inside the color window, which is window 1 too.
+    Scene scene = modeScene(1u);
+    scene.inBlank.clear();
+    scene.registers.insert(scene.registers.end(),
+                           {{0x212Cu, 0x15u}, {0x212Du, 0x06u}, {0x212Eu, 0x04u}, {0x212Fu, 0x00u}, {0x2124u, 0x02u},
+                            {0x2125u, 0x20u}, {0x2126u, 60u},   {0x2127u, 180u},  {0x2130u, 0x12u}, {0x2131u, 0x3Fu}});
+    EXPECT_TRUE(drawsAlike(run(scene, 4u), 3u)) << "Mode 1";
+  }
+  {
+    // Mode 5, both halves of each position: BG1 on the main screen alone, BG2 on both
+    // and masked by window 1 on the main screen alone, the same math.
+    Scene scene = modeScene(5u);
+    scene.inBlank.clear();
+    scene.registers.insert(scene.registers.end(),
+                           {{0x212Cu, 0x13u}, {0x212Du, 0x02u}, {0x212Eu, 0x02u}, {0x212Fu, 0x00u}, {0x2123u, 0x20u},
+                            {0x2125u, 0x20u}, {0x2126u, 60u},   {0x2127u, 180u},  {0x2130u, 0x12u}, {0x2131u, 0x3Fu}});
+    EXPECT_TRUE(drawsAlike(run(scene, 4u), 3u)) << "Mode 5";
+  }
+}
+
+TEST_F(GpuCase, AMainScreenWriteInsideAHalfPixelLineReachesEachHalf) {
+  // Mode 5 with the sub screen added to the main: BG1 is taken off the main screen
+  // and put back three times each inside line 100, and set back in vertical blank.
+  // At each write's dot the position there has its right half drawn under the new
+  // layers and its left half under the decision of the main pixel to its left, made
+  // under the old.
+  Scene scene = modeScene(5u);
+  scene.inBlank = store(0x212Cu, 0x13u);
+  scene.registers.insert(scene.registers.end(), {{0x212Du, 0x02u}, {0x2130u, 0x02u}, {0x2131u, 0x3Fu}});
+  scene.irqBody = joined({store(0x212Cu, 0x12u), store(0x212Cu, 0x13u), store(0x212Cu, 0x12u), store(0x212Cu, 0x13u),
+                          store(0x212Cu, 0x12u), store(0x212Cu, 0x13u)});
+  scene.htime = 60u;
+  scene.vtime = 100u;
+  scene.irq = true;
+  const Checker checker = run(scene, 6u, true);
+  EXPECT_TRUE(drawsAlike(checker, 5u));
+  unsigned inside = 0u;
+  for (const PpuTimeline::Event& event : checker.timelines.back().events) {
+    if (event.field() == PpuTimeline::Field::Tm && event.line() == 100u && event.dot() > kFirstPictureDot &&
+        event.dot() <= kLastPictureDot) {
+      ++inside;
+    }
+  }
+  EXPECT_EQ(inside, 6u);
 }
 
 // Sixty-four bytes a transfer writes into VRAM, at bank 0 $B000.

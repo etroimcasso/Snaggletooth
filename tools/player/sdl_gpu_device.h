@@ -3,12 +3,13 @@
 // The GPU PPU's device over SDL's GPU API: what the player hands SnesConfig::gpuPpu.
 // It opens a device in whichever of SDL's backends the platform has, makes the
 // three passes' compute pipelines from the shader bytes the machine selects, maps
-// its upload buffer for the machine to pack a frame into, and on draw() uploads
-// the frame, dispatches the three passes over its scratch buffer into its texture
-// under the field placement it was given, and submits. The texture persists between frames. A window claimed for the
-// device is where present() blits the texture; readBack() copies the texture's
-// rows out as RGBA bytes, each channel rounded from the texture's float, for a
-// recording or a comparison with the machine's own frame. Every call the machine
+// its upload buffer for the machine to pack a frame into, and on draw() records the
+// frame's upload and the three passes over its scratch buffer into its texture,
+// under the field placement it was given, on one command buffer, and submits it.
+// The texture persists between frames. A window claimed for the device is where
+// present() blits the texture; readBack() copies the texture's rows out as RGBA
+// bytes, each channel rounded from the texture's float, for a recording or a
+// comparison with the machine's own frame. Every call the machine
 // makes arrives on the thread the machine is stepped on; present() and readBack()
 // are the player's own calls, made from the same thread.
 
@@ -71,6 +72,20 @@ class SdlGpuDevice final : public gpu::Device {
   // on the GPU, measured by a run that proves the picture rather than shows it.
   [[nodiscard]] std::uint64_t waitForDrawn();
 
+  // With `on`, every frame's upload and each of its three passes is submitted on a
+  // command buffer of its own and waited for on a fence, and the nanoseconds each
+  // took, from its command buffer's acquire to the fence, are kept for the frame:
+  // the mode apportions a frame's device time between its parts. Each part carries
+  // a fence round trip of its own, so the parts summed, and waitForDrawn() under
+  // the mode, are not what a frame costs; waitForDrawn() with the mode off is.
+  void setTimesPasses(bool on) noexcept { timesPasses_ = on; }
+  // The last frame's upload and passes under the timed mode, in nanoseconds; 0
+  // with the mode off.
+  [[nodiscard]] std::uint64_t uploadNanos() const noexcept { return uploadNanos_; }
+  [[nodiscard]] std::uint64_t passNanos(gpu::Pass pass) const noexcept {
+    return passNanos_[static_cast<unsigned>(pass)];
+  }
+
   // What the run reports: the format the pipeline was made in, the present mode,
   // how many times the buffers grew, and the nanoseconds draw() spent from its
   // entry to its submit's return, summed, least and most, over the frames drawn.
@@ -85,10 +100,22 @@ class SdlGpuDevice final : public gpu::Device {
   [[nodiscard]] std::uint64_t lastDrawNanos() const noexcept { return lastDrawNanos_; }
 
  private:
-  // The texture cleared to black, and the frame uploaded drawn under `rows`: the
-  // three passes dispatched in order.
+  // The texture cleared to black; the three passes over the frame uploaded recorded
+  // on `command` in order under `rows`; and under the timed mode, the three passes
+  // each submitted on a command buffer of its own and timed.
   void clear();
-  void dispatch(gpu::RowMap rows);
+  void dispatch(SDL_GPUCommandBuffer* command, gpu::RowMap rows);
+  void dispatchTimed(gpu::RowMap rows);
+  // One pass recorded on `command`, in a compute pass of its own.
+  void recordPass(SDL_GPUCommandBuffer* command, gpu::Pass pass, gpu::RowMap rows);
+  // Once the three pipelines are made: the buffers grown to a frame's usual length,
+  // the texture cleared, and the three passes dispatched over a frame header of
+  // zeros, which draws nothing, all waited for. A device's first use of each costs
+  // milliseconds; paid here, inside the machine's constructor, the first frame
+  // costs what any frame does.
+  void warm();
+  // `command` submitted and waited for on a fence: the nanoseconds from `began`.
+  std::uint64_t submitAndWait(SDL_GPUCommandBuffer* command, std::uint64_t began);
 
   SDL_GPUDevice* device_ = nullptr;
   SDL_GPUComputePipeline* pipelines_[3] = {nullptr, nullptr, nullptr};  // one a pass, in Pass's order
@@ -116,6 +143,9 @@ class SdlGpuDevice final : public gpu::Device {
   std::uint64_t drawNanosMost_ = 0;
   std::uint64_t lastDrawNanos_ = 0;
   std::uint64_t lastDrawBegan_ = 0;
+  bool timesPasses_ = false;
+  std::uint64_t uploadNanos_ = 0;
+  std::uint64_t passNanos_[3] = {0, 0, 0};  // one a pass, in Pass's order
 };
 
 }  // namespace snaggletooth::player
