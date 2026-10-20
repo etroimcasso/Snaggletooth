@@ -2075,7 +2075,7 @@ class Snes {
     // each, both halves always filled: a line drawn whole fills both with the one
     // pixel.
     std::array<std::uint8_t, kHiresWidth * 4u> pixels{};
-    bool hires = false;    // the line's dots were drawn in half-pixels
+    bool hires = false;    // a picture dot of the line was drawn in half-pixels: a frame taking the line is 512 wide
     bool watched = false;  // the pixels are the line's
     bool valid = false;
   };
@@ -2096,8 +2096,9 @@ class Snes {
     // whether this side drew the line from its first read dot (a line the beam was
     // put part-way along by a restore is not kept), whether it is pending (taken
     // from the record, nothing drawn), where drawing resumes from if an access
-    // lands, whether an access landed inside its picture dots, and whether the
-    // verification mode predicted it reused.
+    // lands, whether an access landed inside its picture dots, whether the
+    // verification mode predicted it reused, and whether a picture dot of it was
+    // drawn in half-pixels.
     LineKey key{};
     std::uint64_t drawnAt = 0;
     LineReason reason = LineReason::FirstDrawn;
@@ -2107,6 +2108,7 @@ class Snes {
     bool pending = false;
     bool disturbed = false;
     bool predicted = false;
+    bool drawnInHalfPixels = false;  // a picture dot of the line was drawn in half-pixels
     std::uint16_t pendingFrom = 0;
   };
   std::unique_ptr<LineCache> cache_;
@@ -2141,9 +2143,10 @@ class Snes {
   // reached cannot be disturbed: its key, built there, sees the write.
   void settleLine(Ppu& ppu, const PpuInputs& in, std::uint16_t hpos, bool disturbing) noexcept;
   // The line's end: a pending line takes its outputs from the record — the tile
-  // reads, the last decision and, on a watched machine, its pixels — a line drawn
-  // whole and undisturbed is recorded for the next frame's same line, and the
-  // frame's counts take the line.
+  // reads, the last decision and, on a watched machine, its pixels, the frame
+  // widened first where a picture dot of the record's line was drawn in
+  // half-pixels — a line drawn whole and undisturbed is recorded for the next
+  // frame's same line, and the frame's counts take the line.
   void completeLine(Ppu& ppu, const PpuInputs& in) noexcept;
   // Whether a write of `value` to the register at `offset` would change a byte of
   // VRAM or the palette if it reached the memory, read from the chip before the
