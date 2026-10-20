@@ -1606,7 +1606,9 @@ TEST(SnesPpuTimeline, ThePackedPaletteEventsAreSortedByIndexThenDot) {
   const std::array<unsigned, 5> recordedIndices = {7u, 3u, 7u, 3u, 200u};
   for (std::size_t i = 0u; i < recordedPalette.size(); ++i) {
     ASSERT_EQ(recordedPalette[i].paletteIndex(), recordedIndices[i]);
-    if (i > 0u) ASSERT_GT(recordedPalette[i].dot(), recordedPalette[i - 1u].dot());
+    if (i > 0u) {
+      ASSERT_GT(recordedPalette[i].dot(), recordedPalette[i - 1u].dot());
+    }
   }
   ASSERT_LE(recordedPalette.back().dot(), kLastPictureDot);
 

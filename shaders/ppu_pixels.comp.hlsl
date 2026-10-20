@@ -252,7 +252,9 @@ void main(uint3 id : SV_DispatchThreadID) {
   Decision decision;
   [loop] for (uint pass = drawLeft ? 0u : 1u; pass < 2u; ++pass) {
     uint position = pass == 0u ? x - 1u : x;
-    drawPosition(position, pass == 0u ? atLeft : atDot, blank, hires, mainColor, subColor, decision);
+    Regs atPosition = atDot;
+    if (pass == 0u) atPosition = atLeft;
+    drawPosition(position, atPosition, blank, hires, mainColor, subColor, decision);
     if (pass == 0u) before = decision;
   }
   float4 left;
