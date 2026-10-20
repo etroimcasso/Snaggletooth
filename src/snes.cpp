@@ -1956,7 +1956,10 @@ void Snes::drawDots(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos, std::
   for (std::uint32_t at = firstPixel; at <= stop; ++at) {
     const std::uint16_t x = static_cast<std::uint16_t>(at - kFirstPictureDot);
     const Ppu::Dot out = ppu.dot(x, in);
-    if (out.hires && !frameWide_) widenFrame(line, x);
+    if (out.hires) {
+      cache_->drawnInHalfPixels = true;
+      if (!frameWide_) widenFrame(line, x);
+    }
 
     // A frame drawn in half-pixels anywhere is 512 wide throughout, and a
     // position drawn whole fills both of its halves.
@@ -3505,6 +3508,7 @@ void Snes::decideLine(Ppu& ppu, const PpuInputs& in, std::uint16_t fromHpos) noe
   cache.disturbed = false;
   cache.predicted = false;
   cache.scrollOnly = false;
+  cache.drawnInHalfPixels = false;
   // A span that begins past the first read dot is a line this side did not draw
   // from its start — a restore put the beam part-way along it — so what it leaves
   // is not kept, and nothing stands in for it.
@@ -3606,7 +3610,8 @@ void Snes::completeLine(Ppu& ppu, const PpuInputs& in) noexcept {
   if (cache.pending) {
     // Taken whole from the frame before: the tile reads and the last decision as
     // that line left them, with the derived view's knowledge of the columns, and on
-    // a watched machine its pixels, at the frame's current width.
+    // a watched machine its pixels, at the frame's current width, with the frame
+    // widened where a picture dot of the record's line was drawn in half-pixels.
     s.tiles = record.tiles;
     d.nothing = record.nothing;
     d.allNothing = record.allNothing;
@@ -3687,7 +3692,7 @@ void Snes::completeLine(Ppu& ppu, const PpuInputs& in) noexcept {
     record.nothing = d.nothing;
     record.allNothing = d.allNothing;
     record.lastMain = s.lastMain;
-    record.hires = ppu.hiresAt();
+    record.hires = cache.drawnInHalfPixels;
     record.watched = frameObserver_ != nullptr;
     if (record.watched) {
       // Both halves of every position: a narrow line's pixel fills both.

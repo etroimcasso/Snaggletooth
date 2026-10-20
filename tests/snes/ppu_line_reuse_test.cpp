@@ -909,6 +909,81 @@ TEST(SnesLineReuse, ALineTakenFromTheFrameBeforeIsCopiedAtTheFramesWidth) {
   EXPECT_EQ(t.reusingReports.at(6).frame.width, 512u);
 }
 
+TEST(SnesLineReuse, AWriteInTheLastLinesHorizontalBlankLeavesTheFrameNarrow) {
+  // The interrupt on line 224 sets $2133 bit 3 every frame and the NMI handler clears
+  // it, so every line's first read dot sees the bit clear. Timed to land in the line's
+  // horizontal blank, the write reaches no picture dot: no dot of any line is drawn in
+  // half-pixels, every frame is 256 wide, and from the second lit frame on every line
+  // is taken. Timed to land inside the line's picture dots, the write draws that line
+  // every frame, its dots from the write on in half-pixels, and every lit frame is 512
+  // wide while the other lines are taken.
+  for (const bool pictureThread : {false, true}) {
+    SCOPED_TRACE(::testing::Message() << (pictureThread ? "the picture thread" : "the calling thread"));
+    {
+      Pair t(scene(Variant{.inBlank = clear(0x2133u), .irqBody = store(0x2133u, 0x08u), .htime = 262u,
+                           .vtime = 224u, .irq = true}),
+             true, pictureThread);
+      WriteSite site;
+      site.machine = &t.verifying;
+      site.watched = 0x2133u;
+      t.verifying.setObserver(&site);
+      ASSERT_TRUE(t.runTo(4));
+      ASSERT_TRUE(site.hpos.has_value());
+      EXPECT_EQ(site.vpos, 224u);
+      EXPECT_GE(*site.hpos, 1112u) << "the write lands in the line's horizontal blank";
+      EXPECT_EQ(t.counts(2).reused, kLines) << describe(t.counts(2));
+      EXPECT_EQ(t.counts(3).reused, kLines) << describe(t.counts(3));
+      for (std::uint8_t counter = 1u; counter <= 4u; ++counter) {
+        EXPECT_EQ(t.reusingReports.at(counter).frame.width, 256u) << "count " << unsigned{counter};
+      }
+    }
+    {
+      Pair t(scene(Variant{.inBlank = clear(0x2133u), .irqBody = store(0x2133u, 0x08u), .htime = 100u,
+                           .vtime = 224u, .irq = true}),
+             true, pictureThread);
+      WriteSite site;
+      site.machine = &t.verifying;
+      site.watched = 0x2133u;
+      t.verifying.setObserver(&site);
+      ASSERT_TRUE(t.runTo(4));
+      ASSERT_TRUE(site.hpos.has_value());
+      EXPECT_EQ(site.vpos, 224u);
+      EXPECT_GE(*site.hpos, 12u) << "the write lands inside the picture dots";
+      EXPECT_LT(*site.hpos, 1112u);
+      EXPECT_EQ(t.counts(2).midLine, 1u) << describe(t.counts(2));
+      EXPECT_EQ(t.counts(2).reused, kLines - 1u);
+      for (std::uint8_t counter = 1u; counter <= 4u; ++counter) {
+        EXPECT_EQ(t.reusingReports.at(counter).frame.width, 512u) << "count " << unsigned{counter};
+      }
+    }
+  }
+}
+
+TEST(SnesLineReuse, AHalfPixelDotOnALineNotKeptWidensNoLaterRecord) {
+  // In frame 2's picture the interrupt on line 100 sets $2133 bit 3, clears it, and
+  // moves BG1's horizontal scroll to 5: a few of line 100's dots are drawn in
+  // half-pixels, so frame 2 is 512 wide, and line 100 is drawn for the writes and not
+  // kept. Lines 101 to 224 are drawn under the new scroll, narrow, and recorded. Frame
+  // 3 draws lines 1 to 100 for the scroll and takes 101 to 224 from frame 2's records,
+  // none of which holds a dot drawn in half-pixels, so frame 3 is 256 wide; frame 4
+  // takes every line, 256 wide.
+  Pair t(scene(Variant{.irqBody = onFrame(2u, joined({store(0x2133u, 0x08u), clear(0x2133u), store(0x210Du, 0x05u),
+                                                       clear(0x210Du)})),
+                       .htime = 100u,
+                       .vtime = 100u,
+                       .irq = true}));
+  ASSERT_TRUE(t.runTo(4));
+  EXPECT_EQ(t.counts(2).midLine, 1u) << describe(t.counts(2));
+  EXPECT_EQ(t.counts(2).registers, 124u) << describe(t.counts(2));
+  EXPECT_EQ(t.counts(2).reused, 99u);
+  EXPECT_EQ(t.reusingReports.at(2).frame.width, 512u);
+  EXPECT_EQ(t.counts(3).registers, 100u) << describe(t.counts(3));
+  EXPECT_EQ(t.counts(3).reused, 124u);
+  EXPECT_EQ(t.reusingReports.at(3).frame.width, 256u);
+  EXPECT_EQ(t.counts(4).reused, kLines) << describe(t.counts(4));
+  EXPECT_EQ(t.reusingReports.at(4).frame.width, 256u);
+}
+
 TEST(SnesLineReuse, AMachineNobodyWatchesTakesItsTileReadsAndItsDecisionFromTheFrameBefore) {
   Pair t(scene(), /*watch=*/false);
   for (int frame = 0; frame < 6; ++frame) {

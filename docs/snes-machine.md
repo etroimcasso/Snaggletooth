@@ -428,7 +428,9 @@ and the groups of palette words the line's reads touch, the frame parity where t
 write to the chip that lands inside the line's picture dots. The machine records each of these for
 every picture line it draws, with the line's outputs, and when the next frame's same line reads the
 same it takes the line from the record and draws nothing: the pixels, the tile reads and the decision
-are the record's. A page or group counts as changed when a write through the port, or a host's
+are the record's. A frame taking a line a picture dot of which was drawn in half-pixels is 512 wide,
+as it is with the line drawn; a write to `$2133` or `$2105` landing in a line's horizontal blank
+reaches no picture dot and widens nothing. A page or group counts as changed when a write through the port, or a host's
 `writeVram` or `writeCgram`, changed a byte in it since the line read it; a write that stores the byte
 already there changes nothing. A write landing inside the line's picture dots to a register the line
 reads, or to a palette word while the palette is open and the screen is on, draws the line from its
