@@ -22,6 +22,7 @@
 // on plain RAM and, later, on the register-overlaid APU. Reads may have side
 // effects on real hardware, so the core issues every documented memory access.
 
+#include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -276,7 +277,8 @@ class Spc700 {
   // Executes one cycle of the instruction already in the instruction register, and
   // answers whether that cycle was its last. The cycle index says which cycle is due;
   // every branch a cycle can take is decided by state the earlier cycles latched, so
-  // a handler never has to look ahead.
+  // a handler never has to look ahead. The instruction's shape and form come from
+  // the decode table below, one read a cycle, and pick the handler that runs.
   template <ApuBus B>
   bool executeCycle(B& bus);
 
@@ -462,6 +464,31 @@ class Spc700 {
   // is one.
   [[nodiscard]] static constexpr bool controlForm(std::uint8_t opcode,
                                                   CtrlForm& form) noexcept;
+
+  // ---- the decode ---------------------------------------------------------
+  // Which of the three cycle sequences an opcode runs: a direct-page word
+  // instruction's, a memory instruction's, or a control-flow instruction's.
+  enum class OpcodeShape : std::uint8_t { Word, Memory, Control };
+
+  // What the decode knows of one opcode: its shape and the form that shape's cycles
+  // read. The word and memory forms are filled in only for an opcode of that shape;
+  // the control form is always the one controlForm leaves.
+  struct OpcodeDecode {
+    OpcodeShape shape = OpcodeShape::Control;
+    WordForm word = WordForm::None;
+    MemForm mem{};
+    CtrlForm ctrl{};
+  };
+
+  // Decodes one opcode by asking the classifiers in turn — the word forms first, then
+  // the memory forms — and taking the first that claims it. An opcode neither claims
+  // is a control-flow instruction.
+  [[nodiscard]] static constexpr OpcodeDecode decodeOpcode(std::uint8_t opcode) noexcept;
+
+  // The decode of an opcode, from a table of all 256 that decodeOpcode builds at
+  // compile time. An opcode's shape and form depend on the opcode alone, so the table
+  // never changes and holds no machine state: nothing saves or restores it.
+  [[nodiscard]] static const OpcodeDecode& decoded(std::uint8_t opcode) noexcept;
 
   // Whether a relative branch's condition holds. BRA carries no flag and is always
   // taken.
@@ -889,6 +916,45 @@ constexpr Spc700::WordForm Spc700::wordForm(std::uint8_t opcode) noexcept {
     case 0xDA: return WordForm::Store;                          // MOVW dp,YA
     default: return WordForm::None;
   }
+}
+
+constexpr Spc700::OpcodeDecode Spc700::decodeOpcode(std::uint8_t opcode) noexcept {
+  OpcodeDecode decode{};
+  decode.word = wordForm(opcode);
+  if (decode.word != WordForm::None) {
+    decode.shape = OpcodeShape::Word;
+  } else if (memoryForm(opcode, decode.mem)) {
+    decode.shape = OpcodeShape::Memory;
+  }
+  static_cast<void>(controlForm(opcode, decode.ctrl));
+  return decode;
+}
+
+inline const Spc700::OpcodeDecode& Spc700::decoded(std::uint8_t opcode) noexcept {
+  // Every opcode is claimed by exactly one of the three classifiers, so the order
+  // decodeOpcode asks them in never decides an entry. An opcode two of them claim, or
+  // none, fails the build here.
+  static_assert(
+      [] {
+        for (unsigned i = 0; i < 256; ++i) {
+          const auto op = static_cast<std::uint8_t>(i);
+          MemForm mem{};
+          CtrlForm ctrl{};
+          const int claims = (wordForm(op) != WordForm::None ? 1 : 0) +
+                             (memoryForm(op, mem) ? 1 : 0) + (controlForm(op, ctrl) ? 1 : 0);
+          if (claims != 1) return false;
+        }
+        return true;
+      }(),
+      "every opcode is claimed by exactly one of wordForm, memoryForm and controlForm");
+  static constexpr std::array<OpcodeDecode, 256> kTable = [] {
+    std::array<OpcodeDecode, 256> table{};
+    for (std::size_t i = 0; i < table.size(); ++i) {
+      table[i] = decodeOpcode(static_cast<std::uint8_t>(i));
+    }
+    return table;
+  }();
+  return kTable[opcode];
 }
 
 constexpr std::uint8_t Spc700::setupCycles(AddrMode mode) noexcept {
@@ -1825,15 +1891,13 @@ bool Spc700::executeControlCycle(B& bus, const CtrlForm& form) {
 
 template <ApuBus B>
 bool Spc700::executeCycle(B& bus) {
-  if (const WordForm word = wordForm(state_.ir); word != WordForm::None) {
-    return executeWordCycle(bus, word);
+  const OpcodeDecode& decode = decoded(state_.ir);
+  switch (decode.shape) {
+    case OpcodeShape::Word: return executeWordCycle(bus, decode.word);
+    case OpcodeShape::Memory: return executeMemoryCycle(bus, decode.mem);
+    case OpcodeShape::Control: break;
   }
-  if (MemForm form{}; memoryForm(state_.ir, form)) {
-    return executeMemoryCycle(bus, form);
-  }
-  CtrlForm control{};
-  static_cast<void>(controlForm(state_.ir, control));
-  return executeControlCycle(bus, control);
+  return executeControlCycle(bus, decode.ctrl);
 }
 
 template <ApuBus B>
