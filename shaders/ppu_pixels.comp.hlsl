@@ -118,24 +118,30 @@ void setLane(inout uint4 v, uint layer, uint value) {
 }
 
 // The front-most pixel of one screen by the mode's chart, from the four layers'
-// samples for that screen and the sprite where the screen shows it: the packed
-// sample of the layer the chart reaches first, with the sprite's as bit 0, its word
-// in bits 1 to 8 and layer 4 in bits 26 to 28; a layer's own layer number stands in
-// the same bits; zero where nothing stands and the screen shows its backdrop.
+// samples for that screen and the sprite where the screen shows it: of the layers
+// with a pixel there, each standing in the place its tile's priority bit names, and
+// the sprite in the place of its priority, the one the chart ranks first. The packed
+// sample of that layer, with the sprite's as bit 0, its word in bits 1 to 8 and
+// layer 4 in bits 26 to 28; a layer's own layer number stands in the same bits;
+// zero where nothing stands and the screen shows its backdrop.
 uint resolveFrom(uint chart, uint4 samples, bool spriteOn, uint spriteWord, uint spritePriority) {
-  uint2 span = chartSpan(chart);
-  [loop] for (uint i = 0u; i < span.y; ++i) {
-    uint place = chartPlace(span.x + i);
-    uint layer = place & 0xFu;
-    uint priority = place >> 4;
-    if (layer == 4u) {
-      if (spriteOn && spritePriority == priority) return 1u | (spriteWord << 1) | (4u << 26);
-      continue;
-    }
+  uint2 ranks = chartRanks(chart);
+  uint best = 15u;
+  uint front = 0u;
+  [unroll] for (uint layer = 0u; layer < 4u; ++layer) {
     uint shown = lane(samples, layer);
-    if (shown != 0u && (((shown >> 9) & 1u) != 0u) == (priority != 0u)) return shown | (layer << 26);
+    if (shown == 0u) continue;
+    uint rank = (ranks.x >> (4u * (2u * layer + ((shown >> 9) & 1u)))) & 0xFu;
+    if (rank < best) {
+      best = rank;
+      front = shown | (layer << 26);
+    }
   }
-  return 0u;
+  if (spriteOn && spritePriority < 4u) {
+    uint rank = (ranks.y >> (4u * spritePriority)) & 0xFu;
+    if (rank < best) front = 1u | (spriteWord << 1) | (4u << 26);
+  }
+  return front;
 }
 
 uint colorOfPacked(uint dot, uint shown) {
@@ -144,12 +150,12 @@ uint colorOfPacked(uint dot, uint shown) {
   return paletteColor(dot, (shown >> 1) & 0xFFu);
 }
 
-// One position drawn: `blank` under forced blank at its dot; else the main screen's
-// pixel under color math as `mainColor` with its decision, and the sub screen's
-// front-most color as `subColor` with whether the line is in half-pixels there.
-void drawPosition(uint x, out bool blank, out bool hires, out uint mainColor, out uint subColor, out Decision decision) {
+// One position drawn under `r`, the registers at its dot: `blank` under forced
+// blank; else the main screen's pixel under color math as `mainColor` with its
+// decision, and the sub screen's front-most color as `subColor` with whether the
+// line is in half-pixels there.
+void drawPosition(uint x, Regs r, out bool blank, out bool hires, out uint mainColor, out uint subColor, out Decision decision) {
   uint dot = 22u + x;
-  Regs r = regsAt(dot);
   blank = forcedBlank(r);
   hires = hiresAt(r);
   mainColor = 0u;
@@ -229,8 +235,13 @@ void main(uint3 id : SV_DispatchThreadID) {
   gLineIndex = lineNo - gFirstLine;
   readLine(gLineIndex);
   // The position to the left first where this one is in half-pixels, for the
-  // decision its left half is drawn under; then this position.
-  Regs atDot = regsAt(22u + x);
+  // decision its left half is drawn under; then this position. The registers at the
+  // left position's dot, 21 + x, then carried on to this position's, 22 + x.
+  Regs atLeft = lineRegs();
+  uint cursor = gRegisterFirst;
+  regsOn(atLeft, cursor, 21u + x);
+  Regs atDot = atLeft;
+  regsOn(atDot, cursor, 22u + x);
   bool drawLeft = x != 0u && !forcedBlank(atDot) && hiresAt(atDot);
   Decision before;
   before.present = false; before.clipped = false; before.addend = 0u; before.subtract = false; before.halved = false; before.color = 0u;
@@ -241,7 +252,9 @@ void main(uint3 id : SV_DispatchThreadID) {
   Decision decision;
   [loop] for (uint pass = drawLeft ? 0u : 1u; pass < 2u; ++pass) {
     uint position = pass == 0u ? x - 1u : x;
-    drawPosition(position, blank, hires, mainColor, subColor, decision);
+    Regs atPosition = atDot;
+    if (pass == 0u) atPosition = atLeft;
+    drawPosition(position, atPosition, blank, hires, mainColor, subColor, decision);
     if (pass == 0u) before = decision;
   }
   float4 left;

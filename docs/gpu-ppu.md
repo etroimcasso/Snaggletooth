@@ -118,7 +118,7 @@ words from the buffer's start and every count in entries:
 |---|---|
 | 0–3 | `height`, `width`, `firstLine`, `field` |
 | 4, 5 | the lines' offset and count — 32 words each, `lines` as they stand |
-| 6, 7 | the events' offset and count — 2 words each, `events` as they stand |
+| 6, 7 | the register events' offset and count — 2 words each, every event of `events` but a palette word's, in the order `events` holds them |
 | 8 | VRAM's offset — 16384 words, the 64 KB as it stands |
 | 9, 10 | the palettes' offset and version count — 128 words each |
 | 11, 12 | the sprite tables' offset and version count — 136 words each |
@@ -127,13 +127,20 @@ words from the buffer's start and every count in entries:
 | 17 | the same writes sorted by address, then by ordinal — 2 words each: `address \| ordinal << 16`, then the byte; the ordinal is the write's index in the position-ordered list |
 | 18 | the page table's offset — 257 words: word `p` the index in the sorted list where the writes to addresses `p × 256` to `p × 256 + 255` begin, word 256 the list's length |
 | 19 | the line table's offset — 240 words: word `L` the number of writes whose line is below `L`, so the ordinal of line `L`'s first write |
-| 20–31 | zero |
+| 20 | the register events' line table's offset — 241 words: word `L` the number of register events whose line is below `L`, word 240 their count, so line `L`'s register events are the entries from word `L` to word `L + 1` |
+| 21, 22 | the palette events' offset and count — 2 words each, every palette word's event of `events`, by line, then by palette index, then by dot |
+| 23 | the palette events' line table's offset — 241 words, as word 20's |
+| 24–31 | zero |
 
 Every section begins on a word boundary. A reader finds the byte at an address as of a line and
 dot by counting the writes placed at or before that point — the line table's entry for the line,
 stepped past the line's own writes at or before the dot — and taking, from the address's run in
 the sorted list, the last write whose ordinal is below that count, or VRAM's byte where there is
-none. `pack` writes nothing and answers 0 for a span shorter than `packedSize()`.
+none. It finds the registers at a dot by applying the line's register events up to the dot to the
+line's words 0 to 15, and a palette word at a dot by a binary search over the line's palette
+events for the last write to that index at or before the dot, or the line's palette version's
+word where there is none. `pack` writes nothing and answers 0 for a span shorter than
+`packedSize()`.
 
 ## The scratch buffer
 
@@ -195,10 +202,13 @@ the chip's own dot code, and the texture is held to it row for row: a 512-wide f
 column, a 256-wide frame each position against both of `draw()`'s equal halves. The suite's GPU
 cases (`tests/gpu/gpu_ppu_test.cpp`) hold every mode, Mode 7 each way, mosaic, the offset table,
 the windows and the color regions, color math, the half-pixel line, interlace and the taller
-picture, events inside a line, VRAM written inside a frame, the sprite walk and its budgets,
-carried and empty lines and both widths to `draw()` and to the machine's own frame of the same
-cycle; `snes_player --gpu-verify` and `snes_gpu_verify` hold a whole run of a cartridge to the
-machine's frames the same way ([tools/player/README.md](../tools/player/README.md)).
+picture, events inside a line, hundreds of palette writes in a frame and a palette word written
+twice in a line, VRAM written inside a frame, the sprite walk and its budgets, carried and empty
+lines, a layer on one screen only, and both widths to `draw()` and to the machine's own frame of
+the same cycle; `snes_player --gpu-verify` and `snes_gpu_verify` hold a whole run of a cartridge to
+the machine's frames the same way ([tools/player/README.md](../tools/player/README.md)), and
+`snes_gpu_verify --pass-times` divides a frame's device time between the upload and the three
+passes.
 
 ## Gotchas
 
@@ -211,6 +221,10 @@ machine's frames the same way ([tools/player/README.md](../tools/player/README.m
   reading it back takes `round(v × 255)`. A blit to an 8-bit swapchain rounds the same way.
 - **A frame recorded from part-way down** (`firstLine` above 1) draws its rows from there; the
   rows above hold what the texture held.
+- **A GPU's first use of a texture and of a pipeline costs milliseconds.** A device that draws its
+  first frame cold pays it in that frame. The player's device pays it once its three pipelines are
+  made, inside the machine's constructor, by clearing the texture and dispatching the passes over
+  a frame header of zeros, whose height of 0 draws nothing.
 
 ## See also
 

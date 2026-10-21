@@ -7,12 +7,15 @@
 // column's reads once at their dots, and every pixel from those.
 //
 // The frame is PpuTimeline's packed form (`snaggletooth/snes/ppu_timeline.h`,
-// `docs/gpu-ppu.md`): a header of offsets, then the lines, the events, VRAM, the
-// palette and sprite-table versions, the carried sprite buffers, and the VRAM writes
-// in position order and again sorted by address behind a page table and a line
-// table. The registers at a dot are the line's base words with the line's events up
-// to that dot applied; the byte at a VRAM address as of a dot is found through the
-// sorted writes. Nothing is carried from thread to thread but through the scratch
+// `docs/gpu-ppu.md`): a header of offsets, then the lines, the register events, the
+// palette events, VRAM, the palette and sprite-table versions, the carried sprite
+// buffers, the VRAM writes in position order and again sorted by address behind a
+// page table and a line table, and a line table for each kind of event. The
+// registers at a dot are the line's base words with the line's register events up
+// to that dot applied; a palette word as of a dot is the last of the line's palette
+// events to that index at or before the dot, found by a binary search, or the
+// line's palette version's word; the byte at a VRAM address as of a dot is found
+// through the sorted writes. Nothing is carried from thread to thread but through the scratch
 // buffer the passes hand each other (`gpu_ppu.h` gives its layout).
 //
 // The frame is bound at t0 of space 0 in every pass; the passes declare the rest.
@@ -28,9 +31,11 @@ uint byteAt(uint offset) { return (frame.Load(offset & ~3u) >> (8u * (offset & 3
 static uint gHeight, gWidth, gFirstLine, gField;
 static uint gLinesAt, gEventsAt, gVramAt, gPalettesAt, gOamsAt, gBuffersAt;
 static uint gWritesAt, gWriteCount, gSortedAt, gPagesAt, gLineTableAt;
+static uint gRegisterTableAt, gPaletteEventsAt, gPaletteTableAt;
 
-// The thread's line: where its 32 words stand, its number, and the ordinals of the
-// frame's VRAM writes that stand before it and before the line after it. The words
+// The thread's line: where its 32 words stand, its number, the ordinals of the
+// frame's VRAM writes that stand before it and before the line after it, and where
+// its register events and its palette events begin and end. The words
 // are read from the frame as they are needed, where every thread of the line finds
 // them in the cache, rather than copied into an array a thread keeps in its own
 // memory.
@@ -38,6 +43,8 @@ static uint gLineAt;
 static uint gLine;
 static uint gWritesBeforeLine;
 static uint gWritesBeforeNext;
+static uint gRegisterFirst, gRegisterEnd;
+static uint gPaletteFirst, gPaletteEnd;
 
 uint lineWord(uint index) { return word(gLineAt + index); }
 
@@ -57,6 +64,9 @@ void readHeader() {
   gSortedAt = word(17u);
   gPagesAt = word(18u);
   gLineTableAt = word(19u);
+  gRegisterTableAt = word(20u);
+  gPaletteEventsAt = word(21u);
+  gPaletteTableAt = word(23u);
 }
 
 void readLine(uint lineIndex) {
@@ -64,6 +74,10 @@ void readLine(uint lineIndex) {
   gLine = lineWord(21u);
   gWritesBeforeLine = word(gLineTableAt + gLine);
   gWritesBeforeNext = gLine + 1u < 240u ? word(gLineTableAt + gLine + 1u) : gWriteCount;
+  gRegisterFirst = word(gRegisterTableAt + gLine);
+  gRegisterEnd = word(gRegisterTableAt + gLine + 1u);
+  gPaletteFirst = word(gPaletteTableAt + gLine);
+  gPaletteEnd = word(gPaletteTableAt + gLine + 1u);
 }
 
 // ---- the registers at a dot ----------------------------------------------------
@@ -188,47 +202,59 @@ uint bgVofs(Regs r, uint layer) {
   }
 }
 
-// The registers the picture reads as they stood at `dot` of the thread's line: the
-// line's base words, then every event of the line placed at or before the dot, in
-// order. A palette word changes no register.
-Regs regsAt(uint dot) {
+// The registers the picture reads as they stood at the thread's line's first read
+// dot: the line's base words.
+Regs lineRegs() {
   Regs r;
   r.w0 = lineWord(0u); r.w1 = lineWord(1u); r.w2 = lineWord(2u); r.w3 = lineWord(3u);
   r.w4 = lineWord(4u); r.w5 = lineWord(5u); r.w6 = lineWord(6u); r.w7 = lineWord(7u);
   r.w8 = lineWord(8u); r.w9 = lineWord(9u); r.w10 = lineWord(10u); r.w11 = lineWord(11u);
   r.w12 = lineWord(12u); r.w13 = lineWord(13u); r.w14 = lineWord(14u); r.w15 = lineWord(15u);
-  uint first = lineWord(19u);
-  uint count = lineWord(20u);
-  for (uint e = 0u; e < count; ++e) {
-    uint at = word(gEventsAt + (first + e) * 2u);
+  return r;
+}
+
+// The registers carried forward to `dot`: the line's register events from `cursor`
+// placed at or before the dot applied to `r` in order, and `cursor` left at the
+// first event past the dot. A thread that reads the registers at several dots of its
+// line walks the line's events once, from lineRegs() and the line's first register
+// event, in rising order of the dots.
+void regsOn(inout Regs r, inout uint cursor, uint dot) {
+  for (; cursor < gRegisterEnd; ++cursor) {
+    uint at = word(gEventsAt + cursor * 2u);
     if ((at >> 16) > dot) break;
-    uint change = word(gEventsAt + (first + e) * 2u + 1u);
-    uint field = change & 0xFFu;
-    if (field >= F_PALETTEWORD) continue;
-    uint3 place = placeOf(field);
+    uint change = word(gEventsAt + cursor * 2u + 1u);
+    uint3 place = placeOf(change & 0xFFu);
     uint mask = (1u << place.z) - 1u;
     setRegWord(r, place.x, (regWord(r, place.x) & ~(mask << place.y)) | (((change >> 16) & mask) << place.y));
   }
-  return r;
 }
 
 bool forcedBlank(Regs r) { return (reg(r, F_INIDISP) & 0x80u) != 0u; }
 uint modeOf(Regs r) { return reg(r, F_BGMODE) & 7u; }
 
-// The 15-bit color at palette word `index` as it stood at `dot`: the line's
-// version, then the last palette write of the line placed at or before the dot.
+// The 15-bit color at palette word `index` as it stood at `dot`: the last of the
+// line's palette events to the index placed at or before the dot, or the line's
+// version's word. The line's palette events stand by index and then by dot, so the
+// search is for the first entry past (index, dot), and the entry before it is the
+// write where it is to the same index.
 uint paletteColor(uint dot, uint index) {
+  uint lo = gPaletteFirst;
+  uint hi = gPaletteEnd;
+  uint target = (index << 16) | (dot + 1u);
+  while (lo < hi) {
+    uint mid = (lo + hi) / 2u;
+    uint at = word(gPaletteEventsAt + mid * 2u);
+    uint change = word(gPaletteEventsAt + mid * 2u + 1u);
+    uint key = (((change >> 8) & 0xFFu) << 16) | (at >> 16);
+    if (key < target) lo = mid + 1u; else hi = mid;
+  }
+  if (lo > gPaletteFirst) {
+    uint change = word(gPaletteEventsAt + (lo - 1u) * 2u + 1u);
+    if (((change >> 8) & 0xFFu) == index) return (change >> 16) & 0x7FFFu;
+  }
   uint version = lineWord(17) >> 16;
   uint pair = word(gPalettesAt + version * 128u + index / 2u);
   uint color = (index & 1u) != 0u ? (pair >> 16) : (pair & 0xFFFFu);
-  uint first = lineWord(19);
-  uint count = lineWord(20);
-  for (uint e = 0u; e < count; ++e) {
-    uint at = word(gEventsAt + (first + e) * 2u);
-    if ((at >> 16) > dot) break;
-    uint change = word(gEventsAt + (first + e) * 2u + 1u);
-    if ((change & 0xFFu) == F_PALETTEWORD && ((change >> 8) & 0xFFu) == index) color = change >> 16;
-  }
   return color & 0x7FFFu;
 }
 
@@ -419,11 +445,11 @@ struct Tile {
   bool hires;
 };
 
-Tile entryRead(uint layer, uint column) {
+// `r` is the registers at the entry read's dot, 8E + 3.
+Tile entryRead(Regs r, uint layer, uint column) {
   Tile t;
   t.entry = 0u; t.bgX = 0u; t.bgY = 0u; t.planes = 0u; t.large = false; t.hires = false;
   uint dot = column * 8u + 3u;
-  Regs r = regsAt(dot);
   if (forcedBlank(r) || modeOf(r) == 7u) return t;
   Background b = describedAt(r, layer);
   if (b.planes == 0u) return t;
@@ -466,12 +492,11 @@ uint2 rowIndices(uint upTo, uint at, uint planes, bool flipX) {
 // the horizontal flip. `first` holds the eight indices of the tile's character, or
 // of the first of a two-character tile's pair, and `second` the second's, zero for
 // any other tile; both zero under forced blank at that dot, or where the entry read
-// stored nothing.
-void characterRows(uint layer, uint column, Tile t, out uint2 first, out uint2 second) {
+// stored nothing. `r` is the registers at that dot.
+void characterRows(Regs r, uint layer, uint column, Tile t, out uint2 first, out uint2 second) {
   first = uint2(0u, 0u);
   second = uint2(0u, 0u);
   uint dot = column * 8u + 7u;
-  Regs r = regsAt(dot);
   if (forcedBlank(r) || t.planes == 0u) return;
   bool flipX = (t.entry & 0x4000u) != 0u;
   bool flipY = (t.entry & 0x8000u) != 0u;
@@ -502,10 +527,9 @@ void characterRows(uint layer, uint column, Tile t, out uint2 first, out uint2 s
 }
 
 // The fine horizontal scroll column E's positions are drawn with, read at dot
-// 8E + 22; the thirty-third column reads none.
-uint fineOf(uint layer, uint column) {
+// 8E + 22 from `r`, the registers at that dot; the thirty-third column reads none.
+uint fineOf(Regs r, uint layer, uint column) {
   if (column >= 32u) return 0u;
-  Regs r = regsAt(column * 8u + 22u);
   return bgHofs(r, layer) & 7u;
 }
 
@@ -532,9 +556,6 @@ uint directColor(uint pixel, uint palette) {
   uint blue = (((pixel >> 6) & 3u) << 3) | (palette & 4u);
   return red | (green << 5) | (blue << 10);
 }
-
-// A tilemap background's pixel at position x, `half` naming which half of the
-// position a two-character tile is read for, with the mode's palette terms and
 
 // ---- Mode 7's field ---------------------------------------------------------------
 
@@ -625,11 +646,6 @@ uint rowCrossed(uint y, uint width, uint height, uint lineNo, bool halfHeight, u
 
 int countedX(int x) { return x == -256 ? 0 : x; }
 uint flipRow(uint row, uint width) { return (row / width) * width + (width - 1u - row % width); }
-
-// The sprite's palette word and priority at position x, or priority 4 and word 0
-// where no sprite claims it: none on a line whose Time gathered nothing, the carried
-// buffer's bytes on a carried line, and on a gathered line Time's own walk — from
-// the last sprite Range kept back to the first, loading at most 34 on-picture tiles
 
 // Time's walk over a gathered line, into `words` and `priorities`, 256 bytes each
 // packed four to a word: from the last sprite Range kept back to the first, loading
@@ -735,81 +751,19 @@ bool regionCovers(Regs r, uint region, uint x) {
 
 // ---- the charts ---------------------------------------------------------------------
 
-// Each mode's priority chart, front to back, a place being the layer in the low
-// nibble and the priority above it; the sprites are layer 4. chartSpan gives where
-// a chart's places begin and how many it has; chartPlace the place at an index.
-uint2 chartSpan(uint chart) {
+// Each mode's priority chart as the rank of each place a pixel can stand in, front
+// to back from 0: the first word a nibble for each background's two priorities,
+// background L's priority p at nibble 2L + p; the second a nibble for each sprite
+// priority, 0 to 3. A place the chart does not hold is 15. The sprites are layer 4.
+uint2 chartRanks(uint chart) {
   switch (chart) {
-    case 0u: return uint2(0u, 12u);   // Mode 0
-    case 1u: return uint2(12u, 10u);  // Mode 1
-    case 2u: return uint2(22u, 10u);  // Mode 1 with $2105 bit 3
-    case 3u: return uint2(32u, 8u);   // Modes 2, 3, 4 and 5
-    case 4u: return uint2(40u, 6u);   // Mode 6
-    case 5u: return uint2(46u, 5u);   // Mode 7
-    default: return uint2(51u, 7u);   // Mode 7 with SETINI bit 6
-  }
-}
-uint chartPlace(uint index) {
-  switch (index) {
-    case 0u: return 0x34u;
-    case 1u: return 0x10u;
-    case 2u: return 0x11u;
-    case 3u: return 0x24u;
-    case 4u: return 0x00u;
-    case 5u: return 0x01u;
-    case 6u: return 0x14u;
-    case 7u: return 0x12u;
-    case 8u: return 0x13u;
-    case 9u: return 0x04u;
-    case 10u: return 0x02u;
-    case 11u: return 0x03u;
-    case 12u: return 0x34u;
-    case 13u: return 0x10u;
-    case 14u: return 0x11u;
-    case 15u: return 0x24u;
-    case 16u: return 0x00u;
-    case 17u: return 0x01u;
-    case 18u: return 0x14u;
-    case 19u: return 0x12u;
-    case 20u: return 0x04u;
-    case 21u: return 0x02u;
-    case 22u: return 0x12u;
-    case 23u: return 0x34u;
-    case 24u: return 0x10u;
-    case 25u: return 0x11u;
-    case 26u: return 0x24u;
-    case 27u: return 0x00u;
-    case 28u: return 0x01u;
-    case 29u: return 0x14u;
-    case 30u: return 0x04u;
-    case 31u: return 0x02u;
-    case 32u: return 0x34u;
-    case 33u: return 0x10u;
-    case 34u: return 0x24u;
-    case 35u: return 0x11u;
-    case 36u: return 0x14u;
-    case 37u: return 0x00u;
-    case 38u: return 0x04u;
-    case 39u: return 0x01u;
-    case 40u: return 0x34u;
-    case 41u: return 0x10u;
-    case 42u: return 0x24u;
-    case 43u: return 0x14u;
-    case 44u: return 0x00u;
-    case 45u: return 0x04u;
-    case 46u: return 0x34u;
-    case 47u: return 0x24u;
-    case 48u: return 0x14u;
-    case 49u: return 0x00u;
-    case 50u: return 0x04u;
-    case 51u: return 0x34u;
-    case 52u: return 0x24u;
-    case 53u: return 0x11u;
-    case 54u: return 0x14u;
-    case 55u: return 0x00u;
-    case 56u: return 0x04u;
-    case 57u: return 0x01u;
-    default: return 0u;
+    case 0u: return uint2(0x8B7A2514u, 0xFFFF0369u);  // Mode 0
+    case 1u: return uint2(0xFF792514u, 0xFFFF0368u);  // Mode 1
+    case 2u: return uint2(0xFF093625u, 0xFFFF1478u);  // Mode 1 with $2105 bit 3
+    case 3u: return uint2(0xFFFF3715u, 0xFFFF0246u);  // Modes 2, 3, 4 and 5
+    case 4u: return uint2(0xFFFFFF14u, 0xFFFF0235u);  // Mode 6
+    case 5u: return uint2(0xFFFFFFF3u, 0xFFFF0124u);  // Mode 7
+    default: return uint2(0xFFFF26F4u, 0xFFFF0135u);  // Mode 7 with SETINI bit 6
   }
 }
 
@@ -850,10 +804,8 @@ struct Decision {
   uint color;
 };
 
-// The main screen's pixel at position x under color math, and its decision. `sub`
-// is the sub screen's pixel where the caller resolved it (`haveSub`), which the
-// left half of a half-pixel position does; otherwise it is resolved here when the
-
+// Whether a dot under `r` is drawn in half-pixels: in Mode 5 or 6, or under $2133
+// bit 3.
 bool hiresAt(Regs r) {
   uint mode = modeOf(r);
   return mode == 5u || mode == 6u || (reg(r, F_SETINI) & 8u) != 0u;
@@ -869,6 +821,3 @@ float4 convert(Regs r, uint color) {
   uint blue = (((color >> 10) & 0x1Fu) * (brightness + 1u) * 255u + 248u) / 496u;
   return float4(float(red), float(green), float(blue), 255.0) / 255.0;
 }
-
-// The decision the main pixel one position to the left made, read where the left
-// half of a half-pixel position is drawn under it: none at position 0, none where

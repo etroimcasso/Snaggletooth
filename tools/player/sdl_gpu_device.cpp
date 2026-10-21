@@ -14,6 +14,11 @@ namespace {
 
 constexpr SDL_GPUTextureFormat kTextureFormat = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
 constexpr std::size_t kTexelBytes = 16u;
+// What warm() maps and uploads: buffers of a length a frame with no VRAM write fits,
+// and a frame header of zeros, whose height of 0 leaves every thread of each pass
+// drawing nothing.
+constexpr std::size_t kWarmBytes = 131072u;
+constexpr std::size_t kWarmHeaderBytes = 128u;
 
 [[nodiscard]] gpu::ShaderFormat toFormats(SDL_GPUShaderFormat sdl) noexcept {
   gpu::ShaderFormat out = gpu::ShaderFormat::None;
@@ -144,7 +149,29 @@ bool SdlGpuDevice::makePipeline(gpu::Pass pass, const gpu::ShaderBytecode& code,
   }
   pipelines_[static_cast<unsigned>(pass)] = pipeline;
   format_ = format;
+  if (pipelines_[0] != nullptr && pipelines_[1] != nullptr && pipelines_[2] != nullptr) warm();
   return true;
+}
+
+void SdlGpuDevice::warm() {
+  const std::span<std::uint8_t> bytes = frameBytes(kWarmBytes);
+  if (bytes.empty()) return;
+  std::memset(bytes.data(), 0, kWarmHeaderBytes);
+  SDL_UnmapGPUTransferBuffer(device_, upload_);
+  mapped_ = nullptr;
+  clear();
+  frame_ = gpu::Frame{.width = 256u, .height = 1u, .firstLine = 1u, .field = 0u, .interlaced = false,
+                      .bytes = kWarmHeaderBytes};
+  const std::uint64_t began = SDL_GetTicksNS();
+  SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device_);
+  SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);
+  const SDL_GPUTransferBufferLocation from{.transfer_buffer = upload_, .offset = 0u};
+  const SDL_GPUBufferRegion to{.buffer = buffer_, .offset = 0u, .size = static_cast<Uint32>(kWarmHeaderBytes)};
+  SDL_UploadToGPUBuffer(copy, &from, &to, true);
+  SDL_EndGPUCopyPass(copy);
+  dispatch(command, gpu::rowMapFor(gpu::FieldPlacement::Field, false, 0u));
+  (void)submitAndWait(command, began);
+  frame_ = gpu::Frame{};
 }
 
 std::span<std::uint8_t> SdlGpuDevice::frameBytes(std::size_t bytes) {
@@ -190,14 +217,22 @@ void SdlGpuDevice::draw(const gpu::Frame& frame) {
     shapeWidth_ = frame.width;
     shapeRows_ = rows;
   }
+  const std::uint64_t uploadBegan = SDL_GetTicksNS();
   SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device_);
   SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(command);
   const SDL_GPUTransferBufferLocation from{.transfer_buffer = upload_, .offset = 0u};
   const SDL_GPUBufferRegion to{.buffer = buffer_, .offset = 0u, .size = static_cast<Uint32>(frame.bytes)};
   SDL_UploadToGPUBuffer(copy, &from, &to, true);
   SDL_EndGPUCopyPass(copy);
-  SDL_SubmitGPUCommandBuffer(command);
-  dispatch(rows_);
+  if (timesPasses_) {
+    uploadNanos_ = submitAndWait(command, uploadBegan);
+    dispatchTimed(rows_);
+  } else {
+    // The copy pass and the three compute passes on one command buffer, which the
+    // device runs in the order they were recorded.
+    dispatch(command, rows_);
+    SDL_SubmitGPUCommandBuffer(command);
+  }
   drawn_ = true;
   const std::uint64_t nanos = SDL_GetTicksNS() - began;
   lastDrawNanos_ = nanos;
@@ -207,26 +242,48 @@ void SdlGpuDevice::draw(const gpu::Frame& frame) {
   ++drawCount_;
 }
 
-void SdlGpuDevice::dispatch(gpu::RowMap rows) {
-  SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device_);
+namespace {
+constexpr gpu::Pass kPasses[] = {gpu::Pass::Sprites, gpu::Pass::Tiles, gpu::Pass::Pixels};
+}  // namespace
+
+void SdlGpuDevice::dispatch(SDL_GPUCommandBuffer* command, gpu::RowMap rows) {
+  for (const gpu::Pass pass : kPasses) recordPass(command, pass, rows);
+}
+
+void SdlGpuDevice::dispatchTimed(gpu::RowMap rows) {
+  for (const gpu::Pass pass : kPasses) {
+    const std::uint64_t began = SDL_GetTicksNS();
+    SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device_);
+    recordPass(command, pass, rows);
+    passNanos_[static_cast<unsigned>(pass)] = submitAndWait(command, began);
+  }
+}
+
+void SdlGpuDevice::recordPass(SDL_GPUCommandBuffer* command, gpu::Pass pass, gpu::RowMap rows) {
   const SDL_GPUStorageBufferReadWriteBinding scratch{
       .buffer = scratch_, .cycle = false, .padding1 = 0u, .padding2 = 0u, .padding3 = 0u};
-  for (const gpu::Pass pass : {gpu::Pass::Sprites, gpu::Pass::Tiles, gpu::Pass::Pixels}) {
-    const bool pixels = pass == gpu::Pass::Pixels;
-    const SDL_GPUStorageTextureReadWriteBinding target{
-        .texture = texture_, .mip_level = 0u, .layer = 0u, .cycle = false, .padding1 = 0u, .padding2 = 0u, .padding3 = 0u};
-    SDL_GPUComputePass* run = SDL_BeginGPUComputePass(command, pixels ? &target : nullptr, pixels ? 1u : 0u, &scratch, 1u);
-    SDL_BindGPUComputePipeline(run, pipelines_[static_cast<unsigned>(pass)]);
-    SDL_BindGPUComputeStorageBuffers(run, 0u, &buffer_, 1u);
-    if (pixels) {
-      const gpu::Uniform uniform = gpu::uniformFor(rows);
-      SDL_PushGPUComputeUniformData(command, 0u, &uniform, static_cast<Uint32>(gpu::kUniformBytes));
-    }
-    const gpu::Groups groups = gpu::groupsFor(pass, frame_);
-    SDL_DispatchGPUCompute(run, groups.x, groups.y, groups.z);
-    SDL_EndGPUComputePass(run);
+  const bool pixels = pass == gpu::Pass::Pixels;
+  const SDL_GPUStorageTextureReadWriteBinding target{
+      .texture = texture_, .mip_level = 0u, .layer = 0u, .cycle = false, .padding1 = 0u, .padding2 = 0u, .padding3 = 0u};
+  SDL_GPUComputePass* run = SDL_BeginGPUComputePass(command, pixels ? &target : nullptr, pixels ? 1u : 0u, &scratch, 1u);
+  SDL_BindGPUComputePipeline(run, pipelines_[static_cast<unsigned>(pass)]);
+  SDL_BindGPUComputeStorageBuffers(run, 0u, &buffer_, 1u);
+  if (pixels) {
+    const gpu::Uniform uniform = gpu::uniformFor(rows);
+    SDL_PushGPUComputeUniformData(command, 0u, &uniform, static_cast<Uint32>(gpu::kUniformBytes));
   }
-  SDL_SubmitGPUCommandBuffer(command);
+  const gpu::Groups groups = gpu::groupsFor(pass, frame_);
+  SDL_DispatchGPUCompute(run, groups.x, groups.y, groups.z);
+  SDL_EndGPUComputePass(run);
+}
+
+std::uint64_t SdlGpuDevice::submitAndWait(SDL_GPUCommandBuffer* command, std::uint64_t began) {
+  SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+  if (fence != nullptr) {
+    SDL_WaitForGPUFences(device_, true, &fence, 1u);
+    SDL_ReleaseGPUFence(device_, fence);
+  }
+  return SDL_GetTicksNS() - began;
 }
 
 void SdlGpuDevice::redraw(gpu::RowMap rows) {
@@ -238,7 +295,13 @@ void SdlGpuDevice::redraw(gpu::RowMap rows) {
     shapeWidth_ = frame_.width;
     shapeRows_ = textureRows;
   }
-  dispatch(rows);
+  if (timesPasses_) {
+    dispatchTimed(rows);
+    return;
+  }
+  SDL_GPUCommandBuffer* command = SDL_AcquireGPUCommandBuffer(device_);
+  dispatch(command, rows);
+  SDL_SubmitGPUCommandBuffer(command);
 }
 
 void SdlGpuDevice::clear() {
