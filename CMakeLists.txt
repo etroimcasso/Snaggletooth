@@ -52,6 +52,7 @@ add_library(snaggletooth STATIC
   src/ppu.cpp
   src/ppu_timeline.cpp
   src/gpu_ppu.cpp
+  src/upd77c25.cpp
 )
 add_library(snaggletooth::snaggletooth ALIAS snaggletooth)
 
@@ -661,6 +662,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/assembler/assembler_test.cpp
     tests/spc700/asm_test.cpp
     tests/spc700/state_bytes_test.cpp
+    tests/upd77c25/core_test.cpp
     tests/cpu65816/vector_harness.cpp
     tests/cpu65816/harness_test.cpp
     tests/cpu65816/algorithm_test.cpp

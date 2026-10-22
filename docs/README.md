@@ -14,6 +14,7 @@ what is unstarted.
 - [Where to start](#where-to-start)
 - [The machine](#the-machine)
 - [The audio unit](#the-audio-unit)
+- [The coprocessors](#the-coprocessors)
 - [Tools](#tools)
 - [Reading these pages](#reading-these-pages)
 
@@ -88,6 +89,15 @@ what is unstarted.
 | [spc700-cpu.md](spc700-cpu.md) | The audio CPU core — its surface, usage, and how to run the vector suite |
 | [dsp.md](dsp.md) | The S-DSP — voices, the output mixer, the echo unit, and its stereo output |
 | [s-dsp-behavior.md](s-dsp-behavior.md) | Where the published S-DSP documentation is incomplete, ambiguous or wrong, what the hardware does instead, and the measurement that settles each case |
+
+## The coprocessors
+
+The chips a cartridge carries on its own board have their pages in [coprocessors/](coprocessors/).
+
+| Page | Covers |
+|---|---|
+| [coprocessors/upd77c25-cpu.md](coprocessors/upd77c25-cpu.md) | The NEC µPD77C25 core, the chip inside the DSP-1 to DSP-4 — the program it is handed, its state, one instruction a cycle, the three instruction forms, the ALU and its flags, the sources and destinations, the pointers, the multiplier, the jumps and the stack, reset, the host's two ports, and the readings fullsnes alone carries |
+| [coprocessors/dsp-1-behavior.md](coprocessors/dsp-1-behavior.md) | The DSP-1's behavior and the evidence for it — the evidentiary standard, the sources and their standing, and what is not settled: the chip's clock, the commands, and the core's single-source readings |
 
 ## Tools
 

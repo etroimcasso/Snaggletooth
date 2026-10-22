@@ -119,11 +119,12 @@ not do. Each row links to the page that describes the component in full.
 ### The coprocessors
 
 The cartridge header names which chip a cartridge carries beside the CPU, and the machine reports
-it; none of them runs. A cartridge that needs one does not boot.
+it; the machine runs none of them. A cartridge that needs one does not boot.
 
 | Component | Status |
 |---|---|
-| DSP-1, DSP-2, DSP-3, DSP-4 | **not started** — the NEC µPD77C25 fixed-point DSPs, each with its own program |
+| [DSP-1](docs/coprocessors/dsp-1-behavior.md) | **in progress** — the [NEC µPD77C25 core](docs/coprocessors/upd77c25-cpu.md) it runs on: one instruction a chip cycle, the ALU and its flags, the multiplier, the jumps and the stack, the host's two ports, checked word by word against fullsnes; the machine has no DSP-1 board and the chip has no program |
+| DSP-2, DSP-3, DSP-4 | **not started** — the same µPD77C25, each with its own program |
 | SuperFX (GSU-1, GSU-2) | **not started** — the RISC coprocessor with its own ROM and RAM windows |
 | SA-1 | **not started** — a second 65816 at four times the clock, with its own memory map and DMA |
 | S-DD1 | **not started** — a decompression chip fed through DMA |
