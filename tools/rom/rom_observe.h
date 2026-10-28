@@ -30,7 +30,7 @@
 // the screen mode and the bases then say the memory was: a layer's map, a
 // name base, the sprite tiles, or nothing; a run that ends before a frame is
 // drawn says so. With the areas it keeps what a lifted file's editable form
-// needs and the areas alone do not say: the colour depth of the tile areas
+// needs and the areas alone do not say: the color depth of the tile areas
 // a landing lies in, the palette as it stood at the frame the landing was
 // read at, and the transfer unit an HDMA channel walked a table under.
 //
@@ -117,16 +117,18 @@ struct ReachedTarget {
 // What a range of bytes was to the engine that moved it: a general-purpose
 // transfer; an HDMA channel's table, read as the frame walked it — the line
 // counts, a direct table's inline values, an indirect table's pointers; or the
-// block an indirect entry pointed at. The last three are not an engine's: they
+// block an indirect entry pointed at. The last four are not an engine's: they
 // name a lifted file whose bytes the CPU carried to a data register itself,
 // one store at a time (`Stream`), the image source of a range a routine built
-// in work RAM before an engine carried it (`Staged`), or a range the code
-// proves a channel was set up to carry that no run has moved (`Proven`,
-// `rom_facts.h`); no range an engine moved is ever of those kinds.
-enum class MovedKind : std::uint8_t { Dma, Table, Indirect, Stream, Staged, Proven };
+// in work RAM before an engine carried it (`Staged`), a range the code proves
+// a channel was set up to carry that no run has moved (`Proven`,
+// `rom_facts.h`), or the image bytes a routine read when the toolkit ran it
+// for an entry the run did not select (`Enumerated`); no range an engine moved
+// is ever of those kinds.
+enum class MovedKind : std::uint8_t { Dma, Table, Indirect, Stream, Staged, Proven, Enumerated };
 
 // A kind as a manifest names it: `dma`, `table`, `indirect`, `stream`,
-// `staged`, `proven`.
+// `staged`, `proven`, `enumerated`.
 [[nodiscard]] std::string_view movedKindName(MovedKind kind);
 
 // How the memory address moved from one byte to the next, as the channel's
@@ -224,7 +226,7 @@ enum class PortMemory : std::uint8_t { Vram, Cgram, Oam };
 // screen mode and the bases said at the first frame the PPU drew after a
 // landing: a layer's screen (its one, two or four screens of a thousand
 // words), a layer's name base (the eight, sixteen or thirty-two thousand words
-// its thousand tiles take at the layer's colour depth in that mode), the
+// its thousand tiles take at the layer's color depth in that mode), the
 // sprite tiles (four thousand words at the base and four thousand after the
 // gap), the whole of VRAM under Mode 7, where the map and the tiles are
 // interleaved; and, for the other two memories, the palette and the sprite
@@ -244,7 +246,7 @@ constexpr std::uint16_t kAreaOam = 1u << 11;
 constexpr std::uint16_t kAreaTilemaps = kAreaTilemap1 | kAreaTilemap2 | kAreaTilemap3 | kAreaTilemap4;
 constexpr std::uint16_t kAreaTiles = kAreaTiles1 | kAreaTiles2 | kAreaTiles3 | kAreaTiles4 | kAreaSprites;
 
-// The colour depths a landing's tile areas were read at, one bit each: a
+// The color depths a landing's tile areas were read at, one bit each: a
 // layer's name base at the layer's depth in the mode, the sprite tiles at
 // four bits a pixel, the whole of VRAM under Mode 7 at eight.
 constexpr std::uint8_t kDepth2 = 1u << 0;
@@ -264,7 +266,7 @@ constexpr std::uint8_t kDepth8 = 1u << 2;
 // `kDepth8`), and `palette` names, among `RunObservation::palettes`, the
 // palette RAM as it stood at the first drawn frame a VRAM landing was read
 // at — nothing for a landing no frame drew, and for the palette and the
-// sprite table, which no palette colours.
+// sprite table, which no palette colors.
 struct PortLanding {
   PortMemory memory = PortMemory::Vram;
   std::uint16_t lowest = 0;
@@ -424,6 +426,89 @@ struct StreamedRange {
 // Two streams are the same when every field but the count and the source agrees.
 [[nodiscard]] bool sameStream(const StreamedRange& a, const StreamedRange& b);
 
+// A register the toolkit sets when it runs a routine for each value its index
+// can take.
+enum class InputRegister : std::uint8_t { A, X, Y };
+
+// A register as a manifest and a note name it: `A`, `X`, `Y`.
+[[nodiscard]] std::string_view inputRegisterName(InputRegister reg);
+
+// The values a line names: sorted runs, `$lo-$hi` for consecutive values, `$lo-$hi/d` for three or more a step `d`
+// apart, a value alone otherwise, joined by `,`; `$XX` at eight bits, `$XXXX` at sixteen, the step in decimal.
+[[nodiscard]] std::string inputValuesText(unsigned bits, std::span<const std::uint32_t> values);
+
+// One register every path into a routine bounds: the register, the width the
+// mode at the routine's entry gives it — 8 or 16 bits — and the values every
+// path proves it holds there, ascending, distinct, each below `1 << bits`.
+struct EnumerationInput {
+  InputRegister reg = InputRegister::X;
+  unsigned bits = 8;
+  std::vector<std::uint32_t> values;
+};
+
+// A routine a run is to run once for each value of each of its inputs: its
+// address, as the tree places it, its label, and its inputs in the order A, X,
+// Y — only those with two values or more.
+struct PlannedRoutine {
+  Address address = 0;
+  std::string label;
+  std::vector<EnumerationInput> inputs;
+};
+
+// The routines to run, in address order, and for every byte of work RAM
+// (`0x20000` entries, by work-RAM index) a bit per register class a recorded
+// staged extent holding the byte went to, as `1u << class`: the classes a
+// value's write of that byte can take. A routine with no input is not here;
+// the note that says why is (`rom/rom_enumerate.h`).
+struct EnumerationPlan {
+  std::vector<PlannedRoutine> routines;
+  std::vector<std::uint16_t> recordedClasses;
+};
+
+// One transfer a value's own frames started from work RAM, as its recorder saw it.
+struct OwnCarry {
+  RegisterClass cls = RegisterClass::Display;
+  MovedKind kind = MovedKind::Dma;
+  Address registerAddress = 0;
+  Address site = 0;
+  friend bool operator==(const OwnCarry&, const OwnCarry&) = default;
+};
+
+// One run of consecutive work-RAM bytes a routine wrote when the toolkit ran
+// it, every byte of it under the same classes: the lowest address, in bank
+// `$7E` or `$7F`, the count, the bytes as work RAM held them when the routine
+// returned, the origin of every byte together, and the runs of image bytes
+// those bytes were built from — read from the shadow exactly as a staged
+// byte's sources are — ascending, no two touching. `classes` are the classes
+// the recorded staged extents holding its bytes went to and those of the
+// value's own transfers that carried them, ascending, each once; `carried` is
+// every one of the value's own transfers that carried a byte of it, in the
+// order the recorder closed them.
+struct EnumeratedExtent {
+  Address memory = 0;
+  std::uint32_t bytes = 0;
+  std::vector<std::uint8_t> values;
+  ir::OriginSet origin;
+  std::vector<ir::OriginInterval> sources;
+  std::vector<RegisterClass> classes;
+  std::vector<OwnCarry> carried;
+  friend bool operator==(const EnumeratedExtent&, const EnumeratedExtent&) = default;
+};
+
+// One outcome of the toolkit's runs of a routine: the routine's address, the
+// register it set and at what width, the values that built it — ascending,
+// distinct; every one of them, entered from the same call, built these same
+// extents field for field — the call the run entered the routine from, as the
+// tree places it, and the extents, in address order.
+struct EnumeratedRun {
+  Address routine = 0;
+  InputRegister reg = InputRegister::X;
+  unsigned bits = 8;
+  std::vector<std::uint32_t> values;
+  Address enteredFrom = 0;
+  std::vector<EnumeratedExtent> extents;
+};
+
 // One sample a key-on named: the address in the audio memory its first block
 // lies at and the address the directory entry gives the DSP to continue from
 // at the end flag — both read from the sample directory as the DSP reads
@@ -463,7 +548,12 @@ struct KeyedSample {
 // under the same check: the instructions it executed and checked, the distinct
 // nodes lifted — an address and its bytes — and the steps that disagreed.
 // `originSets` is how many distinct origins the run interned, and `originCap`
-// the cap above which one is widened.
+// the cap above which one is widened. A run given a plan also answers the
+// outcomes of the values it ran each planned routine for and kept, in routine
+// address order, then register, then the first value of each, and counts the
+// values: planned, run, returned, and returned having written only where the
+// recorded run saw the routine write; `enumerationCycles` is the master cycles
+// the runs spent together.
 struct RunObservation {
   std::vector<ReachedTarget> reached;
   std::vector<MovedRange> moved;
@@ -484,6 +574,12 @@ struct RunObservation {
   std::uint64_t spc700Divergences = 0;
   std::size_t originSets = 0;
   std::size_t originCap = 0;
+  std::vector<EnumeratedRun> enumerated;
+  std::uint64_t variantsPlanned = 0;
+  std::uint64_t variantsRun = 0;
+  std::uint64_t variantsReturned = 0;
+  std::uint64_t variantsConfined = 0;
+  std::uint64_t enumerationCycles = 0;
 };
 
 // Boots `rom` on the machine and steps it for `masterCycles` of the master clock,
@@ -517,5 +613,49 @@ struct RunObservation {
                                         std::uint64_t masterCycles, const InputScript& input,
                                         std::vector<std::string>& notes,
                                         const ProgressSink& progress = {});
+
+// The same run again, over the same image, cycles and script, carrying out
+// `plan`: the run that runs each planned routine once for every value of each
+// of its inputs. The run is deterministic, so it arrives at every instruction
+// the first did; it checks that it did against the first run's instruction
+// and divergence counts, `firstInstructions` and `firstDivergences`, and runs
+// nothing when they differ. Its own findings are the first run's again: its
+// notes are not repeated, and only `enumerated` and the counts are new.
+//
+// At the first instruction of a planned routine's first invocation the run
+// keeps a copy of the machine and of the shadow. Over the whole run it keeps,
+// for each planned routine, every byte of work RAM its frames wrote — its own
+// and every deeper one's, a handler that interrupts them excluded, an engine's
+// write while the routine's frames were live included — every register
+// `$2100`-`$43FF` its frames wrote, and the cycles of its longest invocation.
+// A routine an interrupt handler calls is followed the same way, inside the
+// handler.
+//
+// When the run is over, each value runs on a second machine restored from
+// that copy with the register set to it, the rest of the machine as the run
+// left it at the entry. A value is refused, with the reason in `notes`, when
+// the routine does not return within 64 times its longest invocation and no
+// less than one second of the master clock; when its frames write a byte of
+// work RAM, or a register, the run never saw them write; or when the lifted
+// instruction disagrees with the machine. A value that returns is kept with
+// the extents it wrote, each with the image bytes it was built from. A byte it
+// wrote takes the classes of the recorded staged extents holding its address
+// (`EnumerationPlan::recordedClasses`) and of its own transfers from work RAM
+// that carried it, and nothing else; the extents are the runs of written
+// bytes with one class set, and a byte no class covers is scratch. Values of
+// one input whose extents are equal field for field are one outcome. Once a
+// routine's values have run, the scratch its kept values wrote is noted once:
+// `enumerate <label>: <k> value(s) wrote <ranges>, extents the run never
+// carried; not lifted`, the ranges as `$BB:XXXX` or `$BB:XXXX-$BB:XXXX` in
+// address order.
+//
+// An empty plan is the run above: the overload above calls this one with an
+// empty plan and zero counts. `progress` is told `running the cartridge again`
+// as the run goes, as the first run's stage is told, and `enumerating`, a
+// stage with no measure, once a value.
+[[nodiscard]] RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t masterCycles,
+                                        const InputScript& input, std::vector<std::string>& notes,
+                                        const ProgressSink& progress, const EnumerationPlan& plan,
+                                        std::uint64_t firstInstructions, std::uint64_t firstDivergences);
 
 }  // namespace snaggletooth::disasm

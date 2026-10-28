@@ -520,4 +520,24 @@ TEST(SoundRender, EverySoundExampleLineRendersTheListingsOwnLine) {
 }
 
 }  // namespace
+// A file the toolkit's run of a routine lifted says so where the bank file
+// includes it: what a routine builds from it, for an entry the run did not
+// select.
+TEST(Render, AnEnumeratedFilesIncludeSaysSo) {
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  disasm::CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 21'477'272u;
+  const disasm::CartridgeDisassembly d = disasm::disassembleCartridge(request);
+  ASSERT_FALSE(d.regions.empty());
+  const std::string bank = disasm::renderRegion(d.regions.front(), d);
+  EXPECT_NE(bank.find("; ---- $00:8300-$00:8321: 34 bytes a routine builds Vram data from, for an entry the run did "
+                      "not select, in vram/00_8300.bin\n"
+                      "        INCBIN \"vram/00_8300.bin\"\n"),
+            std::string::npos)
+      << bank;
+}
+
 }  // namespace snaggletooth::ir

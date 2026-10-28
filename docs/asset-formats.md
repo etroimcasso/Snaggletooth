@@ -1,7 +1,7 @@
 # Asset formats
 
 A cartridge's graphics, palettes and tables are bytes the hardware reads directly — planar tiles,
-15-bit colours, packed map and sprite entries, HDMA programs. This page defines the editable forms
+15-bit colors, packed map and sprite entries, HDMA programs. This page defines the editable forms
 the toolkit reads and writes for each of them: a tile sheet as an indexed PNG, and the palette,
 tilemap, OAM and HDMA tables as text. Each form is exact both ways — the bytes encode to the form
 and the form decodes back to the same bytes — so a form is a source the assembler can include in
@@ -29,14 +29,14 @@ described at the end of this page. Every example below is the `drawing` cartridg
 
 ## The tile sheet (`.png`)
 
-Tiles are an indexed PNG. An 8×8 tile is 16, 32 or 64 bytes for 2, 4 or 8 bits a pixel, the colour
+Tiles are an indexed PNG. An 8×8 tile is 16, 32 or 64 bytes for 2, 4 or 8 bits a pixel, the color
 number of each pixel spread across the bit-planes the hardware reads: planes 0 and 1 interleave in
 the first sixteen bytes, planes 2 and 3 in the next sixteen, planes 4 through 7 in the last
 thirty-two, two bytes a row, and in each byte bit 7 is the left-most pixel. Plane 0 is the low bit
-of the colour number.
+of the color number.
 
 The PNG is indexed at the tile depth — a 2bpp file is a 2-bit PNG, 4bpp a 4-bit, 8bpp an 8-bit — so
-the file carries its own depth and a pixel value is a colour number, not a colour. The sheet is as
+the file carries its own depth and a pixel value is a color number, not a color. The sheet is as
 wide as its tiles up to sixteen — a one-tile file is 8 × 8, a five-tile file 40 × 8 — and a longer
 file wraps at sixteen, `ceil(tiles ÷ 16) × 8` pixels tall, tiles in file order left to right and
 down. Decoding accepts any width that is a whole number of tiles, so a sheet a person has widened
@@ -51,22 +51,22 @@ INCBIN "tiles/00_9000.png", 0, 1000
 ```
 
 Decoding yields whole tiles up to the sheet's last row; the length clips the result back to the
-file. The PNG's palette is a viewing aid — the index is the data, and a person may recolour the
-palette freely without changing a pixel's colour number. The disassembler writes the palette the
+file. The PNG's palette is a viewing aid — the index is the data, and a person may recolor the
+palette freely without changing a pixel's color number. The disassembler writes the palette the
 run held at the frame that read the sheet's landing: the first `2^depth` entries of palette RAM,
 palette 0 of that depth, with each five-bit channel spread to eight bits; entries 128–143 for a
 sheet the sprite tiles alone use; all 256 for a sheet at eight bits a pixel; and a ramp from black
 to white where no frame drew the sheet. A tree written without a run keeps the palette the sheet on
 disk carries.
 
-Only indexed PNGs are read. A truecolour, greyscale or 16-bit PNG is refused, naming its colour
-type, because its pixels are colours rather than the colour numbers a tile is made of.
+Only indexed PNGs are read. A truecolor, greyscale or 16-bit PNG is refused, naming its color
+type, because its pixels are colors rather than the color numbers a tile is made of.
 
 ## The palette (`.pal`)
 
-CGRAM holds one 15-bit colour a word: five bits each of blue, green and red, low bits to high, and a
+CGRAM holds one 15-bit color a word: five bits each of blue, green and red, low bits to high, and a
 top bit the PPU ignores. The text writes one word a line, the word verbatim as a four-digit hex
-number, then the colour it names at eight bits a channel as a comment:
+number, then the color it names at eight bits a channel as a comment:
 
 ```
 $0000 ; 0 0 0
@@ -75,7 +75,7 @@ $0842 ; 16 16 16
 $0C63 ; 24 24 24
 ```
 
-The number is the data. The comment is not read back, so a person recolours by editing the word;
+The number is the data. The comment is not read back, so a person recolors by editing the word;
 the eight-bit channels spread the five-bit value so `0` stays black and `31` reaches full `255`. A
 run of an odd number of bytes ends with its lone byte as `$XX`. The top bit of a word is the
 image's — the PPU ignores it — and is written as it lies.
@@ -213,7 +213,11 @@ itself than any source supplied — cleared, computed, assembled from constants 
 work, and no source shows it. A Mode 7 file under `vram/`, whose even bytes are a map and whose
 odd bytes are tiles, gets two: `<name>-tiles.png`, the odd bytes as an 8-bit sheet sixteen tiles
 wide with one byte a pixel and no bit-planes, and `<name>-map.map`, the even bytes as tile numbers,
-each `$XX`, thirty-two a line:
+each `$XX`, thirty-two a line. Beside a file holding a source of what the toolkit's run of a routine
+built for an entry the run did not select, `<name>-enumerated-<form>.<ext>` holds what each kept
+value built, in the form the recorded extent's first content took, combined the same way; the run's
+own preview of the file is left as it is
+([snes-disassembler.md §What the toolkit ran](snes-disassembler.md#what-the-toolkit-ran)):
 
 ```
 $00 $01 $02 $03 $04 $05 $06 $07 $08 $09 $0A $0B $0C $0D $0E $0F $10 $11 $12 …

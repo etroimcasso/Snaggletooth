@@ -34,18 +34,22 @@
 // would; --input-dir names a directory of recorded runs, and the one named for
 // the image (`rom/input_script.h`, `scriptFor`) is replayed when it is there,
 // the directory's `default.snaginput` when it is not, and the ports stay empty only
-// when the directory holds neither.
+// when the directory holds neither. With a run, the routines that built what the
+// run carried are run again for every value every path bounds their index to
+// (`rom/rom_enumerate.h`), and the summary says how many values ran, how many
+// were kept and how many files they were lifted into.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
 //
-// What the tool is doing is written to standard error as it goes — the run
-// and each boot with the seconds of the master clock spent against the bound,
-// refreshed in place on a terminal and one line per ten seconds otherwise, and
-// the trace, the analysis and the writing each as one line — so a minute of
-// emulation is not a minute of silence. --quiet turns it off; the results on
+// What the tool is doing is written to standard error as it goes — the run,
+// the second run and each boot with the seconds of the master clock spent
+// against the bound, refreshed in place on a terminal and one line per ten
+// seconds otherwise, and the trace, the analysis, the values and the writing
+// each as one line — so a minute of emulation is not a minute of silence. --quiet turns it off; the results on
 // standard output are the same either way.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -277,6 +281,16 @@ int main(int argc, char** argv) {
     std::cout << "sound program: entry " << snaggletooth::disasm::formatAddress(disassembly.sound->capture.entry, 16)
               << ", " << disassembly.sound->capture.blocks.size() << " blocks, " << placed
               << " matched to the image\n";
+  }
+  // The values the toolkit ran routines for, and the files what they built
+  // was lifted into; said when there is either.
+  const std::size_t enumeratedFiles = static_cast<std::size_t>(
+      std::count_if(disassembly.assets.begin(), disassembly.assets.end(), [](const snaggletooth::disasm::AssetFile& a) {
+        return a.kind == snaggletooth::disasm::MovedKind::Enumerated;
+      }));
+  if (disassembly.enumeration.planned != 0 || enumeratedFiles != 0) {
+    std::cout << disassembly.enumeration.run << " of " << disassembly.enumeration.planned << " variants run, "
+              << disassembly.enumeration.confined << " confined, " << enumeratedFiles << " enumerated files\n";
   }
   for (const std::string& note : disassembly.notes) std::cout << "note: " << note << "\n";
   std::cout << (placement.image.size() - placement.unplaced) << " of " << placement.image.size()

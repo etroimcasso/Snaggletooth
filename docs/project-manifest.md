@@ -28,7 +28,9 @@ findings outlive it, and how a name a person gives a file survives.
 > and the direct register and the data bank the run saw at every site it executed. Read for what every path proves, it records the direct
 > register, the data bank and the stack pointer at every label where something
 > is proven, and the destinations of every jump through a table the bytes
-> bound, and traces from those too.
+> bound, and traces from those too. A second run runs every routine that built
+> what the run carried once for each value every path bounds its index to, and
+> records what each value built and the files it was built from.
 
 ---
 
@@ -56,6 +58,7 @@ findings outlive it, and how a name a person gives a file survives.
   - [2.18 How a table was walked](#218-how-a-table-was-walked)
   - [2.19 Previews](#219-previews)
   - [2.20 Samples](#220-samples)
+  - [2.21 What the toolkit ran](#221-what-the-toolkit-ran)
 - [3. What is read back](#3-what-is-read-back)
 - [4. Stability](#4-stability)
 - [See also](#see-also)
@@ -608,14 +611,16 @@ beside it.
 ### 2.12 Assets
 
 ```
-asset    <path> <class> as dma | table | indirect | staged | stream | proven from <address> bytes <n>
+asset    <path> <class> as dma | table | indirect | staged | stream | proven | enumerated from <address> bytes <n>
 ```
 
 A file lifted out of a bank file: a range the run saw an engine carry from the
 image to the hardware, the image source of a range a routine built in work RAM
 before it was carried out, the run of image bytes a routine read while
-carrying a stream to a data register itself, or a range the code proves a
-channel was set up to carry from the image and no run has moved — written once, as the bytes are,
+carrying a stream to a data register itself, a range the code proves a
+channel was set up to carry from the image and no run has moved, or the run
+of image bytes a routine read when the toolkit ran it for an entry the run did
+not select — written once, as the bytes are,
 under a directory named for the memory it went to — and, for VRAM, for what the
 PPU used that memory as when the run saw the bytes drawn: `maps/` for a file
 every landing of which lies in a tilemap, `tiles/` for one every landing of
@@ -631,7 +636,9 @@ file is: `dma`, `table` or `indirect`, what the range was to the engine as the
 (§2.15); `stream`, the run the CPU carried a stream from (§2.16); `proven`, a
 transfer the code proves whole — its destination, source, step, count and a
 general-purpose start every path settles (§2.6) — that no run has started, the
-one kind of file whose evidence is the code alone. After `from`,
+one kind of file whose evidence is the code alone; `enumerated`, the image
+bytes a routine read when the toolkit ran it for an entry the run did not
+select (§2.21), a file no other kind of evidence holds. After `from`,
 the address the tree places the file's first byte at, and after `bytes`, how
 many it holds. The `moved` lines whose memory lies within a file are its uses,
 and say which instruction sent it where and how many times; a `staged` line
@@ -675,8 +682,8 @@ the form gives the bytes back exactly, which the disassembler checks before
 it writes; otherwise the file is `.bin`, and where a form was expected and
 did not hold, a `note` says which file and why. A file shorter than one unit
 of its form — one tile at its depth, one palette word, one map entry, one
-sprite, one HDMA entry — is `.bin` without a note. A `staged` file is the
-bytes a routine read, not what it built, and stays `.bin` with its
+sprite, one HDMA entry — is `.bin` without a note. A `staged` or `enumerated`
+file is the bytes a routine read, not what it built, and stays `.bin` with its
 [previews](#219-previews) beside it; so does a file under `vram/`, `apu/` or
 `staged/`, and an `indirect` block.
 
@@ -693,9 +700,10 @@ form, is written as `.bin`, the path here changes to say so, and a `note`
 says why. For a `dma`, `table` or `indirect` file the class,
 the kind and the range are the run's and are written fresh, the `moved` lines
 being what keeps the file, and for a `proven` file they are the trace's, which
-finds the same transfer every time; a `staged` or `stream` file's evidence is written
-fresh (§2.15, §2.16), so its line is read back whole and keeps the file from
-one disassembly to the next until a run lifts a wider file over its bytes.
+finds the same transfer every time; a `staged`, `stream` or `enumerated` file's
+evidence is written fresh (§2.15, §2.16, §2.21), so its line is read back whole
+and keeps the file from one disassembly to the next until a run lifts a wider
+file over its bytes.
 
 ### 2.13 Where the CPU arrived
 
@@ -918,7 +926,7 @@ its name and class; after `from`, where the first byte came from and after
 `bytes` how many consecutive ones followed; after `times`, how many sightings
 of exactly this stream the run made; after `at`, where the bytes landed on the
 other side of the port, after `in`, what the PPU used that memory as, and
-after `depth`, the colour depth of the tile areas it lies in, all three
+after `depth`, the color depth of the tile areas it lies in, all three
 exactly as a [`landed` line](#217-where-a-transfer-landed) says them —
 `none`, `none` and `none` for the audio ports, whose bytes land in no memory
 the run can name. A store continues a stream when its value
@@ -968,7 +976,7 @@ at — a VRAM word address, `$0000`–`$7FFF`, for a range to `VMDATAL` or
 `VMDATAH`; a palette word, `$00`–`$FF`, for one to `CGDATA`; an OAM byte,
 `$000`–`$21F`, for one to `OAMDATA` — after `in`, what the PPU used that memory
 as, after `times`, how many sightings of exactly this landing the run
-made, and after `depth`, the colour depth of the tile areas the landing lies
+made, and after `depth`, the color depth of the tile areas the landing lies
 in. A range whose bytes reach no data port — a table to the brightness
 register, a fill of a register, a read back into memory — has no line. A
 range the run saw land in two places has two lines, each with its own count,
@@ -989,7 +997,7 @@ frame's start has the bytes it lands afterwards read at the next such frame,
 its areas being every area read. The areas are `tilemap1`–`tilemap4`, a layer's screen base
 and its one, two or four screens of a thousand words, for the layers the mode
 has; `tiles1`–`tiles4`, a layer's name base and the eight, sixteen or
-thirty-two thousand words its thousand tiles occupy at the layer's colour
+thirty-two thousand words its thousand tiles occupy at the layer's color
 depth in that mode; `sprites`, the four thousand words at the sprite base and
 the four thousand after the gap; and `mode7`, the whole of VRAM when the mode
 is 7, where the map lies in the even bytes and the tiles in the odd. The line
@@ -1002,7 +1010,7 @@ not consulted: a layer the mode has keeps its bases whether or not it is shown
 this frame.
 
 The depth is read with the areas: each name base the extent lies in has the
-colour depth of its layer in the mode, 2, 4 or 8 bits a pixel; the sprite
+color depth of its layer in the mode, 2, 4 or 8 bits a pixel; the sprite
 tiles are 4; and the whole of VRAM under Mode 7 is 8. When every tile area
 the landing lies in — over every frame it was read at — has one depth, the
 line says it; when they differ, or the landing lies in no tile area, in no
@@ -1131,7 +1139,11 @@ a range that landed in tiles of one depth, in a tilemap, in the palette or in
 the sprite table, or a table walked under one unit; a content whose landing
 mixes a screen with tiles, lies in no area or was never shown is left out. A
 Mode 7 file under `vram/` — one range holding a map in its even bytes and
-tiles in its odd — gets two, `<name>-tiles.png` and `<name>-map.map`.
+tiles in its odd — gets two, `<name>-tiles.png` and `<name>-map.map`. Beside a
+file holding a source of what the toolkit's run of a routine built (§2.21),
+after the run's own previews, `<name>-enumerated-<form>.<ext>` holds what each
+kept value built, once each, in the form the recorded extent's first content
+with a form took; the run's own preview of the file stays as it is.
 
 The `drawing` cartridge fills one buffer of thirty-two bytes from eleven
 blobs and sends it out ten times — a blob of two parts, a part at a time, to
@@ -1212,6 +1224,187 @@ The line is written fresh and read back by nothing; the WAV is a listening
 copy, which nothing includes and the verifier never reads. A run that had no
 machine leaves the WAVs on disk as they were.
 
+### 2.21 What the toolkit ran
+
+```
+enumerated <path> at <address> bytes <n> to <class> by <label> <A|X|Y>=<values> entered from <address>
+           exact | approximate
+```
+
+What a routine builds for an entry of its table that the run did not select.
+A loader takes an index, reads a pointer and builds the entry it points at in
+work RAM, and a run sees only the entries the game selected. The disassembler
+plans every routine the shadow named as the writer of a staged extent (§2.15),
+and every routine whose calls reach one, and reads, at the entry of each one a
+call enters, the registers every path bounds there (§2.9): A, X and Y, each at
+the width the entry's mode gives it — the low byte alone at eight bits — and
+each only where every path proves two values or more for it. A bounded
+register is an input when some path of the routine reads it before writing
+it: an operand, a push, or a call to a routine that reads it at its entry.
+Where the paths cannot be followed — a jump or a call to a target the tree
+does not know, `BRK`, `COP` — every byte counts as read. A register the
+routine overwrites before reading it is noted and not set. The direct
+register, the data bank and the flags are never set.
+
+A second run of the same image, cycles and recorded input keeps a copy of the
+machine and of the shadow at the first instruction of each planned routine's
+first invocation. Over the whole run it keeps every byte of work RAM and every
+register `$2100`-`$43FF` the routine's frames wrote — an engine's writes while
+they were live included, a handler that interrupted them excluded — and the
+cycles of its longest invocation. When the run is over, each value runs on a
+second machine restored from that copy with the register set to it, the rest
+of the machine as the run left it there. A value is kept when the routine
+returns — the program counter at the address after the call, the stack
+pointer above the entry's — within 64 times its longest invocation, and no
+less than one second of the master clock, having written only bytes and
+registers the run saw it write.
+
+A byte a kept value wrote takes a class from what covers its address and from
+nothing else: the classes the recorded staged extents holding it went to, and
+those of the value's own transfers out of work RAM that carried it. Its
+extents are the runs of consecutive written bytes with one class set, each
+with its sources as a staged byte's are: the runs of image bytes its own
+invocation read. A byte no class covers is scratch — the pointers, counters
+and stack bytes a routine keeps for itself, and anything it builds past what
+the run carried — and the scratch a routine's kept values wrote is noted once
+for the routine, as ranges, with how many values wrote it. Values whose
+extents are the same in every field — the bytes, their sources, their classes
+and the transfers that carried them — are one outcome.
+
+The run's own files are grouped first, exactly as a disassembly without the
+toolkit's runs groups them, and the toolkit's pieces never change one but by
+widening it. A piece that overlaps one recorded file joins it when its class
+is one of the file's and its landings leave the file's directory and the
+facts its form is chosen by as they are; the file widens to hold it, and its
+path is named for its new first byte. A piece that would add a class to the
+file, move it to another directory or change its form, or that lies across
+two recorded files, is refused with a note naming the file. Pieces that
+overlap no recorded file are grouped among themselves as files of the kind
+`enumerated` (§2.12).
+
+An `enumerated` line says what one outcome built from one file: the file its
+source was lifted into; after `at` and `bytes`, the extent; after `to`, a
+class of the extent; after `by`, the routine, then the register and the
+values; after `entered from`, the call the run entered the routine from, whose
+state every value started from; and the mark, as a `staged` line's. The values
+are written as runs — `$lo-$hi` for consecutive values, `$lo-$hi/d` for three
+or more `d` apart, a value alone otherwise, joined by `,` — at `$XX` for eight
+bits and `$XXXX` for sixteen: `X=$0000-$000E/2`, `A=$00,$03`. One line per
+outcome: values that build the same bytes from the same sources share it.
+One line per file, extent and class, the lines into the run's own files
+first, then those into the toolkit's, each in the order of their sources'
+image offsets. The value the run itself selected runs as every other does and
+has its line, so the lines read as the whole table.
+
+A routine or a value that is not run or not kept, a register that is not an
+input, and a piece that is not lifted is a `note`, one of these:
+
+```
+enumerate <label>: no input every path bounds; not run
+enumerate <label>: <R> is bounded on every path and read on none before it is written; not an input
+enumerate <label>: no path the analysis follows reaches its entry; not run
+enumerate <label>: entered by a jump, no return to end at; not run
+enumerate $BB:XXXX: no routine holds the site; not run
+enumerate <label> <R>=$v: did not return within <n> cycles; not lifted
+enumerate <label> <R>=$v: wrote $BB:XXXX, outside what the run saw the routine write; not lifted
+enumerate <label> <R>=$v: wrote <register or $BB:XXXX>, a register the run never saw the routine write; not lifted
+enumerate <label> <R>=$v: the lift disagreed with the machine at $BB:XXXX; not lifted
+enumerate <label> <R>=$v: wrote no byte of work RAM; nothing to lift
+enumerate <label>: <k> value(s) wrote <ranges>, extents the run never carried; not lifted
+enumerate <label>: the second run did not enter it; nothing run
+run: the second run executed <n> instructions and <m> divergences where the first executed <n'> and <m'>; nothing enumerated
+enumerate <label> <R>=<values>: its source at $BB:XXXX would add <class> to <file>; not lifted
+enumerate <label> <R>=<values>: its source at $BB:XXXX would move <file> to <directory>/; not lifted
+enumerate <label> <R>=<values>: its source at $BB:XXXX would change the form of <file>; not lifted
+enumerate <label> <R>=<values>: its source at $BB:XXXX lies across <file> and <file>; not lifted
+enumerate <label> <R>=<values>: wrote $BB:XXXX bytes <n>, carried to <register or $BB:XXXX>, which no file is named for; not lifted
+```
+
+A routine only a jump enters, or a site no routine holds, has no return the
+copy names to end a value at. A source's `$BB:XXXX` is its first byte where
+the tree places it; `<ranges>` are `$BB:XXXX` for one byte and
+`$BB:XXXX-$BB:XXXX` for more, in address order. An extent only the value's
+own transfer to a register no file is named for carried — a buffer sent to
+`WMDATA` — is noted and lifts nothing, while the value's other extents lift.
+The second run executes what the first did, instruction for instruction; one
+that did not runs nothing and says so in its note.
+
+A transfer the code proves whole from work RAM (§2.6) that the run never
+started has no copy of the machine to run it from, and a `note` says whether
+the run wrote its extent. The run started it only when it moved exactly that
+range: from the same start, on the same channel, with the same lowest
+address, count and step.
+
+```
+dma $BB:XXXX channel <n>: the code proves $BB:XXXX <step> bytes <n>; the run wrote the extent and never started this transfer; its sources are the staged lines at $BB:XXXX
+dma $BB:XXXX channel <n>: the code proves $BB:XXXX <step> bytes <n>; nothing wrote the extent in the run; nothing to run from
+```
+
+The `enumerating` cartridge's five loaders, run for one second; its notes,
+then its lines:
+
+```
+note     enumerate reset: entered by a jump, no return to end at; not run
+note     enumerate sub_008500: no input every path bounds; not run
+note     enumerate loc_008700: entered by a jump, no return to end at; not run
+note     enumerate sub_008D00: X is bounded on every path and read on none before it is written; not an input
+note     enumerate nmi_native: entered by a jump, no return to end at; not run
+note     enumerate sub_008100 X=$0006: wrote INIDISP, a register the run never saw the routine write; not lifted
+note     enumerate sub_008100 X=$000C: did not return within 21477272 cycles; not lifted
+note     enumerate sub_008100 X=$000E: wrote $7F:0020, outside what the run saw the routine write; not lifted
+note     enumerate sub_008100: 5 values wrote $7E:0000-$7E:0001, $7E:0004-$7E:0006, extents the run never carried; not lifted
+note     enumerate sub_008800: 4 values wrote $7E:0000-$7E:0001, extents the run never carried; not lifted
+note     enumerate sub_008B00: 4 values wrote $7E:0000-$7E:0001, extents the run never carried; not lifted
+note     enumerate sub_008D00: 5 values wrote $7E:0000-$7E:0001, $7E:0004-$7E:0007, $7F:0420-$7F:042F, extents the run never carried; not lifted
+note     enumerate sub_008D00 A=$0003: its source at $00:8A10 would add Vram to cgram/00_8A20.bin; not lifted
+note     enumerate sub_008B00 A=$01: its source at $00:8A20 would add Oam to cgram/00_8A20.bin; not lifted
+note     enumerate sub_008D00 A=$0004: its source at $00:8A30 would add Vram to oam/00_8A40.bin; not lifted
+note     enumerate sub_008800 A=$0002: its source at $00:8A40 would add Cgram to oam/00_8A40.bin; not lifted
+
+enumerated vram/00_8380.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0004 entered from $00:804A exact
+enumerated vram/00_8440.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$000A entered from $00:804A exact
+enumerated cgram/00_8A20.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0001 entered from $00:8096 exact
+enumerated oam/00_8A40.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$02 entered from $00:80DD exact
+enumerated vram/00_9100.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0000 entered from $00:8E29 exact
+enumerated vram/00_8300.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0000 entered from $00:804A exact
+enumerated vram/00_8340.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0002 entered from $00:804A exact
+enumerated vram/00_8400.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0008 entered from $00:804A exact
+enumerated staged/00_8A00.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$00 entered from $00:80DD exact
+enumerated staged/00_8A00.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0000 entered from $00:8096 exact
+enumerated staged/00_8A60.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$03 entered from $00:80DD exact
+enumerated staged/00_8A60.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0003 entered from $00:8096 exact
+enumerated vram/00_9140.bin at $7F:0400 bytes 48 to Vram by sub_008D00 A=$0001 entered from $00:8E29 exact
+enumerated vram/00_9180.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0002 entered from $00:8E29 exact
+```
+
+The first loader's index is X, masked to three bits and doubled by its
+caller: eight values at sixteen bits. Entries 2 and 5, `X=$0004` and
+`X=$000A`, are the two the run selected, and their lines name the run's own
+files; entries 0, 1 and 4 are files of their own; entry 3 writes `INIDISP`,
+which the run never saw the loader write; entry 6 never returns; entry 7
+builds 255 bytes, past the thirty-two the run saw it write. Every value writes
+the pointer and the length in the direct page, and the run-length entries a
+counter beside them, which nothing carried: the routine's scratch. The third
+and fourth loaders' index is A,
+bounded by a compare and a branch at sixteen bits and by a mask at eight, and
+both read the same four blobs. The run sent the second blob to the palette and
+the third to the sprite table, each a file of its one class; the palette
+loader's third blob and the sprite loader's second would add a class to those
+files and are refused; the first and fourth blobs, which no recorded file
+holds, are each one file under `staged/` with a line for each class. The
+fifth loader is called from the vertical-blank handler with an index in A
+below five, and writes X, which the handler bounds, before it reads it. Entry
+0 is the run's: it builds forty-eight bytes and sends thirty-two, which are
+the run's file, and the sixteen past them are scratch. Entry 1 sends all
+forty-eight on its own channel, a file of its own; entry 2 sends sixteen, and
+the thirty-two the recorded extent holds are its file. Entries 3 and 4 read
+from the blobs the palette and sprite files hold and would add VRAM to them.
+The second loader loads its own index from work RAM, and its caller bounds
+nothing.
+
+Every line here is written fresh from the run and read back by no disassembly;
+an `enumerated` file outlives the run through its `asset` line (§2.12).
+
 
 ## 3. What is read back
 
@@ -1236,9 +1429,9 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - every `asset` line, for its path — a file lifted again with the same first
   address and length takes the path the line gives it, so a name a person gave
   a file survives; a `dma`, `table`, `indirect` or `proven` line matching no file this
-  run lifts is dropped, and a `note` says so — and a `staged` or `stream` line
-  whole, the file lifted again as the line records it unless this run lifts a
-  file over its bytes;
+  run lifts is dropped, and a `note` says so — and a `staged`, `stream` or
+  `enumerated` line whole, the file lifted again as the line records it unless
+  this run lifts a file over its bytes;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not
@@ -1256,8 +1449,8 @@ directory, it reads:
   disassembler does.
 
 Everything else is what the last run found and is written fresh — the `access`,
-`dma`, `routine`, `state`, `seen`, `origin`, `staged`, `streamed`, `landed`,
-`walked`, `preview` and `sample` lines among them — and the next disassembly reads none of it back: they are what
+`dma`, `routine`, `state`, `seen`, `origin`, `staged`, `enumerated`, `streamed`,
+`landed`, `walked`, `preview` and `sample` lines among them — and the next disassembly reads none of it back: they are what
 the trace and the run saw, and the next sees it again. A `stop` line records;
 only an `entry` line directs. `snes_render` reads `map`, `save` and `chip`, and the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the

@@ -135,6 +135,24 @@ destination of a jump through a table whose index the bytes bound; the
 disassembler traces from each and writes it as a `derived` line, so a bounded
 table is traced past without running the cartridge.
 
+With a run, the routines that built what the run carried are run again for the
+entries of their tables the run never selected. `rom/rom_enumerate.h`'s
+`enumerationPlan(disassembly, proven, notes)` names every routine the shadow
+saw build a staged extent and every routine whose calls reach one, and, for
+each one a call enters, the registers every path bounds at its entry; a second
+`observeRun`, given that plan and the first run's instruction and divergence
+counts, runs the cartridge again, keeps a copy of the machine at each
+routine's first invocation, and runs each value from it on a machine of its
+own. What each kept value built is lifted as files of kind `enumerated` with
+an `enumerated` line per file, extent, class and value, and every routine or
+value not run or not kept is a `note` — see
+[What the toolkit ran](../../docs/snes-disassembler.md#what-the-toolkit-ran).
+`noteProvenFromWorkRam(disassembly)` notes every transfer the code proves from
+work RAM that the run never started. The summary on standard output counts the
+values, where there are any: `16 of 16 variants run, 13 confined, 5 enumerated
+files`, and standard error says `running the cartridge again` and
+`enumerating` as they go.
+
 The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count,
 `renderProgramFile`, `renderSoundProgramFile` and `renderManifest` for the

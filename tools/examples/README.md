@@ -1,6 +1,6 @@
 # Example cartridges
 
-Twenty-seven cartridges, each built by hand to do one thing, each in its own
+Twenty-eight cartridges, each built by hand to do one thing, each in its own
 directory with the source that builds it and a README saying what it does and
 who reads it. They are the cartridges the tests run the tools on, and the
 cartridges every page's example output comes from — a page shows what a tool
@@ -50,6 +50,7 @@ snes_differential mixed examples/mixed.smc -o mixed/differential --seconds 0.1
 | [`drawing/`](drawing/README.md) | One of everything an editable form has a grammar for: tile sheets at three depths, a palette, a tilemap, a sprite table, two HDMA tables, eleven blobs unpacked through one buffer, a Mode 7 block, and a sound program keying two voices on |
 | [`bare_window/`](bare_window/README.md) | A byte read and a range sent through a save window with no save behind it, and a call into it taken only with B down |
 | [`chip_half/`](chip_half/README.md) | A byte read from a DSP board's lower half, and a call into it and a jump into the expansion area taken only with B down |
+| [`enumerating/`](enumerating/README.md) | Five loaders that build what they send from tables of entries, called for only some of the entries, one of them called from the vertical-blank handler |
 
 Each directory's header builds its image as a function in
 `snaggletooth::examples`; `common.h` holds what they share — a LoROM or a HiROM

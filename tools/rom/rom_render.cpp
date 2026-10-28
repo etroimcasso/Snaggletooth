@@ -406,6 +406,9 @@ std::string renderRegion(const RenderRegion& region, const RenderInput& input,
         case MovedKind::Stream: what = counted(asset.bytes, "byte") + " a routine carried " + cls + " data from"; break;
         case MovedKind::Staged: what = counted(asset.bytes, "byte") + " a routine built " + cls + " data from"; break;
         case MovedKind::Proven: what = counted(asset.bytes, "byte") + " a transfer the code sets up to carry to " + to; break;
+        case MovedKind::Enumerated:
+          what = counted(asset.bytes, "byte") + " a routine builds " + cls + " data from, for an entry the run did not select";
+          break;
       }
       // The path as the lexicon reads it: relative to this file, which for a
       // file at the tree's root is the manifest's own path.

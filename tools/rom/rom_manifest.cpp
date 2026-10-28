@@ -31,6 +31,7 @@ std::optional<MovedKind> parseMovedKind(const std::string& word) {
   if (word == "stream") return MovedKind::Stream;
   if (word == "staged") return MovedKind::Staged;
   if (word == "proven") return MovedKind::Proven;
+  if (word == "enumerated") return MovedKind::Enumerated;
   return std::nullopt;
 }
 
@@ -411,8 +412,9 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.seen.push_back(std::move(seen));
       continue;
     }
-    static const std::set<std::string> kKnown = {"title",  "stop",     "warning", "note",   "state",   "origin",
-                                                 "staged", "streamed", "landed",  "walked", "preview", "sample"};
+    static const std::set<std::string> kKnown = {"title",   "stop",       "warning", "note",   "state",
+                                                 "origin",  "staged",     "streamed", "landed", "walked",
+                                                 "preview", "sample",     "enumerated"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   std::map<std::string, Address> routineAddresses;
