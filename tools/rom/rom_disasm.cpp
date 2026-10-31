@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 #include "cpu65816/cpu65816_asm.h"
@@ -1666,15 +1667,44 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
   }
 
-  // A total order, so two pieces of the same bytes sent two places stand in
-  // register order whatever the library's sort does with equals.
-  const auto pieceBefore = [](const Piece& a, const Piece& b) {
+  // A total order over every field, so the pieces stand in one order whatever
+  // the library's sort does with equals: two pieces of the same bytes sent two
+  // places in register order, and two that differ only in their landings with
+  // the one that has fewer first — an outcome's own transfer, which has none,
+  // before the recorded extent it shares, so the own piece joins and widens a
+  // file before the other is checked against it.
+  const auto landingBefore = [](const PortLanding& a, const PortLanding& b) {
+    return std::tie(a.memory, a.lowest, a.highest, a.shown, a.areas, a.depths, a.palette) <
+           std::tie(b.memory, b.lowest, b.highest, b.shown, b.areas, b.depths, b.palette);
+  };
+  const auto walkBefore = [](const Walk& a, const Walk& b) {
+    return std::tie(a.unit, a.indirect) < std::tie(b.unit, b.indirect);
+  };
+  const auto pieceBefore = [&](const Piece& a, const Piece& b) {
     if (a.offset != b.offset) return a.offset < b.offset;
     if (a.length != b.length) return a.length > b.length;
     if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
     if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
     if (a.cls != b.cls) return static_cast<int>(a.cls) < static_cast<int>(b.cls);
-    return a.site < b.site;
+    if (a.site != b.site) return a.site < b.site;
+    if (a.use != b.use) return static_cast<int>(a.use) < static_cast<int>(b.use);
+    if (a.landings.size() != b.landings.size()) return a.landings.size() < b.landings.size();
+    if (std::lexicographical_compare(a.landings.begin(), a.landings.end(), b.landings.begin(), b.landings.end(),
+                                     landingBefore)) {
+      return true;
+    }
+    if (std::lexicographical_compare(b.landings.begin(), b.landings.end(), a.landings.begin(), a.landings.end(),
+                                     landingBefore)) {
+      return false;
+    }
+    if (a.walks.size() != b.walks.size()) return a.walks.size() < b.walks.size();
+    if (a.walks != b.walks) {
+      return std::lexicographical_compare(a.walks.begin(), a.walks.end(), b.walks.begin(), b.walks.end(),
+                                          walkBefore);
+    }
+    if (a.wholeCarried != b.wholeCarried) return a.wholeCarried && !b.wholeCarried;
+    if (a.run != b.run) return a.run < b.run;
+    return a.extent < b.extent;
   };
   std::sort(pieces.begin(), pieces.end(), pieceBefore);
 
