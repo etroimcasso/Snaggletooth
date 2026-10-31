@@ -152,7 +152,10 @@ struct SoundProgram {
 // them or the bytes themselves.
 struct AssetFile {
   std::string file;  // relative to the manifest: `tiles/00_9000.png`
-  std::vector<RegisterClass> classes;  // of the registers the bytes went to, ascending, one for every file but a `staged/` one
+  std::vector<RegisterClass> classes;  // of the registers the run saw the bytes go to, ascending, one for every file but a `staged/` one
+  // The classes a routine the toolkit ran built the bytes into that the run's own transfers never reached, ascending;
+  // empty for a file of the toolkit's own, whose `classes` are every class its bytes went to.
+  std::vector<RegisterClass> also;
   MovedKind kind = MovedKind::Dma;
   Address registerAddress = 0;  // the register itself, for the comment beside the `INCBIN`
   Address first = 0;            // the address the tree places its first byte at
@@ -204,12 +207,15 @@ struct SampleFile {
 // rename survives a run when the file it names is lifted again with the same
 // first byte and length — and, for a file the run's shadow named (`staged`,
 // `stream`, `enumerated`), for the file itself: its evidence is written fresh
-// by a run, so the line is what keeps it from one disassembly to the next.
+// by a run, so the line is what keeps it from one disassembly to the next —
+// and, for a file whose line says `also`, the classes the toolkit's runs built
+// it into, kept with the line.
 struct ManifestAsset {
   std::string file;
   Address first = 0;
   std::size_t bytes = 0;
   std::vector<RegisterClass> classes;
+  std::vector<RegisterClass> also;
   MovedKind kind = MovedKind::Dma;
 };
 

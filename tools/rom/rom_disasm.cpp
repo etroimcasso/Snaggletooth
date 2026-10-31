@@ -1307,8 +1307,9 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
 // What a routine the toolkit ran for an entry the run did not select built is
 // lifted the same way, as the image bytes its values read, under the classes
 // its extent's bytes took; the run's own files are grouped first, and those
-// pieces join one only where they leave its classes, directory and form as
-// they are.
+// pieces join one only where they leave its directory and form as they are.
+// A recorded file an outcome of another class joins keeps its directory, kind
+// and classes, and its line names the other class after `also`.
 void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   const CartridgeBoard& board = out.board;
   const std::size_t imageBytes = out.imageBytes;
@@ -1625,7 +1626,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
 
   // A file the shadow named in an earlier run, kept as its line records it
   // when nothing this pass lifted covers its bytes: its evidence is written
-  // fresh by a run, and the line is what keeps the file.
+  // fresh by a run, and the line is what keeps the file. A `staged` or
+  // `stream` line's `also` classes are kept with it, by the file's first byte.
+  std::map<std::size_t, std::vector<RegisterClass>> keptAlso;
   for (const ManifestAsset& kept : request.assets) {
     if (kept.kind != MovedKind::Staged && kept.kind != MovedKind::Stream && kept.kind != MovedKind::Enumerated) continue;
     const std::optional<std::size_t> offset = romOffset(board, kept.first, imageBytes);
@@ -1636,6 +1639,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     const bool covered = std::any_of(pieces.begin(), pieces.end(), overlaps) ||
                          std::any_of(toolkit.begin(), toolkit.end(), overlaps);
     if (covered) continue;
+    if ((kept.kind == MovedKind::Staged || kept.kind == MovedKind::Stream) && !kept.also.empty()) {
+      keptAlso[*offset] = kept.also;
+    }
     // The line does not say what the range went as; a class only HDMA reaches
     // is placed as a table, the rest as a transfer. The path is the line's
     // own either way. A file named for two classes is one piece per class,
@@ -1756,6 +1762,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
                               hex(*home & 0xFFFFu, 4) + ".bin",
                       .classes = classes,
+                      .also = keptAlso.count(first.offset) != 0 ? keptAlso.at(first.offset)
+                                                                : std::vector<RegisterClass>{},
                       .kind = mixed && named == nullptr ? (staged ? MovedKind::Staged : MovedKind::Stream)
                                                         : lead.kind,
                       .registerAddress = lead.registerAddress,
@@ -1779,12 +1787,13 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   }
 
   // The toolkit's pieces, once the run's files are grouped. A piece that
-  // overlaps one of those files joins it when its class is one of the file's
-  // and its landings leave the file's directory and the facts its form is
-  // chosen by as they are; the file then widens to hold it, under the same
-  // directory, its path named for its new first byte. A piece that overlaps
-  // two files, or would change the one it overlaps, is refused with a note
-  // naming the file. Pieces that overlap no such file are grouped among
+  // overlaps one of those files joins it when its landings leave the file's
+  // directory and the facts its form is chosen by as they are; the file then
+  // widens to hold it, under the same directory, its path named for its new
+  // first byte. A class of the piece the run's transfers never reached is
+  // written after `also` on the file's line. A piece that overlaps two files,
+  // or would move or reform the one it overlaps, is refused with a note naming
+  // the file. Pieces that overlap no such file are grouped among
   // themselves into files of their own kind, `enumerated`. Every piece of an
   // outcome that is lifted records its file once per extent and class, in the
   // order the pieces are taken.
@@ -1836,11 +1845,6 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
     const std::size_t g = overlapping.front();
     AssetFile& asset = out.assets[g];
-    if (std::find(asset.classes.begin(), asset.classes.end(), piece.cls) == asset.classes.end()) {
-      refuse(head + "would add " + std::string(cpu65816RegisterClassName(piece.cls)) + " to " + asset.file +
-             "; not lifted");
-      continue;
-    }
     std::vector<PortLanding> recordedLandings;
     for (const Piece& member : groups[g]) {
       recordedLandings.insert(recordedLandings.end(), member.landings.begin(), member.landings.end());
@@ -1857,6 +1861,10 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       continue;
     }
     groups[g].push_back(piece);
+    if (std::find(asset.classes.begin(), asset.classes.end(), piece.cls) == asset.classes.end()) {
+      const auto at = std::lower_bound(asset.also.begin(), asset.also.end(), piece.cls);
+      if (at == asset.also.end() || *at != piece.cls) asset.also.insert(at, piece.cls);
+    }
     const std::size_t first = std::min(asset.romOffset, piece.offset);
     const std::size_t end = std::max(asset.romOffset + asset.bytes.size(), pieceEnd);
     if (first != asset.romOffset || end != asset.romOffset + asset.bytes.size()) {
@@ -1892,6 +1900,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
                               hex(*home & 0xFFFFu, 4) + ".bin",
                       .classes = classes,
+                      .also = {},
                       .kind = MovedKind::Enumerated,
                       .registerAddress = first.registerAddress,
                       .first = *home,
@@ -2743,12 +2752,16 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   }
   if (!origins.empty()) out += "\n" + origins;
 
-  // The files lifted out of the banks. The `moved` lines are their uses.
+  // The files lifted out of the banks, each with the classes the toolkit's
+  // runs built it into that the run's transfers never reached. The `moved`
+  // lines are their uses.
   if (!disassembly.assets.empty()) out += "\n";
   for (const AssetFile& asset : disassembly.assets) {
     out += "asset    " + asset.file + " " + classesText(asset.classes, "+") + " as " +
            std::string(movedKindName(asset.kind)) + " from " + address24(asset.first) + " bytes " +
-           std::to_string(asset.bytes.size()) + "\n";
+           std::to_string(asset.bytes.size());
+    if (!asset.also.empty()) out += " also " + classesText(asset.also, "+");
+    out += "\n";
   }
 
   // What was written beside a file to show what its bytes became, and how
@@ -3002,6 +3015,7 @@ RenderInput renderInputOf(const CartridgeDisassembly& disassembly) {
   for (const AssetFile& asset : disassembly.assets) {
     input.assets.push_back(RenderAsset{.file = asset.file,
                                        .classes = asset.classes,
+                                       .also = asset.also,
                                        .kind = asset.kind,
                                        .registerAddress = asset.registerAddress,
                                        .first = asset.first,

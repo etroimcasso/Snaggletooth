@@ -143,8 +143,10 @@ each one a call enters, the registers every path bounds at its entry; a second
 `observeRun`, given that plan and the first run's instruction and divergence
 counts, runs the cartridge again, keeps a copy of the machine at each
 routine's first invocation, and runs each value from it on a machine of its
-own. What each kept value built is lifted as files of kind `enumerated` with
-an `enumerated` line per file, extent, class and value, and every routine or
+own. What each kept value built is lifted as files of kind `enumerated`, or
+into the run's own files, whose `asset` lines then say `also` which other
+classes the toolkit built from them, with an `enumerated` line per file,
+extent, class and outcome, and every routine or
 value not run or not kept is a `note` — see
 [What the toolkit ran](../../docs/snes-disassembler.md#what-the-toolkit-ran).
 `noteProvenFromWorkRam(disassembly)` notes every transfer the code proves from

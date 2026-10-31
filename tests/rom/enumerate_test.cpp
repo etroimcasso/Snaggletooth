@@ -1189,6 +1189,166 @@ TEST(RomEnumerate, ABufferSentToARegisterNoFileIsNamedForIsNoted) {
       << renderManifest(d);
 }
 
+// A loader indexed in X over {0, 2, 4, 6} that copies the sixteen bytes at
+// `$9000` into `$7F:0000` and sends them on channel 0 to the register its
+// entry names: `CGDATA` for entry 0, the run's; `OAMDATA` for entry 1;
+// `VMDATAL` for entries 2 and 3.
+std::vector<std::uint8_t> crossClassImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {
+      0x18u, 0xFBu,                // $8000 CLC / XCE
+      0xC2u, 0x30u,                // $8002 REP #$30
+      0xA2u, 0xFFu, 0x1Fu,         // $8004 LDX #$1FFF
+      0x9Au,                       // $8007 TXS
+      0xA9u, 0x00u, 0x00u,         // $8008 LDA #$0000
+      0x5Bu,                       // $800B TCD
+      0xAFu, 0x10u, 0x00u, 0x7Eu,  // $800C LDA $7E:0010
+      0x29u, 0x06u, 0x00u,         // $8010 AND #$0006
+      0xAAu,                       // $8013 TAX             X in {0, 2, 4, 6}
+      0xA9u, 0x00u, 0x00u,         // $8014 LDA #$0000
+      0xA0u, 0x00u, 0x00u,         // $8017 LDY #$0000
+      0x20u, 0x00u, 0x81u,         // $801A JSR !$8100
+      0x80u, 0xFEu,                // $801D BRA *
+  });
+  put(rom, 0x0100u, {
+      0xE2u, 0x20u,                // $8100 SEP #$20        sub_008100
+      0xBFu, 0x00u, 0x91u, 0x00u,  // $8102 LDA $00:9100,X  the entry's register
+      0x8Fu, 0x01u, 0x43u, 0x00u,  // $8106 STA $00:4301    BBAD0
+      0xA2u, 0x00u, 0x00u,         // $810A LDX #$0000
+      0xBFu, 0x00u, 0x90u, 0x00u,  // $810D LDA $00:9000,X
+      0x9Fu, 0x00u, 0x00u, 0x7Fu,  // $8111 STA $7F:0000,X
+      0xE8u,                       // $8115 INX
+      0xE0u, 0x10u, 0x00u,         // $8116 CPX #$0010
+      0xD0u, 0xF2u,                // $8119 BNE $810D
+      0xA9u, 0x00u,                // $811B LDA #$00
+      0x8Fu, 0x00u, 0x43u, 0x00u,  // $811D STA $00:4300    DMAP0
+      0x8Fu, 0x02u, 0x43u, 0x00u,  // $8121 STA $00:4302    A1T0 low
+      0x8Fu, 0x03u, 0x43u, 0x00u,  // $8125 STA $00:4303    A1T0 high
+      0x8Fu, 0x06u, 0x43u, 0x00u,  // $8129 STA $00:4306    DAS0 high
+      0xA9u, 0x7Fu,                // $812D LDA #$7F
+      0x8Fu, 0x04u, 0x43u, 0x00u,  // $812F STA $00:4304    A1B0
+      0xA9u, 0x10u,                // $8133 LDA #$10
+      0x8Fu, 0x05u, 0x43u, 0x00u,  // $8135 STA $00:4305    DAS0 low: 16
+      0xA9u, 0x01u,                // $8139 LDA #$01
+      0x8Fu, 0x0Bu, 0x42u, 0x00u,  // $813B STA $00:420B    MDMAEN
+      0xC2u, 0x20u,                // $813F REP #$20
+      0x60u,                       // $8141 RTS
+  });
+  put(rom, 0x1000u, {0x10u, 0x21u, 0x32u, 0x43u, 0x54u, 0x65u, 0x76u, 0x87u,
+                     0x98u, 0xA9u, 0xBAu, 0xCBu, 0xDCu, 0xEDu, 0xFEu, 0x0Fu});  // $9000: the bytes
+  put(rom, 0x1100u, {0x22u, 0x00u, 0x04u, 0x00u, 0x18u, 0x00u, 0x18u, 0x00u});  // $9100: CGDATA, OAMDATA, VMDATAL twice
+  return rom;
+}
+
+// The recorded palette file keeps its directory, kind and class; the classes
+// the toolkit's runs built its bytes into for the other entries follow `also`
+// in class order, whatever order the pieces arrived in.
+TEST(RomEnumerate, AnOutcomeSentElsewhereJoinsTheRecordedFileUnderItsClass) {
+  const CartridgeDisassembly d = disassembled(crossClassImage());
+  const std::string manifest = renderManifest(d);
+  const auto file = std::find_if(d.assets.begin(), d.assets.end(),
+                                 [](const AssetFile& a) { return a.file == "cgram/00_9000.bin"; });
+  ASSERT_NE(file, d.assets.end()) << manifest;
+  EXPECT_EQ(file->kind, MovedKind::Staged);
+  EXPECT_EQ(file->classes, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(file->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  EXPECT_NE(manifest.find("asset    cgram/00_9000.bin Cgram as staged from $00:9000 bytes 16 also Vram+Oam\n"),
+            std::string::npos)
+      << manifest;
+  const std::vector<std::string> lines = enumeratedLinesBy(manifest, "sub_008100");
+  const auto names = [&](const std::string& to, const std::string& value) {
+    return std::any_of(lines.begin(), lines.end(), [&](const std::string& line) {
+      return line.starts_with("enumerated cgram/00_9000.bin ") &&
+             line.find(" to " + to + " by sub_008100 " + value + " ") != std::string::npos;
+    });
+  };
+  EXPECT_TRUE(names("Cgram", "X=$0002")) << manifest;
+  EXPECT_TRUE(names("Oam", "X=$0002")) << manifest;
+  EXPECT_TRUE(names("Cgram", "X=$0004,$0006")) << manifest;
+  EXPECT_TRUE(names("Vram", "X=$0004,$0006")) << manifest;
+  const auto outcome = [&](const std::vector<std::uint32_t>& values) -> const EnumeratedRun* {
+    const auto found = std::find_if(d.enumerated.begin(), d.enumerated.end(), [&](const EnumeratedRun& r) {
+      return r.routine == 0x008100u && r.values == values;
+    });
+    return found == d.enumerated.end() ? nullptr : &*found;
+  };
+  const EnumeratedRun* oam = outcome({2});
+  ASSERT_NE(oam, nullptr) << manifest;
+  ASSERT_EQ(oam->extents.size(), 1u);
+  EXPECT_EQ(oam->extents[0].classes, (std::vector<RegisterClass>{RegisterClass::Cgram, RegisterClass::Oam}));
+  const EnumeratedRun* vram = outcome({4, 6});
+  ASSERT_NE(vram, nullptr) << manifest;
+  ASSERT_EQ(vram->extents.size(), 1u);
+  EXPECT_EQ(vram->extents[0].classes, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Cgram}));
+}
+
+// A loader indexed in X over {0, 2, 4, 6} that copies sixteen bytes from the
+// blob its entry points at into `$7F:0000` and sends them to the palette. Its
+// table points at `$9000`, `$9014`, `$900A` and `$900A`; reset calls it for
+// entries 0 and 1, so the run records two files with four bytes between them,
+// and the last two entries' bytes lie across both. Sources that touch are one
+// run of bytes, so the gap is what keeps the two files apart.
+std::vector<std::uint8_t> spanningImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {
+      0x18u, 0xFBu,                // $8000 CLC / XCE
+      0xC2u, 0x30u,                // $8002 REP #$30
+      0xA2u, 0xFFu, 0x1Fu,         // $8004 LDX #$1FFF
+      0x9Au,                       // $8007 TXS
+      0xA9u, 0x00u, 0x00u,         // $8008 LDA #$0000
+      0x5Bu,                       // $800B TCD
+      0xAFu, 0x10u, 0x00u, 0x7Eu,  // $800C LDA $7E:0010
+      0x29u, 0x06u, 0x00u,         // $8010 AND #$0006
+      0xAAu,                       // $8013 TAX             X in {0, 2, 4, 6}: entry 0
+      0xA0u, 0x00u, 0x00u,         // $8014 LDY #$0000
+      0x20u, 0x00u, 0x81u,         // $8017 JSR !$8100
+      0xAFu, 0x10u, 0x00u, 0x7Eu,  // $801A LDA $7E:0010
+      0x09u, 0x02u, 0x00u,         // $801E ORA #$0002
+      0x29u, 0x06u, 0x00u,         // $8021 AND #$0006
+      0xAAu,                       // $8024 TAX             X in {2, 6}: entry 1
+      0xA0u, 0x00u, 0x00u,         // $8025 LDY #$0000
+      0x20u, 0x00u, 0x81u,         // $8028 JSR !$8100
+      0x80u, 0xFEu,                // $802B BRA *
+  });
+  put(rom, 0x0100u, {
+      0xBFu, 0x00u, 0x82u, 0x00u,  // $8100 LDA $00:8200,X  sub_008100: the blob's address
+      0x85u, 0x00u,                // $8104 STA $00         the pointer; its bank at $02 powers on zero
+      0xE2u, 0x20u,                // $8106 SEP #$20
+      0xA0u, 0x00u, 0x00u,         // $8108 LDY #$0000
+      0xA2u, 0x00u, 0x00u,         // $810B LDX #$0000
+      0xB7u, 0x00u,                // $810E LDA [$00],Y
+      0x9Fu, 0x00u, 0x00u, 0x7Fu,  // $8110 STA $7F:0000,X
+      0xC8u,                       // $8114 INY
+      0xE8u,                       // $8115 INX
+      0xE0u, 0x10u, 0x00u,         // $8116 CPX #$0010
+      0xD0u, 0xF3u,                // $8119 BNE $810E
+  });
+  putPaletteSend(rom, 0x011Bu, 16);  // $811B
+  put(rom, 0x0147u, {0x60u});         // $8147 RTS
+  put(rom, 0x0200u, {0x00u, 0x90u, 0x14u, 0x90u, 0x0Au, 0x90u, 0x0Au, 0x90u});  // $8200: $9000, $9014, $900A, $900A
+  for (std::size_t i = 0; i < 36; ++i) rom[0x1000u + i] = static_cast<std::uint8_t>(0x40u + i);  // $9000: two blobs
+  return rom;
+}
+
+// A piece whose bytes lie across two recorded files would merge them: it is
+// refused, and both files stand as the run recorded them.
+TEST(RomEnumerate, AnEnumeratedPieceAcrossTwoRecordedFilesIsRefused) {
+  const CartridgeDisassembly d = disassembled(spanningImage());
+  const std::string manifest = renderManifest(d);
+  EXPECT_TRUE(hasNote(d.notes, "enumerate sub_008100 X=$0004,$0006: its source at $00:900A lies across "
+                               "cgram/00_9000.bin and cgram/00_9014.bin; not lifted"))
+      << manifest;
+  for (const std::string name : {"cgram/00_9000.bin", "cgram/00_9014.bin"}) {
+    const auto file = std::find_if(d.assets.begin(), d.assets.end(), [&](const AssetFile& a) { return a.file == name; });
+    ASSERT_NE(file, d.assets.end()) << name << "\n" << manifest;
+    EXPECT_EQ(file->bytes.size(), 16u) << name;
+    EXPECT_TRUE(file->also.empty()) << name;
+  }
+  for (const std::string& line : enumeratedLinesBy(manifest, "sub_008100")) {
+    EXPECT_EQ(line.find("X=$0004"), std::string::npos) << line;
+  }
+}
+
 TEST(RomEnumerate, LandingsThatMoveAFileOrChangeItsFormAreRefused) {
   const PortLanding map{.memory = PortMemory::Vram,
                         .lowest = 0,

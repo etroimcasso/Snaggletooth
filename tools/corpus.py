@@ -85,8 +85,9 @@ def facts(tree):
     # moved <site> channel <n> <direction> <register> <name> <class> memory <address>
     #       <step> bytes <n> as <kind> times <n>
     moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
-    # asset <path> <class> as <kind> from <address> bytes <n>
-    assets = [(w[1].split("/")[0], int(w[8]), w[4], w[1].rsplit(".", 1)[-1]) for w in manifestLines(tree, "asset", 9)]
+    # asset <path> <class> as <kind> from <address> bytes <n> [also <class>]
+    assets = [(w[1].split("/")[0], int(w[8]), w[4], w[1].rsplit(".", 1)[-1])
+              for w in manifestLines(tree, "asset", 9) + manifestLines(tree, "asset", 11)]
     # landed <site> channel <n> memory <address> bytes <n> as <kind> at <lowest>-<highest>
     #        in <area> times <n> depth <2|4|8|none>
     landed = [(w[13], w[17]) for w in manifestLines(tree, "landed", 18)]
@@ -154,7 +155,6 @@ ENUMERATION_NOTES = [
     ("the lift disagreed", "the lift disagreed with the machine at"),
     ("wrote no work RAM", "wrote no byte of work RAM; nothing to lift"),
     ("an extent never carried", "extents the run never carried; not lifted"),
-    ("would add a class to a recorded file", "would add "),
     ("would move a recorded file", "would move "),
     ("would change a recorded file's form", "would change the form of "),
     ("lies across two recorded files", "lies across "),

@@ -817,7 +817,9 @@ pointed at, to any register. The file lives under `vram/`, `cgram/`, `oam/` or
 `apu/` for a transfer, `hdma/` for a table or a block — and `staged/` for a
 source the run's shadow named whose bytes were built into data for two
 classes, the next section — and is named `<bank>_<offset>.bin` after the
-address of its first byte. A VRAM file goes further, by
+address of its first byte. A file a routine the toolkit ran builds another
+class's data from keeps its place and its class, and says so after `also` on
+its line ([§What the toolkit ran](#what-the-toolkit-ran)). A VRAM file goes further, by
 [where its bytes landed](#what-a-run-moved): when every landing the run saw
 drawn of every range the file's bytes went through — its own ranges, or the
 ranges built from it, or the stream that carried it — lies in a layer's
@@ -1192,12 +1194,14 @@ Values whose extents are the same in every field are one outcome, and the
 manifest gives it one line with its values written as runs, `X=$0000-$000E/2`.
 
 The run's own files are grouped first, exactly as they are without the
-toolkit, and an outcome's sources never change one. A source that overlaps
-one recorded file joins it, under the same rules as a staged range's, only
-where its class is one of the file's and its landings leave the file's
-directory and form as they are; the file then widens to hold it. A source
-that would add a class, move the file or change its form, or that lies across
-two recorded files, is refused with a `note` naming the file. Sources no
+toolkit, and an outcome's sources never change one but by widening it. A
+source that overlaps one recorded file joins it, under the same rules as a
+staged range's, where its landings leave the file's directory and form as they
+are; the file then widens to hold it, named for its new first byte. A class of
+the source the run's own transfers never carried is written after `also` on
+the file's `asset` line, and the file keeps its directory, kind and class. A
+source that would move the file or change its form, or that lies across two
+recorded files, is refused with a `note` naming the file. Sources no
 recorded file holds are files of their own, of the kind `enumerated`. After
 the run's own previews, a preview of its own beside each file shows what each
 outcome built, in the form the first recorded extent holding its bytes took.
@@ -1233,8 +1237,8 @@ asset    vram/00_8380.bin Vram as staged from $00:8380 bytes 34
 asset    vram/00_8400.bin Vram as enumerated from $00:8400 bytes 34
 asset    vram/00_8440.bin Vram as staged from $00:8440 bytes 18
 asset    staged/00_8A00.bin Cgram+Oam as enumerated from $00:8A00 bytes 16
-asset    cgram/00_8A20.bin Cgram as staged from $00:8A20 bytes 16
-asset    oam/00_8A40.bin Oam as staged from $00:8A40 bytes 16
+asset    cgram/00_8A10.bin Cgram as staged from $00:8A10 bytes 34 also Vram+Oam
+asset    oam/00_8A40.bin Oam as staged from $00:8A40 bytes 16 also Cgram
 asset    staged/00_8A60.bin Cgram+Oam as enumerated from $00:8A60 bytes 16
 asset    vram/00_9000.bin Vram as staged from $00:9000 bytes 16
 asset    vram/00_9100.bin Vram as staged from $00:9100 bytes 50
@@ -1249,23 +1253,32 @@ builds past the thirty-two bytes the run saw the loader write, so each is
 refused. The loader that loads its own index from work RAM is not run, and
 neither is reset nor the routine reset jumps to. The third and fourth loaders
 read the same four blobs; the run sent the second to the palette and the
-third to the sprite table, each a file of its one class, and the two entries
-that would add the other class to those files are refused. The first and
-fourth blobs, which no recorded file holds, are each one file under `staged/`
-named for both. The fifth loader, which the vertical-blank handler calls,
-builds each entry's blob at `$7F:0400`: its recorded file is the run's entry,
-`vram/00_9100.bin`, two more entries are files of their own, and the two that
-read from the palette and sprite blobs are refused. In
-the bank file an `enumerated` file's `INCBIN` says what it is:
+third to the sprite table, each a file of its one class. The palette loader's
+entry for the third blob joins the sprite file and the sprite loader's entry
+for the second joins the palette file, and each file's line names the other
+class after `also`. The first and fourth blobs, which no recorded file holds,
+are each one file under `staged/` named for both. The fifth loader, which the
+vertical-blank handler calls, builds each entry's blob at `$7F:0400`: its
+recorded file is the run's entry, `vram/00_9100.bin`, and two more entries are
+files of their own. Entry 3 reads from `$8A10`, two header bytes before the
+palette file, which widens to `$8A10` and adds VRAM after `also`; its piece
+that carries the recorded extent's VRAM landings would change the palette
+file's form and is refused. Entry 4 reads from `$8A30`, across the widened
+palette file and the sprite file, and is refused. In the bank file an
+`enumerated` file's `INCBIN` says what it is, and a recorded file's names the
+classes the toolkit's runs built from it:
 
 ```
 ; ---- $00:8300-$00:8321: 34 bytes a routine builds Vram data from, for an entry the run did not select, in vram/00_8300.bin
         INCBIN "vram/00_8300.bin"
+; ---- $00:8A10-$00:8A31: 34 bytes a routine built Cgram data from, which a routine builds Vram and Oam data from for entries the run did not select, in cgram/00_8A10.bin
+        INCBIN "cgram/00_8A10.bin"
 ```
 
 An `enumerated` file's evidence is the run's, written fresh; its `asset` line
 is read back whole, as a `staged` line is, so the file is kept through a
-disassembly without a run.
+disassembly without a run. A `staged` line's `also` classes are read back with
+it the same way.
 
 **Cost.** The second run costs what the first does, about the time it
 emulates, plus a copy of the machine — a quarter of a megabyte — and of the

@@ -612,6 +612,7 @@ beside it.
 
 ```
 asset    <path> <class> as dma | table | indirect | staged | stream | proven | enumerated from <address> bytes <n>
+         [also <class>]
 ```
 
 A file lifted out of a bank file: a range the run saw an engine carry from the
@@ -640,7 +641,11 @@ one kind of file whose evidence is the code alone; `enumerated`, the image
 bytes a routine read when the toolkit ran it for an entry the run did not
 select (§2.21), a file no other kind of evidence holds. After `from`,
 the address the tree places the file's first byte at, and after `bytes`, how
-many it holds. The `moved` lines whose memory lies within a file are its uses,
+many it holds. After `also`, where there is one, the classes a routine the
+toolkit ran built the file's bytes into that the run's own transfers never
+reached, joined by `+` as the class field's are: the file is named and placed
+for the run's classes, and these are the toolkit's finding beside them
+(§2.21). The `moved` lines whose memory lies within a file are its uses,
 and say which instruction sent it where and how many times; a `staged` line
 says what a routine built from it; a `proven` file's use is the `dma` line
 whose source and count name its bytes. One line per file, in address order. Which
@@ -703,7 +708,10 @@ being what keeps the file, and for a `proven` file they are the trace's, which
 finds the same transfer every time; a `staged`, `stream` or `enumerated` file's
 evidence is written fresh (§2.15, §2.16, §2.21), so its line is read back whole
 and keeps the file from one disassembly to the next until a run lifts a wider
-file over its bytes.
+file over its bytes. The `also` classes are read back with a `staged` or
+`stream` line and written fresh with the rest of any other line; an
+`enumerated` line's class field already names every class its file's pieces
+have, so it is never written with them, and `also` read on one is dropped.
 
 ### 2.13 Where the CPU arrived
 
@@ -1273,12 +1281,14 @@ and the transfers that carried them — are one outcome.
 
 The run's own files are grouped first, exactly as a disassembly without the
 toolkit's runs groups them, and the toolkit's pieces never change one but by
-widening it. A piece that overlaps one recorded file joins it when its class
-is one of the file's and its landings leave the file's directory and the
-facts its form is chosen by as they are; the file widens to hold it, and its
-path is named for its new first byte. A piece that would add a class to the
-file, move it to another directory or change its form, or that lies across
-two recorded files, is refused with a note naming the file. Pieces that
+widening it. A piece that overlaps one recorded file joins it when its
+landings leave the file's directory and the facts its form is chosen by as
+they are; the file widens to hold it, and its path is named for its new first
+byte. A class of the piece the run's own transfers never carried is written
+after `also` on the file's `asset` line (§2.12); the file keeps its directory,
+its kind and its class. A piece that would move the file to another directory
+or change its form, or that lies across two recorded files, is refused with a
+note naming the file. Pieces that
 overlap no recorded file are grouped among themselves as files of the kind
 `enumerated` (§2.12).
 
@@ -1313,7 +1323,6 @@ enumerate <label> <R>=$v: wrote no byte of work RAM; nothing to lift
 enumerate <label>: <k> value(s) wrote <ranges>, extents the run never carried; not lifted
 enumerate <label>: the second run did not enter it; nothing run
 run: the second run executed <n> instructions and <m> divergences where the first executed <n'> and <m'>; nothing enumerated
-enumerate <label> <R>=<values>: its source at $BB:XXXX would add <class> to <file>; not lifted
 enumerate <label> <R>=<values>: its source at $BB:XXXX would move <file> to <directory>/; not lifted
 enumerate <label> <R>=<values>: its source at $BB:XXXX would change the form of <file>; not lifted
 enumerate <label> <R>=<values>: its source at $BB:XXXX lies across <file> and <file>; not lifted
@@ -1341,7 +1350,8 @@ dma $BB:XXXX channel <n>: the code proves $BB:XXXX <step> bytes <n>; nothing wro
 ```
 
 The `enumerating` cartridge's five loaders, run for one second; its notes,
-then its lines:
+the `asset` lines of the two recorded files the toolkit's pieces joined, then
+its lines:
 
 ```
 note     enumerate reset: entered by a jump, no return to end at; not run
@@ -1356,15 +1366,19 @@ note     enumerate sub_008100: 5 values wrote $7E:0000-$7E:0001, $7E:0004-$7E:00
 note     enumerate sub_008800: 4 values wrote $7E:0000-$7E:0001, extents the run never carried; not lifted
 note     enumerate sub_008B00: 4 values wrote $7E:0000-$7E:0001, extents the run never carried; not lifted
 note     enumerate sub_008D00: 5 values wrote $7E:0000-$7E:0001, $7E:0004-$7E:0007, $7F:0420-$7F:042F, extents the run never carried; not lifted
-note     enumerate sub_008D00 A=$0003: its source at $00:8A10 would add Vram to cgram/00_8A20.bin; not lifted
-note     enumerate sub_008B00 A=$01: its source at $00:8A20 would add Oam to cgram/00_8A20.bin; not lifted
-note     enumerate sub_008D00 A=$0004: its source at $00:8A30 would add Vram to oam/00_8A40.bin; not lifted
-note     enumerate sub_008800 A=$0002: its source at $00:8A40 would add Cgram to oam/00_8A40.bin; not lifted
+note     enumerate sub_008D00 A=$0003: its source at $00:8A10 would change the form of cgram/00_8A10.bin; not lifted
+note     enumerate sub_008D00 A=$0004: its source at $00:8A30 lies across cgram/00_8A10.bin and oam/00_8A40.bin; not lifted
+
+asset    cgram/00_8A10.bin Cgram as staged from $00:8A10 bytes 34 also Vram+Oam
+asset    oam/00_8A40.bin Oam as staged from $00:8A40 bytes 16 also Cgram
 
 enumerated vram/00_8380.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0004 entered from $00:804A exact
 enumerated vram/00_8440.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$000A entered from $00:804A exact
-enumerated cgram/00_8A20.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0001 entered from $00:8096 exact
+enumerated cgram/00_8A10.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0003 entered from $00:8E29 exact
+enumerated cgram/00_8A10.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$01 entered from $00:80DD exact
+enumerated cgram/00_8A10.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0001 entered from $00:8096 exact
 enumerated oam/00_8A40.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$02 entered from $00:80DD exact
+enumerated oam/00_8A40.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0002 entered from $00:8096 exact
 enumerated vram/00_9100.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0000 entered from $00:8E29 exact
 enumerated vram/00_8300.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0000 entered from $00:804A exact
 enumerated vram/00_8340.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0002 entered from $00:804A exact
@@ -1389,16 +1403,21 @@ and fourth loaders' index is A,
 bounded by a compare and a branch at sixteen bits and by a mask at eight, and
 both read the same four blobs. The run sent the second blob to the palette and
 the third to the sprite table, each a file of its one class; the palette
-loader's third blob and the sprite loader's second would add a class to those
-files and are refused; the first and fourth blobs, which no recorded file
-holds, are each one file under `staged/` with a line for each class. The
+loader's third blob joins the sprite file and the sprite loader's second
+joins the palette file, and each file's line says `also` for the class the
+other loader built from it; the first and fourth blobs, which no recorded
+file holds, are each one file under `staged/` with a line for each class. The
 fifth loader is called from the vertical-blank handler with an index in A
 below five, and writes X, which the handler bounds, before it reads it. Entry
 0 is the run's: it builds forty-eight bytes and sends thirty-two, which are
 the run's file, and the sixteen past them are scratch. Entry 1 sends all
 forty-eight on its own channel, a file of its own; entry 2 sends sixteen, and
-the thirty-two the recorded extent holds are its file. Entries 3 and 4 read
-from the blobs the palette and sprite files hold and would add VRAM to them.
+the thirty-two the recorded extent holds are its file. Entry 3 reads its two
+header bytes and thirty-two from `$8A10`, over the palette file: the file
+widens to `$8A10` and adds VRAM after `also`. The same outcome's piece under
+the recorded extent carries that extent's VRAM landings into a file with
+none, and is refused for the form. Entry 4 reads from `$8A30`, which now lies
+across the widened palette file and the sprite file, and is refused.
 The second loader loads its own index from work RAM, and its caller bounds
 nothing.
 
@@ -1430,8 +1449,8 @@ When the disassembler runs over a directory that holds a manifest, it reads:
   address and length takes the path the line gives it, so a name a person gave
   a file survives; a `dma`, `table`, `indirect` or `proven` line matching no file this
   run lifts is dropped, and a `note` says so — and a `staged`, `stream` or
-  `enumerated` line whole, the file lifted again as the line records it unless
-  this run lifts a file over its bytes;
+  `enumerated` line whole, its `also` classes with it, the file lifted again as
+  the line records it unless this run lifts a file over its bytes;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
 - `image` and `checksum`, and refuses to run when the image it was given is not

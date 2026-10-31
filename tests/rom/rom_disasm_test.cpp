@@ -1479,16 +1479,41 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
   EXPECT_NE(error.find("$BB:XXXX"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $00:9000 bytes 0\n", error).has_value());
   EXPECT_NE(error.find("not a byte count"), std::string::npos);
+
+  // The classes after `also`, read in class order whatever order they are written in.
+  const std::optional<ManifestInput> also =
+      parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also Oam+Vram\n", error);
+  ASSERT_TRUE(also.has_value()) << error;
+  ASSERT_EQ(also->assets.size(), 1u);
+  EXPECT_EQ(also->assets[0].classes, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(also->assets[0].also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also Tiles\n", error).has_value());
+  EXPECT_NE(error.find("not a register class"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also Cgram\n", error).has_value());
+  EXPECT_NE(error.find("the file's own class"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also\n", error).has_value());
+  EXPECT_NE(error.find("an asset is a path"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 more Oam\n", error).has_value());
+  EXPECT_NE(error.find("an asset is a path"), std::string::npos);
+  // A parsed `also` renders back in class order.
+  CartridgeDisassembly withAlso = d;
+  const auto table = std::find_if(withAlso.assets.begin(), withAlso.assets.end(),
+                                  [](const AssetFile& a) { return a.file == "hdma/00_9712.bin"; });
+  ASSERT_NE(table, withAlso.assets.end());
+  table->also = also->assets[0].also;
+  EXPECT_NE(renderManifest(withAlso).find(
+                "asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2 also Vram+Oam\n"),
+            std::string::npos);
 }
 
 TEST(RomAssets, APersonsPathSurvivesARunAndAnOrphanIsDropped) {
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Dma},
                     ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Dma},
                     ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma}};
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Dma}};
   const CartridgeDisassembly d = lifted(liftingImage(), request);
   EXPECT_NE(assetNamed(d, "vram/tiles.bin"), nullptr);
   EXPECT_EQ(assetNamed(d, "vram/00_9000.bin"), nullptr);
@@ -1732,7 +1757,7 @@ TEST(RomAssets, AStagedFileTheNextRunLiftsWiderIsTheWiderFile) {
   // file over the same bytes names the wider file, and no note is owed.
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "vram/two.bin", .first = 0x009100u, .bytes = 2,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Staged}};
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Staged}};
   const CartridgeDisassembly d = stagedLift(request);
   EXPECT_EQ(assetNamed(d, "vram/two.bin"), nullptr);
   EXPECT_NE(assetNamed(d, "vram/00_9100.bin"), nullptr);
@@ -2051,9 +2076,9 @@ TEST(RomAssets, AProvenTransferTheRunContradictsIsNotedAndTheRunsRangeIsLifted) 
 TEST(RomAssets, AProvenFilesPathSurvivesAndAnOrphanIsDropped) {
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "oam/sprites.bin", .first = 0x009300u, .bytes = 544,
-                                  .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven},
+                                  .classes = {RegisterClass::Oam}, .also = {}, .kind = MovedKind::Proven},
                     ManifestAsset{.file = "oam/gone.bin", .first = 0x009500u, .bytes = 5,
-                                  .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven}};
+                                  .classes = {RegisterClass::Oam}, .also = {}, .kind = MovedKind::Proven}};
   const CartridgeDisassembly d = declared(request);
   // The name is the person's; the extension is the form's, and the change is said.
   EXPECT_NE(assetNamed(d, "oam/sprites.oam"), nullptr) << renderManifest(d);
@@ -2810,26 +2835,84 @@ TEST(RomDisasm, AnEnumeratedSourceIsAFileOfItsKind) {
 // the same bytes join them, and the kind stays `staged`.
 TEST(RomDisasm, AnEnumeratedPieceJoinsAStagedFile) {
   const CartridgeDisassembly& d = enumeratingLift();
-  for (const char* file : {"vram/00_8380.bin", "vram/00_8440.bin", "staged/00_8A20.bin", "staged/00_8A40.bin"}) {
+  for (const char* file :
+       {"vram/00_8380.bin", "vram/00_8440.bin", "cgram/00_8A10.bin", "oam/00_8A40.bin", "vram/00_9100.bin"}) {
     const AssetFile* asset = assetNamed(d, file);
-    ASSERT_NE(asset, nullptr) << file;
+    ASSERT_NE(asset, nullptr) << file << "\n" << renderManifest(d);
     EXPECT_EQ(asset->kind, MovedKind::Staged) << file;
   }
-  const AssetFile* both = assetNamed(d, "staged/00_8A00.bin");
-  ASSERT_NE(both, nullptr);
-  EXPECT_EQ(both->kind, MovedKind::Enumerated) << "a group of the toolkit's pieces alone";
-  EXPECT_EQ(both->classes, (std::vector<RegisterClass>{RegisterClass::Cgram, RegisterClass::Oam}));
+  for (const char* file : {"staged/00_8A00.bin", "staged/00_8A60.bin"}) {
+    const AssetFile* both = assetNamed(d, file);
+    ASSERT_NE(both, nullptr) << file;
+    EXPECT_EQ(both->kind, MovedKind::Enumerated) << file << ": a group of the toolkit's pieces alone";
+    EXPECT_EQ(both->classes, (std::vector<RegisterClass>{RegisterClass::Cgram, RegisterClass::Oam})) << file;
+  }
 }
 
-TEST(RomDisasm, AnEnumeratedLineIsWrittenPerFileExtentClassAndValue) {
+// A recorded file a routine the toolkit ran builds another class's data from
+// keeps its directory, kind and class, widens to every byte its pieces read,
+// and names the other classes after `also`. A piece that would change the
+// file's form, or that lies across two recorded files, is refused.
+TEST(RomDisasm, AnEnumeratedPieceOfAnotherClassJoinsTheRecordedFile) {
+  const CartridgeDisassembly& d = enumeratingLift();
+  const std::string manifest = renderManifest(d);
+  const AssetFile* palette = assetNamed(d, "cgram/00_8A10.bin");
+  ASSERT_NE(palette, nullptr) << manifest;
+  EXPECT_EQ(palette->kind, MovedKind::Staged);
+  EXPECT_EQ(palette->classes, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(palette->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  EXPECT_EQ(palette->first, 0x008A10u);
+  EXPECT_EQ(palette->bytes.size(), 34u) << "the fifth loader's entry 3, its two header bytes and thirty-two";
+  const AssetFile* sprites = assetNamed(d, "oam/00_8A40.bin");
+  ASSERT_NE(sprites, nullptr) << manifest;
+  EXPECT_EQ(sprites->kind, MovedKind::Staged);
+  EXPECT_EQ(sprites->classes, (std::vector<RegisterClass>{RegisterClass::Oam}));
+  EXPECT_EQ(sprites->also, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(sprites->first, 0x008A40u);
+  EXPECT_EQ(sprites->bytes.size(), 16u);
+  for (const char* file : {"vram/00_8380.bin", "staged/00_8A00.bin"}) {
+    const AssetFile* asset = assetNamed(d, file);
+    ASSERT_NE(asset, nullptr) << file;
+    EXPECT_TRUE(asset->also.empty()) << file;
+  }
+  for (const std::string& note : d.notes) EXPECT_EQ(note.find("would add"), std::string::npos) << note;
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "enumerate sub_008D00 A=$0003: its source at $00:8A10 would change the form of "
+                      "cgram/00_8A10.bin; not lifted"),
+            d.notes.end())
+      << "the piece carrying the recorded VRAM extent's landings into a file with none";
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "enumerate sub_008D00 A=$0004: its source at $00:8A30 lies across cgram/00_8A10.bin and "
+                      "oam/00_8A40.bin; not lifted"),
+            d.notes.end());
+  for (const char* line : {
+           "asset    cgram/00_8A10.bin Cgram as staged from $00:8A10 bytes 34 also Vram+Oam\n",
+           "asset    oam/00_8A40.bin Oam as staged from $00:8A40 bytes 16 also Cgram\n",
+           "enumerated cgram/00_8A10.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$01 entered from $00:80DD exact\n",
+           "enumerated cgram/00_8A10.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0003 entered from $00:8E29 "
+           "exact\n",
+           "enumerated oam/00_8A40.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0002 entered from $00:8096 "
+           "exact\n",
+       }) {
+    EXPECT_NE(manifest.find(line), std::string::npos) << line;
+  }
+  EXPECT_EQ(manifest.find(" by sub_008D00 A=$0004 "), std::string::npos);
+}
+
+TEST(RomDisasm, AnEnumeratedLineIsWrittenPerFileExtentClassAndOutcome) {
   const std::vector<std::string> lines = linesStarting(renderManifest(enumeratingLift()), "enumerated ");
-  EXPECT_EQ(lines.size(), 13u);
+  EXPECT_EQ(lines.size(), 17u);
   for (const char* line : {
            "enumerated vram/00_8300.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0000 entered from $00:804A exact",
            "enumerated vram/00_8380.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0004 entered from $00:804A exact",
            "enumerated staged/00_8A00.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0000 entered from $00:8096 "
            "exact",
            "enumerated staged/00_8A00.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$00 entered from $00:80DD exact",
+           "enumerated cgram/00_8A10.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0001 entered from $00:8096 "
+           "exact",
+           "enumerated cgram/00_8A10.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$01 entered from $00:80DD exact",
+           "enumerated cgram/00_8A10.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0003 entered from $00:8E29 exact",
+           "enumerated oam/00_8A40.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0002 entered from $00:8096 exact",
        }) {
     EXPECT_NE(std::find(lines.begin(), lines.end(), line), lines.end()) << line;
   }
@@ -2861,13 +2944,55 @@ TEST(RomDisasm, AnEnumeratedAssetLineIsKeptWithoutARun) {
   EXPECT_TRUE(d.enumerated.empty()) << "the runs themselves are a run's";
 }
 
+// Without a run, a `staged` line's `also` classes are kept with its file, as
+// the rest of the line is.
+TEST(RomAssets, AnAlsoClassIsKeptWithTheLineWithoutARun) {
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(enumeratingLift()), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  const auto kept = std::find_if(input->assets.begin(), input->assets.end(),
+                                 [](const ManifestAsset& a) { return a.file == "cgram/00_8A10.bin"; });
+  ASSERT_NE(kept, input->assets.end());
+  EXPECT_EQ(kept->kind, MovedKind::Staged);
+  EXPECT_EQ(kept->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  CartridgeRequest again;
+  again.rom = rom;
+  again.captureSound = false;
+  again.observeRun = false;
+  again.moved = input->moved;
+  again.assets = input->assets;
+  const CartridgeDisassembly d = disassembleCartridge(again);
+  const AssetFile* palette = assetNamed(d, "cgram/00_8A10.bin");
+  ASSERT_NE(palette, nullptr) << renderManifest(d);
+  EXPECT_EQ(palette->bytes.size(), 34u);
+  EXPECT_EQ(palette->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  const AssetFile* sprites = assetNamed(d, "oam/00_8A40.bin");
+  ASSERT_NE(sprites, nullptr) << renderManifest(d);
+  EXPECT_EQ(sprites->also, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_NE(renderManifest(d).find("asset    cgram/00_8A10.bin Cgram as staged from $00:8A10 bytes 34 also Vram+Oam\n"),
+            std::string::npos)
+      << renderManifest(d);
+}
+
 // Beside a file what the kept values built is a preview of its own, after the
 // run's, and the run's preview stays as it was.
 TEST(RomDisasm, AnEnumeratedFileHasItsOwnPreview) {
   const CartridgeDisassembly& d = enumeratingLift();
-  const PreviewFile* recorded = previewNamed(d, "staged/00_8A20-palette.pal");
-  ASSERT_NE(recorded, nullptr);
+  const PreviewFile* recorded = previewNamed(d, "cgram/00_8A10-palette.pal");
+  ASSERT_NE(recorded, nullptr) << renderManifest(d);
+  EXPECT_EQ(recorded->of, "cgram/00_8A10.bin");
   EXPECT_EQ(recorded->contents, 1u);
+  // What the sprite loader's second entry built from the palette file's bytes,
+  // in the form its class gives.
+  const PreviewFile* sprites = previewNamed(d, "cgram/00_8A10-enumerated-oam.oam");
+  ASSERT_NE(sprites, nullptr) << renderManifest(d);
+  EXPECT_EQ(sprites->of, "cgram/00_8A10.bin");
+  EXPECT_EQ(sprites->form, "oam");
+  EXPECT_EQ(sprites->contents, 1u);
+  const std::vector<std::uint8_t> image = examples::enumeratingImage();
+  const std::vector<std::uint8_t> second(image.begin() + 0x0A20, image.begin() + 0x0A30);  // $8A20: sixteen bytes
+  EXPECT_EQ(textOf(sprites->written), formats::encodeOam(second).text);
   const PreviewFile* palette = previewNamed(d, "staged/00_8A00-enumerated-palette.pal");
   ASSERT_NE(palette, nullptr) << renderManifest(d);
   EXPECT_EQ(palette->of, "staged/00_8A00.bin");

@@ -60,20 +60,24 @@ What it shows, with a run of one second:
   build their recorded files, which stay `staged`. The other three are files of
   their own, `enumerated`. Every entry of the third and fourth loaders is kept.
   The run sent the second blob to the palette and the third to the sprite
-  table, each a file of its one class, and the entries that build those blobs
-  for their own class join them; the first and fourth blobs, which no recorded
-  file holds, are each one file under `staged/` with a preview of what each
-  value built beside it. Every entry of the fifth loader is kept: entry 0's
-  first 32 bytes are the run's file, `vram/00_9100.bin`; entry 1 sends all 48
-  on its own channel, a file of its own; entry 2's first 32, which the recorded
-  extent holds, are a file of their own.
+  table, each a file of its one class. Every entry that builds one of those
+  blobs joins its file: the palette loader's entry for the third blob makes the
+  sprite file's line say `also Cgram`, and the sprite loader's entry for the
+  second makes the palette file's say `also Oam`. The first and fourth blobs,
+  which no recorded file holds, are each one file under `staged/` with a
+  preview of what each value built beside it. Every entry of the fifth loader
+  is kept: entry 0's first 32 bytes are the run's file, `vram/00_9100.bin`;
+  entry 1 sends all 48 on its own channel, a file of its own; entry 2's first
+  32, which the recorded extent holds, are a file of their own; entry 3 reads
+  from `$8A10`, its two header bytes and the 32 after them, so the palette file
+  widens to `cgram/00_8A10.bin` and its line says `also Vram+Oam`.
 - **What is refused.** Entry 3 of the first loader writes `INIDISP`, a register
   the run never saw the loader write. Entry 6 never returns within a second of
   the master clock. Entry 7 writes past `$7F:001F`, outside what the run saw.
-  The third loader's entry 2 and the fourth's entry 1 would add a class to the
-  sprite and palette files, and the fifth loader's entries 3 and 4 would add
-  VRAM to them; each is a note naming the file, which stays as the run lifted
-  it.
+  The fifth loader's entry 3 is kept, but its piece that carries the recorded
+  VRAM extent's landings into the palette file would change that file's form,
+  and is a note naming the file. Entry 4 reads from `$8A30`, across the widened
+  palette file and the sprite file, and is a note naming both.
 - **What is scratch.** The pointer, the length and the count each loader keeps
   in the direct page, and the 16 bytes the fifth loader builds past what the
   run carried, are noted once for each loader as extents the run never carried.
