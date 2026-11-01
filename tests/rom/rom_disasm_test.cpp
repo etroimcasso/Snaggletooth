@@ -27,6 +27,7 @@
 #include "gtest/gtest.h"
 #include "ir/ir_text.h"
 #include "rom/rom_disasm.h"
+#include "rom/rom_text.h"
 
 namespace snaggletooth::disasm {
 namespace {
@@ -62,6 +63,16 @@ const Line* codeLineAt(const Listing& listing, Address address) {
     if (line.isCode && line.address == address) return &line;
   }
   return nullptr;
+}
+
+// The notes but the ones the toolkit's runs of the routines write: what the
+// lift refused.
+std::vector<std::string> refusals(const std::vector<std::string>& notes) {
+  std::vector<std::string> out;
+  for (const std::string& note : notes) {
+    if (note.rfind("enumerate ", 0) != 0) out.push_back(note);
+  }
+  return out;
 }
 
 }  // namespace
@@ -1468,16 +1479,41 @@ TEST(RomAssets, TheAssetLineIsWrittenAndReadBack) {
   EXPECT_NE(error.find("$BB:XXXX"), std::string::npos);
   EXPECT_FALSE(parseManifest("asset vram/x.bin Vram as dma from $00:9000 bytes 0\n", error).has_value());
   EXPECT_NE(error.find("not a byte count"), std::string::npos);
+
+  // The classes after `also`, read in class order whatever order they are written in.
+  const std::optional<ManifestInput> also =
+      parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also Oam+Vram\n", error);
+  ASSERT_TRUE(also.has_value()) << error;
+  ASSERT_EQ(also->assets.size(), 1u);
+  EXPECT_EQ(also->assets[0].classes, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(also->assets[0].also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also Tiles\n", error).has_value());
+  EXPECT_NE(error.find("not a register class"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also Cgram\n", error).has_value());
+  EXPECT_NE(error.find("the file's own class"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 also\n", error).has_value());
+  EXPECT_NE(error.find("an asset is a path"), std::string::npos);
+  EXPECT_FALSE(parseManifest("asset cgram/x.bin Cgram as staged from $00:8A12 bytes 32 more Oam\n", error).has_value());
+  EXPECT_NE(error.find("an asset is a path"), std::string::npos);
+  // A parsed `also` renders back in class order.
+  CartridgeDisassembly withAlso = d;
+  const auto table = std::find_if(withAlso.assets.begin(), withAlso.assets.end(),
+                                  [](const AssetFile& a) { return a.file == "hdma/00_9712.bin"; });
+  ASSERT_NE(table, withAlso.assets.end());
+  table->also = also->assets[0].also;
+  EXPECT_NE(renderManifest(withAlso).find(
+                "asset    hdma/00_9712.bin Cgram as indirect from $00:9712 bytes 2 also Vram+Oam\n"),
+            std::string::npos);
 }
 
 TEST(RomAssets, APersonsPathSurvivesARunAndAnOrphanIsDropped) {
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "vram/tiles.bin", .first = 0x009000u, .bytes = 80,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Dma},
                     ManifestAsset{.file = "vram/nowhere.bin", .first = 0x00C000u, .bytes = 5,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma},
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Dma},
                     ManifestAsset{.file = "vram/short.bin", .first = 0x009000u, .bytes = 64,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Dma}};
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Dma}};
   const CartridgeDisassembly d = lifted(liftingImage(), request);
   EXPECT_NE(assetNamed(d, "vram/tiles.bin"), nullptr);
   EXPECT_EQ(assetNamed(d, "vram/00_9000.bin"), nullptr);
@@ -1655,7 +1691,7 @@ TEST(RomAssets, ABufferTheCpuCarriesOutIsLiftedAsItsSourceNotAsAStream) {
   for (const AssetFile& asset : d.assets) {
     EXPECT_FALSE(asset.first == 0x009600u && asset.kind == MovedKind::Stream) << asset.file;
   }
-  EXPECT_TRUE(d.notes.empty()) << d.notes.front();  // and nothing was refused in its place
+  EXPECT_EQ(refusals(d.notes), std::vector<std::string>{});  // and nothing was refused in its place
   EXPECT_NE(renderManifest(d).find("asset    vram/00_9600.bin Vram as staged from $00:9600 bytes 16\n"),
             std::string::npos);
 }
@@ -1721,7 +1757,7 @@ TEST(RomAssets, AStagedFileTheNextRunLiftsWiderIsTheWiderFile) {
   // file over the same bytes names the wider file, and no note is owed.
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "vram/two.bin", .first = 0x009100u, .bytes = 2,
-                                  .classes = {RegisterClass::Vram}, .kind = MovedKind::Staged}};
+                                  .classes = {RegisterClass::Vram}, .also = {}, .kind = MovedKind::Staged}};
   const CartridgeDisassembly d = stagedLift(request);
   EXPECT_EQ(assetNamed(d, "vram/two.bin"), nullptr);
   EXPECT_NE(assetNamed(d, "vram/00_9100.bin"), nullptr);
@@ -2040,9 +2076,9 @@ TEST(RomAssets, AProvenTransferTheRunContradictsIsNotedAndTheRunsRangeIsLifted) 
 TEST(RomAssets, AProvenFilesPathSurvivesAndAnOrphanIsDropped) {
   CartridgeRequest request;
   request.assets = {ManifestAsset{.file = "oam/sprites.bin", .first = 0x009300u, .bytes = 544,
-                                  .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven},
+                                  .classes = {RegisterClass::Oam}, .also = {}, .kind = MovedKind::Proven},
                     ManifestAsset{.file = "oam/gone.bin", .first = 0x009500u, .bytes = 5,
-                                  .classes = {RegisterClass::Oam}, .kind = MovedKind::Proven}};
+                                  .classes = {RegisterClass::Oam}, .also = {}, .kind = MovedKind::Proven}};
   const CartridgeDisassembly d = declared(request);
   // The name is the person's; the extension is the form's, and the change is said.
   EXPECT_NE(assetNamed(d, "oam/sprites.oam"), nullptr) << renderManifest(d);
@@ -2120,7 +2156,7 @@ TEST(RomLandedFiles, EachFileIsWrittenInItsFormAndGivesItsBytesBack) {
                        "vram/00_A600.bin",     // the Mode 7 block
                    }))
       << renderManifest(d);
-  EXPECT_TRUE(d.notes.empty()) << d.notes.front();
+  EXPECT_EQ(refusals(d.notes), std::vector<std::string>{});
   for (const AssetFile& asset : d.assets) {
     const std::string extension = asset.file.substr(asset.file.find_last_of('.') + 1);
     formats::Bytes back;
@@ -2172,8 +2208,8 @@ TEST(RomLandedFiles, ATileSheetCarriesItsDepthAndTheRunsPalette) {
   EXPECT_EQ(image.image.palette, fourBit->palette);
   EXPECT_EQ(image.image.width, 32u) << "as wide as its tiles: three and a half is four";
   EXPECT_EQ(image.image.height, 8u) << "on one row";
-  // A file the palette RAM colours the other way stays exact: every other
-  // entry of the sprite palette is one colour, and every pixel keeps its index.
+  // A file the palette RAM colors the other way stays exact: every other
+  // entry of the sprite palette is one color, and every pixel keeps its index.
   const formats::Bytes back = formats::decodeTiles(sprites->written);
   ASSERT_TRUE(back.ok());
   EXPECT_TRUE(std::equal(sprites->bytes.begin(), sprites->bytes.end(), back.bytes.begin()));
@@ -2682,6 +2718,457 @@ TEST(RomDisasm, TheChipHalfCartridgeCallsIntoTheChipsHalf) {
   const Line* stp = codeLineAt(regionNamed(d, "bank_00.asm").listing, 0x00801Eu);
   ASSERT_NE(stp, nullptr);
   EXPECT_EQ(stp->instruction.text, "STP");
+}
+
+// ---- what the toolkit ran ---------------------------------------------------
+
+namespace {
+
+// The `enumerating` cartridge with a run of one second, disassembled once.
+const CartridgeDisassembly& enumeratingLift() {
+  static const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  static const CartridgeDisassembly d = [] {
+    CartridgeRequest request;
+    request.rom = rom;
+    request.captureSound = false;
+    request.observeRun = true;
+    request.runMasterCycles = 21'477'272u;
+    return disassembleCartridge(request);
+  }();
+  return d;
+}
+
+// The lines of a manifest that begin with `head`.
+std::vector<std::string> linesStarting(const std::string& manifest, std::string_view head) {
+  std::vector<std::string> out;
+  std::size_t at = 0;
+  while (at < manifest.size()) {
+    const std::size_t end = manifest.find('\n', at);
+    const std::string line = manifest.substr(at, end - at);
+    if (line.rfind(head, 0) == 0) out.push_back(line);
+    if (end == std::string::npos) break;
+    at = end + 1;
+  }
+  return out;
+}
+
+// A cartridge that copies sixteen bytes from `$9000` to `$7E:2000` and sends
+// them to VRAM, then, on a branch the run never falls through, sets up and
+// starts two more transfers: the same sixteen bytes to CGRAM, and eight bytes
+// from `$7E:3000`, which nothing writes, to OAM.
+std::vector<std::uint8_t> provenFromWorkRamImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {
+      0x18u, 0xFBu,                // $8000 CLC / XCE
+      0xE2u, 0x30u,                // $8002 SEP #$30
+      0xA2u, 0x00u,                // $8004 LDX #$00
+      0xBFu, 0x00u, 0x90u, 0x00u,  // $8006 LDA $00:9000,X
+      0x9Fu, 0x00u, 0x20u, 0x7Eu,  // $800A STA $7E:2000,X
+      0xE8u,                       // $800E INX
+      0xE0u, 0x10u,                // $800F CPX #$10
+      0xD0u, 0xF3u,                // $8011 BNE $8006
+  });
+  const auto transfer = [&](std::size_t at, std::uint8_t channel, std::uint8_t dmap, std::uint8_t bbad,
+                            std::uint8_t high, std::uint8_t length) {
+    const auto reg = [&](std::uint8_t offset) { return static_cast<std::uint8_t>((channel << 4) | offset); };
+    put(rom, at, {
+        0xA9u, dmap,   0x8Fu, reg(0), 0x43u, 0x00u,  // DMAPn
+        0xA9u, bbad,   0x8Fu, reg(1), 0x43u, 0x00u,  // BBADn
+        0xA9u, 0x00u,  0x8Fu, reg(2), 0x43u, 0x00u,  // A1Tn low
+        0xA9u, high,   0x8Fu, reg(3), 0x43u, 0x00u,  // A1Tn high
+        0xA9u, 0x7Eu,  0x8Fu, reg(4), 0x43u, 0x00u,  // A1Bn = $7E
+        0xA9u, length, 0x8Fu, reg(5), 0x43u, 0x00u,  // DASn low
+        0xA9u, 0x00u,  0x8Fu, reg(6), 0x43u, 0x00u,  // DASn high
+        0xA9u, static_cast<std::uint8_t>(1u << channel), 0x8Fu, 0x0Bu, 0x42u, 0x00u,  // MDMAEN
+    });
+  };
+  transfer(0x0013u, 0, 0x01u, 0x18u, 0x20u, 0x10u);  // $8013: $7E:2000, 16 -> VMDATAL; the run takes it
+  put(rom, 0x0043u, {
+      0xA9u, 0x00u, 0x8Fu, 0x10u, 0x00u, 0x7Eu,  // $8043 STA $7E:0010 = 0
+      0xAFu, 0x10u, 0x00u, 0x7Eu,              // $8049 LDA $7E:0010
+      0xF0u, 0x60u,                            // $804D BEQ $80AF
+  });
+  transfer(0x004Fu, 1, 0x00u, 0x22u, 0x20u, 0x10u);  // $804F: $7E:2000, 16 -> CGDATA; never started
+  transfer(0x007Fu, 2, 0x00u, 0x04u, 0x30u, 0x08u);  // $807F: $7E:3000, 8 -> OAMDATA; never started
+  put(rom, 0x00AFu, {0x80u, 0xFEu});                // $80AF BRA *
+  for (std::size_t i = 0; i < 16; ++i) rom[0x1000u + i] = static_cast<std::uint8_t>(0x30u + i);
+  return rom;
+}
+
+const CartridgeDisassembly& provenFromWorkRam() {
+  static const std::vector<std::uint8_t> rom = provenFromWorkRamImage();
+  static const CartridgeDisassembly d = [] {
+    CartridgeRequest request;
+    request.rom = rom;
+    request.captureSound = false;
+    request.observeRun = true;
+    request.runMasterCycles = 357'954u;
+    return disassembleCartridge(request);
+  }();
+  return d;
+}
+
+const DmaTransfer* dmaOnChannel(const CartridgeDisassembly& d, std::uint8_t channel) {
+  for (const DmaTransfer& dma : d.dmas) {
+    if (dma.channel == channel) return &dma;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+// What a routine builds for an entry the run did not select is lifted as the
+// image bytes it read, a file of its own kind, written as the bytes.
+TEST(RomDisasm, AnEnumeratedSourceIsAFileOfItsKind) {
+  const CartridgeDisassembly& d = enumeratingLift();
+  const AssetFile* blob = assetNamed(d, "vram/00_8300.bin");
+  ASSERT_NE(blob, nullptr) << renderManifest(d);
+  EXPECT_EQ(blob->kind, MovedKind::Enumerated);
+  EXPECT_EQ(blob->classes, std::vector<RegisterClass>{RegisterClass::Vram});
+  EXPECT_EQ(blob->bytes.size(), 34u) << "the kind, the length and the thirty-two bytes";
+  EXPECT_EQ(blob->written, blob->bytes);
+  EXPECT_NE(renderManifest(d).find("asset    vram/00_8300.bin Vram as enumerated from $00:8300 bytes 34\n"),
+            std::string::npos);
+}
+
+// The entries the run selected are the run's files: the toolkit's pieces of
+// the same bytes join them, and the kind stays `staged`.
+TEST(RomDisasm, AnEnumeratedPieceJoinsAStagedFile) {
+  const CartridgeDisassembly& d = enumeratingLift();
+  for (const char* file :
+       {"vram/00_8380.bin", "vram/00_8440.bin", "cgram/00_8A10.bin", "oam/00_8A40.bin", "vram/00_9100.bin"}) {
+    const AssetFile* asset = assetNamed(d, file);
+    ASSERT_NE(asset, nullptr) << file << "\n" << renderManifest(d);
+    EXPECT_EQ(asset->kind, MovedKind::Staged) << file;
+  }
+  for (const char* file : {"staged/00_8A00.bin", "staged/00_8A60.bin"}) {
+    const AssetFile* both = assetNamed(d, file);
+    ASSERT_NE(both, nullptr) << file;
+    EXPECT_EQ(both->kind, MovedKind::Enumerated) << file << ": a group of the toolkit's pieces alone";
+    EXPECT_EQ(both->classes, (std::vector<RegisterClass>{RegisterClass::Cgram, RegisterClass::Oam})) << file;
+  }
+}
+
+// A recorded file a routine the toolkit ran builds another class's data from
+// keeps its directory, kind and class, widens to every byte its pieces read,
+// and names the other classes after `also`. A piece that would change the
+// file's form, or that lies across two recorded files, is refused.
+TEST(RomDisasm, AnEnumeratedPieceOfAnotherClassJoinsTheRecordedFile) {
+  const CartridgeDisassembly& d = enumeratingLift();
+  const std::string manifest = renderManifest(d);
+  const AssetFile* palette = assetNamed(d, "cgram/00_8A10.bin");
+  ASSERT_NE(palette, nullptr) << manifest;
+  EXPECT_EQ(palette->kind, MovedKind::Staged);
+  EXPECT_EQ(palette->classes, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(palette->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  EXPECT_EQ(palette->first, 0x008A10u);
+  EXPECT_EQ(palette->bytes.size(), 34u) << "the fifth loader's entry 3, its two header bytes and thirty-two";
+  const AssetFile* sprites = assetNamed(d, "oam/00_8A40.bin");
+  ASSERT_NE(sprites, nullptr) << manifest;
+  EXPECT_EQ(sprites->kind, MovedKind::Staged);
+  EXPECT_EQ(sprites->classes, (std::vector<RegisterClass>{RegisterClass::Oam}));
+  EXPECT_EQ(sprites->also, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_EQ(sprites->first, 0x008A40u);
+  EXPECT_EQ(sprites->bytes.size(), 16u);
+  for (const char* file : {"vram/00_8380.bin", "staged/00_8A00.bin"}) {
+    const AssetFile* asset = assetNamed(d, file);
+    ASSERT_NE(asset, nullptr) << file;
+    EXPECT_TRUE(asset->also.empty()) << file;
+  }
+  for (const std::string& note : d.notes) EXPECT_EQ(note.find("would add"), std::string::npos) << note;
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "enumerate sub_008D00 A=$0003: its source at $00:8A10 would change the form of "
+                      "cgram/00_8A10.bin; not lifted"),
+            d.notes.end())
+      << "the piece carrying the recorded VRAM extent's landings into a file with none";
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "enumerate sub_008D00 A=$0004: its source at $00:8A30 lies across cgram/00_8A10.bin and "
+                      "oam/00_8A40.bin; not lifted"),
+            d.notes.end());
+  for (const char* line : {
+           "asset    cgram/00_8A10.bin Cgram as staged from $00:8A10 bytes 34 also Vram+Oam\n",
+           "asset    oam/00_8A40.bin Oam as staged from $00:8A40 bytes 16 also Cgram\n",
+           "enumerated cgram/00_8A10.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$01 entered from $00:80DD exact\n",
+           "enumerated cgram/00_8A10.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0003 entered from $00:8E29 "
+           "exact\n",
+           "enumerated oam/00_8A40.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0002 entered from $00:8096 "
+           "exact\n",
+       }) {
+    EXPECT_NE(manifest.find(line), std::string::npos) << line;
+  }
+  EXPECT_EQ(manifest.find(" by sub_008D00 A=$0004 "), std::string::npos);
+}
+
+TEST(RomDisasm, AnEnumeratedLineIsWrittenPerFileExtentClassAndOutcome) {
+  const std::vector<std::string> lines = linesStarting(renderManifest(enumeratingLift()), "enumerated ");
+  EXPECT_EQ(lines.size(), 17u);
+  for (const char* line : {
+           "enumerated vram/00_8300.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0000 entered from $00:804A exact",
+           "enumerated vram/00_8380.bin at $7F:0000 bytes 32 to Vram by sub_008100 X=$0004 entered from $00:804A exact",
+           "enumerated staged/00_8A00.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0000 entered from $00:8096 "
+           "exact",
+           "enumerated staged/00_8A00.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$00 entered from $00:80DD exact",
+           "enumerated cgram/00_8A10.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0001 entered from $00:8096 "
+           "exact",
+           "enumerated cgram/00_8A10.bin at $7F:0300 bytes 16 to Oam by sub_008B00 A=$01 entered from $00:80DD exact",
+           "enumerated cgram/00_8A10.bin at $7F:0400 bytes 32 to Vram by sub_008D00 A=$0003 entered from $00:8E29 exact",
+           "enumerated oam/00_8A40.bin at $7F:0200 bytes 16 to Cgram by sub_008800 A=$0002 entered from $00:8096 exact",
+       }) {
+    EXPECT_NE(std::find(lines.begin(), lines.end(), line), lines.end()) << line;
+  }
+}
+
+// Without a run, an `enumerated` asset line keeps its file whole, as a
+// `staged` one does: the evidence is a run's, and the line is what keeps it.
+TEST(RomDisasm, AnEnumeratedAssetLineIsKeptWithoutARun) {
+  const CartridgeDisassembly& ran = enumeratingLift();
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(ran), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  const auto kept = std::find_if(input->assets.begin(), input->assets.end(),
+                                 [](const ManifestAsset& a) { return a.file == "vram/00_8300.bin"; });
+  ASSERT_NE(kept, input->assets.end());
+  EXPECT_EQ(kept->kind, MovedKind::Enumerated);
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  CartridgeRequest again;
+  again.rom = rom;
+  again.captureSound = false;
+  again.observeRun = false;
+  again.moved = input->moved;
+  again.assets = input->assets;
+  const CartridgeDisassembly d = disassembleCartridge(again);
+  const AssetFile* blob = assetNamed(d, "vram/00_8300.bin");
+  ASSERT_NE(blob, nullptr) << renderManifest(d);
+  EXPECT_EQ(blob->kind, MovedKind::Enumerated);
+  EXPECT_EQ(blob->bytes.size(), 34u);
+  EXPECT_TRUE(d.enumerated.empty()) << "the runs themselves are a run's";
+}
+
+// Without a run, a `staged` line's `also` classes are kept with its file, as
+// the rest of the line is.
+TEST(RomAssets, AnAlsoClassIsKeptWithTheLineWithoutARun) {
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(enumeratingLift()), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  const auto kept = std::find_if(input->assets.begin(), input->assets.end(),
+                                 [](const ManifestAsset& a) { return a.file == "cgram/00_8A10.bin"; });
+  ASSERT_NE(kept, input->assets.end());
+  EXPECT_EQ(kept->kind, MovedKind::Staged);
+  EXPECT_EQ(kept->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  CartridgeRequest again;
+  again.rom = rom;
+  again.captureSound = false;
+  again.observeRun = false;
+  again.moved = input->moved;
+  again.assets = input->assets;
+  const CartridgeDisassembly d = disassembleCartridge(again);
+  const AssetFile* palette = assetNamed(d, "cgram/00_8A10.bin");
+  ASSERT_NE(palette, nullptr) << renderManifest(d);
+  EXPECT_EQ(palette->bytes.size(), 34u);
+  EXPECT_EQ(palette->also, (std::vector<RegisterClass>{RegisterClass::Vram, RegisterClass::Oam}));
+  const AssetFile* sprites = assetNamed(d, "oam/00_8A40.bin");
+  ASSERT_NE(sprites, nullptr) << renderManifest(d);
+  EXPECT_EQ(sprites->also, (std::vector<RegisterClass>{RegisterClass::Cgram}));
+  EXPECT_NE(renderManifest(d).find("asset    cgram/00_8A10.bin Cgram as staged from $00:8A10 bytes 34 also Vram+Oam\n"),
+            std::string::npos)
+      << renderManifest(d);
+}
+
+// Beside a file what the kept values built is a preview of its own, after the
+// run's, and the run's preview stays as it was.
+TEST(RomDisasm, AnEnumeratedFileHasItsOwnPreview) {
+  const CartridgeDisassembly& d = enumeratingLift();
+  const PreviewFile* recorded = previewNamed(d, "cgram/00_8A10-palette.pal");
+  ASSERT_NE(recorded, nullptr) << renderManifest(d);
+  EXPECT_EQ(recorded->of, "cgram/00_8A10.bin");
+  EXPECT_EQ(recorded->contents, 1u);
+  // What the sprite loader's second entry built from the palette file's bytes,
+  // in the form its class gives.
+  const PreviewFile* sprites = previewNamed(d, "cgram/00_8A10-enumerated-oam.oam");
+  ASSERT_NE(sprites, nullptr) << renderManifest(d);
+  EXPECT_EQ(sprites->of, "cgram/00_8A10.bin");
+  EXPECT_EQ(sprites->form, "oam");
+  EXPECT_EQ(sprites->contents, 1u);
+  const std::vector<std::uint8_t> image = examples::enumeratingImage();
+  const std::vector<std::uint8_t> second(image.begin() + 0x0A20, image.begin() + 0x0A30);  // $8A20: sixteen bytes
+  EXPECT_EQ(textOf(sprites->written), formats::encodeOam(second).text);
+  const PreviewFile* palette = previewNamed(d, "staged/00_8A00-enumerated-palette.pal");
+  ASSERT_NE(palette, nullptr) << renderManifest(d);
+  EXPECT_EQ(palette->of, "staged/00_8A00.bin");
+  EXPECT_EQ(palette->contents, 1u);
+  std::vector<std::uint8_t> blob(16);
+  for (std::size_t i = 0; i < 16; ++i) blob[i] = static_cast<std::uint8_t>(0x40u + i);
+  EXPECT_EQ(textOf(palette->written), formats::encodePalette(blob).text);
+  const std::vector<std::string> files = previewFiles(d);
+  const auto firstEnumerated = std::find_if(files.begin(), files.end(), [](const std::string& f) {
+    return f.find("-enumerated-") != std::string::npos;
+  });
+  EXPECT_TRUE(std::all_of(files.begin(), firstEnumerated,
+                          [](const std::string& f) { return f.find("-enumerated-") == std::string::npos; }));
+  EXPECT_TRUE(std::all_of(firstEnumerated, files.end(),
+                          [](const std::string& f) { return f.find("-enumerated-") != std::string::npos; }))
+      << "the run's previews first";
+}
+
+// A transfer the code proves from an extent the run wrote, and never started:
+// noted with where its sources are. The one the run started is not.
+TEST(RomDisasm, AProvenTransferFromAWrittenExtentIsNoted) {
+  const CartridgeDisassembly& d = provenFromWorkRam();
+  const DmaTransfer* started = dmaOnChannel(d, 0);
+  const DmaTransfer* never = dmaOnChannel(d, 1);
+  ASSERT_NE(started, nullptr);
+  ASSERT_NE(never, nullptr);
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "dma " + text::address24(never->site) +
+                          " channel 1: the code proves $7E:2000 increment bytes 16; the run wrote the extent and "
+                          "never started this transfer; its sources are the staged lines at $7E:2000"),
+            d.notes.end())
+      << renderManifest(d);
+  for (const std::string& note : d.notes) {
+    EXPECT_EQ(note.find("dma " + text::address24(started->site) + " channel 0"), std::string::npos) << note;
+  }
+}
+
+TEST(RomDisasm, AProvenTransferFromAnUnwrittenExtentIsNoted) {
+  const CartridgeDisassembly& d = provenFromWorkRam();
+  const DmaTransfer* never = dmaOnChannel(d, 2);
+  ASSERT_NE(never, nullptr);
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "dma " + text::address24(never->site) +
+                          " channel 2: the code proves $7E:3000 increment bytes 8; nothing wrote the extent in the "
+                          "run; nothing to run from"),
+            d.notes.end())
+      << renderManifest(d);
+}
+
+TEST(RomDisasm, TheSummaryCountsTheVariants) {
+  const EnumerationCount& count = enumeratingLift().enumeration;
+  EXPECT_EQ(count.planned, 21u);
+  EXPECT_EQ(count.run, 21u);
+  EXPECT_EQ(count.returned, 18u);
+  EXPECT_EQ(count.confined, 18u);
+  EXPECT_GT(count.cycles, 21'477'272u);
+}
+
+namespace {
+
+// A loader that copies a blob of thirty-two bytes from the table at `$8200` to
+// `$7F:0000` and sends it to VRAM, reading each blob from its length byte; the
+// run selects the blob at `$8410`, and the other entry's blob at `$8400` runs
+// on into it.
+std::vector<std::uint8_t> overlappingBlobsImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {
+      0x18u, 0xFBu,                // $8000 CLC / XCE
+      0xC2u, 0x30u,                // $8002 REP #$30
+      0xA2u, 0xFFu, 0x1Fu,         // $8004 LDX #$1FFF
+      0x9Au,                       // $8007 TXS
+      0xA9u, 0x00u, 0x00u,         // $8008 LDA #$0000
+      0x5Bu,                       // $800B TCD
+      0x85u, 0x02u,                // $800C STA $02         the pointer's bank
+      0x8Fu, 0x10u, 0x00u, 0x7Eu,  // $800E STA $7E:0010
+      0xAFu, 0x10u, 0x00u, 0x7Eu,  // $8012 LDA $7E:0010
+      0x29u, 0x01u, 0x00u,         // $8016 AND #$0001
+      0x0Au,                       // $8019 ASL A
+      0xAAu,                       // $801A TAX
+      0xA9u, 0x00u, 0x00u,         // $801B LDA #$0000
+      0xA0u, 0x00u, 0x00u,         // $801E LDY #$0000
+      0x20u, 0x00u, 0x81u,         // $8021 JSR !$8100
+      0x80u, 0xFEu,                // $8024 BRA *
+  });
+  put(rom, 0x0100u, {
+      0xBFu, 0x00u, 0x82u, 0x00u,  // $8100 LDA $00:8200,X  sub_008100
+      0x85u, 0x00u,                // $8104 STA $00
+      0xE2u, 0x20u,                // $8106 SEP #$20
+      0x64u, 0x05u,                // $8108 STZ $05
+      0xA0u, 0x01u, 0x00u,         // $810A LDY #$0001
+      0xB7u, 0x00u,                // $810D LDA [$00],Y     the length
+      0x85u, 0x04u,                // $810F STA $04
+      0xA2u, 0x00u, 0x00u,         // $8111 LDX #$0000
+      0xA0u, 0x02u, 0x00u,         // $8114 LDY #$0002
+      0xB7u, 0x00u,                // $8117 LDA [$00],Y
+      0x9Fu, 0x00u, 0x00u, 0x7Fu,  // $8119 STA $7F:0000,X
+      0xE8u,                       // $811D INX
+      0xC8u,                       // $811E INY
+      0xE4u, 0x04u,                // $811F CPX $04
+      0xD0u, 0xF4u,                // $8121 BNE $8117
+      0xA9u, 0x01u,                // $8123 LDA #$01
+      0x8Fu, 0x00u, 0x43u, 0x00u,  // $8125 STA $00:4300    DMAP0
+      0xA9u, 0x18u,                // $8129 LDA #$18
+      0x8Fu, 0x01u, 0x43u, 0x00u,  // $812B STA $00:4301    BBAD0 = VMDATAL
+      0xA9u, 0x00u,                // $812F LDA #$00
+      0x8Fu, 0x02u, 0x43u, 0x00u,  // $8131 STA $00:4302
+      0x8Fu, 0x03u, 0x43u, 0x00u,  // $8135 STA $00:4303
+      0x8Fu, 0x06u, 0x43u, 0x00u,  // $8139 STA $00:4306
+      0xA9u, 0x7Fu,                // $813D LDA #$7F
+      0x8Fu, 0x04u, 0x43u, 0x00u,  // $813F STA $00:4304
+      0xA5u, 0x04u,                // $8143 LDA $04
+      0x8Fu, 0x05u, 0x43u, 0x00u,  // $8145 STA $00:4305    DAS0 low: the length
+      0xA9u, 0x01u,                // $8149 LDA #$01
+      0x8Fu, 0x0Bu, 0x42u, 0x00u,  // $814B STA $00:420B
+      0xC2u, 0x20u,                // $814F REP #$20
+      0x60u,                       // $8151 RTS
+  });
+  put(rom, 0x0200u, {0x10u, 0x84u, 0x00u, 0x84u});  // $8200: entry 0 at $8410, entry 1 at $8400
+  rom[0x0400u] = 0x00u;                               // $8400: raw, 32 bytes, running on into the next blob
+  rom[0x0401u] = 0x20u;
+  for (std::size_t i = 0; i < 14; ++i) rom[0x0402u + i] = static_cast<std::uint8_t>(0x80u + i);
+  rom[0x0410u] = 0x00u;  // $8410: raw, 32 bytes
+  rom[0x0411u] = 0x20u;
+  for (std::size_t i = 0; i < 32; ++i) rom[0x0412u + i] = static_cast<std::uint8_t>(0xA0u + i);
+  return rom;
+}
+
+}  // namespace
+
+// A file is led by what the run recorded: the blob the run selected is a
+// staged source, and the blob the toolkit's run reads, which starts below it
+// and runs on into it, joins it as one file of the run's kind.
+TEST(RomDisasm, AnEnumeratedPieceNeverLeadsARecordedOne) {
+  const std::vector<std::uint8_t> rom = overlappingBlobsImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 21'477'272u;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.enumerated.size(), 2u) << renderManifest(d);
+  // The loader reads a blob from its length byte on.
+  const AssetFile* file = assetNamed(d, "vram/00_8401.bin");
+  ASSERT_NE(file, nullptr) << renderManifest(d);
+  EXPECT_EQ(file->kind, MovedKind::Staged);
+  EXPECT_EQ(file->bytes.size(), 49u) << "$8401 through the selected blob's last byte at $8431";
+}
+
+// What the run saw stands after the toolkit's second run: a range an earlier
+// manifest kept, which neither run saw, is still among the ranges, with its
+// count.
+TEST(RomDisasm, TheToolkitsRunsLeaveTheRecordedRangesAsTheyWere) {
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  const MovedRange earlier{.site = 0x00800Cu,
+                           .channel = 7,
+                           .toRegister = true,
+                           .registerAddress = 0x002118u,
+                           .registerName = "VMDATAL",
+                           .registerClass = RegisterClass::Vram,
+                           .memory = 0x009000u,
+                           .step = MovedStep::Increment,
+                           .bytes = 16,
+                           .kind = MovedKind::Dma,
+                           .times = 3};
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 21'477'272u;
+  request.moved = {earlier};
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_FALSE(d.enumerated.empty());
+  const auto kept = std::find_if(d.moved.begin(), d.moved.end(), [&](const MovedRange& m) { return sameRange(m, earlier); });
+  ASSERT_NE(kept, d.moved.end());
+  EXPECT_EQ(kept->times, 3u);
+  EXPECT_EQ(d.moved.size(), enumeratingLift().moved.size() + 1u);
 }
 
 }  // namespace snaggletooth::disasm

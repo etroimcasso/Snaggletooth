@@ -396,7 +396,9 @@ std::string renderRegion(const RenderRegion& region, const RenderInput& input,
       const std::string_view name = cpu65816RegisterName(asset.registerAddress);
       const std::string to = name.empty() ? address24(asset.registerAddress) : std::string(name);
       // A file the shadow named is described by the class it went to, which
-      // its line keeps; the register is the run's and is not.
+      // its line keeps; the register is the run's and is not. A file is also
+      // described by the classes the toolkit's runs built it into, which the
+      // line keeps after `also`.
       const std::string cls = text::classesText(asset.classes, " and ");
       std::string what;
       switch (asset.kind) {
@@ -406,6 +408,13 @@ std::string renderRegion(const RenderRegion& region, const RenderInput& input,
         case MovedKind::Stream: what = counted(asset.bytes, "byte") + " a routine carried " + cls + " data from"; break;
         case MovedKind::Staged: what = counted(asset.bytes, "byte") + " a routine built " + cls + " data from"; break;
         case MovedKind::Proven: what = counted(asset.bytes, "byte") + " a transfer the code sets up to carry to " + to; break;
+        case MovedKind::Enumerated:
+          what = counted(asset.bytes, "byte") + " a routine builds " + cls + " data from, for an entry the run did not select";
+          break;
+      }
+      if (!asset.also.empty()) {
+        what += ", which a routine builds " + text::classesText(asset.also, " and ") +
+                " data from for entries the run did not select";
       }
       // The path as the lexicon reads it: relative to this file, which for a
       // file at the tree's root is the manifest's own path.
@@ -753,6 +762,7 @@ std::optional<RenderInput> readRenderInput(const std::filesystem::path& director
   for (const ManifestAsset& asset : manifest->assets) {
     input.assets.push_back(RenderAsset{.file = asset.file,
                                        .classes = asset.classes,
+                                       .also = asset.also,
                                        .kind = asset.kind,
                                        .registerAddress = assetRegister(*manifest, input.board, input.imageBytes, asset),
                                        .first = asset.first,

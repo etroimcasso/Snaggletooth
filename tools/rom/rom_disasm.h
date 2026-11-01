@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -126,7 +127,8 @@ struct SoundProgram {
 // transfer engine carry from the image to the hardware — or the image source of
 // a range it carried out of work RAM, or the run of image bytes a stream the
 // CPU carried was read from, or a range the code proves a channel was set up
-// to carry that no run started — written once, as the bytes are in the image,
+// to carry that no run started, or the image bytes a routine read when the
+// toolkit ran it for an entry the run did not select — written once, as the bytes are in the image,
 // under a directory named for the memory they went to — `vram/`, `cgram/`,
 // `oam/`, `apu/`, `hdma/` for a table and for a block an indirect entry pointed
 // at, and `staged/` for a source whose bytes were built into data for two
@@ -145,11 +147,15 @@ struct SoundProgram {
 // walked it; and `.bin` for bytes as they are — a source a routine built its
 // data from, a file under `vram/`, `apu/` or `staged/`, an indirect block, a
 // file shorter than one unit of its form, or one whose form does not give
-// the bytes back. `bytes` are the image's; `written` is the file as it goes
-// to disk, the form's encoding of them or the bytes themselves.
+// the bytes back — or a file the toolkit's run of a routine names. `bytes` are
+// the image's; `written` is the file as it goes to disk, the form's encoding of
+// them or the bytes themselves.
 struct AssetFile {
   std::string file;  // relative to the manifest: `tiles/00_9000.png`
-  std::vector<RegisterClass> classes;  // of the registers the bytes went to, ascending, one for every file but a `staged/` one
+  std::vector<RegisterClass> classes;  // of the registers the run saw the bytes go to, ascending, one for every file but a `staged/` one
+  // The classes a routine the toolkit ran built the bytes into that the run's own transfers never reached, ascending;
+  // empty for a file of the toolkit's own, whose `classes` are every class its bytes went to.
+  std::vector<RegisterClass> also;
   MovedKind kind = MovedKind::Dma;
   Address registerAddress = 0;  // the register itself, for the comment beside the `INCBIN`
   Address first = 0;            // the address the tree places its first byte at
@@ -200,14 +206,28 @@ struct SampleFile {
 // An asset as the manifest records it, read back for its path — a person's
 // rename survives a run when the file it names is lifted again with the same
 // first byte and length — and, for a file the run's shadow named (`staged`,
-// `stream`), for the file itself: its evidence is written fresh by a run, so
-// the line is what keeps it from one disassembly to the next.
+// `stream`, `enumerated`), for the file itself: its evidence is written fresh
+// by a run, so the line is what keeps it from one disassembly to the next —
+// and, for a file whose line says `also`, the classes the toolkit's runs built
+// it into, kept with the line.
 struct ManifestAsset {
   std::string file;
   Address first = 0;
   std::size_t bytes = 0;
   std::vector<RegisterClass> classes;
+  std::vector<RegisterClass> also;
   MovedKind kind = MovedKind::Dma;
+};
+
+// How many values the run ran routines for: planned, run, returned, and
+// returned having written only where the recorded run saw the routine write,
+// and the master cycles those runs spent together (`rom/rom_observe.h`).
+struct EnumerationCount {
+  std::uint64_t planned = 0;
+  std::uint64_t run = 0;
+  std::uint64_t returned = 0;
+  std::uint64_t confined = 0;
+  std::uint64_t cycles = 0;
 };
 
 // A whole cartridge, disassembled.
@@ -295,6 +315,24 @@ struct CartridgeDisassembly {
   // carrier read — or, for a buffer the CPU carried out, as the buffer's source.
   std::vector<StagedRange> staged;
   std::vector<StreamedRange> streamed;
+  // The outcomes of the values the toolkit ran each planned routine for and
+  // kept, and how many values it planned, ran and kept — see
+  // `rom/rom_enumerate.h` and `rom/rom_observe.h`. Written fresh by the second
+  // run and read back by nothing; empty without a run. An outcome's sources
+  // join a file the run recorded only where they leave its classes, its
+  // directory and its form as they are, and are otherwise lifted as files of
+  // their own kind, `enumerated`, or refused with a note.
+  std::vector<EnumeratedRun> enumerated;
+  EnumerationCount enumeration;
+  // One lift of what the toolkit's run of a routine built: the file its sources were lifted into, the run and the extent
+  // (indices into `enumerated`), and the class; written fresh by the lift and read back by nothing.
+  struct EnumeratedLift {
+    std::string file;
+    std::size_t run = 0;
+    std::size_t extent = 0;
+    RegisterClass cls = RegisterClass::Display;
+  };
+  std::vector<EnumeratedLift> enumeratedLifts;
 };
 
 // The text of one of the tree's files, by the path the manifest names, or
@@ -341,8 +379,10 @@ struct CartridgeRequest {
   // cartridge` with the cycles spent against `runMasterCycles` every tenth of
   // a second of the master clock, then `tracing`, then `proving what every
   // path reaches`, then `booting the sound program` against `bootMasterCycles`
-  // for each of the two boots (`rom/progress.h`). Nothing is printed by the
-  // library; `snes_disasm` prints these to standard error unless `--quiet`.
+  // for each of the two boots, then, where a routine is planned, `running the
+  // cartridge again` the way the first run is told and `enumerating` once a
+  // value (`rom/progress.h`). Nothing is printed by the library; `snes_disasm`
+  // prints these to standard error unless `--quiet`.
   ProgressSink progress;
 };
 
@@ -350,6 +390,18 @@ struct CartridgeRequest {
 // control flow carried across them, the sound program when one is uploaded, and
 // the stops.
 [[nodiscard]] CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request);
+
+// The label of the routine every line of the tree belongs to, by the line's
+// address. A line two routines hold takes the later routine's label.
+[[nodiscard]] std::map<Address, std::string> routineByLine(const CartridgeDisassembly& disassembly);
+
+// For every byte of work RAM, a bit per register class a recorded staged extent holding the byte went to, as
+// `1u << class`: what the toolkit's run of a routine gives a byte it writes there.
+[[nodiscard]] std::vector<std::uint16_t> stagedClassBits(const CartridgeDisassembly& disassembly);
+
+// Whether a file the run lifted stays as it is when pieces with `added` landings join it: the directory a VRAM file
+// takes from its landings, and the facts its form is chosen by, are the same with them as without.
+[[nodiscard]] bool landingsKeepTheFile(std::span<const PortLanding> recorded, std::span<const PortLanding> added);
 
 // The image the source tree assembles back to, built from the bytes each listing
 // carries — an instruction's own bytes or a data run, placed at the image offset

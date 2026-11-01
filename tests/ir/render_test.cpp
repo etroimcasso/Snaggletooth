@@ -13,6 +13,7 @@
 // uploaded addresses, and the gap comment between two.
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <span>
@@ -520,4 +521,56 @@ TEST(SoundRender, EverySoundExampleLineRendersTheListingsOwnLine) {
 }
 
 }  // namespace
+// A file the toolkit's run of a routine lifted says so where the bank file
+// includes it: what a routine builds from it, for an entry the run did not
+// select.
+TEST(Render, AnEnumeratedFilesIncludeSaysSo) {
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  disasm::CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 21'477'272u;
+  const disasm::CartridgeDisassembly d = disasm::disassembleCartridge(request);
+  ASSERT_FALSE(d.regions.empty());
+  const std::string bank = disasm::renderRegion(d.regions.front(), d);
+  EXPECT_NE(bank.find("; ---- $00:8300-$00:8321: 34 bytes a routine builds Vram data from, for an entry the run did "
+                      "not select, in vram/00_8300.bin\n"
+                      "        INCBIN \"vram/00_8300.bin\"\n"),
+            std::string::npos)
+      << bank;
+}
+
+// A recorded file a routine the toolkit ran builds other classes' data from
+// says so where it is included, from the disassembly and from the manifest
+// alike.
+TEST(Render, ARecordedFilesIncludeNamesTheClassesTheToolkitBuilt) {
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  disasm::CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 21'477'272u;
+  const disasm::CartridgeDisassembly d = disasm::disassembleCartridge(request);
+  ASSERT_FALSE(d.regions.empty());
+  const std::string include =
+      "; ---- $00:8A10-$00:8A31: 34 bytes a routine built Cgram data from, which a routine builds Vram and Oam data "
+      "from for entries the run did not select, in cgram/00_8A10.bin\n"
+      "        INCBIN \"cgram/00_8A10.bin\"\n";
+  const std::string bank = disasm::renderRegion(d.regions.front(), d);
+  EXPECT_NE(bank.find(include), std::string::npos) << bank;
+
+  const std::filesystem::path tree = std::filesystem::temp_directory_path() / "snaggletooth-render-also";
+  std::filesystem::remove_all(tree);
+  std::string error;
+  ASSERT_TRUE(disasm::writeProject(d, tree, error)) << error;
+  Program program;
+  const std::optional<disasm::RenderInput> input = disasm::readRenderInput(tree, program, error);
+  std::filesystem::remove_all(tree);
+  ASSERT_TRUE(input.has_value()) << error;
+  ASSERT_FALSE(input->regions.empty());
+  const std::string fromManifest = disasm::renderRegion(input->regions.front(), *input, program);
+  EXPECT_NE(fromManifest.find(include), std::string::npos) << fromManifest;
+}
+
 }  // namespace snaggletooth::ir

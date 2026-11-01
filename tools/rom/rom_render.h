@@ -88,6 +88,7 @@ struct RenderRoutine {
 struct RenderAsset {
   std::string file;
   std::vector<RegisterClass> classes;
+  std::vector<RegisterClass> also;
   MovedKind kind = MovedKind::Dma;
   Address registerAddress = 0;
   Address first = 0;

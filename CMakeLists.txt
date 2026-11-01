@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(Snaggletooth VERSION 0.0.1 LANGUAGES CXX)
+project(Snaggletooth VERSION 0.9.0 LANGUAGES CXX)
 
 # A build is optimized by default: an empty CMAKE_BUILD_TYPE (CMake's default when nothing
 # supplies one) would produce an unoptimized, unstripped library. Multi-config generators
@@ -382,6 +382,7 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
     tools/rom/cartridge_entries.cpp
     tools/rom/input_script.cpp
     tools/rom/rom_disasm.cpp
+    tools/rom/rom_enumerate.cpp
     tools/rom/rom_facts.cpp
     tools/rom/rom_observe.cpp
     tools/rom/rom_verify.cpp
@@ -682,6 +683,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/cartridge_map_test.cpp
     tests/snes/cartridge_header_test.cpp
     tests/rom/cartridge_entries_test.cpp
+    tests/rom/enumerate_test.cpp
     tests/rom/facts_test.cpp
     tests/rom/input_script_test.cpp
     tests/rom/observe_test.cpp

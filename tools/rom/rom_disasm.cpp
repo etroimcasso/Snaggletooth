@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 #include "cpu65816/cpu65816_asm.h"
@@ -23,6 +24,7 @@
 #include "ir/ir_text.h"
 #include "ir/spc700_lift.h"
 #include "rom/cartridge_entries.h"
+#include "rom/rom_enumerate.h"
 #include "rom/rom_text.h"
 #include "snaggletooth/snes/snes.h"
 #include "spc700/spc700_disasm.h"
@@ -304,6 +306,14 @@ std::vector<SourceRegion> bankRegions(CartridgeMap map, std::size_t imageBytes) 
   return regions;
 }
 
+std::map<Address, std::string> routineByLine(const CartridgeDisassembly& disassembly) {
+  std::map<Address, std::string> out;
+  for (const Routine& routine : disassembly.routines) {
+    for (const Address line : routine.lines) out[line] = routine.label;
+  }
+  return out;
+}
+
 namespace {
 
 // ---- the assets -------------------------------------------------------------------
@@ -332,12 +342,17 @@ std::optional<std::string_view> assetDirectory(RegisterClass cls, MovedKind kind
 // the range — or the range built from the source, or the stream — landed on
 // the other side of the port, every landing the run saw; empty for a transfer
 // the code proves, a file kept from the manifest, and a range to no data port.
+// A piece of what the toolkit ran names the outcome and the extent it lifts,
+// as indices into `CartridgeDisassembly::enumerated`; every other piece, and
+// one kept from the manifest, names `kNoLift` for both.
 // How a table piece was walked, once per distinct unit and form.
 struct Walk {
   unsigned unit = 1;
   bool indirect = false;
   bool operator==(const Walk&) const = default;
 };
+
+constexpr std::size_t kNoLift = SIZE_MAX;
 
 struct Piece {
   std::size_t offset = 0;
@@ -350,6 +365,8 @@ struct Piece {
   std::vector<PortLanding> landings;
   std::vector<Walk> walks;   // a table's, from the run's `walked` lines; empty for anything else
   bool wholeCarried = true;  // false for a stream whose file is wider than the bytes it carried
+  std::size_t run = kNoLift;
+  std::size_t extent = kNoLift;
 };
 
 // The walks of one `moved` range, by the fields that identify it.
@@ -454,6 +471,25 @@ std::vector<ExtentUse> extentUses(const CartridgeDisassembly& out, const StagedR
   return uses;
 }
 
+}  // namespace
+
+std::vector<std::uint16_t> stagedClassBits(const CartridgeDisassembly& disassembly) {
+  std::vector<std::uint16_t> bits(0x20000u, 0u);
+  for (const StagedRange& range : disassembly.staged) {
+    const std::optional<std::size_t> first = ir::Provenance::workRamIndex(range.memory);
+    if (!first) continue;
+    std::uint16_t classes = 0;
+    for (const ExtentUse& use : extentUses(disassembly, range)) {
+      classes |= static_cast<std::uint16_t>(1u << static_cast<unsigned>(use.cls));
+    }
+    if (classes == 0u) continue;
+    for (std::size_t k = 0; k < range.bytes && *first + k < bits.size(); ++k) bits[*first + k] |= classes;
+  }
+  return bits;
+}
+
+namespace {
+
 // ---- where a staged range came from ------------------------------------------------
 
 // The label a writer's site carries: the routine it lies in, or the site
@@ -520,18 +556,31 @@ std::vector<StagedSource> stagedSources(const StagedRange& range,
   return out;
 }
 
-// The routine every line of the tree belongs to, by address.
-std::map<Address, std::string> routineByLine(const CartridgeDisassembly& disassembly) {
-  std::map<Address, std::string> out;
-  for (const Routine& routine : disassembly.routines) {
-    for (const Address line : routine.lines) out[line] = routine.label;
-  }
-  return out;
-}
-
 std::string stagedText(const StagedRange& range, const StagedSource& source) {
   return "staged " + address24(range.memory) + " bytes " + std::to_string(range.bytes) + " by " +
          source.label;
+}
+
+// ---- what the toolkit ran -----------------------------------------------------------
+
+// The label of the routine a run ran, or its address where no routine begins
+// there.
+std::string enumeratedLabel(const CartridgeDisassembly& out, Address routine) {
+  for (const Routine& r : out.routines) {
+    if (r.address == routine) return r.label;
+  }
+  return address24(routine);
+}
+
+// The register and the values of an outcome, as a manifest line and a note
+// write them: `X=$0000-$000E/2` (`inputValuesText`).
+std::string enumeratedValue(const EnumeratedRun& run) {
+  return std::string(inputRegisterName(run.reg)) + "=" + inputValuesText(run.bits, run.values);
+}
+
+std::string enumeratedText(const CartridgeDisassembly& out, const EnumeratedRun& run, const EnumeratedExtent& extent) {
+  return "enumerated " + enumeratedLabel(out, run.routine) + " " + enumeratedValue(run) + " at " +
+         address24(extent.memory) + " bytes " + std::to_string(extent.bytes);
 }
 
 std::string streamText(const StreamedRange& stream) {
@@ -604,7 +653,7 @@ std::vector<std::uint8_t> rgbaOf(std::span<const std::uint8_t> cgram, std::size_
 }
 
 // A ramp from black to white over `count` entries, for a sheet no palette
-// of the run's colours.
+// of the run's colors.
 std::vector<std::uint8_t> ramp(std::size_t count) {
   std::vector<std::uint8_t> out;
   for (std::size_t i = 0; i < count; ++i) {
@@ -637,6 +686,7 @@ struct FormFacts {
   std::optional<std::size_t> palette;
   std::vector<Walk> walks;
   bool wholeCarried = true;
+  friend bool operator==(const FormFacts&, const FormFacts&) = default;
 };
 
 FormFacts factsOf(std::vector<Piece>::const_iterator first, std::vector<Piece>::const_iterator last) {
@@ -658,6 +708,31 @@ FormFacts factsOf(std::vector<Piece>::const_iterator first, std::vector<Piece>::
   }
   return facts;
 }
+
+}  // namespace
+
+bool landingsKeepTheFile(std::span<const PortLanding> recorded, std::span<const PortLanding> added) {
+  const auto piece = [](std::span<const PortLanding> landings) {
+    return Piece{.offset = 0,
+                 .length = 1,
+                 .cls = RegisterClass::Vram,
+                 .kind = MovedKind::Dma,
+                 .use = MovedKind::Dma,
+                 .registerAddress = 0,
+                 .site = 0,
+                 .landings = std::vector<PortLanding>(landings.begin(), landings.end()),
+                 .walks = {},
+                 .wholeCarried = true,
+                 .run = kNoLift,
+                 .extent = kNoLift};
+  };
+  const std::vector<Piece> without{piece(recorded)};
+  const std::vector<Piece> with{piece(recorded), piece(added)};
+  return vramDirectory(without) == vramDirectory(with) &&
+         factsOf(without.begin(), without.end()) == factsOf(with.begin(), with.end());
+}
+
+namespace {
 
 // The smallest file a form has a picture of: one tile at the depth, one word,
 // one entry, one sprite, one HDMA entry with its data.
@@ -758,7 +833,8 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
                       const CartridgeRequest& request) {
   FormChoice choice;
   const std::string_view directory = directoryOf(asset.file);
-  const bool source = asset.kind == MovedKind::Staged || (request.observeRun && !facts.wholeCarried);
+  const bool source = asset.kind == MovedKind::Staged || asset.kind == MovedKind::Enumerated ||
+                      (request.observeRun && !facts.wholeCarried);
   if (source) return choice;  // the bytes are what a routine read, not what it built
   const std::string kept = extensionOf(asset.file);
   if (!request.observeRun) {
@@ -1028,7 +1104,7 @@ struct SourceContent {
 };
 
 // Several tile contents as one sheet: each padded to whole tiles at its own
-// depth, then laid end to end at the deepest depth among them — a colour
+// depth, then laid end to end at the deepest depth among them — a color
 // number at a lower depth is the same number at a higher, with the planes
 // above it zero — with the palette of the first content at that depth.
 formats::Bytes combinedSheet(const std::vector<const SourceContent*>& tiles) {
@@ -1067,7 +1143,9 @@ std::string combinedText(const std::vector<const SourceContent*>& items) {
 // Writes the previews: beside a source a routine built its data from, one per
 // form, every distinct content the run attributed to the source and of that
 // form combined in the order the run first carried each; beside a Mode 7
-// file, its tiles and its map.
+// file, its tiles and its map; and after all of those, beside every file
+// holding a source of what the toolkit's run of a routine built, one per form
+// of what its kept values built.
 void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts) {
   out.previews.clear();
   // Every content with a form, under its one source, in the order carried.
@@ -1140,6 +1218,75 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
                                          .written = std::vector<std::uint8_t>(text.text.begin(), text.text.end())});
     }
   }
+
+  // Beside every file an outcome of the toolkit's runs was lifted into, a
+  // preview of its own of what each outcome built: the extent's bytes in the
+  // form of the first content with a form of the first recorded staged extent,
+  // in address order, that holds a byte of it; the contents once each, in the
+  // order of the lifts, combined per form as a source's preview is. An extent
+  // no recorded extent holds — one only its own transfers carried — or whose
+  // recorded extents have no content in a form gives none.
+  for (const AssetFile& asset : out.assets) {
+    std::vector<CarriedContent> built;
+    for (const CartridgeDisassembly::EnumeratedLift& lift : out.enumeratedLifts) {
+      if (lift.file != asset.file) continue;
+      const EnumeratedExtent& extent = out.enumerated[lift.run].extents[lift.extent];
+      const std::optional<std::size_t> from = ir::Provenance::workRamIndex(extent.memory);
+      const CarriedContent* shaped = nullptr;
+      for (const StagedRange& range : out.staged) {
+        const std::optional<std::size_t> at = ir::Provenance::workRamIndex(range.memory);
+        if (!from || !at || *at >= *from + extent.bytes || *from >= *at + range.bytes) continue;
+        const auto found = std::find_if(range.contents.begin(), range.contents.end(),
+                                        [&](const CarriedContent& c) { return formOfContent(out, c).has_value(); });
+        if (found != range.contents.end()) {
+          shaped = &*found;
+          break;
+        }
+      }
+      if (shaped == nullptr) continue;
+      CarriedContent content{.bytes = extent.values,
+                             .origin = extent.origin,
+                             .cls = shaped->cls,
+                             .kind = shaped->kind,
+                             .landing = shaped->landing,
+                             .unit = shaped->unit,
+                             .indirect = shaped->indirect,
+                             .byteOrigins = {},
+                             .order = 0};
+      const bool known = std::any_of(built.begin(), built.end(),
+                                     [&](const CarriedContent& c) { return sameContent(c, content); });
+      if (!known) built.push_back(std::move(content));
+    }
+    std::vector<SourceContent> items;
+    for (const CarriedContent& content : built) {
+      std::optional<ContentForm> form = formOfContent(out, content);
+      if (!form) continue;
+      items.push_back(SourceContent{.source = 0, .content = &content, .form = std::move(*form)});
+    }
+    std::vector<std::string> forms;
+    std::map<std::string, std::vector<const SourceContent*>> byForm;
+    for (const SourceContent& item : items) {
+      if (byForm.find(item.form.form) == byForm.end()) forms.push_back(item.form.form);
+      byForm[item.form.form].push_back(&item);
+    }
+    for (const std::string& form : forms) {
+      const std::vector<const SourceContent*>& group = byForm[form];
+      PreviewFile preview{.file = stemOf(asset.file) + "-enumerated-" + form + "." + std::string(previewExtension(form)),
+                          .of = asset.file,
+                          .form = form,
+                          .contents = static_cast<std::uint32_t>(group.size()),
+                          .written = {}};
+      if (form == "tiles") {
+        const formats::Bytes png = combinedSheet(group);
+        if (!png.ok()) continue;
+        preview.written = png.bytes;
+      } else {
+        const std::string text = combinedText(group);
+        preview.written.assign(text.begin(), text.end());
+      }
+      out.previews.push_back(std::move(preview));
+    }
+  }
 }
 
 // Lifts every `moved` range the rules admit into `out.assets`. The rules are the
@@ -1158,6 +1305,12 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
 // carried it or the CPU did, a store at a time. A stream the CPU carried from
 // the image is lifted as the run its carrier read, the same way. A source
 // whose bytes went to two classes is one file under `staged/`, named for both.
+// What a routine the toolkit ran for an entry the run did not select built is
+// lifted the same way, as the image bytes its values read, under the classes
+// its extent's bytes took; the run's own files are grouped first, and those
+// pieces join one only where they leave its directory and form as they are.
+// A recorded file an outcome of another class joins keeps its directory, kind
+// and classes, and its line names the other class after `also`.
 void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   const CartridgeBoard& board = out.board;
   const std::size_t imageBytes = out.imageBytes;
@@ -1231,7 +1384,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                              .site = range.site,
                              .landings = landings,
                              .walks = walks,
-                             .wholeCarried = true});
+                             .wholeCarried = true,
+                             .run = kNoLift,
+                             .extent = kNoLift});
       }
       previous = at;
     }
@@ -1256,9 +1411,12 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
   }
   // A piece the run's shadow named — a staged range's source, a stream's
-  // bytes — under the same two refusals. A refusal is said once: a stream
-  // seen landing in several places is several ranges of the same bytes, and
-  // one note names them.
+  // bytes — or the toolkit's run of a routine named, under the same two
+  // refusals. A refusal is said once: a stream seen landing in several places
+  // is several ranges of the same bytes, and one note names them. The
+  // toolkit's pieces are kept apart from the run's, in `toolkit`, until the
+  // run's files are grouped.
+  std::vector<Piece> toolkit;
   const auto refuse = [&](const std::string& note) {
     if (std::find(out.notes.begin(), out.notes.end(), note) == out.notes.end()) out.notes.push_back(note);
   };
@@ -1275,7 +1433,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
              " overlaps a block of the sound program; not lifted");
       return;
     }
-    pieces.push_back(piece);
+    (piece.kind == MovedKind::Enumerated ? toolkit : pieces).push_back(std::move(piece));
   };
 
   // The transfers the code proves whole: to a register a file can be named
@@ -1340,7 +1498,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                              .site = dma.site,
                              .landings = {},
                              .walks = {},
-                             .wholeCarried = true});
+                             .wholeCarried = true,
+                             .run = kNoLift,
+                             .extent = kNoLift});
       }
       previous = at;
     }
@@ -1373,7 +1533,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                       .site = use.site,
                       .landings = use.landings,
                       .walks = {},
-                      .wholeCarried = true},
+                      .wholeCarried = true,
+                      .run = kNoLift,
+                      .extent = kNoLift},
                 stagedText(range, source));
         }
       }
@@ -1396,21 +1558,91 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                 .landings = stream.landing ? std::vector<PortLanding>{*stream.landing} : std::vector<PortLanding>{},
                 .walks = {},
                 .wholeCarried = stream.source.first == stream.romOffset &&
-                                stream.source.last - stream.source.first + 1u == stream.bytes},
+                                stream.source.last - stream.source.first + 1u == stream.bytes,
+                .run = kNoLift,
+                .extent = kNoLift},
           streamText(stream));
+  }
+
+  // What the toolkit ran: every extent of every outcome lifted as the image
+  // bytes its values built it from, once for each use a class of the extent
+  // has — each way a recorded staged extent holding its bytes went under that
+  // class, and each of the outcome's own transfers of that class to a register
+  // a file can be named for. An extent whose classes have no such use is noted
+  // and lifts nothing.
+  for (std::size_t r = 0; r < out.enumerated.size(); ++r) {
+    const EnumeratedRun& run = out.enumerated[r];
+    for (std::size_t e = 0; e < run.extents.size(); ++e) {
+      const EnumeratedExtent& extent = run.extents[e];
+      const std::optional<std::size_t> from = ir::Provenance::workRamIndex(extent.memory);
+      std::vector<const StagedRange*> recorded;
+      for (const StagedRange& range : out.staged) {
+        const std::optional<std::size_t> at = ir::Provenance::workRamIndex(range.memory);
+        if (from && at && *at < *from + extent.bytes && *from < *at + range.bytes) recorded.push_back(&range);
+      }
+      std::vector<ExtentUse> uses;
+      for (const RegisterClass cls : extent.classes) {
+        for (const StagedRange* range : recorded) {
+          for (ExtentUse& use : extentUses(out, *range)) {
+            if (use.cls == cls) uses.push_back(std::move(use));
+          }
+        }
+        for (const OwnCarry& carry : extent.carried) {
+          if (carry.cls != cls || !assetDirectory(carry.cls, carry.kind)) continue;
+          uses.push_back(ExtentUse{.cls = carry.cls,
+                                   .kind = carry.kind,
+                                   .registerAddress = carry.registerAddress,
+                                   .site = carry.site,
+                                   .landings = {}});
+        }
+      }
+      if (uses.empty()) {
+        const Address reached = extent.carried.empty() ? 0 : extent.carried.front().registerAddress;
+        const std::string_view name = cpu65816RegisterName(reached);
+        refuse("enumerate " + enumeratedLabel(out, run.routine) + " " + enumeratedValue(run) + ": wrote " +
+               address24(extent.memory) + " bytes " + std::to_string(extent.bytes) + ", carried to " +
+               (name.empty() ? address24(reached) : std::string(name)) + ", which no file is named for; not lifted");
+        continue;
+      }
+      for (const ir::OriginInterval& source : extent.sources) {
+        if (source.last >= imageBytes) continue;
+        for (const ExtentUse& use : uses) {
+          admit(Piece{.offset = source.first,
+                      .length = source.last - source.first + 1u,
+                      .cls = use.cls,
+                      .kind = MovedKind::Enumerated,
+                      .use = use.kind == MovedKind::Stream ? MovedKind::Dma : use.kind,
+                      .registerAddress = use.registerAddress,
+                      .site = use.site,
+                      .landings = use.landings,
+                      .walks = {},
+                      .wholeCarried = true,
+                      .run = r,
+                      .extent = e},
+                enumeratedText(out, run, extent));
+        }
+      }
+    }
   }
 
   // A file the shadow named in an earlier run, kept as its line records it
   // when nothing this pass lifted covers its bytes: its evidence is written
-  // fresh by a run, and the line is what keeps the file.
+  // fresh by a run, and the line is what keeps the file. A `staged` or
+  // `stream` line's `also` classes are kept with it, by the file's first byte.
+  std::map<std::size_t, std::vector<RegisterClass>> keptAlso;
   for (const ManifestAsset& kept : request.assets) {
-    if (kept.kind != MovedKind::Staged && kept.kind != MovedKind::Stream) continue;
+    if (kept.kind != MovedKind::Staged && kept.kind != MovedKind::Stream && kept.kind != MovedKind::Enumerated) continue;
     const std::optional<std::size_t> offset = romOffset(board, kept.first, imageBytes);
     if (!offset || *offset + kept.bytes > imageBytes) continue;
-    const bool covered = std::any_of(pieces.begin(), pieces.end(), [&](const Piece& piece) {
+    const auto overlaps = [&](const Piece& piece) {
       return piece.offset < *offset + kept.bytes && *offset < piece.offset + piece.length;
-    });
+    };
+    const bool covered = std::any_of(pieces.begin(), pieces.end(), overlaps) ||
+                         std::any_of(toolkit.begin(), toolkit.end(), overlaps);
     if (covered) continue;
+    if ((kept.kind == MovedKind::Staged || kept.kind == MovedKind::Stream) && !kept.also.empty()) {
+      keptAlso[*offset] = kept.also;
+    }
     // The line does not say what the range went as; a class only HDMA reaches
     // is placed as a table, the rest as a transfer. The path is the line's
     // own either way. A file named for two classes is one piece per class,
@@ -1428,21 +1660,53 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
                   .site = 0,
                   .landings = {},
                   .walks = {},
-                  .wholeCarried = true},
+                  .wholeCarried = true,
+                  .run = kNoLift,
+                  .extent = kNoLift},
             "asset " + kept.file);
     }
   }
 
-  // A total order, so two pieces of the same bytes sent two places stand in
-  // register order whatever the library's sort does with equals.
-  std::sort(pieces.begin(), pieces.end(), [](const Piece& a, const Piece& b) {
+  // A total order over every field, so the pieces stand in one order whatever
+  // the library's sort does with equals: two pieces of the same bytes sent two
+  // places in register order, and two that differ only in their landings with
+  // the one that has fewer first — an outcome's own transfer, which has none,
+  // before the recorded extent it shares, so the own piece joins and widens a
+  // file before the other is checked against it.
+  const auto landingBefore = [](const PortLanding& a, const PortLanding& b) {
+    return std::tie(a.memory, a.lowest, a.highest, a.shown, a.areas, a.depths, a.palette) <
+           std::tie(b.memory, b.lowest, b.highest, b.shown, b.areas, b.depths, b.palette);
+  };
+  const auto walkBefore = [](const Walk& a, const Walk& b) {
+    return std::tie(a.unit, a.indirect) < std::tie(b.unit, b.indirect);
+  };
+  const auto pieceBefore = [&](const Piece& a, const Piece& b) {
     if (a.offset != b.offset) return a.offset < b.offset;
     if (a.length != b.length) return a.length > b.length;
     if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
     if (a.kind != b.kind) return static_cast<int>(a.kind) < static_cast<int>(b.kind);
     if (a.cls != b.cls) return static_cast<int>(a.cls) < static_cast<int>(b.cls);
-    return a.site < b.site;
-  });
+    if (a.site != b.site) return a.site < b.site;
+    if (a.use != b.use) return static_cast<int>(a.use) < static_cast<int>(b.use);
+    if (a.landings.size() != b.landings.size()) return a.landings.size() < b.landings.size();
+    if (std::lexicographical_compare(a.landings.begin(), a.landings.end(), b.landings.begin(), b.landings.end(),
+                                     landingBefore)) {
+      return true;
+    }
+    if (std::lexicographical_compare(b.landings.begin(), b.landings.end(), a.landings.begin(), a.landings.end(),
+                                     landingBefore)) {
+      return false;
+    }
+    if (a.walks.size() != b.walks.size()) return a.walks.size() < b.walks.size();
+    if (a.walks != b.walks) {
+      return std::lexicographical_compare(a.walks.begin(), a.walks.end(), b.walks.begin(), b.walks.end(),
+                                          walkBefore);
+    }
+    if (a.wholeCarried != b.wholeCarried) return a.wholeCarried && !b.wholeCarried;
+    if (a.run != b.run) return a.run < b.run;
+    return a.extent < b.extent;
+  };
+  std::sort(pieces.begin(), pieces.end(), pieceBefore);
 
   // The groups: pieces that share a byte are one file, if they agree on what
   // the bytes were for. A piece the shadow named agrees with any piece of its
@@ -1454,7 +1718,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // under `staged/`, named for every class; only the engines' own pieces, and
   // the code's, sent two places, or two ways, are refused.
   out.assets.clear();
-  std::vector<FormFacts> facts;  // beside `out.assets`, one per file
+  out.enumeratedLifts.clear();
+  std::vector<FormFacts> facts;            // beside `out.assets`, one per file
+  std::vector<std::vector<Piece>> groups;  // beside `out.assets`, each file's pieces
   for (std::size_t i = 0; i < pieces.size();) {
     std::size_t end = pieces[i].offset + pieces[i].length;
     std::size_t j = i + 1;
@@ -1526,6 +1792,8 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
                               hex(*home & 0xFFFFu, 4) + ".bin",
                       .classes = classes,
+                      .also = keptAlso.count(first.offset) != 0 ? keptAlso.at(first.offset)
+                                                                : std::vector<RegisterClass>{},
                       .kind = mixed && named == nullptr ? (staged ? MovedKind::Staged : MovedKind::Stream)
                                                         : lead.kind,
                       .registerAddress = lead.registerAddress,
@@ -1542,8 +1810,166 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       out.assets.push_back(std::move(asset));
       facts.push_back(factsOf(pieces.begin() + static_cast<std::ptrdiff_t>(i),
                               pieces.begin() + static_cast<std::ptrdiff_t>(j)));
+      groups.emplace_back(pieces.begin() + static_cast<std::ptrdiff_t>(i),
+                          pieces.begin() + static_cast<std::ptrdiff_t>(j));
     }
     i = j;
+  }
+
+  // The toolkit's pieces, once the run's files are grouped. A piece that
+  // overlaps one of those files joins it when its landings leave the file's
+  // directory and the facts its form is chosen by as they are; the file then
+  // widens to hold it, under the same directory, its path named for its new
+  // first byte. A class of the piece the run's transfers never reached is
+  // written after `also` on the file's line. A piece that overlaps two files,
+  // or would move or reform the one it overlaps, is refused with a note naming
+  // the file. Pieces that overlap no such file are grouped among
+  // themselves into files of their own kind, `enumerated`. Every piece of an
+  // outcome that is lifted records its file once per extent and class, in the
+  // order the pieces are taken.
+  std::sort(toolkit.begin(), toolkit.end(), pieceBefore);
+  struct PendingLift {
+    std::size_t asset = 0;
+    std::size_t run = 0;
+    std::size_t extent = 0;
+    RegisterClass cls = RegisterClass::Display;
+  };
+  std::vector<PendingLift> lifts;
+  const auto liftInto = [&](std::size_t asset, const Piece& piece) {
+    if (piece.run == kNoLift) return;
+    const bool known = std::any_of(lifts.begin(), lifts.end(), [&](const PendingLift& lift) {
+      return lift.asset == asset && lift.run == piece.run && lift.extent == piece.extent && lift.cls == piece.cls;
+    });
+    if (!known) lifts.push_back(PendingLift{.asset = asset, .run = piece.run, .extent = piece.extent, .cls = piece.cls});
+  };
+  // What a refused piece's note begins with: the outcome it lifts, or the
+  // manifest line it was kept from.
+  const auto pieceHead = [&](const Piece& piece) -> std::string {
+    if (piece.run != kNoLift) {
+      const EnumeratedRun& run = out.enumerated[piece.run];
+      return "enumerate " + enumeratedLabel(out, run.routine) + " " + enumeratedValue(run);
+    }
+    for (const ManifestAsset& kept : request.assets) {
+      if (romOffset(board, kept.first, imageBytes) == std::optional<std::size_t>{piece.offset}) return "asset " + kept.file;
+    }
+    return "asset " + address24(romAddress(board.map, piece.offset).value_or(0));
+  };
+  std::vector<Piece> rest;
+  for (const Piece& piece : toolkit) {
+    const std::size_t pieceEnd = piece.offset + piece.length;
+    std::vector<std::size_t> overlapping;
+    for (std::size_t g = 0; g < out.assets.size(); ++g) {
+      const AssetFile& asset = out.assets[g];
+      if (asset.romOffset < pieceEnd && piece.offset < asset.romOffset + asset.bytes.size()) overlapping.push_back(g);
+    }
+    if (overlapping.empty()) {
+      rest.push_back(piece);
+      continue;
+    }
+    const std::string head = pieceHead(piece) + ": its source at " +
+                             address24(romAddress(board.map, piece.offset).value_or(0)) + " ";
+    if (overlapping.size() > 1) {
+      refuse(head + "lies across " + out.assets[overlapping[0]].file + " and " + out.assets[overlapping[1]].file +
+             "; not lifted");
+      continue;
+    }
+    const std::size_t g = overlapping.front();
+    AssetFile& asset = out.assets[g];
+    std::vector<PortLanding> recordedLandings;
+    for (const Piece& member : groups[g]) {
+      recordedLandings.insert(recordedLandings.end(), member.landings.begin(), member.landings.end());
+    }
+    if (!landingsKeepTheFile(recordedLandings, piece.landings)) {
+      std::vector<Piece> with = groups[g];
+      with.push_back(piece);
+      const std::string_view moved = vramDirectory(with);
+      if (vramDirectory(groups[g]) != moved) {
+        refuse(head + "would move " + asset.file + " to " + std::string(moved) + "/; not lifted");
+      } else {
+        refuse(head + "would change the form of " + asset.file + "; not lifted");
+      }
+      continue;
+    }
+    groups[g].push_back(piece);
+    if (std::find(asset.classes.begin(), asset.classes.end(), piece.cls) == asset.classes.end()) {
+      const auto at = std::lower_bound(asset.also.begin(), asset.also.end(), piece.cls);
+      if (at == asset.also.end() || *at != piece.cls) asset.also.insert(at, piece.cls);
+    }
+    const std::size_t first = std::min(asset.romOffset, piece.offset);
+    const std::size_t end = std::max(asset.romOffset + asset.bytes.size(), pieceEnd);
+    if (first != asset.romOffset || end != asset.romOffset + asset.bytes.size()) {
+      const Address home = romAddress(board.map, first).value_or(asset.first);
+      asset.file = std::string(directoryOf(asset.file)) + "/" + hex(home >> 16, 2) + "_" + hex(home & 0xFFFFu, 4) + ".bin";
+      asset.first = home;
+      asset.romOffset = first;
+      asset.bytes.assign(request.rom.begin() + static_cast<std::ptrdiff_t>(first),
+                         request.rom.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    liftInto(g, piece);
+  }
+  for (std::size_t i = 0; i < rest.size();) {
+    std::size_t end = rest[i].offset + rest[i].length;
+    std::size_t j = i + 1;
+    while (j < rest.size() && rest[j].offset < end) {
+      end = std::max(end, rest[j].offset + rest[j].length);
+      ++j;
+    }
+    const Piece& first = rest[i];
+    const std::optional<Address> home = romAddress(board.map, first.offset);
+    if (home) {
+      const std::vector<Piece> group(rest.begin() + static_cast<std::ptrdiff_t>(i),
+                                     rest.begin() + static_cast<std::ptrdiff_t>(j));
+      std::vector<RegisterClass> classes;
+      for (const Piece& piece : group) {
+        if (std::find(classes.begin(), classes.end(), piece.cls) == classes.end()) classes.push_back(piece.cls);
+      }
+      std::sort(classes.begin(), classes.end());
+      std::string_view directory =
+          classes.size() > 1 ? std::string_view("staged") : *assetDirectory(first.cls, first.use);
+      if (directory == "vram") directory = vramDirectory(group);
+      AssetFile asset{.file = std::string(directory) + "/" + hex(*home >> 16, 2) + "_" +
+                              hex(*home & 0xFFFFu, 4) + ".bin",
+                      .classes = classes,
+                      .also = {},
+                      .kind = MovedKind::Enumerated,
+                      .registerAddress = first.registerAddress,
+                      .first = *home,
+                      .romOffset = first.offset,
+                      .bytes = {},
+                      .depth = 0,
+                      .palette = {},
+                      .unit = 1,
+                      .indirect = false,
+                      .written = {}};
+      asset.bytes.assign(request.rom.begin() + static_cast<std::ptrdiff_t>(first.offset),
+                         request.rom.begin() + static_cast<std::ptrdiff_t>(end));
+      out.assets.push_back(std::move(asset));
+      facts.push_back(factsOf(group.begin(), group.end()));
+      for (const Piece& piece : group) liftInto(out.assets.size() - 1u, piece);
+      groups.push_back(group);
+    }
+    i = j;
+  }
+
+  // The files in address order, the facts beside them, and each lift's file
+  // where it now stands.
+  std::vector<std::size_t> order(out.assets.size());
+  for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+    return out.assets[a].romOffset < out.assets[b].romOffset;
+  });
+  {
+    std::vector<AssetFile> sortedAssets;
+    std::vector<FormFacts> sortedFacts;
+    std::vector<std::size_t> placeOf(order.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      sortedAssets.push_back(std::move(out.assets[order[i]]));
+      sortedFacts.push_back(std::move(facts[order[i]]));
+      placeOf[order[i]] = i;
+    }
+    out.assets = std::move(sortedAssets);
+    facts = std::move(sortedFacts);
+    for (PendingLift& lift : lifts) lift.asset = placeOf[lift.asset];
   }
 
   // A person's path for a file lifted again. A file the shadow named that
@@ -1555,7 +1981,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       return a.first == named.first && a.bytes.size() == named.bytes;
     });
     if (found == out.assets.end()) {
-      if (named.kind == MovedKind::Staged || named.kind == MovedKind::Stream) continue;
+      if (named.kind == MovedKind::Staged || named.kind == MovedKind::Stream || named.kind == MovedKind::Enumerated) {
+        continue;
+      }
       out.notes.push_back("asset " + named.file + " at " + address24(named.first) +
                           " names no range this run lifted; dropped");
       continue;
@@ -1568,6 +1996,10 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // written beside a file the run could not turn into a source.
   for (std::size_t i = 0; i < out.assets.size(); ++i) {
     applyForm(out, out.assets[i], facts[i], request, namedByAPerson[i]);
+  }
+  for (const PendingLift& lift : lifts) {
+    out.enumeratedLifts.push_back(CartridgeDisassembly::EnumeratedLift{
+        .file = out.assets[lift.asset].file, .run = lift.run, .extent = lift.extent, .cls = lift.cls});
   }
   writePreviews(out, facts);
 }
@@ -1798,10 +2230,15 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // The samples the run's key-ons named, written once the files that could
   // hold their bytes are known.
   std::vector<KeyedSample> keyed;
+  // The first run's counts, which the second run is held to.
+  std::uint64_t firstInstructions = 0;
+  std::uint64_t firstDivergences = 0;
   if (request.observeRun) {
     RunObservation observation =
         observeRun(request.rom, request.runMasterCycles, request.input, out.notes, request.progress);
     keyed = std::move(observation.samples);
+    firstInstructions = observation.instructions;
+    firstDivergences = observation.divergences;
     for (const ReachedTarget& seen : observation.reached) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
         return sameSighting(r, seen);
@@ -2102,6 +2539,26 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   out.routines = routines(out);
   out.states = stateFacts(out, *proven);
 
+  // The routines that built what the run carried, run again by the toolkit
+  // once for every value every path bounds their index to, from the machine
+  // as the run entered them; and what the code proves about a transfer from
+  // work RAM the run never started. The second run's other findings are the
+  // first run's, which stand.
+  if (request.observeRun) {
+    const EnumerationPlan plan = enumerationPlan(out, *proven, out.notes);
+    if (!plan.routines.empty()) {
+      const RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, out.notes,
+                                               request.progress, plan, firstInstructions, firstDivergences);
+      out.enumerated = second.enumerated;
+      out.enumeration = EnumerationCount{.planned = second.variantsPlanned,
+                                         .run = second.variantsRun,
+                                         .returned = second.variantsReturned,
+                                         .confined = second.variantsConfined,
+                                         .cycles = second.enumerationCycles};
+    }
+    noteProvenFromWorkRam(out);
+  }
+
   // The files lifted out of the banks: what the run saw the engines carry from
   // the image, and the sources of what they carried out of work RAM, now that
   // the listings say where the instructions are, the sound program says where
@@ -2325,12 +2782,16 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   }
   if (!origins.empty()) out += "\n" + origins;
 
-  // The files lifted out of the banks. The `moved` lines are their uses.
+  // The files lifted out of the banks, each with the classes the toolkit's
+  // runs built it into that the run's transfers never reached. The `moved`
+  // lines are their uses.
   if (!disassembly.assets.empty()) out += "\n";
   for (const AssetFile& asset : disassembly.assets) {
     out += "asset    " + asset.file + " " + classesText(asset.classes, "+") + " as " +
            std::string(movedKindName(asset.kind)) + " from " + address24(asset.first) + " bytes " +
-           std::to_string(asset.bytes.size()) + "\n";
+           std::to_string(asset.bytes.size());
+    if (!asset.also.empty()) out += " also " + classesText(asset.also, "+");
+    out += "\n";
   }
 
   // What was written beside a file to show what its bytes became, and how
@@ -2381,6 +2842,19 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   }
   if (!stagedLines.empty()) out += "\n";
   for (const std::string& line : stagedLines) out += line;
+
+  // What the toolkit ran: one line per lift — the file an outcome's extent
+  // was lifted into, the extent, the class and the outcome's values — in the
+  // order the lift recorded them.
+  if (!disassembly.enumeratedLifts.empty()) out += "\n";
+  for (const CartridgeDisassembly::EnumeratedLift& lift : disassembly.enumeratedLifts) {
+    const EnumeratedRun& run = disassembly.enumerated[lift.run];
+    const EnumeratedExtent& extent = run.extents[lift.extent];
+    out += "enumerated " + lift.file + " at " + address24(extent.memory) + " bytes " + std::to_string(extent.bytes) +
+           " to " + std::string(cpu65816RegisterClassName(lift.cls)) + " by " +
+           enumeratedLabel(disassembly, run.routine) + " " + enumeratedValue(run) + " entered from " +
+           address24(run.enteredFrom) + " " + std::string(originMark(extent.origin)) + "\n";
+  }
 
   // What the CPU streamed a byte at a time: from the image, or from a buffer
   // in work RAM.
@@ -2571,6 +3045,7 @@ RenderInput renderInputOf(const CartridgeDisassembly& disassembly) {
   for (const AssetFile& asset : disassembly.assets) {
     input.assets.push_back(RenderAsset{.file = asset.file,
                                        .classes = asset.classes,
+                                       .also = asset.also,
                                        .kind = asset.kind,
                                        .registerAddress = asset.registerAddress,
                                        .first = asset.first,

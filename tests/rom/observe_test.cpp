@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,6 +32,7 @@
 #include "ir/ir_differential.h"
 #include "rom/rom_disasm.h"
 #include "rom/rom_observe.h"
+#include "rom/rom_observe_internal.h"
 #include "rom/rom_verify.h"
 
 namespace snaggletooth::disasm {
@@ -56,10 +58,11 @@ using examples::uploadingImage;
 constexpr std::uint64_t kFrame = 357'954u;  // one NTSC frame of the master clock, roughly
 
 // The manifest without the blocks a run writes fresh and a disassembly without
-// one does not write at all — `origin`, `staged`, `streamed`, `landed`,
-// `walked`, `preview` and `seen` — and without the blank line that stood
-// before each, so what the manifest keeps from one to the next is compared
-// without them.
+// one does not write at all — `origin`, `staged`, `enumerated`, `streamed`,
+// `landed`, `walked`, `preview` and `seen`, and the notes the toolkit's run of
+// the routines and its reading of a transfer from work RAM write — and without
+// the blank line that stood before each, so what the manifest keeps from one
+// to the next is compared without them.
 std::string withoutRunLines(const std::string& manifest) {
   std::string out;
   std::size_t position = 0;
@@ -71,7 +74,11 @@ std::string withoutRunLines(const std::string& manifest) {
     const bool fresh = line.rfind("seen ", 0) == 0 || line.rfind("origin ", 0) == 0 ||
                        line.rfind("staged ", 0) == 0 || line.rfind("streamed ", 0) == 0 ||
                        line.rfind("landed ", 0) == 0 || line.rfind("walked ", 0) == 0 ||
-                       line.rfind("preview ", 0) == 0;
+                       line.rfind("preview ", 0) == 0 || line.rfind("enumerated ", 0) == 0 ||
+                       line.rfind("note     enumerate ", 0) == 0 ||
+                       (line.rfind("note     dma ", 0) == 0 &&
+                        (line.find("; the run wrote the extent and never started this transfer;") != std::string::npos ||
+                         line.find("; nothing wrote the extent in the run; nothing to run from") != std::string::npos));
     if (fresh) continue;
     if (line == "\n" && out.size() >= 1 && out.back() == '\n' && out.size() >= 2 &&
         out[out.size() - 2] == '\n') {
@@ -1793,7 +1800,7 @@ TEST(RomLanded, AVramLandingNamesThePaletteAsItStoodAtItsFrame) {
     EXPECT_EQ(first[2u * i + 1u], word >> 8) << i;
   }
   EXPECT_EQ(first[32], 0u) << "entry sixteen was not written yet";
-  // A palette landing names none: no palette colours the palette.
+  // A palette landing names none: no palette colors the palette.
   EXPECT_FALSE(palette->landing.palette.has_value());
   // The tiles sent from the buffer on the second frame were read at the third,
   // after the handler had sent the second blob to entry sixteen.
@@ -2204,6 +2211,41 @@ TEST(RomSamples, AWalkThatReachesTheEndOfMemoryWithoutAnEndFlagIsANoteAndNoSampl
                           [](const std::string& n) { return n.find("without an end flag") != std::string::npos; }),
             1)
       << "once per start address";
+}
+
+// Every byte an engine writes on the A bus is named in the step that wrote it:
+// a transfer from a register back into work RAM, and one into work RAM through
+// the port.
+TEST(RomObserve, TheRecorderNamesEveryEngineWrite) {
+  const std::vector<std::pair<std::vector<std::uint8_t>, Address>> cases = {
+      {movingImage(), 0x7E0300u},           // channel 1 reads VRAM back into $7E:0300
+      {examples::transferImage(), 0x7E1000u},  // through the port to $7E:1000
+  };
+  for (const auto& [rom, first] : cases) {
+    const CartridgeBoard board = cartridgeBoard(rom);
+    Snes machine{SnesConfig{.rom = rom}};
+    ir::Provenance shadow{board, rom.size(), 64};
+    detail::Recorder recorder{machine, shadow};
+    shadow.carries = &recorder;
+    machine.setObserver(&recorder);
+    std::set<Address> named;
+    std::uint64_t spent = 0;
+    while (spent < 3u * kFrame) {
+      const Cpu65816State& cpu = machine.state().cpu;
+      recorder.stepBegan((static_cast<Address>(cpu.pbr) << 16) | cpu.pc);
+      spent += machine.step();
+      named.insert(recorder.engineWrites.begin(), recorder.engineWrites.end());
+    }
+    machine.setObserver(nullptr);
+    shadow.carries = nullptr;
+    for (Address at = first; at < first + 16u; ++at) {
+      // The same byte of work RAM, through whichever mirror the engine named it.
+      const bool found = std::any_of(named.begin(), named.end(), [&](Address a) {
+        return ir::Provenance::workRamIndex(a) == ir::Provenance::workRamIndex(at);
+      });
+      EXPECT_TRUE(found) << formatAddress(at, 24);
+    }
+  }
 }
 
 }  // namespace snaggletooth::disasm

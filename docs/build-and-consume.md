@@ -228,7 +228,7 @@ same stability as the public headers: their surfaces are documented in place and
 ## Versioning
 
 `snaggletooth::version()`, declared in `snaggletooth/version.h`, returns the library's version as
-a `std::string_view` in `"major.minor.patch"` form — `"0.0.1"` today. The view refers to static
+a `std::string_view` in `"major.minor.patch"` form — `"0.9.0"` today. The view refers to static
 storage and is valid for the life of the process. It is an identity a program can log or display
 and carries no behavior. The status of each component sits in the
 [project README](../README.md#what-is-built), which is where "what does this build do" is

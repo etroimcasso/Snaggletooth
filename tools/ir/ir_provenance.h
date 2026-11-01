@@ -247,6 +247,17 @@ class Provenance final : public Shadow {
   void called();
   void returned();
 
+  // How many invocations are live: the root, and one for every call and
+  // interrupt that has not returned.
+  [[nodiscard]] std::size_t depth() const noexcept { return frames_.size(); }
+
+  // The index into work RAM's 128 KB an address reaches — banks `$7E`-`$7F`
+  // whole and the first 8 KB of every bank that mirrors them — or nothing for
+  // an address outside work RAM; and the address in bank `$7E` or `$7F` an
+  // index names.
+  [[nodiscard]] static std::optional<std::size_t> workRamIndex(Address address) noexcept;
+  [[nodiscard]] static Address workRamAddress(std::size_t index) noexcept;
+
   // The work-RAM addresses the port reached, in order, for the accesses the
   // CPU is about to make to `$2180` in the instruction being run: the machine
   // reports the port's own access before the CPU's, and the interpreter runs
@@ -286,8 +297,6 @@ class Provenance final : public Shadow {
   [[nodiscard]] std::uint32_t& loaded(Place place, unsigned byte) noexcept;
   [[nodiscard]] Origin unionOf(Place place);
   void wrote(Place place, unsigned bits) noexcept;
-  [[nodiscard]] static std::optional<std::size_t> workRamIndex(Address address) noexcept;
-  [[nodiscard]] static Address workRamAddress(std::size_t index) noexcept;
   [[nodiscard]] static bool inSystemBank(Address address) noexcept;
   [[nodiscard]] static std::optional<std::uint32_t> dataRegister(Address address) noexcept;
   void streamed(std::uint32_t registerAddress, Origin origin, std::uint32_t loadedFrom);

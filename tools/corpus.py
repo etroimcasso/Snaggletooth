@@ -32,12 +32,14 @@ bytes it holds, every staged extent by what the shadow found of its source —
 exact, approximate, computed, from a register, unwritten — every landing by
 what the PPU used the memory as and by its depth, every walk by its unit and
 form, every preview by its form, every sample the key-ons named by whether the
-image holds it, and every routine with what it calls and reaches.
+image holds it, every note the toolkit's runs of the routines wrote by what it
+says, and every routine with what it calls and reaches.
 
 Every image's line counts its manifest's `stop`, `reached`, `ran`, `derived`,
 `moved`, `landed`, `walked`, `asset`, `preview`, `sample`, `origin`, `staged`,
-`streamed`, `state` and `seen` lines, so a corpus run says how far the trace,
-the run, the analysis and the shadow reached.
+`enumerated`, `streamed`, `state` and `seen` lines, so a corpus run says how far
+the trace, the run, the analysis and the shadow reached, and carries the
+disassembler's count of the values it ran routines for.
 
 An image is OK only when every command exits 0; the script exits 0 only when
 every image is OK. A failure's whole output is printed, never truncated. The
@@ -83,8 +85,9 @@ def facts(tree):
     # moved <site> channel <n> <direction> <register> <name> <class> memory <address>
     #       <step> bytes <n> as <kind> times <n>
     moved = [(w[7], w[14], fromImage(w[9])) for w in manifestLines(tree, "moved", 17)]
-    # asset <path> <class> as <kind> from <address> bytes <n>
-    assets = [(w[1].split("/")[0], int(w[8]), w[4], w[1].rsplit(".", 1)[-1]) for w in manifestLines(tree, "asset", 9)]
+    # asset <path> <class> as <kind> from <address> bytes <n> [also <class>]
+    assets = [(w[1].split("/")[0], int(w[8]), w[4], w[1].rsplit(".", 1)[-1])
+              for w in manifestLines(tree, "asset", 9) + manifestLines(tree, "asset", 11)]
     # landed <site> channel <n> memory <address> bytes <n> as <kind> at <lowest>-<highest>
     #        in <area> times <n> depth <2|4|8|none>
     landed = [(w[13], w[17]) for w in manifestLines(tree, "landed", 18)]
@@ -135,6 +138,52 @@ def staged(tree):
                 spanned += int(w[7])
                 used += int(w[9])
     return kinds, spanned, used, stagedLines, streamedLines
+
+
+# What each note the toolkit's runs of the routines write says, by the words
+# that end it or name it, in the order the notes are listed.
+ENUMERATION_NOTES = [
+    ("no routine holds the site", "no routine holds the site; not run"),
+    ("entered by a jump", "entered by a jump, no return to end at; not run"),
+    ("no path reaches the entry", "no path the analysis follows reaches its entry; not run"),
+    ("no bounded input", "no input every path bounds; not run"),
+    ("an input no path reads", "read on none before it is written; not an input"),
+    ("not entered by the second run", "the second run did not enter it; nothing run"),
+    ("did not return", "cycles; not lifted"),
+    ("wrote outside the footprint", "outside what the run saw the routine write; not lifted"),
+    ("wrote a new register", "a register the run never saw the routine write; not lifted"),
+    ("the lift disagreed", "the lift disagreed with the machine at"),
+    ("wrote no work RAM", "wrote no byte of work RAM; nothing to lift"),
+    ("an extent never carried", "extents the run never carried; not lifted"),
+    ("would move a recorded file", "would move "),
+    ("would change a recorded file's form", "would change the form of "),
+    ("lies across two recorded files", "lies across "),
+    ("carried to a register no file is named for", "which no file is named for; not lifted"),
+    ("the second run differed", "; nothing enumerated"),
+    ("a proven transfer from a written extent", "the run wrote the extent and never started this transfer"),
+    ("a proven transfer from an unwritten extent", "nothing wrote the extent in the run; nothing to run from"),
+]
+
+
+def enumeration(tree):
+    """The notes the toolkit's runs of the routines wrote, counted by what they
+    say, and the `enumerated` lines counted."""
+    counts = collections.Counter()
+    manifest = tree / "project.snagifest"
+    if not manifest.exists():
+        return counts, 0
+    lines = 0
+    for line in manifest.read_text(errors="replace").splitlines():
+        if line.startswith("enumerated "):
+            lines += 1
+            continue
+        if not line.startswith("note"):
+            continue
+        for label, words in ENUMERATION_NOTES:
+            if words in line:
+                counts[label] += 1
+                break
+    return counts, lines
 
 
 def fromImage(address):
@@ -241,6 +290,7 @@ def main():
     corpusSamples = collections.Counter()
     corpusReaches = collections.Counter()
     corpusThrough = collections.Counter()
+    corpusEnumeration = collections.Counter()
     factTotals = collections.Counter()
     routineTotals = collections.Counter()
     largest = []
@@ -266,8 +316,12 @@ def main():
                         f"{kinds['derived']} derived, {kinds['moved']} moved, {kinds['landed']} landed, "
                         f"{kinds['walked']} walked, {kinds['asset']} assets, {kinds['preview']} previews, "
                         f"{kinds['sample']} samples, "
-                        f"{kinds['origin']} origin, {kinds['staged']} staged, {kinds['streamed']} streamed, "
-                        f"{kinds['state']} state lines, {kinds['seen']} seen lines")
+                        f"{kinds['origin']} origin, {kinds['staged']} staged, {kinds['enumerated']} enumerated, "
+                        f"{kinds['streamed']} streamed, {kinds['state']} state lines, {kinds['seen']} seen lines")
+        # The disassembler's count of the values it ran routines for, as it printed it.
+        variants = [line for line in results[0].stdout.splitlines() if " variants run, " in line]
+        if variants:
+            summary += f"; {variants[0]}"
         if replayLine:
             summary += f"; {replayLine}"
         if args.facts:
@@ -287,7 +341,8 @@ def main():
             # note beside the two; the count is what the check found.
             factTotals["contradicted"] += sum(
                 1 for line in manifest.read_text(errors="replace").splitlines()
-                if line.startswith("note") and "the code proves" in line) if manifest.exists() else 0
+                if line.startswith("note") and "the code proves" in line and "; the run moved " in line
+            ) if manifest.exists() else 0
             factTotals["moved"] += len(movedLines)
             imageRanges = 0
             for destination, kind, image in movedLines:
@@ -323,6 +378,9 @@ def main():
             factTotals["sourceUsed"] += used
             factTotals["staged"] += stagedLines
             factTotals["streamed"] += streamedLines
+            enumerationNotes, enumeratedLines = enumeration(tree)
+            corpusEnumeration.update(enumerationNotes)
+            factTotals["enumerated"] += enumeratedLines
             top = ", ".join(f"{k} {v}" for k, v in classes.most_common(5))
             sources = ", ".join(f"{k} {v}" for k, v in sourceKinds.most_common())
             forms = ", ".join(f"{k} {v}" for k, v in collections.Counter(f for _, _, _, f in assets).most_common())
@@ -407,6 +465,9 @@ def main():
               f"{factTotals['sourceUsed']} used):")
         for k, v in corpusSources.most_common():
             print(f"  {k:<12} {v}")
+        print(f"\nenumeration, whole corpus ({factTotals['enumerated']} enumerated lines):")
+        for label, _ in ENUMERATION_NOTES:
+            print(f"  {label:<44} {corpusEnumeration[label]}")
         print("\nthe thirty most-reached registers, whole corpus:")
         for k, v in corpusRegisters.most_common(30):
             print(f"  {k:<16} {v}")

@@ -31,6 +31,7 @@ std::optional<MovedKind> parseMovedKind(const std::string& word) {
   if (word == "stream") return MovedKind::Stream;
   if (word == "staged") return MovedKind::Staged;
   if (word == "proven") return MovedKind::Proven;
+  if (word == "enumerated") return MovedKind::Enumerated;
   return std::nullopt;
 }
 
@@ -178,23 +179,39 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       continue;
     }
     if (words[0] == "asset") {
-      // asset <path> <class> as <kind> from <address> bytes <n>
-      if (words.size() != 9 || words[3] != "as" || words[5] != "from" || words[7] != "bytes") {
-        return fail("an asset is a path, a class, `as` a kind, `from` an address and `bytes` n");
+      // asset <path> <class> as <kind> from <address> bytes <n> [also <class>]
+      if ((words.size() != 9 && words.size() != 11) || words[3] != "as" || words[5] != "from" || words[7] != "bytes" ||
+          (words.size() == 11 && words[9] != "also")) {
+        return fail(
+            "an asset is a path, a class, `as` a kind, `from` an address, `bytes` n and, after them, `also` a class or "
+            "nothing");
       }
-      // The class, or several joined by `+` for a file built into data for
-      // two.
+      // A class, or several joined by `+`, ascending: the file's own, for a
+      // file built into data for two, and those after `also`.
+      const auto classList = [](const std::string& word, std::vector<RegisterClass>& into) -> std::string {
+        for (std::size_t from = 0; from <= word.size();) {
+          const std::size_t joint = word.find('+', from);
+          const std::string name = word.substr(from, joint == std::string::npos ? std::string::npos : joint - from);
+          const std::optional<RegisterClass> cls = parseRegisterClass(name);
+          if (!cls) return name + " is not a register class";
+          if (std::find(into.begin(), into.end(), *cls) == into.end()) into.push_back(*cls);
+          if (joint == std::string::npos) break;
+          from = joint + 1u;
+        }
+        std::sort(into.begin(), into.end());
+        return {};
+      };
       std::vector<RegisterClass> classes;
-      for (std::size_t from = 0; from <= words[2].size();) {
-        const std::size_t joint = words[2].find('+', from);
-        const std::string word = words[2].substr(from, joint == std::string::npos ? std::string::npos : joint - from);
-        const std::optional<RegisterClass> cls = parseRegisterClass(word);
-        if (!cls) return fail(word + " is not a register class");
-        if (std::find(classes.begin(), classes.end(), *cls) == classes.end()) classes.push_back(*cls);
-        if (joint == std::string::npos) break;
-        from = joint + 1u;
+      if (const std::string failed = classList(words[2], classes); !failed.empty()) return fail(failed);
+      std::vector<RegisterClass> also;
+      if (words.size() == 11) {
+        if (const std::string failed = classList(words[10], also); !failed.empty()) return fail(failed);
+        for (const RegisterClass cls : also) {
+          if (std::find(classes.begin(), classes.end(), cls) != classes.end()) {
+            return fail(std::string(cpu65816RegisterClassName(cls)) + " is the file's own class, not one after also");
+          }
+        }
       }
-      std::sort(classes.begin(), classes.end());
       const std::optional<MovedKind> kind = parseMovedKind(words[4]);
       if (!kind) return fail(words[4] + " is not dma, table, indirect, stream, staged or proven");
       const std::optional<Address> first = parseLongAddress(words[6]);
@@ -202,7 +219,7 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       const std::optional<std::size_t> bytes = parseCount(words[8]);
       if (!bytes || *bytes == 0) return fail(words[8] + " is not a byte count");
       input.assets.push_back(
-          ManifestAsset{.file = words[1], .first = *first, .bytes = *bytes, .classes = classes, .kind = *kind});
+          ManifestAsset{.file = words[1], .first = *first, .bytes = *bytes, .classes = classes, .also = also, .kind = *kind});
       continue;
     }
     if (words[0] == "derived") {
@@ -411,8 +428,9 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.seen.push_back(std::move(seen));
       continue;
     }
-    static const std::set<std::string> kKnown = {"title",  "stop",     "warning", "note",   "state",   "origin",
-                                                 "staged", "streamed", "landed",  "walked", "preview", "sample"};
+    static const std::set<std::string> kKnown = {"title",   "stop",       "warning", "note",   "state",
+                                                 "origin",  "staged",     "streamed", "landed", "walked",
+                                                 "preview", "sample",     "enumerated"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   std::map<std::string, Address> routineAddresses;

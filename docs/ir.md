@@ -1066,7 +1066,7 @@ the data bank, and the program bank — the bank the CPU runs in, which is the
 bank the program places the instruction in only when the code does not run
 through a mirror, so what `PHK` pushes is what the chip pushes; a `State` adds
 the compare the last instruction made against an immediate, for the branch on
-the carry after it, and the bytes the path has pushed and not yet pulled.
+the carry after it, and the bytes the path has pushed and has not pulled.
 
 `evaluate(node, before, image)` runs one node's effects over a state. It follows
 `Set`, the address arithmetic, the shifts, `Inc`, `Dec`, `And`, `Or`, `Xor`,
@@ -1106,7 +1106,9 @@ A call the bytes do not resolve, a `BRK` or `COP`, and a routine that reaches a
 jump the bytes do not name bring back nothing known but that bank.
 
 `before(address)` is what is proven before the first node at an address, or
-nothing for an address no path reached. `derived()` is every `DerivedTarget` —
+nothing for an address no path reached; read at a routine's entry, its A, X and
+Y with two values or more are the index values the disassembler runs the
+routine for ([snes-disassembler.md §What the toolkit ran](snes-disassembler.md#what-the-toolkit-ran)). `derived()` is every `DerivedTarget` —
 site, pointer, target, whether the site calls — of a `JMP (abs,X)` or `JSR (abs,X)`
 whose index every path bounds and whose table lies in the image: each slot the
 index selects is read as the chip reads it. The plain and long indirect forms

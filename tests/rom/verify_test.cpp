@@ -614,7 +614,7 @@ TEST(RomVerify, AnEditedTableEntryDiffersAtItsByte) {
 TEST(RomVerify, ASheetThatIsNotIndexedIsTheBankFilesErrorNamingIt) {
   const std::vector<std::uint8_t> rom = drawingImage();
   Tree tree = drawingTree();
-  // A sheet re-saved as truecolour: the same picture, no indexes to read.
+  // A sheet re-saved as truecolor: the same picture, no indexes to read.
   std::vector<unsigned char> pixels(32u * 8u * 3u, 40);
   lodepng::State state;
   state.info_raw.colortype = LCT_RGB;
