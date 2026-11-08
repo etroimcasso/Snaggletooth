@@ -232,7 +232,8 @@ Snes::Snes(SnesConfig config)
       region_(config.region),
       apuThreaded_(config.apuThread),
       ppuThreaded_(config.ppuThread),
-      ppuVerify_(config.ppuVerify) {
+      ppuVerify_(config.ppuVerify),
+      slowStep_(config.apuThread || config.ppuThread) {
   gpuPpu_ = config.gpuPpu;
   // The board is the header's, with the map and the save the caller overrides.
   board_ = cartridgeBoard(rom_);
@@ -306,6 +307,7 @@ Snes::Snes(Snes&& moved) noexcept
       apuThreaded_(moved.apuThreaded_),
       ppuThreaded_(moved.ppuThreaded_),
       ppuVerify_(moved.ppuVerify_),
+      slowStep_(moved.slowStep_),
       apuNum_(moved.apuNum_),
       apuDen_(moved.apuDen_),
       lastCost_(moved.lastCost_),
@@ -341,8 +343,14 @@ Snes::Snes(Snes&& moved) noexcept
       link_(),
       picture_(std::move(moved.picture_)),
       cache_(std::move(moved.cache_)),
-      timeline_(std::move(moved.timeline_)) {
+      timeline_(std::move(moved.timeline_)),
+      instructionObserver_(moved.instructionObserver_),
+      boundaryCpu_(moved.boundaryCpu_),
+      boundaryMaster_(moved.boundaryMaster_),
+      tellingBoundary_(moved.tellingBoundary_),
+      inSlowStep_(false) {
   moved.observer_ = nullptr;
+  moved.instructionObserver_ = nullptr;
   moved.frameObserver_ = nullptr;
   moved.timelineObserver_ = nullptr;
   moved.gpuPpu_ = nullptr;
@@ -382,6 +390,7 @@ bool Snes::restore(const SnesState& state) {
   load();
   // The pages the watches reach are worked out again from the state now in place.
   if (armed_ || standins_) refreshWatchPages();
+  markBoundary();
   return true;
 }
 
@@ -512,6 +521,7 @@ void Snes::reset() {
   apu_.reset();
   if (bootsAudio_) enterIplStub(state_.apu);
   load();
+  markBoundary();
 }
 
 Cpu65816State Snes::powerOnCpu() const {
@@ -643,6 +653,40 @@ void Snes::machineCycle() {
   deliverFinished();
 }
 
+void Snes::setInstructionObserver(InstructionObserver* observer) noexcept {
+  instructionObserver_ = observer;
+  slowStep_ = apuThreaded_ || ppuThreaded_ || observer != nullptr;
+  markBoundary();
+}
+
+void Snes::markBoundary() noexcept {
+  boundaryCpu_ = cpu_.state();
+  boundaryMaster_ = state_.master;
+}
+
+void Snes::tellBoundary() {
+  // The register file goes back into the state first, so state() inside the call
+  // is the machine at this boundary.
+  state_.cpu = cpu_.state();
+  const Cpu65816State before = boundaryCpu_;
+  const auto cycles = static_cast<std::uint32_t>(state_.master - boundaryMaster_);
+  boundaryCpu_ = state_.cpu;
+  boundaryMaster_ = state_.master;
+  tellingBoundary_ = true;
+  instructionObserver_->instruction(before, state_.cpu, cycles);
+  tellingBoundary_ = false;
+}
+
+void Snes::observedCycle() {
+  // step()'s own test: a refresh cycle never ends a step, a halted core's idle cycle
+  // always does, and otherwise the cycle that leaves the CPU between instructions
+  // does. Both halves are read before the cycle, as step() reads them.
+  const bool refresh = state_.refreshLeft != 0u;
+  const bool halted = cpu_.state().run != CpuRunState::Running;
+  machineCycle();
+  if (!refresh && (halted || cpu_.atInstructionBoundary())) tellBoundary();
+}
+
 void Snes::deliverReports() {
   // A picture the beam finished this cycle, and the save window that frame
   // changed, go to whoever is watching once the cycle has closed: the master
@@ -667,11 +711,10 @@ void Snes::deliverReports() {
 }
 
 std::uint32_t Snes::step() {
-  // A machine built with either thread runs the call inside a flight, entered here
-  // and the call made again from inside it; the default machine runs it as it stands.
-  if ((apuThreaded_ || ppuThreaded_) && !inFlight_.load(std::memory_order_relaxed)) [[unlikely]] {
-    return stepInFlight();
-  }
+  // A machine with either thread or an instruction observer set takes the call out
+  // of line, which makes it again from there; every other machine runs it as it
+  // stands, and pays this one test.
+  if (slowStep_ && !inSlowStep_) [[unlikely]] return stepSlow();
   const std::uint64_t before = state_.master;
   // A refresh the last call left part-way through is spent first: it is not an
   // instruction, and the instruction this call owes is the one after it.
@@ -694,7 +737,12 @@ std::uint64_t Snes::run(std::uint64_t budget) {
     return runInFlight(budget);
   }
   state_.consumed += budget;
-  while (state_.master < state_.consumed) machineCycle();
+  // The observer is looked for once a call, never once a cycle.
+  if (instructionObserver_ == nullptr) [[likely]] {
+    while (state_.master < state_.consumed) machineCycle();
+  } else {
+    while (state_.master < state_.consumed) observedCycle();
+  }
   sync();
   return budget;
 }
@@ -899,6 +947,7 @@ void Snes::setCpuState(const Cpu65816State& state) {
   cpu_.restore(state_.cpu);
   cpu_.syncNmiLine((state_.nmitimen & 0x80u) != 0u && state_.vblankNmi);
   cpu_.setIrqLine(state_.timeup);
+  markBoundary();
 }
 
 std::size_t Snes::takeFrames(std::span<StereoFrame> into) noexcept {
@@ -1571,6 +1620,7 @@ bool Snes::runCall(std::uint32_t entry, Cpu65816State file, Standin returns, std
   // boundary a CPU cycle lands on — an idle cycle of a halted core lands on one
   // too — and the guard counts those.
   std::size_t left = guard;
+  const bool observed = instructionObserver_ != nullptr;  // looked for once a call
   for (;;) {
     if (left == 0u) {
       sync();
@@ -1578,7 +1628,7 @@ bool Snes::runCall(std::uint32_t entry, Cpu65816State file, Standin returns, std
     }
     const bool cpuCycle =
         state_.refreshLeft == 0u && !state_.hdmaRunPending && !state_.dmaRunning;
-    machineCycle();
+    observed ? observedCycle() : machineCycle();
     if (!cpuCycle || !cpu_.atInstructionBoundary()) continue;
     --left;
     const Cpu65816State& cpu = cpu_.state();
@@ -1595,13 +1645,18 @@ bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard
   // then runs to the boundary exactly as step() would, those cycles the guest's
   // own, out of the budget the host runs next; the file taken there is the one
   // the guest resumes at. A call from the audio thread is refused by the thread it
-  // comes on, before anything the console's own thread writes is read.
-  if (returns == Standin::None || onApuThread() || insideCycle_ ||
+  // comes on, before anything the console's own thread writes is read. So is a
+  // call from inside the instruction observer's.
+  if (returns == Standin::None || onApuThread() || insideCycle_ || tellingBoundary_ ||
       !addressable(entry & 0xFFFFFFu, 1)) {
     return false;
   }
   const Flight flight{*this};
-  while (!cpu_.atInstructionBoundary()) machineCycle();
+  if (instructionObserver_ == nullptr) [[likely]] {
+    while (!cpu_.atInstructionBoundary()) machineCycle();
+  } else {
+    while (!cpu_.atInstructionBoundary()) observedCycle();
+  }
   sync();
   const Cpu65816State before = state_.cpu;
   const bool returned = runCall(entry, before, returns, guard);
@@ -1618,12 +1673,16 @@ bool Snes::callInContext(std::uint32_t entry, Standin returns, std::size_t guard
 bool Snes::callOnStack(std::uint32_t entry, std::uint16_t stackTop, Standin returns,
                        std::size_t guard) {
   // Refused, or run to the boundary first, as callInContext is.
-  if (returns == Standin::None || onApuThread() || insideCycle_ ||
+  if (returns == Standin::None || onApuThread() || insideCycle_ || tellingBoundary_ ||
       !addressable(entry & 0xFFFFFFu, 1)) {
     return false;
   }
   const Flight flight{*this};
-  while (!cpu_.atInstructionBoundary()) machineCycle();
+  if (instructionObserver_ == nullptr) [[likely]] {
+    while (!cpu_.atInstructionBoundary()) machineCycle();
+  } else {
+    while (!cpu_.atInstructionBoundary()) observedCycle();
+  }
   sync();
   Cpu65816State file = state_.cpu;
   file.s = stackTop;
@@ -2919,9 +2978,25 @@ void Snes::writeJoypadStrobe(std::uint8_t value) noexcept {
 
 // step() and run() inside a flight. Never inlined: step() and run() carry one test of
 // the flags on a machine without a thread, and none of this.
-SNAGGLETOOTH_NOINLINE std::uint32_t Snes::stepInFlight() {
+SNAGGLETOOTH_NOINLINE std::uint32_t Snes::stepSlow() {
+  // The flight is entered where the machine has a thread and is not in one already,
+  // and is nothing otherwise. step() runs as it stands while the flag is up; the flag
+  // comes down even when a report inside the call throws.
   const Flight flight{*this};
-  return step();
+  struct Inside {
+    bool& flag;
+    explicit Inside(bool& f) : flag(f) { flag = true; }
+    ~Inside() { flag = false; }
+    Inside(const Inside&) = delete;
+    Inside& operator=(const Inside&) = delete;
+  };
+  std::uint32_t cycles = 0;
+  {
+    const Inside inside{inSlowStep_};
+    cycles = step();
+  }
+  if (instructionObserver_ != nullptr) tellBoundary();
+  return cycles;
 }
 
 SNAGGLETOOTH_NOINLINE std::uint64_t Snes::runInFlight(std::uint64_t budget) {

@@ -405,6 +405,40 @@ class InstructionWatcher {
   virtual void reached(std::uint32_t address) = 0;
 };
 
+// A host told every time the machine reaches a boundary step() returns at, and
+// told it from step(), from run() and from the calls into the guest alike, so a
+// machine run a budget at a time is told the boundaries a stepped one returns at.
+// A boundary is the end of a CPU instruction; one idle cycle of a halted core; or
+// a cycle an engine held the bus for while the CPU stood between instructions, an
+// HDMA event, told with the program counter where it was. A memory refresh is not
+// one, and its cycles count toward the boundary after it.
+//
+// `before` is the register file at the boundary before, or as it stood when the
+// observer was set or after the last restore(), reset() or setCpuState(); `after`
+// is the file at this boundary; `masterCycles` is the master cycles from the one
+// to the other, which is what step() returns for the instruction it runs.
+//
+// The call comes on the calling thread, once the cycle has closed and after any
+// frame, timeline or save report that cycle owed. Inside it, state() is the
+// machine at the boundary with `cpu` equal to `after`; on a machine built with
+// either thread, the audio machine and the two fields of `ppu` the picture writes
+// read as they read in a bus observer's call (state(), below). The call does not
+// throw and runs nothing on the machine: no step(), run(), restore(), reset() or
+// setCpuState(). A call into the guest made from inside it is refused.
+//
+// It is the observing side of InstructionWatcher, as BusObserver is of
+// AccessWatcher: told after the fact, at every boundary, with no answer to give.
+// The observer is the host's object, set by pointer and not part of the state, so
+// a snapshot does not carry it, and restore() and reset() leave it in place.
+class InstructionObserver {
+ public:
+  virtual ~InstructionObserver() = default;
+  // The machine has reached a boundary: the register file was `before` at the
+  // boundary before and is `after` now, `masterCycles` master cycles later.
+  virtual void instruction(const Cpu65816State& before, const Cpu65816State& after,
+                           std::uint32_t masterCycles) = 0;
+};
+
 // How a machine is built: the cartridge image, the clock rate, and whether to
 // seed the APU upload stub. The ROM is copied in, so the span need not outlive
 // the call.
@@ -712,13 +746,13 @@ class Snes {
   // machine's part, `apu`, runs on the audio thread inside a call: it is coherent in
   // the frame, timeline and save reports, which wait for the audio machine, and in the audio
   // machine's observer's calls, which run on that thread. A bus observer, an access
-  // watcher or an instruction watcher there reads the audio machine through peekApu
-  // and peekApuRegister, which wait for it. On a machine built with
-  // SnesConfig::ppuThread on, the two fields of `ppu` the picture writes, `tiles` and
-  // `lastMain`, are the picture thread's inside a call: they are coherent in the
-  // frame, timeline and save reports, which wait for the picture, and at every return, where
-  // the console copies them back; a bus observer or a watcher inside a call does not
-  // read them.
+  // watcher, an instruction watcher or an instruction observer there reads the audio
+  // machine through peekApu and peekApuRegister, which wait for it. On a machine
+  // built with SnesConfig::ppuThread on, the two fields of `ppu` the picture writes,
+  // `tiles` and `lastMain`, are the picture thread's inside a call: they are coherent
+  // in the frame, timeline and save reports, which wait for the picture, and at every
+  // return, where the console copies them back; a bus observer, a watcher or an
+  // instruction observer inside a call does not read them.
   [[nodiscard]] const SnesState& state() const noexcept { return state_; }
   // Takes the state by const reference rather than by value: a SnesState is a quarter
   // of a megabyte, and a by-value parameter would copy it onto the caller's stack.
@@ -816,6 +850,17 @@ class Snes {
   // costs one check.
   void setObserver(BusObserver* observer) noexcept { observer_ = observer; }
   [[nodiscard]] BusObserver* observer() const noexcept { return observer_; }
+
+  // The observer told every boundary step() returns at (InstructionObserver,
+  // above), or none, which is how the machine starts. Set it between calls: the
+  // register file the machine holds as it is set is the first call's `before`. It
+  // is the host's object and not part of the state: a snapshot does not carry it,
+  // and restore() and reset() leave it in place. With none set, step() pays one
+  // test a call and run() one test a call, never one a cycle.
+  void setInstructionObserver(InstructionObserver* observer) noexcept;
+  [[nodiscard]] InstructionObserver* instructionObserver() const noexcept {
+    return instructionObserver_;
+  }
 
   // The observer told every frame the PPU finishes (FrameObserver,
   // `video_frame.h`), or none, which is how the machine starts. The machine
@@ -1097,7 +1142,8 @@ class Snes {
   // 1)), or when it is made from inside a host's call the machine makes during a
   // cycle — an access watcher's, the bus observer's, or the audio machine's
   // observer's, which on a machine built with SnesConfig::apuThread on comes on the
-  // audio thread and is refused by the thread it comes on. An instruction watcher is told between instructions, and a call
+  // audio thread and is refused by the thread it comes on — and when it is made
+  // from inside the instruction observer's call. An instruction watcher is told between instructions, and a call
   // from inside its call, at any depth, is the same call. The frame and save
   // observers are told at a cycle's end, and a call from inside their reports
   // runs the machine to its boundary first, as above; a frame the routine
@@ -1172,8 +1218,11 @@ class Snes {
   // A write to a port from the bus, handed to the audio thread to land at the
   // audio cycle the console has reached.
   void pushPortWrite(std::uint8_t index, std::uint8_t value) noexcept;
-  // step() and run() inside a flight, on a machine built with either thread.
-  std::uint32_t stepInFlight();
+  // step() out of line, on a machine with either thread or an instruction observer
+  // set: the call inside a flight where the machine has a thread, then the boundary
+  // told where it has an observer. run() inside a flight, on a machine built with
+  // either thread.
+  std::uint32_t stepSlow();
   std::uint64_t runInFlight(std::uint64_t budget);
 
   // The picture thread's loop, its start and stop, and both threads' stop.
@@ -1288,6 +1337,17 @@ class Snes {
   // by the master cycles it now owes. A frame, timeline or save report the cycle
   // owes is made after it closes.
   void machineCycle();
+
+  // The instruction observer's side of a cycle. markBoundary makes the machine as
+  // it stands the next call's `before`. tellBoundary tells the observer the
+  // boundary the machine stands at, from the one marked before it, and marks this
+  // one. observedCycle runs one machine cycle and tells the boundary where the
+  // cycle ends at one step() returns at: not after a refresh cycle, always after a
+  // halted core's idle cycle, and otherwise where the CPU stands between
+  // instructions.
+  void markBoundary() noexcept;
+  void tellBoundary();
+  void observedCycle();
 
   // The master cycles the refresh holds the CPU off the bus, spent a fast cycle at a
   // time, and what every cycle ends with: the timer's crossing settled, the interrupt
@@ -1704,6 +1764,9 @@ class Snes {
   bool apuThreaded_ = false;
   bool ppuThreaded_ = false;
   bool ppuVerify_ = false;           // every picture line drawn and checked against the frame before (SnesConfig::ppuVerify)
+  // step() takes the call out of line (stepSlow): the machine has either thread or an
+  // instruction observer set. Kept as one byte so a machine with neither pays one test.
+  bool slowStep_ = false;
   std::uint32_t apuNum_ = 5632u;     // the APU-to-master cycle ratio for this region (numerator)
   std::uint32_t apuDen_ = 118125u;   // and its denominator
   std::uint32_t lastCost_ = 6;       // the master cost of the cycle in progress
@@ -2220,6 +2283,18 @@ class Snes {
     bool paletteHalf = false;  // the write in progress is a palette word's second half
   };
   std::unique_ptr<TimelineRecorder> timeline_;
+
+  // The instruction observer, none by default, and the boundary its next call
+  // counts from: the register file and the master count as they stood there. The
+  // first flag is set for the length of the observer's call, and a call into the
+  // guest made while it is set is refused. None of these is part of the state. They
+  // sit after every member a cycle reads, so a machine with no observer set lays
+  // out the members its cycles reach as one without the feature does.
+  InstructionObserver* instructionObserver_ = nullptr;
+  Cpu65816State boundaryCpu_{};
+  std::uint64_t boundaryMaster_ = 0;
+  bool tellingBoundary_ = false;
+  bool inSlowStep_ = false;  // stepSlow's own call of step() is in progress, and runs as it stands
 
   // The recorder's points, each reached on the side that draws only while a
   // timeline observer is set, `s` being that side's chip state: Time's inputs as a

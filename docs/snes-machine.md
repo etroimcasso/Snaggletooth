@@ -45,6 +45,9 @@ handed each frame as what it is drawn from.
   - [General-purpose DMA](#general-purpose-dma)
   - [HDMA](#hdma)
 - [The bus observer](#the-bus-observer)
+- [The instruction observer](#the-instruction-observer)
+  - [What it is told](#what-it-is-told)
+  - [Inside the report](#inside-the-report)
 - [The save observer](#the-save-observer)
 - [The timeline observer](#the-timeline-observer)
 - [Snapshot and restore](#snapshot-and-restore)
@@ -241,7 +244,9 @@ A cycle is priced by its region, so a budget rarely lands on a cycle boundary. W
 part-way through a cycle, the machine finishes that cycle and carries the small overshoot into the
 next call — so `run(a)` followed by `run(b)` advances the machine exactly as `run(a + b)` would,
 and `run(0)` does nothing. `step()` always finishes on an instruction boundary; called after a `run()`
-stopped mid-instruction, it completes the instruction in progress rather than starting a new one.
+stopped mid-instruction, it completes the instruction in progress rather than starting a new one. A
+host that runs a budget at a time and still wants every boundary `step()` would have returned at sets
+an [instruction observer](#the-instruction-observer).
 
 ## The reset line
 
@@ -1003,6 +1008,87 @@ The [intermediate representation](ir.md#running-beside-the-machine) is the first
 a run replayed instruction by instruction with an interpreter beside each core, held to every access
 the two observers report.
 
+## The instruction observer
+
+The bus observer says what every cycle did. The instruction observer says where the main CPU stood
+between them: it is told every boundary `step()` returns at, from inside `step()`, from inside `run()`
+and from inside the calls into the guest, so a host that runs the machine a budget at a time is told
+exactly the boundaries a host stepping it would see returned. It is the console's twin of the audio
+machine's `ApuObserver::instruction`, and the observing side of the
+[instruction watch](#standing-in-for-a-routine): told after the fact, at every boundary, with no
+answer to give.
+
+```cpp
+#include "snaggletooth/snes/snes.h"
+using namespace snaggletooth;
+
+struct Count final : InstructionObserver {
+  std::uint64_t boundaries = 0;
+  std::uint64_t cycles = 0;
+  void instruction(const Cpu65816State&, const Cpu65816State&, std::uint32_t masterCycles) override {
+    ++boundaries;
+    cycles += masterCycles;
+  }
+};
+
+Snes ran{SnesConfig{.rom = rom}};
+Count count;
+ran.setInstructionObserver(&count);
+ran.run(357'368);             // one frame, run a budget at a time as a player runs it
+ran.setInstructionObserver(nullptr);
+
+Snes stepped{SnesConfig{.rom = rom}};
+std::uint64_t steps = 0, spent = 0;
+while (steps < count.boundaries) {
+  spent += stepped.step();
+  ++steps;
+}
+// spent == count.cycles: the stepped machine returned at every boundary the run reported
+```
+
+### What it is told
+
+`instruction(before, after, masterCycles)` is called once a boundary. A boundary is one of three
+things, the same three `step()` returns after:
+
+| Boundary | `after` |
+|---|---|
+| The end of a CPU instruction, or of the sequence that takes an interrupt | the register file it left |
+| One idle cycle of a core halted by `WAI` or `STP` | the file unchanged, `run` not `Running` |
+| A cycle an engine held the bus for while the CPU stood between instructions: an HDMA event | the file unchanged, the program counter where it was |
+
+A [memory refresh](#the-memory-refresh) is not a boundary: the CPU is held off the bus for it, no report
+is made, and its cycles count toward the boundary after it. A general-purpose transfer runs inside the
+instruction that started it, so its cycles land in that instruction's report.
+
+`before` is the register file at the boundary before. Where there was none to count from, it is the file
+as it stood when the observer was set, or after the last `restore()`, `reset()` or `setCpuState()`, each
+of which marks the boundary again. `masterCycles` is the master cycles from `before` to `after`: what
+`step()` returns for the instruction it runs, and the sum over every report is the master cycles the
+machine spent since the mark.
+
+### Inside the report
+
+The call comes on the calling thread, once the cycle has closed and after any frame, timeline or save
+report the cycle owed. `state()` inside it is the machine at the boundary, `state().cpu` equal to
+`after`. On a machine built with either thread, the audio machine and the two fields of `ppu` the
+picture writes read as they read inside a bus observer's call: the audio machine through `peekApu` and
+`peekApuRegister`, the picture's two fields not at all (`state()`'s comment in `snes.h`). The threads
+are not waited for, so a report costs the host's own work and nothing more.
+
+The call does not throw, and it runs nothing on the machine: no `step()`, `run()`, `restore()`,
+`reset()` or `setCpuState()`. A [call into the guest](#calling-into-the-guest) made from inside it is
+refused and returns false with nothing done. A call made between calls reports its own boundaries, the
+guest's instruction it finishes first and every instruction of the routine, and the report after it
+counts from the guest's file, put back.
+
+The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()`
+and `reset()` leave it in place, and a move carries it to the new machine. `instructionObserver()`
+reads back what is set; the machine starts with none. With none set, `step()` and `run()` each make one
+test a call and the machine runs exactly as it does without the feature; `tests/snes/instruction_observer_test.cpp`
+holds a machine with an observer that keeps nothing to the same state at every return and the same
+frames as one with none.
+
 ## The save observer
 
 A cartridge with a battery keeps what it writes, in a window the machine holds as state
@@ -1709,6 +1795,10 @@ machine that calls.
 - `callInContext` puts the register file back, so `cpuState()` after it is the guest's file, not the
   routine's. Read a routine's registers inside an instruction watch on its return, or call with
   `callOnStack`, which leaves them.
+- The instruction observer's report is not the place to copy the whole state on a machine built with a
+  thread: the report comes at every boundary, the threads are not waited for, and `state().apu` and the
+  picture's two fields are not coherent there. Copy the register file the call hands over, and read
+  `state()` whole at a frame report or between calls.
 - A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
   Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
   the console spends.

@@ -705,6 +705,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/host_memory_test.cpp
     tests/snes/access_watch_test.cpp
     tests/snes/instruction_watch_test.cpp
+    tests/snes/instruction_observer_test.cpp
     tests/snes/guest_call_test.cpp
     tests/snes/host_surface_test.cpp
     tests/snes/apu_thread_test.cpp
