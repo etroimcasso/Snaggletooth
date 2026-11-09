@@ -80,6 +80,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -91,6 +92,10 @@
 #include "ir/ir_provenance.h"
 #include "rom/input_script.h"
 #include "rom/progress.h"
+
+namespace snaggletooth {
+class Snes;
+}  // namespace snaggletooth
 
 namespace snaggletooth::disasm {
 
@@ -580,6 +585,70 @@ struct RunObservation {
   std::uint64_t variantsReturned = 0;
   std::uint64_t variantsConfined = 0;
   std::uint64_t enumerationCycles = 0;
+};
+
+// The run on a machine the host runs. Built over a machine at power-on, it sets
+// the machine's bus, audio and instruction observers (`snes/snes.h`) and records,
+// from the boundaries the machine reports, everything `observeRun` records; the
+// host runs the machine as it likes in the meantime, with `step()` or `run()`,
+// presents its own pads, and draws its own frames. The run is the same however
+// the machine is driven: it rides the boundaries `step()` returns at, which the
+// machine reports from `run()` as from `step()`, and a machine built with either
+// thread keeps its batches.
+//
+//   Snes machine{SnesConfig{.rom = rom}};
+//   disasm::ObservedRun run{machine, rom};
+//   for (int second = 0; second < 60; ++second) machine.run(21'477'272u);  // the host's own loop
+//   std::vector<std::string> notes;
+//   const disasm::RunObservation seen = run.finish(notes);
+//
+// The constructor throws `std::logic_error` when the machine has run a master
+// cycle, when it already has a bus, audio or instruction observer, or when the
+// image holds no cartridge header. `rom` is the image the machine was built
+// from, without a copier's header, and outlives the run; the machine is built
+// with no `map` and no `saveRamBytes` of its own, so its board is the header's.
+// From construction to `finish()` the host makes no call into the guest, sets
+// none of the three observers, and resets the machine only through `reset()`.
+class ObservedRun {
+ public:
+  ObservedRun(Snes& machine, std::span<const std::uint8_t> rom);
+  // Clears the three observers when `finish()` was not called.
+  ~ObservedRun();
+  ObservedRun(const ObservedRun&) = delete;
+  ObservedRun& operator=(const ObservedRun&) = delete;
+
+  // Pulls the console's reset line (`Snes::reset()`) and takes the run through
+  // it: every range open at the reset closes and is counted, the call stack the
+  // shadow held ends there, and both interpreters take the registers the reset
+  // left, so the run goes on checking every step after it.
+  void reset();
+
+  // How many times the beam has wrapped to line 0 since power-on: the frame a
+  // host presents an input script's pads for, as `observeRun` does.
+  [[nodiscard]] std::uint32_t frame() const noexcept;
+
+  // What the run has closed so far, with the run left going: the ranges,
+  // streams and contents that have closed and the landings a drawn frame has
+  // read; a range, a stream or a landing still open is not in it. `notes` gains
+  // the run's notes so far, the main CPU's in the order made and then the sound
+  // CPU's in the order made.
+  [[nodiscard]] RunObservation observation(std::vector<std::string>& notes) const;
+
+  // Ends the run as `observeRun` ends one — every stream and range closes, what
+  // the end cut short is counted, a landing no frame drew is unshown — clears
+  // the three observers and answers the whole observation; `notes` gains the
+  // notes as `observation` gives them. Called once.
+  [[nodiscard]] RunObservation finish(std::vector<std::string>& notes);
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  // `observeRun` runs the same `Impl` over a machine of its own.
+  friend RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t masterCycles,
+                                   const InputScript& input, std::vector<std::string>& notes,
+                                   const ProgressSink& progress, const EnumerationPlan& plan,
+                                   std::uint64_t firstInstructions, std::uint64_t firstDivergences);
 };
 
 // Boots `rom` on the machine and steps it for `masterCycles` of the master clock,

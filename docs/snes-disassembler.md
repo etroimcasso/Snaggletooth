@@ -582,6 +582,44 @@ disassembly to the next and merges a new run's with them, so an unattended run
 and a played one over the same directory accumulate — and an `entry` a person
 adds still names what no run has taken.
 
+The run need not own the machine. `snes_disasm` builds one and steps it; a host
+already running a machine for its own reasons — a player, a front end — binds
+an `ObservedRun` to it at power-on instead, runs it as it runs it, `step()` or
+`run()`, either thread on or off, its own pads and pictures and all, and hands
+what the run saw to the disassembly:
+
+```cpp
+#include "rom/rom_disasm.h"
+#include "snaggletooth/snes/snes.h"
+
+snaggletooth::Snes machine{snaggletooth::SnesConfig{.rom = image}};
+snaggletooth::disasm::ObservedRun run{machine, image};
+for (int second = 0; second < 60; ++second) machine.run(21'477'272u);  // the host's own loop
+std::vector<std::string> notes;
+const snaggletooth::disasm::RunObservation seen = run.finish(notes);
+
+bool found = false;
+std::string error;
+std::optional<snaggletooth::disasm::CartridgeRequest> request =
+    snaggletooth::disasm::treeRequest(image, "cartridge", found, error);  // the tree's entries and earlier runs
+request->observed = &seen;
+request->observedNotes = notes;
+snaggletooth::disasm::writeProject(snaggletooth::disasm::disassembleCartridge(*request), "cartridge", error);
+```
+
+The run rides the boundaries the machine reports, from `run()` as from `step()`
+([The instruction observer](snes-machine.md#the-instruction-observer)), so a
+host that steps the machine and presents each frame's pads after the step that
+wrapped the beam, as `snes_disasm` does, gets the observation `snes_disasm` gets
+field for field, and a host that runs it a quarter frame at a time gets the same
+again. The console's reset line goes through the run: `ObservedRun::reset()`
+pulls it, every range open at the reset closes there and is counted, the call
+stack the shadow held ends, and both CPUs are checked on every step after it. A
+disassembly handed a run boots nothing for one and writes the tree from it as
+from its own, except that it plans no routine to
+[run again](#what-the-toolkit-ran): the tree has no `enumerated` line, and none
+of the `note     enumerate` lines the plan writes.
+
 ## Where the CPU arrived, and what it saw
 
 The four forms are not the only way a program leaves the bytes' flow. A
@@ -1620,10 +1658,31 @@ interpreter checked — the `instructions` and `interrupts` it ran a node or a
 sequence for, the distinct `nodes` it lifted from the fetches, the
 `divergences` on which a node disagreed with the machine, each site once in
 the notes, and the `originSets` the shadow interned under its `originCap`.
-`extentStart` is the lowest address a `MovedRange` covered. `CartridgeRequest::observeRun`
+`extentStart` is the lowest address a `MovedRange` covered.
+
+`ObservedRun` in the same header is the run over a machine the host runs
+([Running the cartridge](#running-the-cartridge)). Its constructor,
+`ObservedRun(machine, rom)`, takes a `Snes` at power-on, built from `rom` with
+no `map` or `saveRamBytes` of its own, and sets the machine's bus, audio and
+instruction observers; it throws `std::logic_error` when the machine has run a
+master cycle, already has one of the three observers, or `rom` holds no
+cartridge header. From then on the host runs the machine as it likes, makes no
+call into the guest, and resets it only through `reset()`, which pulls the
+console's reset line and takes the run through it. `frame()` is how many times
+the beam has wrapped to line 0 since power-on, the frame an input script's pads
+are presented for. `observation(notes)` answers what has closed so far and
+leaves the run going: a range, a stream or a landing still open is not in it.
+`finish(notes)` closes everything as `observeRun` does at its end, clears the
+three observers and answers the whole observation; the destructor clears them
+when `finish` was not called. Both append the run's notes, the main CPU's in
+the order made and then the sound CPU's. `CartridgeRequest::observeRun`
 asks for the run — off unless asked, since it costs about as long as it emulates;
 `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
-`CartridgeRequest::input` is the script it replays. `CartridgeRequest::reached`,
+`CartridgeRequest::input` is the script it replays. `CartridgeRequest::observed`
+is a host's run in place of that one: set, the cartridge is not booted for a
+run, `observeRun`, `runMasterCycles` and `input` are not read,
+`CartridgeRequest::observedNotes` join the notes where the run's own would, and
+no plan of routines to run again is made. `CartridgeRequest::reached`,
 `CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs
 found, read back from the manifest, which the disassembly merges with this
 run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`),
@@ -1667,6 +1726,14 @@ reached and derived targets, landings, moved ranges, assets, file split, map,
 sound program and image identity back, and the accesses, routines, seen
 registers and transfers the renderer reads, and `manifestMismatch` says
 whether that manifest can direct a run over a given image.
+`treeRequest(rom, directory, found, error)` is the request a tree's directory
+gives, which `snes_disasm` disassembles from: a `CartridgeRequest` over `rom`
+whose `readFile` reads the directory's files and, where the directory holds a
+`project.snagifest` — `found` says whether it does — whose `entries`,
+`regions`, `reached`, `ran`, `moved`, `assets` and `derived` are the
+manifest's, every other field its default; nothing, with `error` the
+manifest's path, `: ` and what is wrong, when the manifest does not parse or
+was written for another image.
 
 The bank files and the sound file are `rom/rom_render.h`'s, a library that
 links nothing able to trace, run or lift: `readRenderInput(directory, program,
@@ -1773,7 +1840,9 @@ no state to run it from. A value runs from the state the routine's first
 invocation entered with, every other register as it stood there, so a routine
 whose other inputs differ from call to call is run under the first call's. A
 value that writes beyond what the run saw the routine write is refused, so an
-entry larger than any the run built is not lifted.
+entry larger than any the run built is not lifted. The values run only on a
+disassembly's own run: one handed a host's run (`CartridgeRequest::observed`)
+runs no routine again, and its tree has no `enumerated` line.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or

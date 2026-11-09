@@ -114,6 +114,9 @@ constexpr std::size_t kOriginCap = 64;
 // machine's own reading of it, and the blocks from its start to the first
 // carrying the end flag, stopping at the memory's end — and kept once per
 // distinct sample with a count.
+//
+// It keeps its own notes, which the run gives after the main CPU's: on a
+// machine built with `apuThread` its reports arrive on the audio thread.
 struct AudioLockstep final : ApuObserver {
   // The DSP's address register and its register file as the CPU last wrote
   // them; a write to `$F3` while the address is $80 or above sets nothing,
@@ -128,7 +131,7 @@ struct AudioLockstep final : ApuObserver {
   static constexpr std::size_t kBrrBlock = 9;
 
   const Snes& machine;
-  std::vector<std::string>& notes;
+  std::vector<std::string> notes;
   ir::Spc700Interpreter interpreter;
   std::vector<ir::Spc700Access> accesses;  // since the last boundary, in order
   std::uint8_t dspAddress = 0;
@@ -156,9 +159,22 @@ struct AudioLockstep final : ApuObserver {
   std::uint64_t diverged = 0;
   std::uint64_t steps = 0;
 
-  AudioLockstep(const Snes& m, std::vector<std::string>& n) : machine(m), notes(n) {
+  explicit AudioLockstep(const Snes& m) : machine(m) {
     interpreter.registers = ir::registersOf(m.state().apu.cpu);
     prepare(m.state().apu.cpu);
+  }
+
+  // The console's reset line went through the audio machine: the interpreter
+  // takes the sound CPU's registers as the reset left them and the instruction
+  // at its program counter, the accesses before the reset are dropped, and the
+  // copy of the DSP's address and register file is read again from the machine.
+  void restart() {
+    const ApuState& apu = machine.state().apu;
+    interpreter.registers = ir::registersOf(apu.cpu);
+    accesses.clear();
+    dspAddress = apu.dspAddr;
+    std::copy_n(apu.dsp.regs.begin(), kDspRegisters, dsp.begin());
+    prepare(apu.cpu);
   }
 
   void access(std::uint16_t address, std::uint8_t value, bool write) override {
@@ -576,6 +592,289 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   return observeRun(rom, masterCycles, input, notes, progress, EnumerationPlan{}, 0, 0);
 }
 
+// The run, bound to a machine the host runs. The machine reports every
+// boundary `step()` returns at; `begin` reads, at a boundary, what the step
+// about to run is going to do — the pointer an indirect form is about to read,
+// the stack and the line before it — and `instruction` is the step seen from
+// the boundary after it: the frame the beam began, the step checked against
+// the lifted node, the pointer confirmed by the landing. Nothing here presents
+// a pad or takes a snapshot; a host does both between its calls.
+struct ObservedRun::Impl final : InstructionObserver {
+  Snes& machine;
+  std::span<const std::uint8_t> rom;
+  CartridgeBoard board;
+  ir::Provenance shadow;
+  Recorder recorder;
+  Lockstep lockstep;
+  AudioLockstep audio;
+  std::optional<Enumerating> enumerating;
+  std::vector<ReachedTarget> reached;
+  std::set<std::tuple<Address, Address, std::uint32_t>> seen;
+  std::set<Address> unreadableSites, unconfirmedSites;
+  std::vector<std::string> notes;  // the main CPU's, in the order made
+  std::uint64_t spent = 0;
+  std::uint32_t frame = 0;  // counted from power-on, the first being 0; a frame begins when the beam wraps to line 0
+  // What the step about to run was read as, at the boundary before it.
+  Address site = 0;
+  std::uint16_t stackBefore = 0;
+  std::uint16_t lineBefore = 0;
+  std::optional<Pending> pending;
+  Cpu65816Mode mode{};
+
+  Impl(Snes& m, std::span<const std::uint8_t> image)
+      : machine(m),
+        rom(image),
+        board(cartridgeBoard(image)),
+        shadow{board, image.size(), kOriginCap},
+        recorder{m, shadow},
+        lockstep{board, image.size(), m.state().cpu, shadow},
+        audio{m} {
+    shadow.carries = &recorder;
+    machine.setObserver(&recorder);
+    machine.setApuObserver(&audio);
+    machine.setInstructionObserver(this);
+    begin();
+  }
+
+  // The boundary the next step starts from. `state()` is the live machine:
+  // everything read from it is copied out here, since the step rewrites it.
+  void begin() {
+    const SnesState& before = machine.state();
+    site = (static_cast<Address>(before.cpu.pbr) << 16) | before.cpu.pc;
+    stackBefore = before.cpu.s;
+    lineBefore = before.vpos;
+    bool unreadable = false;
+    pending = pendingTarget(board, rom, before, unreadable);
+    mode = modeOf(before.cpu);
+    if (unreadable && unreadableSites.insert(site).second) {
+      notes.push_back("run: the jump at " + formatAddress(site, 24) +
+                      " reads its pointer from memory the run cannot see; not recorded");
+    }
+    recorder.stepBegan(site);
+  }
+
+  void instruction(const Cpu65816State& before, const Cpu65816State& after, std::uint32_t masterCycles) override {
+    spent += masterCycles;
+    if (enumerating) enumerating->spent = spent;
+
+    // A step runs one instruction, or one cycle of a transfer, never a whole
+    // frame, so the beam wrapping to line 0 is a frame boundary seen exactly once.
+    if (machine.state().vpos < lineBefore) {
+      ++frame;
+      recorder.frameBegan();
+    }
+
+    // The interpreter beside the machine: the step's instruction lifted from
+    // its fetches and checked, the landing read, the registers recorded.
+    lockstep.step(before, after, recorder.cpu, notes);
+
+    // The second run keeps what the planned routines' frames wrote.
+    if (enumerating) enumerating->wrote(recorder);
+
+    confirm(after);
+    begin();
+  }
+
+  // The landing confirms the pointer. A step that serviced an interrupt instead
+  // lands in the handler and the instruction has not run yet; it is seen when it
+  // does. A landing elsewhere means the reading of the form is wrong, and that is
+  // said rather than recorded.
+  void confirm(const Cpu65816State& after) {
+    if (!pending) return;
+    const Address landed = (static_cast<Address>(after.pbr) << 16) | after.pc;
+    // A step that left the program counter where it was ran no instruction: the
+    // CPU was held off the bus — a DMA transfer, an HDMA event — and the jump is
+    // still ahead of it. It is seen on the step that runs it.
+    if (landed == site) return;
+    if (landed != pending->target) {
+      // An interrupt sequence lands in bank zero having pushed the return address
+      // and the status byte: four bytes in native mode, three in emulation. Nothing
+      // the four forms do moves the stack that way.
+      const std::uint16_t pushed = static_cast<std::uint16_t>(stackBefore - after.s);
+      const bool interrupted = after.pbr == 0 && (pushed == 4u || pushed == 3u);
+      if (!interrupted && unconfirmedSites.insert(site).second) {
+        notes.push_back("run: the jump at " + formatAddress(site, 24) + " read a pointer to " +
+                        formatAddress(pending->target, 24) + " but the CPU went to " + formatAddress(landed, 24) +
+                        "; not recorded");
+      }
+      return;
+    }
+    if (!seen.insert({site, pending->target, contextOf(mode).bits}).second) return;
+    reached.push_back(ReachedTarget{.target = pending->target,
+                                    .mode = mode,
+                                    .site = site,
+                                    .call = pending->call,
+                                    .name = {}});
+  }
+
+  // The console's reset line, taken through every part of the run: the ranges
+  // open close, the call stack the shadow held ends, and both interpreters
+  // start again from the registers the reset left.
+  void reset() {
+    machine.reset();
+    for (std::uint8_t c = 0; c < 8; ++c) recorder.closeChannel(c);
+    recorder.hdmaEnabled = 0;
+    recorder.port.reset();
+    recorder.carried.reset();
+    shadow.forgetPlaces();
+    shadow.flowBroke();
+    shadow.abandon();
+    lockstep.interpreter.registers = ir::registersOf(machine.state().cpu);
+    lockstep.interpreter.release();
+    if (enumerating) {
+      enumerating->live.clear();
+      enumerating->interruptDepth = 0;
+    }
+    audio.restart();
+    begin();
+  }
+
+  // The run's notes: the main CPU's in the order made, then the sound CPU's.
+  void notesInto(std::vector<std::string>& into) const {
+    into.insert(into.end(), notes.begin(), notes.end());
+    into.insert(into.end(), audio.notes.begin(), audio.notes.end());
+  }
+
+  // The shadow closes the stream still open — the recorder folds the last
+  // carry with it and takes its landing — and then the recorder closes every
+  // range, so what the run's end cut short is counted, and a landing no frame
+  // drew is unshown.
+  void finish(RunObservation& observation) {
+    shadow.finish();
+    recorder.finish();
+    shadow.carries = nullptr;
+    machine.setObserver(nullptr);
+    machine.setApuObserver(nullptr);
+    machine.setInstructionObserver(nullptr);
+    assemble(observation);
+  }
+
+  // What the run holds, as an observation: everything but what a plan's
+  // values add.
+  void assemble(RunObservation& observation) const {
+    observation.reached = reached;
+    std::sort(observation.reached.begin(), observation.reached.end(),
+              [](const ReachedTarget& a, const ReachedTarget& b) {
+                if (a.site != b.site) return a.site < b.site;
+                if (a.target != b.target) return a.target < b.target;
+                return contextOf(a.mode).bits < contextOf(b.mode).bits;
+              });
+    observation.moved = recorder.out;
+    std::sort(observation.moved.begin(), observation.moved.end(), rangeBefore);
+    observation.landed = recorder.landed;
+    std::sort(observation.landed.begin(), observation.landed.end(), landedBefore);
+    observation.walked = recorder.walked;
+    std::sort(observation.walked.begin(), observation.walked.end(), walkedBefore);
+    observation.palettes = recorder.palettes;
+
+    observation.ran = lockstep.ran;
+    std::sort(observation.ran.begin(), observation.ran.end(), [](const Landing& a, const Landing& b) {
+      if (a.site != b.site) return a.site < b.site;
+      if (a.target != b.target) return a.target < b.target;
+      return contextOf(a.mode).bits < contextOf(b.mode).bits;
+    });
+    for (const auto& [address, values] : lockstep.seen) {
+      observation.seen.push_back(SeenState{.address = address,
+                                           .d = {values.d.begin(), values.d.end()},
+                                           .dbr = {values.dbr.begin(), values.dbr.end()}});
+    }
+    observation.instructions = lockstep.instructions;
+    observation.interrupts = lockstep.interrupts;
+    observation.nodes = lockstep.nodes.size();
+    observation.divergences = lockstep.diverged;
+    observation.spc700Instructions = audio.instructions;
+    observation.spc700Nodes = audio.nodes.size();
+    observation.spc700Divergences = audio.diverged;
+    // The samples the key-ons named: by start, the shorter first, then by bytes.
+    observation.samples = audio.samples;
+    std::sort(observation.samples.begin(), observation.samples.end(),
+              [](const KeyedSample& a, const KeyedSample& b) {
+                if (a.start != b.start) return a.start < b.start;
+                if (a.bytes.size() != b.bytes.size()) return a.bytes.size() < b.bytes.size();
+                return a.bytes < b.bytes;
+              });
+
+    // What was staged: every extent, in address order then by count, its
+    // writers most bytes first.
+    for (const auto& [extent, staged] : recorder.staged) {
+      StagedRange range = staged;
+      std::sort(range.writers.begin(), range.writers.end(), [](const StagedWriter& a, const StagedWriter& b) {
+        if (a.bytes != b.bytes) return a.bytes > b.bytes;
+        if (a.unwritten != b.unwritten) return !a.unwritten;
+        return a.writer < b.writer;
+      });
+      observation.staged.push_back(std::move(range));
+    }
+    // What the CPU streamed: each distinct stream and landing once with its
+    // count, as the recorder took them from the shadow's closings; the source
+    // is the shadow's, which stands as the widest run it found.
+    observation.streamed = recorder.streams;
+    for (StreamedRange& range : observation.streamed) {
+      for (const ir::Stream& stream : shadow.streams()) {
+        if (stream.site == range.site && stream.registerAddress == range.registerAddress &&
+            stream.memory == range.memory && stream.first == range.romOffset && stream.bytes == range.bytes) {
+          range.source = stream.source;
+          break;
+        }
+      }
+    }
+    std::sort(observation.streamed.begin(), observation.streamed.end(),
+              [](const StreamedRange& a, const StreamedRange& b) {
+                if (a.site != b.site) return a.site < b.site;
+                if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
+                if (a.memory != b.memory) return a.memory < b.memory;
+                if (a.romOffset != b.romOffset) return a.romOffset < b.romOffset;
+                if (a.landing.has_value() != b.landing.has_value()) return !a.landing.has_value();
+                if (!a.landing) return false;
+                if (a.landing->lowest != b.landing->lowest) return a.landing->lowest < b.landing->lowest;
+                if (a.landing->highest != b.landing->highest) return a.landing->highest < b.landing->highest;
+                if (a.landing->shown != b.landing->shown) return a.landing->shown;
+                if (a.landing->areas != b.landing->areas) return a.landing->areas < b.landing->areas;
+                return a.landing->depths < b.landing->depths;
+              });
+    observation.originSets = shadow.origins().interned();
+    observation.originCap = shadow.origins().cap();
+  }
+};
+
+ObservedRun::ObservedRun(Snes& machine, std::span<const std::uint8_t> rom) {
+  if (machine.state().master != 0) {
+    throw std::logic_error("a run binds to a machine at power-on, and this one has run");
+  }
+  if (machine.observer() != nullptr || machine.apuObserver() != nullptr || machine.instructionObserver() != nullptr) {
+    throw std::logic_error("a run sets the machine's bus, audio and instruction observers, and one is already set");
+  }
+  if (!parseCartridgeHeader(rom)) {
+    throw std::logic_error("the image is too small to hold a cartridge header at any site");
+  }
+  impl_ = std::make_unique<Impl>(machine, rom);
+}
+
+ObservedRun::~ObservedRun() {
+  if (impl_->machine.instructionObserver() != impl_.get()) return;
+  impl_->machine.setObserver(nullptr);
+  impl_->machine.setApuObserver(nullptr);
+  impl_->machine.setInstructionObserver(nullptr);
+}
+
+void ObservedRun::reset() { impl_->reset(); }
+
+std::uint32_t ObservedRun::frame() const noexcept { return impl_->frame; }
+
+RunObservation ObservedRun::observation(std::vector<std::string>& notes) const {
+  RunObservation observation;
+  impl_->assemble(observation);
+  impl_->notesInto(notes);
+  return observation;
+}
+
+RunObservation ObservedRun::finish(std::vector<std::string>& notes) {
+  RunObservation observation;
+  impl_->finish(observation);
+  impl_->notesInto(notes);
+  return observation;
+}
+
 RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t masterCycles, const InputScript& input,
                           std::vector<std::string>& notes, const ProgressSink& progress, const EnumerationPlan& plan,
                           std::uint64_t firstInstructions, std::uint64_t firstDivergences) {
@@ -589,34 +888,21 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
   const auto report = [&](std::uint64_t at) {
     if (progress) progress(Progress{.stage = kStage, .spent = at, .budget = masterCycles});
   };
-  std::vector<ReachedTarget>& out = observation.reached;
-  const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
-  if (!header) {
+  if (!parseCartridgeHeader(rom)) {
     runNotes.push_back("no run: the image is too small to hold a cartridge header at any site");
     return observation;
   }
-  const CartridgeBoard board = cartridgeBoard(rom);
 
   Snes machine{SnesConfig{.rom = rom}};
-  ir::Provenance shadow{board, rom.size(), kOriginCap};
-  Recorder recorder{machine, shadow};
-  shadow.carries = &recorder;
-  machine.setObserver(&recorder);
-  Lockstep lockstep{board, rom.size(), machine.state().cpu, shadow};
-  AudioLockstep audio{machine, runNotes};
-  machine.setApuObserver(&audio);
-  std::optional<Enumerating> enumerating;
+  ObservedRun::Impl run{machine, rom};
   if (second) {
-    enumerating.emplace(plan);
-    lockstep.enumerating = &*enumerating;
+    run.enumerating.emplace(plan);
+    run.lockstep.enumerating = &*run.enumerating;
   }
-  std::set<std::tuple<Address, Address, std::uint32_t>> seen;
-  std::set<Address> unreadableSites;
-  std::set<Address> unconfirmedSites;
 
-  // Frames are counted from power-on, the first being 0, and a frame begins when
-  // the beam wraps to line 0. The pads for a frame are presented as it begins,
-  // ahead of the vertical blank in which the auto-read latches them.
+  // The pads for a frame are presented as it begins, ahead of the vertical
+  // blank in which the auto-read latches them: after the step that wrapped the
+  // beam to line 0.
   std::uint32_t frame = 0;
   presentPads(machine, input, frame);
 
@@ -628,185 +914,37 @@ RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t maste
       reported = spent / kProgressTick;
       report(spent);
     }
-    // `state()` is the live machine: everything read from it before the step is
-    // copied out here, since the step rewrites it.
-    const SnesState& before = machine.state();
-    const Cpu65816State cpuBefore = before.cpu;
-    const Address site = (static_cast<Address>(before.cpu.pbr) << 16) | before.cpu.pc;
-    const std::uint16_t stackBefore = before.cpu.s;
-    const std::uint16_t lineBefore = before.vpos;
-    bool unreadable = false;
-    const std::optional<Pending> pending = pendingTarget(board, rom, before, unreadable);
-    const Cpu65816Mode mode = modeOf(before.cpu);
-    if (unreadable && unreadableSites.insert(site).second) {
-      runNotes.push_back("run: the jump at " + formatAddress(site, 24) +
-                      " reads its pointer from memory the run cannot see; not recorded");
-    }
-
-    recorder.stepBegan(site);
     spent += machine.step();
-    if (enumerating) enumerating->spent = spent;
-
-    // A step runs one instruction, or one cycle of a transfer, never a whole
-    // frame, so the beam wrapping to line 0 is a frame boundary seen exactly once.
-    if (machine.state().vpos < lineBefore) {
-      ++frame;
+    if (run.frame != frame) {
+      frame = run.frame;
       presentPads(machine, input, frame);
-      recorder.frameBegan();
     }
 
-    // The interpreter beside the machine: the step's instruction lifted from
-    // its fetches and checked, the landing read, the registers recorded.
-    const SnesState& after = machine.state();
-    lockstep.step(cpuBefore, after.cpu, recorder.cpu, runNotes);
-
-    // The second run keeps what the planned routines' frames wrote, and the
-    // machine and the shadow at the first instruction of each one's first
-    // invocation.
-    if (enumerating) {
-      enumerating->wrote(recorder);
-      if (lockstep.snapshotDue) {
-        Planned& due = enumerating->planned[*lockstep.snapshotDue];
-        due.snapshot.emplace(Snapshot{.state = after,
-                                      .shadow = shadow,
-                                      .returnTo = enumerating->dueReturn,
-                                      .enteredFrom = enumerating->dueSite,
-                                      .entryS = after.cpu.s,
-                                      .frame = frame,
-                                      .spent = spent});
-        due.snapshot->shadow.carries = nullptr;
-        lockstep.snapshotDue.reset();
-      }
+    // The machine and the shadow at the first instruction of each planned
+    // routine's first invocation.
+    if (run.enumerating && run.lockstep.snapshotDue) {
+      const SnesState& after = machine.state();
+      Planned& due = run.enumerating->planned[*run.lockstep.snapshotDue];
+      due.snapshot.emplace(Snapshot{.state = after,
+                                    .shadow = run.shadow,
+                                    .returnTo = run.enumerating->dueReturn,
+                                    .enteredFrom = run.enumerating->dueSite,
+                                    .entryS = after.cpu.s,
+                                    .frame = frame,
+                                    .spent = spent});
+      due.snapshot->shadow.carries = nullptr;
+      run.lockstep.snapshotDue.reset();
     }
-
-    if (!pending) continue;
-    // The landing confirms the pointer. A step that serviced an interrupt instead
-    // lands in the handler and the instruction has not run yet; it is seen when it
-    // does. A landing elsewhere means the reading of the form is wrong, and that is
-    // said rather than recorded.
-    const Address landed = (static_cast<Address>(after.cpu.pbr) << 16) | after.cpu.pc;
-    // A step that left the program counter where it was ran no instruction: the
-    // CPU was held off the bus — a DMA transfer, an HDMA event — and the jump is
-    // still ahead of it. It is seen on the step that runs it.
-    if (landed == site) continue;
-    if (landed != pending->target) {
-      // An interrupt sequence lands in bank zero having pushed the return address
-      // and the status byte: four bytes in native mode, three in emulation. Nothing
-      // the four forms do moves the stack that way.
-      const std::uint16_t pushed = static_cast<std::uint16_t>(stackBefore - after.cpu.s);
-      const bool interrupted = after.cpu.pbr == 0 && (pushed == 4u || pushed == 3u);
-      if (!interrupted && unconfirmedSites.insert(site).second) {
-        runNotes.push_back("run: the jump at " + formatAddress(site, 24) + " read a pointer to " +
-                        formatAddress(pending->target, 24) + " but the CPU went to " +
-                        formatAddress(landed, 24) + "; not recorded");
-      }
-      continue;
-    }
-    if (!seen.insert({site, pending->target, contextOf(mode).bits}).second) continue;
-    out.push_back(ReachedTarget{.target = pending->target,
-                                .mode = mode,
-                                .site = site,
-                                .call = pending->call,
-                                .name = {}});
   }
 
-  std::sort(out.begin(), out.end(), [](const ReachedTarget& a, const ReachedTarget& b) {
-    if (a.site != b.site) return a.site < b.site;
-    if (a.target != b.target) return a.target < b.target;
-    return contextOf(a.mode).bits < contextOf(b.mode).bits;
-  });
-
-  if (enumerating) {
+  if (run.enumerating) {
     report(spent);
-    enumerate(observation, *enumerating, plan.recordedClasses, lockstep, rom, board, input, notes, progress,
-              firstInstructions, firstDivergences);
+    enumerate(observation, *run.enumerating, plan.recordedClasses, run.lockstep, rom, run.board, input, notes,
+              progress, firstInstructions, firstDivergences);
   }
-
-  // The shadow closes the stream still open — the recorder folds the last
-  // carry with it and takes its landing — and then the recorder closes every
-  // range, so what the run's end cut short is counted, and a landing no frame
-  // drew is unshown.
-  shadow.finish();
-  recorder.finish();
-  shadow.carries = nullptr;
-  machine.setObserver(nullptr);
-  machine.setApuObserver(nullptr);
-  observation.moved = std::move(recorder.out);
-  std::sort(observation.moved.begin(), observation.moved.end(), rangeBefore);
-  observation.landed = std::move(recorder.landed);
-  std::sort(observation.landed.begin(), observation.landed.end(), landedBefore);
-  observation.walked = std::move(recorder.walked);
-  std::sort(observation.walked.begin(), observation.walked.end(), walkedBefore);
-  observation.palettes = std::move(recorder.palettes);
-
-  observation.ran = std::move(lockstep.ran);
-  std::sort(observation.ran.begin(), observation.ran.end(), [](const Landing& a, const Landing& b) {
-    if (a.site != b.site) return a.site < b.site;
-    if (a.target != b.target) return a.target < b.target;
-    return contextOf(a.mode).bits < contextOf(b.mode).bits;
-  });
-  for (const auto& [address, values] : lockstep.seen) {
-    observation.seen.push_back(SeenState{.address = address,
-                                         .d = {values.d.begin(), values.d.end()},
-                                         .dbr = {values.dbr.begin(), values.dbr.end()}});
-  }
-  observation.instructions = lockstep.instructions;
-  observation.interrupts = lockstep.interrupts;
-  observation.nodes = lockstep.nodes.size();
-  observation.divergences = lockstep.diverged;
-  observation.spc700Instructions = audio.instructions;
-  observation.spc700Nodes = audio.nodes.size();
-  observation.spc700Divergences = audio.diverged;
-  // The samples the key-ons named: by start, the shorter first, then by bytes.
-  observation.samples = std::move(audio.samples);
-  std::sort(observation.samples.begin(), observation.samples.end(),
-            [](const KeyedSample& a, const KeyedSample& b) {
-              if (a.start != b.start) return a.start < b.start;
-              if (a.bytes.size() != b.bytes.size()) return a.bytes.size() < b.bytes.size();
-              return a.bytes < b.bytes;
-            });
-
-  // What was staged: every extent, in address order then by count, its
-  // writers most bytes first.
-  for (auto& [extent, range] : recorder.staged) {
-    std::sort(range.writers.begin(), range.writers.end(),
-              [](const StagedWriter& a, const StagedWriter& b) {
-                if (a.bytes != b.bytes) return a.bytes > b.bytes;
-                if (a.unwritten != b.unwritten) return !a.unwritten;
-                return a.writer < b.writer;
-              });
-    observation.staged.push_back(std::move(range));
-  }
-  // What the CPU streamed: each distinct stream and landing once with its
-  // count, as the recorder took them from the shadow's closings; the source
-  // is the shadow's, which stands as the widest run it found.
-  observation.streamed = std::move(recorder.streams);
-  for (StreamedRange& range : observation.streamed) {
-    for (const ir::Stream& stream : shadow.streams()) {
-      if (stream.site == range.site && stream.registerAddress == range.registerAddress &&
-          stream.memory == range.memory && stream.first == range.romOffset && stream.bytes == range.bytes) {
-        range.source = stream.source;
-        break;
-      }
-    }
-  }
-  std::sort(observation.streamed.begin(), observation.streamed.end(),
-            [](const StreamedRange& a, const StreamedRange& b) {
-              if (a.site != b.site) return a.site < b.site;
-              if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
-              if (a.memory != b.memory) return a.memory < b.memory;
-              if (a.romOffset != b.romOffset) return a.romOffset < b.romOffset;
-              if (a.landing.has_value() != b.landing.has_value()) return !a.landing.has_value();
-              if (!a.landing) return false;
-              if (a.landing->lowest != b.landing->lowest) return a.landing->lowest < b.landing->lowest;
-              if (a.landing->highest != b.landing->highest) return a.landing->highest < b.landing->highest;
-              if (a.landing->shown != b.landing->shown) return a.landing->shown;
-              if (a.landing->areas != b.landing->areas) return a.landing->areas < b.landing->areas;
-              return a.landing->depths < b.landing->depths;
-            });
-  observation.originSets = shadow.origins().interned();
-  if (!enumerating) report(spent);
-  observation.originCap = shadow.origins().cap();
+  run.finish(observation);
+  run.notesInto(runNotes);
+  if (!run.enumerating) report(spent);
   return observation;
 }
 

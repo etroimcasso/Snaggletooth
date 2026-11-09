@@ -371,6 +371,15 @@ struct CartridgeRequest {
   // should not pay it. `snes_disasm` asks for it unless told `--no-run`.
   bool observeRun = false;
   std::uint64_t runMasterCycles = 60u * 21'477'272u;
+  // A run a host made (`ObservedRun`), in place of one the disassembly makes:
+  // set, the cartridge is not booted for a run, `observeRun`,
+  // `runMasterCycles` and `input` are not read, and `observedNotes` join the
+  // notes where the run's own notes would. The tree is the one the disassembly
+  // writes from a run of its own that saw what the host's run saw, except that
+  // no routine is run again for the values its index takes: the tree carries no
+  // `enumerated` line.
+  const RunObservation* observed = nullptr;
+  std::span<const std::string> observedNotes;
   // The recorded run replayed into the controller ports while the machine runs —
   // see `rom/input_script.h`. Empty, the ports stay empty and the run is the boot
   // alone. `snes_disasm --input <script>` supplies one.
@@ -496,6 +505,17 @@ struct ManifestInput {
 // entry or a file split meant for one image is meaningless over another.
 [[nodiscard]] std::string manifestMismatch(const ManifestInput& input,
                                            std::span<const std::uint8_t> rom);
+
+// The request a tree's directory gives a disassembly over `rom`: `readFile`
+// reads the directory's files, and when the directory holds a
+// `project.snagifest` — `found` says whether it does — the entries, the file
+// split, the reached targets, the landings, the moved ranges, the assets' paths
+// and the derived targets are the manifest's. Nothing, with `error` the
+// manifest's path, `": "` and what is wrong, when the manifest does not parse or
+// was written for another image. The request's other fields are their defaults.
+[[nodiscard]] std::optional<CartridgeRequest> treeRequest(std::span<const std::uint8_t> rom,
+                                                          const std::filesystem::path& directory, bool& found,
+                                                          std::string& error);
 
 // The renderer's input as a disassembly holds it in memory: every region with
 // its listing, and the facts. What `readRenderInput` (`rom/rom_render.h`)

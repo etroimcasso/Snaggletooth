@@ -116,6 +116,17 @@ directory keeps for an image (`scriptPathFor`: the image's name without its
 extension, exactly as it is, then `.snaginput`), and picks the one to play
 (`scriptFor`: the image's own, else `default.snaginput`).
 
+The run is also an object a host binds to a machine of its own:
+`rom/rom_observe.h`'s `ObservedRun` takes a machine at power-on, sets its bus,
+audio and instruction observers, and records from the boundaries the machine
+reports while the host runs it with `step()` or `run()`, either thread on or
+off, its own pads and pictures and all; `reset()` takes the console's reset
+line through it, `observation()` reads what has closed so far, and `finish()`
+answers the whole `RunObservation`. `observeRun` is that run over a machine it
+builds and steps itself. A disassembly handed the observation through
+`CartridgeRequest::observed` boots nothing for a run and writes the tree from
+it, with no routine run again for its values.
+
 The facts it attaches to addresses — the hardware each instruction reaches, the
 DMA transfers those add up to (one per start, with the channel's registers as
 they stood: the destination, the source and its step, the count, and the write
@@ -155,7 +166,9 @@ values, where there are any: `16 of 16 variants run, 13 confined, 5 enumerated
 files`, and standard error says `running the cartridge again` and
 `enumerating` as they go.
 
-The library behind it is `rom/rom_disasm.h`: `disassembleCartridge` for the whole
+The library behind it is `rom/rom_disasm.h`: `treeRequest` for the request a
+tree's directory gives — its files, and its manifest's entries, file split and
+earlier runs' findings — `disassembleCartridge` for the whole
 run, `captureUpload` for the boot alone, `placeBytes` for the count,
 `renderProgramFile`, `renderSoundProgramFile` and `renderManifest` for the
 three files, and `writeProject` for everything it writes, the lifted files

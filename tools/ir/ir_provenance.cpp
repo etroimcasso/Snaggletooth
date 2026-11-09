@@ -353,6 +353,18 @@ void Provenance::returned() {
   kept_.emplace(ended.id, Kept{.runs = std::move(ended.runs), .parent = caller.id});
 }
 
+void Provenance::abandon() {
+  while (frames_.size() > 1) {
+    Invocation ended = std::move(frames_.back());
+    frames_.pop_back();
+    frameIndex_.erase(ended.id);
+    // Held, its runs stay readable with no invocation to follow out to: a
+    // parent of zero ends the walk, and releasing it lets go of nothing.
+    if (refs_.find(ended.id) == refs_.end()) continue;
+    kept_.emplace(ended.id, Kept{.runs = std::move(ended.runs), .parent = 0});
+  }
+}
+
 std::optional<OriginInterval> Provenance::sourceRun(std::uint32_t invocation, std::size_t offset) const {
   std::optional<OriginInterval> best;
   // A caller's run that begins or ends where the run found so far does grew

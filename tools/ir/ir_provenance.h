@@ -246,6 +246,11 @@ class Provenance final : public Shadow {
   // runs joining its caller's. A hardware interrupt taken is a call.
   void called();
   void returned();
+  // The console's reset: every invocation above the root ends with its runs
+  // joining nothing, since no caller is left to have read on from them. One
+  // still held — by a byte of work RAM it wrote, by an open stream — keeps its
+  // runs readable, and a source followed out from it ends there.
+  void abandon();
 
   // How many invocations are live: the root, and one for every call and
   // interrupt that has not returned.

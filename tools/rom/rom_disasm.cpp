@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -825,6 +826,9 @@ std::optional<Form> formOfExtension(const std::string& extension) {
   return std::nullopt;
 }
 
+// Whether the disassembly has a run: one it makes, or one a host handed it.
+bool hasRun(const CartridgeRequest& r) { return r.observeRun || r.observed != nullptr; }
+
 // With a run, the form follows from the directory the landings named and the
 // facts the run kept. Without one, the manifest's path names the form — the
 // run that wrote it chose it — and the facts a tile sheet and a table need
@@ -834,10 +838,10 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
   FormChoice choice;
   const std::string_view directory = directoryOf(asset.file);
   const bool source = asset.kind == MovedKind::Staged || asset.kind == MovedKind::Enumerated ||
-                      (request.observeRun && !facts.wholeCarried);
+                      (hasRun(request) && !facts.wholeCarried);
   if (source) return choice;  // the bytes are what a routine read, not what it built
   const std::string kept = extensionOf(asset.file);
-  if (!request.observeRun) {
+  if (!hasRun(request)) {
     choice.form = formOfExtension(kept).value_or(Form::Bin);
     choice.expected = choice.form != Form::Bin;
   } else if (directory == "maps") {
@@ -856,7 +860,7 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
     return choice;  // `vram/`, `apu/`, `staged/`, a block an entry points at: bytes as they are
   }
   if (choice.form == Form::Tiles) {
-    if (request.observeRun) {
+    if (hasRun(request)) {
       const std::optional<unsigned> depth = landingDepth(PortLanding{.memory = PortMemory::Vram,
                                                                      .lowest = 0,
                                                                      .highest = 0,
@@ -897,7 +901,7 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
       }
     }
   } else if (choice.form == Form::Hdma) {
-    if (request.observeRun) {
+    if (hasRun(request)) {
       if (facts.walks.size() != 1u) {
         choice.form = Form::Bin;
         choice.reason = facts.walks.empty() ? "no walk names its unit" : "the engine walked it under two units";
@@ -2233,9 +2237,16 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // The first run's counts, which the second run is held to.
   std::uint64_t firstInstructions = 0;
   std::uint64_t firstDivergences = 0;
-  if (request.observeRun) {
-    RunObservation observation =
-        observeRun(request.rom, request.runMasterCycles, request.input, out.notes, request.progress);
+  if (hasRun(request)) {
+    // A host's run is taken as it was handed over, its notes where this
+    // disassembly's own run would put them.
+    RunObservation observation;
+    if (request.observed != nullptr) {
+      observation = *request.observed;
+      out.notes.insert(out.notes.end(), request.observedNotes.begin(), request.observedNotes.end());
+    } else {
+      observation = observeRun(request.rom, request.runMasterCycles, request.input, out.notes, request.progress);
+    }
     keyed = std::move(observation.samples);
     firstInstructions = observation.instructions;
     firstDivergences = observation.divergences;
@@ -2543,18 +2554,21 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // once for every value every path bounds their index to, from the machine
   // as the run entered them; and what the code proves about a transfer from
   // work RAM the run never started. The second run's other findings are the
-  // first run's, which stand.
-  if (request.observeRun) {
-    const EnumerationPlan plan = enumerationPlan(out, *proven, out.notes);
-    if (!plan.routines.empty()) {
-      const RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, out.notes,
-                                               request.progress, plan, firstInstructions, firstDivergences);
-      out.enumerated = second.enumerated;
-      out.enumeration = EnumerationCount{.planned = second.variantsPlanned,
-                                         .run = second.variantsRun,
-                                         .returned = second.variantsReturned,
-                                         .confined = second.variantsConfined,
-                                         .cycles = second.enumerationCycles};
+  // first run's, which stand. A host's run has no second run: nothing is
+  // planned over it.
+  if (hasRun(request)) {
+    if (request.observed == nullptr) {
+      const EnumerationPlan plan = enumerationPlan(out, *proven, out.notes);
+      if (!plan.routines.empty()) {
+        const RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, out.notes,
+                                                 request.progress, plan, firstInstructions, firstDivergences);
+        out.enumerated = second.enumerated;
+        out.enumeration = EnumerationCount{.planned = second.variantsPlanned,
+                                           .run = second.variantsRun,
+                                           .returned = second.variantsReturned,
+                                           .confined = second.variantsConfined,
+                                           .cycles = second.enumerationCycles};
+      }
     }
     noteProvenFromWorkRam(out);
   }
@@ -3014,6 +3028,13 @@ bool writeFile(const std::filesystem::path& path, std::string_view text, std::st
   return true;
 }
 
+// A file's bytes, or nothing when it cannot be read.
+std::optional<std::string> readText(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return std::nullopt;
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 }  // namespace
 
 RenderInput renderInputOf(const CartridgeDisassembly& disassembly) {
@@ -3114,6 +3135,39 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
     if (!writeFile(directory / sample.file, bytes, error)) return false;
   }
   return true;
+}
+
+std::optional<CartridgeRequest> treeRequest(std::span<const std::uint8_t> rom, const std::filesystem::path& directory,
+                                            bool& found, std::string& error) {
+  CartridgeRequest request;
+  request.rom = rom;
+  // A lifted file the manifest names is read from the tree as it lies, for a
+  // disassembly without a run to take a sheet's depth and palette and a
+  // table's unit from.
+  request.readFile = [directory](const std::string& file) { return readText(directory / file); };
+  const std::filesystem::path manifestPath = directory / "project.snagifest";
+  const std::optional<std::string> manifestText = readText(manifestPath);
+  found = manifestText.has_value();
+  if (!found) return request;
+  std::string why;
+  const std::optional<ManifestInput> input = parseManifest(*manifestText, why);
+  if (!input) {
+    error = manifestPath.string() + ": " + why;
+    return std::nullopt;
+  }
+  const std::string mismatch = manifestMismatch(*input, rom);
+  if (!mismatch.empty()) {
+    error = manifestPath.string() + ": " + mismatch;
+    return std::nullopt;
+  }
+  request.entries = input->entries;
+  request.regions = input->regions;
+  request.reached = input->reached;
+  request.ran = input->ran;
+  request.moved = input->moved;
+  request.assets = input->assets;
+  request.derived = input->derived;
+  return request;
 }
 
 }  // namespace snaggletooth::disasm

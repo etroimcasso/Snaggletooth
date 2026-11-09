@@ -28,6 +28,7 @@
 #include "ir/ir_text.h"
 #include "rom/rom_disasm.h"
 #include "rom/rom_text.h"
+#include "snaggletooth/snes/snes.h"
 
 namespace snaggletooth::disasm {
 namespace {
@@ -3169,6 +3170,282 @@ TEST(RomDisasm, TheToolkitsRunsLeaveTheRecordedRangesAsTheyWere) {
   ASSERT_NE(kept, d.moved.end());
   EXPECT_EQ(kept->times, 3u);
   EXPECT_EQ(d.moved.size(), enumeratingLift().moved.size() + 1u);
+}
+
+// ---- a disassembly handed a host's run ---------------------------------------------
+//
+// A host that ran the cartridge itself hands the disassembly its ObservedRun's
+// observation: the program file and the manifest are the ones the disassembly
+// writes making the same run itself, but for what the plan of routines to run
+// again adds — its notes, and the values a planned routine is run for — since
+// no plan is made over a handed run.
+
+namespace {
+
+// One script for every example: buttons pressed and let go over the first
+// frames. No example has a script of its own.
+InputScript handedScript() {
+  std::string error;
+  const std::optional<InputScript> parsed =
+      parseInputScript("frame 2 1 b\nframe 4 1 none\nframe 6 1 start\nframe 8 1 start b\nframe 10 1 none\n", error);
+  EXPECT_TRUE(parsed.has_value()) << error;
+  return parsed.value_or(InputScript{});
+}
+
+struct HandedRun {
+  RunObservation observation;
+  std::vector<std::string> notes;
+};
+
+// A host's run: the machine stepped for `cycles`, each frame's pads presented
+// after the step that wrapped the beam, as the disassembly's own run presents them.
+HandedRun hostsRun(std::span<const std::uint8_t> rom, std::uint64_t cycles, const InputScript& input) {
+  Snes machine{SnesConfig{.rom = rom}};
+  ObservedRun run{machine, rom};
+  const auto present = [&](std::uint32_t frame) {
+    machine.setJoypad(JoypadPort::One, input.padAt(JoypadPort::One, frame));
+    machine.setJoypad(JoypadPort::Two, input.padAt(JoypadPort::Two, frame));
+  };
+  std::uint32_t frame = 0;
+  present(frame);
+  std::uint64_t spent = 0;
+  while (spent < cycles) {
+    spent += machine.step();
+    if (run.frame() != frame) {
+      frame = run.frame();
+      present(frame);
+    }
+  }
+  HandedRun out;
+  out.observation = run.finish(out.notes);
+  return out;
+}
+
+// The manifest without the notes the plan of routines to run again writes,
+// `note     enumerate …`, which a disassembly handed a run makes no plan to
+// write, and without a blank line those notes leave standing alone.
+std::string withoutPlanNotes(const std::string& manifest) {
+  std::string out;
+  std::size_t position = 0;
+  while (position < manifest.size()) {
+    const std::size_t end = manifest.find('\n', position);
+    const std::string line =
+        manifest.substr(position, end == std::string::npos ? std::string::npos : end - position + 1);
+    position = end == std::string::npos ? manifest.size() : end + 1;
+    if (line.rfind("note     enumerate ", 0) == 0) continue;
+    if (line == "\n" && out.size() >= 2 && out.compare(out.size() - 2, 2, "\n\n") == 0) continue;
+    out += line;
+  }
+  return out;
+}
+
+CartridgeRequest exampleRequest(std::span<const std::uint8_t> rom) {
+  CartridgeRequest request;
+  request.rom = rom;
+  request.bootMasterCycles = 20u * kRunFrame;
+  request.runMasterCycles = 12u * kRunFrame;
+  return request;
+}
+
+// A disassembly handed `handed`. Asked for a run of its own as well, that run
+// would see nothing, so a tree that matches was not made from it; not asked,
+// the handed run is the disassembly's run all the same.
+CartridgeDisassembly disassembleHanded(std::span<const std::uint8_t> rom, const HandedRun& handed,
+                                       bool askedToRun = true) {
+  CartridgeRequest given = exampleRequest(rom);
+  given.observeRun = askedToRun;
+  given.runMasterCycles = 1;
+  given.observed = &handed.observation;
+  given.observedNotes = handed.notes;
+  return disassembleCartridge(given);
+}
+
+}  // namespace
+
+TEST(RomDisasm, AHostsRunWritesTheTreeTheDisassemblysOwnRunWrites) {
+  const InputScript script = handedScript();
+  std::vector<std::string> unplanned;
+  for (const examples::Example& example : examples::examples()) {
+    const std::vector<std::uint8_t> rom = example.build();
+    CartridgeRequest own = exampleRequest(rom);
+    own.observeRun = true;
+    own.input = script;
+    const CartridgeDisassembly ran = disassembleCartridge(own);
+    if (ran.enumeration.planned != 0) continue;
+    unplanned.emplace_back(example.name);
+    const HandedRun hosted = hostsRun(rom, own.runMasterCycles, script);
+    const CartridgeDisassembly handed = disassembleHanded(rom, hosted);
+    EXPECT_EQ(renderProgramFile(handed), renderProgramFile(ran)) << example.name;
+    const std::string manifest = renderManifest(handed);
+    EXPECT_EQ(manifest.find("\nnote     enumerate "), std::string::npos) << example.name << ": no plan is made";
+    EXPECT_EQ(manifest, withoutPlanNotes(renderManifest(ran))) << example.name;
+    ASSERT_EQ(handed.sound.has_value(), ran.sound.has_value()) << example.name;
+    if (ran.sound) EXPECT_EQ(renderSoundProgramFile(handed), renderSoundProgramFile(ran)) << example.name;
+    const CartridgeDisassembly unasked = disassembleHanded(rom, hosted, false);
+    EXPECT_EQ(renderProgramFile(unasked), renderProgramFile(handed)) << example.name << ", not asked to run";
+    EXPECT_EQ(renderManifest(unasked), manifest) << example.name << ", not asked to run";
+  }
+  EXPECT_EQ(unplanned, (std::vector<std::string>{"three_bank", "uploading", "cop_vector", "straddling_upload", "dispatching",
+                                                 "stalled_jump", "unreadable_pointer", "button_dispatch", "mixed", "waiting",
+                                                 "transfer", "ram_code", "hdma", "irq", "frame_press", "proving", "moving",
+                                                 "lifting", "wrapping", "mirrored", "running_bank", "staging", "declaring",
+                                                 "landing", "drawing", "bare_window", "chip_half"}));
+}
+
+TEST(RomDisasm, AHostsRunPlansNoRoutine) {
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  CartridgeRequest own = exampleRequest(rom);
+  own.observeRun = true;
+  const CartridgeDisassembly ran = disassembleCartridge(own);
+  ASSERT_GT(ran.enumeration.planned, 0u) << "the disassembly's own run plans the loaders";
+  ASSERT_FALSE(ran.enumerated.empty());
+  const CartridgeDisassembly handed = disassembleHanded(rom, hostsRun(rom, own.runMasterCycles, InputScript{}));
+  EXPECT_EQ(handed.enumeration.planned, 0u);
+  EXPECT_EQ(handed.enumeration.run, 0u);
+  EXPECT_TRUE(handed.enumerated.empty());
+  EXPECT_EQ(renderManifest(handed).find("\nenumerated "), std::string::npos);
+  EXPECT_FALSE(handed.moved.empty()) << "the handed run's findings are there all the same";
+}
+
+TEST(RomDisasm, TheTreesRequestIsReadFromItsDirectory) {
+  const std::vector<std::uint8_t> rom = examples::dispatchingImage();
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-tree-request-test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir);
+
+  // An empty directory: no manifest, the defaults, and a reader over it.
+  bool found = true;
+  std::string error;
+  std::optional<CartridgeRequest> empty = treeRequest(rom, dir, found, error);
+  ASSERT_TRUE(empty.has_value()) << error;
+  EXPECT_FALSE(found);
+  EXPECT_EQ(empty->rom.data(), rom.data());
+  EXPECT_TRUE(empty->entries.empty());
+  EXPECT_TRUE(empty->regions.empty());
+  EXPECT_FALSE(empty->observeRun);
+  ASSERT_TRUE(static_cast<bool>(empty->readFile));
+  EXPECT_FALSE(empty->readFile("project.snagifest").has_value());
+
+  // A tree: the manifest's entries, file split and earlier runs' findings.
+  CartridgeRequest first;
+  first.rom = rom;
+  first.captureSound = false;
+  first.observeRun = true;
+  first.runMasterCycles = 4u * kRunFrame;
+  first.entries = {TraceEntry{.address = 0x008000u, .mode = Cpu65816Mode::reset(), .name = "a_person_named_it"}};
+  const CartridgeDisassembly d = disassembleCartridge(first);
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(d), error);
+  ASSERT_TRUE(input.has_value()) << error;
+  found = false;
+  const std::optional<CartridgeRequest> tree = treeRequest(rom, dir, found, error);
+  ASSERT_TRUE(tree.has_value()) << error;
+  EXPECT_TRUE(found);
+  ASSERT_EQ(tree->entries.size(), input->entries.size());
+  ASSERT_FALSE(tree->entries.empty());
+  for (std::size_t i = 0; i < input->entries.size(); ++i) {
+    EXPECT_EQ(tree->entries[i].address, input->entries[i].address);
+    EXPECT_EQ(tree->entries[i].name, input->entries[i].name);
+  }
+  ASSERT_EQ(tree->regions.size(), input->regions.size());
+  ASSERT_FALSE(tree->regions.empty());
+  for (std::size_t i = 0; i < input->regions.size(); ++i) EXPECT_EQ(tree->regions[i].file, input->regions[i].file);
+  ASSERT_EQ(tree->reached.size(), input->reached.size());
+  ASSERT_FALSE(tree->reached.empty()) << "every indirect form the cartridge takes";
+  for (std::size_t i = 0; i < input->reached.size(); ++i) EXPECT_TRUE(sameSighting(tree->reached[i], input->reached[i]));
+  EXPECT_EQ(tree->ran.size(), input->ran.size());
+  EXPECT_EQ(tree->moved.size(), input->moved.size());
+  EXPECT_EQ(tree->assets.size(), input->assets.size());
+  EXPECT_EQ(tree->derived.size(), input->derived.size());
+  ASSERT_TRUE(static_cast<bool>(tree->readFile));
+  const std::optional<std::string> manifest = tree->readFile("project.snagifest");
+  ASSERT_TRUE(manifest.has_value());
+  EXPECT_EQ(*manifest, renderManifest(d));
+
+  // A manifest that does not parse.
+  {
+    std::ofstream out(dir / "project.snagifest", std::ios::binary | std::ios::trunc);
+    out << "entry nowhere\n";
+  }
+  error.clear();
+  EXPECT_FALSE(treeRequest(rom, dir, found, error).has_value());
+  EXPECT_TRUE(found);
+  EXPECT_EQ(error.rfind((dir / "project.snagifest").string() + ": ", 0), 0u) << error;
+  EXPECT_GT(error.size(), (dir / "project.snagifest").string().size() + 2u);
+
+  // One written for another image.
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  std::vector<std::uint8_t> other = rom;
+  other[0x7FDEu] = static_cast<std::uint8_t>(other[0x7FDEu] + 1u);  // the checksum's low byte
+  error.clear();
+  EXPECT_FALSE(treeRequest(other, dir, found, error).has_value());
+  EXPECT_EQ(error, (dir / "project.snagifest").string() + ": " + manifestMismatch(*input, other)) << error;
+  EXPECT_FALSE(manifestMismatch(*input, other).empty());
+
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(RomDisasm, AHandedRunNotesTheProvenTransfersItNeverStarted) {
+  // The transfers the code proves from work RAM are read against the handed
+  // run's findings as against the disassembly's own.
+  const std::vector<std::uint8_t> rom = provenFromWorkRamImage();
+  const CartridgeDisassembly d = disassembleHanded(rom, hostsRun(rom, 357'954u, InputScript{}), false);
+  const auto noted = [&](std::string_view text) {
+    return std::any_of(d.notes.begin(), d.notes.end(), [&](const std::string& n) { return n.find(text) != std::string::npos; });
+  };
+  EXPECT_TRUE(noted("channel 1: the code proves $7E:2000 increment bytes 16; the run wrote the extent and never started"))
+      << renderManifest(d);
+  EXPECT_TRUE(noted("channel 2: the code proves $7E:3000 increment bytes 8; nothing wrote the extent in the run"))
+      << renderManifest(d);
+}
+
+TEST(RomDisasm, TheTreesRequestCarriesEveryLineTheManifestKeeps) {
+  // Three trees between them hold every kind of line the request reads back.
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-tree-lines-test";
+  std::size_t ran = 0, moved = 0, assets = 0, derived = 0;
+  for (const std::vector<std::uint8_t>& rom :
+       {examples::runningBankImage(), examples::movingImage(), examples::provingImage()}) {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    CartridgeRequest first;
+    first.rom = rom;
+    first.captureSound = false;
+    first.observeRun = true;
+    first.runMasterCycles = 4u * kRunFrame;
+    const CartridgeDisassembly d = disassembleCartridge(first);
+    std::string error;
+    ASSERT_TRUE(writeProject(d, dir, error)) << error;
+    const std::optional<ManifestInput> input = parseManifest(renderManifest(d), error);
+    ASSERT_TRUE(input.has_value()) << error;
+    bool found = false;
+    const std::optional<CartridgeRequest> tree = treeRequest(rom, dir, found, error);
+    ASSERT_TRUE(tree.has_value()) << error;
+    ASSERT_TRUE(found);
+    ASSERT_EQ(tree->ran.size(), input->ran.size());
+    for (std::size_t i = 0; i < input->ran.size(); ++i) EXPECT_TRUE(sameLanding(tree->ran[i], input->ran[i]));
+    ASSERT_EQ(tree->moved.size(), input->moved.size());
+    for (std::size_t i = 0; i < input->moved.size(); ++i) {
+      EXPECT_TRUE(sameRange(tree->moved[i], input->moved[i]));
+      EXPECT_EQ(tree->moved[i].times, input->moved[i].times);
+    }
+    ASSERT_EQ(tree->assets.size(), input->assets.size());
+    for (std::size_t i = 0; i < input->assets.size(); ++i) EXPECT_EQ(tree->assets[i].file, input->assets[i].file);
+    ASSERT_EQ(tree->derived.size(), input->derived.size());
+    for (std::size_t i = 0; i < input->derived.size(); ++i) {
+      EXPECT_EQ(tree->derived[i].target, input->derived[i].target);
+      EXPECT_EQ(tree->derived[i].site, input->derived[i].site);
+    }
+    ran += input->ran.size();
+    moved += input->moved.size();
+    assets += input->assets.size();
+    derived += input->derived.size();
+    std::filesystem::remove_all(dir, ec);
+  }
+  EXPECT_GT(ran, 0u);
+  EXPECT_GT(moved, 0u);
+  EXPECT_GT(assets, 0u);
+  EXPECT_GT(derived, 0u);
 }
 
 }  // namespace snaggletooth::disasm

@@ -567,6 +567,54 @@ TEST(Provenance, ForgettingThePlacesLeavesWorkRamAlone) {
   EXPECT_EQ(m.originAt(0x7E0200u), imageSet({{0x1000u, 0x1000u}}));
 }
 
+// ---- the console's reset --------------------------------------------------------
+
+TEST(Provenance, AbandoningTheCallStackLeavesTheRootAndItsRuns) {
+  Machine m;
+  m.image(0x009000u, {0x10u, 0x11u, 0x12u});
+  m.run({0xADu, 0x00u, 0x90u});  // LDA !$9000: the root's own run
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  m.run({0x20u, 0x00u, 0x82u});  // $8100 JSR !$8200
+  ASSERT_EQ(m.shadow.depth(), 3u);
+  m.shadow.abandon();
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  m.shadow.abandon();
+  EXPECT_EQ(m.shadow.depth(), 1u) << "the root is never abandoned";
+  m.run({0xADu, 0x01u, 0x90u});  // LDA !$9001, in the root again
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1001u}}));
+}
+
+TEST(Provenance, AnAbandonedInvocationsRunsJoinNothing) {
+  // A helper reads four bytes and the reset ends it there: a return would have
+  // joined its run to the root's, and the abandoned one does not.
+  Machine m;
+  m.image(0x009000u, {0x10u, 0x11u, 0x12u, 0x13u});
+  m.run({0x20u, 0x00u, 0x81u});                                   // JSR !$8100
+  for (std::uint8_t i = 0; i < 4; ++i) m.run({0xADu, i, 0x90u});  // $8100 LDA !$9000 .. !$9003
+  m.shadow.abandon();
+  m.run({0xADu, 0x02u, 0x90u});  // LDA !$9002, in the root
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1002u, 0x1002u}}));
+}
+
+TEST(Provenance, AnAbandonedInvocationsByteNamesItsOwnRunAndNoCaller) {
+  // The root read eight bytes; a helper reads the first two of them and writes
+  // one to work RAM, and the reset ends it. Held by the byte, its run stays
+  // readable, and the source stops there: no caller is left whose run grew from it.
+  Machine m;
+  m.image(0x009000u, {0x10u, 0x11u, 0x12u, 0x13u, 0x14u, 0x15u, 0x16u, 0x17u});
+  for (std::uint8_t i = 0; i < 8; ++i) m.run({0xADu, i, 0x90u});  // LDA !$9000 .. !$9007
+  m.run({0x20u, 0x00u, 0x81u});                                    // JSR !$8100
+  m.run({0xADu, 0x00u, 0x90u});                                    // $8100 LDA !$9000
+  m.run({0xADu, 0x01u, 0x90u});                                    // LDA !$9001
+  m.run({0x8Du, 0x00u, 0x02u});                                    // STA !$0200: from $9001
+  ASSERT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1007u}}))
+      << "while the helper is live, the root's run is followed out to";
+  m.shadow.abandon();
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1001u}}));
+}
+
 // ---- streams --------------------------------------------------------------------
 
 TEST(Provenance, ConsecutiveStoresFromConsecutiveBytesAreOneStream) {

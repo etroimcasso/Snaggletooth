@@ -209,8 +209,22 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  snaggletooth::disasm::CartridgeRequest request;
-  request.rom = rom;
+  // The tree's own request: its files, and the manifest's entries, file split
+  // and earlier runs' findings when it holds one.
+  const std::filesystem::path directory(outDir);
+  bool found = false;
+  std::string error;
+  std::optional<snaggletooth::disasm::CartridgeRequest> tree =
+      snaggletooth::disasm::treeRequest(rom, directory, found, error);
+  if (!tree) {
+    std::cerr << error << "\n";
+    return 1;
+  }
+  snaggletooth::disasm::CartridgeRequest& request = *tree;
+  if (found) {
+    std::cout << "read " << request.entries.size() << " entries and " << request.regions.size() << " files from "
+              << (directory / "project.snagifest").string() << "\n";
+  }
   request.captureSound = sound;
   request.observeRun = run;
   request.runMasterCycles = runSeconds * kMasterPerSecond;
@@ -219,45 +233,9 @@ int main(int argc, char** argv) {
   snaggletooth::disasm::ProgressPrinter printer(std::cerr, errorIsTerminal());
   if (!quiet) request.progress = std::ref(printer);
 
-  const std::filesystem::path directory(outDir);
-  // A lifted file the manifest names is read from the tree as it lies, for a
-  // disassembly without a run to take a sheet's depth and palette and a
-  // table's unit from.
-  request.readFile = [&](const std::string& file) -> std::optional<std::string> {
-    std::string text;
-    if (!readFile(directory / file, text)) return std::nullopt;
-    return text;
-  };
-  const std::filesystem::path manifestPath = directory / "project.snagifest";
-  std::string manifestText;
-  if (readFile(manifestPath, manifestText)) {
-    std::string error;
-    const std::optional<snaggletooth::disasm::ManifestInput> input =
-        snaggletooth::disasm::parseManifest(manifestText, error);
-    if (!input) {
-      std::cerr << manifestPath.string() << ": " << error << "\n";
-      return 1;
-    }
-    const std::string mismatch = snaggletooth::disasm::manifestMismatch(*input, rom);
-    if (!mismatch.empty()) {
-      std::cerr << manifestPath.string() << ": " << mismatch << "\n";
-      return 1;
-    }
-    request.entries = input->entries;
-    request.regions = input->regions;
-    request.reached = input->reached;
-    request.ran = input->ran;
-    request.moved = input->moved;
-    request.assets = input->assets;
-    request.derived = input->derived;
-    std::cout << "read " << input->entries.size() << " entries and " << input->regions.size()
-              << " files from " << manifestPath.string() << "\n";
-  }
-
   const snaggletooth::disasm::CartridgeDisassembly disassembly =
       snaggletooth::disasm::disassembleCartridge(request);
   if (!quiet) printer.stage("writing " + directory.string());
-  std::string error;
   if (!snaggletooth::disasm::writeProject(disassembly, directory, error)) {
     std::cerr << error << "\n";
     return 1;

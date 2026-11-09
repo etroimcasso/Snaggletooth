@@ -591,7 +591,10 @@ read them — which is what makes a
 decoded range's source the whole stream it read, and a chunked decoder's the
 whole file its caller read; `sourcesOf` answers it for a work-RAM byte with the
 run holding its origin, followed outward through each caller whose run begins
-or ends where it does. A byte loaded from work RAM keeps the
+or ends where it does. A console reset leaves no caller to return to:
+`abandon()` ends every invocation above the root with its runs joining
+nothing, and one still held — by a byte of work RAM it wrote, or a stream left
+open — keeps its runs, so a source followed out from it stops there. A byte loaded from work RAM keeps the
 address it came from until something computes with it, so a store of it to a
 data register is the buffer being carried out, told to a `CarrySink` the host
 sets byte by byte; `streams()` is every sequence of such stores, from a buffer
