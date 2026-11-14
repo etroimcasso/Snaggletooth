@@ -26,6 +26,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "examples/example_cartridges.h"
@@ -3099,6 +3101,650 @@ TEST(RomObservedRun, AnOriginLeftCarriedAtABoundaryReachesNothing) {
       return origins;
     };
     EXPECT_TRUE(runOnce(false) == runOnce(true)) << example.name;
+  }
+}
+
+
+// ---- the invocations the stack pointer marks ------------------------------------
+//
+// A cartridge that moves its stack every way a program does: a call wrapping
+// inside page one, a routine that pulls its own return address, a return to an
+// address the code pushed, an interrupt handler that takes the stack back and
+// never returns, one that runs on a stack of its own and returns, and two tasks
+// each on its own stack. The cases stop the machine at the boundaries where the
+// shadow's invocations change, with the lockstep bound by hand as `observeRun`
+// binds it, and read what is live and what is running there.
+
+namespace {
+
+// The image: the replay cartridges' header and vectors, the program from
+// reset at $8000, the native NMI handler at $8320, task B at $8500, and the
+// data each routine reads at $9020 onward.
+std::vector<std::uint8_t> stackPlayImage() {
+  std::vector<std::uint8_t> rom = examples::imageWithNmi();
+  put(rom, 0x0000u, {
+      0xA2u, 0x00u,                 // $8000 LDX #$00            reset
+      0x9Au,                        // $8002 TXS                 S = $0100: the next push wraps inside page one
+      0x20u, 0x00u, 0x81u,          // $8003 JSR !$8100          pushed at $0100 and at $01FF
+      0xA2u, 0xFFu,                 // $8006 LDX #$FF            after_wrapped
+      0x9Au,                        // $8008 TXS                 S = $01FF
+      0x18u,                        // $8009 CLC
+      0xFBu,                        // $800A XCE                 native
+      0xE2u, 0x30u,                 // $800B SEP #$30            A8, X8
+      0x64u, 0x10u,                 // $800D STZ $10             the phase the interrupt handler reads
+      0xA9u, 0x80u,                 // $800F LDA #$80
+      0x8Du, 0x15u, 0x21u,          // $8011 STA !$2115          VMAIN: a word address, stepped after the high byte
+      0x20u, 0x10u, 0x81u,          // $8014 JSR !$8110          reads $9028-$902F
+      0x20u, 0x20u, 0x81u,          // $8017 JSR !$8120          its callee pulls the address back to it and jumps on
+      0x20u, 0x38u, 0x81u,          // $801A JSR !$8138          after_caller: $9020-$9027 -> $7E:2000
+      0xA9u, 0x08u,                 // $801D LDA #$08
+      0xA2u, 0x00u,                 // $801F LDX #$00
+      0xA0u, 0x20u,                 // $8021 LDY #$20
+      0x20u, 0x00u, 0x82u,          // $8023 JSR !$8200          $7E:2000, 8 -> VRAM
+      0x20u, 0x50u, 0x81u,          // $8026 JSR !$8150          reads $9108-$910F and $9118-$911F
+      0x20u, 0x70u, 0x81u,          // $8029 JSR !$8170          $9110-$9117 -> $7E:2100, after a PEA / RTS
+      0xA9u, 0x08u,                 // $802C LDA #$08
+      0xA2u, 0x00u,                 // $802E LDX #$00
+      0xA0u, 0x21u,                 // $8030 LDY #$21
+      0x20u, 0x00u, 0x82u,          // $8032 JSR !$8200          $7E:2100, 8 -> VRAM
+      0x20u, 0x90u, 0x81u,          // $8035 JSR !$8190          reads $9228-$922F
+      0xA9u, 0x80u,                 // $8038 LDA #$80
+      0x8Du, 0x00u, 0x42u,          // $803A STA !$4200          NMITIMEN: the vertical-blank interrupt on
+      0x20u, 0xA0u, 0x81u,          // $803D JSR !$81A0          the handler takes the stack back; nothing returns here
+  });
+  put(rom, 0x0080u, {
+      0x20u, 0xA8u, 0x81u,          // $8080 JSR !$81A8          main_b: $9220-$9227 -> $7E:2200
+      0x20u, 0xA0u, 0x81u,          // $8083 JSR !$81A0          its push overwrites the first wait's return address
+  });
+  put(rom, 0x00A0u, {
+      0xA9u, 0x08u,                 // $80A0 LDA #$08            main_c
+      0xA2u, 0x00u,                 // $80A2 LDX #$00
+      0xA0u, 0x22u,                 // $80A4 LDY #$22
+      0x20u, 0x00u, 0x82u,          // $80A6 JSR !$8200          $7E:2200, 8 -> VRAM
+      0x20u, 0xC0u, 0x81u,          // $80A9 JSR !$81C0          $9300-$930F -> $7E:2300, the third interrupt in the middle
+      0xA9u, 0x00u,                 // $80AC LDA #$00            after_splitter
+      0x8Du, 0x00u, 0x42u,          // $80AE STA !$4200          the interrupt off
+      0xA9u, 0x10u,                 // $80B1 LDA #$10
+      0xA2u, 0x00u,                 // $80B3 LDX #$00
+      0xA0u, 0x23u,                 // $80B5 LDY #$23
+      0x20u, 0x00u, 0x82u,          // $80B7 JSR !$8200          $7E:2300, 16 -> VRAM
+      0xA9u, 0x84u,                 // $80BA LDA #$84
+      0x8Du, 0xFFu, 0x03u,          // $80BC STA !$03FF
+      0xA9u, 0xFFu,                 // $80BF LDA #$FF
+      0x8Du, 0xFEu, 0x03u,          // $80C1 STA !$03FE          task B's stack holds the address before its first instruction
+      0xA9u, 0xFDu,                 // $80C4 LDA #$FD
+      0x85u, 0x14u,                 // $80C6 STA $14
+      0xA9u, 0x03u,                 // $80C8 LDA #$03
+      0x85u, 0x15u,                 // $80CA STA $15             and its stack pointer is kept at $14: $03FD
+      0x20u, 0x40u, 0x82u,          // $80CC JSR !$8240
+      0x80u, 0xFEu,                 // $80CF BRA $80CF           idle
+  });
+  put(rom, 0x0100u, {
+      0x60u,                        // $8100 RTS                 wrapped
+  });
+  put(rom, 0x0110u, {
+      0xA2u, 0x00u,                 // $8110 LDX #$00            reader1
+      0xBDu, 0x28u, 0x90u,          // $8112 LDA !$9028,X        r1
+      0xE8u,                        // $8115 INX
+      0xE0u, 0x08u,                 // $8116 CPX #$08
+      0xD0u, 0xF8u,                 // $8118 BNE $8112
+      0x60u,                        // $811A RTS
+  });
+  put(rom, 0x0120u, {
+      0x20u, 0x28u, 0x81u,          // $8120 JSR !$8128          caller
+      0x60u,                        // $8123 RTS                 never reached: the dispatcher's target returns for it
+  });
+  put(rom, 0x0128u, {
+      0x68u,                        // $8128 PLA                 dispatch
+      0x68u,                        // $8129 PLA                 the return address, pulled
+      0x4Cu, 0x30u, 0x81u,          // $812A JMP !$8130
+  });
+  put(rom, 0x0130u, {
+      0x60u,                        // $8130 RTS                 target: returns through the caller's address
+  });
+  put(rom, 0x0138u, {
+      0xA2u, 0x00u,                 // $8138 LDX #$00            writer1
+      0xBDu, 0x20u, 0x90u,          // $813A LDA !$9020,X        w1
+      0x9Fu, 0x00u, 0x20u, 0x7Eu,   // $813D STA $7E:2000,X
+      0xE8u,                        // $8141 INX
+      0xE0u, 0x08u,                 // $8142 CPX #$08
+      0xD0u, 0xF4u,                 // $8144 BNE $813A
+      0x60u,                        // $8146 RTS
+  });
+  put(rom, 0x0150u, {
+      0xA2u, 0x00u,                 // $8150 LDX #$00            reader2
+      0xBDu, 0x08u, 0x91u,          // $8152 LDA !$9108,X        r2
+      0xE8u,                        // $8155 INX
+      0xE0u, 0x08u,                 // $8156 CPX #$08
+      0xD0u, 0xF8u,                 // $8158 BNE $8152
+      0xA2u, 0x00u,                 // $815A LDX #$00
+      0xBDu, 0x18u, 0x91u,          // $815C LDA !$9118,X        r2b
+      0xE8u,                        // $815F INX
+      0xE0u, 0x08u,                 // $8160 CPX #$08
+      0xD0u, 0xF8u,                 // $8162 BNE $815C
+      0x60u,                        // $8164 RTS
+  });
+  put(rom, 0x0170u, {
+      0xF4u, 0x73u, 0x81u,          // $8170 PEA $8173           jumper: the address before `mid`
+      0x60u,                        // $8173 RTS                 a jump: nothing called pushed that address
+      0xA2u, 0x00u,                 // $8174 LDX #$00            mid
+      0xBDu, 0x10u, 0x91u,          // $8176 LDA !$9110,X        m1
+      0x9Fu, 0x00u, 0x21u, 0x7Eu,   // $8179 STA $7E:2100,X
+      0xE8u,                        // $817D INX
+      0xE0u, 0x08u,                 // $817E CPX #$08
+      0xD0u, 0xF4u,                 // $8180 BNE $8176
+      0x60u,                        // $8182 RTS
+  });
+  put(rom, 0x0190u, {
+      0xA2u, 0x00u,                 // $8190 LDX #$00            reader3
+      0xBDu, 0x28u, 0x92u,          // $8192 LDA !$9228,X        r3
+      0xE8u,                        // $8195 INX
+      0xE0u, 0x08u,                 // $8196 CPX #$08
+      0xD0u, 0xF8u,                 // $8198 BNE $8192
+      0x60u,                        // $819A RTS
+  });
+  put(rom, 0x01A0u, {
+      0xCBu,                        // $81A0 WAI                 waiter
+      0x80u, 0xFDu,                 // $81A1 BRA $81A0
+  });
+  put(rom, 0x01A8u, {
+      0xA2u, 0x00u,                 // $81A8 LDX #$00            writer3
+      0xBDu, 0x20u, 0x92u,          // $81AA LDA !$9220,X        w3
+      0x9Fu, 0x00u, 0x22u, 0x7Eu,   // $81AD STA $7E:2200,X
+      0xE8u,                        // $81B1 INX
+      0xE0u, 0x08u,                 // $81B2 CPX #$08
+      0xD0u, 0xF4u,                 // $81B4 BNE $81AA
+      0x60u,                        // $81B6 RTS
+  });
+  put(rom, 0x01C0u, {
+      0xA2u, 0x00u,                 // $81C0 LDX #$00            splitter
+      0xBDu, 0x00u, 0x93u,          // $81C2 LDA !$9300,X        sp1
+      0x9Fu, 0x00u, 0x23u, 0x7Eu,   // $81C5 STA $7E:2300,X
+      0xE8u,                        // $81C9 INX
+      0xE0u, 0x08u,                 // $81CA CPX #$08
+      0xD0u, 0xF4u,                 // $81CC BNE $81C2
+      0xCBu,                        // $81CE WAI                 the third interrupt arrives here
+      0xBDu, 0x00u, 0x93u,          // $81CF LDA !$9300,X        after_wai, sp2
+      0x9Fu, 0x00u, 0x23u, 0x7Eu,   // $81D2 STA $7E:2300,X
+      0xE8u,                        // $81D6 INX
+      0xE0u, 0x10u,                 // $81D7 CPX #$10
+      0xD0u, 0xF4u,                 // $81D9 BNE $81CF
+      0x60u,                        // $81DB RTS
+  });
+  put(rom, 0x01E8u, {
+      0xA2u, 0x00u,                 // $81E8 LDX #$00            helper
+      0xBDu, 0x80u, 0x93u,          // $81EA LDA !$9380,X        h1
+      0xE8u,                        // $81ED INX
+      0xE0u, 0x08u,                 // $81EE CPX #$08
+      0xD0u, 0xF8u,                 // $81F0 BNE $81EA
+      0x60u,                        // $81F2 RTS
+  });
+  put(rom, 0x0200u, {
+      0x8Du, 0x05u, 0x43u,          // $8200 STA !$4305          send: A: the count
+      0x8Eu, 0x02u, 0x43u,          // $8203 STX !$4302          X: the source's low byte
+      0x8Cu, 0x03u, 0x43u,          // $8206 STY !$4303          Y: its high byte
+      0xA9u, 0x01u,                 // $8209 LDA #$01
+      0x8Du, 0x00u, 0x43u,          // $820B STA !$4300          DMAP0: two registers, low then high
+      0xA9u, 0x18u,                 // $820E LDA #$18
+      0x8Du, 0x01u, 0x43u,          // $8210 STA !$4301          BBAD0: VMDATAL
+      0xA9u, 0x7Eu,                 // $8213 LDA #$7E
+      0x8Du, 0x04u, 0x43u,          // $8215 STA !$4304          A1B0
+      0xA9u, 0x00u,                 // $8218 LDA #$00
+      0x8Du, 0x06u, 0x43u,          // $821A STA !$4306          DAS0 high
+      0xA9u, 0x01u,                 // $821D LDA #$01
+      0x8Du, 0x0Bu, 0x42u,          // $821F STA !$420B          MDMAEN
+      0x60u,                        // $8222 RTS
+  });
+  put(rom, 0x0230u, {
+      0xC2u, 0x30u,                 // $8230 REP #$30            yield: A16, X16
+      0x3Bu,                        // $8232 TSC
+      0xAAu,                        // $8233 TAX                 this task's stack pointer
+      0xA5u, 0x14u,                 // $8234 LDA $14
+      0x1Bu,                        // $8236 TCS                 the other task's
+      0x86u, 0x14u,                 // $8237 STX $14
+      0xE2u, 0x30u,                 // $8239 SEP #$30
+      0x60u,                        // $823B RTS                 through the other task's return address
+  });
+  put(rom, 0x0240u, {
+      0x20u, 0x30u, 0x82u,          // $8240 JSR !$8230          work_a: task B runs until it yields
+      0x20u, 0x68u, 0x82u,          // $8243 JSR !$8268          in_a: $9410-$9417 -> $7E:2410
+      0x20u, 0x30u, 0x82u,          // $8246 JSR !$8230          task B finishes its stream and yields
+      0xA9u, 0x10u,                 // $8249 LDA #$10
+      0xA2u, 0x00u,                 // $824B LDX #$00
+      0xA0u, 0x24u,                 // $824D LDY #$24
+      0x20u, 0x00u, 0x82u,          // $824F JSR !$8200          $7E:2400, 16 -> VRAM
+      0xA9u, 0x08u,                 // $8252 LDA #$08
+      0xA2u, 0x10u,                 // $8254 LDX #$10
+      0xA0u, 0x24u,                 // $8256 LDY #$24
+      0x20u, 0x00u, 0x82u,          // $8258 JSR !$8200          $7E:2410, 8 -> VRAM
+      0x60u,                        // $825B RTS
+  });
+  put(rom, 0x0268u, {
+      0xA2u, 0x00u,                 // $8268 LDX #$00            reader_a
+      0xBDu, 0x10u, 0x94u,          // $826A LDA !$9410,X        ra1
+      0x9Fu, 0x10u, 0x24u, 0x7Eu,   // $826D STA $7E:2410,X
+      0xE8u,                        // $8271 INX
+      0xE0u, 0x08u,                 // $8272 CPX #$08
+      0xD0u, 0xF4u,                 // $8274 BNE $826A
+      0x60u,                        // $8276 RTS
+  });
+  put(rom, 0x0280u, {
+      0xA2u, 0x00u,                 // $8280 LDX #$00            decoder_b
+      0xBDu, 0x00u, 0x94u,          // $8282 LDA !$9400,X        db1
+      0x9Fu, 0x00u, 0x24u, 0x7Eu,   // $8285 STA $7E:2400,X
+      0xE8u,                        // $8289 INX
+      0xE0u, 0x08u,                 // $828A CPX #$08
+      0xD0u, 0xF4u,                 // $828C BNE $8282
+      0xDAu,                        // $828E PHX
+      0x20u, 0x30u, 0x82u,          // $828F JSR !$8230          task A runs; this invocation waits on its own stack
+      0xFAu,                        // $8292 PLX
+      0xBDu, 0x00u, 0x94u,          // $8293 LDA !$9400,X        resumed, db2
+      0x9Fu, 0x00u, 0x24u, 0x7Eu,   // $8296 STA $7E:2400,X
+      0xE8u,                        // $829A INX
+      0xE0u, 0x10u,                 // $829B CPX #$10
+      0xD0u, 0xF4u,                 // $829D BNE $8293
+      0x60u,                        // $829F RTS
+  });
+  put(rom, 0x0300u, {
+      0x4Cu, 0x20u, 0x83u,          // $8300 JMP !$8320          the native NMI vector
+  });
+  put(rom, 0x0320u, {
+      0xE2u, 0x30u,                 // $8320 SEP #$30            handler: A8, X8
+      0xA5u, 0x10u,                 // $8322 LDA $10
+      0xC9u, 0x02u,                 // $8324 CMP #$02
+      0xF0u, 0x16u,                 // $8326 BEQ $833E
+      0xC2u, 0x10u,                 // $8328 REP #$10
+      0xA2u, 0xFFu, 0x01u,          // $832A LDX #$01FF
+      0x9Au,                        // $832D TXS
+      0xE2u, 0x10u,                 // $832E SEP #$10            after_txs
+      0xE6u, 0x10u,                 // $8330 INC $10
+      0xA5u, 0x10u,                 // $8332 LDA $10
+      0xC9u, 0x01u,                 // $8334 CMP #$01
+      0xF0u, 0x03u,                 // $8336 BEQ $833B
+      0x4Cu, 0xA0u, 0x80u,          // $8338 JMP !$80A0
+      0x4Cu, 0x80u, 0x80u,          // $833B JMP !$8080          first
+      0xC2u, 0x20u,                 // $833E REP #$20            second
+      0x3Bu,                        // $8340 TSC
+      0x85u, 0x12u,                 // $8341 STA $12             the stack the interrupt was taken on
+      0xA9u, 0xFFu, 0x02u,          // $8343 LDA #$02FF
+      0x1Bu,                        // $8346 TCS
+      0xE2u, 0x20u,                 // $8347 SEP #$20
+      0xDAu,                        // $8349 PHX
+      0x20u, 0xE8u, 0x81u,          // $834A JSR !$81E8          reads $9380-$9387
+      0xFAu,                        // $834D PLX
+      0xE6u, 0x10u,                 // $834E INC $10
+      0xC2u, 0x20u,                 // $8350 REP #$20
+      0xA5u, 0x12u,                 // $8352 LDA $12
+      0x1Bu,                        // $8354 TCS                 back
+      0x40u,                        // $8355 RTI
+  });
+  put(rom, 0x0500u, {
+      0x20u, 0x80u, 0x82u,          // $8500 JSR !$8280          task_b: $9400-$940F -> $7E:2400, a yield in the middle
+      0x20u, 0x30u, 0x82u,          // $8503 JSR !$8230          task A runs on
+      0x80u, 0xFEu,                 // $8506 BRA $8506           tb_idle
+  });
+  put(rom, 0x1020u, {
+      0x20u, 0x21u, 0x22u, 0x23u, 0x24u, 0x25u, 0x26u, 0x27u,// $9020 data
+      0x28u, 0x29u, 0x2Au, 0x2Bu, 0x2Cu, 0x2Du, 0x2Eu, 0x2Fu,// $9028 data
+  });
+  put(rom, 0x1108u, {
+      0x08u, 0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu,// $9108 data
+      0x10u, 0x11u, 0x12u, 0x13u, 0x14u, 0x15u, 0x16u, 0x17u,// $9110 data
+      0x18u, 0x19u, 0x1Au, 0x1Bu, 0x1Cu, 0x1Du, 0x1Eu, 0x1Fu,// $9118 data
+  });
+  put(rom, 0x1220u, {
+      0xA0u, 0xA1u, 0xA2u, 0xA3u, 0xA4u, 0xA5u, 0xA6u, 0xA7u,// $9220 data
+      0xA8u, 0xA9u, 0xAAu, 0xABu, 0xACu, 0xADu, 0xAEu, 0xAFu,// $9228 data
+  });
+  put(rom, 0x1300u, {
+      0x30u, 0x31u, 0x32u, 0x33u, 0x34u, 0x35u, 0x36u, 0x37u,// $9300 data
+      0x38u, 0x39u, 0x3Au, 0x3Bu, 0x3Cu, 0x3Du, 0x3Eu, 0x3Fu,// $9308 data
+  });
+  put(rom, 0x1380u, {
+      0x80u, 0x81u, 0x82u, 0x83u, 0x84u, 0x85u, 0x86u, 0x87u,// $9380 data
+  });
+  put(rom, 0x1400u, {
+      0x40u, 0x41u, 0x42u, 0x43u, 0x44u, 0x45u, 0x46u, 0x47u,// $9400 data
+      0x48u, 0x49u, 0x4Au, 0x4Bu, 0x4Cu, 0x4Du, 0x4Eu, 0x4Fu,// $9408 data
+      0x50u, 0x51u, 0x52u, 0x53u, 0x54u, 0x55u, 0x56u, 0x57u,// $9410 data
+  });
+  return rom;
+}
+
+// The machine stepped as `observeRun` steps it, beside a lockstep and a shadow
+// of the test's own, and stopped at a boundary to read the shadow there.
+struct Following {
+  std::vector<std::uint8_t> rom;
+  CartridgeBoard board;
+  Snes machine;
+  ir::Provenance shadow;
+  detail::Recorder recorder;
+  detail::Lockstep lockstep;
+  std::vector<std::string> notes;
+  std::uint64_t spent = 0;
+
+  explicit Following(std::vector<std::uint8_t> image)
+      : rom(std::move(image)),
+        board(cartridgeBoard(rom)),
+        machine{SnesConfig{.rom = rom}},
+        shadow{board, rom.size(), 64},
+        recorder{machine, shadow},
+        lockstep{board, rom.size(), machine.state().cpu, shadow} {
+    shadow.carries = &recorder;
+    machine.setObserver(&recorder);
+  }
+  Following(const Following&) = delete;
+  Following& operator=(const Following&) = delete;
+  ~Following() {
+    machine.setObserver(nullptr);
+    shadow.carries = nullptr;
+  }
+
+  // Steps until the CPU arrives at `pc` in bank zero for the `nth` time, within
+  // twelve frames; says whether it did.
+  bool to(std::uint16_t pc, unsigned nth = 1) {
+    unsigned arrivals = 0;
+    while (spent < 12u * kFrame) {
+      const SnesState& before = machine.state();
+      const Cpu65816State cpuBefore = before.cpu;
+      const std::uint16_t lineBefore = before.vpos;
+      recorder.stepBegan((static_cast<Address>(cpuBefore.pbr) << 16) | cpuBefore.pc);
+      spent += machine.step();
+      if (machine.state().vpos < lineBefore) recorder.frameBegan();
+      const Cpu65816State& after = machine.state().cpu;
+      lockstep.step(cpuBefore, after, recorder.cpu, notes);
+      const bool arrived = after.pbr == 0 && after.pc == pc && (cpuBefore.pbr != 0 || cpuBefore.pc != pc);
+      if (arrived && ++arrivals == nth) return true;
+    }
+    return false;
+  }
+
+  [[nodiscard]] std::uint16_t stack() const { return machine.state().cpu.s; }
+};
+
+// One step through a lockstep built by hand: the shadow holds one invocation,
+// marked by a call told from `markBefore` to `markAfter`; the CPU fetched
+// `fetches` at $00:8000 and went from `before` to `after`. Answers the
+// shadow's depth after the step and the notes the step made.
+std::pair<std::size_t, std::vector<std::string>> stepAt(const std::vector<std::uint8_t>& fetches, Cpu65816State before,
+                                                        Cpu65816State after, std::uint16_t markBefore,
+                                                        std::uint16_t markAfter, bool markPage) {
+  const std::vector<std::uint8_t> rom = loRomImage(1);
+  const CartridgeBoard board = cartridgeBoard(rom);
+  ir::Provenance shadow{board, rom.size(), 64};
+  shadow.called(markBefore, markAfter, markPage);
+  before.pc = 0x8000u;
+  after.pc = static_cast<std::uint16_t>(0x8000u + fetches.size());
+  detail::Lockstep lockstep{board, rom.size(), before, shadow};
+  ir::StepObserver observed;
+  observed.cpuRan = true;
+  for (std::size_t i = 0; i < fetches.size(); ++i) {
+    BusAccess fetch;
+    fetch.address = 0x008000u + static_cast<std::uint32_t>(i);
+    fetch.value = fetches[i];
+    fetch.kind = i == 0 ? CycleKind::OpcodeFetch : CycleKind::OperandFetch;
+    observed.fetches.push_back(fetch);
+  }
+  std::vector<std::string> notes;
+  lockstep.step(before, after, observed, notes);
+  return {shadow.depth(), notes};
+}
+
+// The same in native mode, A8, X8, with X = $01FF: from S = $01FD to
+// `stackAfter`, the invocation marked at $01FD.
+std::pair<std::size_t, std::vector<std::string>> oneStep(const std::vector<std::uint8_t>& fetches,
+                                                         std::uint16_t stackAfter) {
+  Cpu65816State before;
+  before.s = 0x01FDu;
+  before.x = 0x01FFu;
+  before.p = 0x30u;
+  Cpu65816State after = before;
+  after.s = stackAfter;
+  return stepAt(fetches, before, after, 0x01FFu, 0x01FDu, false);
+}
+
+// The one staged extent at `memory`, or nothing.
+const StagedRange* stagedAt(const std::vector<StagedRange>& staged, Address memory) {
+  for (const StagedRange& s : staged) {
+    if (s.memory == memory) return &s;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(RomInvocations, ACallInsidePageOneWrapsAndItsReturnEndsIt) {
+  Following f(stackPlayImage());
+  const std::uint32_t root = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8100u));  // wrapped, called at S = $0100
+  EXPECT_EQ(f.stack(), 0x01FEu);
+  EXPECT_EQ(f.shadow.depth(), 2u);
+  EXPECT_NE(f.shadow.running(), root);
+  ASSERT_TRUE(f.to(0x8006u));  // after its RTS, which pulled $01FF and $0100
+  EXPECT_EQ(f.stack(), 0x0100u);
+  EXPECT_EQ(f.shadow.depth(), 1u);
+  EXPECT_EQ(f.shadow.running(), root);
+}
+
+TEST(RomInvocations, APulledReturnAddressEndsTheRoutineThatPulledIt) {
+  Following f(stackPlayImage());
+  const std::uint32_t root = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8120u));  // caller
+  const std::uint32_t caller = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8128u));  // dispatch
+  EXPECT_EQ(f.stack(), 0x01FBu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  const std::uint32_t dispatch = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8129u));  // one byte of its return address pulled
+  EXPECT_EQ(f.stack(), 0x01FCu);
+  EXPECT_EQ(f.shadow.depth(), 2u);
+  EXPECT_FALSE(f.shadow.live(dispatch));
+  EXPECT_EQ(f.shadow.running(), caller);
+  ASSERT_TRUE(f.to(0x8130u));  // target, reached by a jump
+  EXPECT_EQ(f.stack(), 0x01FDu);
+  EXPECT_EQ(f.shadow.depth(), 2u);
+  EXPECT_EQ(f.shadow.running(), caller);
+  ASSERT_TRUE(f.to(0x801Au));  // target's RTS returned through caller's address
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 1u);
+  EXPECT_EQ(f.shadow.running(), root);
+}
+
+TEST(RomInvocations, AReturnToAPushedAddressIsAJumpInsideTheRoutine) {
+  Following f(stackPlayImage());
+  ASSERT_TRUE(f.to(0x8170u));  // jumper
+  const std::uint32_t jumper = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8174u));  // mid, after PEA / RTS
+  EXPECT_EQ(f.stack(), 0x01FDu);
+  EXPECT_EQ(f.shadow.depth(), 2u);
+  EXPECT_EQ(f.shadow.running(), jumper);
+}
+
+TEST(RomInvocations, AHandlerThatTakesTheStackBackRunsOnAsItsOwnInvocation) {
+  Following f(stackPlayImage());
+  ASSERT_TRUE(f.to(0x8300u));  // the first interrupt taken
+  const std::uint32_t first = f.shadow.running();
+  ASSERT_TRUE(f.to(0x832Eu));  // after its TXS to $01FF
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), first);
+  ASSERT_TRUE(f.to(0x8080u));  // main_b, jumped to
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), first);
+}
+
+TEST(RomInvocations, TheSecondInterruptsPushesEndTheFirst) {
+  Following f(stackPlayImage());
+  ASSERT_TRUE(f.to(0x8300u));
+  const std::uint32_t first = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8300u));  // the second interrupt taken
+  const std::uint32_t second = f.shadow.running();
+  EXPECT_FALSE(f.shadow.live(first));
+  ASSERT_TRUE(f.to(0x832Eu));
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), second);
+  ASSERT_TRUE(f.to(0x80A0u));  // main_c
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), second);
+}
+
+TEST(RomInvocations, AHelperOnTheHandlersStackIsNotWithinTheRoutineInterrupted) {
+  Following f(stackPlayImage());
+  ASSERT_TRUE(f.to(0x81C0u));  // splitter
+  const std::uint32_t splitter = f.shadow.running();
+  ASSERT_TRUE(f.to(0x81E8u));  // helper, on the handler's stack
+  EXPECT_EQ(f.stack(), 0x02FCu);
+  EXPECT_EQ(f.shadow.depth(), 4u);
+  EXPECT_TRUE(f.shadow.live(splitter));
+  EXPECT_NE(f.shadow.running(), splitter);
+  EXPECT_FALSE(f.shadow.within(splitter));
+}
+
+TEST(RomInvocations, AHandlersReturnLeavesTheSameInvocationRunning) {
+  Following f(stackPlayImage());
+  const std::uint32_t root = f.shadow.running();
+  ASSERT_TRUE(f.to(0x81C0u));
+  const std::uint32_t splitter = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8300u));  // the third interrupt, taken once the WAI ends
+  ASSERT_TRUE(f.to(0x81CFu));  // the handler's RTI
+  EXPECT_EQ(f.stack(), 0x01FDu);
+  EXPECT_EQ(f.shadow.depth(), 2u);
+  EXPECT_EQ(f.shadow.running(), splitter);
+  ASSERT_TRUE(f.to(0x80ACu));  // after splitter
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 1u);
+  EXPECT_EQ(f.shadow.running(), root);
+}
+
+TEST(RomInvocations, ATasksFirstRunIsTheYieldThatSwitchedToIt) {
+  Following f(stackPlayImage());
+  ASSERT_TRUE(f.to(0x8230u));  // work_a's first yield
+  const std::uint32_t yield = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8500u));  // task B, entered by that yield's RTS on task B's stack
+  EXPECT_EQ(f.stack(), 0x03FFu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), yield);
+  ASSERT_TRUE(f.to(0x8282u));  // decoder_b
+  EXPECT_EQ(f.stack(), 0x03FDu);
+  EXPECT_EQ(f.shadow.depth(), 4u);
+  EXPECT_NE(f.shadow.running(), yield);
+}
+
+TEST(RomInvocations, ATaskResumedIsTheSameInvocationItLeft) {
+  Following f(stackPlayImage());
+  ASSERT_TRUE(f.to(0x8240u));  // work_a
+  const std::uint32_t workA = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8280u));  // decoder_b
+  const std::uint32_t decoderB = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8243u));  // work_a after its first yield
+  EXPECT_EQ(f.stack(), 0x01FDu);
+  EXPECT_EQ(f.shadow.depth(), 4u);
+  EXPECT_EQ(f.shadow.running(), workA);
+  EXPECT_TRUE(f.shadow.live(decoderB));
+  ASSERT_TRUE(f.to(0x8268u));  // reader_a
+  EXPECT_EQ(f.stack(), 0x01FBu);
+  EXPECT_EQ(f.shadow.depth(), 5u);
+  ASSERT_TRUE(f.to(0x8293u));  // decoder_b resumed
+  EXPECT_EQ(f.stack(), 0x03FDu);
+  EXPECT_EQ(f.shadow.depth(), 4u);
+  EXPECT_EQ(f.shadow.running(), decoderB);
+}
+
+TEST(RomInvocations, ATasksChainIsTheRootsOnceItsFirstYieldIsReturnedThrough) {
+  Following f(stackPlayImage());
+  const std::uint32_t root = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8240u));
+  const std::uint32_t workA = f.shadow.running();
+  ASSERT_TRUE(f.to(0x8503u));  // task_b after decoder_b
+  EXPECT_EQ(f.stack(), 0x03FFu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), root);
+  ASSERT_TRUE(f.to(0x8249u));  // work_a after its second yield
+  EXPECT_EQ(f.stack(), 0x01FDu);
+  EXPECT_EQ(f.shadow.depth(), 3u);
+  EXPECT_EQ(f.shadow.running(), workA);
+}
+
+TEST(RomInvocations, AYieldSetAsideStaysLiveAtTheEnd) {
+  Following f(stackPlayImage());
+  const std::uint32_t root = f.shadow.running();
+  ASSERT_TRUE(f.to(0x80CFu));  // idle
+  EXPECT_EQ(f.stack(), 0x01FFu);
+  EXPECT_EQ(f.shadow.depth(), 2u);
+  EXPECT_EQ(f.shadow.running(), root);
+}
+
+// A `TXS` that takes the pointer two bytes up, past the mark, is a transfer and
+// is not told; a `PLA` and `PLX` that do the same are pulls, and end it.
+TEST(RomInvocations, TheLockstepTellsAPullAndNotATransfer) {
+  EXPECT_EQ(oneStep({0x9Au}, 0x01FFu).first, 2u);  // TXS
+  EXPECT_EQ(oneStep({0x68u}, 0x01FEu).first, 1u);  // PLA
+  EXPECT_EQ(oneStep({0xFAu}, 0x01FEu).first, 1u);  // PLX
+}
+
+// A step whose fetched bytes do not decode as one instruction of that length
+// is not checked, and how it moved the pointer is told all the same.
+TEST(RomInvocations, AStepThatDoesNotDecodeStillTellsThePointersMotion) {
+  const auto [depth, notes] = oneStep({0xEAu, 0xEAu}, 0x01FFu);  // a NOP fetched as two bytes
+  ASSERT_EQ(notes.size(), 1u);
+  EXPECT_NE(notes.front().find("do not decode as one instruction"), std::string::npos) << notes.front();
+  EXPECT_EQ(depth, 1u);
+  EXPECT_EQ(oneStep({0xEAu, 0xEAu}, 0x01FDu).first, 2u) << "a step that left the pointer alone";
+}
+
+// The pointer wraps inside page one only for a step in emulation mode before
+// and after it: a step that leaves emulation mode moves it around the bank,
+// where $0100 to $01FF is no push.
+TEST(RomInvocations, AStepThatLeavesEmulationModeMovesThePointerAroundTheBank) {
+  Cpu65816State before;
+  before.e = true;
+  before.s = 0x0100u;
+  before.p = 0x30u;
+  Cpu65816State after = before;
+  after.e = false;
+  after.s = 0x01FFu;
+  // Undecoded bytes, so the motion is told whatever the instruction.
+  EXPECT_EQ(stepAt({0xEAu, 0xEAu}, before, after, 0x0101u, 0x01FFu, true).first, 2u);
+  after.e = true;
+  EXPECT_EQ(stepAt({0xEAu, 0xEAu}, before, after, 0x0101u, 0x01FFu, true).first, 1u) << "inside page one, a push";
+}
+
+TEST(RomInvocations, TheStackPlayCartridgeRecordsNoDivergence) {
+  const RunObservation run = observe(stackPlayImage(), 12u * kFrame);
+  EXPECT_EQ(run.divergences, 0u);
+  EXPECT_EQ(run.interrupts, 3u);
+}
+
+TEST(RomInvocations, TheStackPlayCartridgesSourcesAreTheRules) {
+  const RunObservation run = observe(stackPlayImage(), 12u * kFrame);
+  const std::vector<std::tuple<Address, std::uint32_t, ir::OriginInterval>> expected = {
+      // writer1's run and reader1's, one run in the root once both returned
+      {0x7E2000u, 8u, {0x1020u, 0x102Fu}},
+      // jumper's own run: its `PEA`/`RTS` ended nothing, so reader2's runs on
+      // either side stay the root's
+      {0x7E2100u, 8u, {0x1110u, 0x1117u}},
+      // writer3's run and reader3's, one run in the root once the first
+      // handler's invocation was pushed past
+      {0x7E2200u, 8u, {0x1220u, 0x122Fu}},
+      // splitter, one invocation across the third interrupt
+      {0x7E2300u, 16u, {0x1300u, 0x130Fu}},
+      // decoder_b, one invocation across its yield
+      {0x7E2400u, 16u, {0x1400u, 0x140Fu}},
+      // reader_a's own run
+      {0x7E2410u, 8u, {0x1410u, 0x1417u}},
+  };
+  for (const auto& [memory, bytes, source] : expected) {
+    const StagedRange* staged = stagedAt(run.staged, memory);
+    ASSERT_NE(staged, nullptr) << formatAddress(memory, 24);
+    EXPECT_EQ(staged->bytes, bytes) << formatAddress(memory, 24);
+    EXPECT_EQ(staged->origin.imageBytes(), bytes) << formatAddress(memory, 24);
+    ASSERT_FALSE(staged->writers.empty()) << formatAddress(memory, 24);
+    for (const StagedWriter& writer : staged->writers) {
+      EXPECT_EQ(writer.sources, (std::vector<ir::OriginInterval>{source})) << formatAddress(memory, 24);
+    }
   }
 }
 

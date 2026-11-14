@@ -582,8 +582,10 @@ and nothing is the board's: a LoROM save window with no save behind it reads the
 image through the upper half and carries that byte's origin, and a coprocessor's
 half carries nothing, as open bus does. A union wider than the cap is widened to
 its hull and marked `approximate`, and the mark is carried through every union
-after. The shadow also follows every `called()` and `returned()` the host
-reports and keeps each invocation's image reads as runs, by the rule
+after. The shadow also follows the invocations — `called` at every call,
+`interrupted` at every hardware interrupt taken, `stackMoved` at every push and
+pull, each told the stack pointer before and after the step — and keeps each
+invocation's image reads as runs, by the rule
 [project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from)
 states — a read inside a run changes nothing, any other read starts one, runs
 that touch are one, a helper's runs join its caller's as if the caller had
@@ -591,7 +593,15 @@ read them — which is what makes a
 decoded range's source the whole stream it read, and a chunked decoder's the
 whole file its caller read; `sourcesOf` answers it for a work-RAM byte with the
 run holding its origin, followed outward through each caller whose run begins
-or ends where it does. A console reset leaves no caller to return to:
+or ends where it does. An invocation lives until the stack pointer passes the
+place its return address was pushed: a pull past it ends the invocation and
+leaves its caller running, a push past it overwrites the address and ends it
+where it stands, and a transfer into the pointer (`TCS`, `TXS`, `XCE` into
+emulation mode; `loadsStackPointer`) passes nothing — a routine that pulls its
+own return address ends there, a `PEA`/`RTS` jump ends nothing, a handler on a
+stack of its own is one invocation until its `RTI`, and two tasks on two stacks
+keep their own chains. `within` says whether the running invocation is one or
+was called from it with no interrupt between. A console reset leaves no caller to return to:
 `abandon()` ends every invocation above the root with its runs joining
 nothing, and one still held — by a byte of work RAM it wrote, or a stream left
 open — keeps its runs, so a source followed out from it stops there. A byte loaded from work RAM keeps the
@@ -1197,7 +1207,7 @@ green, since the bytes are unchanged; a deliberate wrong character in rendered
 source — an absolute form's `!` dropped, `,X` written as `,Y`, a label's `EQU`
 truncated to its offset — reddens `snes_verify` and leaves the replay green,
 since the replay never reads the text. A break that reddened both, or neither,
-would mean the layers leak into each other.
+would mean the layers depend on each other.
 
 ## Library
 
@@ -1219,7 +1229,7 @@ would mean the layers leak into each other.
 | `Shadow`, `Interpreter::shadow` | What travels beside a value: told every move the interpreter makes — `copy`, `combine`, `load`, `store`, `exchange` — and never read back. |
 | `Clock`, `Interpreter::clock`, `Spc700Interpreter::clock` | What travels beside the cycles: told each program fetch and each idle, in order, and never read back. |
 | `Origins`, `Origin`, `OriginSet`, `OriginInterval` | The interned table of origins: an image byte, a hardware register, the save, the union of two; a set's intervals, marks and approximate flag. |
-| `Provenance`, `Writer`, `Stream` | The shadow of a run: work RAM's origin, writer and invocation byte by byte, `originOf`, `writerOf`, `sourcesOf`; `called`, `returned`; the streams the CPU carried. |
+| `Provenance`, `Writer`, `Stream` | The shadow of a run: work RAM's origin, writer and invocation byte by byte, `originOf`, `writerOf`, `sourcesOf`; `called`, `interrupted`, `stackMoved`, `abandon`, `running`, `live`, `within`; the streams the CPU carried. |
 | `differential(program, replay)` | Replay a run on the machine beside the interpreter, held to every access, register and cycle. |
 | `Replay` | The cartridge, the master-cycle budget, the recorded run, the divergence limit, and the progress sink. |
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped, on both CPUs; each disagreement with its step, processor, node, effect and the two values; the form and construct histograms, and the sound CPU's form histogram. |

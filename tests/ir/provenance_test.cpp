@@ -10,7 +10,9 @@
 // the union, a flag carrying nothing, a narrow write following the register's
 // own rule, the cap widening a set to its hull and saying so, a read inside a
 // run changing nothing and runs that touch being one, a helper's runs reaching
-// a source through the caller that read on from them, a byte loaded from work
+// a source through the caller that read on from them, an invocation living
+// until the stack pointer passes where its return address was pushed and a
+// transfer into the pointer passing nothing, a byte loaded from work
 // RAM carried out as the buffer it came from, a stream's source being the run
 // its invocation read, and a run with the shadow computing exactly what a run
 // without one does.
@@ -103,9 +105,15 @@ struct Machine {
     shadow.site = at;
     if (at != expectedNext) shadow.flowBroke();
     expectedNext = at + node.instruction.length;
+    const std::uint16_t stackBefore = r.s;
+    const bool emulationBefore = r.e;
     interpreter.execute(node, bus);
-    if (node.instruction.flow == Flow::Call) shadow.called();
-    if (node.instruction.flow == Flow::Return) shadow.returned();
+    const bool page = emulationBefore && r.e;
+    if (node.instruction.flow == Flow::Call) {
+      shadow.called(stackBefore, r.s, page);
+    } else if (!loadsStackPointer(node.instruction)) {
+      shadow.stackMoved(stackBefore, r.s, page);
+    }
   }
 
   // The bytes at an image address, as data the program reads.
@@ -615,6 +623,340 @@ TEST(Provenance, AnAbandonedInvocationsByteNamesItsOwnRunAndNoCaller) {
   EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1001u}}));
 }
 
+// ---- the stack pointer and the invocations -------------------------------------
+
+TEST(Provenance, ACallMarksTheInvocationWhereItsPushesLeftThePointer) {
+  Machine m;
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: pushes at $01FF and $01FE
+  EXPECT_EQ(m.interpreter.registers.s, 0x01FDu);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  EXPECT_NE(m.shadow.running(), root);
+  EXPECT_TRUE(m.shadow.live(m.shadow.running()));
+  EXPECT_TRUE(m.shadow.live(root));
+}
+
+TEST(Provenance, AReturnPastTheMarkEndsTheInvocationAndItsCallerRuns) {
+  Machine m;
+  m.image(0x009000u, {0x11u, 0x22u, 0x33u});
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  const std::uint32_t helper = m.shadow.running();
+  m.run({0xADu, 0x00u, 0x90u});  // $8100 LDA !$9000
+  m.run({0xADu, 0x01u, 0x90u});  // LDA !$9001
+  m.run({0x60u});                // RTS: pulls $01FE and $01FF, past the mark
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_FALSE(m.shadow.live(helper));
+  m.run({0xADu, 0x02u, 0x90u});  // LDA !$9002, in the caller
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1002u}}));
+}
+
+TEST(Provenance, APulledReturnAddressEndsTheInvocation) {
+  // A routine that pulls its own return address and runs on: from the pull,
+  // its reads are its caller's.
+  Machine m;
+  m.image(0x009000u, {0x10u, 0x11u, 0x12u, 0x13u, 0x14u});
+  const std::uint32_t root = m.shadow.running();
+  for (std::uint8_t i = 1; i < 4; ++i) m.run({0xADu, i, 0x90u});  // LDA !$9001 .. !$9003
+  m.run({0x20u, 0x00u, 0x81u});                                    // JSR !$8100
+  m.run({0xADu, 0x00u, 0x90u});                                    // $8100 LDA !$9000
+  m.run({0x68u});                                                  // PLA: the return address's low byte
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+  m.run({0x68u});                // PLA: its high byte, at the root
+  m.run({0xADu, 0x04u, 0x90u});  // LDA !$9004
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200: the root's write, from the root's run
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1004u}}));
+}
+
+TEST(Provenance, AReturnToAPushedAddressEndsNothing) {
+  Machine m;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: S $01FD
+  const std::uint32_t helper = m.shadow.running();
+  m.run({0xF4u, 0xFFu, 0x81u});  // $8100 PEA $81FF: S $01FB
+  m.run({0x60u});                // RTS: a jump to $8200, S $01FD again
+  EXPECT_EQ(m.interpreter.registers.pc, 0x8200u);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  EXPECT_EQ(m.shadow.running(), helper);
+  m.run({0x60u});  // $8200 RTS: through the call's address
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_FALSE(m.shadow.live(helper));
+}
+
+TEST(Provenance, ATransferIntoThePointerEndsNothing) {
+  Machine m;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: marked at $01FD
+  const std::uint32_t helper = m.shadow.running();
+  m.run({0xC2u, 0x10u});         // $8100 REP #$10
+  m.run({0xA2u, 0xFFu, 0x01u});  // LDX #$01FF
+  m.run({0x9Au});                // TXS: above the mark
+  EXPECT_EQ(m.interpreter.registers.s, 0x01FFu);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  EXPECT_EQ(m.shadow.running(), helper);
+  m.run({0xC2u, 0x20u});         // REP #$20
+  m.run({0xA9u, 0x80u, 0x01u});  // LDA #$0180
+  m.run({0x1Bu});                // TCS: below it
+  EXPECT_EQ(m.interpreter.registers.s, 0x0180u);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  EXPECT_EQ(m.shadow.running(), helper);
+}
+
+TEST(Provenance, APushPastAMarkEndsTheInvocationItOverwrites) {
+  Machine m;
+  m.image(0x009000u, {0x10u, 0x11u});
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: marked at $01FD
+  const std::uint32_t helper = m.shadow.running();
+  m.run({0xADu, 0x00u, 0x90u});  // $8100 LDA !$9000
+  m.run({0xC2u, 0x10u});         // REP #$10
+  m.run({0xA2u, 0xFFu, 0x01u});  // LDX #$01FF
+  m.run({0x9Au});                // TXS: S $01FF, above the mark
+  m.run({0x48u});                // PHA: writes $01FF
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.run({0x48u});  // PHA: writes $01FE, the return address's low byte
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_FALSE(m.shadow.live(helper));
+  m.run({0x48u});                // PHA: writes $01FD
+  m.run({0xADu, 0x01u, 0x90u});  // LDA !$9001
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200: the helper's read joined the root's
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), (std::vector<OriginInterval>{{0x1000u, 0x1001u}}));
+}
+
+TEST(Provenance, APushPastAMarkGivesItsCalleesToItsCaller) {
+  // `a`, called from `p`, calls `b` on a stack of its own; `b` moves to just
+  // above `a`'s mark and pushes over it. `a` ends, and `b` is `p`'s.
+  Machine m;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: p, marked at $01FD
+  const std::uint32_t p = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x82u});  // $8100 JSR !$8200: a, marked at $01FB
+  const std::uint32_t a = m.shadow.running();
+  m.run({0xC2u, 0x10u});         // $8200 REP #$10
+  m.run({0xA2u, 0xFFu, 0x02u});  // LDX #$02FF
+  m.run({0x9Au});                // TXS
+  m.run({0x20u, 0x00u, 0x83u});  // JSR !$8300: b, marked at $02FD
+  const std::uint32_t b = m.shadow.running();
+  m.run({0xA2u, 0xFCu, 0x01u});  // $8300 LDX #$01FC
+  m.run({0x9Au});                // TXS
+  m.run({0x48u});                // PHA: writes $01FC, past a's mark
+  EXPECT_FALSE(m.shadow.live(a));
+  EXPECT_EQ(m.shadow.running(), b);
+  EXPECT_TRUE(m.shadow.within(p));
+  EXPECT_EQ(m.shadow.depth(), 3u);
+  m.run({0xA2u, 0xFDu, 0x02u});  // LDX #$02FD: b's mark
+  m.run({0x9Au});                // TXS
+  m.run({0x60u});                // RTS: through b's address
+  EXPECT_EQ(m.shadow.running(), p);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+}
+
+TEST(Provenance, AnInvocationOnAnotherStackStaysLiveAndIsReturnedInto) {
+  Machine m;
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: a, marked at $01FD
+  const std::uint32_t a = m.shadow.running();
+  m.run({0xC2u, 0x10u});         // $8100 REP #$10
+  m.run({0xA2u, 0xFFu, 0x02u});  // LDX #$02FF
+  m.run({0x9Au});                // TXS: a stack of its own
+  m.run({0x20u, 0x00u, 0x82u});  // JSR !$8200: b, marked at $02FD
+  const std::uint32_t b = m.shadow.running();
+  EXPECT_EQ(m.shadow.depth(), 3u);
+  m.run({0xA2u, 0xFDu, 0x01u});  // $8200 LDX #$01FD: a's mark
+  m.run({0x9Au});                // TXS
+  m.run({0x60u});                // RTS: through a's address
+  EXPECT_FALSE(m.shadow.live(a));
+  EXPECT_TRUE(m.shadow.live(b));
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.run({0xA2u, 0xFDu, 0x02u});  // LDX #$02FD: b's mark
+  m.run({0x9Au});                // TXS
+  m.run({0x60u});                // RTS: through b's address
+  EXPECT_FALSE(m.shadow.live(b));
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_EQ(m.shadow.depth(), 1u);
+}
+
+TEST(Provenance, ACalleeLeftBehindByAReturnIsTheRoots) {
+  // As above with `a` called from `p`: once `a` is returned through, `b` has
+  // no caller left, and a return through `b` leaves the root running.
+  Machine m;
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: p, marked at $01FD
+  const std::uint32_t p = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x82u});  // $8100 JSR !$8200: a, marked at $01FB
+  const std::uint32_t a = m.shadow.running();
+  m.run({0xC2u, 0x10u});         // $8200 REP #$10
+  m.run({0xA2u, 0xFFu, 0x02u});  // LDX #$02FF
+  m.run({0x9Au});                // TXS
+  m.run({0x20u, 0x00u, 0x83u});  // JSR !$8300: b, marked at $02FD
+  const std::uint32_t b = m.shadow.running();
+  m.run({0xA2u, 0xFBu, 0x01u});  // $8300 LDX #$01FB: a's mark
+  m.run({0x9Au});                // TXS
+  m.run({0x60u});                // RTS: through a's address, into p
+  EXPECT_FALSE(m.shadow.live(a));
+  EXPECT_EQ(m.shadow.running(), p);
+  m.run({0xA2u, 0xFDu, 0x02u});  // LDX #$02FD: b's mark
+  m.run({0x9Au});                // TXS
+  m.run({0x60u});                // RTS: through b's address
+  EXPECT_FALSE(m.shadow.live(b));
+  EXPECT_TRUE(m.shadow.live(p));
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+}
+
+TEST(Provenance, TheStackWrapsInsidePageOneInEmulationMode) {
+  Machine m;
+  m.interpreter.registers.e = true;
+  m.interpreter.registers.s = 0x0100u;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: pushes at $0100 and $01FF
+  EXPECT_EQ(m.interpreter.registers.s, 0x01FEu);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.run({0x60u});  // $8100 RTS: pulls $01FF and $0100
+  EXPECT_EQ(m.interpreter.registers.s, 0x0100u);
+  EXPECT_EQ(m.shadow.depth(), 1u);
+
+  // The same two moves told around the bank: neither is a push or a pull.
+  Machine control;
+  control.shadow.called(0x0100u, 0x01FEu, false);
+  control.shadow.stackMoved(0x01FEu, 0x0100u, false);
+  EXPECT_EQ(control.shadow.depth(), 2u);
+}
+
+TEST(Provenance, APushAroundPageOnePassesAMarkAtItsTop) {
+  // Called at S = $0101 in emulation mode: the pushes land at $0101 and $0100
+  // and the mark is $01FF, around the page. A push from $0100 writes the
+  // return address's low byte and wraps to $01FF, past the mark.
+  Machine m;
+  m.interpreter.registers.e = true;
+  m.interpreter.registers.s = 0x0101u;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  EXPECT_EQ(m.interpreter.registers.s, 0x01FFu);
+  ASSERT_EQ(m.shadow.depth(), 2u);
+  m.run({0xA2u, 0x00u});  // $8100 LDX #$00
+  m.run({0x9Au});         // TXS: S = $0100
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.run({0x48u});  // PHA: writes $0100
+  EXPECT_EQ(m.interpreter.registers.s, 0x01FFu);
+  EXPECT_EQ(m.shadow.depth(), 1u);
+}
+
+TEST(Provenance, AnInterruptIsACallThatWithinStopsAt) {
+  Machine m;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: p
+  const std::uint32_t p = m.shadow.running();
+  const std::uint16_t s = m.interpreter.registers.s;
+  m.interpreter.registers.s = static_cast<std::uint16_t>(s - 4u);
+  m.shadow.interrupted(s, static_cast<std::uint16_t>(s - 4u), false);  // a hardware interrupt's four pushes
+  const std::uint32_t handler = m.shadow.running();
+  EXPECT_FALSE(m.shadow.within(p));
+  EXPECT_TRUE(m.shadow.within(handler));
+  m.run({0x20u, 0x00u, 0x82u});  // $8100 JSR !$8200: q, from the handler
+  const std::uint32_t q = m.shadow.running();
+  EXPECT_TRUE(m.shadow.within(q));
+  EXPECT_TRUE(m.shadow.within(handler));
+  EXPECT_FALSE(m.shadow.within(p));
+  m.interpreter.registers.s = s;
+  m.shadow.stackMoved(static_cast<std::uint16_t>(s - 4u), s, false);  // the RTI's pulls
+  EXPECT_FALSE(m.shadow.live(handler));
+  EXPECT_EQ(m.shadow.running(), p);
+  EXPECT_TRUE(m.shadow.within(p));
+}
+
+TEST(Provenance, WithinFollowsTheCallers) {
+  Machine m;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: outer
+  const std::uint32_t outer = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x82u});  // $8100 JSR !$8200: inner
+  const std::uint32_t inner = m.shadow.running();
+  EXPECT_TRUE(m.shadow.within(outer));
+  EXPECT_TRUE(m.shadow.within(inner));
+  m.run({0x60u});  // $8200 RTS
+  EXPECT_FALSE(m.shadow.within(inner));
+  EXPECT_FALSE(m.shadow.live(inner));
+  EXPECT_TRUE(m.shadow.within(outer));
+}
+
+TEST(Provenance, AMoveOfMoreThanFourBytesPassesNothing) {
+  Machine m;
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: marked at $01FD
+  m.shadow.stackMoved(0x01FDu, 0x01FDu + 100u, false);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.shadow.stackMoved(0x0250u, 0x0250u - 100u, false);
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.shadow.stackMoved(0x01FDu, 0x0202u, false);  // five bytes
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.shadow.stackMoved(0x0201u, 0x01FCu, false);  // five bytes down
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.shadow.stackMoved(0x01FDu, 0x0201u, false);  // four bytes: a pull past the mark
+  EXPECT_EQ(m.shadow.depth(), 1u);
+}
+
+TEST(Provenance, AReturnThroughTwoMarksEndsBoth) {
+  Machine m;
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: a, marked at $01FD
+  m.run({0x20u, 0x00u, 0x82u});  // $8100 JSR !$8200: b, marked at $01FB
+  EXPECT_EQ(m.shadow.depth(), 3u);
+  m.run({0x6Bu});  // $8200 RTL: pulls $01FC, $01FD and $01FE
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+}
+
+TEST(Provenance, TheRootIsNeverEnded) {
+  Machine m;
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x68u});  // PLA with nothing called
+  m.run({0x68u});
+  m.run({0x48u});  // PHA
+  m.run({0x48u});
+  m.run({0x48u});
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_TRUE(m.shadow.live(root));
+}
+
+TEST(Provenance, AbandonEndsEveryInvocationOnEveryStack) {
+  Machine m;
+  const std::uint32_t root = m.shadow.running();
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: a, marked at $01FD
+  const std::uint32_t a = m.shadow.running();
+  m.run({0xC2u, 0x10u});         // $8100 REP #$10
+  m.run({0xA2u, 0xFFu, 0x02u});  // LDX #$02FF
+  m.run({0x9Au});                // TXS
+  m.run({0x20u, 0x00u, 0x82u});  // JSR !$8200: b, marked at $02FD
+  const std::uint32_t b = m.shadow.running();
+  ASSERT_EQ(m.shadow.depth(), 3u);
+  m.shadow.abandon();
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+  EXPECT_FALSE(m.shadow.live(a));
+  EXPECT_FALSE(m.shadow.live(b));
+  m.run({0x60u});  // $8200 RTS: past where b was marked; the abandon cleared the mark
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  m.run({0x20u, 0x00u, 0x83u});  // JSR !$8300: a new invocation in a freed slot
+  EXPECT_EQ(m.shadow.depth(), 2u);
+  m.run({0x60u});  // $8300 RTS
+  EXPECT_EQ(m.shadow.depth(), 1u);
+  EXPECT_EQ(m.shadow.running(), root);
+}
+
+TEST(Provenance, LoadsStackPointerNamesTheThreeTransfers) {
+  for (const char* name : {"TCS", "TXS", "XCE"}) {
+    Instruction instruction;
+    instruction.mnemonic = name;
+    EXPECT_TRUE(loadsStackPointer(instruction)) << name;
+  }
+  for (const char* name : {"PHA", "PLA", "RTS", "JSR", "TSC", "TSX"}) {
+    Instruction instruction;
+    instruction.mnemonic = name;
+    EXPECT_FALSE(loadsStackPointer(instruction)) << name;
+  }
+}
+
 // ---- streams --------------------------------------------------------------------
 
 TEST(Provenance, ConsecutiveStoresFromConsecutiveBytesAreOneStream) {
@@ -713,6 +1055,22 @@ TEST(Provenance, AStreamsSourceIsTheRunItsInvocationRead) {
   EXPECT_EQ(stream.bytes, 2u);
   EXPECT_EQ(stream.source, (OriginInterval{0x1000u, 0x1003u}));
   EXPECT_FALSE(stream.memory.has_value());
+}
+
+TEST(Provenance, AStreamClosedWhileItsHelperRunsIsTheHelpersRun) {
+  // The helper reads three bytes and carries the first two; the run ends with
+  // the helper still running, and the root read nothing.
+  Machine m;
+  m.image(0x009000u, {0x11u, 0x22u, 0x33u});
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  m.run({0xADu, 0x00u, 0x90u});  // $8100 LDA !$9000
+  m.run({0x8Du, 0x22u, 0x21u});  // STA !$2122
+  m.run({0xADu, 0x01u, 0x90u});  // LDA !$9001
+  m.run({0x8Du, 0x22u, 0x21u});  // STA !$2122
+  m.run({0xADu, 0x02u, 0x90u});  // LDA !$9002: read, not carried
+  m.shadow.finish();
+  ASSERT_EQ(m.shadow.streams().size(), 1u);
+  EXPECT_EQ(m.shadow.streams().front().source, (OriginInterval{0x1000u, 0x1002u}));
 }
 
 TEST(Provenance, AStreamCarriedByAHelperFindsItsRunAfterTheHelperReturned) {

@@ -852,7 +852,11 @@ one run however many tables it consults and however often it re-reads the
 byte it is at; a copy that walks its source from the end reads one run; and a
 table read in whatever order its entries are asked for is one run where the
 entries lie end to end. When a helper returns, each of its runs joins the
-caller's exactly as if the caller had read those bytes itself.
+caller's exactly as if the caller had read those bytes itself. A helper's
+invocation ends when the stack pointer passes the place its return address was
+pushed — by the return, by a pull that throws the address away, or by a push
+that overwrites it — and at no other time; a transfer into the pointer ends
+nothing.
 
 The source of a byte is the run holding its origin among the writer's
 invocation's runs, followed outward: at each caller, the caller's run holding

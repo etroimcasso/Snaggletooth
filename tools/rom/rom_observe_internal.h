@@ -951,26 +951,23 @@ struct Planned {
 };
 
 // The second run's record of the planned routines, one entry per routine in
-// the plan's order, and which of them have frames on the stack: each live
-// invocation, outermost first, with the shadow's depth once it was entered, the
-// master cycles the run had then counted, and the interrupt depth it was
-// entered at. A hardware interrupt deepens `interruptDepth` and an `RTI`
-// returns it; what the CPU or an engine writes is a live invocation's only at
-// the interrupt depth it was entered at, so a handler that interrupts a
-// routine writes nothing of the routine's, and a routine a handler calls has
-// its writes all the same. `spent` is the run's master cycles as the loop last
-// counted them; `dueSite` and `dueReturn` the call whose routine's snapshot the
-// loop is to take.
+// the plan's order, and which of them are live: each live invocation,
+// outermost first, with the shadow's id for it and the master cycles the
+// run had counted when it was entered. What the CPU or an engine writes is a
+// live routine's only while the running invocation is the routine's own or
+// was called from it with no hardware interrupt taken between, so a handler
+// that interrupts a routine writes nothing of the routine's, and a routine
+// a handler calls has its writes all the same. `spent` is the run's master
+// cycles as the loop last counted them; `dueSite` and `dueReturn` the call
+// whose routine's snapshot the loop is to take.
 struct Enumerating {
   struct Live {
     std::size_t planned;
-    std::size_t depth;
+    std::uint32_t invocation;
     std::uint64_t enteredAt;
-    unsigned interrupts;
   };
   std::vector<Planned> planned;
   std::vector<Live> live;
-  unsigned interruptDepth = 0;
   std::uint64_t spent = 0;
   Address dueSite = 0;
   Address dueReturn = 0;
@@ -983,14 +980,14 @@ struct Enumerating {
     }
   }
 
-  // A call landed on `landed`, the shadow `depth` deep after it: when that is a
-  // planned routine, its invocation is live, and its snapshot falls due when
-  // it has none yet. Answers the routine whose snapshot is due.
-  std::optional<std::size_t> entered(Address landed, Address site, Address returnTo, std::size_t depth) {
+  // A call landed on `landed`, opening `invocation`: when that is a planned
+  // routine, its invocation is live, and its snapshot falls due when it has
+  // none yet. Answers the routine whose snapshot is due.
+  std::optional<std::size_t> entered(Address landed, Address site, Address returnTo, std::uint32_t invocation) {
     std::optional<std::size_t> due;
     for (std::size_t p = 0; p < planned.size(); ++p) {
       if (planned[p].routine->address != landed) continue;
-      live.push_back(Live{.planned = p, .depth = depth, .enteredAt = spent, .interrupts = interruptDepth});
+      live.push_back(Live{.planned = p, .invocation = invocation, .enteredAt = spent});
       if (!planned[p].snapshot) {
         due = p;
         dueSite = site;
@@ -1001,21 +998,22 @@ struct Enumerating {
     return due;
   }
 
-  // A return left the shadow `depth` deep: every invocation deeper than that
-  // has returned, and its cycles count toward its routine's longest.
-  void returned(std::size_t depth) {
-    while (!live.empty() && live.back().depth > depth) {
-      Planned& entry = planned[live.back().planned];
-      entry.longest = std::max(entry.longest, spent - live.back().enteredAt);
-      live.pop_back();
+  // Every live routine whose invocation has ended leaves, its cycles counting
+  // toward its routine's longest.
+  void ended(const ir::Provenance& shadow) {
+    for (std::size_t i = live.size(); i-- > 0;) {
+      if (shadow.live(live[i].invocation)) continue;
+      Planned& entry = planned[live[i].planned];
+      entry.longest = std::max(entry.longest, spent - live[i].enteredAt);
+      live.erase(live.begin() + static_cast<std::ptrdiff_t>(i));
     }
   }
 
   // What the CPU and the engines wrote this step, given to every live
-  // invocation's routine entered at the interrupt depth the step ran at.
-  void wrote(const Recorder& recorder) {
+  // routine the running invocation is within.
+  void wrote(const Recorder& recorder, const ir::Provenance& shadow) {
     for (const Live& l : live) {
-      if (l.interrupts != interruptDepth) continue;
+      if (!shadow.within(l.invocation)) continue;
       Planned& entry = planned[l.planned];
       for (const BusAccess& access : recorder.cpu.data) {
         if (!access.write) continue;
@@ -1085,8 +1083,8 @@ struct Lockstep {
   std::uint64_t diverged = 0;
   std::uint64_t steps = 0;
 
-  // The second run's record of the planned routines, told of every call,
-  // return and interrupt; nothing in the first run. `snapshotDue` names the
+  // The second run's record of the planned routines, told of every call and
+  // of every invocation that ends; nothing in the first run. `snapshotDue` names the
   // planned routine whose snapshot the loop takes once this step is done.
   Enumerating* enumerating = nullptr;
   std::optional<std::size_t> snapshotDue;
@@ -1133,6 +1131,8 @@ struct Lockstep {
     prototype.instruction = ordinal;
     prototype.site = site;
     const std::size_t divergencesBefore = divergences.size();
+    // The stack pointer wraps inside page one while the CPU is in emulation mode.
+    const bool page = before.e && after.e;
 
     // What the machine took: a hardware request due at the boundary, or the
     // instruction at the program counter.
@@ -1142,8 +1142,8 @@ struct Lockstep {
       prototype.name = nmiTaken ? "NMI" : "IRQ";
       shadow.site = site;
       shadow.flowBroke();
-      shadow.called();
-      if (enumerating != nullptr) ++enumerating->interruptDepth;
+      shadow.interrupted(before.s, after.s, page);
+      if (enumerating != nullptr) enumerating->ended(shadow);
       ir::checkInterrupt(interpreter, nmiTaken ? nmi : irq, observed, after, prototype, divergences);
       ++interrupts;
       expectedReturns.insert(site);
@@ -1174,6 +1174,7 @@ struct Lockstep {
         }
         interpreter.registers = ir::registersOf(after);
         shadow.forgetPlaces();
+        if (before.s != after.s) shadow.stackMoved(before.s, after.s, page);
         clearPort();
         return;
       }
@@ -1200,10 +1201,14 @@ struct Lockstep {
       shadow.forgetPlaces();
     }
     clearPort();
-    // An invocation begins at a call and ends at a return, by the chip's own
-    // rules: a `PEA`/`RTS` jump ends one too, and a tail jump does not.
-    if (node.instruction.flow == ir::Flow::Call) shadow.called();
-    if (node.instruction.flow == ir::Flow::Return) shadow.returned();
+    // What the step did to the stack pointer: a call opens an invocation
+    // marked where its pushes left the pointer; a push or a pull may pass a
+    // mark and end one; a load of the pointer from a register is not told.
+    if (node.instruction.flow == ir::Flow::Call) {
+      shadow.called(before.s, after.s, page);
+    } else if (before.s != after.s && !ir::loadsStackPointer(node.instruction)) {
+      shadow.stackMoved(before.s, after.s, page);
+    }
     if (enumerating != nullptr) followRoutines(node, site, after);
 
     // Where the CPU went, against what the instruction names: the address
@@ -1246,21 +1251,17 @@ struct Lockstep {
 
   // The second run's record told what a node did to the planned routines'
   // frames: a call, not a software interrupt, that lands on a planned routine
-  // enters it; every return leaves the frames deeper than the shadow now is;
-  // an `RTI` ends an interrupt handler.
+  // enters it; every live routine whose invocation the step ended leaves.
   void followRoutines(const ir::Node& node, Address site, const Cpu65816State& after) {
     const ir::Instruction& instruction = node.instruction;
     const std::string_view mnemonic = instruction.mnemonic;
     if (instruction.flow == ir::Flow::Call && mnemonic != "BRK" && mnemonic != "COP") {
       const Address landed = placed(board, imageBytes, (static_cast<Address>(after.pbr) << 16) | after.pc);
       const Address returnTo = placed(board, imageBytes, backend.following(site, instruction.length));
-      const std::optional<std::size_t> due = enumerating->entered(landed, site, returnTo, shadow.depth());
+      const std::optional<std::size_t> due = enumerating->entered(landed, site, returnTo, shadow.running());
       if (due && !snapshotDue) snapshotDue = due;
     }
-    if (instruction.flow == ir::Flow::Return) {
-      enumerating->returned(shadow.depth());
-      if (mnemonic == "RTI" && enumerating->interruptDepth > 0) --enumerating->interruptDepth;
-    }
+    enumerating->ended(shadow);
   }
 
   // The mode the CPU is in, as the trace carries one: the widths are known —
@@ -1328,7 +1329,9 @@ inline void setInput(SnesState& state, const VariantSetting& setting) {
 //
 // The caller restores `sandbox`, binds `copy` — the snapshot's shadow — to
 // `rec`, and builds `step` over `copy` from the restored registers, expecting
-// the routine's first instruction next and its return; a `copy` reporting
+// the routine's first instruction next and its return; the routine's
+// invocation is `copy`'s running one, and a write is its frames' while
+// `copy.within` it; a `copy` reporting
 // anywhere but `rec` throws `std::logic_error`. Each step is checked in
 // this order: the lifted instruction disagreeing with the machine refuses the
 // value; so does a byte of work RAM or a register `$2100`-`$43FF` the routine's
@@ -1367,7 +1370,7 @@ inline void setInput(SnesState& state, const VariantSetting& setting) {
   std::vector<bool> written(0x20000u, false);
   std::uint32_t frame = snapshot.frame;
   std::uint64_t spent = 0;
-  unsigned interruptDepth = 0;
+  const std::uint32_t routine = copy.running();
   const auto refuse = [&](const std::string& why) {
     notes.push_back(head + why);
     cycles += spent;
@@ -1378,8 +1381,6 @@ inline void setInput(SnesState& state, const VariantSetting& setting) {
     const Cpu65816State cpuBefore = before.cpu;
     const Address site = (static_cast<Address>(before.cpu.pbr) << 16) | before.cpu.pc;
     const std::uint16_t lineBefore = before.vpos;
-    const std::uint64_t interruptsBefore = step.interrupts;
-    const std::uint64_t instructionsBefore = step.instructions;
     rec.stepBegan(site);
     spent += sandbox.step();
     if (sandbox.state().vpos < lineBefore) {
@@ -1389,18 +1390,12 @@ inline void setInput(SnesState& state, const VariantSetting& setting) {
     }
     const SnesState& after = sandbox.state();
     step.step(cpuBefore, after.cpu, rec.cpu, dropped);
-    if (step.interrupts != interruptsBefore) {
-      ++interruptDepth;
-    } else if (step.instructions != instructionsBefore && !rec.cpu.fetches.empty() &&
-               rec.cpu.fetches.front().value == 0x40u && interruptDepth > 0) {
-      --interruptDepth;  // RTI
-    }
 
     if (step.diverged > 0) {
       return refuse("the lift disagreed with the machine at " + text::address24(step.divergences.back().site) +
                     "; not lifted");
     }
-    if (interruptDepth == 0) {
+    if (copy.within(routine)) {
       for (const BusAccess& access : rec.cpu.data) {
         if (!access.write) continue;
         if (const std::optional<std::size_t> index = ir::Provenance::workRamIndex(access.address)) {

@@ -700,6 +700,60 @@ TEST(RomEnumerate, TheLongestInvocationSetsTheBudget) {
   EXPECT_EQ(found->substr(found->size() - std::string(" cycles; not lifted").size()), " cycles; not lifted");
 }
 
+// A routine's invocation is counted to the step that ended it: its return, or
+// an interrupt whose pushes overwrote its return address. The case drives the
+// second run's lockstep by hand over a call, its return, a second call, a
+// transfer of the pointer above the mark and an interrupt.
+TEST(RomEnumerate, ARoutinesInvocationIsCountedToTheStepThatEndedIt) {
+  const std::vector<std::uint8_t> rom = loRomImage(1);
+  const CartridgeBoard board = cartridgeBoard(rom);
+  ir::Provenance shadow{board, rom.size(), 64};
+  EnumerationPlan plan;
+  plan.routines.push_back(PlannedRoutine{.address = 0x008100u, .label = "sub_008100", .inputs = {}});
+  detail::Enumerating enumerating{plan};
+  Cpu65816State state;
+  state.pc = 0x8000u;
+  state.s = 0x01FFu;
+  state.p = 0x30u;
+  detail::Lockstep lockstep{board, rom.size(), state, shadow};
+  lockstep.enumerating = &enumerating;
+  std::vector<std::string> notes;
+  // One step from `state`: the CPU fetched `fetches` at its program counter and
+  // went to `pc` with S = `s`, the run `spent` master cycles in.
+  const auto step = [&](const std::vector<std::uint8_t>& fetches, std::uint16_t pc, std::uint16_t s,
+                        std::uint64_t spent, bool nmi) {
+    Cpu65816State before = state;
+    before.nmiPending = nmi;
+    Cpu65816State after = state;
+    after.pc = pc;
+    after.s = s;
+    ir::StepObserver observed;
+    observed.cpuRan = true;
+    for (std::size_t i = 0; i < fetches.size(); ++i) {
+      BusAccess fetch;
+      fetch.address = before.pc + static_cast<std::uint32_t>(i);
+      fetch.value = fetches[i];
+      fetch.kind = i == 0 ? CycleKind::OpcodeFetch : CycleKind::OperandFetch;
+      observed.fetches.push_back(fetch);
+    }
+    enumerating.spent = spent;
+    lockstep.step(before, after, observed, notes);
+    state = after;
+  };
+  step({0x20u, 0x00u, 0x81u}, 0x8100u, 0x01FDu, 100u, false);  // JSR !$8100
+  ASSERT_EQ(enumerating.live.size(), 1u);
+  step({0x60u}, 0x8003u, 0x01FFu, 500u, false);  // RTS
+  EXPECT_TRUE(enumerating.live.empty());
+  EXPECT_EQ(enumerating.planned[0].longest, 400u);
+  step({0x20u, 0x00u, 0x81u}, 0x8100u, 0x01FDu, 1000u, false);  // JSR !$8100 again
+  state.x = 0x0200u;
+  step({0x9Au}, 0x8101u, 0x0200u, 1100u, false);  // TXS: above the mark, not told
+  ASSERT_EQ(enumerating.live.size(), 1u);
+  step({}, 0x8300u, 0x01FCu, 1600u, true);  // an NMI: its pushes overwrite the return address
+  EXPECT_TRUE(enumerating.live.empty());
+  EXPECT_EQ(enumerating.planned[0].longest, 600u);
+}
+
 // ---- the values -----------------------------------------------------------------
 
 // Every value of every input runs: eight for the first loader's X, four each
@@ -1064,6 +1118,104 @@ TEST(RomEnumerate, AReturnIsTheStackPointerAsWellAsTheAddress) {
     ASSERT_NE(built, nullptr) << value;
     EXPECT_EQ(built->values, (std::vector<std::uint8_t>{0x11u, 0x22u})) << "both stores, the second after the call";
   }
+}
+
+// The same loader with a return to an address it pushed in place of the call:
+// `PEA $820D` / `RTS` jumps to the next instruction, and the loader's
+// invocation goes on through it, so its second store is its own.
+std::vector<std::uint8_t> pushedReturnLoaderImage() {
+  std::vector<std::uint8_t> rom = reenteringImage();
+  put(rom, 0x0200u, {
+      0xE2u, 0x20u,                // $8200 SEP #$20
+      0xBFu, 0x00u, 0x90u, 0x00u,  // $8202 LDA $00:9000,X  $11 for either entry
+      0x8Fu, 0x00u, 0x00u, 0x7Fu,  // $8206 STA $7F:0000
+      0xF4u, 0x0Du, 0x82u,         // $820A PEA $820D
+      0x60u,                       // $820D RTS             a jump to $820E
+      0xA9u, 0x22u,                // $820E LDA #$22
+      0x8Fu, 0x01u, 0x00u, 0x7Fu,  // $8210 STA $7F:0001
+      0xA9u, 0x00u,                // $8214 LDA #$00
+      0x8Fu, 0x00u, 0x43u, 0x00u,  // $8216 STA $00:4300    DMAP0
+      0x8Fu, 0x02u, 0x43u, 0x00u,  // $821A STA $00:4302    A1T0 low
+      0x8Fu, 0x03u, 0x43u, 0x00u,  // $821E STA $00:4303    A1T0 high
+      0x8Fu, 0x06u, 0x43u, 0x00u,  // $8222 STA $00:4306    DAS0 high
+      0x8Fu, 0x21u, 0x21u, 0x00u,  // $8226 STA $00:2121    CGADD
+      0xA9u, 0x22u,                // $822A LDA #$22
+      0x8Fu, 0x01u, 0x43u, 0x00u,  // $822C STA $00:4301    BBAD0 = CGDATA
+      0xA9u, 0x7Fu,                // $8230 LDA #$7F
+      0x8Fu, 0x04u, 0x43u, 0x00u,  // $8232 STA $00:4304    A1B0
+      0xA9u, 0x02u,                // $8236 LDA #$02
+      0x8Fu, 0x05u, 0x43u, 0x00u,  // $8238 STA $00:4305    DAS0 low: 2
+      0xA9u, 0x01u,                // $823C LDA #$01
+      0x8Fu, 0x0Bu, 0x42u, 0x00u,  // $823E STA $00:420B    MDMAEN
+      0xC2u, 0x20u,                // $8242 REP #$20
+      0x60u,                       // $8244 RTS
+  });
+  return rom;
+}
+
+TEST(RomEnumerate, AReturnThroughAPushedAddressKeepsTheFootprint) {
+  const std::vector<std::uint8_t> rom = pushedReturnLoaderImage();
+  const Enumerated runs = enumerateRun(rom, disassembled(rom));
+  for (const std::uint32_t value : {0u, 2u}) {
+    const EnumeratedRun* run = runOf(runs.second, 0x008200u, value);
+    ASSERT_NE(run, nullptr) << value;
+    EXPECT_EQ(run->enteredFrom, 0x00810Fu) << value;
+    const EnumeratedExtent* built = extentAt(*run, 0x7F0000u);
+    ASSERT_NE(built, nullptr) << value;
+    EXPECT_EQ(built->values, (std::vector<std::uint8_t>{0x11u, 0x22u})) << "the store after the jump is the loader's";
+  }
+  for (const std::string& note : runs.notes) {
+    EXPECT_EQ(note.find("outside what the run saw"), std::string::npos) << note;
+  }
+}
+
+// The same loader with its second store made by a helper it calls: a value's
+// writes are its frames', the helper's among them.
+std::vector<std::uint8_t> calleeWriterImage() {
+  std::vector<std::uint8_t> rom = reenteringImage();
+  put(rom, 0x020Au, {
+      0x20u, 0x50u, 0x82u,         // $820A JSR !$8250      the helper
+      0xEAu, 0xEAu, 0xEAu,         // $820D NOP / NOP / NOP
+      0xEAu, 0xEAu, 0xEAu,         // $8210 NOP / NOP / NOP
+  });
+  put(rom, 0x0250u, {
+      0xA9u, 0x22u,                // $8250 LDA #$22
+      0x8Fu, 0x01u, 0x00u, 0x7Fu,  // $8252 STA $7F:0001
+      0x60u,                       // $8256 RTS
+  });
+  return rom;
+}
+
+TEST(RomEnumerate, AValuesWritesIncludeItsCalleesWrites) {
+  const std::vector<std::uint8_t> rom = calleeWriterImage();
+  const Enumerated runs = enumerateRun(rom, disassembled(rom));
+  for (const std::uint32_t value : {0u, 2u}) {
+    const EnumeratedRun* run = runOf(runs.second, 0x008200u, value);
+    ASSERT_NE(run, nullptr) << value;
+    const EnumeratedExtent* built = extentAt(*run, 0x7F0000u);
+    ASSERT_NE(built, nullptr) << value;
+    EXPECT_EQ(built->values, (std::vector<std::uint8_t>{0x11u, 0x22u})) << "the helper's store is the value's";
+  }
+}
+
+// Every routine of the enumerating cartridge leaves the record when its
+// invocation ends, and only then: the values refused are exactly the three
+// the cartridge is built to have refused, and no other routine's footprint
+// took a write that was not its frames'.
+TEST(RomEnumerate, ARoutineWhoseInvocationEndsLeavesTheRecord) {
+  std::vector<std::string> refused;
+  for (const std::string& note : enumeratingRuns().notes) {
+    // A value's note names its register and value before the colon.
+    const bool value = note.substr(0, note.find(':')).find('=') != std::string::npos;
+    if (value && note.find("; not lifted") != std::string::npos) refused.push_back(note);
+  }
+  EXPECT_EQ(refused, (std::vector<std::string>{
+                         "enumerate sub_008100 X=$0006: wrote INIDISP, a register the run never saw the routine write; "
+                         "not lifted",
+                         "enumerate sub_008100 X=$000C: did not return within 21477272 cycles; not lifted",
+                         "enumerate sub_008100 X=$000E: wrote $7F:0020, outside what the run saw the routine write; "
+                         "not lifted",
+                     }));
 }
 
 // ---- outcomes, lines and the files ------------------------------------------

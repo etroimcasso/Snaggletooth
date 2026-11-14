@@ -32,7 +32,19 @@
 // files read a chunk at a time turn and turn about stay two runs, a decoder's
 // stream stays one however many tables it consults and however often it
 // re-reads a byte, and a copy that walks its source from the end reads one
-// run. The source of a staged byte is the run holding its origin among the
+// run.
+//
+// An invocation is opened by a call, a hardware interrupt included, and marked
+// with where the stack pointer stands after the call's pushes. It lives until
+// the pointer passes that place: a pull past it returns through the address
+// or throws it away, and the invocation ends with its runs joining its
+// caller's and its caller running; a push past it overwrites the address, and
+// the invocation ends where it stands. A transfer into the pointer passes
+// nothing: the code runs on in the invocation that made it, and the
+// invocations on the stack it left stay live until a pull or a push passes
+// them. The invocations a run has not ended are a tree, one of them running.
+//
+// The source of a staged byte is the run holding its origin among the
 // writer's invocation's runs, followed outward: a caller's run that begins or
 // ends where it does replaces it — that caller read on from it, so a decoder
 // called once per chunk has the whole file for its source — and the search
@@ -242,19 +254,37 @@ class Provenance final : public Shadow {
   // touching; empty when the byte has no image origin.
   [[nodiscard]] std::vector<OriginInterval> sourcesOf(Address address) const;
 
-  // A call the CPU made, and a return: an invocation begins, and ends with its
-  // runs joining its caller's. A hardware interrupt taken is a call.
-  void called();
-  void returned();
+  // A call the CPU made: the invocation it opens is marked with the stack
+  // pointer as it stands after the call's pushes. `before` and `after` are
+  // the pointer at the step's two boundaries; `page` says it wraps inside
+  // page one, as it does when the CPU is in emulation mode before and after
+  // the step. The pushes may pass a live invocation's mark first, and end it.
+  void called(std::uint16_t before, std::uint16_t after, bool page);
+  // A hardware interrupt taken: a call, told apart so `within` stops at it.
+  void interrupted(std::uint16_t before, std::uint16_t after, bool page);
+  // A push or a pull by a step that called nothing. A pull that takes the
+  // pointer up past a live invocation's mark ends it, its runs joining its
+  // caller's, and leaves its caller running; a push that takes the pointer
+  // down past one ends it where it stands, its callees being its caller's.
+  // A transfer into the pointer — `TCS`, `TXS`, `XCE` entering emulation
+  // mode — is not told: see `loadsStackPointer`.
+  void stackMoved(std::uint16_t before, std::uint16_t after, bool page);
   // The console's reset: every invocation above the root ends with its runs
   // joining nothing, since no caller is left to have read on from them. One
   // still held — by a byte of work RAM it wrote, by an open stream — keeps its
   // runs readable, and a source followed out from it ends there.
   void abandon();
 
-  // How many invocations are live: the root, and one for every call and
-  // interrupt that has not returned.
-  [[nodiscard]] std::size_t depth() const noexcept { return frames_.size(); }
+  // How many invocations are live: the root, and every one no pull or push
+  // has passed.
+  [[nodiscard]] std::size_t depth() const noexcept { return live_; }
+  // The running invocation, by the id `writerOf`'s tag and a stream's carrier
+  // use; whether an invocation is live; whether the running invocation is
+  // `invocation` or was called from it with no hardware interrupt taken
+  // between.
+  [[nodiscard]] std::uint32_t running() const noexcept { return frames_[running_].id; }
+  [[nodiscard]] bool live(std::uint32_t invocation) const { return frameIndex_.find(invocation) != frameIndex_.end(); }
+  [[nodiscard]] bool within(std::uint32_t invocation) const;
 
   // The index into work RAM's 128 KB an address reaches — banks `$7E`-`$7F`
   // whole and the first 8 KB of every bank that mirrors them — or nothing for
@@ -330,22 +360,40 @@ class Provenance final : public Shadow {
     void place(Run run);  // enters `run`, taking into it every run it touches or overlaps
   };
 
-  // The invocations: the call stack, the root first, each with its runs; the
-  // ones that returned and are still held — by a byte of work RAM tagged with
-  // them, by a returned invocation whose runs joined theirs, or by an open
-  // stream they carried — with the invocation their runs joined; and the tag
-  // of every work-RAM byte, zero for an engine's write. `refs_` counts what
-  // holds each invocation, so a returned one is dropped when nothing does.
+  // The invocations that ended and are still held — by a byte of work RAM
+  // tagged with them, by an ended invocation whose runs joined theirs, or by an
+  // open stream they carried — with the invocation their runs joined; and the
+  // tag of every work-RAM byte, zero for an engine's write. `refs_` counts what
+  // holds each invocation, so an ended one is dropped when nothing does.
+  //
+  // The invocations that are live, in slots the root holds the first of:
+  // each with its runs, its caller's slot, how many live callees it has, and
+  // its mark. A free slot has an id of zero. `markAt_` holds, for every stack
+  // address, the slot plus one of the live invocation marked there, so a
+  // pointer's path is read a byte at a time.
   struct Invocation {
     std::uint32_t id = 0;
     Runs runs;
+    std::uint32_t parent = 0;
+    std::uint32_t children = 0;
+    std::uint16_t mark = 0;
+    bool marked = false;
+    bool interrupt = false;
   };
   struct Kept {
     Runs runs;
     std::uint32_t parent = 0;
   };
   std::vector<Invocation> frames_;
-  std::unordered_map<std::uint32_t, std::size_t> frameIndex_;  // a live invocation's place on the stack
+  std::vector<std::uint32_t> free_;
+  std::vector<std::uint32_t> markAt_;
+  std::uint32_t running_ = 0;
+  std::size_t live_ = 1;
+  std::unordered_map<std::uint32_t, std::size_t> frameIndex_;  // a live invocation's slot
+  [[nodiscard]] std::uint32_t open(std::uint32_t parent);
+  void end(std::uint32_t slot, bool joins);
+  void pulledPast(std::uint32_t slot);
+  void pushedPast(std::uint32_t slot);
   std::uint32_t nextInvocation_ = 1;
   std::unordered_map<std::uint32_t, Kept> kept_;
   std::unordered_map<std::uint32_t, std::uint32_t> refs_;
@@ -374,5 +422,10 @@ class Provenance final : public Shadow {
   std::vector<Stream> streams_;
   bool broken_ = false;  // the flow left a straight run since the last store to a data register
 };
+
+// Whether an instruction loads the stack pointer from a register — `TCS`,
+// `TXS`, or `XCE`, which sets its high byte on entering emulation mode —
+// rather than pushing or pulling: a move the shadow is not told.
+[[nodiscard]] bool loadsStackPointer(const Instruction& instruction) noexcept;
 
 }  // namespace snaggletooth::ir

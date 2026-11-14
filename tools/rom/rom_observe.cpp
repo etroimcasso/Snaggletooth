@@ -669,7 +669,7 @@ struct ObservedRun::Impl final : InstructionObserver {
     lockstep.step(before, after, recorder.cpu, notes);
 
     // The second run keeps what the planned routines' frames wrote.
-    if (enumerating) enumerating->wrote(recorder);
+    if (enumerating) enumerating->wrote(recorder, shadow);
 
     confirm(after);
     begin();
@@ -721,10 +721,7 @@ struct ObservedRun::Impl final : InstructionObserver {
     shadow.abandon();
     lockstep.interpreter.registers = ir::registersOf(machine.state().cpu);
     lockstep.interpreter.release();
-    if (enumerating) {
-      enumerating->live.clear();
-      enumerating->interruptDepth = 0;
-    }
+    if (enumerating) enumerating->live.clear();
     audio.restart();
     begin();
   }

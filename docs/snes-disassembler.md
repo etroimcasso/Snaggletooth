@@ -1031,8 +1031,11 @@ of bytes built from constants alone. The origin of a decoder's output is the
 literal bytes it copied; the counts and lengths that decided how many are not
 in it, since they never reached a value.
 
-**A source is what the writer read.** The shadow follows every call and return
-and keeps, for each invocation, the maximal stretches of the image it read
+**A source is what the writer read.** The shadow follows every invocation —
+from the call that pushes its return address until the stack pointer passes
+that place, by a pull that returns through it or throws it away or by a push
+that overwrites it; a transfer into the pointer passes nothing — and keeps, for
+each invocation, the maximal stretches of the image it read
 as runs, by the rule
 [project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from)
 states: a read inside a run changes nothing, any other read starts a run of

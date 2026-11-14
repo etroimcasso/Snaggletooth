@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <string_view>
 #include <utility>
 
 namespace snaggletooth::ir {
@@ -163,7 +164,8 @@ std::optional<OriginInterval> Provenance::Runs::holding(std::size_t offset) cons
 Provenance::Provenance(const CartridgeBoard& board, std::size_t imageBytes, std::size_t cap)
     : invocation_(0x20000u, 0u), board_(board), imageBytes_(imageBytes), origins_(cap),
       workRam_(0x20000u, kNoOrigin), writers_(0x20000u), written_(0x20000u, false) {
-  frames_.push_back(Invocation{.id = nextInvocation_++, .runs = {}});
+  markAt_.assign(0x10000u, 0u);
+  frames_.push_back(Invocation{.id = nextInvocation_++, .runs = {}, .parent = 0, .children = 0, .mark = 0, .marked = false, .interrupt = false});
   frameIndex_.emplace(frames_.back().id, 0u);
   for (auto& place : loaded_) {
     for (std::uint32_t& byte : place) byte = kNotLoaded;
@@ -305,14 +307,14 @@ void Provenance::written(Address address, Origin origin, Writer writer) {
     invocation_[*index] = 0;
     return;
   }
-  const Invocation& running = frames_.back();
+  const Invocation& running = frames_[running_];
   invocation_[*index] = running.id;
   hold(running.id);
 }
 
 void Provenance::hold(std::uint32_t invocation) { ++refs_[invocation]; }
 
-// One less thing holds the invocation; a returned one nothing holds is
+// One less thing holds the invocation; an ended one nothing holds is
 // dropped, and lets go of the invocation its runs joined.
 void Provenance::release(std::uint32_t invocation) {
   const auto found = refs_.find(invocation);
@@ -326,7 +328,7 @@ void Provenance::release(std::uint32_t invocation) {
   release(parent);
 }
 
-void Provenance::noteRead(std::size_t offset) { frames_.back().runs.read(offset); }
+void Provenance::noteRead(std::size_t offset) { frames_[running_].runs.read(offset); }
 
 Origin Provenance::read(Address address) {
   address &= 0xFFFFFFu;
@@ -334,35 +336,137 @@ Origin Provenance::read(Address address) {
   return at(address);
 }
 
-void Provenance::called() {
-  frames_.push_back(Invocation{.id = nextInvocation_++, .runs = {}});
-  frameIndex_.emplace(frames_.back().id, frames_.size() - 1u);
+// A slot for a new invocation, called by the one in `parent`.
+std::uint32_t Provenance::open(std::uint32_t parent) {
+  std::uint32_t slot = 0;
+  if (free_.empty()) {
+    slot = static_cast<std::uint32_t>(frames_.size());
+    frames_.emplace_back();
+  } else {
+    slot = free_.back();
+    free_.pop_back();
+  }
+  frames_[slot] = Invocation{.id = nextInvocation_++, .runs = {}, .parent = parent, .children = 0, .mark = 0, .marked = false, .interrupt = false};
+  ++frames_[parent].children;
+  frameIndex_.emplace(frames_[slot].id, slot);
+  ++live_;
+  return slot;
 }
 
-void Provenance::returned() {
-  if (frames_.size() < 2) return;  // the root never returns; a return with nothing to pop is the code's own stack play
-  Invocation ended = std::move(frames_.back());
-  frames_.pop_back();
+// One invocation ends: its runs join its caller's when `joins`, it stays
+// readable while something holds it, and its slot is free. Its callees and
+// the running slot are settled by the caller of this.
+void Provenance::end(std::uint32_t slot, bool joins) {
+  Invocation ended = std::move(frames_[slot]);
+  frames_[slot] = Invocation{};
+  free_.push_back(slot);
+  --live_;
   frameIndex_.erase(ended.id);
-  Invocation& caller = frames_.back();
-  for (const auto& [first, run] : ended.runs.byFirst) caller.runs.join(run);
+  if (ended.marked && markAt_[ended.mark] == slot + 1u) markAt_[ended.mark] = 0;
+  Invocation& caller = frames_[ended.parent];
+  if (caller.children > 0) --caller.children;
+  if (joins) {
+    for (const auto& [first, run] : ended.runs.byFirst) caller.runs.join(run);
+  }
   if (refs_.find(ended.id) == refs_.end()) return;
   // Something still holds it: its runs stay readable, and it holds the caller
   // its runs joined so the source can be followed there.
-  hold(caller.id);
-  kept_.emplace(ended.id, Kept{.runs = std::move(ended.runs), .parent = caller.id});
+  if (joins) hold(caller.id);
+  kept_.emplace(ended.id, Kept{.runs = std::move(ended.runs), .parent = joins ? caller.id : 0});
+}
+
+// A pull took the stack pointer past the mark of the invocation in `slot`:
+// the code returned through its address or threw it away. It ends, and its
+// caller is running, whichever invocation was. A callee of it still live —
+// set aside on another stack, or left below the pointer by a transfer — has
+// no caller left and is the root's.
+void Provenance::pulledPast(std::uint32_t slot) {
+  const std::uint32_t caller = frames_[slot].parent;
+  if (frames_[slot].children != 0) {
+    for (std::uint32_t i = 1; i < frames_.size(); ++i) {
+      if (i == slot || frames_[i].id == 0 || frames_[i].parent != slot) continue;
+      frames_[i].parent = 0;
+      ++frames_[0].children;
+      --frames_[slot].children;
+    }
+  }
+  end(slot, true);
+  running_ = caller;
+}
+
+// A push took the stack pointer down past the mark of the invocation in
+// `slot`: its return address is overwritten. It ends where it stands, its
+// runs joining its caller's, and its callees are its caller's.
+void Provenance::pushedPast(std::uint32_t slot) {
+  const std::uint32_t caller = frames_[slot].parent;
+  if (frames_[slot].children != 0) {
+    for (std::uint32_t i = 1; i < frames_.size(); ++i) {
+      if (i == slot || frames_[i].id == 0 || frames_[i].parent != slot) continue;
+      frames_[i].parent = caller;
+      ++frames_[caller].children;
+      --frames_[slot].children;
+    }
+  }
+  if (running_ == slot) running_ = caller;
+  end(slot, true);
+}
+
+// The pointer's path, a byte at a time: up through the addresses a pull left
+// behind, down through the addresses a push wrote, around the page in
+// emulation mode and around the bank otherwise. Nothing pushes or pulls more
+// than four bytes in one step; a motion of more is a transfer the step did
+// not name, and passes nothing.
+void Provenance::stackMoved(std::uint16_t before, std::uint16_t after, bool page) {
+  const auto at = [&](std::uint32_t value) {
+    return static_cast<std::uint16_t>(page ? (0x0100u | (value & 0xFFu)) : (value & 0xFFFFu));
+  };
+  const int delta = page ? static_cast<std::int8_t>(static_cast<std::uint8_t>(after - before))
+                         : static_cast<std::int16_t>(static_cast<std::uint16_t>(after - before));
+  if (delta > 4 || delta < -4) return;
+  for (int k = 0; k < delta; ++k) {
+    const std::uint16_t mark = at(static_cast<std::uint32_t>(before) + static_cast<std::uint32_t>(k));
+    if (const std::uint32_t entry = markAt_[mark]; entry != 0) pulledPast(entry - 1u);
+  }
+  for (int k = 1; k <= -delta; ++k) {
+    const std::uint16_t mark = at(static_cast<std::uint32_t>(before) - static_cast<std::uint32_t>(k));
+    if (const std::uint32_t entry = markAt_[mark]; entry != 0) pushedPast(entry - 1u);
+  }
+}
+
+void Provenance::called(std::uint16_t before, std::uint16_t after, bool page) {
+  stackMoved(before, after, page);
+  running_ = open(running_);
+  frames_[running_].mark = after;
+  frames_[running_].marked = true;
+  markAt_[after] = running_ + 1u;
+}
+
+void Provenance::interrupted(std::uint16_t before, std::uint16_t after, bool page) {
+  called(before, after, page);
+  frames_[running_].interrupt = true;
+}
+
+bool Provenance::within(std::uint32_t invocation) const {
+  for (std::uint32_t slot = running_;; slot = frames_[slot].parent) {
+    if (frames_[slot].id == invocation) return true;
+    if (slot == 0 || frames_[slot].interrupt) return false;
+  }
 }
 
 void Provenance::abandon() {
-  while (frames_.size() > 1) {
-    Invocation ended = std::move(frames_.back());
-    frames_.pop_back();
-    frameIndex_.erase(ended.id);
+  for (std::uint32_t slot = 1; slot < frames_.size(); ++slot) {
+    if (frames_[slot].id == 0) continue;
     // Held, its runs stay readable with no invocation to follow out to: a
     // parent of zero ends the walk, and releasing it lets go of nothing.
-    if (refs_.find(ended.id) == refs_.end()) continue;
-    kept_.emplace(ended.id, Kept{.runs = std::move(ended.runs), .parent = 0});
+    end(slot, false);
   }
+  frames_[0].children = 0;
+  running_ = 0;
+}
+
+bool loadsStackPointer(const Instruction& instruction) noexcept {
+  const std::string_view name = instruction.mnemonic;
+  return name == "TCS" || name == "TXS" || name == "XCE";
 }
 
 std::optional<OriginInterval> Provenance::sourceRun(std::uint32_t invocation, std::size_t offset) const {
@@ -381,8 +485,8 @@ std::optional<OriginInterval> Provenance::sourceRun(std::uint32_t invocation, st
     if (run->last - run->first > best->last - best->first) best = run;
     return true;
   };
-  // The returned invocations first, each holding the one its runs joined,
-  // until one that is still on the stack; then every frame below it.
+  // The ended invocations first, each holding the one its runs joined,
+  // until one that is still live; then that one and each of its callers.
   std::uint32_t id = invocation;
   while (id != 0) {
     const auto kept = kept_.find(id);
@@ -392,8 +496,9 @@ std::optional<OriginInterval> Provenance::sourceRun(std::uint32_t invocation, st
   }
   const auto live = frameIndex_.find(id);
   if (live == frameIndex_.end()) return best;
-  for (std::size_t i = live->second + 1u; i-- > 0;) {
-    if (!follow(frames_[i].runs)) return best;
+  for (std::size_t slot = live->second;; slot = frames_[slot].parent) {
+    if (!follow(frames_[slot].runs)) return best;
+    if (slot == 0) break;
   }
   return best;
 }
@@ -531,7 +636,7 @@ void Provenance::streamed(std::uint32_t registerAddress, Origin origin, std::uin
   const auto found = open_.find(registerAddress);
   const bool straight = !broken_;
   broken_ = false;
-  const std::uint32_t running = frames_.back().id;
+  const std::uint32_t running = frames_[running_].id;
   const std::optional<std::uint16_t> at =
       carries != nullptr ? carries->landedAt(registerAddress) : std::nullopt;
   if (found != open_.end()) {
