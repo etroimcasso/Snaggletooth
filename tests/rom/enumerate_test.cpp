@@ -863,7 +863,7 @@ TEST(RomEnumerate, ADivergingVariantIsRefused) {
   Snes sandbox{SnesConfig{.rom = rom}};
   ASSERT_TRUE(sandbox.restore(state));
   ir::Provenance copy = snapshot.shadow;
-  detail::Recorder rec{sandbox, copy};
+  detail::Recorder rec{detail::MachineView{sandbox}, copy};
   copy.carries = &rec;
   sandbox.setObserver(&rec);
   detail::Lockstep step{board, rom.size(), state.cpu, copy};
@@ -879,7 +879,7 @@ TEST(RomEnumerate, ADivergingVariantIsRefused) {
                                     [](const ir::Effect& e) { return e.op == ir::Op::LongAddress; });
   ASSERT_NE(address, node.effects.end());
   address->a.value += 1u;
-  step.nodes.emplace(detail::Lockstep::NodeKey{0x008100u, contextOf(mode).bits, bytes}, node);
+  step.check.nodes.emplace(detail::Lockstep::NodeKey{0x008100u, contextOf(mode).bits, bytes}, node);
   std::vector<std::string> notes;
   std::uint64_t cycles = 0;
   std::vector<bool> scratch(0x20000u, false);

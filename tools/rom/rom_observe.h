@@ -74,8 +74,10 @@
 // samples, each once with how many key-ons named it, are what a listening
 // copy is written from.
 //
-// A run sees what it exercised. Left alone, a cartridge reaches its title and
-// its attract mode; with a recorded run replayed into its controller ports it
+// A run sees what it exercised. A host that must not wait for any of this binds a
+// `BufferedRun` (`rom/rom_buffered_run.h`), whose observers copy and whose
+// watching runs on threads of its own. Left alone, a cartridge reaches its title
+// and its attract mode; with a recorded run replayed into its controller ports it
 // reaches what a player does, and the trace follows.
 
 #include <cstddef>
@@ -644,7 +646,9 @@ class ObservedRun {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 
-  // `observeRun` runs the same `Impl` over a machine of its own.
+  // `observeRun` runs the same `Impl` over a machine of its own, and a
+  // `BufferedRun` over a state its threads keep current from its buffer.
+  friend class BufferedRun;
   friend RunObservation observeRun(std::span<const std::uint8_t> rom, std::uint64_t masterCycles,
                                    const InputScript& input, std::vector<std::string>& notes,
                                    const ProgressSink& progress, const EnumerationPlan& plan,

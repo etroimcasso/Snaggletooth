@@ -127,6 +127,16 @@ builds and steps itself. A disassembly handed the observation through
 `CartridgeRequest::observed` boots nothing for a run and writes the tree from
 it, with no routine run again for its values.
 
+A host that must not wait for any of that binds `rom/rom_buffered_run.h`'s
+`BufferedRun` instead: its observers copy each report into a buffer and do
+nothing else, and the run works through the buffer on threads of its own — the
+instruction checks on a pool, the shadow and the recorder on one thread, the
+sound CPU's registers and samples on another — to the same observation, with
+`keyframe()` putting the whole machine into the buffer once a frame for the run
+to check its work RAM against. `rom/rom_buffer.h` is the buffer: the records the
+observers copy, and the stream that holds them in memory and then in files
+under a directory, so the thread that writes them never waits.
+
 The facts it attaches to addresses — the hardware each instruction reaches, the
 DMA transfers those add up to (one per start, with the channel's registers as
 they stood: the destination, the source and its step, the count, and the write

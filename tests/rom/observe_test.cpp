@@ -32,6 +32,7 @@
 
 #include "examples/example_cartridges.h"
 #include "gtest/gtest.h"
+#include "run_test_support.h"
 #include "ir/cpu65816_lift.h"
 #include "ir/ir_differential.h"
 #include "rom/rom_disasm.h"
@@ -2230,7 +2231,7 @@ TEST(RomObserve, TheRecorderNamesEveryEngineWrite) {
     const CartridgeBoard board = cartridgeBoard(rom);
     Snes machine{SnesConfig{.rom = rom}};
     ir::Provenance shadow{board, rom.size(), 64};
-    detail::Recorder recorder{machine, shadow};
+    detail::Recorder recorder{detail::MachineView{machine}, shadow};
     shadow.carries = &recorder;
     machine.setObserver(&recorder);
     std::set<Address> named;
@@ -2262,125 +2263,6 @@ TEST(RomObserve, TheRecorderNamesEveryEngineWrite) {
 // taken mid-run, the order of the notes, and the reset line.
 
 namespace {
-
-void expectSameLanding(const PortLanding& a, const PortLanding& b, const std::string& what) {
-  EXPECT_EQ(a.memory, b.memory) << what;
-  EXPECT_EQ(a.lowest, b.lowest) << what;
-  EXPECT_EQ(a.highest, b.highest) << what;
-  EXPECT_EQ(a.shown, b.shown) << what;
-  EXPECT_EQ(a.areas, b.areas) << what;
-  EXPECT_EQ(a.depths, b.depths) << what;
-  EXPECT_EQ(a.palette, b.palette) << what;
-}
-
-// Every field of two observations, in the order `RunObservation` declares them.
-void expectSameObservation(const RunObservation& a, const RunObservation& b, const std::string& what) {
-  ASSERT_EQ(a.reached.size(), b.reached.size()) << what;
-  for (std::size_t i = 0; i < a.reached.size(); ++i) {
-    EXPECT_TRUE(sameSighting(a.reached[i], b.reached[i])) << what << " reached " << i;
-    EXPECT_EQ(a.reached[i].call, b.reached[i].call) << what;
-    EXPECT_EQ(a.reached[i].name, b.reached[i].name) << what;
-  }
-  ASSERT_EQ(a.moved.size(), b.moved.size()) << what;
-  for (std::size_t i = 0; i < a.moved.size(); ++i) {
-    EXPECT_EQ(detail::keyOf(a.moved[i]), detail::keyOf(b.moved[i])) << what << " moved " << i;
-    EXPECT_EQ(a.moved[i].times, b.moved[i].times) << what << " moved " << i;
-  }
-  ASSERT_EQ(a.landed.size(), b.landed.size()) << what;
-  for (std::size_t i = 0; i < a.landed.size(); ++i) {
-    EXPECT_EQ(detail::keyOf(a.landed[i]), detail::keyOf(b.landed[i])) << what << " landed " << i;
-    EXPECT_EQ(a.landed[i].landing.palette, b.landed[i].landing.palette) << what << " landed " << i;
-    EXPECT_EQ(a.landed[i].times, b.landed[i].times) << what << " landed " << i;
-  }
-  ASSERT_EQ(a.walked.size(), b.walked.size()) << what;
-  for (std::size_t i = 0; i < a.walked.size(); ++i) {
-    EXPECT_EQ(detail::keyOf(a.walked[i]), detail::keyOf(b.walked[i])) << what << " walked " << i;
-    EXPECT_EQ(a.walked[i].times, b.walked[i].times) << what << " walked " << i;
-  }
-  EXPECT_EQ(a.palettes, b.palettes) << what;
-  ASSERT_EQ(a.ran.size(), b.ran.size()) << what;
-  for (std::size_t i = 0; i < a.ran.size(); ++i) {
-    EXPECT_TRUE(sameLanding(a.ran[i], b.ran[i])) << what << " ran " << i;
-    EXPECT_EQ(a.ran[i].name, b.ran[i].name) << what;
-  }
-  ASSERT_EQ(a.seen.size(), b.seen.size()) << what;
-  for (std::size_t i = 0; i < a.seen.size(); ++i) {
-    EXPECT_EQ(a.seen[i].address, b.seen[i].address) << what;
-    EXPECT_EQ(a.seen[i].d, b.seen[i].d) << what;
-    EXPECT_EQ(a.seen[i].dbr, b.seen[i].dbr) << what;
-  }
-  ASSERT_EQ(a.staged.size(), b.staged.size()) << what;
-  for (std::size_t i = 0; i < a.staged.size(); ++i) {
-    const StagedRange& x = a.staged[i];
-    const StagedRange& y = b.staged[i];
-    EXPECT_EQ(x.memory, y.memory) << what << " staged " << i;
-    EXPECT_EQ(x.bytes, y.bytes) << what << " staged " << i;
-    EXPECT_EQ(x.origin, y.origin) << what << " staged " << i;
-    ASSERT_EQ(x.writers.size(), y.writers.size()) << what << " staged " << i;
-    for (std::size_t w = 0; w < x.writers.size(); ++w) {
-      EXPECT_EQ(x.writers[w].writer, y.writers[w].writer) << what << " staged " << i;
-      EXPECT_EQ(x.writers[w].unwritten, y.writers[w].unwritten) << what << " staged " << i;
-      EXPECT_EQ(x.writers[w].bytes, y.writers[w].bytes) << what << " staged " << i;
-      EXPECT_EQ(x.writers[w].origin, y.writers[w].origin) << what << " staged " << i;
-      EXPECT_EQ(x.writers[w].sources, y.writers[w].sources) << what << " staged " << i;
-    }
-    ASSERT_EQ(x.contents.size(), y.contents.size()) << what << " staged " << i;
-    for (std::size_t c = 0; c < x.contents.size(); ++c) {
-      const CarriedContent& p = x.contents[c];
-      const CarriedContent& q = y.contents[c];
-      EXPECT_TRUE(sameContent(p, q)) << what << " staged " << i << " content " << c;
-      EXPECT_EQ(p.origin, q.origin) << what << " staged " << i << " content " << c;
-      ASSERT_EQ(p.landing.has_value(), q.landing.has_value()) << what;
-      if (p.landing) expectSameLanding(*p.landing, *q.landing, what);
-      ASSERT_EQ(p.byteOrigins.size(), q.byteOrigins.size()) << what;
-      for (std::size_t k = 0; k < p.byteOrigins.size(); ++k) {
-        EXPECT_EQ(p.byteOrigins[k].bytes, q.byteOrigins[k].bytes) << what;
-        EXPECT_EQ(p.byteOrigins[k].origin, q.byteOrigins[k].origin) << what;
-      }
-      EXPECT_EQ(p.order, q.order) << what << " staged " << i << " content " << c;
-    }
-  }
-  ASSERT_EQ(a.streamed.size(), b.streamed.size()) << what;
-  for (std::size_t i = 0; i < a.streamed.size(); ++i) {
-    EXPECT_EQ(detail::keyOf(a.streamed[i]), detail::keyOf(b.streamed[i])) << what << " streamed " << i;
-    EXPECT_EQ(a.streamed[i].times, b.streamed[i].times) << what << " streamed " << i;
-    EXPECT_EQ(a.streamed[i].source, b.streamed[i].source) << what << " streamed " << i;
-  }
-  ASSERT_EQ(a.samples.size(), b.samples.size()) << what;
-  for (std::size_t i = 0; i < a.samples.size(); ++i) {
-    EXPECT_EQ(a.samples[i].start, b.samples[i].start) << what;
-    EXPECT_EQ(a.samples[i].loop, b.samples[i].loop) << what;
-    EXPECT_EQ(a.samples[i].bytes, b.samples[i].bytes) << what;
-    EXPECT_EQ(a.samples[i].times, b.samples[i].times) << what;
-  }
-  EXPECT_EQ(a.instructions, b.instructions) << what;
-  EXPECT_EQ(a.interrupts, b.interrupts) << what;
-  EXPECT_EQ(a.nodes, b.nodes) << what;
-  EXPECT_EQ(a.divergences, b.divergences) << what;
-  EXPECT_EQ(a.spc700Instructions, b.spc700Instructions) << what;
-  EXPECT_EQ(a.spc700Nodes, b.spc700Nodes) << what;
-  EXPECT_EQ(a.spc700Divergences, b.spc700Divergences) << what;
-  EXPECT_EQ(a.originSets, b.originSets) << what;
-  EXPECT_EQ(a.originCap, b.originCap) << what;
-  // A host's run makes no plan, so neither side holds an outcome to compare.
-  EXPECT_EQ(a.enumerated.size(), b.enumerated.size()) << what;
-  EXPECT_EQ(a.variantsPlanned, b.variantsPlanned) << what;
-  EXPECT_EQ(a.variantsRun, b.variantsRun) << what;
-  EXPECT_EQ(a.variantsReturned, b.variantsReturned) << what;
-  EXPECT_EQ(a.variantsConfined, b.variantsConfined) << what;
-  EXPECT_EQ(a.enumerationCycles, b.enumerationCycles) << what;
-}
-
-// One script for every example: buttons pressed and let go over the first
-// frames, so a cartridge that reads the pads takes its paths. No example has a
-// script of its own.
-InputScript exampleScript() {
-  std::string error;
-  const std::optional<InputScript> parsed =
-      parseInputScript("frame 2 1 b\nframe 4 1 none\nframe 6 1 start\nframe 8 1 start b\nframe 10 1 none\n", error);
-  EXPECT_TRUE(parsed.has_value()) << error;
-  return parsed.value_or(InputScript{});
-}
 
 // The host `observeRun` is, over an ObservedRun: the machine stepped to the
 // budget, each frame's pads presented after the step that wrapped the beam.
@@ -2686,64 +2568,6 @@ TEST(RomObservedRun, TheMainCpusNotesComeBeforeTheSoundCpus) {
   EXPECT_LT(at(kMain), at(kSound)) << "the main CPU's first, though the sound CPU's was made first";
 }
 
-namespace {
-
-// A cartridge for the reset line, in emulation mode throughout. Every pass
-// starts a fill of sixty-four bytes from $9100 to VMDATAL on channel 0 and
-// sets channel 1 up on a one-line HDMA table at $9200. A flag in work RAM,
-// which a reset keeps, says which pass it is. The first enables the table from
-// $8049, sets the flag and calls a helper that loads Y from $9007, reads
-// $9000-$900F and spins; the pass after the reset enables the table from $8057,
-// stores Y to VMDATAL, then $9008-$900A one at a time, a stream, and spins.
-std::vector<std::uint8_t> resettingImage() {
-  std::vector<std::uint8_t> rom = loRomImage(1);
-  put(rom, 0x0000u, {
-      0xA9u, 0x08u, 0x8Du, 0x00u, 0x43u,  // $8000 DMAP0 = $08: A->B, fixed source, pattern 0
-      0xA9u, 0x18u, 0x8Du, 0x01u, 0x43u,  // $8005 BBAD0 = $18: VMDATAL
-      0xA9u, 0x00u, 0x8Du, 0x02u, 0x43u,  // $800A A1T0 low
-      0xA9u, 0x91u, 0x8Du, 0x03u, 0x43u,  // $800F A1T0 high: $9100
-      0xA9u, 0x00u, 0x8Du, 0x04u, 0x43u,  // $8014 A1B0 = $00
-      0xA9u, 0x40u, 0x8Du, 0x05u, 0x43u,  // $8019 DAS0 low: 64
-      0xA9u, 0x00u, 0x8Du, 0x06u, 0x43u,  // $801E DAS0 high
-      0xA9u, 0x01u, 0x8Du, 0x0Bu, 0x42u,  // $8023 MDMAEN = $01 (the write at $8025)
-      0xA9u, 0x00u, 0x8Du, 0x10u, 0x43u,  // $8028 DMAP1 = $00: direct, pattern 0
-      0xA9u, 0x32u, 0x8Du, 0x11u, 0x43u,  // $802D BBAD1 = $32: COLDATA
-      0xA9u, 0x00u, 0x8Du, 0x12u, 0x43u,  // $8032 A1T1 low
-      0xA9u, 0x92u, 0x8Du, 0x13u, 0x43u,  // $8037 A1T1 high: $9200
-      0xA9u, 0x00u, 0x8Du, 0x14u, 0x43u,  // $803C A1B1 = $00
-      0xAFu, 0x00u, 0x00u, 0x7Eu,         // $8041 LDA $7E:0000: the flag
-      0xD0u, 0x0Eu,                       // $8045 BNE $8055
-      0xA9u, 0x02u, 0x8Du, 0x0Cu, 0x42u,  // $8047 HDMAEN = $02 (the write at $8049)
-      0xA9u, 0x01u,                       // $804C LDA #$01
-      0x8Fu, 0x00u, 0x00u, 0x7Eu,         // $804E STA $7E:0000
-      0x20u, 0x80u, 0x80u,                // $8052 JSR $8080
-      0xA9u, 0x02u, 0x8Du, 0x0Cu, 0x42u,  // $8055 HDMAEN = $02 (the write at $8057)
-      0x8Cu, 0x18u, 0x21u,                // $805A STY $2118: Y as the reset left it
-      0xADu, 0x08u, 0x90u,                // $805D LDA $9008
-      0x8Du, 0x18u, 0x21u,                // $8060 STA $2118
-      0xADu, 0x09u, 0x90u,                // $8063 LDA $9009
-      0x8Du, 0x18u, 0x21u,                // $8066 STA $2118
-      0xADu, 0x0Au, 0x90u,                // $8069 LDA $900A
-      0x8Du, 0x18u, 0x21u,                // $806C STA $2118
-      0x80u, 0xFEu,                       // $806F BRA $806F
-  });
-  put(rom, 0x0080u, {
-      0xACu, 0x07u, 0x90u, // $8080 LDY $9007
-      0xA2u, 0x00u,        // $8083 LDX #$00
-      0xBDu, 0x00u, 0x90u, // $8085 LDA $9000,X
-      0xE8u,               // $8088 INX
-      0xE0u, 0x10u,        // $8089 CPX #$10
-      0xD0u, 0xF8u,        // $808B BNE $8085
-      0x80u, 0xFEu,        // $808D BRA $808D
-  });
-  for (std::size_t i = 0; i < 16; ++i) rom[0x1000u + i] = static_cast<std::uint8_t>(0x20u + i);
-  rom[0x1100u] = 0x5Au;                   // the fill's byte
-  put(rom, 0x1200u, {0x01u, 0x1Fu, 0x00u});  // one line of $1F, then the table's end
-  return rom;
-}
-
-}  // namespace
-
 TEST(RomObservedRun, TheResetLineIsTakenThroughTheRun) {
   const std::vector<std::uint8_t> rom = resettingImage();
   Snes machine{SnesConfig{.rom = rom}};
@@ -2869,48 +2693,6 @@ TEST(RomObservedRun, AResetTakenWhileTheCpuWaitsLeavesItRunning) {
   EXPECT_EQ(o.instructions, 2u) << "the WAI before the reset, and the one after it";
   EXPECT_EQ(noteWith(notes, "not checked"), "");
 }
-
-namespace {
-
-// A sound boot program of the test's own, in place of the stub. It reads X
-// before anything writes it. Before the reset, with the flag at $0300 clear,
-// it writes a directory entry at $0400 naming a one-block sample at $0500,
-// sets DIR to $04 and leaves the DSP's address at DIR, sets the flag, writes
-// `BRA $FFC0` into the RAM under the window, sets X to $55, unmaps the window
-// and spins there. After the reset, the window mapped again, it writes $04
-// through $F3 to whatever register the address names, and keys voice 0 on
-// without setting DIR.
-std::array<std::uint8_t, kIplWindowBytes> resettingBootImage() {
-  std::array<std::uint8_t, kIplWindowBytes> image{};
-  const std::vector<std::uint8_t> code = {
-      0x7Du,                    // $FFC0 MOV A,X
-      0xE5u, 0x00u, 0x03u,      // $FFC1 MOV A,!$0300: the flag
-      0xD0u, 0x28u,             // $FFC4 BNE $FFEE
-      0xE8u, 0x05u,             // $FFC6 MOV A,#$05
-      0xC5u, 0x01u, 0x04u,      // $FFC8 MOV !$0401,A: entry 0 starts at $0500
-      0xC5u, 0x03u, 0x04u,      // $FFCB MOV !$0403,A: and loops there
-      0xE8u, 0x01u,             // $FFCE MOV A,#$01
-      0xC5u, 0x00u, 0x05u,      // $FFD0 MOV !$0500,A: a block with the end flag
-      0xC5u, 0x00u, 0x03u,      // $FFD3 MOV !$0300,A: the flag
-      0x8Fu, 0x5Du, 0xF2u,      // $FFD6 MOV $F2,#$5D: DIR
-      0x8Fu, 0x04u, 0xF3u,      // $FFD9 MOV $F3,#$04: the directory at $0400
-      0xE8u, 0x2Fu,             // $FFDC MOV A,#$2F
-      0xC5u, 0xC0u, 0xFFu,      // $FFDE MOV !$FFC0,A
-      0xE8u, 0xFEu,             // $FFE1 MOV A,#$FE
-      0xC5u, 0xC1u, 0xFFu,      // $FFE3 MOV !$FFC1,A: BRA $FFC0 in the RAM beneath
-      0xCDu, 0x55u,             // $FFE6 MOV X,#$55
-      0x8Fu, 0x00u, 0xF1u,      // $FFE8 MOV $F1,#$00: the window unmapped
-      0x5Fu, 0xC0u, 0xFFu,      // $FFEB JMP !$FFC0
-      0x8Fu, 0x04u, 0xF3u,      // $FFEE MOV $F3,#$04
-      0x8Fu, 0x4Cu, 0xF2u,      // $FFF1 MOV $F2,#$4C: KON
-      0x8Fu, 0x01u, 0xF3u,      // $FFF4 MOV $F3,#$01: voice 0
-      0x2Fu, 0xFEu,             // $FFF7 BRA $FFF7
-  };
-  std::copy(code.begin(), code.end(), image.begin());
-  return image;
-}
-
-}  // namespace
 
 TEST(RomObservedRun, TheResetLineGoesThroughTheSoundCpu) {
   // At sixteen points a CPU step apart, the reset finds the sound CPU in its
@@ -3053,7 +2835,7 @@ TEST(RomObservedRun, AtEveryBoundaryTheRecorderHoldsNoPortAccess) {
     const CartridgeBoard board = cartridgeBoard(rom);
     Snes machine{SnesConfig{.rom = rom}};
     ir::Provenance shadow{board, rom.size(), 64};
-    detail::Recorder recorder{machine, shadow};
+    detail::Recorder recorder{detail::MachineView{machine}, shadow};
     shadow.carries = &recorder;
     machine.setObserver(&recorder);
     std::uint64_t spent = 0;
@@ -3082,7 +2864,7 @@ TEST(RomObservedRun, AnOriginLeftCarriedAtABoundaryReachesNothing) {
       Snes machine{SnesConfig{.rom = rom}};
       ir::Provenance shadow{board, rom.size(), 64};
       const ir::Origin bogus = shadow.origins().hardwareRegister(0x21FFu);
-      detail::Recorder recorder{machine, shadow};
+      detail::Recorder recorder{detail::MachineView{machine}, shadow};
       shadow.carries = &recorder;
       machine.setObserver(&recorder);
       std::uint64_t spent = 0;
@@ -3428,7 +3210,7 @@ struct Following {
         board(cartridgeBoard(rom)),
         machine{SnesConfig{.rom = rom}},
         shadow{board, rom.size(), 64},
-        recorder{machine, shadow},
+        recorder{detail::MachineView{machine}, shadow},
         lockstep{board, rom.size(), machine.state().cpu, shadow} {
     shadow.carries = &recorder;
     machine.setObserver(&recorder);
@@ -3746,6 +3528,253 @@ TEST(RomInvocations, TheStackPlayCartridgesSourcesAreTheRules) {
       EXPECT_EQ(writer.sources, (std::vector<ir::OriginInterval>{source})) << formatAddress(memory, 24);
     }
   }
+}
+
+
+namespace {
+
+// A shadow that writes down every call it is told, in order.
+struct CallLog final : ir::Shadow {
+  std::vector<std::string> calls;
+  static std::string place(ir::Place p) { return std::to_string(static_cast<int>(p)); }
+  void copy(ir::Place dst, unsigned bits, ir::Place a) override {
+    calls.push_back("copy " + place(dst) + " " + std::to_string(bits) + " " + place(a));
+  }
+  void combine(ir::Place dst, unsigned bits, ir::Place a, ir::Place b, ir::Place c) override {
+    calls.push_back("combine " + place(dst) + " " + std::to_string(bits) + " " + place(a) + " " + place(b) + " " +
+                    place(c));
+  }
+  void load(ir::Place dst, unsigned bits, unsigned byte, Address address) override {
+    calls.push_back("load " + place(dst) + " " + std::to_string(bits) + " " + std::to_string(byte) + " " +
+                    std::to_string(address));
+  }
+  void store(Address address, ir::Place source, unsigned byte) override {
+    calls.push_back("store " + std::to_string(address) + " " + place(source) + " " + std::to_string(byte));
+  }
+  void exchange() override { calls.push_back("exchange"); }
+};
+
+// The five calls, made on `shadow`.
+void fiveCalls(ir::Shadow& shadow) {
+  shadow.copy(ir::Place::A, 16, ir::Place::X);
+  shadow.combine(ir::Place::Y, 8, ir::Place::A, ir::Place::D, ir::Place::DBR);
+  shadow.load(ir::Place::X, 16, 1, 0x7E1234u);
+  shadow.store(0x002118u, ir::Place::A, 0);
+  shadow.exchange();
+}
+
+// Every step of a run: the file before and after it and what the CPU did.
+struct StepLog final : BusObserver, InstructionObserver {
+  struct Step {
+    Cpu65816State before;
+    Cpu65816State after;
+    ir::StepObserver observed;
+  };
+  ir::StepObserver current;
+  std::vector<Step> steps;
+  void access(const BusAccess& a) override { current.access(a); }
+  void internal(std::uint32_t address, std::optional<CycleKind> kind) override { current.internal(address, kind); }
+  void instruction(const Cpu65816State& before, const Cpu65816State& after, std::uint32_t) override {
+    steps.push_back(Step{.before = before, .after = after, .observed = current});
+    current.clear();
+  }
+};
+
+void expectSameCheck(const detail::Checked& a, const detail::Checked& b, const std::string& what) {
+  EXPECT_EQ(a.kind, b.kind) << what;
+  EXPECT_EQ(a.nmi, b.nmi) << what;
+  EXPECT_EQ(a.site, b.site) << what;
+  EXPECT_EQ(a.rawSite, b.rawSite) << what;
+  EXPECT_EQ(a.modeBits, b.modeBits) << what;
+  EXPECT_EQ(a.bytes, b.bytes) << what;
+  EXPECT_EQ(a.length, b.length) << what;
+  EXPECT_EQ(a.flow, b.flow) << what;
+  EXPECT_EQ(a.addressing, b.addressing) << what;
+  EXPECT_EQ(a.target, b.target) << what;
+  EXPECT_EQ(a.loadsStackPointer, b.loadsStackPointer) << what;
+  EXPECT_EQ(a.brkOrCop, b.brkOrCop) << what;
+  EXPECT_EQ(a.mnemonic, b.mnemonic) << what;
+  EXPECT_EQ(a.divergence.has_value(), b.divergence.has_value()) << what;
+}
+
+}  // namespace
+
+TEST(RomObservedRun, TheTapePlaysEveryCallInOrder) {
+  CallLog direct;
+  fiveCalls(direct);
+  ir::Tape tape;
+  fiveCalls(tape);
+  ASSERT_EQ(tape.entries.size(), 5u);
+
+  CallLog some;
+  tape.play(some, 1, 3);
+  EXPECT_EQ(some.calls, std::vector<std::string>(direct.calls.begin() + 1, direct.calls.begin() + 4));
+  EXPECT_EQ(tape.entries.size(), 5u) << "a range played is kept";
+
+  CallLog all;
+  tape.play(all);
+  EXPECT_EQ(all.calls, direct.calls);
+  EXPECT_TRUE(tape.entries.empty()) << "the whole tape played is cleared";
+}
+
+TEST(RomObservedRun, ACheckBegunAtAnyBoundaryIsTheCheckFromPowerOn) {
+  // The mixed cartridge runs a spread of the effect layer's constructs and
+  // takes three vertical-blank interrupts, so the boundaries below fall on
+  // instructions and interrupts alike.
+  const std::vector<std::uint8_t> rom = mixedImage();
+  const CartridgeBoard board = cartridgeBoard(rom);
+  Snes machine{SnesConfig{.rom = rom}};
+  StepLog log;
+  machine.setObserver(&log);
+  machine.setInstructionObserver(&log);
+  std::uint64_t spent = 0;
+  while (spent < 5u * kFrame) spent += machine.step();
+  machine.setObserver(nullptr);
+  machine.setInstructionObserver(nullptr);
+  const std::vector<StepLog::Step>& steps = log.steps;
+  ASSERT_GT(steps.size(), 1000u);
+
+  detail::StepCheck whole{board, rom.size(), steps.front().before, nullptr};
+  std::vector<detail::Checked> fromPowerOn;
+  std::vector<ir::Registers> registers;
+  std::set<detail::Checked::Kind> kinds;
+  for (std::size_t i = 0; i < steps.size(); ++i) {
+    fromPowerOn.push_back(whole.step(i, steps[i].before, steps[i].after, steps[i].observed));
+    registers.push_back(whole.interpreter.registers);
+    kinds.insert(fromPowerOn.back().kind);
+    EXPECT_FALSE(fromPowerOn.back().divergence.has_value()) << "step " << i;
+  }
+  EXPECT_TRUE(kinds.count(detail::Checked::Kind::Instruction) != 0);
+  EXPECT_TRUE(kinds.count(detail::Checked::Kind::Interrupt) != 0) << "an NMI is among the steps";
+
+  for (std::size_t n = 1; n <= 10; ++n) {
+    const std::size_t at = steps.size() * n / 11u;
+    detail::StepCheck begun{board, rom.size(), steps[at].before, nullptr};
+    for (std::size_t i = at; i < steps.size(); ++i) {
+      const detail::Checked c = begun.step(i, steps[i].before, steps[i].after, steps[i].observed);
+      const std::string what = "begun at " + std::to_string(at) + ", step " + std::to_string(i);
+      expectSameCheck(c, fromPowerOn[i], what);
+      ASSERT_EQ(begun.interpreter.registers, registers[i]) << what;
+    }
+  }
+}
+
+
+namespace {
+
+// Every sound-CPU step of a run, checked as it comes by a check of the test's own.
+struct SoundSteps final : ApuObserver {
+  detail::Spc700Check check;
+  explicit SoundSteps(const Snes& machine) : check(detail::MachineView{machine}, machine.state().apu.cpu) {}
+  void access(std::uint16_t address, std::uint8_t value, bool write) override { check.access(address, value, write); }
+  void instruction(const Spc700State& before, const Spc700State& after, std::uint32_t cycles) override {
+    static_cast<void>(check.step(before, after, cycles));
+  }
+};
+
+}  // namespace
+
+TEST(RomObservedRun, TheNodeCountsAreEveryNodeEitherCheckLifted) {
+  // The drawing cartridge uploads a sound program and runs it, so both CPUs
+  // lift nodes. The same play as observeRun's with no script, every step
+  // checked here by checks of the test's own, counts the distinct nodes the
+  // run reports.
+  const std::vector<std::uint8_t> rom = examples::drawingImage();
+  constexpr std::uint64_t kBudget = 6u * kFrame;
+  std::vector<std::string> notes;
+  const RunObservation o = observeRun(rom, kBudget, InputScript{}, notes);
+
+  const CartridgeBoard board = cartridgeBoard(rom);
+  Snes machine{SnesConfig{.rom = rom}};
+  StepLog log;
+  SoundSteps sound{machine};
+  machine.setObserver(&log);
+  machine.setInstructionObserver(&log);
+  machine.setApuObserver(&sound);
+  std::uint64_t spent = 0;
+  while (spent < kBudget) spent += machine.step();
+  machine.setObserver(nullptr);
+  machine.setInstructionObserver(nullptr);
+  machine.setApuObserver(nullptr);
+  ASSERT_FALSE(log.steps.empty());
+  detail::StepCheck cpu{board, rom.size(), log.steps.front().before, nullptr};
+  for (std::size_t i = 0; i < log.steps.size(); ++i) {
+    static_cast<void>(cpu.step(i, log.steps[i].before, log.steps[i].after, log.steps[i].observed));
+  }
+  ASSERT_GT(cpu.nodes.size(), 0u);
+  ASSERT_GT(sound.check.nodes.size(), 0u);
+  EXPECT_EQ(o.nodes, cpu.nodes.size());
+  EXPECT_EQ(o.spc700Nodes, sound.check.nodes.size());
+}
+
+TEST(RomObservedRun, AStepThatDoesNotDecodeLeavesTheCheckOnTheMachinesFile) {
+  // `LDA #imm` under an eight-bit accumulator is two bytes; three fetched are no
+  // one instruction of that length, so nothing is checked and the check takes
+  // the file the machine reported after the step.
+  const std::vector<std::uint8_t> rom = examples::threeBankImage();
+  const CartridgeBoard board = cartridgeBoard(rom);
+  Cpu65816State before;
+  before.pc = 0x8000u;
+  before.e = true;
+  before.p = 0x34u;
+  before.run = CpuRunState::Running;
+  Cpu65816State after = before;
+  after.pc = 0x8003u;
+  after.a = 0x1234u;
+  after.x = 0x0056u;
+  ir::StepObserver observed;
+  observed.access(BusAccess{.address = 0x008000u,
+                            .value = 0xA9u,
+                            .write = false,
+                            .kind = CycleKind::OpcodeFetch,
+                            .source = AccessSource::Cpu,
+                            .channel = 0,
+                            .table = false,
+                            .pastTableEnd = false,
+                            .landed = std::nullopt});
+  for (const std::uint32_t at : {0x008001u, 0x008002u}) {
+    observed.access(BusAccess{.address = at,
+                              .value = 0x12u,
+                              .write = false,
+                              .kind = CycleKind::OperandFetch,
+                              .source = AccessSource::Cpu,
+                              .channel = 0,
+                              .table = false,
+                              .pastTableEnd = false,
+                              .landed = std::nullopt});
+  }
+  detail::StepCheck check{board, rom.size(), before, nullptr};
+  const detail::Checked c = check.step(0, before, after, observed);
+  EXPECT_EQ(c.kind, detail::Checked::Kind::Undecoded);
+  EXPECT_FALSE(c.divergence.has_value());
+  EXPECT_TRUE(check.nodes.empty()) << "nothing lifted";
+  EXPECT_EQ(check.interpreter.registers, ir::registersOf(after));
+}
+
+TEST(RomObservedRun, ASoundStepThatDidNotFetchItsDecodedBytesIsNotedOnceAndNotChecked) {
+  // The bytes at $0300 decode as `NOP` at the boundary; the step's fetch there
+  // reads $BC. The step is not checked, the interpreter takes the file after,
+  // and the note is made once however often the site does it.
+  const auto state = std::make_unique<SnesState>();
+  state->apu.cpu.pc = 0x0300u;
+  state->apu.cpu.run = RunState::Running;
+  detail::ApuWindow window;
+  window.pc[0] = 0x0300u;
+  window.pc[1] = 0x0301u;
+  detail::AudioLockstep audio{detail::MachineView{*state, window}};
+  Spc700State before = state->apu.cpu;
+  Spc700State after = before;
+  after.pc = 0x0301u;
+  after.a = 0x77u;
+  for (int twice = 0; twice < 2; ++twice) {
+    audio.access(0x0300u, 0xBCu, false);
+    audio.instruction(before, after, 2u);
+    EXPECT_EQ(audio.check.interpreter.registers, ir::registersOf(after));
+  }
+  EXPECT_EQ(audio.instructions, 0u);
+  EXPECT_EQ(audio.notes, (std::vector<std::string>{
+                             "run: the sound CPU's step at $0300 did not fetch the instruction decoded there; the "
+                             "step is not checked"}));
 }
 
 }  // namespace snaggletooth::disasm

@@ -620,6 +620,35 @@ from its own, except that it plans no routine to
 [run again](#what-the-toolkit-ran): the tree has no `enumerated` line, and none
 of the `note     enumerate` lines the plan writes.
 
+A host that must not wait binds a `BufferedRun` instead. Its three observers
+copy what the machine reports into a buffer and do nothing else, and the run
+works through the buffer on threads of its own: the two CPUs' instruction checks
+on a pool, a slice of the stream to a thread, the shadow and the recorder on one
+thread fed by the checks, the sound CPU's registers and samples on another. The
+host calls `keyframe()` once a frame between two of its calls, which puts the
+whole machine into the buffer; the run checks its own work RAM against it. The
+buffer holds what the threads have not reached, in RAM to a size the host names
+and then in files under a directory it names, to a second size, so a host on a
+slow CPU runs at its own pace and the threads catch up. The observation is the one
+`observeRun` makes of the same play, field for field.
+
+```cpp
+#include "rom/rom_buffered_run.h"
+#include "snaggletooth/snes/snes.h"
+
+snaggletooth::Snes machine{snaggletooth::SnesConfig{.rom = image}};
+snaggletooth::disasm::BufferedRun run{machine, image, "cartridge/buffer", {}};  // 1 GB of RAM, 64 GB of files
+for (int frame = 0; frame < 3600; ++frame) {
+  machine.run(357'366u);  // the host's own loop
+  run.keyframe();
+}
+std::vector<std::string> notes;
+const snaggletooth::disasm::RunObservation seen = run.finish(notes);
+```
+
+The observation goes to the disassembly as an `ObservedRun`'s does, through
+`CartridgeRequest::observed` and `observedNotes`.
+
 ## Where the CPU arrived, and what it saw
 
 The four forms are not the only way a program leaves the bytes' flow. A
@@ -1678,7 +1707,54 @@ leaves the run going: a range, a stream or a landing still open is not in it.
 `finish(notes)` closes everything as `observeRun` does at its end, clears the
 three observers and answers the whole observation; the destructor clears them
 when `finish` was not called. Both append the run's notes, the main CPU's in
-the order made and then the sound CPU's. `CartridgeRequest::observeRun`
+the order made and then the sound CPU's.
+
+`BufferedRun` (`rom/rom_buffered_run.h`) is the same run with the host's thread
+copying and the watching on threads of the run's own
+([Running the cartridge](#running-the-cartridge)). Its constructor,
+`BufferedRun(machine, rom, directory, options)`, refuses what `ObservedRun`'s
+refuses with the same `std::logic_error`, throws `std::runtime_error` when
+`directory` cannot be created, sets the three observers and starts its threads,
+each at the lowest scheduling class the platform gives a thread.
+`BufferedRunOptions` holds `memoryBytes`, the most RAM the buffer's blocks take,
+its two streams together and every block counted whole, 1,000,000,000 by
+default; `diskBytes`, the most its files hold, 64,000,000,000; and `threads`,
+the pool's threads, by default two fewer than the host's cores and at least
+one. Neither size has a floor or a ceiling. The buffer's files go under
+`directory/cpu` and `directory/sound`, each removed as it is read back. `keyframe()` puts the
+whole machine into the buffer, called once a frame between two of the host's
+calls; `reset()` pulls the console's reset line as `ObservedRun::reset()` does.
+`frame()` counts the beam's wraps on the host's thread. `full()` says the buffer
+filled: a block opened is charged whole, and the buffer is full when one more
+would bring what it holds past the two sizes together. From then on the
+observers copy nothing, the frames are still counted, and the observation is of
+everything before; a host that stops running the machine before then, by
+`progress()`, loses nothing. `progress()` answers the master cycles of the last
+boundary the threads played against the host's; the bytes the buffer holds; the
+RAM its blocks take and the bytes in its files now, each beside its limit; the
+bytes written to its files so far; and how many keyframes the work RAM the run
+keeps differed from, which is 0 for a record that holds everything the run
+reads. `observation(notes)` is the observation so
+far with the run left going, as `ObservedRun::observation` gives it: asked on
+the host's thread it first hands over the blocks being written, so it is the
+observation at the host's boundary; asked on another thread it is of every
+block the buffer had handed over then. It waits for the threads to reach that
+point. `finish(notes)` clears the observers, ends the buffer, waits for the
+threads to play all of it and joins them, and answers the whole observation;
+it is called once. Both throw `std::logic_error` once the run is finished, as
+`keyframe()` and `reset()` do. `failure()` is the first failure a thread of the
+run met — a buffer file that could not be written or read, a block that did
+not play — or nothing: from it on the threads play nothing more, and
+`observation()` and `finish()` answer everything played before it, their notes
+ending with `run: <failure>; the observation holds what was played before it`. The destructor clears the observers and joins every thread when
+`finish` was not called, removes the buffer's files, and removes `directory`
+when that leaves it empty. Every member but
+`progress()`, `full()` and `observation()` is called on the host's thread
+between two of its calls into the machine; the host makes no call into the
+guest and restores no state while the run is bound. The record and the stream
+the buffer is made of are in `rom/rom_buffer.h`, for the run's own use.
+
+`CartridgeRequest::observeRun`
 asks for the run — off unless asked, since it costs about as long as it emulates;
 `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
 `CartridgeRequest::input` is the script it replays. `CartridgeRequest::observed`
@@ -1845,7 +1921,9 @@ whose other inputs differ from call to call is run under the first call's. A
 value that writes beyond what the run saw the routine write is refused, so an
 entry larger than any the run built is not lifted. The values run only on a
 disassembly's own run: one handed a host's run (`CartridgeRequest::observed`)
-runs no routine again, and its tree has no `enumerated` line.
+runs no routine again, and its tree has no `enumerated` line. A tree made from a
+host's run in the middle of a session counts each sighting as of that tree; the
+tree made when the session closes has the session's counts.
 
 What the code reaches is reported for the main CPU's regions. The sound program is
 another chip's, with registers of its own, and has no `access`, `routine` or

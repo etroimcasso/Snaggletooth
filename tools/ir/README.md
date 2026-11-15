@@ -10,7 +10,8 @@ in the toolkit where bytes become meaning —
 `ir_interpret.h` runs a program's effects and nothing else, `ir_provenance.h`
 is the shadow that follows where every value came from, `ir_render.h` writes
 SNES assembly from its instruction layer, `ir_lockstep.h` holds the interpreter
-to one step of the machine, `ir_differential.h` runs a program beside the
+to one step of the machine, with the `Tape` that keeps a step's shadow calls for
+a shadow on another thread to play, `ir_differential.h` runs a program beside the
 machine through a recorded run and reports every disagreement, `ir_dataflow.h`
 runs the effects over every path at once and says what each instruction can
 rely on — the direct register, the data bank, the stack pointer, a stored

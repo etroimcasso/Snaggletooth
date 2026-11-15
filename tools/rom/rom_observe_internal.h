@@ -1,10 +1,12 @@
 #pragma once
 
-// The working parts of a run, shared by `rom_observe.cpp` and the run's
-// contract file: the observer the run sets on the machine, the interpreter run
-// beside it, the reading of addresses they share, and what the run keeps to
-// run a routine again for each value of its index. Not a library surface:
-// nothing outside `tools/rom/` and `tests/rom/` includes it.
+// The working parts of a run, shared by `rom_observe.cpp`, the buffered run
+// (`rom_buffered_run.cpp`, `rom_buffer.h`) and the run's contract files: what
+// the run reads of the machine, the observer the run sets on it, the check of
+// each step on both CPUs and what the run does with a checked step, the run
+// itself (`ObservedRun::Impl`), the reading of addresses they share, and what
+// the run keeps to run a routine again for each value of its index. Not a
+// library surface: nothing outside `tools/rom/` and `tests/rom/` includes it.
 
 #include <algorithm>
 #include <array>
@@ -17,6 +19,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -24,8 +27,10 @@
 #include "ir/ir_lockstep.h"
 #include "ir/ir_provenance.h"
 #include "ir/ir_text.h"
+#include "ir/spc700_lift.h"
 #include "rom/rom_observe.h"
 #include "rom/rom_text.h"
+#include "snaggletooth/apu/dsp.h"
 #include "snaggletooth/cpu/cpu65816.h"
 #include "snaggletooth/snes/cartridge.h"
 #include "snaggletooth/snes/snes.h"
@@ -247,6 +252,33 @@ inline std::uint8_t workRamByte(const SnesState& state, Address address) {
   return state.wram[(((address >> 16) - 0x7Eu) << 16) | (address & 0xFFFFu)];
 }
 
+// What the run reads of the machine: the machine itself, for a run on the thread
+// that runs it, or a state a worker keeps current from the buffer, with the bytes
+// at the sound CPU's program counter as they stood at each boundary.
+struct ApuWindow {
+  std::uint16_t pc[2]{};  // the counter at the boundary before the step, and after it
+  std::array<std::uint8_t, 3> bytes[2]{};
+};
+struct MachineView {
+  const SnesState* state = nullptr;
+  const Snes* live = nullptr;         // set for the machine itself
+  const ApuWindow* window = nullptr;  // set for a kept state
+  explicit MachineView(const Snes& machine) noexcept : state(&machine.state()), live(&machine) {}
+  MachineView(const SnesState& kept, const ApuWindow& apuWindow) noexcept : state(&kept), window(&apuWindow) {}
+  [[nodiscard]] const SnesState& held() const noexcept { return *state; }
+  [[nodiscard]] std::span<const std::uint8_t> cgram() const noexcept { return state->ppu.cgram; }
+  // The audio machine's byte at `address`: `Snes::peekApu` on the machine; on a
+  // kept state, a byte of the window, and `std::logic_error` for any other.
+  [[nodiscard]] std::uint8_t peekApu(std::uint16_t address) const {
+    if (live != nullptr) return live->peekApu(address);
+    for (const std::size_t side : {std::size_t{1}, std::size_t{0}}) {
+      const auto offset = static_cast<std::uint16_t>(address - window->pc[side]);
+      if (offset < 3u) return window->bytes[side][offset];
+    }
+    throw std::logic_error("a byte of the audio machine the buffer does not hold");
+  }
+};
+
 // The observer the run sets on the machine: it follows every byte the two
 // transfer engines move and groups them into ranges, and hands every CPU
 // access and cycle to the step observer the lockstep reads. A range is open
@@ -283,7 +315,7 @@ inline std::uint8_t workRamByte(const SnesState& state, Address address) {
 // a range or a carry read out of work RAM keeps the bytes it carried, which
 // join the extent's contents once its landing is read.
 struct Recorder final : BusObserver, ir::CarrySink {
-  const Snes& machine;
+  MachineView machine;
   ir::Provenance& shadow;
   Address site = 0;  // the instruction about to run
   ir::StepObserver cpu;  // what the CPU did this step: its fetches, its data accesses, its cycles
@@ -375,7 +407,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
   };
   std::map<std::uint32_t, Carry> carries;
 
-  Recorder(const Snes& m, ir::Provenance& p) : machine(m), shadow(p) {}
+  Recorder(MachineView m, ir::Provenance& p) : machine(m), shadow(p) {}
 
   // A step begins: what the CPU did last step is cleared, and so are the port
   // landings the shadow did not take and the engines' writes.
@@ -418,7 +450,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
       case PortMemory::Cgram: landing.areas = kAreaPalette; return;
       case PortMemory::Oam: landing.areas = kAreaOam; return;
       case PortMemory::Vram: {
-        const VramUse use = vramAreas(machine.state().ppu, landing.lowest, landing.highest);
+        const VramUse use = vramAreas(machine.held().ppu, landing.lowest, landing.highest);
         landing.areas |= use.areas;
         landing.depths |= use.depths;
         if (!landing.palette) landing.palette = paletteNow();
@@ -559,7 +591,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
   // stream that closed since the last such frame — against the mode and the
   // bases as they stand.
   void frameDrawn() {
-    if (machine.state().ppu.forcedBlank()) return;
+    if (machine.held().ppu.forcedBlank()) return;
     for (std::uint8_t c = 0; c < 8; ++c) {
       for (std::optional<Open>* open : {&dma[c], &table[c], &indirect[c]}) {
         if (!*open || !(*open)->landing || !(*open)->unread) continue;
@@ -696,7 +728,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
     if (!continues) carry = Carry{.memory = memory, .bytes = 0, .writers = {}, .values = {}, .byteOrigins = {}};
     fold(carry.writers, memory);
     ++carry.bytes;
-    carry.values.push_back(workRamByte(machine.state(), memory));
+    carry.values.push_back(workRamByte(machine.held(), memory));
     noteOrigin(carry.byteOrigins, memory, true);
   }
 
@@ -764,7 +796,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
   void moved(std::uint8_t channel, MovedKind kind, Address address, bool read, std::uint8_t value) {
     std::optional<Open>& open =
         kind == MovedKind::Dma ? dma[channel] : kind == MovedKind::Table ? table[channel] : indirect[channel];
-    const DmaChannel& ch = machine.state().dma[channel];
+    const DmaChannel& ch = machine.held().dma[channel];
     const Address trigger = kind == MovedKind::Dma ? dmaSite[channel] : hdmaSite[channel];
     const bool toRegister = (ch.dmap & 0x80u) == 0u;
     const Address registerAddress = 0x2100u | ch.bbad;
@@ -875,7 +907,7 @@ struct Recorder final : BusObserver, ir::CarrySink {
     if (a.pastTableEnd) return;
     // The A-bus side of a byte is the read when the byte goes to the register
     // and the write when it comes back from one; the other side is the register.
-    const bool toRegister = (machine.state().dma[a.channel].dmap & 0x80u) == 0u;
+    const bool toRegister = (machine.held().dma[a.channel].dmap & 0x80u) == 0u;
     const MovedKind kind = a.source == AccessSource::Dma ? MovedKind::Dma
                            : a.table                     ? MovedKind::Table
                                                          : MovedKind::Indirect;
@@ -1033,23 +1065,45 @@ struct Enumerating {
   }
 };
 
-// The four forms whose destination the bytes do not name and the run reads
-// from the pointer instead: their landing is a reached target, never a
-// landing the run has to record from where the CPU went.
-inline bool indirectForm(const ir::Instruction& instruction) {
-  const bool indirect = instruction.addressing == ir::Addressing::AbsoluteIndirect ||
-                        instruction.addressing == ir::Addressing::AbsoluteIndirectLong ||
-                        instruction.addressing == ir::Addressing::AbsoluteIndexedIndirect;
-  return indirect && (instruction.flow == ir::Flow::Jump || instruction.flow == ir::Flow::Call);
-}
+// The check of one step, as the rest of the run reads it: what the step was,
+// the node's identity and the parts of it the run follows, and the last
+// disagreement the check found, which is the one a note names.
+struct Checked {
+  enum class Kind : std::uint8_t { Halted, EngineHeld, Interrupt, Undecoded, Instruction };
+  Kind kind = Kind::Halted;
+  bool nmi = false;                     // Interrupt: NMI rather than IRQ
+  bool fresh = false;                   // Instruction: the check lifted the node at this step
+  Address site = 0;                     // placed
+  Address rawSite = 0;
+  std::uint32_t modeBits = 0;           // contextOf(mode).bits
+  std::array<std::uint8_t, 4> bytes{};  // the instruction's bytes
+  std::uint8_t length = 0;
+  ir::Flow flow = ir::Flow::Continue;
+  ir::Addressing addressing{};
+  std::optional<Address> target;
+  bool loadsStackPointer = false;
+  bool brkOrCop = false;
+  std::string_view mnemonic;            // the node's, which lives in the check's cache for the run
+  std::uint32_t calls = 0;              // the shadow calls the step made, where a tape keeps them
+  std::optional<ir::Divergence> divergence;
+};
 
-// The interpreter run beside the machine over the whole run: every executed
-// instruction lifted from the bytes the CPU fetched, checked, and read for
-// where the CPU went next and what its registers held.
-struct Lockstep {
+// Told by the check what the step is once it knows, before the interpreter
+// tells the shadow anything: a run with the shadow under its own interpreter
+// sets the shadow's site there.
+struct CheckHook {
+  virtual ~CheckHook() = default;
+  virtual void beforeShadow(const Checked& step, const Cpu65816State& before, const Cpu65816State& after) = 0;
+};
+
+// The check of one step: the node from the fetched bytes, the interpreter run
+// over the step's accesses against the file after, with the shadow told each
+// move. Its one state between steps is the interpreter's file, which equals the
+// machine's at every boundary, so a check begun at any boundary from
+// `registersOf(before)` is the check begun at power-on.
+struct StepCheck {
   CartridgeBoard board;
   std::size_t imageBytes;
-  ir::Provenance& shadow;
   const Cpu65816Backend& backend = cpu65816Backend();
   ir::Interpreter interpreter;
   const std::vector<ir::Effect> nmi = ir::interruptSequence(ir::Interrupt::Nmi);
@@ -1060,6 +1114,117 @@ struct Lockstep {
   // shares the node of the bank the tree places the bytes in.
   using NodeKey = std::tuple<Address, std::uint32_t, std::vector<std::uint8_t>>;
   std::map<NodeKey, ir::Node> nodes;
+
+  StepCheck(const CartridgeBoard& b, std::size_t bytes, const Cpu65816State& start, ir::Shadow* shadow)
+      : board(b), imageBytes(bytes) {
+    interpreter.registers = ir::registersOf(start);
+    interpreter.shadow = shadow;
+  }
+
+  // One step, from the file before it to the file after; `ordinal` is the step's
+  // index for a divergence. Answers what the step was and what the check found;
+  // `hook`, when given, is told before the shadow is.
+  Checked step(std::uint64_t ordinal, const Cpu65816State& before, const Cpu65816State& after,
+               const ir::StepObserver& observed, CheckHook* hook = nullptr) {
+    Checked c;
+    if (before.run != CpuRunState::Running) {
+      // A halted cycle: nothing ran. If a line ended the wait, the interpreter's
+      // wait ends with it.
+      if (after.run == CpuRunState::Running) interpreter.release();
+      return c;
+    }
+    // A transfer engine held the bus for the whole step; the instruction is
+    // still ahead of the CPU and is seen on the step that runs it.
+    if (!observed.cpuRan) {
+      c.kind = Checked::Kind::EngineHeld;
+      return c;
+    }
+    c.rawSite = (static_cast<Address>(before.pbr) << 16) | before.pc;
+    c.site = placed(board, imageBytes, c.rawSite);
+    ir::Divergence prototype;
+    prototype.instruction = ordinal;
+    prototype.site = c.site;
+    std::vector<ir::Divergence> found;
+
+    // What the machine took: a hardware request due at the boundary, or the
+    // instruction at the program counter.
+    const bool nmiTaken = before.nmiPending;
+    const bool irqTaken = !nmiTaken && before.irqLine && (before.p & kCpuFlagI) == 0;
+    if (nmiTaken || irqTaken) {
+      c.kind = Checked::Kind::Interrupt;
+      c.nmi = nmiTaken;
+      prototype.name = nmiTaken ? "NMI" : "IRQ";
+      if (hook != nullptr) hook->beforeShadow(c, before, after);
+      ir::checkInterrupt(interpreter, nmiTaken ? nmi : irq, observed, after, prototype, found);
+      if (!found.empty()) c.divergence = std::move(found.back());
+      return c;
+    }
+
+    // The instruction, from the bytes the CPU fetched, decoded under the mode
+    // the CPU was in and placed where the tree places it.
+    std::vector<std::uint8_t> bytes;
+    for (const BusAccess& fetch : observed.fetches) bytes.push_back(fetch.value);
+    const Cpu65816Mode mode = modeOf(before);
+    c.modeBits = contextOf(mode).bits;
+    NodeKey key{c.site, c.modeBits, bytes};
+    auto known = nodes.find(key);
+    if (known == nodes.end()) {
+      const std::optional<Decoded> decoded = backend.decode(bytes, c.site, c.site, contextOf(mode));
+      if (!decoded || decoded->instruction.length != bytes.size()) {
+        // The chip fetched bytes the decoder does not read as one instruction of
+        // that length. Nothing is known to run, so nothing is checked.
+        c.kind = Checked::Kind::Undecoded;
+        interpreter.registers = ir::registersOf(after);
+        return c;
+      }
+      known = nodes.emplace(std::move(key), ir::liftInstruction(decoded->instruction, mode)).first;
+      c.fresh = true;
+    }
+    const ir::Node& node = known->second;
+    const ir::Instruction& instruction = node.instruction;
+    c.kind = Checked::Kind::Instruction;
+    std::copy(bytes.begin(), bytes.end(), c.bytes.begin());
+    c.length = instruction.length;
+    c.flow = instruction.flow;
+    c.addressing = instruction.addressing;
+    c.target = instruction.target;
+    c.loadsStackPointer = ir::loadsStackPointer(instruction);
+    c.brkOrCop = instruction.mnemonic == std::string_view("BRK") || instruction.mnemonic == std::string_view("COP");
+    c.mnemonic = instruction.mnemonic;
+    if (hook != nullptr) hook->beforeShadow(c, before, after);
+    ir::checkNode(interpreter, node, observed, after, prototype, found);
+    if (!found.empty()) c.divergence = std::move(found.back());
+    return c;
+  }
+};
+
+// The four forms whose destination the bytes do not name and the run reads
+// from the pointer instead: their landing is a reached target, never a
+// landing the run has to record from where the CPU went.
+inline bool indirectForm(ir::Addressing addressing, ir::Flow flow) {
+  const bool indirect = addressing == ir::Addressing::AbsoluteIndirect ||
+                        addressing == ir::Addressing::AbsoluteIndirectLong ||
+                        addressing == ir::Addressing::AbsoluteIndexedIndirect;
+  return indirect && (flow == ir::Flow::Jump || flow == ir::Flow::Call);
+}
+
+// The interpreter run beside the machine over the whole run: every executed
+// instruction lifted from the bytes the CPU fetched, checked, and read for
+// where the CPU went next and what its registers held. `check` is the check of
+// each step; `follow` is everything the run does with a step once checked, in
+// the order the run does it, so a step checked on another thread, its shadow
+// calls kept on a tape, is followed here as the step checked here is.
+struct Lockstep final : CheckHook {
+  CartridgeBoard board;
+  std::size_t imageBytes;
+  ir::Provenance& shadow;
+  const Cpu65816Backend& backend = cpu65816Backend();
+  StepCheck check;
+
+  // Every node the checks lifted, by address, mode and bytes: a step's node
+  // joins when the check that met it lifted it then.
+  using NodeKey = StepCheck::NodeKey;
+  std::set<NodeKey> nodeKeys;
 
   // Where the run's own flow says execution may arrive without an instruction
   // naming it: the address after every call taken, for its return, and every
@@ -1077,7 +1242,7 @@ struct Lockstep {
   std::map<Address, Values> seen;
   std::set<Address> notedSites;  // a site already named in the notes
   Address expectedNext = 0;      // where falling through the last instruction leads, raw
-  std::vector<ir::Divergence> divergences;
+  std::vector<ir::Divergence> divergences;  // each step's last, in order
   std::uint64_t instructions = 0;
   std::uint64_t interrupts = 0;
   std::uint64_t diverged = 0;
@@ -1090,10 +1255,7 @@ struct Lockstep {
   std::optional<std::size_t> snapshotDue;
 
   Lockstep(const CartridgeBoard& b, std::size_t bytes, const Cpu65816State& start, ir::Provenance& p)
-      : board(b), imageBytes(bytes), shadow(p) {
-    interpreter.registers = ir::registersOf(start);
-    interpreter.shadow = &shadow;
-  }
+      : board(b), imageBytes(bytes), shadow(p), check{b, bytes, start, &p} {}
 
   // What the port did on the CPU's behalf this step is paired with the CPU's
   // accesses as the interpreter runs them; whatever is left over is dropped
@@ -1107,109 +1269,99 @@ struct Lockstep {
     return backend.describe(contextOf(mode));
   }
 
-  // One step the machine took, from the state before it to the state after.
+  // One step the machine took, from the state before it to the state after,
+  // checked and followed here, the shadow under the check's own interpreter.
   void step(const Cpu65816State& before, const Cpu65816State& after,
             const ir::StepObserver& observed, std::vector<std::string>& notes) {
-    const std::uint64_t ordinal = steps++;
-    if (before.run != CpuRunState::Running) {
-      // A halted cycle: nothing ran. If a line ended the wait, the interpreter's
-      // wait ends with it.
-      if (after.run == CpuRunState::Running) interpreter.release();
-      clearPort();
-      return;
-    }
-    // A transfer engine held the bus for the whole step; the instruction is
-    // still ahead of the CPU and is seen on the step that runs it.
-    if (!observed.cpuRan) {
-      clearPort();
-      return;
-    }
+    const Checked checked = check.step(steps, before, after, observed, this);
+    follow(checked, before, after, notes);
+  }
 
-    const Address rawSite = (static_cast<Address>(before.pbr) << 16) | before.pc;
-    const Address site = placed(board, imageBytes, rawSite);
-    ir::Divergence prototype;
-    prototype.instruction = ordinal;
-    prototype.site = site;
-    const std::size_t divergencesBefore = divergences.size();
+  // What the shadow is told about a step before the interpreter's moves: the
+  // site it runs under, whether the CPU fell through to it, and for an
+  // interrupt the stack it pushed; and the values seen at the site.
+  void beforeShadow(const Checked& c, const Cpu65816State& before, const Cpu65816State& after) override {
     // The stack pointer wraps inside page one while the CPU is in emulation mode.
     const bool page = before.e && after.e;
-
-    // What the machine took: a hardware request due at the boundary, or the
-    // instruction at the program counter.
-    const bool nmiTaken = before.nmiPending;
-    const bool irqTaken = !nmiTaken && before.irqLine && (before.p & kCpuFlagI) == 0;
-    if (nmiTaken || irqTaken) {
-      prototype.name = nmiTaken ? "NMI" : "IRQ";
-      shadow.site = site;
+    if (c.kind == Checked::Kind::Interrupt) {
+      shadow.site = c.site;
       shadow.flowBroke();
       shadow.interrupted(before.s, after.s, page);
       if (enumerating != nullptr) enumerating->ended(shadow);
-      ir::checkInterrupt(interpreter, nmiTaken ? nmi : irq, observed, after, prototype, divergences);
-      ++interrupts;
-      expectedReturns.insert(site);
-      if (divergences.size() != divergencesBefore) {
-        noteDivergence(prototype.name, site, before, notes);
-        shadow.forgetPlaces();
-      }
-      clearPort();
       return;
     }
+    // What the run saw at the site, before the instruction ran.
+    if (inImage(board, imageBytes, c.rawSite)) {
+      Values& values = seen[c.site];
+      values.d.insert(before.d);
+      values.dbr.insert(before.dbr);
+    }
+    // The shadow follows the instruction under its site, told when the CPU did
+    // not fall through to it — which is what a stream's straight run means.
+    shadow.site = c.site;
+    if (c.rawSite != expectedNext) shadow.flowBroke();
+    expectedNext = backend.following(c.rawSite, c.length);
+  }
 
-    // The instruction, from the bytes the CPU fetched, decoded under the mode
-    // the CPU was in and placed where the tree places it.
-    std::vector<std::uint8_t> bytes;
-    for (const BusAccess& fetch : observed.fetches) bytes.push_back(fetch.value);
-    const Cpu65816Mode mode = modeOf(before);
-    const NodeKey key{site, contextOf(mode).bits, bytes};
-    auto found = nodes.find(key);
-    if (found == nodes.end()) {
-      const std::optional<Decoded> decoded = backend.decode(bytes, site, site, contextOf(mode));
-      if (!decoded || decoded->instruction.length != bytes.size()) {
-        // The chip fetched bytes the decoder does not read as one instruction of
-        // that length. Nothing is known to run, so nothing is checked; said once.
-        if (notedSites.insert(site).second) {
-          notes.push_back("run: the bytes the CPU fetched at " + formatAddress(site, 24) +
-                          " do not decode as one instruction under " + modeText(mode) +
+  // Everything the run does with a checked step. A step checked with its
+  // shadow calls kept on `tape` — `c.calls` of them from `from` — is told to
+  // the shadow here first, the tape played where the check ran; a step checked
+  // with the shadow under the check's interpreter was told already.
+  void follow(const Checked& c, const Cpu65816State& before, const Cpu65816State& after,
+              std::vector<std::string>& notes, const ir::Tape* tape = nullptr, std::size_t from = 0) {
+    ++steps;
+    const bool page = before.e && after.e;
+    if (tape != nullptr && (c.kind == Checked::Kind::Interrupt || c.kind == Checked::Kind::Instruction)) {
+      beforeShadow(c, before, after);
+      tape->play(shadow, from, c.calls);
+    }
+    switch (c.kind) {
+      case Checked::Kind::Halted:
+      case Checked::Kind::EngineHeld:
+        clearPort();
+        return;
+      case Checked::Kind::Interrupt:
+        ++interrupts;
+        expectedReturns.insert(c.site);
+        if (c.divergence) {
+          divergences.push_back(*c.divergence);
+          noteDivergence(c.nmi ? "NMI" : "IRQ", c.site, before, notes);
+          shadow.forgetPlaces();
+        }
+        clearPort();
+        return;
+      case Checked::Kind::Undecoded:
+        // Said once: nothing is known to run, so nothing is checked.
+        if (notedSites.insert(c.site).second) {
+          notes.push_back("run: the bytes the CPU fetched at " + formatAddress(c.site, 24) +
+                          " do not decode as one instruction under " + modeText(modeOf(before)) +
                           "; the step is not checked");
         }
-        interpreter.registers = ir::registersOf(after);
         shadow.forgetPlaces();
         if (before.s != after.s) shadow.stackMoved(before.s, after.s, page);
         clearPort();
         return;
-      }
-      found = nodes.emplace(key, ir::liftInstruction(decoded->instruction, mode)).first;
-    }
-    const ir::Node& node = found->second;
-
-    // What the run saw at the site, before the instruction ran.
-    if (inImage(board, imageBytes, rawSite)) {
-      Values& values = seen[site];
-      values.d.insert(before.d);
-      values.dbr.insert(before.dbr);
+      case Checked::Kind::Instruction:
+        break;
     }
 
-    // The shadow follows the instruction under its site, told when the CPU did
-    // not fall through to it — which is what a stream's straight run means.
-    shadow.site = site;
-    if (rawSite != expectedNext) shadow.flowBroke();
-    expectedNext = backend.following(rawSite, node.instruction.length);
-    ir::checkNode(interpreter, node, observed, after, prototype, divergences);
+    if (c.fresh) nodeKeys.insert(NodeKey{c.site, c.modeBits, std::vector<std::uint8_t>(c.bytes.begin(), c.bytes.begin() + c.length)});
     ++instructions;
-    if (divergences.size() != divergencesBefore) {
-      noteDivergence(describeNode(node), site, before, notes);
+    if (c.divergence) {
+      divergences.push_back(*c.divergence);
+      noteDivergence(describeNode(c), c.site, before, notes);
       shadow.forgetPlaces();
     }
     clearPort();
     // What the step did to the stack pointer: a call opens an invocation
     // marked where its pushes left the pointer; a push or a pull may pass a
     // mark and end one; a load of the pointer from a register is not told.
-    if (node.instruction.flow == ir::Flow::Call) {
+    if (c.flow == ir::Flow::Call) {
       shadow.called(before.s, after.s, page);
-    } else if (before.s != after.s && !ir::loadsStackPointer(node.instruction)) {
+    } else if (before.s != after.s && !c.loadsStackPointer) {
       shadow.stackMoved(before.s, after.s, page);
     }
-    if (enumerating != nullptr) followRoutines(node, site, after);
+    if (enumerating != nullptr) followRoutines(c, after);
 
     // Where the CPU went, against what the instruction names: the address
     // after it, for a form that falls through; its constant target; the
@@ -1217,72 +1369,53 @@ struct Lockstep {
     // a software interrupt; and for a return, an address the run's own calls
     // and interrupts said to expect one at. A call's return is expected after
     // it, whichever instruction returns there.
-    const ir::Instruction& instruction = node.instruction;
-    const Address following = backend.following(site, instruction.length);
-    if (instruction.flow == ir::Flow::Call) expectedReturns.insert(following);
+    const Address following = backend.following(c.site, c.length);
+    if (c.flow == ir::Flow::Call) expectedReturns.insert(following);
     if (after.run != CpuRunState::Running) return;  // a wait or a stop: no landing
     const Address rawLanded = (static_cast<Address>(after.pbr) << 16) | after.pc;
     const Address landed = placed(board, imageBytes, rawLanded);
-    const bool fallsThrough = instruction.flow == ir::Flow::Continue ||
-                              instruction.flow == ir::Flow::Branch ||
-                              instruction.flow == ir::Flow::Call;
+    const bool fallsThrough = c.flow == ir::Flow::Continue || c.flow == ir::Flow::Branch || c.flow == ir::Flow::Call;
     const bool named =
-        rawLanded == rawSite ||  // a block move with bytes left, run again
+        rawLanded == c.rawSite ||  // a block move with bytes left, run again
         (fallsThrough && landed == following) ||
-        (instruction.target && landed == placed(board, imageBytes, *instruction.target)) ||
-        indirectForm(instruction) ||  // a reached target
-        instruction.mnemonic == std::string_view("BRK") ||  // the vector the header names
-        instruction.mnemonic == std::string_view("COP") ||
-        (instruction.flow == ir::Flow::Return && expectedReturns.count(landed) != 0);
+        (c.target && landed == placed(board, imageBytes, *c.target)) ||
+        indirectForm(c.addressing, c.flow) ||  // a reached target
+        c.brkOrCop ||                          // the vector the header names
+        (c.flow == ir::Flow::Return && expectedReturns.count(landed) != 0);
     if (named) return;
     if (!inImage(board, imageBytes, rawLanded)) {
-      if (notedSites.insert(site).second) {
+      if (notedSites.insert(c.site).second) {
         notes.push_back("run: the CPU arrived at " + formatAddress(rawLanded, 24) + " from " +
-                        formatAddress(site, 24) + ", which the tree does not hold; not recorded");
+                        formatAddress(c.site, 24) + ", which the tree does not hold; not recorded");
       }
       return;
     }
     // The landing is where the CPU arrived, in the bank it arrived in; the
     // disassembler places it to trace from it.
     const Cpu65816Mode arrived = modeOf(after);
-    if (!landings.insert({site, rawLanded, contextOf(arrived).bits}).second) return;
-    ran.push_back(Landing{.target = rawLanded, .mode = arrived, .site = site, .name = {}});
+    if (!landings.insert({c.site, rawLanded, contextOf(arrived).bits}).second) return;
+    ran.push_back(Landing{.target = rawLanded, .mode = arrived, .site = c.site, .name = {}});
   }
 
-  // The second run's record told what a node did to the planned routines'
+  // The second run's record told what a step did to the planned routines'
   // frames: a call, not a software interrupt, that lands on a planned routine
   // enters it; every live routine whose invocation the step ended leaves.
-  void followRoutines(const ir::Node& node, Address site, const Cpu65816State& after) {
-    const ir::Instruction& instruction = node.instruction;
-    const std::string_view mnemonic = instruction.mnemonic;
-    if (instruction.flow == ir::Flow::Call && mnemonic != "BRK" && mnemonic != "COP") {
+  void followRoutines(const Checked& c, const Cpu65816State& after) {
+    if (c.flow == ir::Flow::Call && !c.brkOrCop) {
       const Address landed = placed(board, imageBytes, (static_cast<Address>(after.pbr) << 16) | after.pc);
-      const Address returnTo = placed(board, imageBytes, backend.following(site, instruction.length));
-      const std::optional<std::size_t> due = enumerating->entered(landed, site, returnTo, shadow.running());
+      const Address returnTo = placed(board, imageBytes, backend.following(c.site, c.length));
+      const std::optional<std::size_t> due = enumerating->entered(landed, c.site, returnTo, shadow.running());
       if (due && !snapshotDue) snapshotDue = due;
     }
     enumerating->ended(shadow);
   }
 
-  // The mode the CPU is in, as the trace carries one: the widths are known —
-  // the CPU has them — and the carry is not remembered, since nothing here
-  // follows an `XCE`.
-  static Cpu65816Mode modeOf(const Cpu65816State& cpu) {
-    return {.emulation = cpu.e,
-            .accumulator8 = (cpu.p & kCpuFlagM) != 0,
-            .index8 = (cpu.p & kCpuFlagX) != 0,
-            .accumulatorKnown = true,
-            .indexKnown = true,
-            .carryKnown = false,
-            .carry = false};
+  static std::string describeNode(const Checked& c) {
+    return "`" + std::string(c.mnemonic) + " " + std::string(ir::addressingName(c.addressing)) + "`";
   }
 
-  static std::string describeNode(const ir::Node& node) {
-    return "`" + std::string(node.instruction.mnemonic) + " " +
-           std::string(ir::addressingName(node.instruction.addressing)) + "`";
-  }
-
-  // A disagreement, said once per site with what disagreed first.
+  // A disagreement, said once per site with what disagreed: the last the
+  // check found.
   void noteDivergence(const std::string& what, Address site, const Cpu65816State& before,
                       std::vector<std::string>& notes) {
     ++diverged;
@@ -1514,4 +1647,665 @@ inline void setInput(SnesState& state, const VariantSetting& setting) {
   return run;
 }
 
+inline std::optional<std::uint16_t> readWord(const CartridgeBoard& board, std::span<const std::uint8_t> rom,
+                                             const SnesState& state, Address address) {
+  const std::optional<std::uint8_t> low = readByte(board, rom, state, address);
+  const std::optional<std::uint8_t> high = readByte(board, rom, state, address + 1u);
+  if (!low || !high) return std::nullopt;
+  return static_cast<std::uint16_t>(*low | (*high << 8));
+}
+
+// Where the instruction at the CPU's position is about to go, when it is one of
+// the four forms whose pointer the bytes do not name — read the way the CPU is
+// about to read it. Nothing for any other instruction; nothing, with `unreadable`
+// set, when the pointer lies where the run cannot see.
+struct Pending {
+  Address target = 0;
+  bool call = false;
+};
+
+inline std::optional<Pending> pendingTarget(const CartridgeBoard& board, std::span<const std::uint8_t> rom,
+                                            const SnesState& state, bool& unreadable) {
+  const Cpu65816State& cpu = state.cpu;
+  const Address site = (static_cast<Address>(cpu.pbr) << 16) | cpu.pc;
+  const std::optional<std::uint8_t> opcode = readByte(board, rom, state, site);
+  if (!opcode) return std::nullopt;
+  const Cpu65816Opcode& info = cpu65816Opcodes()[*opcode];
+  const bool indirect = info.mode == Cpu65816Addressing::AbsoluteIndirect ||
+                        info.mode == Cpu65816Addressing::AbsoluteIndirectLong ||
+                        info.mode == Cpu65816Addressing::AbsoluteIndexedIndirect;
+  if (!indirect || (info.flow != Flow::Jump && info.flow != Flow::Call)) return std::nullopt;
+
+  // The operand follows the opcode within the program bank.
+  const Address operandAt = (site & 0xFF0000u) | ((cpu.pc + 1u) & 0xFFFFu);
+  const std::optional<std::uint16_t> operand = readWord(board, rom, state, operandAt);
+  if (!operand) {
+    unreadable = true;
+    return std::nullopt;
+  }
+
+  const Address programBank = site & 0xFF0000u;
+  std::optional<Address> target;
+  switch (info.mode) {
+    // `(!abs)`: a two-byte pointer in bank zero; the program bank is unchanged.
+    case Cpu65816Addressing::AbsoluteIndirect:
+      if (const std::optional<std::uint16_t> ptr = readWord(board, rom, state, *operand)) {
+        target = programBank | *ptr;
+      }
+      break;
+    // `[!abs]`: a three-byte pointer in bank zero; the third byte is the bank.
+    case Cpu65816Addressing::AbsoluteIndirectLong: {
+      const std::optional<std::uint16_t> low = readWord(board, rom, state, *operand);
+      const std::optional<std::uint8_t> bank = readByte(board, rom, state, *operand + 2u);
+      if (low && bank) target = (static_cast<Address>(*bank) << 16) | *low;
+      break;
+    }
+    // `(!abs,X)`: the operand plus X addresses a two-byte pointer in the program
+    // bank, wrapping within it; the program bank is unchanged.
+    case Cpu65816Addressing::AbsoluteIndexedIndirect: {
+      const Address pointerAt = programBank | ((*operand + cpu.x) & 0xFFFFu);
+      if (const std::optional<std::uint16_t> ptr = readWord(board, rom, state, pointerAt)) {
+        target = programBank | *ptr;
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  if (!target) {
+    unreadable = true;
+    return std::nullopt;
+  }
+  return Pending{.target = *target, .call = info.flow == Flow::Call};
+}
+
+// The cap on an origin's intervals, above which it is widened to its hull:
+// set by exactness — raised until no staged range on a real cartridge is
+// approximate — and never by cost.
+constexpr std::size_t kOriginCap = 64;
+
+// One sound-CPU step as the check saw it: what the step was, the node's text
+// for a note, and the last disagreement the check found.
+struct SoundChecked {
+  enum class Kind : std::uint8_t { Halted, Undecoded, NotFetched, Instruction };
+  Kind kind = Kind::Halted;
+  std::uint16_t site = 0;
+  std::string_view mnemonic;  // the node's, which lives in the check's cache for the run
+  std::string_view form;
+  std::optional<ir::Divergence> divergence;
+};
+
+// The check of the sound CPU's steps. At every boundary the instruction about
+// to run is decoded from the bytes at the program counter as the machine holds
+// them then — the image mapped over the boot-ROM window included — lifted, and
+// held until the boundary after says what the machine did: the accesses
+// between, with the instruction's own fetches set apart, the registers after
+// and the cycles. The fetched bytes are held to the decoded ones too, so an
+// instruction whose bytes changed between the boundary and its fetch is
+// answered as not fetched rather than checked against the wrong node. Its
+// state between steps is the interpreter's file and the instruction decoded at
+// the last boundary, so a check begun from a boundary's file, with the bytes at
+// its program counter as they stood there, is the check begun at power-on.
+struct Spc700Check {
+  MachineView machine;
+  ir::Spc700Interpreter interpreter;
+  std::vector<ir::Spc700Access> accesses;  // since the last boundary, in order
+
+  // The nodes lifted so far, one per address and bytes — so bytes the program
+  // rewrote at an address are a second node there — and the keys lifted since
+  // the last step was answered.
+  using NodeKey = std::pair<std::uint16_t, std::vector<std::uint8_t>>;
+  std::map<NodeKey, ir::Node> nodes;
+  std::vector<NodeKey> lifted;
+
+  // The instruction about to run, decoded at the last boundary; nothing when
+  // the core is halted or the bytes there do not decode.
+  struct Upcoming {
+    std::uint16_t pc = 0;
+    std::vector<std::uint8_t> bytes;
+    const ir::Node* node = nullptr;
+  };
+  std::optional<Upcoming> pending;
+  std::uint64_t steps = 0;
+
+  Spc700Check(MachineView m, const Spc700State& start) : machine(m) { restart(start); }
+
+  // The check begins again from `cpu`: the interpreter takes its file, the
+  // accesses so far are dropped, and the instruction at its program counter is
+  // decoded.
+  void restart(const Spc700State& cpu) {
+    interpreter.registers = ir::registersOf(cpu);
+    accesses.clear();
+    prepare(cpu);
+  }
+
+  void access(std::uint16_t address, std::uint8_t value, bool write) {
+    accesses.push_back(ir::Spc700Access{.address = address, .value = value, .write = write});
+  }
+
+  // One boundary the machine crossed, from the file before the step to the file
+  // after it and the cycles between.
+  SoundChecked step(const Spc700State& before, const Spc700State& after, std::uint32_t cycles) {
+    const std::uint64_t ordinal = steps++;
+    SoundChecked c;
+    if (before.run == RunState::Running) {
+      c = checkStep(ordinal, before, after, cycles);
+    } else if (after.run == RunState::Running) {
+      // Nothing ends a halt but a reset; the interpreter follows the machine.
+      interpreter.registers = ir::registersOf(after);
+    }
+    accesses.clear();
+    prepare(after);
+    return c;
+  }
+
+  // Decodes and lifts the instruction at `state`'s program counter from the
+  // bytes the machine holds there now, ahead of the step that runs it.
+  void prepare(const Spc700State& state) {
+    pending.reset();
+    if (state.run != RunState::Running) return;
+    std::array<std::uint8_t, 3> window{};
+    for (std::size_t i = 0; i < window.size(); ++i) {
+      window[i] = machine.peekApu(static_cast<std::uint16_t>(state.pc + i));
+    }
+    const std::optional<Instruction> decoded = decodeAt(window, state.pc, state.pc);
+    if (!decoded) return;
+    Upcoming next;
+    next.pc = state.pc;
+    next.bytes = decoded->bytes;
+    NodeKey key{state.pc, next.bytes};
+    auto found = nodes.find(key);
+    if (found == nodes.end()) {
+      lifted.push_back(key);
+      found = nodes.emplace(std::move(key), ir::liftSpc700Instruction(*decoded)).first;
+    }
+    next.node = &found->second;
+    pending = std::move(next);
+  }
+
+ private:
+  SoundChecked checkStep(std::uint64_t ordinal, const Spc700State& before, const Spc700State& after,
+                         std::uint32_t cycles) {
+    SoundChecked c;
+    const std::uint16_t site = before.pc;
+    c.site = site;
+    // A reload moved the CPU since the last boundary: the bytes now at the
+    // program counter are the best reading there is.
+    if (!pending || pending->pc != site) prepare(before);
+    if (!pending) {
+      c.kind = SoundChecked::Kind::Undecoded;
+      interpreter.registers = ir::registersOf(after);
+      return c;
+    }
+    const std::optional<ir::Spc700StepAccesses> split =
+        ir::splitSpc700Step(accesses, site, pending->bytes.size());
+    bool fetchedAsDecoded = split.has_value();
+    if (split) {
+      for (std::size_t i = 0; i < split->fetches.size(); ++i) {
+        if (split->fetches[i].value != pending->bytes[i]) fetchedAsDecoded = false;
+      }
+    }
+    if (!fetchedAsDecoded) {
+      c.kind = SoundChecked::Kind::NotFetched;
+      interpreter.registers = ir::registersOf(after);
+      return c;
+    }
+    ir::Divergence prototype;
+    prototype.instruction = ordinal;
+    prototype.site = site;
+    std::vector<ir::Divergence> found;
+    ir::checkSpc700Node(interpreter, *pending->node, split->data, cycles, after, prototype, found);
+    c.kind = SoundChecked::Kind::Instruction;
+    c.mnemonic = pending->node->instruction.mnemonic;
+    c.form = pending->node->instruction.form;
+    if (!found.empty()) c.divergence = std::move(found.back());
+    return c;
+  }
+};
+
+// The sound interpreter run beside the audio machine over the whole run: each
+// step checked (`Spc700Check`) and followed here.
+//
+// The same accesses keep a copy of the DSP's register file: a write to `$F2`
+// selects a register and a write to `$F3` sets it, and a write to `KON` with a
+// bit set is a key-on of each voice named. At each key-on the sample the DSP is
+// about to play is read from the audio memory as the machine holds it then —
+// the directory entry `DIR` and the voice's `SRCN` select, through the
+// machine's own reading of it, and the blocks from its start to the first
+// carrying the end flag, stopping at the memory's end — and kept once per
+// distinct sample with a count.
+//
+// It keeps its own notes, which the run gives after the main CPU's: on a
+// machine built with `apuThread` its reports arrive on the audio thread.
+struct AudioLockstep final : ApuObserver {
+  // The DSP's address register and its register file as the CPU last wrote
+  // them; a write to `$F3` while the address is $80 or above sets nothing,
+  // since those are the file's read-only mirrors.
+  static constexpr std::uint8_t kDspRegisters = 0x80u;
+  static constexpr std::uint16_t kDspAddressPort = 0x00F2u;
+  static constexpr std::uint16_t kDspDataPort = 0x00F3u;
+  static constexpr std::uint8_t kDspKon = 0x4Cu;
+  static constexpr std::uint8_t kDspDir = 0x5Du;
+  static constexpr std::uint8_t kDspSrcn = 0x04u;  // voice v's source number is at v * $10 + 4
+  static constexpr std::size_t kAudioMemory = 65536;
+  static constexpr std::size_t kBrrBlock = 9;
+
+  MachineView machine;
+  Spc700Check check;
+  std::vector<std::string> notes;
+  std::uint8_t dspAddress = 0;
+  std::array<std::uint8_t, kDspRegisters> dsp{};
+  std::vector<KeyedSample> samples;
+  std::set<std::uint16_t> unendedStarts;      // a start already noted as having no end flag
+  std::set<Spc700Check::NodeKey> nodeKeys;    // every node a check lifted
+  std::set<std::uint16_t> notedSites;         // a site already named in the notes
+  std::vector<ir::Divergence> divergences;    // each step's last, in order
+  std::uint64_t instructions = 0;
+  std::uint64_t diverged = 0;
+
+  explicit AudioLockstep(MachineView m) : machine(m), check(m, m.held().apu.cpu) { took(check.lifted); }
+
+  // The console's reset line went through the audio machine: the check takes
+  // the sound CPU's registers as the reset left them and the instruction at its
+  // program counter, the accesses before the reset are dropped, and the copy of
+  // the DSP's address and register file is read again from the machine.
+  void restart() {
+    check.restart(machine.held().apu.cpu);
+    took(check.lifted);
+    restartDsp();
+  }
+  void restartDsp() {
+    const ApuState& apu = machine.held().apu;
+    dspAddress = apu.dspAddr;
+    std::copy_n(apu.dsp.regs.begin(), kDspRegisters, dsp.begin());
+  }
+
+  void access(std::uint16_t address, std::uint8_t value, bool write) override {
+    check.access(address, value, write);
+    wrote(address, value, write);
+  }
+
+  // What an access does to the copy of the DSP's register file.
+  void wrote(std::uint16_t address, std::uint8_t value, bool write) {
+    if (!write) return;
+    if (address == kDspAddressPort) {
+      dspAddress = value;
+    } else if (address == kDspDataPort && dspAddress < kDspRegisters) {
+      dsp[dspAddress] = value;
+      if (dspAddress == kDspKon && value != 0u) keyOn(value);
+    }
+  }
+
+  // Each voice `mask` names keyed on: its sample read from the audio memory as
+  // the machine holds it now — the memory itself, which is what the DSP reads,
+  // not the CPU's view with the boot ROM over its window — and kept once with
+  // its count.
+  void keyOn(std::uint8_t mask) {
+    const std::span<const std::uint8_t, kAudioMemory> ram(machine.held().apu.ram);
+    for (unsigned voice = 0; voice < 8; ++voice) {
+      if ((mask & (1u << voice)) == 0u) continue;
+      const std::uint8_t srcn = dsp[(voice << 4) | kDspSrcn];
+      const BrrSource source = readBrrSource(ram, dsp[kDspDir], srcn);
+      KeyedSample sample{.start = source.start, .loop = source.loop, .bytes = {}, .times = 1};
+      // The blocks from the start to the first carrying the end flag; a walk
+      // that reaches the end of the audio memory without one names nothing.
+      bool ended = false;
+      std::size_t at = source.start;
+      while (at + kBrrBlock <= kAudioMemory) {
+        const std::uint8_t header = ram[at];
+        for (std::size_t k = 0; k < kBrrBlock; ++k) sample.bytes.push_back(ram[at + k]);
+        at += kBrrBlock;
+        if ((header & 0x01u) != 0u) {
+          ended = true;
+          break;
+        }
+      }
+      if (!ended) {
+        if (unendedStarts.insert(source.start).second) {
+          notes.push_back("run: the sample at " + formatAddress(source.start, 16) + " voice " +
+                          std::to_string(voice) +
+                          " keyed on reaches the end of the audio memory without an end flag; not recorded");
+        }
+        continue;
+      }
+      const auto known = std::find_if(samples.begin(), samples.end(),
+                                      [&](const KeyedSample& s) { return sameSample(s, sample); });
+      if (known == samples.end()) {
+        samples.push_back(std::move(sample));
+      } else {
+        ++known->times;
+      }
+    }
+  }
+
+  void instruction(const Spc700State& before, const Spc700State& after, std::uint32_t cycles) override {
+    const SoundChecked checked = check.step(before, after, cycles);
+    took(check.lifted);
+    follow(checked);
+  }
+
+  // The nodes a check lifted join the count, and its list is emptied.
+  void took(std::vector<Spc700Check::NodeKey>& keys) {
+    for (Spc700Check::NodeKey& key : keys) nodeKeys.insert(std::move(key));
+    keys.clear();
+  }
+
+  // Everything the run does with a checked step: its notes and its counts.
+  void follow(const SoundChecked& c) {
+    switch (c.kind) {
+      case SoundChecked::Kind::Halted: return;
+      case SoundChecked::Kind::Undecoded:
+        note(c.site, "run: the bytes at " + formatAddress(c.site, 16) +
+                         " on the sound CPU do not decode as one instruction; the step is not checked");
+        return;
+      case SoundChecked::Kind::NotFetched:
+        note(c.site, "run: the sound CPU's step at " + formatAddress(c.site, 16) +
+                         " did not fetch the instruction decoded there; the step is not checked");
+        return;
+      case SoundChecked::Kind::Instruction: break;
+    }
+    ++instructions;
+    if (!c.divergence) return;
+    ++diverged;
+    divergences.push_back(*c.divergence);
+    const ir::Divergence& d = divergences.back();
+    char values[64];
+    std::snprintf(values, sizeof values, "machine $%X, the lift $%X", d.expected, d.actual);
+    note(c.site, "run: the lift of `" + std::string(c.mnemonic) + " " + std::string(c.form) + "` at " +
+                     formatAddress(c.site, 16) + " on the sound CPU disagreed with the machine (" + d.what + ": " +
+                     values + "); the interpreter was realigned");
+  }
+
+  // A note about a site, said once.
+  void note(std::uint16_t site, std::string text) {
+    if (notedSites.insert(site).second) notes.push_back(std::move(text));
+  }
+};
+
 }  // namespace snaggletooth::disasm::detail
+
+namespace snaggletooth::disasm {
+
+// The run, bound to a machine the host runs, or to a state a worker keeps
+// current from a buffer. The machine reports every boundary `step()` returns
+// at; `begin` reads, at a boundary, what the step about to run is going to do —
+// the pointer an indirect form is about to read, the stack and the line before
+// it — and `instruction` is the step seen from the boundary after it: the frame
+// the beam began, the step checked against the lifted node, the pointer
+// confirmed by the landing. Nothing here presents a pad or takes a snapshot; a
+// host does both between its calls.
+struct ObservedRun::Impl final : InstructionObserver {
+  Snes* host = nullptr;  // the machine the observers are set on; none for a kept state
+  detail::MachineView machine;
+  std::span<const std::uint8_t> rom;
+  CartridgeBoard board;
+  ir::Provenance shadow;
+  detail::Recorder recorder;
+  detail::Lockstep lockstep;
+  detail::AudioLockstep audio;
+  std::optional<detail::Enumerating> enumerating;
+  std::vector<ReachedTarget> reached;
+  std::set<std::tuple<Address, Address, std::uint32_t>> seen;
+  std::set<Address> unreadableSites, unconfirmedSites;
+  std::vector<std::string> notes;  // the main CPU's, in the order made
+  std::uint64_t spent = 0;
+  std::uint32_t frame = 0;  // counted from power-on, the first being 0; a frame begins when the beam wraps to line 0
+  // What the step about to run was read as, at the boundary before it.
+  Address site = 0;
+  std::uint16_t stackBefore = 0;
+  std::uint16_t lineBefore = 0;
+  std::optional<detail::Pending> pending;
+  Cpu65816Mode mode{};
+
+  Impl(Snes& m, std::span<const std::uint8_t> image) : Impl(detail::MachineView{m}, image) {
+    host = &m;
+    host->setObserver(&recorder);
+    host->setApuObserver(&audio);
+    host->setInstructionObserver(this);
+  }
+
+  // Over a state a worker keeps current from a buffer: no machine is told
+  // anything, and the worker hands each boundary to `boundary`.
+  Impl(detail::MachineView kept, std::span<const std::uint8_t> image)
+      : machine(kept),
+        rom(image),
+        board(cartridgeBoard(image)),
+        shadow{board, image.size(), detail::kOriginCap},
+        recorder{kept, shadow},
+        lockstep{board, image.size(), kept.held().cpu, shadow},
+        audio{kept} {
+    shadow.carries = &recorder;
+    begin();
+  }
+
+  // The boundary the next step starts from. The state is the live machine:
+  // everything read from it is copied out here, since the step rewrites it.
+  void begin() {
+    const SnesState& before = machine.held();
+    site = (static_cast<Address>(before.cpu.pbr) << 16) | before.cpu.pc;
+    stackBefore = before.cpu.s;
+    lineBefore = before.vpos;
+    bool unreadable = false;
+    pending = detail::pendingTarget(board, rom, before, unreadable);
+    mode = detail::modeOf(before.cpu);
+    if (unreadable && unreadableSites.insert(site).second) {
+      notes.push_back("run: the jump at " + formatAddress(site, 24) +
+                      " reads its pointer from memory the run cannot see; not recorded");
+    }
+    recorder.stepBegan(site);
+  }
+
+  void instruction(const Cpu65816State& before, const Cpu65816State& after, std::uint32_t masterCycles) override {
+    boundary(before, after, masterCycles, nullptr, nullptr, 0);
+  }
+
+  // One boundary: the step checked here, or, with `checked`, checked elsewhere
+  // with its shadow calls on `tape` from `from`.
+  void boundary(const Cpu65816State& before, const Cpu65816State& after, std::uint32_t masterCycles,
+                const detail::Checked* checked, const ir::Tape* tape, std::size_t from) {
+    spent += masterCycles;
+    if (enumerating) enumerating->spent = spent;
+
+    // A step runs one instruction, or one cycle of a transfer, never a whole
+    // frame, so the beam wrapping to line 0 is a frame boundary seen exactly once.
+    if (machine.held().vpos < lineBefore) {
+      ++frame;
+      recorder.frameBegan();
+    }
+
+    // The interpreter beside the machine: the step's instruction lifted from
+    // its fetches and checked, the landing read, the registers recorded.
+    if (checked != nullptr) {
+      lockstep.follow(*checked, before, after, notes, tape, from);
+    } else {
+      lockstep.step(before, after, recorder.cpu, notes);
+    }
+
+    // The second run keeps what the planned routines' frames wrote.
+    if (enumerating) enumerating->wrote(recorder, shadow);
+
+    confirm(after);
+    begin();
+  }
+
+  // The landing confirms the pointer. A step that serviced an interrupt instead
+  // lands in the handler and the instruction has not run yet; it is seen when it
+  // does. A landing elsewhere means the reading of the form is wrong, and that is
+  // said rather than recorded.
+  void confirm(const Cpu65816State& after) {
+    if (!pending) return;
+    const Address landed = (static_cast<Address>(after.pbr) << 16) | after.pc;
+    // A step that left the program counter where it was ran no instruction: the
+    // CPU was held off the bus — a DMA transfer, an HDMA event — and the jump is
+    // still ahead of it. It is seen on the step that runs it.
+    if (landed == site) return;
+    if (landed != pending->target) {
+      // An interrupt sequence lands in bank zero having pushed the return address
+      // and the status byte: four bytes in native mode, three in emulation. Nothing
+      // the four forms do moves the stack that way.
+      const std::uint16_t pushed = static_cast<std::uint16_t>(stackBefore - after.s);
+      const bool interrupted = after.pbr == 0 && (pushed == 4u || pushed == 3u);
+      if (!interrupted && unconfirmedSites.insert(site).second) {
+        notes.push_back("run: the jump at " + formatAddress(site, 24) + " read a pointer to " +
+                        formatAddress(pending->target, 24) + " but the CPU went to " + formatAddress(landed, 24) +
+                        "; not recorded");
+      }
+      return;
+    }
+    if (!seen.insert({site, pending->target, contextOf(mode).bits}).second) return;
+    reached.push_back(ReachedTarget{.target = pending->target,
+                                    .mode = mode,
+                                    .site = site,
+                                    .call = pending->call,
+                                    .name = {}});
+  }
+
+  // The console's reset line, taken through every part of the run: the ranges
+  // open close, the call stack the shadow held ends, and both interpreters
+  // start again from the registers the reset left.
+  void reset() {
+    host->reset();
+    afterReset();
+    audio.restart();
+  }
+
+  // Everything but the sound CPU's part of a reset, once the state holds what
+  // the reset left.
+  void afterReset() {
+    for (std::uint8_t c = 0; c < 8; ++c) recorder.closeChannel(c);
+    recorder.hdmaEnabled = 0;
+    recorder.port.reset();
+    recorder.carried.reset();
+    shadow.forgetPlaces();
+    shadow.flowBroke();
+    shadow.abandon();
+    lockstep.check.interpreter.registers = ir::registersOf(machine.held().cpu);
+    lockstep.check.interpreter.release();
+    if (enumerating) enumerating->live.clear();
+    begin();
+  }
+
+  // The run's notes: the main CPU's in the order made, then the sound CPU's.
+  void notesInto(std::vector<std::string>& into) const {
+    into.insert(into.end(), notes.begin(), notes.end());
+    into.insert(into.end(), audio.notes.begin(), audio.notes.end());
+  }
+
+  // The shadow closes the stream still open — the recorder folds the last
+  // carry with it and takes its landing — and then the recorder closes every
+  // range, so what the run's end cut short is counted, and a landing no frame
+  // drew is unshown.
+  void finish(RunObservation& observation) {
+    close();
+    if (host != nullptr) {
+      host->setObserver(nullptr);
+      host->setApuObserver(nullptr);
+      host->setInstructionObserver(nullptr);
+    }
+    assemble(observation);
+  }
+  void close() {
+    shadow.finish();
+    recorder.finish();
+    shadow.carries = nullptr;
+  }
+
+  // What the run holds, as an observation: everything but what a plan's
+  // values add.
+  void assemble(RunObservation& observation) const {
+    assembleCpu(observation);
+    assembleSound(observation);
+  }
+
+  // The sound CPU's part of the observation: its counts and its samples.
+  void assembleSound(RunObservation& observation) const {
+    observation.spc700Instructions = audio.instructions;
+    observation.spc700Nodes = audio.nodeKeys.size();
+    observation.spc700Divergences = audio.diverged;
+    // The samples the key-ons named: by start, the shorter first, then by bytes.
+    observation.samples = audio.samples;
+    std::sort(observation.samples.begin(), observation.samples.end(),
+              [](const KeyedSample& a, const KeyedSample& b) {
+                if (a.start != b.start) return a.start < b.start;
+                if (a.bytes.size() != b.bytes.size()) return a.bytes.size() < b.bytes.size();
+                return a.bytes < b.bytes;
+              });
+  }
+
+  // Everything else.
+  void assembleCpu(RunObservation& observation) const {
+    observation.reached = reached;
+    std::sort(observation.reached.begin(), observation.reached.end(),
+              [](const ReachedTarget& a, const ReachedTarget& b) {
+                if (a.site != b.site) return a.site < b.site;
+                if (a.target != b.target) return a.target < b.target;
+                return contextOf(a.mode).bits < contextOf(b.mode).bits;
+              });
+    observation.moved = recorder.out;
+    std::sort(observation.moved.begin(), observation.moved.end(), rangeBefore);
+    observation.landed = recorder.landed;
+    std::sort(observation.landed.begin(), observation.landed.end(), landedBefore);
+    observation.walked = recorder.walked;
+    std::sort(observation.walked.begin(), observation.walked.end(), walkedBefore);
+    observation.palettes = recorder.palettes;
+
+    observation.ran = lockstep.ran;
+    std::sort(observation.ran.begin(), observation.ran.end(), [](const Landing& a, const Landing& b) {
+      if (a.site != b.site) return a.site < b.site;
+      if (a.target != b.target) return a.target < b.target;
+      return contextOf(a.mode).bits < contextOf(b.mode).bits;
+    });
+    for (const auto& [address, values] : lockstep.seen) {
+      observation.seen.push_back(SeenState{.address = address,
+                                           .d = {values.d.begin(), values.d.end()},
+                                           .dbr = {values.dbr.begin(), values.dbr.end()}});
+    }
+    observation.instructions = lockstep.instructions;
+    observation.interrupts = lockstep.interrupts;
+    observation.nodes = lockstep.nodeKeys.size();
+    observation.divergences = lockstep.diverged;
+
+    // What was staged: every extent, in address order then by count, its
+    // writers most bytes first.
+    for (const auto& [extent, staged] : recorder.staged) {
+      StagedRange range = staged;
+      std::sort(range.writers.begin(), range.writers.end(), [](const StagedWriter& a, const StagedWriter& b) {
+        if (a.bytes != b.bytes) return a.bytes > b.bytes;
+        if (a.unwritten != b.unwritten) return !a.unwritten;
+        return a.writer < b.writer;
+      });
+      observation.staged.push_back(std::move(range));
+    }
+    // What the CPU streamed: each distinct stream and landing once with its
+    // count, as the recorder took them from the shadow's closings; the source
+    // is the shadow's, which stands as the widest run it found.
+    observation.streamed = recorder.streams;
+    for (StreamedRange& range : observation.streamed) {
+      for (const ir::Stream& stream : shadow.streams()) {
+        if (stream.site == range.site && stream.registerAddress == range.registerAddress &&
+            stream.memory == range.memory && stream.first == range.romOffset && stream.bytes == range.bytes) {
+          range.source = stream.source;
+          break;
+        }
+      }
+    }
+    std::sort(observation.streamed.begin(), observation.streamed.end(),
+              [](const StreamedRange& a, const StreamedRange& b) {
+                if (a.site != b.site) return a.site < b.site;
+                if (a.registerAddress != b.registerAddress) return a.registerAddress < b.registerAddress;
+                if (a.memory != b.memory) return a.memory < b.memory;
+                if (a.romOffset != b.romOffset) return a.romOffset < b.romOffset;
+                if (a.landing.has_value() != b.landing.has_value()) return !a.landing.has_value();
+                if (!a.landing) return false;
+                if (a.landing->lowest != b.landing->lowest) return a.landing->lowest < b.landing->lowest;
+                if (a.landing->highest != b.landing->highest) return a.landing->highest < b.landing->highest;
+                if (a.landing->shown != b.landing->shown) return a.landing->shown;
+                if (a.landing->areas != b.landing->areas) return a.landing->areas < b.landing->areas;
+                return a.landing->depths < b.landing->depths;
+              });
+    observation.originSets = shadow.origins().interned();
+    observation.originCap = shadow.origins().cap();
+  }
+};
+
+}  // namespace snaggletooth::disasm

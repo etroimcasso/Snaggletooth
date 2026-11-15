@@ -128,6 +128,45 @@ struct Spc700StepAccesses {
 // The sound interpreter's view of a core state.
 [[nodiscard]] Spc700Registers registersOf(const Spc700State& state) noexcept;
 
+// A shadow that keeps the interpreter's calls instead of acting on them, for a
+// shadow on another thread to play in the step's place. The interpreter reads
+// nothing back from its shadow, so a step checked with a tape and the tape then
+// played into a shadow leaves that shadow as the step checked with it would.
+//
+//   ir::Tape tape;
+//   interpreter.shadow = &tape;
+//   ir::checkNode(interpreter, node, step, after, prototype, divergences);
+//   tape.play(provenance);  // on the shadow's own thread, in the step's place
+class Tape final : public Shadow {
+ public:
+  enum class Call : std::uint8_t { Copy, Combine, Load, Store, Exchange };
+  // One call with its arguments; an argument the call does not take is left
+  // as it was built.
+  struct Entry {
+    Call call = Call::Copy;
+    Place dst = Place::None;
+    Place a = Place::None;
+    Place b = Place::None;
+    Place c = Place::None;
+    unsigned bits = 0;
+    unsigned byte = 0;
+    Address address = 0;
+  };
+  std::vector<Entry> entries;
+
+  void copy(Place dst, unsigned bits, Place a) override;
+  void combine(Place dst, unsigned bits, Place a, Place b, Place c) override;
+  void load(Place dst, unsigned bits, unsigned byte, Address address) override;
+  void store(Address address, Place source, unsigned byte) override;
+  void exchange() override;
+
+  // Makes every kept call on `shadow`, in order, and clears.
+  void play(Shadow& shadow);
+  // Makes the `count` kept calls from `from` on `shadow`, in order, and keeps
+  // them: a tape that holds many steps' calls plays one step's at a time.
+  void play(Shadow& shadow, std::size_t from, std::size_t count) const;
+};
+
 // Runs `node` on the sound interpreter over the step's data accesses, then
 // checks the registers after against `after`, the cycles against `cycles` —
 // the audio machine's count for the step — and that the node places exactly as

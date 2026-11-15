@@ -381,6 +381,8 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
   add_library(snaggletooth_rom STATIC
     tools/rom/cartridge_entries.cpp
     tools/rom/input_script.cpp
+    tools/rom/rom_buffer.cpp
+    tools/rom/rom_buffered_run.cpp
     tools/rom/rom_disasm.cpp
     tools/rom/rom_enumerate.cpp
     tools/rom/rom_facts.cpp
@@ -682,6 +684,8 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/snes/bus_test.cpp
     tests/snes/cartridge_map_test.cpp
     tests/snes/cartridge_header_test.cpp
+    tests/rom/buffer_test.cpp
+    tests/rom/buffered_run_test.cpp
     tests/rom/cartridge_entries_test.cpp
     tests/rom/enumerate_test.cpp
     tests/rom/facts_test.cpp

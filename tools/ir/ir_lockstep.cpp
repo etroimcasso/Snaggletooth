@@ -364,4 +364,47 @@ std::uint32_t checkSpc700Node(Spc700Interpreter& interpreter, const Node& node,
   return cost;
 }
 
+void Tape::copy(Place dst, unsigned bits, Place a) {
+  entries.push_back(Entry{.call = Call::Copy, .dst = dst, .a = a, .b = Place::None, .c = Place::None, .bits = bits,
+                          .byte = 0, .address = 0});
+}
+
+void Tape::combine(Place dst, unsigned bits, Place a, Place b, Place c) {
+  entries.push_back(Entry{.call = Call::Combine, .dst = dst, .a = a, .b = b, .c = c, .bits = bits, .byte = 0,
+                          .address = 0});
+}
+
+void Tape::load(Place dst, unsigned bits, unsigned byte, Address address) {
+  entries.push_back(Entry{.call = Call::Load, .dst = dst, .a = Place::None, .b = Place::None, .c = Place::None,
+                          .bits = bits, .byte = byte, .address = address});
+}
+
+void Tape::store(Address address, Place source, unsigned byte) {
+  entries.push_back(Entry{.call = Call::Store, .dst = Place::None, .a = source, .b = Place::None, .c = Place::None,
+                          .bits = 0, .byte = byte, .address = address});
+}
+
+void Tape::exchange() {
+  entries.push_back(Entry{.call = Call::Exchange, .dst = Place::None, .a = Place::None, .b = Place::None,
+                          .c = Place::None, .bits = 0, .byte = 0, .address = 0});
+}
+
+void Tape::play(Shadow& shadow) {
+  play(shadow, 0, entries.size());
+  entries.clear();
+}
+
+void Tape::play(Shadow& shadow, std::size_t from, std::size_t count) const {
+  for (std::size_t i = from; i < from + count; ++i) {
+    const Entry& e = entries[i];
+    switch (e.call) {
+      case Call::Copy: shadow.copy(e.dst, e.bits, e.a); break;
+      case Call::Combine: shadow.combine(e.dst, e.bits, e.a, e.b, e.c); break;
+      case Call::Load: shadow.load(e.dst, e.bits, e.byte, e.address); break;
+      case Call::Store: shadow.store(e.address, e.a, e.byte); break;
+      case Call::Exchange: shadow.exchange(); break;
+    }
+  }
+}
+
 }  // namespace snaggletooth::ir

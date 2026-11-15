@@ -601,7 +601,11 @@ emulation mode; `loadsStackPointer`) passes nothing — a routine that pulls its
 own return address ends there, a `PEA`/`RTS` jump ends nothing, a handler on a
 stack of its own is one invocation until its `RTI`, and two tasks on two stacks
 keep their own chains. `within` says whether the running invocation is one or
-was called from it with no interrupt between. A console reset leaves no caller to return to:
+was called from it with no interrupt between. The interpreter tells the shadow
+every move through `Shadow`'s five calls and reads nothing back, so a `Tape`
+(`ir/ir_lockstep.h`) keeps the calls of a step for a shadow on another thread to
+play in that step's place (`play`); a run split across threads checks each step
+where it is checked and keeps every origin where the shadow is. A console reset leaves no caller to return to:
 `abandon()` ends every invocation above the root with its runs joining
 nothing, and one still held — by a byte of work RAM it wrote, or a stream left
 open — keeps its runs, so a source followed out from it stops there. A byte loaded from work RAM keeps the
@@ -1235,6 +1239,7 @@ would mean the layers depend on each other.
 | `DifferentialReport`, `Divergence` | What was checked, counted and skipped, on both CPUs; each disagreement with its step, processor, node, effect and the two values; the form and construct histograms, and the sound CPU's form histogram. |
 | `StepObserver`, `checkNode(…)`, `checkInterrupt(…)`, `registersOf(state)` | One step of the main CPU collected — the fetches, the data accesses, the cycles — and the interpreter run over it and checked; a core state as the interpreter's registers. |
 | `Spc700Access`, `Spc700StepAccesses`, `splitSpc700Step(step, pc, length)`, `checkSpc700Node(…)` | One sound-CPU access as the audio machine reports it; a step's accesses with the instruction's own fetches set apart from its data; the sound interpreter run over the data and checked against the registers after, the cycles, and the count of cycles the node places. |
+| `Tape`, `play(shadow)`, `play(shadow, from, count)` | A shadow that keeps the interpreter's calls instead of acting on them, and makes them on another shadow in order: all of them, cleared after, or a range of them, kept. |
 | `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `addressingName`, `modeName` | Every value of the vocabulary as text. |
 | `renderProgram(program, file)`, `parseProgram(text, error)`, `ProgramFile`, `Parsed`, `Processor` | One chip's program file written from a program and what it does not carry — the chip among them — and read back to both; the grammar is [snagir.md](snagir.md). |
 | `renderEffect(effect)`, `renderNode(node, processor)`, `equivalent(a, b)` | An effect and a node as the file has them; two programs compared as the files carry them, both node lists. |
