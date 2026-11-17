@@ -1,9 +1,6 @@
 # Pad configuration
 
-A pad configuration is a text file that says which keys and which places on a
-controller hold each of the machine's twelve buttons, and which port a controller
-goes to. [`snes_player`](../tools/player/README.md) ships with one and uses it
-unless you hand it another.
+A pad configuration is a text file that says which keys and which places on a controller hold each of the machine's twelve buttons, and which port a controller goes to. [`snes_player`](../tools/player/README.md) ships with one and uses it unless you hand it another.
 
 > **Status.** `snes_player` reads the keyboard and every gamepad plugged in, and
 > maps both through this file. The file's extension is `.snagpad`.
@@ -25,8 +22,7 @@ unless you hand it another.
 
 ## 1. Form
 
-A configuration is UTF-8 text in a file whose extension is `.snagpad`, in the
-shape of a Unix configuration file:
+A configuration is UTF-8 text in a file whose extension is `.snagpad`, in the shape of a Unix configuration file:
 
 ```
 # a comment, to the end of the line
@@ -36,9 +32,7 @@ key = value
 key = value, second value
 ```
 
-A `#` begins a comment, a blank line is nothing, and section headers and keys are
-read in any case. A value is one or more entries separated by commas, and a button
-with more than one is held when any of them is.
+A `#` begins a comment, a blank line is nothing, and section headers and keys are read in any case. A value is one or more entries separated by commas, and a button with more than one is held when any of them is.
 
 Start from the one the tool ships with:
 
@@ -47,23 +41,18 @@ $ snes_player --default-config > mine.snagpad
 $ snes_player cartridge.sfc --config mine.snagpad
 ```
 
-`--default-config` prints the built-in configuration and exits, opening no window.
-What it prints is the file the tool was built from, so what you copy is what runs.
+`--default-config` prints the built-in configuration and exits, opening no window. What it prints is the file the tool was built from, so what you copy is what runs.
 
-To have it picked up with no flag at all, put it at `config/input/default.snagpad`
-where your files are kept — [user-files.md](user-files.md) says where that is and
-`snes_player --user-files` prints it:
+To have it picked up with no flag at all, put it at `config/input/default.snagpad` where your files are kept — [user-files.md](user-files.md) says where that is and `snes_player --user-files` prints it:
 
 ```
 $ mkdir -p "$(snes_player --user-files)/config/input"
 $ snes_player --default-config > "$(snes_player --user-files)/config/input/default.snagpad"
 ```
 
-A `--config` on the command line still stands over it, and the tool says at the
-start which mapping it took.
+A `--config` on the command line still stands over it, and the tool says at the start which mapping it took.
 
-The twelve buttons are named as the machine names them, which is also how a
-[recorded run](input-script.md) names them:
+The twelve buttons are named as the machine names them, which is also how a [recorded run](input-script.md) names them:
 
 ```
 b  y  select  start  up  down  left  right  a  x  l  r
@@ -88,18 +77,11 @@ left = left
 right = right
 ```
 
-Each button names one or more keys. **Keys are named as the system names them** —
-`Z`, `Return`, `Backspace`, `Up` — because a key's name belongs to the keyboard
-rather than to this tool, and one table of two hundred names is enough. A name the
-keyboard does not have refuses the run and says which one.
+Each button names one or more keys. **Keys are named as the system names them** — `Z`, `Return`, `Backspace`, `Up` — because a key's name belongs to the keyboard rather than to this tool, and one table of two hundred names is enough. A name the keyboard does not have refuses the run and says which one.
 
-The default puts the four face buttons where they sit on a pad rather than where
-their letters fall on the keyboard: `Z` is south and so holds B, `X` is east and
-holds A, `A` is west and holds Y, `S` is north and holds X.
+The default puts the four face buttons where they sit on a pad rather than where their letters fall on the keyboard: `Z` is south and so holds B, `X` is east and holds A, `A` is west and holds Y, `S` is north and holds X.
 
-The keyboard is always in play, so a person with a pad in one hand and a hand on
-the keyboard is one player: both feed the port, and a button either of them holds
-is held.
+The keyboard is always in play, so a person with a pad in one hand and a hand on the keyboard is one player: both feed the port, and a button either of them holds is held.
 
 ## 3. The gamepad
 
@@ -120,11 +102,7 @@ left = dpad left, left stick left
 right = dpad right, left stick right
 ```
 
-**A pad is read by where its buttons sit, not by what is printed on them.** The
-letters move between families and the positions do not: the button under your
-thumb at the south position is the machine's B on every pad, whichever letter that
-pad prints there. One configuration therefore plays the same way round on every
-controller, and no pad needs a section of its own to be usable.
+**A pad is read by where its buttons sit, not by what is printed on them.** The letters move between families and the positions do not: the button under your thumb at the south position is the machine's B on every pad, whichever letter that pad prints there. One configuration therefore plays the same way round on every controller, and no pad needs a section of its own to be usable.
 
 The places a button may name:
 
@@ -139,22 +117,13 @@ The places a button may name:
 | the rest | `start` `back` `guide` |
 | printed letters | `a` `b` `x` `y` — see below |
 
-A stick counts as pointing somewhere once it is past half of its range, and a
-trigger counts as held past half of its travel. Runs of spaces in a phrase read as
-one, so `left  stick   up` is `left stick up`.
+A stick counts as pointing somewhere once it is past half of its range, and a trigger counts as held past half of its travel. Runs of spaces in a phrase read as one, so `left stick up` is `left stick up`.
 
-The four **printed letters** are the exception to reading a pad by position: `a`
-means the button this pad prints an A on, wherever that is. They exist for the one
-family whose letters are the machine's own, and resolve per pad — a pad that
-prints something else on its face, a cross or a circle, prints no such letter, and
-a button bound to one holds nothing. The tool says so once when the pad is opened
-rather than leaving a button quietly dead.
+The four **printed letters** are the exception to reading a pad by position: `a` means the button this pad prints an A on, wherever that is. They exist for the one family whose letters are the machine's own, and resolve per pad — a pad that prints something else on its face, a cross or a circle, prints no such letter, and a button bound to one holds nothing. The tool says so once when the pad is opened rather than leaving a button quietly dead.
 
 ## 4. A family of its own
 
-A `[gamepad <family>]` section overrides the plain one **key by key** for that
-family, and leaves every key it does not name. The families are `nintendo`,
-`sony`, `xbox`, `gamecube`, `standard` and `unknown`.
+A `[gamepad <family>]` section overrides the plain one **key by key** for that family, and leaves every key it does not name. The families are `nintendo`, `sony`, `xbox`, `gamecube`, `standard` and `unknown`.
 
 The shipped configuration has exactly one, because exactly one pad needs it:
 
@@ -170,13 +139,9 @@ l = left trigger
 r = right trigger
 ```
 
-A GameCube pad prints A at south, X at east, B at west and Y at north — so read by
-position its face would be wrong, and read by its letters it is exactly a
-controller for this machine. Its L and R are its analog triggers. Start, Select
-and the d-pad are not named here, so they come from the section above.
+A GameCube pad prints A at south, X at east, B at west and Y at north — so read by position its face would be wrong, and read by its letters it is exactly a controller for this machine. Its L and R are its analog triggers. Start, Select and the d-pad are not named here, so they come from the section above.
 
-That is also how you give one family a port of its own without repeating a whole
-mapping:
+That is also how you give one family a port of its own without repeating a whole mapping:
 
 ```
 [gamepad sony]
@@ -185,33 +150,28 @@ port = 2
 
 ## 5. Ports
 
-`port` is `1`, `2` or `auto`. Under `[keyboard]` it is `1` or `2` — the keyboard is
-on a port of its own and is never `auto`.
+`port` is `1`, `2` or `auto`. Under `[keyboard]` it is `1` or `2` — the keyboard is on a port of its own and is never `auto`.
 
-A pad set to `auto` takes the lowest port free when it is plugged in. The first pad
-to arrive takes port 1, the next takes port 2, a third is reported and left idle,
-and pulling one out frees its port for the next. A pad whose family pins a port
-takes that port, even if it is the first to arrive.
+A pad set to `auto` takes the lowest port free when it is plugged in. The first pad to arrive takes port 1, the next takes port 2, a third is reported and left idle, and pulling one out frees its port for the next. A pad whose family pins a port takes that port, even if it is the first to arrive.
 
-A port with no controller on it is **empty**, which a program can tell from a
-controller with nothing pressed — the machine answers an empty socket with zeros
-and a pad with its own idle word.
+A port with no controller on it is **empty**, which a program can tell from a controller with nothing pressed — the machine answers an empty socket with zeros and a pad with its own idle word.
 
 ## 6. Hotkeys
 
 ```
 [hotkeys]
 reset = cmdorctrl+r
+pause = cmdorctrl+p
 ```
 
-The chords that work the console itself rather than a pad in one of its ports.
+The chords that work the console and the run, where the other sections work a pad in one of its ports.
 
 | Key | What it is |
 |---|---|
 | `reset` | the reset button on the console's front: `Snes::reset()` ([snes-machine.md §The reset line](snes-machine.md#the-reset-line)) |
+| `pause` | stops the game and resumes it, in a run that disassembles as it plays; the player's page says what a stop is ([When the buffer reaches its ceilings](../tools/player/README.md#when-the-buffer-reaches-its-ceilings)) |
 
-A hotkey takes chords, as many as the line lists. A chord is a key, named as
-`[keyboard]` names it, with any of four modifiers joined to its front by `+`:
+A hotkey takes chords, as many as the line lists. A chord is a key, named as `[keyboard]` names it, with any of four modifiers joined to its front by `+`:
 
 | Modifier | The key |
 |---|---|
@@ -221,26 +181,17 @@ A hotkey takes chords, as many as the line lists. A chord is a key, named as
 | `alt` | Alt; Option on a Mac |
 | `shift` | Shift |
 
-Left and right of a modifier are one key. A chord is pressed by exactly its
-modifiers: `cmd+r` is not pressed by `r` alone, nor by `cmd+shift+r`. A press is one
-reset; holding the chord down does not repeat it. A key may stand with no modifier,
-unless `[keyboard]` gives it to a button.
+Left and right of a modifier are one key. A chord is pressed by exactly its modifiers: `cmd+r` is not pressed by `r` alone, nor by `cmd+shift+r`. A press is one reset; holding the chord down does not repeat it. A key may stand with no modifier, unless `[keyboard]` gives it to a button.
 
-The shipped file says `cmdorctrl+r`, so the reset button is Command and R on a Mac,
-where Control and R does nothing, and Control and R everywhere else.
+The shipped file says `cmdorctrl+r`, so the reset button is Command and R on a Mac, where Control and R does nothing, and Control and R everywhere else; and `cmdorctrl+p`, so the pause chord is Command and P on a Mac and Control and P everywhere else.
 
-A hotkey the file does not name comes from the shipped default, so a file with an
-empty `[hotkeys]` section, or with none, still has its reset button.
+A hotkey the file does not name comes from the shipped default, so a file with an empty `[hotkeys]` section, or with none, still has both hotkeys, and one that names only `reset` still has the shipped pause chord.
 
-A run that is read from an input script, or written to one, leaves the button
-alone and says so the first time it is pressed: a script is pads and frames and
-has no word for the reset line, so a run reset part-way through could not be
-played back.
+A run that is read from an input script, or written to one, leaves the button alone and says so the first time it is pressed: a script is pads and frames and has no word for the reset line, so a run reset part-way through could not be played back.
 
 ## 7. Refusals
 
-A configuration is read whole before the window opens, and a line that cannot be
-read refuses it, naming the line:
+A configuration is read whole before the window opens, and a line that cannot be read refuses it, naming the line:
 
 - a section that is not one of the above, or `[keyboard]` or `[gamepad]` twice;
 - a key that is not one of the twelve buttons and is not `port`, or one given twice;
@@ -248,25 +199,18 @@ read refuses it, naming the line:
 - a phrase that names no place on a pad;
 - a `port` that is not `auto`, `1` or `2` — or `auto` under `[keyboard]`;
 - two sections pinned to the same port;
-- a key under `[hotkeys]` that is not `reset`, or `reset` given twice;
+- a key under `[hotkeys]` that is neither `reset` nor `pause`, either one given twice, or one chord given to both;
 - a key name the keyboard does not have;
-- a key with no modifier that `reset` and one of the twelve buttons both name — one press
-  would do both.
+- a key with no modifier that a hotkey and one of the twelve buttons both name — one press would do both.
 
-A present `[keyboard]` or `[gamepad]` section says what holds **every one of the
-twelve**. Those two sections are the whole mapping rather than a patch, so nothing
-hidden fills a gap — a section that leaves a button unnamed is refused, naming it.
-A `[gamepad <family>]` section is the patch, and says as little as it likes.
+A present `[keyboard]` or `[gamepad]` section says what holds **every one of the twelve**. Those two sections are the whole mapping rather than a patch, so nothing hidden fills a gap — a section that leaves a button unnamed is refused, naming it. A `[gamepad <family>]` section is the patch, and says as little as it likes.
 
 ```
 $ snes_player cartridge.sfc --config mine.snagpad
 mine.snagpad: line 4: `elbow` is not a place on a pad
 ```
 
-A file that leaves out `[keyboard]` or `[gamepad]` entirely takes that section from
-the shipped default, so a file that changes one thing can be four lines long. That
-and an unnamed hotkey are the places the default reaches into a configuration of
-your own.
+A file that leaves out `[keyboard]` or `[gamepad]` entirely takes that section from the shipped default, so a file that changes one thing can be four lines long. That and an unnamed hotkey are the places the default reaches into a configuration of your own.
 
 ## 8. Library
 
@@ -284,32 +228,18 @@ const snaggletooth::Joypad held = snaggletooth::player::padFromGamepad(input, ma
 machine.setJoypad(snaggletooth::JoypadPort::One, held);
 ```
 
-`resolve` takes the pad's family and the four letters it prints, and answers the
-mapping for that pad. `padFromGamepad` turns a `PadInput` — the pad's state as the
-application that owns the device reports it — into the `Joypad` the machine takes.
-`padFromKeyboard` does the same for the keys held down, and `either` adds two
-together for a port they share.
+`resolve` takes the pad's family and the four letters it prints, and answers the mapping for that pad. `padFromGamepad` turns a `PadInput` — the pad's state as the application that owns the device reports it — into the `Joypad` the machine takes. `padFromKeyboard` does the same for the keys held down, and `either` adds two together for a port they share.
 
-Nothing in the library opens a device, reads an event or touches a file: it holds
-no reference to any windowing or input library, and an application supplies the
-state. The machine's own `Button`, `Joypad` and `JoypadPort` are the
-[machine's](snes-machine.md#the-controller-ports).
+Nothing in the library opens a device, reads an event or touches a file: it holds no reference to any windowing or input library, and an application supplies the state. The machine's own `Button`, `Joypad` and `JoypadPort` are the [machine's](snes-machine.md#the-controller-ports).
 
 The library target is `snaggletooth_player_pads`.
 
 ## 9. Stability
 
-This document defines a published surface, held to the same rule as the
-[input script](input-script.md#7-stability): once a release reads a
-configuration, a later release reads it to the same effect. New sections, new keys
-and new phrases may be added; the meaning of a line this page describes does not
-change, and nothing described here is removed.
+This document defines a published surface, held to the same rule as the [input script](input-script.md#7-stability): once a release reads a configuration, a later release reads it to the same effect. New sections, new keys and new phrases may be added; the meaning of a line this page describes does not change, and nothing described here is removed.
 
 ## See also
 
-- [Input script](input-script.md) — a recorded run, which the player writes and
-  replays, and which names the same twelve buttons.
-- [tools/player/README.md](../tools/player/README.md) — the player itself: what it
-  shows, what it records, and what it takes on the command line.
-- [The SNES machine §The controller ports](snes-machine.md#the-controller-ports)
-  — how the machine presents a controller to the program.
+- [Input script](input-script.md) — a recorded run, which the player writes and replays, and which names the same twelve buttons.
+- [tools/player/README.md](../tools/player/README.md) — the player itself: what it shows, what it records, and what it takes on the command line.
+- [The SNES machine §The controller ports](snes-machine.md#the-controller-ports) — how the machine presents a controller to the program.

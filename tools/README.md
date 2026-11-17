@@ -1,9 +1,6 @@
 # Tools
 
-The command-line tools that ship with Snaggletooth, and the libraries behind them.
-Every tool here is a thin `main` over a library target; the library is the product,
-and a front end that wants the same capability links the library rather than
-shelling out to the tool.
+The command-line tools that ship with Snaggletooth, and the libraries behind them. Every tool here is a thin `main` over a library target; the library is the product, and a front end that wants the same capability links the library rather than shelling out to the tool.
 
 | Directory | Library | Command line | Page |
 |---|---|---|---|
@@ -16,43 +13,20 @@ shelling out to the tool.
 | [`examples/`](examples/README.md) | — (header-only) | `snes_examples` | one README per cartridge |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
 | [`video/`](video/README.md) | `snaggletooth_video` | — | [ppu.md](../docs/ppu.md) |
-| [`player/`](player/README.md) | `snaggletooth_player_pads` | `snes_player`, `snes_gpu_verify` | [ppu.md](../docs/ppu.md), [gpu-ppu.md](../docs/gpu-ppu.md), [pad-config.md](../docs/pad-config.md), [input-script.md](../docs/input-script.md) |
+| [`player/`](player/README.md) | `snaggletooth_player_pads` | `snes_player`, `snes_gpu_verify` | [ppu.md](../docs/ppu.md), [gpu-ppu.md](../docs/gpu-ppu.md), [pad-config.md](../docs/pad-config.md), [input-script.md](../docs/input-script.md), [snes-disassembler.md](../docs/snes-disassembler.md) |
 | [`inputs/`](inputs/README.md) | — (data) | — | [input-script.md](../docs/input-script.md) |
 
-`inputs/` is the one directory here that holds no code: the recorded runs the
-tools replay, and the `default.snaginput` that plays a cartridge with no run of
-its own, so `--input-dir tools/inputs` plays a whole library.
+`inputs/` is the one directory here that holds no code: the recorded runs the tools replay, and the `default.snaginput` that plays a cartridge with no run of its own, so `--input-dir tools/inputs` plays a whole library.
 
-`player/` carries a library as well as its commands: `snaggletooth_player_pads`
-turns a keyboard and a controller into the buttons a port holds, and opens no
-device of its own, so it is tested wherever the suite is. `snes_gpu_verify` runs a
-cartridge headless on the GPU PPU and holds every frame to the machine's own.
+`player/` carries a library as well as its commands: `snaggletooth_player_pads` turns a keyboard and a controller into the buttons a port holds, and opens no device of its own, so it is tested wherever the suite is. `snes_gpu_verify` runs a cartridge headless on the GPU PPU and holds every frame to the machine's own.
 
-Two scripts sit beside the libraries. `corpus.py` runs a directory of
-cartridges through four commands, one image at a time or `--jobs` of them at
-once — `snes_disasm` writes
-the program file, the manifest, the lifted files in their forms and the
-previews, `snes_render` writes the
-bank files from the program file, `snes_verify` assembles the tree back into a
-rebuilt image with the original's extension and compares it, and
-`snes_differential` replays the recorded run beside the interpreter — and
-reports one line per image and a verdict from the commands' exit statuses, with
-the corpus-wide aggregates the manifests carry on request. It creates nothing
-itself and decides nothing the commands do not, and it runs the two commands
-that emulate under `--quiet`, since their progress is for a terminal:
+Two scripts sit beside the libraries. `corpus.py` runs a directory of cartridges through four commands, one image at a time or `--jobs` of them at once — `snes_disasm` writes the program file, the manifest, the lifted files in their forms and the previews, `snes_render` writes the bank files from the program file, `snes_verify` assembles the tree back into a rebuilt image with the original's extension and compares it, and `snes_differential` replays the recorded run beside the interpreter — and reports one line per image and a verdict from the commands' exit statuses, with the corpus-wide aggregates the manifests carry on request. It creates nothing itself and decides nothing the commands do not, and it runs the two commands that emulate under `--quiet`, since their progress is for a terminal:
 
 ```
 tools/corpus.py <images> <output> --build build [--no-run] [--seconds N] [--input-dir <scripts>] [--no-differential] [--facts] [--routines] [--jobs N]
 ```
 
-It exits 0 only when every command did, and writes nothing outside `<output>`.
-Its lines and aggregates come out in name order however many images run at
-once.
-`parse_dsp_tables.py` stands apart from the toolkit: it transcribes the S-DSP's
-documented constant tables — the Gaussian interpolation table, and the envelope
-and noise rate tables — from two public references, cross-checking them entry by
-entry, into the generated includes the library compiles. It runs once when a table
-changes, never at build time; its docstring carries the usage.
+It exits 0 only when every command did, and writes nothing outside `<output>`. Its lines and aggregates come out in name order however many images run at once. `parse_dsp_tables.py` stands apart from the toolkit: it transcribes the S-DSP's documented constant tables — the Gaussian interpolation table, and the envelope and noise rate tables — from two public references, cross-checking them entry by entry, into the generated includes the library compiles. It runs once when a table changes, never at build time; its docstring carries the usage.
 
 ## Contents
 
@@ -62,74 +36,19 @@ changes, never at build time; its docstring carries the usage.
 
 ## Building
 
-The tools build when `SNAGGLETOOTH_BUILD_TOOLS` is on — the default for a top-level
-build — or when the tests are on (`SNAGGLETOOTH_BUILD_TESTS`). A parent build that
-vendors the library sets the first to have them without the suite. Each is its own
-target:
+The tools build when `SNAGGLETOOTH_BUILD_TOOLS` is on — the default for a top-level build — or when the tests are on (`SNAGGLETOOTH_BUILD_TESTS`). A parent build that vendors the library sets the first to have them without the suite. Each is its own target:
 
 ```
 cmake --build build --config Release --target snes_disasm snes_render snes_verify snes_lift snes_differential snes_examples cpu65816_disasm spc700_disasm cpu65816_asm spc700_asm rom_render spc_render snes_player snes_gpu_verify
 ```
 
-The binaries land in `build/`, or in `build\Release\` on Windows. Keep `--config Release`: on
-Windows the build is `Debug` without it, which runs the machine several times slower
-([docs/build-and-consume.md](../docs/build-and-consume.md#building-a-release-build)).
+The binaries land in `build/`, or in `build\Release\` on Windows. Keep `--config Release`: on Windows the build is `Debug` without it, which runs the machine several times slower ([docs/build-and-consume.md](../docs/build-and-consume.md#building-a-release-build)).
 
 ## How the pieces fit
 
-The two disassemblers are backends over one framework, and the two assemblers
-are dialects over another. `disasm/` is the part of a disassembler that does not
-depend on the chip — it follows control flow from entry points, carries a context
-beside every address, and renders assemblable source — and `assembler/` is the
-part of an assembler that does not: the language's common layer, the two passes,
-the diagnostics. `spc700/` and `cpu65816/` each hold one chip's backend and its
-dialect, built from one instruction table, so what the disassembler writes the
-assembler reads back to the same bytes. `rom/` reads a cartridge through the
-library's own header functions, names the entry points a trace of the whole
-cartridge starts from, and runs that trace: every bank through the 65816 backend
-with control flow carried across banks, the uploaded sound program through the
-SPC700 backend, and the result written as a source tree with a manifest — and
-it runs the reverse, assembling every file of a tree through the two dialects
-and comparing the result with the image. It runs the cartridge on the machine
-to find the destinations of the jumps the bytes do not name, and traces from
-them; to lift every instruction the CPU executes from the bytes it fetched and
-hold it to the machine, so that where the CPU arrived without an instruction
-naming it is traced from too and the registers the run saw at every site are
-recorded; and to record every range of bytes the transfer engines moved — where
-from, where to, how many, and from which instruction — and lifts every such
-range that begins in the image into a file of its own kind, the bank file
-including it where it was. It also reports what the
-traced code reaches: the hardware register behind every instruction that
-touches one, the DMA transfers those add up to — one per start, with the
-source, the step and the count where every path proves them, a transfer
-proven whole that no run took lifted from the code's word and one the run
-did take checked against what it moved — and the routines the
-instructions belong to, each with the routines it calls and the hardware it
-drives itself and through them.
-`ir/` lifts the 65816 listings a cartridge disassembly produces into a form
-with no bytes in it — one node per instruction, carrying what source says and
-the typed effects the chip performs — runs that form through an interpreter
-that never sees the bytes, writes SNES assembly back from it, and replays a
-cartridge's recorded run on the machine with the interpreter beside it, so the
-representation is held to the core rather than taken on trust. The bank files
-`rom/` writes come through that renderer, with the registers, labels and
-routines the manifest carries attached as names. `examples/` holds the cartridges built by hand that the
-tests run every tool on and every page's example output comes from, one
-directory each. `spc/` reads and writes the two file formats the renderers
-use, an SPC dump in and a WAV out.
+The two disassemblers are backends over one framework, and the two assemblers are dialects over another. `disasm/` is the part of a disassembler that does not depend on the chip — it follows control flow from entry points, carries a context beside every address, and renders assemblable source — and `assembler/` is the part of an assembler that does not: the language's common layer, the two passes, the diagnostics. `spc700/` and `cpu65816/` each hold one chip's backend and its dialect, built from one instruction table, so what the disassembler writes the assembler reads back to the same bytes. `rom/` reads a cartridge through the library's own header functions, names the entry points a trace of the whole cartridge starts from, and runs that trace: every bank through the 65816 backend with control flow carried across banks, the uploaded sound program through the SPC700 backend, and the result written as a source tree with a manifest — and it runs the reverse, assembling every file of a tree through the two dialects and comparing the result with the image. It runs the cartridge on the machine to find the destinations of the jumps the bytes do not name, and traces from them; to lift every instruction the CPU executes from the bytes it fetched and hold it to the machine, so that where the CPU arrived without an instruction naming it is traced from too and the registers the run saw at every site are recorded; and to record every range of bytes the transfer engines moved — where from, where to, how many, and from which instruction — and lifts every such range that begins in the image into a file of its own kind, the bank file including it where it was. It also reports what the traced code reaches: the hardware register behind every instruction that touches one, the DMA transfers those add up to — one per start, with the source, the step and the count where every path proves them, a transfer proven whole that no run took lifted from the code's word and one the run did take checked against what it moved — and the routines the instructions belong to, each with the routines it calls and the hardware it drives itself and through them. `ir/` lifts the 65816 listings a cartridge disassembly produces into a form with no bytes in it — one node per instruction, carrying what source says and the typed effects the chip performs — runs that form through an interpreter that never sees the bytes, writes SNES assembly back from it, and replays a cartridge's recorded run on the machine with the interpreter beside it, so the representation is held to the core rather than taken on trust. The bank files `rom/` writes come through that renderer, with the registers, labels and routines the manifest carries attached as names. `examples/` holds the cartridges built by hand that the tests run every tool on and every page's example output comes from, one directory each. `spc/` reads and writes the two file formats the renderers use, an SPC dump in and a WAV out.
 
-The include paths follow the targets. `tools/` is on the public include path of
-`snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_rom`,
-`snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential`
-and `snaggletooth_spc`, so those headers are included by directory:
-`disasm/disasm.h`, `assembler/assembler.h`, `rom/rom_disasm.h`,
-`rom/rom_verify.h`, `rom/cartridge_entries.h`, `ir/ir.h`, `ir/cpu65816_lift.h`,
-`ir/ir_interpret.h`, `ir/ir_render.h`, `ir/ir_text.h`, `ir/ir_dataflow.h`,
-`ir/ir_lockstep.h`, `ir/ir_differential.h`, `examples/example_cartridges.h`,
-`spc/spc_loader.h`. The two chip libraries put their own directory on the path,
-so their headers are included bare: `spc700_disasm.h`, `spc700_asm.h`,
-`cpu65816_disasm.h`, `cpu65816_asm.h`; `snaggletooth_rom` links both, so a
-program that links it reaches them too.
+The include paths follow the targets. `tools/` is on the public include path of `snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_rom`, `snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential` and `snaggletooth_spc`, so those headers are included by directory: `disasm/disasm.h`, `assembler/assembler.h`, `rom/rom_disasm.h`, `rom/rom_verify.h`, `rom/cartridge_entries.h`, `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/ir_interpret.h`, `ir/ir_render.h`, `ir/ir_text.h`, `ir/ir_dataflow.h`, `ir/ir_lockstep.h`, `ir/ir_differential.h`, `examples/example_cartridges.h`, `spc/spc_loader.h`. The two chip libraries put their own directory on the path, so their headers are included bare: `spc700_disasm.h`, `spc700_asm.h`, `cpu65816_disasm.h`, `cpu65816_asm.h`; `snaggletooth_rom` links both, so a program that links it reaches them too.
 
 ## See also
 

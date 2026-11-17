@@ -80,11 +80,13 @@ struct ChordName {
   [[nodiscard]] bool operator==(const ChordName&) const = default;
 };
 
-// The `[hotkeys]` section: the chords that work the console itself rather than a
-// pad in one of its ports.
+// The `[hotkeys]` section: the chords that work the console and the run, where the
+// other sections work a pad in one of the ports.
 struct HotkeySection {
   std::vector<ChordName> reset;  // the console's reset button
   bool resetGiven = false;
+  std::vector<ChordName> pause;  // stops the game and resumes it
+  bool pauseGiven = false;
 };
 
 // A parsed configuration.
@@ -101,15 +103,15 @@ struct PadConfig {
 // with it, when a line does not read: an unknown section or key, a key given twice,
 // a button with no source, a phrase that names no place on a pad, a port that is
 // not `auto`, `1` or `2`, two sections pinning one port, or a key under `[hotkeys]`
-// that is not a hotkey. A file that does not read refuses the run before the window
-// opens, the way a script that does not read does.
+// that is neither `reset` nor `pause`. A file that does not read refuses the run
+// before the window opens, the way a script that does not read does.
 [[nodiscard]] std::optional<PadConfig> parsePadConfig(std::string_view text, std::string& error);
 
 // Fills in whichever of the two plain sections `config` does not have from
 // `defaults`, and any hotkey it does not name. These are the places the shipped
 // default reaches into a person's own file, so a one-section file is worth writing:
 // a file that says only what its author wanted changed still has a keyboard, still
-// has a pad, and still has a reset button.
+// has a pad, and still has its reset and pause chords.
 void fillFrom(PadConfig& config, const PadConfig& defaults);
 
 // The mapping a pad gets: the plain `[gamepad]` section with this family's own
@@ -138,6 +140,7 @@ struct Chord {
 // The hotkeys as the application's own key ids.
 struct HotkeyMap {
   std::vector<Chord> reset;
+  std::vector<Chord> pause;
 };
 
 // Whether pressing `key` with exactly `modifiers` held is one of `chords`. The
@@ -146,9 +149,9 @@ struct HotkeyMap {
 
 // The hotkeys resolved the way the keyboard's keys are, with `cmdorctrl` turned
 // into Command for a Mac's keyboard and Control for any other. Nothing, with
-// `error` naming the key, for a name the application does not know, or for a key
+// `error` naming the key, for a name the application does not know, for a key
 // with no modifier that `keyboard` already gives to a button — one press would do
-// both.
+// both — or for one chord given to both hotkeys.
 [[nodiscard]] std::optional<HotkeyMap> resolveHotkeys(
     const PadConfig& config, const KeyboardMap& keyboard, KeyboardKind kind,
     const std::function<std::optional<KeyId>(std::string_view)>& idFor, std::string& error);

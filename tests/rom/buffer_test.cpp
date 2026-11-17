@@ -1,8 +1,9 @@
 // The buffer a run on another thread is fed through: every record kind written
 // and read back as it was, and the stream that holds them — blocks handed over
 // in order, held in files once memory holds its share, taken back in order, a
-// writer that never waits, a bound past which it takes nothing, and a directory
-// left as it was found.
+// writer that never waits, ceilings past which it takes nothing or, built to
+// keep, takes the writer's records all the same, ceilings changed while it
+// runs, the classes its threads work at, and a directory left as it was found.
 
 #include <algorithm>
 #include <atomic>
@@ -10,16 +11,36 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
+
 #include "gtest/gtest.h"
 #include "rom/rom_buffer.h"
 
 namespace snaggletooth::disasm {
+
+// A stream with a handed ring of the suite's size, its thread started when the
+// case says.
+struct StreamTesting {
+  static std::unique_ptr<Stream> unstarted(const std::filesystem::path& directory, std::uint64_t memoryBytes,
+                                           std::uint64_t diskBytes, AtLimit atLimit, std::size_t ringBlocks) {
+    return std::unique_ptr<Stream>(
+        new Stream(directory, std::make_unique<StreamBudget>(memoryBytes, diskBytes, atLimit), ringBlocks));
+  }
+  static std::unique_ptr<Stream> unstarted(const std::filesystem::path& directory, StreamBudget& budget) {
+    return std::unique_ptr<Stream>(new Stream(directory, budget, 0u));
+  }
+  static void start(Stream& stream) { stream.start(); }
+};
+
 namespace {
 
 constexpr std::uint64_t kMB = 1'000'000;
@@ -81,6 +102,27 @@ Numbered readNumbered(Stream& stream) {
 }
 
 constexpr std::size_t kRecord = 1u + sizeof(InternalRecord);
+
+// Writes `count` Internal records numbered from `first`; answers how many the
+// stream took.
+std::uint32_t writeNumberedFrom(Stream& stream, std::uint32_t first, std::uint32_t count) {
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const InternalRecord record{.address = first + i, .has = false, .kind = CycleKind::DataRead};
+    if (!putRecord(stream, RecordKind::Internal, record)) return i;
+  }
+  return count;
+}
+
+// Waits up to twenty seconds for `done`.
+template <class Done>
+bool within(Done done) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!done()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -299,9 +341,9 @@ TEST_F(RomBuffer, TheFilesStayWithinTheirLimitAndTheRestStaysInRam) {
   EXPECT_GT(static_cast<std::uint64_t>(taken) * kRecord, 3u * kMB - 2u * Stream::kBlockBytes)
       << "full up to a block before";
   stream.end();
-  // The stream's thread moves what it can to files, at the lowest scheduling
-  // class with its disk access throttled: the files are read a millisecond
-  // apart until they hold two blocks, the most the limit has room for.
+  // The stream's thread moves what it can to files at a lowered class: the
+  // files are read a millisecond apart until they hold two blocks, the most
+  // the limit has room for.
   std::uint64_t most = 0;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (std::chrono::steady_clock::now() < deadline && most < 2u * Stream::kBlockBytes - 2u * kRecord) {
@@ -494,6 +536,249 @@ TEST_F(RomBuffer, ADirectoryThatCannotBeMadeIsRefused) {
   std::filesystem::create_directories(dir_);
   { std::ofstream(dir_ / "file") << "a file, not a directory"; }
   EXPECT_THROW(Stream(dir_ / "file" / "under", 4u * kMB, 64u * kMB), std::runtime_error);
+}
+
+TEST_F(RomBuffer, AKeepingStreamTakesEveryRecordPastItsCeilings) {
+  // 1 MB of RAM and 2 MB of files, written to three times both together.
+  StreamBudget budget{1u * kMB, 2u * kMB, AtLimit::Keep};
+  Stream stream{dir_, budget};
+  EXPECT_FALSE(budget.atLimit()) << "nothing held";
+  const std::uint32_t count = static_cast<std::uint32_t>((9u * kMB) / kRecord);
+  std::uint32_t taken = 0;
+  std::uint32_t firstAtLimit = count;
+  std::uint32_t leftLimit = 0;  // records written at the ceilings after which atLimit() went false
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if (putRecord(stream, RecordKind::Internal, InternalRecord{.address = i, .has = false, .kind = {}})) ++taken;
+    if (budget.atLimit()) {
+      firstAtLimit = std::min(firstAtLimit, i);
+    } else if (firstAtLimit != count) {
+      ++leftLimit;
+    }
+  }
+  EXPECT_EQ(taken, count) << "every record taken";
+  EXPECT_FALSE(stream.full());
+  EXPECT_LT(firstAtLimit, count) << "the ceilings were reached";
+  EXPECT_LE(static_cast<std::uint64_t>(firstAtLimit) * kRecord, 3u * kMB) << "at the ceilings no later than 3 MB";
+  EXPECT_EQ(leftLimit, 0u) << "and there from then on while nothing is returned";
+  EXPECT_LE(budget.diskUsed(), 2u * kMB) << "the files never pass their ceiling";
+  stream.end();
+  const Numbered read = readNumbered(stream);
+  EXPECT_EQ(read.records, count);
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
+  EXPECT_FALSE(budget.atLimit()) << "everything returned";
+}
+
+TEST_F(RomBuffer, ARefusingStreamIsAtItsCeilingsTheBlockBeforeItFills) {
+  StreamBudget budget{1u * kMB, 2u * kMB};
+  Stream stream{dir_, budget};
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  std::uint32_t written = 0;
+  std::uint32_t firstAtLimit = 0;
+  bool atLimit = false;
+  while (putRecord(stream, RecordKind::Internal, InternalRecord{.address = written, .has = false, .kind = {}})) {
+    ++written;
+    if (!atLimit && budget.atLimit()) {
+      atLimit = true;
+      firstAtLimit = written;
+    }
+  }
+  EXPECT_TRUE(stream.full());
+  ASSERT_TRUE(atLimit) << "at the ceilings before it filled";
+  EXPECT_GT(written, firstAtLimit) << "the block open at the ceilings is written to its end";
+  EXPECT_LE(written - firstAtLimit, perBlock) << "and the stream fills when it would open the next";
+  stream.end();
+  const Numbered read = readNumbered(stream);
+  EXPECT_EQ(read.records, written);
+}
+
+TEST_F(RomBuffer, AKeepingStreamWhoseRingIsFullKeepsTheBlocksWaitingInOrder) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  {
+    // No thread yet to take from the ring of two: the third full block on waits.
+    const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, 64u * kMB, 64u * kMB, AtLimit::Keep, 2u);
+    const std::uint32_t count = 6u * perBlock + 10u;
+    ASSERT_EQ(writeNumbered(*stream, count), count);
+    EXPECT_EQ(stream->handed(), 2u) << "the ring holds two";
+    EXPECT_FALSE(stream->full()) << "the rest wait with the writer";
+    StreamTesting::start(*stream);
+    // The stream's thread takes the ring's two, so the ring has room when the
+    // partial block is handed: it goes after the blocks waiting, never before.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stream->flush();
+    EXPECT_EQ(stream->handed(), 7u) << "the waiting blocks and the partial one, handed by flush()";
+    stream->end();
+    const Numbered read = readNumbered(*stream);
+    EXPECT_EQ(read.records, count);
+    EXPECT_EQ(read.outOfOrder, 0u) << "the waiting blocks go in order";
+  }
+  {
+    // end() hands the waiting blocks over as flush() does.
+    const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, 64u * kMB, 64u * kMB, AtLimit::Keep, 2u);
+    const std::uint32_t count = 6u * perBlock + 10u;
+    ASSERT_EQ(writeNumbered(*stream, count), count);
+    StreamTesting::start(*stream);
+    stream->end();
+    EXPECT_EQ(stream->handed(), 7u);
+    const Numbered read = readNumbered(*stream);
+    EXPECT_EQ(read.records, count);
+    EXPECT_EQ(read.outOfOrder, 0u);
+  }
+  {
+    // A refusing stream fills there instead.
+    const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, 64u * kMB, 64u * kMB, AtLimit::Refuse, 2u);
+    EXPECT_LT(writeNumbered(*stream, 6u * perBlock), 6u * perBlock);
+    EXPECT_TRUE(stream->full());
+    EXPECT_EQ(stream->handed(), 2u);
+  }
+}
+
+TEST_F(RomBuffer, LargerCeilingsLetAStreamAtItsCeilingsGoOn) {
+  // 2 MB of RAM and no files: at the ceilings once the first block is open.
+  StreamBudget budget{2u * kMB, 0u};
+  Stream stream{dir_, budget};
+  EXPECT_FALSE(budget.atLimit());
+  std::uint32_t written = 0;
+  while (!budget.atLimit()) {
+    ASSERT_EQ(writeNumberedFrom(stream, written, 1u), 1u);
+    ++written;
+  }
+  EXPECT_EQ(written, 1u) << "a block open and one more would pass 2 MB";
+  budget.setLimits(2u * kMB, 8u * kMB);
+  EXPECT_EQ(budget.diskBytes(), 8u * kMB);
+  EXPECT_FALSE(budget.atLimit()) << "room again under the new ceilings";
+  const std::uint32_t more = static_cast<std::uint32_t>((4u * kMB) / kRecord);
+  EXPECT_EQ(writeNumberedFrom(stream, written, more), more);
+  written += more;
+  EXPECT_FALSE(stream.full());
+  EXPECT_TRUE(within([&] { return budget.diskUsed() > 0u; })) << "the files take what RAM passes";
+  EXPECT_LE(budget.diskUsed(), 8u * kMB);
+  stream.end();
+  const Numbered read = readNumbered(stream);
+  EXPECT_EQ(read.records, written);
+  EXPECT_EQ(read.outOfOrder, 0u);
+}
+
+TEST_F(RomBuffer, SmallerCeilingsMoveBlocksToFilesAndLeaveTheStreamAtThem) {
+  StreamBudget budget{8u * kMB, 8u * kMB};
+  Stream stream{dir_, budget};
+  const std::uint32_t count = static_cast<std::uint32_t>((4u * kMB) / kRecord);
+  ASSERT_EQ(writeNumbered(stream, count), count);
+  stream.flush();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(stream.diskWritten(), 0u) << "RAM holds it all under the first ceilings";
+  budget.setLimits(1u * kMB, 2u * kMB);
+  EXPECT_EQ(budget.memoryBytes(), 1u * kMB);
+  EXPECT_TRUE(budget.atLimit()) << "4 MB held against 3 MB of ceilings";
+  EXPECT_TRUE(within([&] { return budget.diskUsed() > 0u; })) << "blocks move to files";
+  std::uint64_t most = 0;
+  for (int sample = 0; sample < 100; ++sample) {
+    most = std::max(most, budget.diskUsed());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_LE(most, 2u * kMB) << "as the files have room";
+  EXPECT_TRUE(budget.atLimit());
+  stream.end();
+  const Numbered read = readNumbered(stream);
+  EXPECT_EQ(read.records, count);
+  EXPECT_EQ(read.outOfOrder, 0u);
+}
+
+TEST_F(RomBuffer, ADiskCeilingUnderWhatTheFilesHoldWritesNoMore) {
+  StreamBudget budget{1u * kMB, 8u * kMB, AtLimit::Keep};
+  Stream stream{dir_, budget};
+  const std::uint32_t first = static_cast<std::uint32_t>((4u * kMB) / kRecord);
+  ASSERT_EQ(writeNumbered(stream, first), first);
+  stream.flush();
+  ASSERT_TRUE(within([&] { return budget.diskUsed() >= 2u * kMB; })) << "blocks went to files";
+  budget.setLimits(1u * kMB, 1u * kMB);
+  // The stream's thread may be inside one more file when the ceiling moves.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const std::uint64_t written = stream.diskWritten();
+  const std::uint32_t second = static_cast<std::uint32_t>((2u * kMB) / kRecord);
+  EXPECT_EQ(writeNumberedFrom(stream, first, second), second);
+  stream.flush();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(stream.diskWritten(), written) << "no file written past the smaller ceiling";
+  EXPECT_GT(budget.diskUsed(), 1u * kMB) << "the files already there stay";
+  stream.end();
+  const Numbered read = readNumbered(stream);
+  EXPECT_EQ(read.records, first + second);
+  EXPECT_EQ(read.outOfOrder, 0u) << "and every one is read back";
+  EXPECT_EQ(budget.diskUsed(), 0u);
+}
+
+TEST_F(RomBuffer, RamPastItsCeilingWhileTheFilesLagIsSaid) {
+  // 2 MB of RAM and 64 MB of files, and no thread yet to move blocks to files:
+  // six full blocks and an open one stand in RAM, over 2 MB and the open block
+  // and one more, with the two ceilings together far off.
+  StreamBudget budget{2u * kMB, 64u * kMB, AtLimit::Keep};
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget);
+  EXPECT_FALSE(budget.memoryOver()) << "nothing held";
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  ASSERT_EQ(writeNumbered(*stream, 6u * perBlock + 1u), 6u * perBlock + 1u);
+  EXPECT_TRUE(budget.memoryOver()) << "the files have taken nothing";
+  EXPECT_FALSE(budget.atLimit()) << "the ceilings together have room";
+  // Two blocks and an open one is RAM's ceiling and the margin, and no more.
+  StreamBudget under{2u * kMB, 64u * kMB, AtLimit::Keep};
+  const std::unique_ptr<Stream> few = StreamTesting::unstarted(dir_ / "few", under);
+  ASSERT_EQ(writeNumbered(*few, 2u * perBlock + 1u), 2u * perBlock + 1u);
+  EXPECT_FALSE(under.memoryOver()) << "within the blocks being written and one more";
+  // With no room in the files, RAM past its ceiling is what holds the rest: the
+  // two ceilings together say so, and nothing lags.
+  StreamBudget full{2u * kMB, 0u, AtLimit::Keep};
+  const std::unique_ptr<Stream> noFiles = StreamTesting::unstarted(dir_ / "none", full);
+  ASSERT_EQ(writeNumbered(*noFiles, 6u * perBlock + 1u), 6u * perBlock + 1u);
+  EXPECT_FALSE(full.memoryOver()) << "the files have no room to lag behind";
+  EXPECT_TRUE(full.atLimit());
+  StreamTesting::start(*noFiles);
+  noFiles->end();
+  EXPECT_EQ(readNumbered(*noFiles).records, 6u * perBlock + 1u);
+  // Once the stream's thread runs it moves blocks to files until RAM is within.
+  StreamTesting::start(*stream);
+  EXPECT_TRUE(within([&] { return !budget.memoryOver(); })) << "the files caught up";
+  EXPECT_GT(budget.diskUsed(), 0u);
+  stream->end();
+  const Numbered read = readNumbered(*stream);
+  EXPECT_EQ(read.records, 6u * perBlock + 1u);
+  EXPECT_EQ(read.outOfOrder, 0u);
+  StreamTesting::start(*few);
+  few->end();
+  EXPECT_EQ(readNumbered(*few).records, 2u * perBlock + 1u);
+}
+
+TEST_F(RomBuffer, ThreadsTakeTheClassTheHostsStopAsksFor) {
+  std::vector<ThreadClass> seen;
+#if defined(__APPLE__)
+  std::vector<qos_class_t> qos;
+#endif
+  std::thread own([&] {
+    seen.push_back(thisThreadClass());
+    for (const ThreadClass which : {ThreadClass::Lowered, ThreadClass::LoweredForFiles, ThreadClass::Normal}) {
+      setThisThreadClass(which);
+      seen.push_back(thisThreadClass());
+#if defined(__APPLE__)
+      qos.push_back(qos_class_self());
+#endif
+    }
+  });
+  own.join();
+  EXPECT_EQ(seen, (std::vector<ThreadClass>{ThreadClass::Normal, ThreadClass::Lowered, ThreadClass::LoweredForFiles,
+                                            ThreadClass::Normal}));
+#if defined(__APPLE__)
+  EXPECT_EQ(qos, (std::vector<qos_class_t>{QOS_CLASS_BACKGROUND, QOS_CLASS_UTILITY, QOS_CLASS_DEFAULT}));
+#endif
+
+  StreamBudget budget{4u * kMB, 64u * kMB};
+  {
+    Stream stream{dir_, budget};
+    EXPECT_TRUE(within([&] { return budget.threadsLowered() == 1u; })) << "the stream's thread, lowered";
+    budget.setHostStopped(true);
+    EXPECT_TRUE(budget.hostStopped());
+    EXPECT_TRUE(within([&] { return budget.threadsLowered() == 0u; })) << "raised while the host is stopped";
+    budget.setHostStopped(false);
+    EXPECT_TRUE(within([&] { return budget.threadsLowered() == 1u; })) << "and lowered again";
+  }
+  EXPECT_EQ(budget.threadsLowered(), 0u) << "a thread that returns leaves the count";
 }
 
 }  // namespace snaggletooth::disasm

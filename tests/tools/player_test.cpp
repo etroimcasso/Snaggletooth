@@ -45,7 +45,7 @@ std::string refusal(std::string_view text) {
 
 PadConfig theDefault() { return parsed(kDefaultPadConfig); }
 
-// The twelve key names the shipped configuration gives to buttons and the three
+// The twelve key names the shipped configuration gives to buttons and the four
 // the hotkey cases use, numbered as an application that owns a keyboard would
 // number them. The names themselves are whoever owns the keyboard's business; what
 // this pins is that each of the twelve reaches exactly one button.
@@ -53,7 +53,7 @@ const std::map<std::string, KeyId>& keyNumbers() {
   static const std::map<std::string, KeyId> kKeys{
       {"z", 0},   {"x", 1},    {"a", 2},          {"s", 3},   {"q", 4},    {"w", 5},
       {"return", 6}, {"backspace", 7}, {"up", 8}, {"down", 9}, {"left", 10}, {"right", 11},
-      {"r", 12}, {"f9", 13}, {"f10", 14},
+      {"r", 12}, {"f9", 13}, {"f10", 14}, {"p", 15},
   };
   return kKeys;
 }
@@ -369,7 +369,8 @@ TEST(PlayerConfig, AConfigRefusesWhatItCannotRead) {
   EXPECT_NE(refusal("[gamepad]\nb = elbow\n").find("not a place on a pad"), std::string::npos);
   EXPECT_NE(refusal("[gamepad]\nport = 3\n").find("not a port"), std::string::npos);
   EXPECT_NE(refusal("[keyboard]\nport = auto\n").find("never auto"), std::string::npos);
-  EXPECT_NE(refusal("[hotkeys]\nquit = escape\n").find("not a hotkey"), std::string::npos);
+  EXPECT_NE(refusal("[hotkeys]\nquit = escape\n").find("not a hotkey; they are `reset` and `pause`"),
+            std::string::npos);
   EXPECT_NE(refusal("[hotkeys]\nreset =\n").find("given nothing"), std::string::npos);
   EXPECT_NE(refusal("[hotkeys]\nreset = f5\nreset = f6\n").find("given twice"), std::string::npos);
   EXPECT_NE(refusal("[hotkeys]\nreset = f5,\n").find("empty key"), std::string::npos);
@@ -502,6 +503,69 @@ TEST(PlayerConfig, AHotkeyIsRefusedWhenTheKeyboardDoesNotHaveItOrAButtonAlreadyD
   PadConfig chorded = parsed("[hotkeys]\nreset = ctrl+z\n");
   fillFrom(chorded, theDefault());
   EXPECT_TRUE(resolveHotkeys(chorded, *keys, KeyboardKind::Mac, numberFor, error).has_value()) << error;
+}
+
+TEST(PlayerConfig, TheShippedPauseChordIsCommandOnAMacAndControlElsewhereAndNeverBoth) {
+  std::string error;
+  const std::optional<KeyboardMap> keys = resolveKeyboard(theDefault(), numberFor, error);
+  ASSERT_TRUE(keys.has_value()) << error;
+  const KeyId p = keyNumbers().at("p");
+  const std::optional<HotkeyMap> mac = resolveHotkeys(theDefault(), *keys, KeyboardKind::Mac, numberFor, error);
+  ASSERT_TRUE(mac.has_value()) << error;
+  EXPECT_EQ(mac->pause, (std::vector<Chord>{Chord{.modifiers = kModifierCmd, .key = p}}));
+  EXPECT_FALSE(pressed(mac->pause, p, kModifierCtrl)) << "Control and P is not a Mac's pause";
+  const std::optional<HotkeyMap> other =
+      resolveHotkeys(theDefault(), *keys, KeyboardKind::Other, numberFor, error);
+  ASSERT_TRUE(other.has_value()) << error;
+  EXPECT_EQ(other->pause, (std::vector<Chord>{Chord{.modifiers = kModifierCtrl, .key = p}}));
+  EXPECT_FALSE(pressed(other->pause, p, kModifierCmd)) << "nor the Windows key and P anyone else's";
+}
+
+TEST(PlayerConfig, APauseChordAFileDoesNotNameComesFromTheDefault) {
+  PadConfig silent = parsed("[hotkeys]\n");
+  EXPECT_TRUE(silent.hotkeys.pause.empty());
+  fillFrom(silent, theDefault());
+  EXPECT_EQ(silent.hotkeys.pause, theDefault().hotkeys.pause);
+  EXPECT_EQ(silent.hotkeys.pause.size(), 1u);
+  // A file that names only `reset` keeps its own reset and takes the shipped pause.
+  PadConfig resetOnly = parsed("[hotkeys]\nreset = f9\n");
+  fillFrom(resetOnly, theDefault());
+  EXPECT_EQ(resetOnly.hotkeys.reset, (std::vector<ChordName>{ChordName{.modifiers = 0u, .key = "f9"}}));
+  EXPECT_EQ(resetOnly.hotkeys.pause, theDefault().hotkeys.pause);
+  // And one that names only `pause` keeps the shipped reset.
+  PadConfig pauseOnly = parsed("[hotkeys]\npause = f10\n");
+  fillFrom(pauseOnly, theDefault());
+  EXPECT_EQ(pauseOnly.hotkeys.pause, (std::vector<ChordName>{ChordName{.modifiers = 0u, .key = "f10"}}));
+  EXPECT_EQ(pauseOnly.hotkeys.reset, theDefault().hotkeys.reset);
+}
+
+TEST(PlayerConfig, APauseChordGivenTwiceIsRefused) {
+  EXPECT_NE(refusal("[hotkeys]\npause = f9\npause = f10\n").find("`pause` is given twice"), std::string::npos);
+}
+
+TEST(PlayerConfig, OneChordGivenToBothHotkeysIsRefusedNamingBoth) {
+  PadConfig both = parsed("[hotkeys]\nreset = cmdorctrl+r\npause = shift+f9, cmdorctrl+r\n");
+  fillFrom(both, theDefault());
+  std::string error;
+  const std::optional<KeyboardMap> keys = resolveKeyboard(both, numberFor, error);
+  ASSERT_TRUE(keys.has_value()) << error;
+  EXPECT_FALSE(resolveHotkeys(both, *keys, KeyboardKind::Mac, numberFor, error).has_value());
+  EXPECT_EQ(error, "`cmdorctrl+r` is both reset and pause");
+  // `cmd+r` and `ctrl+r` are two chords on any one keyboard.
+  PadConfig apart = parsed("[hotkeys]\nreset = cmd+r\npause = ctrl+r\n");
+  fillFrom(apart, theDefault());
+  EXPECT_TRUE(resolveHotkeys(apart, *keys, KeyboardKind::Mac, numberFor, error).has_value()) << error;
+  // An unchorded pause key a button holds is refused as reset's is.
+  PadConfig shared = parsed("[hotkeys]\npause = z\n");
+  fillFrom(shared, theDefault());
+  EXPECT_FALSE(resolveHotkeys(shared, *keys, KeyboardKind::Mac, numberFor, error).has_value());
+  EXPECT_NE(error.find("`z` is the pause hotkey and holds b"), std::string::npos) << error;
+}
+
+TEST(PlayerConfig, AKeyUnderHotkeysThatIsNeitherIsRefusedNamingBoth) {
+  const std::string error = refusal("[hotkeys]\nreset = f9\nstop = f10\n");
+  EXPECT_NE(error.find("`stop` is not a hotkey; they are `reset` and `pause`"), std::string::npos) << error;
+  EXPECT_EQ(error.find("line 3"), 0u);
 }
 
 // ---- the recording -----------------------------------------------------------------

@@ -43,6 +43,7 @@
 #include <span>
 #include <type_traits>
 
+#include "rom/rom_buffered_run.h"
 #include "rom/rom_observe_internal.h"
 #include "snaggletooth/apu/spc700.h"
 #include "snaggletooth/cpu/cpu65816.h"
@@ -149,18 +150,38 @@ struct SoundResetRecord {
 // `Keyframe`, whose header says how many follow it.
 [[nodiscard]] std::size_t payloadBytes(RecordKind kind, const std::uint8_t* payload) noexcept;
 
-// The RAM and the disk one or more streams hold together, and the limit on each:
-// the streams of one run share one, so the limits are the run's whole buffer.
-// Read from any thread.
+// The RAM and the disk one or more streams hold together, the ceiling on each,
+// and what the streams do at the ceilings: the streams of one run share one, so
+// the ceilings are the run's whole buffer. Read from any thread.
 class StreamBudget {
  public:
-  StreamBudget(std::uint64_t memoryBytes, std::uint64_t diskBytes) noexcept
-      : memoryBytes_(memoryBytes), diskBytes_(diskBytes) {}
+  StreamBudget(std::uint64_t memoryBytes, std::uint64_t diskBytes, AtLimit atLimit = AtLimit::Refuse) noexcept
+      : memoryBytes_(memoryBytes), diskBytes_(diskBytes), atLimit_(atLimit) {}
   StreamBudget(const StreamBudget&) = delete;
   StreamBudget& operator=(const StreamBudget&) = delete;
 
-  [[nodiscard]] std::uint64_t memoryBytes() const noexcept { return memoryBytes_; }
-  [[nodiscard]] std::uint64_t diskBytes() const noexcept { return diskBytes_; }
+  // New ceilings, from the thread that writes the streams, between two of its
+  // writes. A RAM ceiling made smaller moves blocks to files as the files have
+  // room; a disk ceiling made smaller than the files hold stops more from being
+  // written, and the files already there stay until they are read back.
+  void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) noexcept {
+    memoryBytes_.store(memoryBytes, std::memory_order_relaxed);
+    diskBytes_.store(diskBytes, std::memory_order_relaxed);
+  }
+  [[nodiscard]] std::uint64_t memoryBytes() const noexcept { return memoryBytes_.load(std::memory_order_relaxed); }
+  [[nodiscard]] std::uint64_t diskBytes() const noexcept { return diskBytes_.load(std::memory_order_relaxed); }
+  // Whether one more block would bring what the streams hold past the two
+  // ceilings together: every byte handed and not returned, and every block
+  // being written counted whole. Under `AtLimit::Refuse` it is where a stream
+  // fills; under `Keep` it is where the writer's host stops writing.
+  [[nodiscard]] bool atLimit() const noexcept;
+  // Whether RAM holds more than its ceiling by more than the blocks being
+  // written and one block more while the files have room for a block: the
+  // streams' threads have fallen behind the writer in moving blocks to files.
+  // The writer's host stops writing here too, until RAM has drained. With the
+  // files full, RAM past its ceiling is what holds the rest, and `atLimit()`
+  // says so.
+  [[nodiscard]] bool memoryOver() const noexcept;
   // Bytes of RAM in blocks, every block counted whole.
   [[nodiscard]] std::uint64_t memoryUsed() const noexcept;
   [[nodiscard]] std::uint64_t diskUsed() const noexcept { return onDisk_.load(std::memory_order_relaxed); }
@@ -168,16 +189,57 @@ class StreamBudget {
   [[nodiscard]] std::uint64_t held() const noexcept {
     return handed_.load(std::memory_order_acquire) - consumed_.load(std::memory_order_acquire);
   }
+  // The class the streams' threads take: lowered while the host runs its
+  // machine, the class a thread starts with once it has stopped.
+  void setHostStopped(bool stopped) noexcept { hostStopped_.store(stopped, std::memory_order_release); }
+  [[nodiscard]] bool hostStopped() const noexcept { return hostStopped_.load(std::memory_order_acquire); }
+  // The threads kept by a `ThreadClassKeeper` over this budget that stand at a
+  // lowered class.
+  [[nodiscard]] unsigned threadsLowered() const noexcept { return lowered_.load(std::memory_order_acquire); }
 
  private:
   friend class Stream;
-  std::uint64_t memoryBytes_;
-  std::uint64_t diskBytes_;
+  friend class ThreadClassKeeper;
+  std::atomic<std::uint64_t> memoryBytes_;
+  std::atomic<std::uint64_t> diskBytes_;
+  AtLimit atLimit_;
   std::atomic<std::uint64_t> blocks_{0};
   std::atomic<std::uint64_t> onDisk_{0};
   std::atomic<std::uint64_t> handed_{0};
   std::atomic<std::uint64_t> consumed_{0};
   std::atomic<std::uint64_t> open_{0};  // blocks being written, each charged whole
+  std::atomic<bool> hostStopped_{false};
+  std::atomic<unsigned> lowered_{0};
+};
+
+// Keeps the calling thread at the class it works at beside a host: `lowered`
+// while the budget says the host runs its machine, `ThreadClass::Normal` once it
+// says the host has stopped. A thread builds one when it starts and calls
+// `keep()` once a pass of its loop; while the thread stands lowered the budget
+// counts it, and the destructor takes it out of the count.
+//
+//   ThreadClassKeeper keeper{budget, ThreadClass::Lowered};
+//   for (;;) {
+//     keeper.keep();
+//     // ...one pass of the thread's work
+//   }
+class ThreadClassKeeper {
+ public:
+  ThreadClassKeeper(StreamBudget& budget, ThreadClass lowered) noexcept : budget_(budget), lowered_(lowered) {}
+  ~ThreadClassKeeper();
+  ThreadClassKeeper(const ThreadClassKeeper&) = delete;
+  ThreadClassKeeper& operator=(const ThreadClassKeeper&) = delete;
+
+  // Sets the class the budget asks for, when it differs from the thread's.
+  void keep() noexcept;
+  // Whether `keep()` would change the thread's class.
+  [[nodiscard]] bool due() const noexcept;
+
+ private:
+  [[nodiscard]] ThreadClass wanted() const noexcept;
+  StreamBudget& budget_;
+  ThreadClass lowered_;
+  bool counted_ = false;
 };
 
 // A stream of records, written by one thread and read by another, held in RAM
@@ -198,19 +260,27 @@ class StreamBudget {
 // block being written and the one being read. A block the writer opens is
 // charged whole, and the stream is full when one more would bring what it holds
 // past `memoryBytes` and `diskBytes` together, so what it holds never passes
-// them and is full up to one block before. Neither has a floor or a ceiling.
+// them and is full up to one block before. Both are the ceilings the host set.
+// Built over a budget that keeps (`AtLimit::Keep`), a stream at the ceilings
+// takes the records of the write in flight all the same, in blocks that stay in
+// RAM, and `StreamBudget::atLimit()` is how the writer's host learns it has
+// reached its ceilings and stops writing. Only a block the system will not
+// allocate fills such a stream.
 // Streams built over one `StreamBudget` count their RAM, their files and what
-// they hold against it together. The constructor creates `directory` and
-// removes any `.snagbuf` file left in it, and throws `std::runtime_error` when
-// it cannot; the destructor
-// stops the stream's thread, removes every file it wrote and the directory when
-// that leaves it empty.
+// they hold against it together. The stream's thread works at
+// `ThreadClass::LoweredForFiles` while the budget says the host runs its
+// machine and at `ThreadClass::Normal` once it says the host has stopped. The
+// constructor creates `directory` and removes any `.snagbuf` file left in it,
+// and throws `std::runtime_error` when it cannot; the destructor stops the
+// stream's thread, removes every file it wrote and the directory when that
+// leaves it empty.
 class Stream {
  public:
   static constexpr std::size_t kBlockBytes = std::size_t{1} << 20;
 
   // A stream with a budget of its own.
-  Stream(std::filesystem::path directory, std::uint64_t memoryBytes, std::uint64_t diskBytes);
+  Stream(std::filesystem::path directory, std::uint64_t memoryBytes, std::uint64_t diskBytes,
+         AtLimit atLimit = AtLimit::Refuse);
   // A stream counted against `budget`, which outlives it.
   Stream(std::filesystem::path directory, StreamBudget& budget);
   ~Stream();
@@ -220,12 +290,16 @@ class Stream {
   // The writer's side: room for `bytes` in the block being written, which is
   // handed to the reader and replaced when full. Never waits, never touches a
   // file. Answers null once the stream is full, or for more than `kBlockBytes`:
-  // the stream takes nothing more.
+  // the stream takes nothing more. Under `AtLimit::Keep` a block the stream's
+  // thread has fallen too far behind to take waits with the writer, and goes
+  // to the reader, in order, at the writer's next hand-over.
   [[nodiscard]] std::uint8_t* put(std::size_t bytes) noexcept;
   // The writer's side: the block being written is handed to the reader as it
-  // stands, so the reader reaches every record written so far.
+  // stands, so the reader reaches every record written so far. A block waiting
+  // with the writer is handed over first, the writer yielding until the
+  // stream's thread has room for it.
   void flush() noexcept;
-  void end() noexcept;  // the writer is done: the last block is handed over
+  void end() noexcept;  // the writer is done: the last block is handed over, as `flush()` hands it
 
   // The reader's side: the next block in order, waiting for one; nothing once
   // the writer has ended and every block was taken. Throws `std::runtime_error`
@@ -249,7 +323,12 @@ class Stream {
   [[nodiscard]] std::uint64_t handed() const noexcept;       // blocks handed to the reader so far
 
  private:
-  Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own);
+  // The suite's: a stream whose ring of handed blocks holds `ringBlocks`, over a
+  // budget of its own or a shared one, its thread started when the suite calls
+  // `start()`.
+  friend struct StreamTesting;
+  Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own, std::size_t ringBlocks);
+  Stream(std::filesystem::path directory, StreamBudget& budget, std::size_t ringBlocks);
   void start();
   struct Impl;
   std::unique_ptr<Impl> impl_;
@@ -311,11 +390,5 @@ struct RecordReader {
   }
   void skip(RecordKind kind) noexcept { at += payloadBytes(kind, block.data() + at); }
 };
-
-// Lowers the calling thread to the lowest scheduling class the platform gives a
-// thread: `QOS_CLASS_BACKGROUND` on macOS, `SCHED_IDLE` on Linux,
-// `THREAD_PRIORITY_LOWEST` on Windows. On a host with fewer cores than threads,
-// every thread at a higher class is scheduled first.
-void lowerThisThread() noexcept;
 
 }  // namespace snaggletooth::disasm

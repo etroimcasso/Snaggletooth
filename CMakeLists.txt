@@ -571,9 +571,12 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
   # source directly so it is tested without a window or a device anywhere near it.
   # The GPU PPU's device over SDL's GPU API is the player's own code, as the store is: the
   # player hands it to the machine, and the verify tool and the GPU suite compile the same
-  # source.
+  # source. So are the disassembly the player runs as you play, its pause control and the
+  # requests to close it counts: none of the three calls into SDL, and the suite compiles
+  # them too.
   add_executable(snes_player tools/player/snes_player_main.cpp tools/player/user_files.cpp
-    tools/player/sdl_gpu_device.cpp)
+    tools/player/sdl_gpu_device.cpp tools/player/pause.cpp tools/player/close_requests.cpp
+    tools/player/live_disasm.cpp)
   # The pad library reaches the cartridge tools publicly, which reach the .spc tooling
   # and so the WAV writer; the player takes all of it through that one link. Naming any
   # of them again is a duplicate the Apple linker reports.
@@ -773,7 +776,13 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/tools/player_test.cpp
     tests/tools/player_interlace_test.cpp
     tests/tools/user_files_test.cpp
+    tests/tools/pause_test.cpp
+    tests/tools/close_requests_test.cpp
+    tests/tools/live_disasm_test.cpp
     tools/player/user_files.cpp
+    tools/player/pause.cpp
+    tools/player/close_requests.cpp
+    tools/player/live_disasm.cpp
   )
   # The differential links the representation and the cartridge tools publicly,
   # which link the library and both chip backends publicly and the codecs

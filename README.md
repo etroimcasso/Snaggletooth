@@ -1,28 +1,14 @@
 # Snaggletooth
 
-A clean-room, MIT-licensed implementation of the SNES — deterministic, embeddable, and
-audio-first — with a toolkit that turns a cartridge into a source tree and proves the tree
-rebuilds it.
+A clean-room, MIT-licensed implementation of the SNES — deterministic, embeddable, and audio-first — with a toolkit that turns a cartridge into a source tree and proves the tree rebuilds it.
 
 Three things live in this repository:
 
-- **The library**, `snaggletooth::snaggletooth`: the audio unit (SPC700, APU machine, S-DSP)
-  and the main machine (65816, cartridge, work RAM, DMA, timers, the audio handshake, and the
-  PPU), each stepped by a cycle budget the host supplies. The PPU resolves each visible dot
-  — one pixel, or two half-pixels on a line drawn in half-pixels — and hands each finished frame
-  to a frame observer, or draws it on a GPU the host hands it with the core's own compute shader.
-- **The tools**, under [`tools/`](tools/README.md): a player that shows a cartridge running in a
-  window and records the same run, two tracing disassemblers and two assemblers, a
-  whole-cartridge disassembler and its verifier, an intermediate representation with an
-  interpreter and a renderer, and two audio renderers — every one a thin command over a library
-  a front end can link instead.
-- **The documentation**, under [`docs/`](docs/README.md): a page per component, every value
-  in it derived from public hardware documentation and validated against it.
+- **The library**, `snaggletooth::snaggletooth`: the audio unit (SPC700, APU machine, S-DSP) and the main machine (65816, cartridge, work RAM, DMA, timers, the audio handshake, and the PPU), each stepped by a cycle budget the host supplies. The PPU resolves each visible dot — one pixel, or two half-pixels on a line drawn in half-pixels — and hands each finished frame to a frame observer, or draws it on a GPU the host hands it with the core's own compute shader.
+- **The tools**, under [`tools/`](tools/README.md): a player that shows a cartridge running in a window, records the same run and disassembles the cartridge as it is played, two tracing disassemblers and two assemblers, a whole-cartridge disassembler and its verifier, an intermediate representation with an interpreter and a renderer, and two audio renderers — every one a thin command over a library a front end can link instead.
+- **The documentation**, under [`docs/`](docs/README.md): a page per component, every value in it derived from public hardware documentation and validated against it.
 
-The library also runs inside RetroArch and every other libretro frontend through
-[Snaggletooth for libretro](https://github.com/etroimcasso/Snaggletooth-libretro), a core built
-on it in a repository of its own: the console's behavior is entirely this library's, and the core
-is the application around it.
+The library also runs inside RetroArch and every other libretro frontend through [Snaggletooth for libretro](https://github.com/etroimcasso/Snaggletooth-libretro), a core built on it in a repository of its own: the console's behavior is entirely this library's, and the core is the application around it.
 
 > [!IMPORTANT]
 > **Build and run Snaggletooth as a Release build.** A Debug build of the core runs
@@ -54,47 +40,21 @@ is the application around it.
 
 ## Why this exists
 
-There is no MIT-compatible, embeddable SNES core. The established emulators are exceptional
-work, but their licenses (GPL, LGPL, non-commercial terms) keep them out of permissively-licensed
-engines, tools, and commercial products. Snaggletooth fills that gap: a SNES implementation you
-can vendor into anything, under MIT, with clean provenance.
+There is no MIT-compatible, embeddable SNES core. The established emulators are exceptional work, but their licenses (GPL, LGPL, non-commercial terms) keep them out of permissively-licensed engines, tools, and commercial products. Snaggletooth fills that gap: a SNES implementation you can vendor into anything, under MIT, with clean provenance.
 
-The name: older sound hardware produced clean, repeating trigonometric waveforms. The SNES's
-SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
+The name: older sound hardware produced clean, repeating trigonometric waveforms. The SNES's SPC700 is an 8-bit sampler — its waveforms are snaggletoothed in comparison.
 
 ## Design commitments
 
-- **Clean-room.** Implemented from public hardware documentation only. No emulator source is
-  consulted, and no copyrighted bytes (game ROMs, the boot ROM) are ever included — the audio
-  unit boots by seeding the documented post-boot state, and where it runs the console's upload
-  handshake it maps an original boot program written to the published protocol, never Sony's
-  boot code. Nothing here needs a console boot ROM; a host holding its own dump may supply one
-  through `SnesConfig::bootRom`, which is the only way bytes like those ever reach the machine.
-- **Deterministic and steppable.** Components advance by an externally supplied cycle budget —
-  no wall clock, and no thread inside the core unless a host asks for one to run the audio unit
-  or draw the picture beside the console (`SnesConfig::apuThread`, `SnesConfig::ppuThread`), each
-  of which stands with it at one master time and one picture whenever a call returns. The same
-  starting state and the same inputs produce the same bytes, every run, with the threads or
-  without; whole-machine state snapshots and restores as a value. A thread takes its work off the
-  stepping thread for a host whose cores are each too slow to run the whole machine at speed: the
-  process spends a little more CPU in total and each thread has less to do, so a slower device keeps
-  up by running the work in parallel. The picture thread comes first; the audio thread joins it only
-  where the picture thread alone does not hold the console's frame rate. A picture line is drawn
-  again only when something it reads has changed since the frame before, and taken from that frame
-  otherwise, the same pixels either way.
-- **Embeddable.** A C++20 static library with a declarative API: no UI, no audio device, no file
-  formats required at the boundary. The host owns time, I/O, and the output samples.
-- **Accurate.** Behavior is held to public hardware documentation and validated against real
-  program output. Accuracy is never traded away for API convenience.
-- **Provable.** A tool that writes something also proves it: the disassembler's tree is
-  assembled back and compared with the image byte for byte; the lifted form is run beside the
-  machine and held to every access, register and cycle.
+- **Clean-room.** Implemented from public hardware documentation only. No emulator source is consulted, and no copyrighted bytes (game ROMs, the boot ROM) are ever included — the audio unit boots by seeding the documented post-boot state, and where it runs the console's upload handshake it maps an original boot program written to the published protocol, never Sony's boot code. Nothing here needs a console boot ROM; a host holding its own dump may supply one through `SnesConfig::bootRom`, which is the only way bytes like those ever reach the machine.
+- **Deterministic and steppable.** Components advance by an externally supplied cycle budget — no wall clock, and no thread inside the core unless a host asks for one to run the audio unit or draw the picture beside the console (`SnesConfig::apuThread`, `SnesConfig::ppuThread`), each of which stands with it at one master time and one picture whenever a call returns. The same starting state and the same inputs produce the same bytes, every run, with the threads or without; whole-machine state snapshots and restores as a value. A thread takes its work off the stepping thread for a host whose cores are each too slow to run the whole machine at speed: the process spends a little more CPU in total and each thread has less to do, so a slower device keeps up by running the work in parallel. The picture thread comes first; the audio thread joins it only where the picture thread alone does not hold the console's frame rate. A picture line is drawn again only when something it reads has changed since the frame before, and taken from that frame otherwise, the same pixels either way.
+- **Embeddable.** A C++20 static library with a declarative API: no UI, no audio device, no file formats required at the boundary. The host owns time, I/O, and the output samples.
+- **Accurate.** Behavior is held to public hardware documentation and validated against real program output. Accuracy is never traded away for API convenience.
+- **Provable.** A tool that writes something also proves it: the disassembler's tree is assembled back and compared with the image byte for byte; the lifted form is run beside the machine and held to every access, register and cycle.
 
 ## What is built
 
-One row per component. The status is one of three — **complete**, **in progress**, **not
-started** — followed by what the component does today and, where it is in progress, what it does
-not do. Each row links to the page that describes the component in full.
+One row per component. The status is one of three — **complete**, **in progress**, **not started** — followed by what the component does today and, where it is in progress, what it does not do. Each row links to the page that describes the component in full.
 
 ### The audio unit
 
@@ -118,8 +78,7 @@ not do. Each row links to the page that describes the component in full.
 
 ### The coprocessors
 
-The cartridge header names which chip a cartridge carries beside the CPU, and the machine reports
-it; the machine runs none of them. A cartridge that needs one does not boot.
+The cartridge header names which chip a cartridge carries beside the CPU, and the machine reports it; the machine runs none of them. A cartridge that needs one does not boot.
 
 | Component | Status |
 |---|---|
@@ -142,17 +101,15 @@ it; the machine runs none of them. A cartridge that needs one does not boot.
 | [Disassembly framework](docs/disassembly-framework.md) | **complete** — traces control flow so data is never read as code, carries a per-path context, and reports a conflict rather than guessing |
 | [SPC700 disassembler](docs/spc700-disassembler.md) | **complete** — names hardware registers, marks run-time-patched bytes, cycle costs measured from the core |
 | [65816 disassembler](docs/65816-disassembler.md) | **complete** — carries the register widths through `REP`, `SEP` and `XCE`, and reports an operand nothing settled |
-| [Cartridge disassembler](docs/snes-disassembler.md) | **in progress** — a whole cartridge into a source tree: a file per bank, the sound program the boot uploads as a program file and source of its own, and a manifest of the entries, the stops, the registers, the transfers and the routines; the cartridge is run, unattended or under an [input script](docs/input-script.md), so the jumps only a run resolves become entries, every executed instruction is lifted from the bytes the CPU fetched and checked against the chip, and every range a transfer engine moved is written as a file of its kind — tile sheet, palette, tilemap, sprite table, HDMA table — that the assembler includes back, and a loader is run again for the entries of its table the run never selected. The coprocessors have no backend |
+| [Cartridge disassembler](docs/snes-disassembler.md) | **in progress** — a whole cartridge into a source tree: a file per bank, the sound program the boot uploads as a program file and source of its own, and a manifest of the entries, the stops, the registers, the transfers and the routines; the cartridge is run — unattended, under an [input script](docs/input-script.md), or played in the [player](tools/player/README.md#disassembling-as-you-play), where each session adds what it reached — so the jumps only a run resolves become entries, every executed instruction is lifted from the bytes the CPU fetched and checked against the chip, and every range a transfer engine moved is written as a file of its kind — tile sheet, palette, tilemap, sprite table, HDMA table — that the assembler includes back, and a loader is run again for the entries of its table the run never selected. The coprocessors have no backend |
 | [Cartridge verifier](docs/snes-disassembler.md#verifying-the-tree) | **complete** — reassembles a tree and reports every difference from the image; thirty-one cartridges across all three maps rebuild byte for byte |
 | [Assemblers](docs/assemblers.md) | **complete** — both dialects over one [common layer](docs/assembly-lexicon.md), each built from its disassembler's own table so every opcode round-trips |
 | [Intermediate representation](docs/ir.md) | **complete** — both instruction sets lifted into one form with no bytes in it, with an interpreter per chip, a renderer back to source, and a dataflow that proves the registers, the stored values and the bounded jump tables over every path |
-| [Player](tools/player/README.md) | **complete** — a cartridge in a window, held to the display where the display is close enough to the console and to the console's own rate where it is not, with its sound at the rate the run delivers, driven by a keyboard, a controller or an input script, recorded as it runs, and drawn on the GPU when asked |
+| [Player](tools/player/README.md) | **complete** — a cartridge in a window, held to the display where the display is close enough to the console and to the console's own rate where it is not, with its sound at the rate the run delivers, driven by a keyboard, a controller or an input script, recorded as it runs, drawn on the GPU when asked, and disassembled as it is played |
 
 ### Validation
 
-Beyond the per-cycle vector suites, the machine runs self-checking SPC test ROMs end-to-end. The
-CPU, timer and memory-access-timing ROMs pass in full. Every sub-test of the DSP ROM passes but
-three, which report a wrong checksum.
+Beyond the per-cycle vector suites, the machine runs self-checking SPC test ROMs end-to-end. The CPU, timer and memory-access-timing ROMs pass in full. Every sub-test of the DSP ROM passes but three, which report a wrong checksum.
 
 | Sub-test still failing | What it exercises |
 |---|---|
@@ -160,20 +117,13 @@ three, which report a wrong checksum.
 | `Random/kon pitch` | eight voices keyed together and re-keyed at random, read back through the echo ring |
 | `Random/brr while playing` | BRR sample content decoded while voices are already sounding |
 
-All three drive long randomised sequences and compare a single checksum at the end, so each run
-reports only whether the whole sequence matched. [s-dsp-behavior.md](docs/s-dsp-behavior.md)
-records what the sub-tests constrain and what they leave open; the three above turn on a rare
-coincidence — a voice re-keyed at the instant its own output crosses zero — which ordinary music
-does not reach, so a rendered comparison cannot arbitrate them either.
+All three drive long randomised sequences and compare a single checksum at the end, so each run reports only whether the whole sequence matched. [s-dsp-behavior.md](docs/s-dsp-behavior.md) records what the sub-tests constrain and what they leave open; the three above turn on a rare coincidence — a voice re-keyed at the instant its own output crosses zero — which ordinary music does not reach, so a rendered comparison cannot arbitrate them either.
 
-The suite is built and run on macOS, Linux and Windows, on x64 and ARM64, before any change
-reaches `main`.
+The suite is built and run on macOS, Linux and Windows, on x64 and ARM64, before any change reaches `main`.
 
 ## Media
 
-The machine running, as the player shows it. Every capture is the core's own output — the
-frames the PPU hands to its observer and the audio the S-DSP mixes — with nothing composited or
-retouched.
+The machine running, as the player shows it. Every capture is the core's own output — the frames the PPU hands to its observer and the audio the S-DSP mixes — with nothing composited or retouched.
 
 ### Screenshots
 
@@ -207,8 +157,7 @@ https://github.com/user-attachments/assets/b300d0fc-e591-425a-a2a0-2003db7bcb64
 
 Requires a C++20 toolchain and CMake 3.24 or later.
 
-**The core is meant to run as a Release build.** These commands build `Release` on Linux,
-macOS and Windows alike:
+**The core is meant to run as a Release build.** These commands build `Release` on Linux, macOS and Windows alike:
 
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -216,43 +165,26 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-**Keep every flag.** On Windows, `cmake --build` without `--config Release` builds `Debug`
-whatever the configure step said, and the player lands in `build\Debug\` instead of
-`build\Release\`. A Debug build runs the machine several times slower, and the player cannot
-hold the console's 60 frames a second in one. The frame rate it shows then measures the build,
-not the core. A Debug player warns about this when it starts. In the Visual Studio IDE, set
-the configuration drop-down to `Release`.
-[docs/build-and-consume.md](docs/build-and-consume.md#building-a-release-build) says which flag
-each generator reads.
+**Keep every flag.** On Windows, `cmake --build` without `--config Release` builds `Debug` whatever the configure step said, and the player lands in `build\Debug\` instead of `build\Release\`. A Debug build runs the machine several times slower, and the player cannot hold the console's 60 frames a second in one. The frame rate it shows then measures the build, not the core. A Debug player warns about this when it starts. In the Visual Studio IDE, set the configuration drop-down to `Release`. [docs/build-and-consume.md](docs/build-and-consume.md#building-a-release-build) says which flag each generator reads.
 
-The tools build whenever Snaggletooth is the top-level project and land in `build/` —
-`build\Release\` on Windows; each is its own target, listed in
-[tools/README.md](tools/README.md#building).
+The tools build whenever Snaggletooth is the top-level project and land in `build/` — `build\Release\` on Windows; each is its own target, listed in [tools/README.md](tools/README.md#building).
 
 ### Embedding the library
 
-Vendor the repository (a git submodule works) and link the library target. The test suite and
-the tools are off when Snaggletooth is built inside a parent project.
+Vendor the repository (a git submodule works) and link the library target. The test suite and the tools are off when Snaggletooth is built inside a parent project.
 
 ```cmake
 add_subdirectory(snaggletooth)
 target_link_libraries(your_target PRIVATE snaggletooth::snaggletooth)
 ```
 
-The tools are off in a parent build unless it sets `SNAGGLETOOTH_BUILD_TOOLS`, which builds the
-tool libraries and command-line tools without the suite.
+The tools are off in a parent build unless it sets `SNAGGLETOOTH_BUILD_TOOLS`, which builds the tool libraries and command-line tools without the suite.
 
-The public headers are under [`include/snaggletooth/`](include/snaggletooth); the pages under
-[`docs/`](docs/README.md) describe each component's surface and how to drive it, and
-[docs/build-and-consume.md](docs/build-and-consume.md) covers the build, the targets, the
-options and what a program that links the library owns. A host with a GPU hands the machine a
-device and the core draws the picture there ([docs/gpu-ppu.md](docs/gpu-ppu.md)); the
-[libretro core](https://github.com/etroimcasso/Snaggletooth-libretro) is one such host, complete.
+The public headers are under [`include/snaggletooth/`](include/snaggletooth); the pages under [`docs/`](docs/README.md) describe each component's surface and how to drive it, and [docs/build-and-consume.md](docs/build-and-consume.md) covers the build, the targets, the options and what a program that links the library owns. A host with a GPU hands the machine a device and the core draws the picture there ([docs/gpu-ppu.md](docs/gpu-ppu.md)); the [libretro core](https://github.com/etroimcasso/Snaggletooth-libretro) is one such host, complete.
 
 ### Running the tools
 
-A cartridge into its program files and manifest, the source tree rendered from the program files,
-the tree proved against the image, and the program file printed back with a summary:
+A cartridge into its program files and manifest, the source tree rendered from the program files, the tree proved against the image, and the program file printed back with a summary:
 
 ```
 snes_disasm game.sfc -o game
@@ -261,15 +193,11 @@ snes_verify game game.sfc
 snes_lift game
 ```
 
-`spc_render` and `rom_render` write what the audio unit plays, from a dump or from a cartridge,
-as a WAV. Every page's example output comes from the hand-built cartridges under
-[`tools/examples/`](tools/examples/README.md), which `snes_examples` writes to disk so anyone
-can produce the same output.
+`spc_render` and `rom_render` write what the audio unit plays, from a dump or from a cartridge, as a WAV. Every page's example output comes from the hand-built cartridges under [`tools/examples/`](tools/examples/README.md), which `snes_examples` writes to disk so anyone can produce the same output.
 
 ### The test data
 
-Three bodies of third-party reference data are never vendored; the tests that use them register
-and skip, with a visible reason, until they are pointed at a local copy:
+Three bodies of third-party reference data are never vendored; the tests that use them register and skip, with a visible reason, until they are pointed at a local copy:
 
 | Option | Points at |
 |---|---|
@@ -283,61 +211,32 @@ cmake -B build -DSNAGGLETOOTH_65816_VECTORS=/path/to/65816/v1 \
                -DSNAGGLETOOTH_BLARGG_ROMS=/path/to/blargg
 ```
 
-`SNAGGLETOOTH_BOOT_ROM` names a 64-byte audio boot ROM a host holds its own dump of; without
-it the acceptance tests boot on the built-in upload program instead.
-`SNAGGLETOOTH_BUILD_TESTS` turns the suite on or off explicitly, and `SNAGGLETOOTH_BUILD_TOOLS`
-the tools.
+`SNAGGLETOOTH_BOOT_ROM` names a 64-byte audio boot ROM a host holds its own dump of; without it the acceptance tests boot on the built-in upload program instead. `SNAGGLETOOTH_BUILD_TESTS` turns the suite on or off explicitly, and `SNAGGLETOOTH_BUILD_TOOLS` the tools.
 
 ## Documentation
 
-[docs/README.md](docs/README.md) indexes every page with what it covers and says where to
-start for a given task. By subject:
+[docs/README.md](docs/README.md) indexes every page with what it covers and says where to start for a given task. By subject:
 
-- **Building and consuming** — [build-and-consume.md](docs/build-and-consume.md): the targets,
-  the build options, linking the library or a tool library from a program of your own, the
-  dependencies and the test data.
-- **The machine** — [snes-machine.md](docs/snes-machine.md),
-  [snes-cartridge.md](docs/snes-cartridge.md), [65816-cpu.md](docs/65816-cpu.md),
-  [ppu.md](docs/ppu.md), [gpu-ppu.md](docs/gpu-ppu.md).
-- **The audio unit** — [apu-machine.md](docs/apu-machine.md),
-  [spc700-cpu.md](docs/spc700-cpu.md), [dsp.md](docs/dsp.md),
-  [s-dsp-behavior.md](docs/s-dsp-behavior.md), [spc-rendering.md](docs/spc-rendering.md).
-- **Disassembly** — [disassembly-framework.md](docs/disassembly-framework.md),
-  [spc700-disassembler.md](docs/spc700-disassembler.md),
-  [65816-disassembler.md](docs/65816-disassembler.md),
-  [snes-disassembler.md](docs/snes-disassembler.md),
-  [project-manifest.md](docs/project-manifest.md), [input-script.md](docs/input-script.md).
-- **Assembly** — [assemblers.md](docs/assemblers.md),
-  [assembly-lexicon.md](docs/assembly-lexicon.md),
-  [spc700-assembly.md](docs/spc700-assembly.md), [65816-assembly.md](docs/65816-assembly.md).
+- **Building and consuming** — [build-and-consume.md](docs/build-and-consume.md): the targets, the build options, linking the library or a tool library from a program of your own, the dependencies and the test data.
+- **The machine** — [snes-machine.md](docs/snes-machine.md), [snes-cartridge.md](docs/snes-cartridge.md), [65816-cpu.md](docs/65816-cpu.md), [ppu.md](docs/ppu.md), [gpu-ppu.md](docs/gpu-ppu.md).
+- **The audio unit** — [apu-machine.md](docs/apu-machine.md), [spc700-cpu.md](docs/spc700-cpu.md), [dsp.md](docs/dsp.md), [s-dsp-behavior.md](docs/s-dsp-behavior.md), [spc-rendering.md](docs/spc-rendering.md).
+- **Disassembly** — [disassembly-framework.md](docs/disassembly-framework.md), [spc700-disassembler.md](docs/spc700-disassembler.md), [65816-disassembler.md](docs/65816-disassembler.md), [snes-disassembler.md](docs/snes-disassembler.md), [project-manifest.md](docs/project-manifest.md), [input-script.md](docs/input-script.md).
+- **Assembly** — [assemblers.md](docs/assemblers.md), [assembly-lexicon.md](docs/assembly-lexicon.md), [spc700-assembly.md](docs/spc700-assembly.md), [65816-assembly.md](docs/65816-assembly.md).
 - **The intermediate representation** — [ir.md](docs/ir.md).
-- **The tools** — [tools/README.md](tools/README.md), with a README beside each tool, and
-  [tools/examples/README.md](tools/examples/README.md), the cartridges the pages' output comes
-  from.
+- **The tools** — [tools/README.md](tools/README.md), with a README beside each tool, and [tools/examples/README.md](tools/examples/README.md), the cartridges the pages' output comes from.
 
 ## Roadmap
 
 Snaggletooth is built audio-first:
 
-1. **The audio unit** — the SPC700 CPU, the APU machine state, and the S-DSP, composing into a
-   complete SNES audio core that plays real sound-driver programs and SPC dumps. It ships as an
-   embeddable component and as the SNES sound backend for the Polyrhythm engine.
-2. **The full machine** — the 5A22 (the main CPU with its DMA and timing hardware), the PPU, and
-   the system glue that binds them to the audio core.
+1. **The audio unit** — the SPC700 CPU, the APU machine state, and the S-DSP, composing into a complete SNES audio core that plays real sound-driver programs and SPC dumps. It ships as an embeddable component and as the SNES sound backend for the Polyrhythm engine.
+2. **The full machine** — the 5A22 (the main CPU with its DMA and timing hardware), the PPU, and the system glue that binds them to the audio core.
 
-The PPU is built. What it draws is in its row under [What is built](#the-main-machine); what
-remains is verifying it across the library of cartridges, and every wrong picture that pass finds
-is fixed in the chip. After that, the machine is taken through the range of cartridge
-types until they boot, and the DSP's three failing sub-tests are closed with the wider body of real
-software then available to exercise it.
+The PPU is built. What it draws is in its row under [What is built](#the-main-machine); what remains is verifying it across the library of cartridges, and every wrong picture that pass finds is fixed in the chip. After that, the machine is taken through the range of cartridge types until they boot, and the DSP's three failing sub-tests are closed with the wider body of real software then available to exercise it.
 
-**1.0 means a fully-featured, accurate SNES emulator core.** No dates are promised; each
-component ships when it meets the accuracy bar.
+**1.0 means a fully-featured, accurate SNES emulator core.** No dates are promised; each component ships when it meets the accuracy bar.
 
-3. **A desktop app that unifies the tooling** — after the 1.0 release, because the core being
-   complete comes first. The command-line tools here are what it will drive; its release
-   packages will carry the app, which owns the toolkit's file types and their icons on each
-   platform, and the source it was built from.
+3. **A desktop app that unifies the tooling** — after the 1.0 release, because the core being complete comes first. The command-line tools here are what it will drive; its release packages will carry the app, which owns the toolkit's file types and their icons on each platform, and the source it was built from.
 
 ## License
 

@@ -224,21 +224,23 @@ struct PoolChecks {
 };
 
 // The threads that check blocks: each takes the oldest block queued, of either
-// stream, and answers its checks through a future.
+// stream, and answers its checks through a future. Each works at the class the
+// budget asks for, set as it takes a task and when `nudge()` wakes it.
 class Pool {
  public:
-  Pool(unsigned count, const CartridgeBoard& board, std::size_t imageBytes, const SnesState& start,
-       const ApuWindow& window) {
+  Pool(unsigned count, StreamBudget& budget, const CartridgeBoard& board, std::size_t imageBytes,
+       const SnesState& start, const ApuWindow& window) {
     for (unsigned i = 0; i < count; ++i) {
-      threads_.emplace_back([this, &board, imageBytes, &start, window] {
-        lowerThisThread();
+      threads_.emplace_back([this, &budget, &board, imageBytes, &start, window] {
+        ThreadClassKeeper keeper{budget, ThreadClass::Lowered};
+        keeper.keep();
         const auto checks = std::make_unique<PoolChecks>(board, imageBytes, start, window);
         {
           std::lock_guard lock(mutex_);
           ++ready_;
         }
         built_.notify_all();
-        run(*checks);
+        run(*checks, keeper);
       });
     }
     // Every thread builds its checks from `start` before the run's own state moves on.
@@ -276,18 +278,28 @@ class Pool {
     return answer;
   }
 
+  // Wakes every thread waiting for a task, so each takes the class the budget
+  // now asks for.
+  void nudge() {
+    { std::lock_guard lock(mutex_); }
+    queued_.notify_all();
+  }
+
  private:
-  void run(PoolChecks& checks) {
+  void run(PoolChecks& checks, ThreadClassKeeper& keeper) {
     for (;;) {
       std::function<void(PoolChecks&)> task;
       {
         std::unique_lock lock(mutex_);
-        queued_.wait(lock, [&] { return stopping_ || !tasks_.empty(); });
-        if (tasks_.empty()) return;
-        task = std::move(tasks_.front());
-        tasks_.pop_front();
+        queued_.wait(lock, [&] { return stopping_ || !tasks_.empty() || keeper.due(); });
+        if (tasks_.empty() && stopping_) return;
+        if (!tasks_.empty()) {
+          task = std::move(tasks_.front());
+          tasks_.pop_front();
+        }
       }
-      task(checks);
+      keeper.keep();
+      if (task) task(checks);
     }
   }
 
@@ -349,6 +361,7 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
   std::unique_ptr<Core> core;
   std::unique_ptr<SnesState> keyframeState;  // the shadow thread's, a keyframe read back
   std::unique_ptr<Pool> pool;
+  unsigned poolThreads = 0;
   std::atomic<std::uint64_t> playedMaster{0};
   std::atomic<std::uint64_t> keyframesDiffered{0};
   bool keyframeNoted = false;
@@ -377,7 +390,10 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
   std::thread soundThread;
 
   Impl(Snes& m, std::span<const std::uint8_t> image, std::filesystem::path where, const BufferedRunOptions& options)
-      : machine(m), rom(image), directory(std::move(where)), budget(options.memoryBytes, options.diskBytes) {
+      : machine(m),
+        rom(image),
+        directory(std::move(where)),
+        budget(options.memoryBytes, options.diskBytes, options.atLimit) {
     std::error_code error;
     std::filesystem::create_directories(directory, error);
     if (error || !std::filesystem::is_directory(directory)) {
@@ -392,7 +408,8 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
     window = windowAt(machine, state.apu.cpu.pc, state.apu.cpu.pc);
     core = std::make_unique<Core>(MachineView{*kept, window}, rom);
     keyframeState = std::make_unique<SnesState>(state);
-    pool = std::make_unique<Pool>(poolSize(options.threads), core->board, rom.size(), state, window);
+    poolThreads = poolSize(options.threads);
+    pool = std::make_unique<Pool>(poolThreads, budget, core->board, rom.size(), state, window);
     shadowThread = std::thread([this] { shadowBody(); });
     soundThread = std::thread([this] { soundBody(); });
     machine.setObserver(this);
@@ -519,11 +536,24 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
     if (!putRecord(*soundStream, RecordKind::SoundReset, sound)) markFull();
   }
 
+  void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) {
+    if (stopped) throw std::logic_error("new ceilings for a run that is finished");
+    budget.setLimits(memoryBytes, diskBytes);
+  }
+
+  void hostStopped(bool stoppedHere) {
+    if (stopped) throw std::logic_error("the host's stop told to a run that is finished");
+    budget.setHostStopped(stoppedHere);
+    pool->nudge();
+  }
+
   // The observers are cleared, both streams end, and every thread of the run is
-  // joined, once.
+  // joined, once; the threads work at the class a thread starts with meanwhile.
   void stop() {
     if (stopped) return;
     stopped = true;
+    budget.setHostStopped(true);
+    pool->nudge();
     machine.setObserver(nullptr);
     machine.setApuObserver(nullptr);
     machine.setInstructionObserver(nullptr);
@@ -627,7 +657,7 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
   // with it until the run stops.
   template <class Checks, class Start, class Play, class Answer>
   void body(Stream& stream, Start start, Play play, Answer answer, const bool& answeredHere) {
-    lowerThisThread();
+    ThreadClassKeeper keeper{budget, ThreadClass::Lowered};
     struct InFlight {
       std::span<const std::uint8_t> block;
       std::future<Checks> checks;
@@ -639,6 +669,7 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
     bool taking = true;
     bool broken = false;
     for (;;) {
+      keeper.keep();
       if (taking && !broken) {
         try {
           while (inflight.size() < lookahead) {
@@ -894,6 +925,16 @@ std::uint32_t BufferedRun::frame() const noexcept { return impl_->frames; }
 
 bool BufferedRun::full() const noexcept { return impl_->isFull(); }
 
+bool BufferedRun::atLimit() const noexcept { return impl_->budget.atLimit(); }
+
+bool BufferedRun::memoryOver() const noexcept { return impl_->budget.memoryOver(); }
+
+void BufferedRun::setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) {
+  impl_->setLimits(memoryBytes, diskBytes);
+}
+
+void BufferedRun::hostStopped(bool stopped) { impl_->hostStopped(stopped); }
+
 BufferedRun::Progress BufferedRun::progress() const noexcept {
   const StreamBudget& budget = impl_->budget;
   return Progress{.playedMaster = impl_->playedMaster.load(std::memory_order_relaxed),
@@ -904,7 +945,9 @@ BufferedRun::Progress BufferedRun::progress() const noexcept {
                   .diskUsed = budget.diskUsed(),
                   .diskBytes = budget.diskBytes(),
                   .diskWritten = impl_->cpuStream->diskWritten() + impl_->soundStream->diskWritten(),
-                  .keyframesDiffered = impl_->keyframesDiffered.load(std::memory_order_relaxed)};
+                  .keyframesDiffered = impl_->keyframesDiffered.load(std::memory_order_relaxed),
+                  .threads = impl_->poolThreads,
+                  .threadsLowered = budget.threadsLowered()};
 }
 
 RunObservation BufferedRun::observation(std::vector<std::string>& notes) { return impl_->observation(notes); }

@@ -69,16 +69,58 @@ std::uint8_t* putBytes(Stream& stream, RecordKind kind, std::size_t bytes) noexc
   return at + 1;
 }
 
-void lowerThisThread() noexcept {
+namespace {
+
+thread_local ThreadClass threadClass = ThreadClass::Normal;
+
+}  // namespace
+
+void setThisThreadClass(ThreadClass which) noexcept {
+  threadClass = which;
 #if defined(__APPLE__)
-  pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+  qos_class_t qos = QOS_CLASS_DEFAULT;
+  if (which == ThreadClass::Lowered) qos = QOS_CLASS_BACKGROUND;
+  if (which == ThreadClass::LoweredForFiles) qos = QOS_CLASS_UTILITY;
+  pthread_set_qos_class_self_np(qos, 0);
 #elif defined(_WIN32)
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+  SetThreadPriority(GetCurrentThread(), which == ThreadClass::Normal ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_LOWEST);
 #elif defined(SCHED_IDLE)
   sched_param param{};
   param.sched_priority = 0;
-  pthread_setschedparam(pthread_self(), SCHED_IDLE, &param);
+  pthread_setschedparam(pthread_self(), which == ThreadClass::Normal ? SCHED_OTHER : SCHED_IDLE, &param);
 #endif
+}
+
+ThreadClass thisThreadClass() noexcept { return threadClass; }
+
+bool StreamBudget::atLimit() const noexcept {
+  const std::uint64_t charged = held() + (open_.load(std::memory_order_acquire) + 1u) * Stream::kBlockBytes;
+  return charged > memoryBytes() + diskBytes();
+}
+
+bool StreamBudget::memoryOver() const noexcept {
+  return memoryUsed() > memoryBytes() + (open_.load(std::memory_order_acquire) + 1u) * Stream::kBlockBytes &&
+         diskUsed() + Stream::kBlockBytes <= diskBytes();
+}
+
+ThreadClass ThreadClassKeeper::wanted() const noexcept {
+  return budget_.hostStopped() ? ThreadClass::Normal : lowered_;
+}
+
+bool ThreadClassKeeper::due() const noexcept { return wanted() != thisThreadClass(); }
+
+void ThreadClassKeeper::keep() noexcept {
+  const ThreadClass which = wanted();
+  if (which == thisThreadClass()) return;
+  setThisThreadClass(which);
+  const bool lowered = which != ThreadClass::Normal;
+  if (lowered && !counted_) budget_.lowered_.fetch_add(1u, std::memory_order_acq_rel);
+  if (!lowered && counted_) budget_.lowered_.fetch_sub(1u, std::memory_order_acq_rel);
+  counted_ = lowered;
+}
+
+ThreadClassKeeper::~ThreadClassKeeper() {
+  if (counted_) budget_.lowered_.fetch_sub(1u, std::memory_order_acq_rel);
 }
 
 namespace {
@@ -141,6 +183,9 @@ struct Stream::Impl {
   std::uint64_t nextSerial = 0;
   std::uint64_t handedBytes = 0;
   bool writerDone = false;
+  // Under `AtLimit::Keep`, filled blocks the handed ring had no room for, in
+  // order; each is charged as open until it is pushed.
+  std::vector<Block*> waiting;
 
   // Between the writer and the stream's thread.
   PointerRing handedRing;
@@ -172,12 +217,15 @@ struct Stream::Impl {
     return static_cast<std::size_t>(std::max<std::uint64_t>(blocks, 1024u));
   }
 
-  Impl(std::filesystem::path where, std::unique_ptr<StreamBudget> ownBudget, StreamBudget& shared)
+  Impl(std::filesystem::path where, std::unique_ptr<StreamBudget> ownBudget, StreamBudget& shared,
+       std::size_t ringBlocks)
       : directory(std::move(where)),
         own(std::move(ownBudget)),
         budget(shared),
-        handedRing(ringCapacity(shared.memoryBytes() + shared.diskBytes())),
+        handedRing(ringBlocks != 0u ? ringBlocks : ringCapacity(shared.memoryBytes() + shared.diskBytes())),
         spareRing(kSpareBlocks) {}
+
+  [[nodiscard]] bool keeps() const noexcept { return budget.atLimit_ == AtLimit::Keep; }
 
   std::filesystem::path fileOf(std::uint64_t serial) const {
     return directory / (std::to_string(serial) + std::string(kExtension));
@@ -209,21 +257,48 @@ struct Stream::Impl {
     release(block);
   }
 
-  // The writer's side.
-  void hand() noexcept {
-    if (current == nullptr || current->used == 0) return;
-    handedBytes += current->used;
-    if (!handedRing.push(current)) {
-      // The stream's thread has fallen this many blocks behind: the stream is full.
-      handedBytes -= current->used;
-      fullFlag.store(true, std::memory_order_relaxed);
-      return;
-    }
-    budget.handed_.fetch_add(current->used, std::memory_order_release);
+  // The writer's side: a filled block onto the handed ring, counted as handed.
+  bool push(Block* block) noexcept {
+    if (!handedRing.push(block)) return false;
+    handedBytes += block->used;
+    budget.handed_.fetch_add(block->used, std::memory_order_release);
     budget.open_.fetch_sub(1u, std::memory_order_release);
     handedTotal.store(handedBytes, std::memory_order_release);
     handedBlocks.fetch_add(1u, std::memory_order_release);
-    current = nullptr;
+    return true;
+  }
+
+  // The blocks waiting with the writer onto the ring, oldest first, as it has
+  // room; answers whether none is left waiting.
+  bool pushWaiting() noexcept {
+    std::size_t pushed = 0;
+    while (pushed < waiting.size() && push(waiting[pushed])) ++pushed;
+    waiting.erase(waiting.begin(), waiting.begin() + static_cast<std::ptrdiff_t>(pushed));
+    return waiting.empty();
+  }
+
+  void hand() noexcept {
+    if (current == nullptr || current->used == 0) return;
+    if (pushWaiting() && push(current)) {
+      current = nullptr;
+      return;
+    }
+    // The stream's thread has fallen as many blocks behind as the ring holds.
+    if (keeps()) {
+      try {
+        waiting.push_back(current);
+        current = nullptr;
+        return;
+      } catch (...) {
+        // No room to keep it waiting: as a block the system will not allocate.
+      }
+    }
+    fullFlag.store(true, std::memory_order_relaxed);
+  }
+
+  // Every waiting block onto the ring, yielding while the ring is full.
+  void handWaiting() noexcept {
+    while (!pushWaiting()) std::this_thread::yield();
   }
 
   std::uint8_t* put(std::size_t bytes) noexcept {
@@ -238,10 +313,9 @@ struct Stream::Impl {
     }
     if (current == nullptr) {
       // A block opened is charged to the budget whole, so what every stream on
-      // it holds never passes the two limits together.
-      const std::uint64_t charged =
-          budget.held() + (budget.open_.load(std::memory_order_acquire) + 1u) * kBlockBytes;
-      if (charged > budget.memoryBytes() + budget.diskBytes()) {
+      // it holds never passes the two ceilings together; a stream that keeps
+      // opens it all the same.
+      if (!keeps() && budget.atLimit()) {
         fullFlag.store(true, std::memory_order_relaxed);
         return nullptr;
       }
@@ -262,10 +336,11 @@ struct Stream::Impl {
 
   // The stream's thread.
   void body() {
-    lowerThisThread();
+    ThreadClassKeeper keeper{budget, ThreadClass::LoweredForFiles};
     std::unique_lock lock(mutex);
     for (;;) {
       lock.unlock();
+      keeper.keep();
       // `ended` is read before the ring, so a writer that ended has handed its
       // last block by the time the ring is found empty.
       const bool writerEnded = ended.load(std::memory_order_acquire);
@@ -397,19 +472,23 @@ struct Stream::Impl {
   }
 };
 
-Stream::Stream(std::filesystem::path directory, std::uint64_t memoryBytes, std::uint64_t diskBytes)
-    : Stream(std::move(directory), std::make_unique<StreamBudget>(memoryBytes, diskBytes)) {}
+Stream::Stream(std::filesystem::path directory, std::uint64_t memoryBytes, std::uint64_t diskBytes, AtLimit atLimit)
+    : Stream(std::move(directory), std::make_unique<StreamBudget>(memoryBytes, diskBytes, atLimit), 0u) {
+  start();
+}
 
 Stream::Stream(std::filesystem::path directory, StreamBudget& budget)
-    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget)) {
+    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget, 0u)) {
   start();
 }
 
-Stream::Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own) {
+Stream::Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own, std::size_t ringBlocks) {
   StreamBudget& shared = *own;
-  impl_ = std::make_unique<Impl>(std::move(directory), std::move(own), shared);
-  start();
+  impl_ = std::make_unique<Impl>(std::move(directory), std::move(own), shared, ringBlocks);
 }
+
+Stream::Stream(std::filesystem::path directory, StreamBudget& budget, std::size_t ringBlocks)
+    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget, ringBlocks)) {}
 
 void Stream::start() {
   std::error_code error;
@@ -429,7 +508,7 @@ Stream::~Stream() {
     impl_->stopping = true;
   }
   impl_->work.notify_all();
-  impl_->thread.join();
+  if (impl_->thread.joinable()) impl_->thread.join();
   std::error_code ignored;
   for (const Impl::Entry& entry : impl_->queue) {
     if (entry.block == nullptr) std::filesystem::remove(impl_->fileOf(entry.serial), ignored);
@@ -439,6 +518,10 @@ Stream::~Stream() {
   for (Block* block : impl_->freed) impl_->release(block);
   while (Block* block = impl_->handedRing.pop()) impl_->release(block);
   while (Block* block = impl_->spareRing.pop()) impl_->release(block);
+  for (Block* block : impl_->waiting) {
+    impl_->budget.open_.fetch_sub(1u, std::memory_order_release);
+    impl_->release(block);
+  }
   if (impl_->current != nullptr) impl_->budget.open_.fetch_sub(1u, std::memory_order_release);
   impl_->release(impl_->current);
   if (std::filesystem::is_empty(impl_->directory, ignored)) std::filesystem::remove(impl_->directory, ignored);
@@ -446,11 +529,15 @@ Stream::~Stream() {
 
 std::uint8_t* Stream::put(std::size_t bytes) noexcept { return impl_->put(bytes); }
 
-void Stream::flush() noexcept { impl_->hand(); }
+void Stream::flush() noexcept {
+  impl_->hand();
+  impl_->handWaiting();
+}
 
 void Stream::end() noexcept {
   if (impl_->writerDone) return;
   impl_->hand();
+  impl_->handWaiting();
   if (impl_->current != nullptr) {
     // An empty block, or one the stream could not hand over: its charge ends.
     impl_->budget.open_.fetch_sub(1u, std::memory_order_release);

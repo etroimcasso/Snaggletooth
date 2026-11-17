@@ -1,60 +1,20 @@
 # Cartridge disassembler
 
-`snes_disasm` disassembles a whole cartridge into its program files —
-`program.snagir`, the main CPU's whole program in the
-[intermediate representation](snagir.md), and `apu.snagir`, the sound program
-the cartridge uploads at boot — and a manifest that says where every file's
-bytes land in the image, where the trace began, and where it stopped, with the
-bytes the cartridge sends to the hardware as files of their own kind.
-`snes_render` writes the source tree from the program files: one file per
-bank and the sound program's file, rendered from the programs in the files
-and the facts in the manifest, by a tool that holds neither the image nor the
-trace.
-`snes_verify` does the reverse: it assembles every file the manifest names,
-places the bytes where the manifest says, and reports the difference from the
-image. The tree is written in the
-[65816](65816-assembly.md) and [SPC700](spc700-assembly.md) dialects over the
-[common layer](assembly-lexicon.md), and the manifest's grammar is
-[project-manifest.md](project-manifest.md).
+Three commands turn a cartridge image into a source tree that assembles back to the image byte for byte, and prove that it does.
 
-The trace starts at the handlers the cartridge header names and follows control
-flow across banks, so a byte anywhere in the image is code only when execution
-can reach it from a vector — or from an entry a person adds to the manifest, or
-from a destination the cartridge, run on the machine, was seen to take. The
-sound program is found by booting the cartridge on the machine and reading what
-reached the audio unit before its program started, then matched back to the bytes
-of the image it was read from.
+| Command | What it does |
+|---|---|
+| `snes_disasm` | traces the cartridge and runs it on the machine, then writes the program files — `program.snagir`, the main CPU's program in the [intermediate representation](snagir.md), and `apu.snagir`, the sound program it uploads at boot — the [manifest](project-manifest.md), and the bytes the cartridge sends to the hardware as files of their own |
+| `snes_render` | writes the source tree from the program files and the manifest: one file per bank and one for the sound program |
+| `snes_verify` | assembles every file the manifest names, places the bytes where the manifest says, and reports any difference from the image |
 
-> **Status.** The tree is complete — every image byte is in exactly one file at
-> its offset — and `snes_verify` proves it assembles back: thirty-one real
-> cartridges' trees, across all three maps, rebuild their images byte for byte.
-> The cartridge is run on the machine and the destinations its indirect jumps
-> took become entries, so a cartridge whose dispatch goes through pointers is
-> traced past them; every instruction the run executes is lifted from the bytes
-> the CPU fetched and checked against the machine, so where the CPU arrived
-> without an instruction naming it — a return to an address the code put on the
-> stack — becomes an entry too, and the direct register and the data bank the
-> run saw at every site are recorded beside what the paths prove; every range
-> of bytes the transfer engines moved is recorded with where it came from,
-> where it went and which instruction sent it — and, for the video memories,
-> which words, palette entries or sprite bytes it landed on and what the PPU
-> used them as when the run saw them drawn — and every such range that begins
-> in the image is lifted out of its bank into a file of its own under a
-> directory named for the memory it went to and, for VRAM, for whether the
-> picture used it as a map or as tiles, the bank file including it where
-> it was; and the lifted program is read for what every path proves, so a jump
-> through a table whose index the bytes bound is traced past without running,
-> and a routine that built what the run carried is run again for every value
-> every path bounds its index to, so the entries of its table the run never
-> selected are files too.
-> The manifest says what the code reaches: every register access, every
-> transfer, every routine with what it calls and what it drives, and the direct
-> register, data bank and stack pointer at every label where the paths settle
-> them — and the bank files say it beside the code, written from the
-> intermediate representation: registers as operands, labels across files, a
-> header per routine.
-> The coprocessors have no backend, so a cartridge carrying one is traced as far
-> as the main CPU's own code goes, and its tree still verifies.
+```
+snes_disasm drawing.smc -o drawing
+snes_render drawing
+snes_verify drawing drawing.smc
+```
+
+A byte is code only where execution reaches it: from a vector the header names, from an entry a person adds to the manifest, or from a destination the run was seen to take. The tree is written in the [65816](65816-assembly.md) and [SPC700](spc700-assembly.md) dialects over the [common layer](assembly-lexicon.md). [Status](#status) says what it covers.
 
 ---
 
@@ -87,11 +47,7 @@ snes_render <directory>
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-`snes_disasm` reads a cartridge image, writes `program.snagir`, `apu.snagir`
-where a sound program was captured, the manifest and the lifted files under the
-directory, creating it, and reports what it found; `snes_render` then writes
-the bank files and the sound program's file from the program files and the
-manifest:
+`snes_disasm` reads a cartridge image, writes `program.snagir`, `apu.snagir` where a sound program was captured, the manifest and the lifted files under the directory, creating it, and reports what it found; `snes_render` then writes the bank files and the sound program's file from the program files and the manifest:
 
 ```
 $ snes_disasm cartridge.sfc -o cartridge
@@ -100,51 +56,27 @@ program.snagir: 29 nodes
 65536 of 65536 bytes placed -> cartridge
 ```
 
-A cartridge that uploads a sound program at boot reports that too, on a line of
-its own: the entry the audio CPU started it at, how many blocks were sent, and
-how many of those were matched back to bytes of the image.
+A cartridge that uploads a sound program at boot reports that too, on a line of its own: the entry the audio CPU started it at, how many blocks were sent, and how many of those were matched back to bytes of the image.
 
-A copier's header ahead of the image — the 512 bytes a Super Wild Card, a Pro Fighter, a Game
-Doctor or a Super UFO wrote so it could load the file again — is dropped, and a line says which
-copier wrote it and what it declares:
+A copier's header ahead of the image — the 512 bytes a Super Wild Card, a Pro Fighter, a Game Doctor or a Super UFO wrote so it could load the file again — is dropped, and a line says which copier wrote it and what it declares:
 
 ```
 dropped a Super Wild Card header: 512 KB, HiROM, 8 KB of save RAM mapped HiROM, a program; the image is 3584 bytes longer than declared
 ```
 
-[The cartridge](snes-cartridge.md#a-copiers-header) says how each copier's header is recognised
-and read.
+[The cartridge](snes-cartridge.md#a-copiers-header) says how each copier's header is recognised and read.
 
-`--no-sound` skips the boot, so no sound program is looked for and the banks keep
-every byte. `--boot-seconds N` bounds the boot at N seconds of the master clock;
-the default is fifteen, more than a cartridge that clears its memory, unpacks its
-program and streams tens of kilobytes of samples takes to start it. A cartridge
-that has not started its sound program in that time is reported as a `note` in
-the manifest and its banks keep every byte.
+`--no-sound` skips the boot, so no sound program is looked for and the banks keep every byte. `--boot-seconds N` bounds the boot at N seconds of the master clock; the default is fifteen, more than a cartridge that clears its memory, unpacks its program and streams tens of kilobytes of samples takes to start it. A cartridge that has not started its sound program in that time is reported as a `note` in the manifest and its banks keep every byte.
 
-`--no-run` skips [running the cartridge](#running-the-cartridge); `--run-seconds N`
-bounds the run at N seconds of the master clock, sixty by default. `--input <script>`
-replays an [input script](input-script.md) into the controller ports while the
-cartridge runs, so the run plays the game rather than watching it; a script that
-cannot be read is refused with its line named, and `--input` under `--no-run` is
-refused as well, having nothing to replay into. `--input-dir <directory>` names a
-directory of recorded runs instead: the one named for the image — its file name
-without the extension, exactly as it is, then `.snaginput` — is replayed when it is
-there; the directory's `default.snaginput` is replayed when it is not, so every image
-in a corpus is played; and the ports stay empty only when the directory holds
-neither. The two forms are not given together.
+`--no-run` skips [running the cartridge](#running-the-cartridge); `--run-seconds N` bounds the run at N seconds of the master clock, sixty by default. `--input
+<script>` replays an [input script](input-script.md) into the controller ports
+while the cartridge runs, so the run plays the game rather than watching it; a script that cannot be read is refused with its line named, and `--input` under `--no-run` is refused as well, having nothing to replay into. `--input-dir
+<directory>` names a directory of recorded runs instead: the one named for the
+image — its file name without the extension, exactly as it is, then `.snaginput` — is replayed when it is there; the directory's `default.snaginput` is replayed when it is not, so every image in a corpus is played; and the ports stay empty only when the directory holds neither. The two forms are not given together.
 
-When the directory already holds a `project.snagifest`, its `entry`, `reached`,
-`ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image
-it was written for: a manifest written for another image is refused rather than
-applied. See [Stops, and getting past them](#stops-and-getting-past-them).
+When the directory already holds a `project.snagifest`, its `entry`, `reached`, `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image it was written for: a manifest written for another image is refused rather than applied. See [Stops, and getting past them](#stops-and-getting-past-them).
 
-What the tool is doing is written to standard error as it goes, so the minute
-the run takes is not a minute of silence: the run and each of the two boots
-with the seconds of the master clock spent against their bound, and the trace,
-the analysis and the writing each as one line. On a terminal a counting line
-is refreshed in place; in a log it is one line when the stage begins, one each
-time the seconds cross a multiple of ten, and one when the stage ends:
+What the tool is doing is written to standard error as it goes, so the minute the run takes is not a minute of silence: the run and each of the two boots with the seconds of the master clock spent against their bound, and the trace, the analysis and the writing each as one line. On a terminal a counting line is refreshed in place; in a log it is one line when the stage begins, one each time the seconds cross a multiple of ten, and one when the stage ends:
 
 ```
 running the cartridge: 0.0 of 60.0 s
@@ -158,18 +90,11 @@ booting the sound program: 0.0 of 15.0 s
 writing cartridge
 ```
 
-A boot ends where the sound program starts, so its count ends short of the
-bound, and there are two of them ([The sound program](#the-sound-program)).
-`--quiet` turns all of it off; the results on standard output are the same
-either way, and `corpus.py` passes it.
+A boot ends where the sound program starts, so its count ends short of the bound, and there are two of them ([The sound program](#the-sound-program)). `--quiet` turns all of it off; the results on standard output are the same either way, and `corpus.py` passes it.
 
 ## The tree
 
-The disassembler writes `program.snagir`, `apu.snagir`, `project.snagifest`
-and the lifted files; the bank files and `apu/driver.asm` are `snes_render`'s,
-written from the two program files, which `snes_lift` prints back and
-`snes_differential` replays the run beside, each on its own CPU
-([ir.md §Reading a program](ir.md#reading-a-program)). Together:
+The disassembler writes `program.snagir`, `apu.snagir`, `project.snagifest` and the lifted files; the bank files and `apu/driver.asm` are `snes_render`'s, written from the two program files, which `snes_lift` prints back and `snes_differential` replays the run beside, each on its own CPU ([ir.md §Reading a program](ir.md#reading-a-program)). Together:
 
 ```
 cartridge/
@@ -189,17 +114,7 @@ cartridge/
   staged/00_A500-tiles.png
 ```
 
-**One file per bank.** Each `bank_XX.asm` covers the ROM window of one bank
-whole, from its first byte to its last, under one `ORG`: instructions where the
-trace reached, `DB` runs everywhere else, and an `INCBIN` where a range was
-lifted into a file of its own. Every image byte is placed once, at the
-address `romAddress` reports for its offset, so a mirror is never written twice —
-a bank reached through `$80`–`$FF` is written as `$00`–`$7F` under LoROM, and
-under HiROM the banks are `$C0`–`$FF`. The instructions are written from the
-[intermediate representation](ir.md#rendering-source) the listing lifts to, with
-the facts the manifest carries attached as names. This is the start of
-`bank_00.asm` for the `mixed` cartridge from
-[`tools/examples/`](../tools/examples/README.md):
+**One file per bank.** Each `bank_XX.asm` covers the ROM window of one bank whole, from its first byte to its last, under one `ORG`: instructions where the trace reached, `DB` runs everywhere else, and an `INCBIN` where a range was lifted into a file of its own. Every image byte is placed once, at the address `romAddress` reports for its offset, so a mirror is never written twice — a bank reached through `$80`–`$FF` is written as `$00`–`$7F` under LoROM, and under HiROM the banks are `$C0`–`$FF`. The instructions are written from the [intermediate representation](ir.md#rendering-source) the listing lifts to, with the facts the manifest carries attached as names. This is the start of `bank_00.asm` for the `mixed` cartridge from [`tools/examples/`](../tools/examples/README.md):
 
 ```
 ; The hardware registers this file names, and the labels other files
@@ -239,46 +154,17 @@ loc_008023:
         STP                             ; $00:802D  DB        3
 ```
 
-Each line is the instruction, then a comment with its address, its bytes, its
-cycle cost and any annotation, as the [65816 disassembler](65816-disassembler.md#output)
-writes a listing. What the file adds is names.
+Each line is the instruction, then a comment with its address, its bytes, its cycle cost and any annotation, as the [65816 disassembler](65816-disassembler.md#output) writes a listing. What the file adds is names.
 
-**The prologue.** The file opens with an `EQU` for every hardware register its
-absolute operands address and every label another file defines that it refers
-to — and nothing else, so the prologue is a list of what the file touches. A
-register's `EQU` carries the 16-bit offset, which the absolute forms take in
-every bank; a label's carries its full 24-bit address, which `>` takes.
+**The prologue.** The file opens with an `EQU` for every hardware register its absolute operands address and every label another file defines that it refers to — and nothing else, so the prologue is a list of what the file touches. A register's `EQU` carries the 16-bit offset, which the absolute forms take in every bank; a label's carries its full 24-bit address, which `>` takes.
 
-**Register names as operands.** An absolute data operand that the manifest's
-`access` line names is written as the register: `STA !NMITIMEN`, `LDA !RDNMI`,
-`STA !VMDATAL,X`. That is exactly the set the listing annotates — an absolute
-operand taken in bank zero — so the operand says what the comment said. A long
-operand keeps its address with the name in the comment, since a long symbol
-would need the bank in the name. A register whose name cannot be a symbol —
-`$4016` is two registers, `JOYSER0/JOYOUT` — keeps its address and its comment,
-as does one whose name the file already uses as a label.
+**Register names as operands.** An absolute data operand that the manifest's `access` line names is written as the register: `STA !NMITIMEN`, `LDA !RDNMI`, `STA !VMDATAL,X`. That is exactly the set the listing annotates — an absolute operand taken in bank zero — so the operand says what the comment said. A long operand keeps its address with the name in the comment, since a long symbol would need the bank in the name. A register whose name cannot be a symbol — `$4016` is two registers, `JOYSER0/JOYOUT` — keeps its address and its comment, as does one whose name the file already uses as a label.
 
-**Labels across files.** The vectors' handlers carry the vector's name as their
-label — `reset`, `nmi`, `irq_native` — except `cop` and `brk`, which are
-mnemonics and cannot be labels, so those handlers are `cop_handler` and
-`brk_handler`. A routine reached from another bank carries `sub_` or `loc_` with
-its address, the way the disassemblers name any target. A branch, jump or call
-whose target carries a label anywhere in the tree names it — `JSR !sub_0080E8`,
-`BNE loc_008034` in the same file; `JSL >sub_018000` into another, whose `EQU`
-the prologue carries. A target the bytes name through a mirror bank keeps its
-address, since a symbol would carry the bank the bytes are placed in rather than
-the one they name.
+**Labels across files.** The vectors' handlers carry the vector's name as their label — `reset`, `nmi`, `irq_native` — except `cop` and `brk`, which are mnemonics and cannot be labels, so those handlers are `cop_handler` and `brk_handler`. A routine reached from another bank carries `sub_` or `loc_` with its address, the way the disassemblers name any target. A branch, jump or call whose target carries a label anywhere in the tree names it — `JSR !sub_0080E8`, `BNE loc_008034` in the same file; `JSL >sub_018000` into another, whose `EQU` the prologue carries. A target the bytes name through a mirror bank keeps its address, since a symbol would carry the bank the bytes are placed in rather than the one they name.
 
-**Routine headers.** Every routine that begins in the file carries a comment
-above its label: how many lines and bytes it holds, the parts of the machine it
-reaches itself and through what it calls, what it calls, and what calls it — the
-manifest's [`routine` line](#what-the-code-reaches) read out beside the code it
-describes.
+**Routine headers.** Every routine that begins in the file carries a comment above its label: how many lines and bytes it holds, the parts of the machine it reaches itself and through what it calls, what it calls, and what calls it — the manifest's [`routine` line](#what-the-code-reaches) read out beside the code it describes.
 
-**The sound program as its own file.** The bytes the cartridge sends to the audio
-unit are written once, as SPC700 source in `apu/driver.asm`, rendered from
-`apu.snagir` as the bank files are from `program.snagir`, and the bank that
-carried them leaves that range to it:
+**The sound program as its own file.** The bytes the cartridge sends to the audio unit are written once, as SPC700 source in `apu/driver.asm`, rendered from `apu.snagir` as the bank files are from `program.snagir`, and the bank that carried them leaves that range to it:
 
 ```
 ; ---- 4 bytes execution did not reach
@@ -288,17 +174,9 @@ carried them leaves that range to it:
         ORG $0E:8E42
 ```
 
-The four bytes are the upload table's own header for that block — its length and
-destination — which the main CPU reads and the audio unit never receives; the
-block itself is in the sound program's file. A bank file therefore carries an
-`ORG` wherever a range was left out, and the lexicon's `ORG` rule, forward only
-and never over emitted bytes, is what makes the file one program.
+The four bytes are the upload table's own header for that block — its length and destination — which the main CPU reads and the audio unit never receives; the block itself is in the sound program's file. A bank file therefore carries an `ORG` wherever a range was left out, and the lexicon's `ORG` rule, forward only and never over emitted bytes, is what makes the file one program.
 
-**The assets as files of their own.** A range the cartridge, run on the machine,
-was seen to send from the image to the hardware is written once, in a file
-under a directory named for the memory it went to — as an editable form where
-the run's facts name one, as the bytes otherwise — and the bank file includes
-it where it was, from `bank_00.asm` of the `lifting` cartridge:
+**The assets as files of their own.** A range the cartridge, run on the machine, was seen to send from the image to the hardware is written once, in a file under a directory named for the memory it went to — as an editable form where the run's facts name one, as the bytes otherwise — and the bank file includes it where it was, from `bank_00.asm` of the `lifting` cartridge:
 
 ```
 ; ---- $00:9000-$00:904F: 80 bytes a transfer carried to VMDATAL, in vram/00_9000.bin
@@ -312,38 +190,17 @@ it where it was, from `bank_00.asm` of the `lifting` cartridge:
         INCBIN "cgram/00_9200.pal", 0, 16
 ```
 
-The `INCBIN` emits the file's bytes at that address, so the bank's range runs on
-through it; the comment says what the run saw the bytes were for, and the file
-they are in. An encoded file is included with its offset and length, since its
-form decodes to whole units and the length is what clips it to the file
-([asset-formats.md](asset-formats.md#including-an-asset)). [The assets](#the-assets)
-says which ranges are lifted, which are not, and which form each file takes.
+The `INCBIN` emits the file's bytes at that address, so the bank's range runs on through it; the comment says what the run saw the bytes were for, and the file they are in. An encoded file is included with its offset and length, since its form decodes to whole units and the length is what clips it to the file ([asset-formats.md](asset-formats.md#including-an-asset)). [The assets](#the-assets) says which ranges are lifted, which are not, and which form each file takes.
 
-**The manifest.** `project.snagifest` names the image, every file and the range it
-covers, the sound program and each of its blocks with the image offset it was read
-from, every entry the trace started from with its mode, every stop, and every
-warning the listings raised. Its grammar is [project-manifest.md](project-manifest.md).
+**The manifest.** `project.snagifest` names the image, every file and the range it covers, the sound program and each of its blocks with the image offset it was read from, every entry the trace started from with its mode, every stop, and every warning the listings raised. Its grammar is [project-manifest.md](project-manifest.md).
 
 ## The trace across banks
 
-Every region is traced by the [65816 disassembler](65816-disassembler.md) from
-the entries that land in it: each vector's handler in the mode the CPU takes that
-vector in — the emulation-mode set, reset among them, in emulation mode, and the
-native set in native mode with the widths unknown, since the image cannot say
-what the interrupted code had — and any entry a person added. A
-call or a jump whose target is in another region — `JSL`, `JML`, and an absolute
-jump whose bank is not the current one — enters that region's trace under the mode
-the instruction was made in, so `REP #$30` in bank `$00` is what makes an immediate
-three bytes in the routine bank `$01` is called into. A target reached through a
-mirror bank is brought home first, so `JML $82:8000` traces `bank_02.asm`.
+Every region is traced by the [65816 disassembler](65816-disassembler.md) from the entries that land in it: each vector's handler in the mode the CPU takes that vector in — the emulation-mode set, reset among them, in emulation mode, and the native set in native mode with the widths unknown, since the image cannot say what the interrupted code had — and any entry a person added. A call or a jump whose target is in another region — `JSL`, `JML`, and an absolute jump whose bank is not the current one — enters that region's trace under the mode the instruction was made in, so `REP #$30` in bank `$00` is what makes an immediate three bytes in the routine bank `$01` is called into. A target reached through a mirror bank is brought home first, so `JML $82:8000` traces `bank_02.asm`.
 
-A new entry in a bank already traced sends the trace round again, and it goes
-round until no bank has an entry it has not seen. A bank nothing reaches is one
-`DB` run.
+A new entry in a bank already traced sends the trace round again, and it goes round until no bank has an entry it has not seen. A bank nothing reaches is one `DB` run.
 
-Two paths reaching one address under different widths are reported, not chosen,
-exactly as the single-bank tool reports them; the warning names the file in the
-manifest and heads the file itself:
+Two paths reaching one address under different widths are reported, not chosen, exactly as the single-bank tool reports them; the warning names the file in the manifest and heads the file itself:
 
 ```
 warning  bank_00.asm $00:98E1 is reached with e=0 m=8 x=8 and with e=0 m=16 x=8
@@ -351,29 +208,11 @@ warning  bank_00.asm $00:98E1 is reached with e=0 m=8 x=8 and with e=0 m=16 x=8
 
 ## The sound program
 
-The cartridge is booted on the machine, twice: once over cleared audio memory
-and once over audio memory filled with `$FF`. The boot runs until the audio CPU
-leaves the upload stub for the program it was sent, which is the moment the
-program starts, and its program counter then is the entry. A byte the upload
-wrote reads the same after both boots; a byte it never touched reads as each
-boot's fill. The runs of written bytes are the blocks.
+The cartridge is booted on the machine, twice: once over cleared audio memory and once over audio memory filled with `$FF`. The boot runs until the audio CPU leaves the upload stub for the program it was sent, which is the moment the program starts, and its program counter then is the entry. A byte the upload wrote reads the same after both boots; a byte it never touched reads as each boot's fill. The runs of written bytes are the blocks.
 
-Each block is then looked for in the image. A block the image holds at exactly
-one place is placed there; a block it holds in pieces — two tables uploaded end to
-end from two places in the image — is reported as those pieces, each at its own
-place; a block the image does not hold as it is, because the cartridge unpacked
-or transformed it on the way, is reported `unplaced`, and the bank keeps its
-bytes. Only a placed block is left out of its bank.
+Each block is then looked for in the image. A block the image holds at exactly one place is placed there; a block it holds in pieces — two tables uploaded end to end from two places in the image — is reported as those pieces, each at its own place; a block the image does not hold as it is, because the cartridge unpacked or transformed it on the way, is reported `unplaced`, and the bank keeps its bytes. Only a placed block is left out of its bank.
 
-The listing is traced from the entry over the uploaded blocks with the
-[SPC700 disassembler](spc700-disassembler.md) and lifted into `apu.snagir`,
-the sound program's own [program file](snagir.md): one region per run of
-uploaded addresses, two blocks that landed end to end being one run, every
-instruction as a node with its effects, the labels and the runs of bytes the
-trace never reached. `snes_render` writes `apu/driver.asm` from that file and
-the manifest's `sound` and `block` lines — each region under its own `ORG`, a
-`; ---- $XXXX-$XXXX: not uploaded` comment where a gap lies between two, and
-the file opening with what was sent:
+The listing is traced from the entry over the uploaded blocks with the [SPC700 disassembler](spc700-disassembler.md) and lifted into `apu.snagir`, the sound program's own [program file](snagir.md): one region per run of uploaded addresses, two blocks that landed end to end being one run, every instruction as a node with its effects, the labels and the runs of bytes the trace never reached. `snes_render` writes `apu/driver.asm` from that file and the manifest's `sound` and `block` lines — each region under its own `ORG`, a `; ---- $XXXX-$XXXX: not uploaded` comment where a gap lies between two, and the file opening with what was sent:
 
 ```
 ; The sound program the cartridge uploads at boot, traced from $0500.
@@ -389,128 +228,63 @@ entry:
         MOV SP,X                        ; $0503  BD        2
 ```
 
-What the boot captures is the program the cartridge starts with. A cartridge
-that sends another program later — a different driver per level, samples
-streamed on demand — sends it after the capture ends, and those bytes stay in
-their banks as data.
+What the boot captures is the program the cartridge starts with. A cartridge that sends another program later — a different driver per level, samples streamed on demand — sends it after the capture ends, and those bytes stay in their banks as data.
 
-**The samples.** When the cartridge is [run](#running-the-cartridge), the
-audio observer keeps a copy of the DSP's register file from every write the
-sound CPU makes through `$F2` and `$F3`. At each write to `KON` with a bit set
-it reads, for each voice named, the sample directory and the voice's source
-number, takes the entry's start and loop addresses from the audio memory, and
-walks the sample's blocks from the start to the first whose header carries the
-end flag. Each distinct sample — its start address and its bytes — is matched
-whole to the image, as a block is, and gets a
-[`sample` line](project-manifest.md#220-samples) naming the file of the tree
-that holds the bytes and the image offset, or `unplaced` when the image holds
-them nowhere as they are, and a WAV beside that file
-([asset-formats.md §The listening copy](asset-formats.md#the-listening-copy-wav)):
-the blocks decoded by the machine's own decoder, once from start to end, at
-32 000 Hz. A sample the image holds nowhere — one the driver built or unpacked —
-gets its WAV under `apu/samples/`. Nothing includes a WAV and the verifier
-never reads one. The `drawing` cartridge, whose program keys one voice on a
-sample the cartridge uploaded and another on one the program wrote into
-cleared memory itself:
+**The samples.** When the cartridge is [run](#running-the-cartridge), the audio observer keeps a copy of the DSP's register file from every write the sound CPU makes through `$F2` and `$F3`. At each write to `KON` with a bit set it reads, for each voice named, the sample directory and the voice's source number, takes the entry's start and loop addresses from the audio memory, and walks the sample's blocks from the start to the first whose header carries the end flag. Each distinct sample — its start address and its bytes — is matched whole to the image, as a block is, and gets a [`sample` line](project-manifest.md#220-samples) naming the file of the tree that holds the bytes and the image offset, or `unplaced` when the image holds them nowhere as they are, and a WAV beside that file ([asset-formats.md §The listening copy](asset-formats.md#the-listening-copy-wav)): the blocks decoded by the machine's own decoder, once from start to end, at 32 000 Hz. A sample the image holds nowhere — one the driver built or unpacked — gets its WAV under `apu/samples/`. Nothing includes a WAV and the verifier never reads one. The `drawing` cartridge, whose program keys one voice on a sample the cartridge uploaded and another on one the program wrote into cleared memory itself:
 
 ```
 sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $002788 times 1
 sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1
 ```
 
-A sample no key-on named is not written: the run cannot say what a byte the
-DSP never played is. A walk that reaches the end of the audio memory without
-an end flag is a `note`, and names nothing.
+A sample no key-on named is not written: the run cannot say what a byte the DSP never played is. A walk that reaches the end of the audio memory without an end flag is a `note`, and names nothing.
 
 ## Stops, and getting past them
 
-Static tracing ends where the bytes do not name the next address. The manifest
-lists each such place as a `stop`:
+Static tracing ends where the bytes do not name the next address. The manifest lists each such place as a `stop`:
 
 ```
 stop     $00:86F7 `JML [!$0000]`: the target is computed at run time; add an entry for each destination
 ```
 
-A jump or call through a table or a pointer — `JMP (!abs,X)`, `JML [!abs]`,
-`JSR (!abs,X)` — is a stop, and so is a call or jump whose target is not in the
-image, work RAM for instance, where the program copied a routine before running
-it. `BRK` and `COP` are not stops: they continue at their vectors' handlers, which
-are entries already.
+A jump or call through a table or a pointer — `JMP (!abs,X)`, `JML [!abs]`, `JSR (!abs,X)` — is a stop, and so is a call or jump whose target is not in the image, work RAM for instance, where the program copied a routine before running it. `BRK` and `COP` are not stops: they continue at their vectors' handlers, which are entries already.
 
-A call or jump into the lower half of a LoROM cartridge bank is a stop too. The
-half repeats the bank's upper half, so the target names image bytes — and the stop
-says which:
+A call or jump into the lower half of a LoROM cartridge bank is a stop too. The half repeats the bank's upper half, so the target names image bytes — and the stop says which:
 
 ```
 stop     $00:8000 `JSL $40:1234`: the target $40:1234 is a LoROM bank's lower half, which repeats $40:9234; add an entry for it if the program runs there
 ```
 
-The trace follows such a target when a run took the CPU there or an entry names
-it, and not on the word of the bytes alone. A table the bytes derive is held to
-the same rule: a destination in a repeated half is a note, not an entry. On a
-LoROM board with no save the save window's lower halves — `$70-$7D` and `$F0-$FF`
-below `$8000` — repeat their upper halves like every other cartridge bank's, so a
-call or jump there is the same stop, naming the half the target repeats. The
-`bare_window` cartridge from [`tools/examples/`](../tools/examples/README.md), one
-bank with no save, calls into its window:
+The trace follows such a target when a run took the CPU there or an entry names it, and not on the word of the bytes alone. A table the bytes derive is held to the same rule: a destination in a repeated half is a note, not an entry. On a LoROM board with no save the save window's lower halves — `$70-$7D` and `$F0-$FF` below `$8000` — repeat their upper halves like every other cartridge bank's, so a call or jump there is the same stop, naming the half the target repeats. The `bare_window` cartridge from [`tools/examples/`](../tools/examples/README.md), one bank with no save, calls into its window:
 
 ```
 stop     $00:803E `JSL $70:1340`: the target $70:1340 is a LoROM bank's lower half, which repeats $70:9340; add an entry for it if the program runs there
 ```
 
-With a save behind the window the target is the save's, and the stop says the
-target is save RAM, not in the image.
+With a save behind the window the target is the save's, and the stop says the target is save RAM, not in the image.
 
-HiROM's and ExHiROM's windows sit in the expansion area of the system banks,
-`$6000-$7FFF`, which holds no image byte on any board, so a call or jump there is
-a stop naming the expansion area, and with a save behind the window one naming
-the save. A coprocessor's LoROM board gives the lower halves of its cartridge
-banks to the chip, so a call or jump there names no image byte either: the stop
-says the target is the chip's, and no entry lifts it — the chip's own code is the
-chip's backend's, which no coprocessor has yet. The `chip_half` cartridge, a DSP
-board, calls into the chip's half and then jumps into the expansion area:
+HiROM's and ExHiROM's windows sit in the expansion area of the system banks, `$6000-$7FFF`, which holds no image byte on any board, so a call or jump there is a stop naming the expansion area, and with a save behind the window one naming the save. A coprocessor's LoROM board gives the lower halves of its cartridge banks to the chip, so a call or jump there names no image byte either: the stop says the target is the chip's, and no entry lifts it — the chip's own code is the chip's backend's, which no coprocessor has yet. The `chip_half` cartridge, a DSP board, calls into the chip's half and then jumps into the expansion area:
 
 ```
 stop     $00:8016 `JSL $60:1000`: the target $60:1000 is the coprocessor's, not in the image
 stop     $00:801A `JML $20:6000`: the target $20:6000 is the expansion area, not in the image
 ```
 
-Which halves are which is the [board's](snes-cartridge.md#the-board), read from
-the header and written into the manifest's `save` and `chip` lines.
+Which halves are which is the [board's](snes-cartridge.md#the-board), read from the header and written into the manifest's `save` and `chip` lines.
 
-A stop is answered with an entry. Add a line to the manifest naming the address
-the trace should continue from, a label for it, and the mode execution arrives in:
+A stop is answered with an entry. Add a line to the manifest naming the address the trace should continue from, a label for it, and the mode execution arrives in:
 
 ```
 entry    $00:9A12 sprite_table_0 e=0 m=8 x=16
 ```
 
-and run the tool again over the same directory. The entry is traced with the
-vectors, and the tree grows. The `file` lines are read back the same way, so the
-file split is a person's to change: a region may be any range within one bank, and
-the default the tool writes is one region per bank.
+and run the tool again over the same directory. The entry is traced with the vectors, and the tree grows. The `file` lines are read back the same way, so the file split is a person's to change: a region may be any range within one bank, and the default the tool writes is one region per bank.
 
-Some stops the bytes answer themselves. A jump or call through a table in the
-image whose index every path bounds — `AND #$07`, `ASL`, `TAX`, `JMP (!table,X)`;
-or `CMP #$03`, `BCS` past the jump, then the same — names every destination it
-can take, and each is a [`derived` line](project-manifest.md#210-what-the-bytes-derive)
-the trace starts from, as it starts from an entry. A jump every destination of
-which is derived is not a stop. What is bounded and how is
-[what every path proves](#what-every-path-proves), below.
+Some stops the bytes answer themselves. A jump or call through a table in the image whose index every path bounds — `AND #$07`, `ASL`, `TAX`, `JMP (!table,X)`; or `CMP #$03`, `BCS` past the jump, then the same — names every destination it can take, and each is a [`derived` line](project-manifest.md#210-what-the-bytes-derive) the trace starts from, as it starts from an entry. A jump every destination of which is derived is not a stop. What is bounded and how is [what every path proves](#what-every-path-proves), below.
 
 ## Running the cartridge
 
-A trace names a target only when the instruction names it. Four forms do not —
-`JMP (!abs)`, `JMP (!abs,X)`, `JML [!abs]` and `JSR (!abs,X)` take their
-destination from a pointer in memory — and a cartridge whose dispatch goes through
-one of them is a wall to the trace: every stop it reports is real, and the
-destinations only exist when the cartridge runs. So the disassembler runs it. The
-machine is booted and stepped one instruction at a time for sixty seconds of its
-clock; every time it is about to execute one of those four forms, the pointer it
-is about to read is read first, the way the CPU reads it, and the destination is
-recorded with the mode the instruction carries in. Each is a
-[`reached` line](project-manifest.md#27-what-a-run-reached) in the manifest, and
-the trace starts from it as it starts from a vector.
+A trace names a target only when the instruction names it. Four forms do not — `JMP (!abs)`, `JMP (!abs,X)`, `JML [!abs]` and `JSR (!abs,X)` take their destination from a pointer in memory — and a cartridge whose dispatch goes through one of them is a wall to the trace: every stop it reports is real, and the destinations only exist when the cartridge runs. So the disassembler runs it. The machine is booted and stepped one instruction at a time for sixty seconds of its clock; every time it is about to execute one of those four forms, the pointer it is about to read is read first, the way the CPU reads it, and the destination is recorded with the mode the instruction carries in. Each is a [`reached` line](project-manifest.md#27-what-a-run-reached) in the manifest, and the trace starts from it as it starts from a vector.
 
 A cartridge that dispatches through a table:
 
@@ -528,8 +302,7 @@ stop     $00:800B `JMP (!$8100,X)`: the target is computed at run time; add an e
 stop     $00:8245 `JMP (!$8100)`: the target is computed at run time; add an entry for each destination
 ```
 
-Both stops stand, since the bytes still do not name the targets; both targets are
-now code in the tree, labelled by the form that took them:
+Both stops stand, since the bytes still do not name the targets; both targets are now code in the tree, labelled by the form that took them:
 
 ```
         JMP (!$8100,X)                  ; $00:800B  7C 00 81  6
@@ -540,24 +313,9 @@ loc_008240:
         LDA #$0F                        ; $00:8240  A9 0F     2
 ```
 
-Nothing is inferred from where the CPU landed. The pointer is read before the
-step, and the landing only confirms it: a step that services an interrupt instead
-lands in the handler and records nothing, a step on which a DMA transfer holds the
-CPU off the bus runs no instruction and records nothing, and the jump is seen on
-the step that runs it. A pointer the run cannot read — one in a register window, in
-the save, or in a coprocessor's half rather than the image or work RAM — is named
-in a `note` and recorded nowhere; a LoROM save window with no save behind it is
-the image, and a pointer there is read. The run is deterministic: work RAM is cleared at power-on and
-the machine has no other seed, so the same cartridge reaches the same set.
+Nothing is inferred from where the CPU landed. The pointer is read before the step, and the landing only confirms it: a step that services an interrupt instead lands in the handler and records nothing, a step on which a DMA transfer holds the CPU off the bus runs no instruction and records nothing, and the jump is seen on the step that runs it. A pointer the run cannot read — one in a register window, in the save, or in a coprocessor's half rather than the image or work RAM — is named in a `note` and recorded nowhere; a LoROM save window with no save behind it is the image, and a pointer there is read. The run is deterministic: work RAM is cleared at power-on and the machine has no other seed, so the same cartridge reaches the same set.
 
-A run sees what it exercised. An unattended boot reaches what the cartridge does
-on its own — its title, its attract mode — and no further. To reach the rest, the
-run is played: `--input <script>` replays an [input script](input-script.md) into
-the controller ports as the machine runs, holding the buttons the script names
-from the frames it names, and the program reads them through the auto-read and
-the serial ports exactly as it reads a pad. A cartridge whose interrupt handler
-takes one jump when Start is down and another when A is, neither named by the
-bytes:
+A run sees what it exercised. An unattended boot reaches what the cartridge does on its own — its title, its attract mode — and no further. To reach the rest, the run is played: `--input <script>` replays an [input script](input-script.md) into the controller ports as the machine runs, holding the buttons the script names from the frames it names, and the program reads them through the auto-read and the serial ports exactly as it reads a pad. A cartridge whose interrupt handler takes one jump when Start is down and another when A is, neither named by the bytes:
 
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
@@ -576,17 +334,9 @@ reached  $00:8200 loc_008200 e=1 m=8 x=8 from $00:8318
 reached  $00:8210 loc_008210 e=1 m=8 x=8 from $00:8342
 ```
 
-Each run's script is a person's record of what was played, and different scripts
-reach different code. The manifest keeps every `reached` line from one
-disassembly to the next and merges a new run's with them, so an unattended run
-and a played one over the same directory accumulate — and an `entry` a person
-adds still names what no run has taken.
+Each run's script is a person's record of what was played, and different scripts reach different code. The manifest keeps every `reached` line from one disassembly to the next and merges a new run's with them, so an unattended run and a played one over the same directory accumulate — and an `entry` a person adds still names what no run has taken.
 
-The run need not own the machine. `snes_disasm` builds one and steps it; a host
-already running a machine for its own reasons — a player, a front end — binds
-an `ObservedRun` to it at power-on instead, runs it as it runs it, `step()` or
-`run()`, either thread on or off, its own pads and pictures and all, and hands
-what the run saw to the disassembly:
+The run need not own the machine. `snes_disasm` builds one and steps it; a host already running a machine for its own reasons — a player, a front end — binds an `ObservedRun` to it at power-on instead, runs it as it runs it, `step()` or `run()`, either thread on or off, its own pads and pictures and all, and hands what the run saw to the disassembly:
 
 ```cpp
 #include "rom/rom_disasm.h"
@@ -607,30 +357,9 @@ request->observedNotes = notes;
 snaggletooth::disasm::writeProject(snaggletooth::disasm::disassembleCartridge(*request), "cartridge", error);
 ```
 
-The run rides the boundaries the machine reports, from `run()` as from `step()`
-([The instruction observer](snes-machine.md#the-instruction-observer)), so a
-host that steps the machine and presents each frame's pads after the step that
-wrapped the beam, as `snes_disasm` does, gets the observation `snes_disasm` gets
-field for field, and a host that runs it a quarter frame at a time gets the same
-again. The console's reset line goes through the run: `ObservedRun::reset()`
-pulls it, every range open at the reset closes there and is counted, the call
-stack the shadow held ends, and both CPUs are checked on every step after it. A
-disassembly handed a run boots nothing for one and writes the tree from it as
-from its own, except that it plans no routine to
-[run again](#what-the-toolkit-ran): the tree has no `enumerated` line, and none
-of the `note     enumerate` lines the plan writes.
+The run rides the boundaries the machine reports, from `run()` as from `step()` ([The instruction observer](snes-machine.md#the-instruction-observer)), so a host that steps the machine and presents each frame's pads after the step that wrapped the beam, as `snes_disasm` does, gets the observation `snes_disasm` gets field for field, and a host that runs it a quarter frame at a time gets the same again. The console's reset line goes through the run: `ObservedRun::reset()` pulls it, every range open at the reset closes there and is counted, the call stack the shadow held ends, and both CPUs are checked on every step after it. A disassembly handed a run boots nothing for one and writes the tree from it as from its own, except that it plans no routine to [run again](#what-the-toolkit-ran): the tree has no `enumerated` line, and none of the `note enumerate` lines the plan writes.
 
-A host that must not wait binds a `BufferedRun` instead. Its three observers
-copy what the machine reports into a buffer and do nothing else, and the run
-works through the buffer on threads of its own: the two CPUs' instruction checks
-on a pool, a slice of the stream to a thread, the shadow and the recorder on one
-thread fed by the checks, the sound CPU's registers and samples on another. The
-host calls `keyframe()` once a frame between two of its calls, which puts the
-whole machine into the buffer; the run checks its own work RAM against it. The
-buffer holds what the threads have not reached, in RAM to a size the host names
-and then in files under a directory it names, to a second size, so a host on a
-slow CPU runs at its own pace and the threads catch up. The observation is the one
-`observeRun` makes of the same play, field for field.
+A host that must not wait binds a `BufferedRun` instead. Its three observers copy what the machine reports into a buffer and do nothing else, and the run works through the buffer on threads of its own: the two CPUs' instruction checks on a pool, a slice of the stream to a thread, the shadow and the recorder on one thread fed by the checks, the sound CPU's registers and samples on another. The host calls `keyframe()` once a frame between two of its calls, which puts the whole machine into the buffer; the run checks its own work RAM against it. The buffer holds what the threads have not reached, in RAM to a size the host names and then in files under a directory it names, to a second size, so a host on a slow CPU runs at its own pace and the threads catch up. The observation is the one `observeRun` makes of the same play, field for field.
 
 ```cpp
 #include "rom/rom_buffered_run.h"
@@ -646,34 +375,15 @@ std::vector<std::string> notes;
 const snaggletooth::disasm::RunObservation seen = run.finish(notes);
 ```
 
-The observation goes to the disassembly as an `ObservedRun`'s does, through
-`CartridgeRequest::observed` and `observedNotes`.
+A host that must lose nothing builds the run to keep (`BufferedRunOptions::atLimit`): at the buffer's ceilings the observers copy the host's call in flight into RAM, and `atLimit()` tells the host to stop running its machine until the threads have drained the buffer. `setLimits` gives the buffer new ceilings while the run goes, and `hostStopped` tells the run's threads the host has stopped, which raises them to the class a thread starts with until it runs again. `snes_player --disasm` is such a host ([The player](../tools/player/README.md#disassembling-as-you-play)).
+
+The observation goes to the disassembly as an `ObservedRun`'s does, through `CartridgeRequest::observed` and `observedNotes`.
 
 ## Where the CPU arrived, and what it saw
 
-The four forms are not the only way a program leaves the bytes' flow. A
-routine dispatches by pushing an address and returning to it; a program builds
-a return frame by hand and enters a routine with `RTL`; an `RTI` returns into
-flow the bytes never carried. None of those reads a pointer the run can read
-ahead, so the run reads the landing instead — and to know what a landing is,
-it has to know what every instruction names. It does: every instruction the
-CPU executes is lifted from the bytes the CPU fetched, wherever they lay,
-through the same lift the tree's program comes from, and run through the
-[interpreter](ir.md#running-beside-the-machine) held to the machine exactly as
-the differential holds it — every access, every register, every cycle — so a
-lift the machine disagrees with is a `note`, never a silent wrong fact. After
-each instruction the run compares where the CPU went with what the instruction
-names: the address after it, its constant target, the pointer the four forms
-read, the vector a `BRK` or `COP` takes, and for a return, an address the run's
-own calls and interrupts said to expect one at. Anything else is a
-[`ran` line](project-manifest.md#213-where-the-cpu-arrived), and the trace starts
-from it as it starts from a `reached` line. A landing in work RAM is a `note`,
-since the tree has nothing to trace there.
+The four forms are not the only way a program leaves the bytes' flow. A routine dispatches by pushing an address and returning to it; a program builds a return frame by hand and enters a routine with `RTL`; an `RTI` returns into flow the bytes never carried. None of those reads a pointer the run can read ahead, so the run reads the landing instead — and to know what a landing is, it has to know what every instruction names. It does: every instruction the CPU executes is lifted from the bytes the CPU fetched, wherever they lay, through the same lift the tree's program comes from, and run through the [interpreter](ir.md#running-beside-the-machine) held to the machine exactly as the differential holds it — every access, every register, every cycle — so a lift the machine disagrees with is a `note`, never a silent wrong fact. After each instruction the run compares where the CPU went with what the instruction names: the address after it, its constant target, the pointer the four forms read, the vector a `BRK` or `COP` takes, and for a return, an address the run's own calls and interrupts said to expect one at. Anything else is a [`ran` line](project-manifest.md#213-where-the-cpu-arrived), and the trace starts from it as it starts from a `reached` line. A landing in work RAM is a `note`, since the tree has nothing to trace there.
 
-A cartridge that copies a routine into work RAM, builds two return frames by
-hand and enters it with `RTL`, lands past a `PEA`/`RTS` pair on both passes of
-a loop, and returns through `RTI` into a frame it built with both widths
-sixteen bits:
+A cartridge that copies a routine into work RAM, builds two return frames by hand and enters it with `RTL`, lands past a `PEA`/`RTS` pair on both passes of a loop, and returns through `RTI` into a frame it built with both widths sixteen bits:
 
 ```
 $ snes_disasm cartridge.sfc -o cartridge --no-sound --run-seconds 1
@@ -682,8 +392,7 @@ program.snagir: 41 nodes
 note: run: the CPU arrived at $7E:2000 from $00:802B, which the tree does not hold; not recorded
 ```
 
-The stop is the `JSL` into work RAM, which the bytes name and the tree cannot
-hold; the note is the `RTL` that followed it there.
+The stop is the `JSL` into work RAM, which the bytes name and the tree cannot hold; the note is the `RTL` that followed it there.
 
 ```
 ran      $00:803A loc_00803A e=1 m=8 x=8 from $00:8039
@@ -691,27 +400,14 @@ ran      $00:804D loc_00804D e=0 m=16 x=16 from $00:804C
 ran      $00:802C loc_00802C e=1 m=8 x=8 from $7E:2001
 ```
 
-The `RTS` was taken on both passes of the loop and is written once; the `RTI`
-ran with both widths eight and arrived with both sixteen, and the line carries
-the mode the CPU arrived in. Without the run, everything after the `RTL` at
-`$00:802B` is data; with it, all three landings are labels with the code under
-them, and the routine's return from work RAM is one of them:
+The `RTS` was taken on both passes of the loop and is written once; the `RTI` ran with both widths eight and arrived with both sixteen, and the line carries the mode the CPU arrived in. Without the run, everything after the `RTL` at `$00:802B` is data; with it, all three landings are labels with the code under them, and the routine's return from work RAM is one of them:
 
 ```
 loc_00802C:
         STA !$0102                      ; $00:802C  8D 02 01     4
 ```
 
-The same lockstep sees the registers at every site. At each instruction the
-run executes in the image, the direct register and the data bank it held are
-recorded as a [`seen` line](project-manifest.md#214-what-a-run-saw), every
-value the run saw, beside the `state` line that says what
-[every path proves](#what-every-path-proves) — the run's answer where the
-paths say `?`, and a disagreement where the run saw a value the paths do not
-prove. A plain direct-page operand the paths prove nothing about, at a site the
-run saw one direct register, carries in its comment the register that value
-lands it on, marked `(run)`; a site the run saw two values at, an indexed form,
-and a site the paths already prove get no such name:
+The same lockstep sees the registers at every site. At each instruction the run executes in the image, the direct register and the data bank it held are recorded as a [`seen` line](project-manifest.md#214-what-a-run-saw), every value the run saw, beside the `state` line that says what [every path proves](#what-every-path-proves) — the run's answer where the paths say `?`, and a disagreement where the run saw a value the paths do not prove. A plain direct-page operand the paths prove nothing about, at a site the run saw one direct register, carries in its comment the register that value lands it on, marked `(run)`; a site the run saw two values at, an indexed form, and a site the paths already prove get no such name:
 
 ```
 seen     $00:802C D=$4300|$4310 DBR=$00
@@ -723,38 +419,13 @@ seen     $00:803F D=$4320 DBR=$00
         STA $03,X                       ; $00:8041  95 03        4
 ```
 
-The manifest keeps every `ran` line as it keeps `reached`, and writes the
-`seen` lines fresh on every run: they are what the run saw, and the next run
-sees it again.
+The manifest keeps every `ran` line as it keeps `reached`, and writes the `seen` lines fresh on every run: they are what the run saw, and the next run sees it again.
 
-The sound CPU is held the same way. The audio machine reports every access the
-sound CPU makes and every instruction boundary it crosses; at each boundary
-the run decodes the instruction about to run from the bytes at the sound
-CPU's program counter — the upload stub's, served from the boot-ROM window,
-and the uploaded program's alike — lifts it through the same lift `apu.snagir`
-comes from, and at the boundary after holds that node to what the machine did
-between them, through the [interpreter](ir.md#running-beside-the-machine) as
-the differential holds it. A lift the audio machine disagrees with is a `note`
-naming the audio site, said once; so is a step whose bytes do not decode as
-one instruction, or that did not fetch the instruction decoded there, which is
-not checked. Nothing is yet computed from a sound node: no `ran`, no `seen`,
-no fact — the check is the whole of it, and a run that ends with no note has
-held every sound instruction it executed to the chip.
+The sound CPU is held the same way. The audio machine reports every access the sound CPU makes and every instruction boundary it crosses; at each boundary the run decodes the instruction about to run from the bytes at the sound CPU's program counter — the upload stub's, served from the boot-ROM window, and the uploaded program's alike — lifts it through the same lift `apu.snagir` comes from, and at the boundary after holds that node to what the machine did between them, through the [interpreter](ir.md#running-beside-the-machine) as the differential holds it. A lift the audio machine disagrees with is a `note` naming the audio site, said once; so is a step whose bytes do not decode as one instruction, or that did not fetch the instruction decoded there, which is not checked. Nothing is yet computed from a sound node: no `ran`, no `seen`, no fact — the check is the whole of it, and a run that ends with no note has held every sound instruction it executed to the chip.
 
 ## What a run moved
 
-The same run watches the two transfer engines. A `dma` line (see
-[What the code reaches](#what-the-code-reaches)) says what a channel was set up
-for, and only where the bytes say the values: a routine that uploads a level's
-tiles takes its source from a pointer, so its `dma` line reads `source none`
-and always will. The run knows. Every byte a general-purpose transfer or an
-HDMA channel moves crosses the bus in the engine's name, and the run records
-each range of them as a [`moved` line](project-manifest.md#211-what-a-run-moved):
-the instruction that started it, the channel, which way the bytes went, the
-register they reached with its class, the memory address they began at and how
-it stepped, how many there were, whether they were a transfer, an HDMA table as
-a frame walked it or the block an indirect entry pointed at, and how many times
-the run saw that exact range.
+The same run watches the two transfer engines. A `dma` line (see [What the code reaches](#what-the-code-reaches)) says what a channel was set up for, and only where the bytes say the values: a routine that uploads a level's tiles takes its source from a pointer, so its `dma` line reads `source none` and always will. The run knows. Every byte a general-purpose transfer or an HDMA channel moves crosses the bus in the engine's name, and the run records each range of them as a [`moved` line](project-manifest.md#211-what-a-run-moved): the instruction that started it, the channel, which way the bytes went, the register they reached with its class, the memory address they began at and how it stepped, how many there were, whether they were a transfer, an HDMA table as a frame walked it or the block an indirect entry pointed at, and how many times the run saw that exact range.
 
 A cartridge that fills a channel from a pointer, run for one second:
 
@@ -770,68 +441,17 @@ dma      $00:8132 channel 7 to-register $00:2104 OAMDATA Oam source none increme
 moved    $00:8326 channel 7 to-register $00:2104 OAMDATA Oam memory $7E:0200 increment bytes 544 as dma times 60
 ```
 
-The `dma` line stands where the channel's `BBAD` was written, and its source,
-its count and its start are `none` because the address registers are filled
-and the channel started elsewhere — here in the vertical-blank handler, which
-writes them and starts the channel every frame.
-The `moved` line stands at the handler's write to `MDMAEN`, names the 544 bytes
-from `$7E:0200`, and says the run saw them go sixty times. A range in work RAM
-is a table the program builds; a range in the image is bytes the cartridge
-ships, which is what an asset is.
+The `dma` line stands where the channel's `BBAD` was written, and its source, its count and its start are `none` because the address registers are filled and the channel started elsewhere — here in the vertical-blank handler, which writes them and starts the channel every frame. The `moved` line stands at the handler's write to `MDMAEN`, names the 544 bytes from `$7E:0200`, and says the run saw them go sixty times. A range in work RAM is a table the program builds; a range in the image is bytes the cartridge ships, which is what an asset is.
 
-What is recorded is what the engine did. A `fixed` step is a fill from one byte
-and says so, since sixty-four bytes from one address are not a range of the
-image. An HDMA table is recorded once per frame that walked it, from its start
-to where the walk stopped — so a table the run's end cut part-way is its own
-range with the bytes it had read — and each block an indirect entry points at
-is a range of its own, named by the register the channel reaches. Two channels
-started by one write are two lines at one site; a write of zero starts nothing.
-The register is the one the channel's `BBAD` names; a pattern that reaches a
-second register is implied by the byte count.
+What is recorded is what the engine did. A `fixed` step is a fill from one byte and says so, since sixty-four bytes from one address are not a range of the image. An HDMA table is recorded once per frame that walked it, from its start to where the walk stopped — so a table the run's end cut part-way is its own range with the bytes it had read — and each block an indirect entry points at is a range of its own, named by the register the channel reaches. Two channels started by one write are two lines at one site; a write of zero starts nothing. The register is the one the channel's `BBAD` names; a pattern that reaches a second register is implied by the byte count.
 
-A `moved` line's site is an instruction the run executed, at the address the
-CPU executed it — a cartridge that runs its code from the fast mirror banks
-names them, and the same bytes are in the file named after their home bank.
-Where the site lies in a `DB` run of that file, the run reached code the trace
-did not — a routine behind a jump the run took and the bytes do not name — and
-an `entry` for the routine is how the trace catches up. A range whose memory address is in
-work RAM was built by the program: a table the cartridge decompresses or draws
-before sending it, which the image holds in another form, or not at all.
+A `moved` line's site is an instruction the run executed, at the address the CPU executed it — a cartridge that runs its code from the fast mirror banks names them, and the same bytes are in the file named after their home bank. Where the site lies in a `DB` run of that file, the run reached code the trace did not — a routine behind a jump the run took and the bytes do not name — and an `entry` for the routine is how the trace catches up. A range whose memory address is in work RAM was built by the program: a table the cartridge decompresses or draws before sending it, which the image holds in another form, or not at all.
 
-The manifest keeps every `moved` line from one disassembly to the next: a range
-this run saw again carries this run's count, one it did not see is kept as it
-was, and a run skipped with `--no-run` keeps them all. So a tree carries where
-the hardware's bytes came from whether or not the disassembly that wrote it ran
-the cartridge.
+The manifest keeps every `moved` line from one disassembly to the next: a range this run saw again carries this run's count, one it did not see is kept as it was, and a run skipped with `--no-run` keeps them all. So a tree carries where the hardware's bytes came from whether or not the disassembly that wrote it ran the cartridge.
 
-**Where a range landed.** The `moved` line says what the engine did on the
-A bus; what happened on the other side of the port is the
-[`landed` line](project-manifest.md#217-where-a-transfer-landed) beside it.
-Every write through a video data port says where the port put the byte —
-the machine reports it with the access ([SNES machine](snes-machine.md#the-bus-observer)) — and
-the run keeps, for each range, the lowest and the highest VRAM word, palette
-word or OAM byte its bytes reached. Then, at the first frame the PPU draws
-after the bytes landed, it reads the screen mode and the base registers as
-they stand at that frame's start to say what the memory was: a
-layer's screen (`tilemap1`–`tilemap4`), a layer's name base at the color
-depth the mode gives it (`tiles1`–`tiles4`), the sprite tiles (`sprites`),
-the whole of VRAM under Mode 7 (`mode7`), several of those joined by `+`,
-`none` for a stretch no base reaches, or `unshown` when no frame was drawn
-before the run ended. A range the engine was still carrying at a frame's
-start has its later bytes read at the next drawn frame, and its areas are
-every area read. A palette landing is `palette` and an OAM landing `oam`,
-whatever the frame. The first drawn frame is the moment the picture first
-used the words, so an upload made in forced blank with the bases written
-afterwards, or into the half of a double buffer the screen is not showing,
-is read as what it became, not as what the registers said when the engine
-ran. A range whose bytes reach no data port — a table to the brightness
-register, a copy into work RAM through its port, a read back — has no line;
-a range that landed in two places has two, each with its own count.
+**Where a range landed.** The `moved` line says what the engine did on the A bus; what happened on the other side of the port is the [`landed` line](project-manifest.md#217-where-a-transfer-landed) beside it. Every write through a video data port says where the port put the byte — the machine reports it with the access ([SNES machine](snes-machine.md#the-bus-observer)) — and the run keeps, for each range, the lowest and the highest VRAM word, palette word or OAM byte its bytes reached. Then, at the first frame the PPU draws after the bytes landed, it reads the screen mode and the base registers as they stand at that frame's start to say what the memory was: a layer's screen (`tilemap1`–`tilemap4`), a layer's name base at the color depth the mode gives it (`tiles1`–`tiles4`), the sprite tiles (`sprites`), the whole of VRAM under Mode 7 (`mode7`), several of those joined by `+`, `none` for a stretch no base reaches, or `unshown` when no frame was drawn before the run ended. A range the engine was still carrying at a frame's start has its later bytes read at the next drawn frame, and its areas are every area read. A palette landing is `palette` and an OAM landing `oam`, whatever the frame. The first drawn frame is the moment the picture first used the words, so an upload made in forced blank with the bases written afterwards, or into the half of a double buffer the screen is not showing, is read as what it became, not as what the registers said when the engine ran. A range whose bytes reach no data port — a table to the brightness register, a copy into work RAM through its port, a read back — has no line; a range that landed in two places has two, each with its own count.
 
-The `landing` cartridge from [`tools/examples/`](../tools/examples/README.md)
-uploads to every video memory in forced blank and sets its bases only
-afterwards; the vertical-blank handler then flips a base behind an upload,
-switches to Mode 7 and blanks the screen before one last upload:
+The `landing` cartridge from [`tools/examples/`](../tools/examples/README.md) uploads to every video memory in forced blank and sets its bases only afterwards; the vertical-blank handler then flips a base behind an upload, switches to Mode 7 and blanks the screen before one last upload:
 
 ```
 $ snes_disasm landing.smc -o landing --no-sound --run-seconds 1
@@ -852,50 +472,13 @@ landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $000-$21F in oam
 landed   $00:8430 channel 0 memory $00:A000 bytes 544 as dma at $010-$21F in oam times 1
 ```
 
-The tileset from `$9000` was uploaded before any base was written and is
-read as the name base BG1 and BG2 share; the map from `$9700` was uploaded
-to `$7800` while BG2's screen was elsewhere, and the flip that followed is
-what the first drawn frame saw — a screen of four from `$7400`, whose last
-wraps round the end of VRAM to hold the map from `$9D00` at `$0200` beside
-BG1's; the upload from `$9A00` was made after the
-screen was blanked and no frame drew it. The sprite table sent from the
-handler landed at byte zero on two frames — the PPU reloads the OAM address
-at the start of every vertical blank — and at `$010` on the one the handler
-had moved the address first. The whole set is the
-[manifest page's example](project-manifest.md#217-where-a-transfer-landed).
-The line is written fresh and read back by nothing; what follows from it —
-the directory a VRAM file lives under — is the next section's, and is kept
-by the file's `asset` line.
+The tileset from `$9000` was uploaded before any base was written and is read as the name base BG1 and BG2 share; the map from `$9700` was uploaded to `$7800` while BG2's screen was elsewhere, and the flip that followed is what the first drawn frame saw — a screen of four from `$7400`, whose last wraps round the end of VRAM to hold the map from `$9D00` at `$0200` beside BG1's; the upload from `$9A00` was made after the screen was blanked and no frame drew it. The sprite table sent from the handler landed at byte zero on two frames — the PPU reloads the OAM address at the start of every vertical blank — and at `$010` on the one the handler had moved the address first. The whole set is the [manifest page's example](project-manifest.md#217-where-a-transfer-landed). The line is written fresh and read back by nothing; what follows from it — the directory a VRAM file lives under — is the next section's, and is kept by the file's `asset` line.
 
 ## The assets
 
-Every range the run saw an engine carry begins somewhere, and where it begins in
-the image, the bytes are the cartridge's own — a tileset, a palette, a sprite
-table, an HDMA table — and are lifted out of their bank into a file of their
-own. The bank file includes the file where the bytes were, with `INCBIN`, so the
-tree still assembles to the image; the manifest records the file as an
-[`asset` line](project-manifest.md#212-assets); and the `moved` lines are its
-uses, joined on the address.
+Every range the run saw an engine carry begins somewhere, and where it begins in the image, the bytes are the cartridge's own — a tileset, a palette, a sprite table, an HDMA table — and are lifted out of their bank into a file of their own. The bank file includes the file where the bytes were, with `INCBIN`, so the tree still assembles to the image; the manifest records the file as an [`asset` line](project-manifest.md#212-assets); and the `moved` lines are its uses, joined on the address.
 
-**What is lifted.** A `moved` range whose bytes went to a register, stepping up
-or down through memory that is the image: a general-purpose transfer to VRAM, to
-CGRAM, to OAM or to the audio port, or an HDMA table or a block an indirect entry
-pointed at, to any register. The file lives under `vram/`, `cgram/`, `oam/` or
-`apu/` for a transfer, `hdma/` for a table or a block — and `staged/` for a
-source the run's shadow named whose bytes were built into data for two
-classes, the next section — and is named `<bank>_<offset>.bin` after the
-address of its first byte. A file a routine the toolkit ran builds another
-class's data from keeps its place and its class, and says so after `also` on
-its line ([§What the toolkit ran](#what-the-toolkit-ran)). A VRAM file goes further, by
-[where its bytes landed](#what-a-run-moved): when every landing the run saw
-drawn of every range the file's bytes went through — its own ranges, or the
-ranges built from it, or the stream that carried it — lies in a layer's
-screen, the file lives under `maps/`; when every one lies in a name base or
-the sprite tiles, under `tiles/`; and when a landing was never drawn, lies in
-no area, lies under Mode 7, mixes a screen with tiles, or when there is no
-landing at all — a transfer the code proves, a tree disassembled without a
-run — it stays under `vram/`, which is the honest answer. The
-`landing` cartridge's thirteen files:
+**What is lifted.** A `moved` range whose bytes went to a register, stepping up or down through memory that is the image: a general-purpose transfer to VRAM, to CGRAM, to OAM or to the audio port, or an HDMA table or a block an indirect entry pointed at, to any register. The file lives under `vram/`, `cgram/`, `oam/` or `apu/` for a transfer, `hdma/` for a table or a block — and `staged/` for a source the run's shadow named whose bytes were built into data for two classes, the next section — and is named `<bank>_<offset>.bin` after the address of its first byte. A file a routine the toolkit ran builds another class's data from keeps its place and its class, and says so after `also` on its line ([§What the toolkit ran](#what-the-toolkit-ran)). A VRAM file goes further, by [where its bytes landed](#what-a-run-moved): when every landing the run saw drawn of every range the file's bytes went through — its own ranges, or the ranges built from it, or the stream that carried it — lies in a layer's screen, the file lives under `maps/`; when every one lies in a name base or the sprite tiles, under `tiles/`; and when a landing was never drawn, lies in no area, lies under Mode 7, mixes a screen with tiles, or when there is no landing at all — a transfer the code proves, a tree disassembled without a run — it stays under `vram/`, which is the honest answer. The `landing` cartridge's thirteen files:
 
 ```
 asset    tiles/00_9000.png Vram as dma from $00:9000 bytes 64
@@ -913,52 +496,15 @@ asset    maps/00_9D00.map Vram as dma from $00:9D00 bytes 64
 asset    oam/00_A000.oam Oam as dma from $00:A000 bytes 544
 ```
 
-The range from `$9200` began in BG3's screen and ended in the name bases,
-`$9300` landed where no base reaches, `$9800` was uploaded under Mode 7 and
-`$9A00` was never drawn: all four stay under `vram/`. The thirty-two bytes at
-`$9B00` were copied into work RAM and sent from there into BG1's screen, so
-their source is placed as a map; the map from `$9D00` lies in two screens at
-once, and two screens are still maps. A range read downward is lifted in image order,
-which is how its bytes lie. Ranges that share a byte are one file, the union of
-them — a tileset sent whole and then sent piece by piece is one tileset; ranges
-that only touch are two files, since the run cannot say whether a chunked
-upload is one asset or two.
+The range from `$9200` began in BG3's screen and ended in the name bases, `$9300` landed where no base reaches, `$9800` was uploaded under Mode 7 and `$9A00` was never drawn: all four stay under `vram/`. The thirty-two bytes at `$9B00` were copied into work RAM and sent from there into BG1's screen, so their source is placed as a map; the map from `$9D00` lies in two screens at once, and two screens are still maps. A range read downward is lifted in image order, which is how its bytes lie. Ranges that share a byte are one file, the union of them — a tileset sent whole and then sent piece by piece is one tileset; ranges that only touch are two files, since the run cannot say whether a chunked upload is one asset or two.
 
-**The form.** The path's extension names what the file is written as
-([asset-formats.md](asset-formats.md#which-form-a-lifted-file-takes)): a tile
-sheet under `tiles/` is a `.png` at the depth its landings were read at — the
-`landed` line's `depth`, the layer's color depth in the mode for a name base,
-four for the sprite tiles — carrying the palette RAM as it stood at the frame
-that read them; a `maps/` file is a `.map`, a `cgram/` file a `.pal`, an `oam/`
-file an `.oam`; a table under `hdma/` is a `.hdma` under the unit and the mode
-the engine walked it, the `walked` line's. The two sheets above at `$9000` and
-`$9400` are four bits a pixel; the rotated words at `$9900` reach name bases of
-two depths, so that file is bytes, and a `note` says so; the staged source at
-`$9B00` is what a routine read, not what it built, and is bytes with a preview
-of the map it became beside it. Every form is decoded back and compared before
-it is written, and a file shorter than one unit of its form stays bytes.
+**The form.** The path's extension names what the file is written as ([asset-formats.md](asset-formats.md#which-form-a-lifted-file-takes)): a tile sheet under `tiles/` is a `.png` at the depth its landings were read at — the `landed` line's `depth`, the layer's color depth in the mode for a name base, four for the sprite tiles — carrying the palette RAM as it stood at the frame that read them; a `maps/` file is a `.map`, a `cgram/` file a `.pal`, an `oam/` file an `.oam`; a table under `hdma/` is a `.hdma` under the unit and the mode the engine walked it, the `walked` line's. The two sheets above at `$9000` and `$9400` are four bits a pixel; the rotated words at `$9900` reach name bases of two depths, so that file is bytes, and a `note` says so; the staged source at `$9B00` is what a routine read, not what it built, and is bytes with a preview of the map it became beside it. Every form is decoded back and compared before it is written, and a file shorter than one unit of its form stays bytes.
 
-**What is not, without a word.** A fill from one byte, which is not a range of
-anything; a read from a register back into memory, whose memory is the
-destination; a range in work RAM, save RAM or a register window — the program
-built it, and the image holds it in another form or not at all; and a
-general-purpose transfer to any other register, such as a copy into work RAM
-through its port, whose bytes could be anything. A transfer whose address runs
-past the end of its bank and on from the bank's start is lifted as far as its
-bytes were in the image, and a `note` says how many were not; under HiROM the
-bytes after the wrap are the image too, the bank's own first bytes, and are a
-file of their own — the `wrapping` cartridge lifts `vram/C1_FFF0.bin` and
-`vram/C1_0000.bin` from one transfer of thirty-two.
+**What is not, without a word.** A fill from one byte, which is not a range of anything; a read from a register back into memory, whose memory is the destination; a range in work RAM, save RAM or a register window — the program built it, and the image holds it in another form or not at all; and a general-purpose transfer to any other register, such as a copy into work RAM through its port, whose bytes could be anything. A transfer whose address runs past the end of its bank and on from the bank's start is lifted as far as its bytes were in the image, and a `note` says how many were not; under HiROM the bytes after the wrap are the image too, the bank's own first bytes, and are a file of their own — the `wrapping` cartridge lifts `vram/C1_FFF0.bin` and `vram/C1_0000.bin` from one transfer of thirty-two.
 
-**What is refused, with a note.** A range over an instruction the trace decoded
-— the instruction is the trace's reading of those bytes, and a file cut through
-it would change what the tree says the code is; a range over a block of the
-sound program, which is already another file's; and a range whose overlapping
-ranges the engines sent two places, or two ways, since a file is one thing. Each
-is left as `DB` rows in its bank, and the manifest says why.
+**What is refused, with a note.** A range over an instruction the trace decoded — the instruction is the trace's reading of those bytes, and a file cut through it would change what the tree says the code is; a range over a block of the sound program, which is already another file's; and a range whose overlapping ranges the engines sent two places, or two ways, since a file is one thing. Each is left as `DB` rows in its bank, and the manifest says why.
 
-The `lifting` cartridge from [`tools/examples/`](../tools/examples/README.md),
-which sends bytes every way the rules have a case for, run for one second:
+The `lifting` cartridge from [`tools/examples/`](../tools/examples/README.md), which sends bytes every way the rules have a case for, run for one second:
 
 ```
 $ snes_disasm lifting.smc -o lifting --no-sound --run-seconds 1
@@ -984,39 +530,11 @@ asset    vram/01_8000.bin Vram as dma from $01:8000 bytes 32
 asset    vram/01_FFF0.bin Vram as dma from $01:FFF0 bytes 16
 ```
 
-Three transfers from `$9000` — sixty-four bytes, sixteen inside them, thirty-two
-across their end — are the one file of eighty, bytes because the run never
-drew them; the two blocks the HDMA table
-points at lie end to end and are two files; the transfer from `$01:FFF0` read
-its last sixteen bytes from `$01:0000`, which is not the image, and its file
-holds the sixteen that were. The three notes are the three refusals: the same
-bytes sent two places, twice — once to two classes, once to two registers of
-one — and the reset routine's own bytes sent to VRAM. The `staged` file is the
-next section's: `$01:0000` is work RAM, and the sixteen bytes there were the
-ones the port had copied in from `$9900`, so the transfer carried them on and
-the run knows it.
+Three transfers from `$9000` — sixty-four bytes, sixteen inside them, thirty-two across their end — are the one file of eighty, bytes because the run never drew them; the two blocks the HDMA table points at lie end to end and are two files; the transfer from `$01:FFF0` read its last sixteen bytes from `$01:0000`, which is not the image, and its file holds the sixteen that were. The three notes are the three refusals: the same bytes sent two places, twice — once to two classes, once to two registers of one — and the reset routine's own bytes sent to VRAM. The `staged` file is the next section's: `$01:0000` is work RAM, and the sixteen bytes there were the ones the port had copied in from `$9900`, so the transfer carried them on and the run knows it.
 
-**A name is a person's.** The disassembler writes every source file fresh, so a
-path edited in a bank file is gone on the next run; the manifest is where a
-name lives. Rename the file, change its `asset` line to match, and the next run
-writes the file under that name and includes it by it, since a line whose
-address and length match a file lifted again gives it its path. The old file is
-not removed — the disassembler never deletes anything — and an `asset` line
-that matches no range the run lifts is dropped, with a `note` saying so. A tree
-disassembled with `--no-run` lifts what its manifest's `moved` lines say, so the
-files are kept from one run to the next whether or not the cartridge ran.
+**A name is a person's.** The disassembler writes every source file fresh, so a path edited in a bank file is gone on the next run; the manifest is where a name lives. Rename the file, change its `asset` line to match, and the next run writes the file under that name and includes it by it, since a line whose address and length match a file lifted again gives it its path. The old file is not removed — the disassembler never deletes anything — and an `asset` line that matches no range the run lifts is dropped, with a `note` saying so. A tree disassembled with `--no-run` lifts what its manifest's `moved` lines say, so the files are kept from one run to the next whether or not the cartridge ran.
 
-**What the code proves is lifted too.** A `dma` line whose every field the
-paths settle — a general-purpose start, a destination in VRAM, CGRAM, OAM or
-the audio port, a source stepping up or down through the image, and a count
-— names a range as exactly as a `moved` line does, and where no run started
-it, the file is lifted from the code's word: the same directory, the same
-name, an `asset` line of kind `proven`, and an `INCBIN` in the bank file. A
-fill, a transfer whose start the code does not prove, an HDMA enable (whose
-count is not a length) and a source outside the image lift nothing, and say
-nothing. Where the run did start the transfer, the `moved` range is the file
-and the proof is only checked against it. The `declaring` cartridge, whose
-reset code sets five channels up behind a button the run never presses:
+**What the code proves is lifted too.** A `dma` line whose every field the paths settle — a general-purpose start, a destination in VRAM, CGRAM, OAM or the audio port, a source stepping up or down through the image, and a count — names a range as exactly as a `moved` line does, and where no run started it, the file is lifted from the code's word: the same directory, the same name, an `asset` line of kind `proven`, and an `INCBIN` in the bank file. A fill, a transfer whose start the code does not prove, an HDMA enable (whose count is not a length) and a source outside the image lift nothing, and say nothing. Where the run did start the transfer, the `moved` range is the file and the proof is only checked against it. The `declaring` cartridge, whose reset code sets five channels up behind a button the run never presses:
 
 ```
 asset    vram/00_9000.bin Vram as dma from $00:9000 bytes 32
@@ -1026,100 +544,23 @@ asset    cgram/00_9200.pal Cgram as dma from $00:9200 bytes 16
 asset    oam/00_9300.oam Oam as proven from $00:9300 bytes 544
 ```
 
-The run took five transfers and confirmed each; the sprite table at `$9300`
-is lifted because the code proves it whole. The 48 bytes at `$9100` are
-proven whole too, and the run sent sixteen from inside them: a proven range
-and a range the run moved that share bytes are one file, the run's kind, as
-two of the run's ranges would be. The fill from `$9600`, the HDMA table at
-`$9700`, the transfer whose source came from a variable and the one set up
-and never started are left where they are.
+The run took five transfers and confirmed each; the sprite table at `$9300` is lifted because the code proves it whole. The 48 bytes at `$9100` are proven whole too, and the run sent sixteen from inside them: a proven range and a range the run moved that share bytes are one file, the run's kind, as two of the run's ranges would be. The fill from `$9600`, the HDMA table at `$9700`, the transfer whose source came from a variable and the one set up and never started are left where they are.
 
-Most of what a cartridge sends is built in work RAM first — decompressed, drawn,
-assembled from pieces — and those ranges are recorded as `moved` lines whose
-memory is work RAM. The image holds them in another form, and the run's shadow
-says which: see the next section.
+Most of what a cartridge sends is built in work RAM first — decompressed, drawn, assembled from pieces — and those ranges are recorded as `moved` lines whose memory is work RAM. The image holds them in another form, and the run's shadow says which: see the next section.
 
 ## Where the bytes came from
 
-Beside the interpreter the run keeps a shadow
-([ir.md §The shadow](ir.md#the-shadow)): every value carries the image offsets
-it was computed from, work RAM keeps the origin and the last writer of every
-byte, and every byte the engines and the port move keeps it current. So when a
-transfer carries a range out of work RAM, the run reads the shadow under it and
-the manifest says where the bytes came from — an
-[`origin` line](project-manifest.md#215-where-a-staged-range-came-from) per
-writer and per source — and what was built from each lifted file, a `staged`
-line.
+Beside the interpreter the run keeps a shadow ([ir.md §The shadow](ir.md#the-shadow)): every value carries the image offsets it was computed from, work RAM keeps the origin and the last writer of every byte, and every byte the engines and the port move keeps it current. So when a transfer carries a range out of work RAM, the run reads the shadow under it and the manifest says where the bytes came from — an [`origin` line](project-manifest.md#215-where-a-staged-range-came-from) per writer and per source — and what was built from each lifted file, a `staged` line.
 
-**An origin is data.** A value's origin is the set of image bytes its value was
-computed from: a load takes the origin of the bytes it read, never of the
-address it read them at; an operation takes the union of its operands'; a
-constant and a flag have none. A value the image does not hold carries a mark
-instead — a hardware register, named, or the save — so `computed` is said only
-of bytes built from constants alone. The origin of a decoder's output is the
-literal bytes it copied; the counts and lengths that decided how many are not
-in it, since they never reached a value.
+**An origin is data.** A value's origin is the set of image bytes its value was computed from: a load takes the origin of the bytes it read, never of the address it read them at; an operation takes the union of its operands'; a constant and a flag have none. A value the image does not hold carries a mark instead — a hardware register, named, or the save — so `computed` is said only of bytes built from constants alone. The origin of a decoder's output is the literal bytes it copied; the counts and lengths that decided how many are not in it, since they never reached a value.
 
-**A source is what the writer read.** The shadow follows every invocation —
-from the call that pushes its return address until the stack pointer passes
-that place, by a pull that returns through it or throws it away or by a push
-that overwrites it; a transfer into the pointer passes nothing — and keeps, for
-each invocation, the maximal stretches of the image it read
-as runs, by the rule
-[project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from)
-states: a read inside a run changes nothing, any other read starts a run of
-the one byte, runs that touch are one, and a helper's runs join its caller's
-as if the caller had read them. So two files uploaded a chunk at a time, turn
-and turn about across vertical blanks, stay two whole runs; a decoder's
-stream stays one run however many tables it consults and however often it
-re-reads a byte; a copy that walks its source from the end reads one run. The
-source of a staged byte is the run holding the byte's origin among the
-writer's invocation's runs, followed outward through each caller whose run
-begins or ends where it does — that caller read on from it: the compressed
-stream whole, counts included, and not a table the decoder
-consulted whose values never reached the output; for a decoder called once
-per chunk, the whole file its caller's run grew into; and for a helper that
-reads two bytes inside a block its caller had read whole, the two bytes — the
-caller's run holds them strictly inside, and the search ends there. The `origin` line names the source and says, with `using`, how many
-of its bytes the origin covers — every byte for a copy, the literals for a
-decoder. Where no run holds the origin — the
-bytes were staged through work RAM twice, or an engine wrote them — the
-origin's own intervals are the source. A source may span more than one asset a
-person would cut; the `staged` lines say which parts were used, and a file is
-easier to split than to complete.
+**A source is what the writer read.** The shadow follows every invocation — from the call that pushes its return address until the stack pointer passes that place, by a pull that returns through it or throws it away or by a push that overwrites it; a transfer into the pointer passes nothing — and keeps, for each invocation, the maximal stretches of the image it read as runs, by the rule [project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from) states: a read inside a run changes nothing, any other read starts a run of the one byte, runs that touch are one, and a helper's runs join its caller's as if the caller had read them. So two files uploaded a chunk at a time, turn and turn about across vertical blanks, stay two whole runs; a decoder's stream stays one run however many tables it consults and however often it re-reads a byte; a copy that walks its source from the end reads one run. The source of a staged byte is the run holding the byte's origin among the writer's invocation's runs, followed outward through each caller whose run begins or ends where it does — that caller read on from it: the compressed stream whole, counts included, and not a table the decoder consulted whose values never reached the output; for a decoder called once per chunk, the whole file its caller's run grew into; and for a helper that reads two bytes inside a block its caller had read whole, the two bytes — the caller's run holds them strictly inside, and the search ends there. The `origin` line names the source and says, with `using`, how many of its bytes the origin covers — every byte for a copy, the literals for a decoder. Where no run holds the origin — the bytes were staged through work RAM twice, or an engine wrote them — the origin's own intervals are the source. A source may span more than one asset a person would cut; the `staged` lines say which parts were used, and a file is easier to split than to complete.
 
-**A staged range is lifted as its source.** Each source of an extent in work
-RAM that went to a register a file can be named for — carried by an engine, as
-a `moved` range, or by the CPU a store at a time, as a `streamed` run — is
-lifted under the same rules as a range from the image, as an `asset` of kind
-`staged`, and placed by where the range built from it landed, as a range from
-the image is; the `staged` line says which extent was built from it, which class
-it went to, and by which routine. A computed range is not lifted, and nothing
-is said. The same bytes sent directly and sent after staging are one file. A
-source whose bytes were built into data for two classes — a block that
-decodes into tiles and a palette — is one file under `staged/`, its `asset`
-line naming both classes, with a `staged` line per extent and class; the
-later passes read the lines, not the directories, so nothing is missed. A
-routine's name is the routine's label; `none` is an engine's write, and a site
-written as an address is one the trace holds no routine at — code the run
-executed that the trace did not reach, which an `entry` answers. Consistent
-addresses are what a reader can follow; a real name is a person's to give.
+**A staged range is lifted as its source.** Each source of an extent in work RAM that went to a register a file can be named for — carried by an engine, as a `moved` range, or by the CPU a store at a time, as a `streamed` run — is lifted under the same rules as a range from the image, as an `asset` of kind `staged`, and placed by where the range built from it landed, as a range from the image is; the `staged` line says which extent was built from it, which class it went to, and by which routine. A computed range is not lifted, and nothing is said. The same bytes sent directly and sent after staging are one file. A source whose bytes were built into data for two classes — a block that decodes into tiles and a palette — is one file under `staged/`, its `asset` line naming both classes, with a `staged` line per extent and class; the later passes read the lines, not the directories, so nothing is missed. A routine's name is the routine's label; `none` is an engine's write, and a site written as an address is one the trace holds no routine at — code the run executed that the trace did not reach, which an `entry` answers. Consistent addresses are what a reader can follow; a real name is a person's to give.
 
-**A stream is lifted as the run its carrier read.** Consecutive stores the CPU
-made to a data register — `VMDATAL`/`VMDATAH`, `CGDATA`, `OAMDATA`, the audio
-ports — of consecutive bytes are recorded as a
-[`streamed` line](project-manifest.md#216-what-the-cpu-streamed). Bytes loaded
-from work RAM are the buffer being carried out, and the buffer is an extent
-exactly as if an engine had carried it — the `streamed` line names it, and its
-source is the file. Bytes with consecutive image origins are the image being
-carried, and the file is the run of image bytes the carrying invocation read
-that holds the first, as an `asset` of kind `stream`: a tileset the CPU copies
-a word at a time is a file exactly as one an engine carries, and a loop that
-reads a count before its data or an end mark after it lifts them with it.
+**A stream is lifted as the run its carrier read.** Consecutive stores the CPU made to a data register — `VMDATAL`/`VMDATAH`, `CGDATA`, `OAMDATA`, the audio ports — of consecutive bytes are recorded as a [`streamed` line](project-manifest.md#216-what-the-cpu-streamed). Bytes loaded from work RAM are the buffer being carried out, and the buffer is an extent exactly as if an engine had carried it — the `streamed` line names it, and its source is the file. Bytes with consecutive image origins are the image being carried, and the file is the run of image bytes the carrying invocation read that holds the first, as an `asset` of kind `stream`: a tileset the CPU copies a word at a time is a file exactly as one an engine carries, and a loop that reads a count before its data or an end mark after it lifts them with it.
 
-The `staging` cartridge from [`tools/examples/`](../tools/examples/README.md)
-builds eight ranges in work RAM every way the shadow has a rule for, then sends
-each, run for one second:
+The `staging` cartridge from [`tools/examples/`](../tools/examples/README.md) builds eight ranges in work RAM every way the shadow has a rule for, then sends each, run for one second:
 
 ```
 $ snes_disasm staging.smc -o staging --no-sound --run-seconds 1
@@ -1159,26 +600,7 @@ streamed $00:818F $00:2122 CGDATA Cgram from $00:9200 bytes 16 times 1 at $00-$0
 streamed $00:84C8 $00:2118 VMDATAL Vram from $7F:0800 bytes 16 times 1 at $0035-$003D in unshown
 ```
 
-The decoder at `$8100` unpacked eleven bytes — five runs, each a count and a
-value, then a zero — into thirty-two at `$7F:0000`: the origin is the five
-values, the source is the eleven, and the file is the eleven. The copy at
-`$8140` used every byte of its source. The fill at `$81A0` built sixteen bytes
-from a constant, which have no source and no file. An engine carried `$9300`
-in through the port and out again, so that extent is the engine's; two stores
-by `sub_008300` put the first two bytes of `$9100` through the port, and their
-source is the block the copy read, which the file the copy was lifted from
-carries a `staged` line for. The loop at `$8180` carried sixteen bytes to
-`CGDATA` one at a time and read the end mark after them, so its file holds
-seventeen while the `streamed` line says sixteen. The table at `$7F:0600` is
-walked by HDMA, so its source is placed as a table the engine reads from the
-image is, under `hdma/`. The eight bytes copied to `$7F:0700` went to VRAM and
-then to CGRAM, so their source is one file under `staged/` named for both. The
-sixteen copied to `$7F:0800` were carried out by the loop at `$84C0` a word at
-a time: the `streamed` line names the buffer, and the buffer's source is its
-file. A stream lands as a transfer does, and its line says where: the palette
-loop's sixteen bytes at entries zero to seven; the VRAM loop's words at
-`$0035`, unshown because no frame was drawn between the loop and the run's
-end.
+The decoder at `$8100` unpacked eleven bytes — five runs, each a count and a value, then a zero — into thirty-two at `$7F:0000`: the origin is the five values, the source is the eleven, and the file is the eleven. The copy at `$8140` used every byte of its source. The fill at `$81A0` built sixteen bytes from a constant, which have no source and no file. An engine carried `$9300` in through the port and out again, so that extent is the engine's; two stores by `sub_008300` put the first two bytes of `$9100` through the port, and their source is the block the copy read, which the file the copy was lifted from carries a `staged` line for. The loop at `$8180` carried sixteen bytes to `CGDATA` one at a time and read the end mark after them, so its file holds seventeen while the `streamed` line says sixteen. The table at `$7F:0600` is walked by HDMA, so its source is placed as a table the engine reads from the image is, under `hdma/`. The eight bytes copied to `$7F:0700` went to VRAM and then to CGRAM, so their source is one file under `staged/` named for both. The sixteen copied to `$7F:0800` were carried out by the loop at `$84C0` a word at a time: the `streamed` line names the buffer, and the buffer's source is its file. A stream lands as a transfer does, and its line says where: the palette loop's sixteen bytes at entries zero to seven; the VRAM loop's words at `$0035`, unshown because no frame was drawn between the loop and the run's end.
 
 In the bank file, a staged file's `INCBIN` says what it is:
 
@@ -1187,100 +609,25 @@ In the bank file, a staged file's `INCBIN` says what it is:
         INCBIN "vram/00_9000.bin"
 ```
 
-A `staged` or `stream` file's evidence is the run's, written fresh; its `asset`
-line is read back whole, so the file is kept through a disassembly without a
-run and until a run lifts a wider file over its bytes. A `proven` file's
-evidence is the code's, which every trace finds again, so its line is read
-back for its path alone, as a `dma` file's is.
+A `staged` or `stream` file's evidence is the run's, written fresh; its `asset` line is read back whole, so the file is kept through a disassembly without a run and until a run lifts a wider file over its bytes. A `proven` file's evidence is the code's, which every trace finds again, so its line is read back for its path alone, as a `dma` file's is.
 
-**Cost.** The shadow runs beside the interpreter on every instruction: on a
-commercial cartridge's sixty seconds it adds about five seconds of wall time
-and some thirty megabytes, and an origin is widened to its hull only above
-sixty-four intervals — which no range of the five cartridges the tool is
-measured on reaches.
+**Cost.** The shadow runs beside the interpreter on every instruction: on a commercial cartridge's sixty seconds it adds about five seconds of wall time and some thirty megabytes, and an origin is widened to its hull only above sixty-four intervals — which no range of the five cartridges the tool is measured on reaches.
 
 ## What the toolkit ran
 
-A run sees the entries of a table that the game selected. A loader takes an
-index, reads a pointer and builds the entry it points at in work RAM; the
-entries the run never selected stay bytes in their bank that no rule lifts.
-The disassembler runs the loader for them, once for every value its index can
-take.
+A run sees the entries of a table that the game selected. A loader takes an index, reads a pointer and builds the entry it points at in work RAM; the entries the run never selected stay bytes in their bank that no rule lifts. The disassembler runs the loader for them, once for every value its index can take.
 
-**The plan.** Every routine the shadow named as the writer of a staged extent
-is planned, and so is every routine whose calls reach one: the bound on an
-index is usually the caller's, and the bytes the writer's. For each routine a
-call enters, the disassembler reads what every path proves before its first
-instruction ([§What every path proves](#what-every-path-proves)) and takes as
-inputs the registers bounded there: A, X and Y, each at the width the entry's
-mode gives it — the low byte alone at eight bits — each where every path
-proves two values or more. That is an index a caller masked, or compared
-against a constant and branched past on the carry. A bounded register is an
-input only when some path of the routine reads it before writing it — an
-operand, a push, or a call to a routine that reads it at its entry — read off
-each instruction's effects, with every byte counted as read wherever the
-paths cannot be followed; one the routine overwrites first is noted and not
-set, so its values are not run. The direct register, the data bank and the
-flags are never set. An index a routine loads from work RAM itself bounds
-nothing at its entry, and a routine only a jump enters has no return to end
-at; neither is run, and a `note` says which.
+**The plan.** Every routine the shadow named as the writer of a staged extent is planned, and so is every routine whose calls reach one: the bound on an index is usually the caller's, and the bytes the writer's. For each routine a call enters, the disassembler reads what every path proves before its first instruction ([§What every path proves](#what-every-path-proves)) and takes as inputs the registers bounded there: A, X and Y, each at the width the entry's mode gives it — the low byte alone at eight bits — each where every path proves two values or more. That is an index a caller masked, or compared against a constant and branched past on the carry. A bounded register is an input only when some path of the routine reads it before writing it — an operand, a push, or a call to a routine that reads it at its entry — read off each instruction's effects, with every byte counted as read wherever the paths cannot be followed; one the routine overwrites first is noted and not set, so its values are not run. The direct register, the data bank and the flags are never set. An index a routine loads from work RAM itself bounds nothing at its entry, and a routine only a jump enters has no return to end at; neither is run, and a `note` says which.
 
-**The second run.** The cartridge runs again over the same image, cycles and
-recorded input, and arrives at every instruction the first did; it checks that
-it did against the first run's counts and runs nothing when they differ. At
-the first instruction of a planned routine's first invocation it keeps a copy
-of the machine and of the shadow. Over the whole run it keeps, for each
-planned routine, every byte of work RAM and every register `$2100`-`$43FF` the
-routine's frames wrote — an engine's writes while they were live included, a
-handler that interrupted them excluded — and the cycles of its longest
-invocation. A routine the vertical-blank handler calls is followed inside the
-handler the same way. The second run's other findings are the first run's, and
-the first run's stand.
+**The second run.** The cartridge runs again over the same image, cycles and recorded input, and arrives at every instruction the first did; it checks that it did against the first run's counts and runs nothing when they differ. At the first instruction of a planned routine's first invocation it keeps a copy of the machine and of the shadow. Over the whole run it keeps, for each planned routine, every byte of work RAM and every register `$2100`-`$43FF` the routine's frames wrote — an engine's writes while they were live included, a handler that interrupted them excluded — and the cycles of its longest invocation. A routine the vertical-blank handler calls is followed inside the handler the same way. The second run's other findings are the first run's, and the first run's stand.
 
-**Each value.** When the run is over, each value runs on a second machine
-restored from the routine's copy with the register set to it — at eight bits
-the accumulator's low byte, or an index whole with its high byte zero, as the
-chip keeps an eight-bit index — with the interpreter and a copy of the shadow
-beside it as in the run. The value ends where the routine returns: the program
-counter at the address after the call, the stack pointer above the entry's.
-It is refused when it has not returned within 64 times the routine's longest
-invocation, and no less than one second of the master clock; when its frames
-write a byte of work RAM or a register the run never saw the routine write; or
-when the lifted instruction disagrees with the machine. Reads are free. The
-footprint is the run's, so an entry bigger than any the run built is refused
-rather than trusted.
+**Each value.** When the run is over, each value runs on a second machine restored from the routine's copy with the register set to it — at eight bits the accumulator's low byte, or an index whole with its high byte zero, as the chip keeps an eight-bit index — with the interpreter and a copy of the shadow beside it as in the run. The value ends where the routine returns: the program counter at the address after the call, the stack pointer above the entry's. It is refused when it has not returned within 64 times the routine's longest invocation, and no less than one second of the master clock; when its frames write a byte of work RAM or a register the run never saw the routine write; or when the lifted instruction disagrees with the machine. Reads are free. The footprint is the run's, so an entry bigger than any the run built is refused rather than trusted.
 
-**What a value built.** A value that returns gives the bytes its frames wrote,
-each with its sources read from its own copy of the shadow as a staged byte's
-are ([§Where the bytes came from](#where-the-bytes-came-from)): the runs of
-image bytes its own invocation read. A byte takes a class only from what
-covers its address: the classes the recorded staged extents holding it went
-to, and those of the value's own transfers out of work RAM that carried it.
-The value's extents are the runs of consecutive bytes with one class set. A
-byte no class covers — the pointers and counters a routine keeps in the
-direct page, and whatever it builds past what the run carried — is scratch,
-and the scratch a routine's kept values wrote is noted once for the routine.
-Values whose extents are the same in every field are one outcome, and the
-manifest gives it one line with its values written as runs, `X=$0000-$000E/2`.
+**What a value built.** A value that returns gives the bytes its frames wrote, each with its sources read from its own copy of the shadow as a staged byte's are ([§Where the bytes came from](#where-the-bytes-came-from)): the runs of image bytes its own invocation read. A byte takes a class only from what covers its address: the classes the recorded staged extents holding it went to, and those of the value's own transfers out of work RAM that carried it. The value's extents are the runs of consecutive bytes with one class set. A byte no class covers — the pointers and counters a routine keeps in the direct page, and whatever it builds past what the run carried — is scratch, and the scratch a routine's kept values wrote is noted once for the routine. Values whose extents are the same in every field are one outcome, and the manifest gives it one line with its values written as runs, `X=$0000-$000E/2`.
 
-The run's own files are grouped first, exactly as they are without the
-toolkit, and an outcome's sources never change one but by widening it. A
-source that overlaps one recorded file joins it, under the same rules as a
-staged range's, where its landings leave the file's directory and form as they
-are; the file then widens to hold it, named for its new first byte. A class of
-the source the run's own transfers never carried is written after `also` on
-the file's `asset` line, and the file keeps its directory, kind and class. A
-source that would move the file or change its form, or that lies across two
-recorded files, is refused with a `note` naming the file. Sources no
-recorded file holds are files of their own, of the kind `enumerated`. After
-the run's own previews, a preview of its own beside each file shows what each
-outcome built, in the form the first recorded extent holding its bytes took.
-The manifest's [`enumerated` lines](project-manifest.md#221-what-the-toolkit-ran)
-say what each outcome built from each file, and its `note` lines what was not
-run, not kept or not lifted.
+The run's own files are grouped first, exactly as they are without the toolkit, and an outcome's sources never change one but by widening it. A source that overlaps one recorded file joins it, under the same rules as a staged range's, where its landings leave the file's directory and form as they are; the file then widens to hold it, named for its new first byte. A class of the source the run's own transfers never carried is written after `also` on the file's `asset` line, and the file keeps its directory, kind and class. A source that would move the file or change its form, or that lies across two recorded files, is refused with a `note` naming the file. Sources no recorded file holds are files of their own, of the kind `enumerated`. After the run's own previews, a preview of its own beside each file shows what each outcome built, in the form the first recorded extent holding its bytes took. The manifest's [`enumerated` lines](project-manifest.md#221-what-the-toolkit-ran) say what each outcome built from each file, and its `note` lines what was not run, not kept or not lifted.
 
-The `enumerating` cartridge from [`tools/examples/`](../tools/examples/README.md)
-calls five loaders for only some of their entries, run for one second:
+The `enumerating` cartridge from [`tools/examples/`](../tools/examples/README.md) calls five loaders for only some of their entries, run for one second:
 
 ```
 $ snes_disasm enumerating.smc -o enumerating --no-sound --run-seconds 1
@@ -1316,27 +663,7 @@ asset    vram/00_9140.bin Vram as enumerated from $00:9140 bytes 50
 asset    vram/00_9180.bin Vram as enumerated from $00:9180 bytes 50
 ```
 
-The first loader's eight entries ran: entries 2 and 5, which the run selected,
-build their recorded files, which stay `staged`; entries 0, 1 and 4 are files
-of their own; entry 3 writes `INIDISP`, entry 6 never returns, and entry 7
-builds past the thirty-two bytes the run saw the loader write, so each is
-refused. The loader that loads its own index from work RAM is not run, and
-neither is reset nor the routine reset jumps to. The third and fourth loaders
-read the same four blobs; the run sent the second to the palette and the
-third to the sprite table, each a file of its one class. The palette loader's
-entry for the third blob joins the sprite file and the sprite loader's entry
-for the second joins the palette file, and each file's line names the other
-class after `also`. The first and fourth blobs, which no recorded file holds,
-are each one file under `staged/` named for both. The fifth loader, which the
-vertical-blank handler calls, builds each entry's blob at `$7F:0400`: its
-recorded file is the run's entry, `vram/00_9100.bin`, and two more entries are
-files of their own. Entry 3 reads from `$8A10`, two header bytes before the
-palette file, which widens to `$8A10` and adds VRAM after `also`; its piece
-that carries the recorded extent's VRAM landings would change the palette
-file's form and is refused. Entry 4 reads from `$8A30`, across the widened
-palette file and the sprite file, and is refused. In the bank file an
-`enumerated` file's `INCBIN` says what it is, and a recorded file's names the
-classes the toolkit's runs built from it:
+The first loader's eight entries ran: entries 2 and 5, which the run selected, build their recorded files, which stay `staged`; entries 0, 1 and 4 are files of their own; entry 3 writes `INIDISP`, entry 6 never returns, and entry 7 builds past the thirty-two bytes the run saw the loader write, so each is refused. The loader that loads its own index from work RAM is not run, and neither is reset nor the routine reset jumps to. The third and fourth loaders read the same four blobs; the run sent the second to the palette and the third to the sprite table, each a file of its one class. The palette loader's entry for the third blob joins the sprite file and the sprite loader's entry for the second joins the palette file, and each file's line names the other class after `also`. The first and fourth blobs, which no recorded file holds, are each one file under `staged/` named for both. The fifth loader, which the vertical-blank handler calls, builds each entry's blob at `$7F:0400`: its recorded file is the run's entry, `vram/00_9100.bin`, and two more entries are files of their own. Entry 3 reads from `$8A10`, two header bytes before the palette file, which widens to `$8A10` and adds VRAM after `also`; its piece that carries the recorded extent's VRAM landings would change the palette file's form and is refused. Entry 4 reads from `$8A30`, across the widened palette file and the sprite file, and is refused. In the bank file an `enumerated` file's `INCBIN` says what it is, and a recorded file's names the classes the toolkit's runs built from it:
 
 ```
 ; ---- $00:8300-$00:8321: 34 bytes a routine builds Vram data from, for an entry the run did not select, in vram/00_8300.bin
@@ -1345,37 +672,21 @@ classes the toolkit's runs built from it:
         INCBIN "cgram/00_8A10.bin"
 ```
 
-An `enumerated` file's evidence is the run's, written fresh; its `asset` line
-is read back whole, as a `staged` line is, so the file is kept through a
-disassembly without a run. A `staged` line's `also` classes are read back with
-it the same way.
+An `enumerated` file's evidence is the run's, written fresh; its `asset` line is read back whole, as a `staged` line is, so the file is kept through a disassembly without a run. A `staged` line's `also` classes are read back with it the same way.
 
-**Cost.** The second run costs what the first does, about the time it
-emulates, plus a copy of the machine — a quarter of a megabyte — and of the
-shadow — a few megabytes — held for each planned routine until the run ends.
-Each value then costs its own run: as long as the routine takes, and for one
-that never returns, 64 times the routine's longest invocation or a second of
-the master clock, whichever is more. The values of a register the routine
-never reads are not run. A value's run is in emulated cycles, and nothing
-about it is bounded by wall time.
+**Cost.** The second run costs what the first does, about the time it emulates, plus a copy of the machine — a quarter of a megabyte — and of the shadow — a few megabytes — held for each planned routine until the run ends. Each value then costs its own run: as long as the routine takes, and for one that never returns, 64 times the routine's longest invocation or a second of the master clock, whichever is more. The values of a register the routine never reads are not run. A value's run is in emulated cycles, and nothing about it is bounded by wall time.
 
 ## What is placed
 
-The tree is complete when every image byte is in exactly one file at its offset.
-The tool reports it on every run:
+The tree is complete when every image byte is in exactly one file at its offset. The tool reports it on every run:
 
 ```
 524288 of 524288 bytes placed
 ```
 
-The count is made from the listings' own byte records — an instruction's bytes or
-a data run, placed at the offset its address reads from — from the sound
-program's placed blocks, and from the lifted files' bytes. Bytes no file carries, and bytes two files carry, are
-counted and reported when there are any; a region split that leaves a bank
-without a file is the usual way to have bytes nobody carries.
+The count is made from the listings' own byte records — an instruction's bytes or a data run, placed at the offset its address reads from — from the sound program's placed blocks, and from the lifted files' bytes. Bytes no file carries, and bytes two files carry, are counted and reported when there are any; a region split that leaves a bank without a file is the usual way to have bytes nobody carries.
 
-That count says the tree describes every byte. Whether the text assembles back
-to them is what `snes_verify` answers.
+That count says the tree describes every byte. Whether the text assembles back to them is what `snes_verify` answers.
 
 ## Verifying the tree
 
@@ -1383,11 +694,7 @@ to them is what `snes_verify` answers.
 snes_verify <directory> <image> [-o <rebuilt>]
 ```
 
-Reads the directory's `project.snagifest`, assembles every bank file with the
-65816 dialect and the sound file with the SPC700 dialect, places each range a
-file emits at the image offset its address reads from under the manifest's map
-and each placed block at the offset the manifest recorded, and compares the
-whole with the image:
+Reads the directory's `project.snagifest`, assembles every bank file with the 65816 dialect and the sound file with the SPC700 dialect, places each range a file emits at the image offset its address reads from under the manifest's map and each placed block at the offset the manifest recorded, and compares the whole with the image:
 
 ```
 $ snes_verify cartridge cartridge.sfc
@@ -1401,9 +708,7 @@ apu/driver.asm: 3 blocks, 11974 bytes, identical
 the tree assembles to the image
 ```
 
-The exit status is 0 only for that last line, which is said only when every
-file assembled, every image byte was produced by exactly one file, and none
-differ. Anything else is reported where it is:
+The exit status is 0 only for that last line, which is said only when every file assembled, every image byte was produced by exactly one file, and none differ. Anything else is reported where it is:
 
 ```
 bank_00.asm: 1 range, 32768 bytes, 1 differ
@@ -1414,58 +719,19 @@ bank_01.asm: 1 error, not assembled
 the tree does not assemble to the image
 ```
 
-A run that differs names the file, the range as the file placed it, where it
-lands in the image, and the first differing byte. A file that does not assemble
-is reported with the assembler's own diagnostics and produces nothing, so its
-bytes are counted among those no file produced. Bytes two files produce are
-counted too, since a tree that holds a byte twice is not a clean rebuild
-whatever the bytes say.
+A run that differs names the file, the range as the file placed it, where it lands in the image, and the first differing byte. A file that does not assemble is reported with the assembler's own diagnostics and produces nothing, so its bytes are counted among those no file produced. Bytes two files produce are counted too, since a tree that holds a byte twice is not a clean rebuild whatever the bytes say.
 
-`-o` writes the image the tree assembled to, whatever the verdict, with a byte
-nobody produced as `$00`. A manifest written for another image is refused, as
-the disassembler refuses it. A copier's header ahead of the image is dropped and
-reported the same way.
+`-o` writes the image the tree assembled to, whatever the verdict, with a byte nobody produced as `$00`. A manifest written for another image is refused, as the disassembler refuses it. A copier's header ahead of the image is dropped and reported the same way.
 
-The sound file's blocks are compared only where the manifest placed them; an
-`unplaced` block's bytes are in its bank, and are compared there. A placed
-block the sound file does not emit whole is reported rather than compared
-against the fill.
+The sound file's blocks are compared only where the manifest placed them; an `unplaced` block's bytes are in its bank, and are compared there. A placed block the sound file does not emit whole is reported rather than compared against the fill.
 
-A lifted file needs no line of its own: a bank file's `INCBIN` emits the file's
-bytes into the bank's own range, read from the tree's directory as the sources
-are, so a tree with assets verifies exactly as one without. A file in an
-editable form is read back to its bytes on include
-([asset-formats.md](asset-formats.md#including-an-asset)), so an edited pixel
-or table entry differs at the byte it changes. A lifted file that cannot be
-read — or a sheet that is not an indexed PNG, a table whose first line names
-no unit — is that bank file's assembly error, reported with its line and the
-reason, and the bank's bytes are then among those no file produced.
+A lifted file needs no line of its own: a bank file's `INCBIN` emits the file's bytes into the bank's own range, read from the tree's directory as the sources are, so a tree with assets verifies exactly as one without. A file in an editable form is read back to its bytes on include ([asset-formats.md](asset-formats.md#including-an-asset)), so an edited pixel or table entry differs at the byte it changes. A lifted file that cannot be read — or a sheet that is not an indexed PNG, a table whose first line names no unit — is that bank file's assembly error, reported with its line and the reason, and the bank's bytes are then among those no file produced.
 
 ## What the code reaches
 
-A listing says which registers an instruction names. The manifest says what that
-adds up to: for every instruction the trace decoded that reaches a hardware
-register, an `access` line with the register, the part of the machine it belongs
-to, whether the instruction reads or writes it, and the value it wrote where the
-bytes say what that was; and for every transfer a routine set a channel up for
-and started, a `dma` line with the transfer those accesses describe — the
-channel's registers as they stood when the start was written. Both are
-[manifest lines](project-manifest.md#26-what-the-code-reaches), written fresh on
-every run.
+A listing says which registers an instruction names. The manifest says what that adds up to: for every instruction the trace decoded that reaches a hardware register, an `access` line with the register, the part of the machine it belongs to, whether the instruction reads or writes it, and the value it wrote where the bytes say what that was; and for every transfer a routine set a channel up for and started, a `dma` line with the transfer those accesses describe — the channel's registers as they stood when the start was written. Both are [manifest lines](project-manifest.md#26-what-the-code-reaches), written fresh on every run.
 
-The destination of a transfer is the register the channel's `BBAD` names — the
-value written there, not `BBAD` itself — so its class is what the transfer is
-for. A transfer to `OAMDATA` is a sprite table, one to `VMDATAL` a tileset or a
-tilemap, one to `CGDATA` a palette, one to `APUIO0` a sound driver or its
-samples — each named by where it is sent, rather than by anything a person has
-labelled yet. The source is where the bytes come from and how the address
-steps, as `DMAP` says; the count is what `DAS` was written with, which for a
-general-purpose transfer is how many bytes move, a zero standing for 65536;
-and the start is the write to `MDMAEN` or `HDMAEN` that set the channel going.
-A stretch of straight-line code that starts one channel four times has four
-lines, each with the registers as they stood — a start that rewrote only the
-source and the count sends to the destination the last one left — and a
-channel written and never started has a line whose start is `none`:
+The destination of a transfer is the register the channel's `BBAD` names — the value written there, not `BBAD` itself — so its class is what the transfer is for. A transfer to `OAMDATA` is a sprite table, one to `VMDATAL` a tileset or a tilemap, one to `CGDATA` a palette, one to `APUIO0` a sound driver or its samples — each named by where it is sent, rather than by anything a person has labelled yet. The source is where the bytes come from and how the address steps, as `DMAP` says; the count is what `DAS` was written with, which for a general-purpose transfer is how many bytes move, a zero standing for 65536; and the start is the write to `MDMAEN` or `HDMAEN` that set the channel going. A stretch of straight-line code that starts one channel four times has four lines, each with the registers as they stood — a start that rewrote only the source and the count sends to the destination the last one left — and a channel written and never started has a line whose start is `none`:
 
 ```
 dma      $00:8007 channel 0 to-register $00:2118 VMDATAL Vram source $00:9000 increment bytes 32 start $01 from $00:8025
@@ -1477,60 +743,19 @@ dma      $00:81C7 channel 4 to-register $00:2118 VMDATAL Vram source none increm
 dma      $00:8207 channel 5 to-register $00:2122 CGDATA Cgram source $00:9700 increment bytes 3 start-hdma $20 from $00:8225
 ```
 
-These are among the `declaring` cartridge's, whose reset code starts channel 0
-four times from one stretch of code — a tileset, then sixteen more bytes to
-the same place with only the source and the count rewritten, a palette read
-downward, a fill — then sets channel 6 up whole and branches before starting
-it.
+These are among the `declaring` cartridge's, whose reset code starts channel 0 four times from one stretch of code — a tileset, then sixteen more bytes to the same place with only the source and the count rewritten, a palette read downward, a fill — then sets channel 6 up whole and branches before starting it.
 
-**A value is what the bytes prove and no more.** It is recorded where the
-instruction immediately before loaded it as an immediate, with no label between
-them — the `LDA #$8F` / `STA !$2100` idiom every cartridge is written in — where
-the instruction is `STZ`, which carries its own zero, and where every path into
-the store proves the register's value, however far back the load was and
-whatever was called in between, as long as the calls give the register back
-(see [What every path proves](#what-every-path-proves)). Anything else leaves
-the field `none`, and a register written with a value the bytes do not say is
-`none` from then on, whatever an earlier write left: the sixth transfer above
-has no source because the low byte of its address was rewritten from a
-variable. The last is an HDMA enable, and its count is the three the code
-wrote and not a length — an HDMA channel takes its counts from its table, and
-the engine writes that register itself. Pieces of one channel are joined only
-within a run of straight-line code, so a channel set up across a label is two
-transfers' worth of lines.
+**A value is what the bytes prove and no more.** It is recorded where the instruction immediately before loaded it as an immediate, with no label between them — the `LDA #$8F` / `STA !$2100` idiom every cartridge is written in — where the instruction is `STZ`, which carries its own zero, and where every path into the store proves the register's value, however far back the load was and whatever was called in between, as long as the calls give the register back (see [What every path proves](#what-every-path-proves)). Anything else leaves the field `none`, and a register written with a value the bytes do not say is `none` from then on, whatever an earlier write left: the sixth transfer above has no source because the low byte of its address was rewritten from a variable. The last is an HDMA enable, and its count is the three the code wrote and not a length — an HDMA channel takes its counts from its table, and the engine writes that register itself. Pieces of one channel are joined only within a run of straight-line code, so a channel set up across a label is two transfers' worth of lines.
 
-A transfer the code proves whole and the run also started is checked against
-the [`moved` line](#what-a-run-moved) from the same start: where the two agree
-the run confirms the proof, and where they do not, a `note` says what each
-said and neither is changed. A transfer proven whole that no run started is
-lifted from the code's word alone — see [The assets](#the-assets).
+A transfer the code proves whole and the run also started is checked against the [`moved` line](#what-a-run-moved) from the same start: where the two agree the run confirms the proof, and where they do not, a `note` says what each said and neither is changed. A transfer proven whole that no run started is lifted from the code's word alone — see [The assets](#the-assets).
 
-An instruction under a sixteen-bit register reaches two registers and produces a
-line for each, which is how one `STA !$4301` sets both a channel's B-bus address
-and the low byte of its source. A direct-page operand reaches a register when
-every path proves the direct register it is an offset from: `LDA #$4300`, `TCD`,
-then `STA $01` is a write to `BBAD0`, and the line says so.
+An instruction under a sixteen-bit register reaches two registers and produces a line for each, which is how one `STA !$4301` sets both a channel's B-bus address and the low byte of its source. A direct-page operand reaches a register when every path proves the direct register it is an offset from: `LDA #$4300`, `TCD`, then `STA $01` is a write to `BBAD0`, and the line says so.
 
 ## What every path proves
 
-The lifted program's effects, run over every path at once with every register a
-set of the values it can hold, say what is true at an instruction however
-execution reached it. The rules are the ones the
-[manifest page](project-manifest.md#29-what-every-path-proves) states: a value is
-proven by an immediate, by a transfer of a proven register, by a pull of a byte
-pushed on the same straight path, or by a load from the image, and by nothing
-else; two paths that prove different values are a disagreement the tree
-reports, never a choice; a call carries the caller's values into the routine
-and brings back what the routine's returns prove, except a register the routine
-gives back as it took it; a hardware interrupt is not a path; and the program
-bank is the bank the CPU runs in, carried along every path like any other
-value, so a cartridge that runs through a mirror of the bank the tree places it
-in proves the mirror's number from `PHK`, and a data bank proven from it names
-what that bank holds.
+The lifted program's effects, run over every path at once with every register a set of the values it can hold, say what is true at an instruction however execution reached it. The rules are the ones the [manifest page](project-manifest.md#29-what-every-path-proves) states: a value is proven by an immediate, by a transfer of a proven register, by a pull of a byte pushed on the same straight path, or by a load from the image, and by nothing else; two paths that prove different values are a disagreement the tree reports, never a choice; a call carries the caller's values into the routine and brings back what the routine's returns prove, except a register the routine gives back as it took it; a hardware interrupt is not a path; and the program bank is the bank the CPU runs in, carried along every path like any other value, so a cartridge that runs through a mirror of the bank the tree places it in proves the mirror's number from `PHK`, and a data bank proven from it names what that bank holds.
 
-Three things come of it. A [`state` line](project-manifest.md#29-what-every-path-proves)
-per label where any of the direct register, the data bank or the stack pointer
-is known:
+Three things come of it. A [`state` line](project-manifest.md#29-what-every-path-proves) per label where any of the direct register, the data bank or the stack pointer is known:
 
 ```
 state    $00:802A D=$0000 DBR=$7E S=$1FFF
@@ -1538,48 +763,25 @@ state    $00:8100 D=$0000|$0100|$0200|$4300 DBR=$00 S=$1FFD
 state    $00:8380 D=$0100|$0200 DBR=$00 S=$1FFF
 ```
 
-— the second inside a routine two callers enter with different direct
-registers, two bytes down the stack; the third at a label two paths reach with
-the direct register set differently.
-A [`derived` line](project-manifest.md#210-what-the-bytes-derive) per
-destination of a jump through a table the bytes bound:
+— the second inside a routine two callers enter with different direct registers, two bytes down the stack; the third at a label two paths reach with the direct register set differently. A [`derived` line](project-manifest.md#210-what-the-bytes-derive) per destination of a jump through a table the bytes bound:
 
 ```
 derived  $00:8300 loc_008300 e=0 m=8 x=16 from $00:8033 via $00:8200
 derived  $00:8310 loc_008310 e=0 m=8 x=16 from $00:8033 via $00:8202
 ```
 
-— the index masked to eight values and doubled, so eight pointers, each read
-from the address after `via`. And `access` lines a direct-page operand or a
-value carried across a call could not have had before.
+— the index masked to eight values and doubled, so eight pointers, each read from the address after `via`. And `access` lines a direct-page operand or a value carried across a call could not have had before.
 
-What is not proven is silent: a register the paths do not settle has `?` in its
-`state` line, a table whose index nothing bounds keeps its `stop`, a store whose
-value the paths disagree on has `none`. The analysis follows the accumulator
-and the index registers by the byte, so an eight-bit load is known while the
-other byte is not; it does not follow the carry, so the result of `ADC`, `SBC`,
-`ROL` and `ROR` is never known, and it does not follow the decimal flag. Memory
-other than the image — work RAM, a register, the save, a coprocessor's half — is
-a value the cartridge supplies when it runs, and a load from it is not known.
+What is not proven is silent: a register the paths do not settle has `?` in its `state` line, a table whose index nothing bounds keeps its `stop`, a store whose value the paths disagree on has `none`. The analysis follows the accumulator and the index registers by the byte, so an eight-bit load is known while the other byte is not; it does not follow the carry, so the result of `ADC`, `SBC`, `ROL` and `ROR` is never known, and it does not follow the decimal flag. Memory other than the image — work RAM, a register, the save, a coprocessor's half — is a value the cartridge supplies when it runs, and a load from it is not known.
 
-**The routines.** A [`routine` line](project-manifest.md#28-routines) per
-routine says which lines belong together, which routines it calls, and its
-role — the classes its own lines reach, and the classes its calls reach through
-every routine they call in turn:
+**The routines.** A [`routine` line](project-manifest.md#28-routines) per routine says which lines belong together, which routines it calls, and its role — the classes its own lines reach, and the classes its calls reach through every routine they call in turn:
 
 ```
 routine  $00:8000 reset lines 26 bytes 66 calls sub_018000 reaches Display,Vram,Oam,Interrupt,DmaControl,DmaChannel through Cgram,DmaChannel
 routine  $01:8000 sub_018000 lines 3 bytes 6 calls none reaches Cgram,DmaChannel through none
 ```
 
-A routine is what execution reaches from a label by falling through, branching
-and jumping, without passing a return or a halt and without entering the routine
-a call names; every entry, every target a run reached, and every label a call
-names begins one. Nothing else draws a boundary: a routine with no return of its
-own runs on into the next label's code and holds those lines too, and a line two
-routines reach is in both. That is what the bytes say, and the labels stay the
-trace's — `sub_` and `loc_` with the address — until a person names them; the
-role is what to name them from.
+A routine is what execution reaches from a label by falling through, branching and jumping, without passing a return or a halt and without entering the routine a call names; every entry, every target a run reached, and every label a call names begins one. Nothing else draws a boundary: a routine with no return of its own runs on into the next label's code and holds those lines too, and a line two routines reach is in both. That is what the bytes say, and the labels stay the trace's — `sub_` and `loc_` with the address — until a person names them; the role is what to name them from.
 
 ## Library
 
@@ -1601,242 +803,84 @@ std::size_t rendered = 0;
 snaggletooth::disasm::renderTree("cartridge", rendered, error);  // the bank files, from the two files on disk
 ```
 
-`disassembleCartridge` returns the header, the entries traced from, one
-`RegionListing` per region — its `SourceRegion` and its `Listing`, whole — the
-`SoundProgram` when one was captured, the `assets` lifted out of the banks, the
-`previews` written beside them, the `samples` the run's key-ons named, the
-`TraceStop`s, and `notes` for what the run
-could not do. Each `AssetFile` is its
-path — whose extension names its form — the `classes` of the registers its
-bytes went to — one, or two for a `staged/` file — and the `registerAddress`
-of the one that named it, its `kind` (a `MovedKind`), the address of its
-`first` byte, its `romOffset`, its `bytes` as the image holds them, and what
-the form needs and the file is written as: a sheet's `depth` and `palette`
-(RGBA quadruples), a table's `unit` and `indirect`, and `written`, the bytes
-that go to disk — the form's encoding, or the bytes themselves. Each
-`PreviewFile` is its path, the lifted file it is `of`, its `form` as the
-`preview` line names it, how many distinct `contents` a source's preview
-holds, and its `written` bytes. Each `SampleFile` is the WAV's path, the
-sample's `start` and `loop` addresses in the audio memory, its `bytes` as the
-audio memory held them, the `in` file and `romOffset` where the image holds
-them whole — absent when it does not — how many `times` a key-on named it, and
-the WAV's `written` bytes. `CartridgeRequest::assets` is the
-`ManifestAsset`s read back from the
-manifest — a path with the first address, length and classes it names — which
-give a file lifted again its path, and `CartridgeRequest::readFile` is a
-`FileReader` over the tree's files, which a disassembly without a run takes a
-sheet's depth and palette and a table's unit from. `bankRegions(map, imageBytes)` is the default split.
-`captureUpload(rom, masterCycles, reason)` is the boot alone: the entry and the
-blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the
-image the tree describes and counts what is unplaced or placed twice.
+`disassembleCartridge` returns the header, the entries traced from, one `RegionListing` per region — its `SourceRegion` and its `Listing`, whole — the `SoundProgram` when one was captured, the `assets` lifted out of the banks, the `previews` written beside them, the `samples` the run's key-ons named, the `TraceStop`s, and `notes` for what the run could not do. Each `AssetFile` is its path — whose extension names its form — the `classes` of the registers its bytes went to — one, or two for a `staged/` file — and the `registerAddress` of the one that named it, its `kind` (a `MovedKind`), the address of its `first` byte, its `romOffset`, its `bytes` as the image holds them, and what the form needs and the file is written as: a sheet's `depth` and `palette` (RGBA quadruples), a table's `unit` and `indirect`, and `written`, the bytes that go to disk — the form's encoding, or the bytes themselves. Each `PreviewFile` is its path, the lifted file it is `of`, its `form` as the `preview` line names it, how many distinct `contents` a source's preview holds, and its `written` bytes. Each `SampleFile` is the WAV's path, the sample's `start` and `loop` addresses in the audio memory, its `bytes` as the audio memory held them, the `in` file and `romOffset` where the image holds them whole — absent when it does not — how many `times` a key-on named it, and the WAV's `written` bytes. `CartridgeRequest::assets` is the `ManifestAsset`s read back from the manifest — a path with the first address, length and classes it names — which give a file lifted again its path, and `CartridgeRequest::readFile` is a `FileReader` over the tree's files, which a disassembly without a run takes a sheet's depth and palette and a table's unit from. `bankRegions(map, imageBytes)` is the default split. `captureUpload(rom, masterCycles, reason)` is the boot alone: the entry and the blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the image the tree describes and counts what is unplaced or placed twice.
 
-`reached` carries [what the run reached](#running-the-cartridge): one
-`ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site`
-that took it, whether it was a `call`, and the `name` the tree gives it. `ran`
-carries [where the CPU arrived](#where-the-cpu-arrived-and-what-it-saw): one
-`Landing` per place — `target`, `mode`, `site` and `name`, as a reached target's
-— and `seen` one `SeenState` per site the run executed in the image, its
-`address` and the values of `d` and `dbr` seen there; `sameLanding` says
-whether two landings are one. `moved`
-carries [what the run moved](#what-a-run-moved): one `MovedRange` per range —
-`site`, `channel`, `toRegister`, `registerAddress` with `registerName` and
-`registerClass` where the address has one, `memory`, `step` (a `MovedStep`),
-`bytes`, `kind` (a `MovedKind`) and `times`; `movedStepName` and `movedKindName`
-are their names as text, `sameRange` says whether two are one range, and
-`rangeBefore` is the order they are written in. `landed` carries
-[where those ranges landed](#what-a-run-moved): one `LandedRange` per
-distinct landing — the `site`, `channel`, `memory`, `bytes` and `kind` of its
-`moved` line, the `landing` and `times`. A `PortLanding` is the `memory` the
-port reaches (a `PortMemory`: `Vram`, `Cgram`, `Oam`), the `lowest` and
-`highest` address the port put a byte at, whether the landing was `shown` —
-read at the first frame drawn after it — and the `areas` it lies in, one bit
-each of `kAreaTilemap1`–`kAreaTilemap4`, `kAreaTiles1`–`kAreaTiles4`,
-`kAreaSprites`, `kAreaMode7`, `kAreaPalette` and `kAreaOam`, the `depths` its
-tile areas were read at, one bit each of `kDepth2`, `kDepth4` and `kDepth8`,
-and the `palette` — an index among the palettes the run kept — as it stood
-at the first drawn frame that read a VRAM landing; `areaText` is
-the areas as the manifest writes them, `none` and `unshown` included,
-`landingDepth` the one depth the tile areas share and `depthText` it as the
-manifest writes it, `portAddressText` an address in the memory's width, and
-`landedBefore` the order the lines are written in. `walked` carries one
-`WalkedRange` per distinct walk of a table or an indirect block — the fields
-of its `moved` line, the `unit`, whether it is `indirect`, and `times` —
-`hdmaUnitOf` is the unit a `DMAP` transfer pattern gives, and `walkedBefore`
-the order the lines are written in; `palettes` is the palette RAM at each
-drawn frame a landing was read at, each distinct copy once. `rom/rom_observe.h` is the run
-itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays
-`input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone
-— into the controller ports, and returns a `RunObservation` holding the
-`reached` sightings in site order, the `moved` ranges and their `landed`
-landings, the `ran` landings,
-the `seen` values, the `staged` extents — one `StagedRange` per extent of work RAM
-carried to a register, by an engine or by the CPU a store at a time: `memory`,
-`bytes`, the `origin` of every byte together (an `ir::OriginSet`), the
-`writers`, each a `StagedWriter` with the `writer` site or engine, whether the
-bytes were `unwritten`, how many `bytes` it wrote, their `origin` and their
-`sources`, and the `contents` the extent was carried out with, each a
-`CarriedContent` with its `bytes`, their `origin`, the `cls` and `kind` of the
-carry, its `landing`, and a table's `unit` and `indirect`; `sameExtent` says
-whether two are one and `sameContent` whether two contents are — the `streamed` runs, one
-`StreamedRange` per stream: `site`, `registerAddress` with `registerName` and
-`registerClass`, `bytes` and `times`, either the `memory` of the buffer
-carried or the `romOffset` carried with the `source` run it is lifted as, and
-its `landing` where the register is a video data port,
-`sameStream` likewise — the `samples` the key-ons named, one `KeyedSample`
-per distinct sample: its `start` and `loop` addresses, its `bytes` and how
-many `times` a key-on named it, `sameSample` saying whether two are one — and
-what the run beside the
-interpreter checked — the `instructions` and `interrupts` it ran a node or a
-sequence for, the distinct `nodes` it lifted from the fetches, the
-`divergences` on which a node disagreed with the machine, each site once in
-the notes, and the `originSets` the shadow interned under its `originCap`.
-`extentStart` is the lowest address a `MovedRange` covered.
+`reached` carries [what the run reached](#running-the-cartridge): one `ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site` that took it, whether it was a `call`, and the `name` the tree gives it. `ran` carries [where the CPU arrived](#where-the-cpu-arrived-and-what-it-saw): one `Landing` per place — `target`, `mode`, `site` and `name`, as a reached target's — and `seen` one `SeenState` per site the run executed in the image, its `address` and the values of `d` and `dbr` seen there; `sameLanding` says whether two landings are one. `moved` carries [what the run moved](#what-a-run-moved): one `MovedRange` per range — `site`, `channel`, `toRegister`, `registerAddress` with `registerName` and `registerClass` where the address has one, `memory`, `step` (a `MovedStep`), `bytes`, `kind` (a `MovedKind`) and `times`; `movedStepName` and `movedKindName` are their names as text, `sameRange` says whether two are one range, and `rangeBefore` is the order they are written in. `landed` carries [where those ranges landed](#what-a-run-moved): one `LandedRange` per distinct landing — the `site`, `channel`, `memory`, `bytes` and `kind` of its `moved` line, the `landing` and `times`. A `PortLanding` is the `memory` the port reaches (a `PortMemory`: `Vram`, `Cgram`, `Oam`), the `lowest` and `highest` address the port put a byte at, whether the landing was `shown` — read at the first frame drawn after it — and the `areas` it lies in, one bit each of `kAreaTilemap1`–`kAreaTilemap4`, `kAreaTiles1`–`kAreaTiles4`, `kAreaSprites`, `kAreaMode7`, `kAreaPalette` and `kAreaOam`, the `depths` its tile areas were read at, one bit each of `kDepth2`, `kDepth4` and `kDepth8`, and the `palette` — an index among the palettes the run kept — as it stood at the first drawn frame that read a VRAM landing; `areaText` is the areas as the manifest writes them, `none` and `unshown` included, `landingDepth` the one depth the tile areas share and `depthText` it as the manifest writes it, `portAddressText` an address in the memory's width, and `landedBefore` the order the lines are written in. `walked` carries one `WalkedRange` per distinct walk of a table or an indirect block — the fields of its `moved` line, the `unit`, whether it is `indirect`, and `times` — `hdmaUnitOf` is the unit a `DMAP` transfer pattern gives, and `walkedBefore` the order the lines are written in; `palettes` is the palette RAM at each drawn frame a landing was read at, each distinct copy once. `rom/rom_observe.h` is the run itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays `input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone — into the controller ports, and returns a `RunObservation` holding the `reached` sightings in site order, the `moved` ranges and their `landed` landings, the `ran` landings, the `seen` values, the `staged` extents — one `StagedRange` per extent of work RAM carried to a register, by an engine or by the CPU a store at a time: `memory`, `bytes`, the `origin` of every byte together (an `ir::OriginSet`), the `writers`, each a `StagedWriter` with the `writer` site or engine, whether the bytes were `unwritten`, how many `bytes` it wrote, their `origin` and their `sources`, and the `contents` the extent was carried out with, each a `CarriedContent` with its `bytes`, their `origin`, the `cls` and `kind` of the carry, its `landing`, and a table's `unit` and `indirect`; `sameExtent` says whether two are one and `sameContent` whether two contents are — the `streamed` runs, one `StreamedRange` per stream: `site`, `registerAddress` with `registerName` and `registerClass`, `bytes` and `times`, either the `memory` of the buffer carried or the `romOffset` carried with the `source` run it is lifted as, and its `landing` where the register is a video data port, `sameStream` likewise — the `samples` the key-ons named, one `KeyedSample` per distinct sample: its `start` and `loop` addresses, its `bytes` and how many `times` a key-on named it, `sameSample` saying whether two are one — and what the run beside the interpreter checked — the `instructions` and `interrupts` it ran a node or a sequence for, the distinct `nodes` it lifted from the fetches, the `divergences` on which a node disagreed with the machine, each site once in the notes, and the `originSets` the shadow interned under its `originCap`. `extentStart` is the lowest address a `MovedRange` covered.
 
-`ObservedRun` in the same header is the run over a machine the host runs
-([Running the cartridge](#running-the-cartridge)). Its constructor,
-`ObservedRun(machine, rom)`, takes a `Snes` at power-on, built from `rom` with
-no `map` or `saveRamBytes` of its own, and sets the machine's bus, audio and
-instruction observers; it throws `std::logic_error` when the machine has run a
-master cycle, already has one of the three observers, or `rom` holds no
-cartridge header. From then on the host runs the machine as it likes, makes no
-call into the guest, and resets it only through `reset()`, which pulls the
-console's reset line and takes the run through it. `frame()` is how many times
-the beam has wrapped to line 0 since power-on, the frame an input script's pads
-are presented for. `observation(notes)` answers what has closed so far and
-leaves the run going: a range, a stream or a landing still open is not in it.
-`finish(notes)` closes everything as `observeRun` does at its end, clears the
-three observers and answers the whole observation; the destructor clears them
-when `finish` was not called. Both append the run's notes, the main CPU's in
-the order made and then the sound CPU's.
+`ObservedRun` in the same header is the run over a machine the host runs ([Running the cartridge](#running-the-cartridge)). Its constructor, `ObservedRun(machine, rom)`, takes a `Snes` at power-on, built from `rom` with no `map` or `saveRamBytes` of its own, and sets the machine's bus, audio and instruction observers; it throws `std::logic_error` when the machine has run a master cycle, already has one of the three observers, or `rom` holds no cartridge header. From then on the host runs the machine as it likes, makes no call into the guest, and resets it only through `reset()`, which pulls the console's reset line and takes the run through it. `frame()` is how many times the beam has wrapped to line 0 since power-on, the frame an input script's pads are presented for. `observation(notes)` answers what has closed so far and leaves the run going: a range, a stream or a landing still open is not in it. `finish(notes)` closes everything as `observeRun` does at its end, clears the three observers and answers the whole observation; the destructor clears them when `finish` was not called. Both append the run's notes, the main CPU's in the order made and then the sound CPU's.
 
-`BufferedRun` (`rom/rom_buffered_run.h`) is the same run with the host's thread
-copying and the watching on threads of the run's own
-([Running the cartridge](#running-the-cartridge)). Its constructor,
-`BufferedRun(machine, rom, directory, options)`, refuses what `ObservedRun`'s
-refuses with the same `std::logic_error`, throws `std::runtime_error` when
-`directory` cannot be created, sets the three observers and starts its threads,
-each at the lowest scheduling class the platform gives a thread.
-`BufferedRunOptions` holds `memoryBytes`, the most RAM the buffer's blocks take,
-its two streams together and every block counted whole, 1,000,000,000 by
-default; `diskBytes`, the most its files hold, 64,000,000,000; and `threads`,
-the pool's threads, by default two fewer than the host's cores and at least
-one. Neither size has a floor or a ceiling. The buffer's files go under
-`directory/cpu` and `directory/sound`, each removed as it is read back. `keyframe()` puts the
-whole machine into the buffer, called once a frame between two of the host's
-calls; `reset()` pulls the console's reset line as `ObservedRun::reset()` does.
-`frame()` counts the beam's wraps on the host's thread. `full()` says the buffer
-filled: a block opened is charged whole, and the buffer is full when one more
-would bring what it holds past the two sizes together. From then on the
-observers copy nothing, the frames are still counted, and the observation is of
-everything before; a host that stops running the machine before then, by
-`progress()`, loses nothing. `progress()` answers the master cycles of the last
-boundary the threads played against the host's; the bytes the buffer holds; the
-RAM its blocks take and the bytes in its files now, each beside its limit; the
-bytes written to its files so far; and how many keyframes the work RAM the run
-keeps differed from, which is 0 for a record that holds everything the run
-reads. `observation(notes)` is the observation so
-far with the run left going, as `ObservedRun::observation` gives it: asked on
-the host's thread it first hands over the blocks being written, so it is the
-observation at the host's boundary; asked on another thread it is of every
-block the buffer had handed over then. It waits for the threads to reach that
-point. `finish(notes)` clears the observers, ends the buffer, waits for the
-threads to play all of it and joins them, and answers the whole observation;
-it is called once. Both throw `std::logic_error` once the run is finished, as
-`keyframe()` and `reset()` do. `failure()` is the first failure a thread of the
-run met — a buffer file that could not be written or read, a block that did
-not play — or nothing: from it on the threads play nothing more, and
-`observation()` and `finish()` answer everything played before it, their notes
-ending with `run: <failure>; the observation holds what was played before it`. The destructor clears the observers and joins every thread when
-`finish` was not called, removes the buffer's files, and removes `directory`
-when that leaves it empty. Every member but
-`progress()`, `full()` and `observation()` is called on the host's thread
-between two of its calls into the machine; the host makes no call into the
-guest and restores no state while the run is bound. The record and the stream
-the buffer is made of are in `rom/rom_buffer.h`, for the run's own use.
+`BufferedRun` (`rom/rom_buffered_run.h`) is the same run with the host's thread copying and the watching on threads of the run's own ([Running the cartridge](#running-the-cartridge)). A host that must lose nothing builds it to keep and stops running its machine while the buffer stands at its ceilings:
 
-`CartridgeRequest::observeRun`
-asks for the run — off unless asked, since it costs about as long as it emulates;
-`snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and
-`CartridgeRequest::input` is the script it replays. `CartridgeRequest::observed`
-is a host's run in place of that one: set, the cartridge is not booted for a
-run, `observeRun`, `runMasterCycles` and `input` are not read,
-`CartridgeRequest::observedNotes` join the notes where the run's own would, and
-no plan of routines to run again is made. `CartridgeRequest::reached`,
-`CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs
-found, read back from the manifest, which the disassembly merges with this
-run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`),
-told what the disassembly is doing as it goes when set — `running the
-cartridge` with the master cycles spent against `runMasterCycles` every tenth
-of a second, then `tracing`, `proving what every path reaches`, and `booting
-the sound program` against `bootMasterCycles` for each boot; the library
-prints nothing, and `ProgressPrinter` in the same header is what the command
-line prints with.
+```cpp
+#include "rom/rom_buffered_run.h"
 
-`accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches).
-`rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`:
-`hardwareAccesses(disassembly, proven)` gives one `HardwareAccess` per register an
-instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the
-`value` where the bytes prove it, and the `run` of straight-line code it sits in —
-and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up.
-`proven` is a `ProvenProgram` from `proveProgram(disassembly, rom)`: the
-[dataflow](ir.md#what-every-path-proves) run over the disassembly's `program` —
-every region lifted once, in address order, an address two paths read two ways
-as two nodes — which the dataflow refers to; without one, a value is the instruction before's alone
-and a direct-page operand produces nothing. `derivedTargets(disassembly, proven)`
-gives one `DerivedTarget` per destination the analysis derived — `target`,
-`mode`, `site`, `pointer`, `call`, `name` — which `disassembleCartridge` traces
-from and carries as `derived`; `stateFacts(disassembly, proven)` gives one
-`StateFact` per label at which any of `d`, `dbr` or `s` is known, each the
-values the register can hold, carried as `states`.
-`accessKindName` and `dmaDirectionName` are their names as text. `routines`
-carries one `Routine` per routine — its `address` and `label`, the `lines` it
-holds and their `bytes`, the routines it `calls`, and its role as `reaches` and
-`through` — from `routines(disassembly)`, which reads the finished listings, the
-accesses and the transfers.
+namespace disasm = snaggletooth::disasm;
+disasm::BufferedRun run{machine, image, "cartridge/buffer",
+                        disasm::BufferedRunOptions{.memoryBytes = 500'000'000,
+                                                   .diskBytes = 8'000'000'000,
+                                                   .threads = 0,
+                                                   .atLimit = disasm::AtLimit::Keep}};
+std::uint32_t frame = 0;
+while (playing) {
+  machine.run(89'341u);  // a quarter frame
+  if (run.frame() != frame) {
+    frame = run.frame();
+    run.keyframe();
+  }
+  if (run.atLimit()) {
+    run.hostStopped(true);
+    while (run.progress().held > 250'000'000u) wait();  // the host's own wait
+    run.hostStopped(false);
+  }
+}
+std::vector<std::string> notes;
+const disasm::RunObservation seen = run.finish(notes);
+```
 
-The disassembler's files are text from `renderProgramFile`,
-`renderSoundProgramFile` and `renderManifest`; `writeProject` writes them
-under a directory — the program file first, then the sound program's file
-where one was captured, the manifest, the lifted files in their forms under
-theirs, the previews and the samples' WAVs — and no bank file and no sound file. The sound program's nodes are
-`CartridgeDisassembly::program.spc700`, lifted from the captured listing
-through `ir/spc700_lift.h`. `parseManifest` reads a manifest's entries,
-reached and derived targets, landings, moved ranges, assets, file split, map,
-sound program and image identity back, and the accesses, routines, seen
-registers and transfers the renderer reads, and `manifestMismatch` says
-whether that manifest can direct a run over a given image.
-`treeRequest(rom, directory, found, error)` is the request a tree's directory
-gives, which `snes_disasm` disassembles from: a `CartridgeRequest` over `rom`
-whose `readFile` reads the directory's files and, where the directory holds a
-`project.snagifest` — `found` says whether it does — whose `entries`,
-`regions`, `reached`, `ran`, `moved`, `assets` and `derived` are the
-manifest's, every other field its default; nothing, with `error` the
-manifest's path, `: ` and what is wrong, when the manifest does not parse or
-was written for another image.
+`BufferedRunOptions`:
 
-The bank files and the sound file are `rom/rom_render.h`'s, a library that
-links nothing able to trace, run or lift: `readRenderInput(directory, program,
-error)` builds a `RenderInput` from `program.snagir`, `project.snagifest` and,
-where the manifest names a sound program, `apu.snagir` — each region's
-listing from the file's nodes, labels and data runs; the register an operand
-reaches from the `access` lines; the direct registers a run saw from `seen`;
-the routines from `routine`; the lifted files from `asset`, with the register
-their bytes went to found in the `moved` and `dma` lines; the sound program's
-entry and blocks from `sound` and `block`, and its nodes and regions from its
-own file — and `renderRegion(region, input, program)` writes each
-instruction from its node in that program, the first at the line's address,
-through `ir/ir_render.h`, with the labels, the register names and the routine
-comments attached; the data runs and the sound-program cut are the listing's.
-`renderSoundFile(input, program)` writes the sound program's file the same
-way from the `spc700` nodes: the header from the `sound` and `block` lines,
-each region under its own `ORG` with the gap comment between two, the labels,
-the data runs, and every instruction through `renderSpc700Line`, a target with
-a label anywhere in the file written as the label.
-`renderTree(directory, rendered, error)` does it for every region and for the
-sound file, and `snes_render` is that call. `renderInputOf(disassembly)`,
-`renderRegion(region, disassembly)` and `renderSoundFile(disassembly)` in
-`rom_disasm.h` render the same from the disassembly in memory, which is how a
-tree rendered from disk is held equal to the disassembly that wrote it.
+| Field | What it is | Default |
+|---|---|---|
+| `memoryBytes` | the most RAM the buffer's blocks take, its two streams together and every block counted whole | 1,000,000,000 |
+| `diskBytes` | the most its files hold | 64,000,000,000 |
+| `threads` | the pool's threads | 0: two fewer than the host's cores, at least 1 |
+| `atLimit` | what the buffer does at its ceilings: `Refuse` or `Keep` | `Refuse` |
+
+Both sizes are ceilings the host sets. The buffer is at its ceilings when one more block would bring what it holds past the two together: every byte handed to the threads that they have not played, and every block being written counted whole.
+
+| Member | What it does |
+|---|---|
+| `BufferedRun(machine, rom, directory, options)` | sets the three observers and starts the threads. Throws `std::logic_error` where `ObservedRun`'s constructor does, and `std::runtime_error` when `directory` cannot be created. The buffer's files go under `directory/cpu` and `directory/sound`, each removed as it is read back. |
+| `keyframe()` | puts the whole machine into the buffer, once a frame between two of the host's calls; the run checks the work RAM it keeps against it |
+| `reset()` | pulls the console's reset line as `ObservedRun::reset()` does |
+| `frame()` | the beam's wraps to line 0, counted on the host's thread |
+| `full()` | the buffer filled. Under `Refuse` that is at the ceilings: the observers copy nothing more, the frames are still counted, and the observation is of everything before. Under `Keep` only a block the system will not allocate fills it. |
+| `atLimit()` | the buffer stands at its ceilings. Under `Keep` the observers go on copying the host's call in flight into RAM past them, and a host that stops here holds the buffer to them. |
+| `memoryOver()` | the buffer's RAM stands past its own ceiling by more than the blocks being written and one block more while its files have room for a block: the files are written more slowly than the host fills the buffer. With the files full, RAM past its ceiling holds the rest and `atLimit()` says so. |
+| `setLimits(memoryBytes, diskBytes)` | new ceilings while the run goes. A smaller RAM ceiling moves blocks to files as the files have room; a disk ceiling under what the files hold writes no more files, and those there stay until they are read back. |
+| `hostStopped(stopped)` | moves every thread of the run to `ThreadClass::Normal` while the host is stopped, and back to its lowered class when it runs |
+| `progress()` | the master cycles of the last boundary the threads played against the host's; the bytes the buffer holds; the RAM its blocks take and the bytes in its files, each beside its ceiling; the bytes written to files so far; the keyframes the kept work RAM differed from, 0 for a record that holds everything the run reads; the pool's threads; and how many of the run's threads stand at a lowered class |
+| `observation(notes)` | the observation so far with the run left going, as `ObservedRun::observation` gives it. On the host's thread it first hands over the blocks being written, so it is the observation at the host's boundary; on another thread it is of every block handed over when it was asked. It waits for the threads to reach that point. |
+| `finish(notes)` | tells the threads the host has stopped, clears the observers, ends the buffer, waits for the threads to play all of it, joins them and answers the whole observation. Called once. |
+| `failure()` | the first failure a thread met — a buffer file that could not be written or read, a block that did not play — or nothing |
+| `~BufferedRun()` | clears the observers and joins every thread where `finish` was not called, removes the buffer's files, and removes `directory` when that leaves it empty |
+
+Each thread the run starts works at a class under the host's thread's (`ThreadClass`): `Lowered` for the threads that check and play, `LoweredForFiles` for the two that move the buffer's blocks to files and back. `setThisThreadClass(which)` sets the calling thread's class and `thisThreadClass()` answers the one it last set, `Normal` before it set one.
+
+- Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()` and `observation()` is called on the host's thread between two of its calls into the machine. The host makes no call into the guest and restores no state while the run is bound.
+- `keyframe()`, `reset()`, `observation()`, `setLimits()` and `hostStopped()` throw `std::logic_error` once the run is finished, and so does a second `finish()`.
+- From a failure on the threads play nothing more: `observation()` and `finish()` answer everything played before it, their notes ending with `run: <failure>; the observation holds what was played before it`.
+- The call into the machine that reaches the ceilings is finished first, since the host cannot interrupt one; under `Keep` its records stay in RAM.
+- RAM takes the newest blocks while the files' thread moves older ones out, so where the files are written more slowly than the host fills the buffer, RAM holds more than its own ceiling until they catch up; the files never pass theirs. `memoryOver()` says RAM stands past its ceiling by more than the blocks being written and one block more while the files have room, and a host that stops there until RAM has drained holds RAM to its ceiling, as `snes_player --disasm` does.
+- The record and the stream the buffer is made of are in `rom/rom_buffer.h`, for the run's own use.
+
+`CartridgeRequest::observeRun` asks for the run — off unless asked, since it costs about as long as it emulates; `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and `CartridgeRequest::input` is the script it replays. `CartridgeRequest::observed` is a host's run in place of that one: set, the cartridge is not booted for a run, `observeRun`, `runMasterCycles` and `input` are not read, `CartridgeRequest::observedNotes` join the notes where the run's own would, and no plan of routines to run again is made. `CartridgeRequest::reached`, `CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs found, read back from the manifest, which the disassembly merges with this run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`), told what the disassembly is doing as it goes when set — `running the cartridge` with the master cycles spent against `runMasterCycles` every tenth of a second, then `tracing`, `proving what every path reaches`, and `booting the sound program` against `bootMasterCycles` for each boot; the library prints nothing, and `ProgressPrinter` in the same header is what the command line prints with.
+
+`accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches). `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`: `hardwareAccesses(disassembly, proven)` gives one `HardwareAccess` per register an instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the `value` where the bytes prove it, and the `run` of straight-line code it sits in — and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up. `proven` is a `ProvenProgram` from `proveProgram(disassembly, rom)`: the [dataflow](ir.md#what-every-path-proves) run over the disassembly's `program` — every region lifted once, in address order, an address two paths read two ways as two nodes — which the dataflow refers to; without one, a value is the instruction before's alone and a direct-page operand produces nothing. `derivedTargets(disassembly, proven)` gives one `DerivedTarget` per destination the analysis derived — `target`, `mode`, `site`, `pointer`, `call`, `name` — which `disassembleCartridge` traces from and carries as `derived`; `stateFacts(disassembly, proven)` gives one `StateFact` per label at which any of `d`, `dbr` or `s` is known, each the values the register can hold, carried as `states`. `accessKindName` and `dmaDirectionName` are their names as text. `routines` carries one `Routine` per routine — its `address` and `label`, the `lines` it holds and their `bytes`, the routines it `calls`, and its role as `reaches` and `through` — from `routines(disassembly)`, which reads the finished listings, the accesses and the transfers.
+
+The disassembler's files are text from `renderProgramFile`, `renderSoundProgramFile` and `renderManifest`; `writeProject` writes them under a directory — the program file first, then the sound program's file where one was captured, the manifest, the lifted files in their forms under theirs, the previews and the samples' WAVs — and no bank file and no sound file. The sound program's nodes are `CartridgeDisassembly::program.spc700`, lifted from the captured listing through `ir/spc700_lift.h`. `parseManifest` reads a manifest's entries, reached and derived targets, landings, moved ranges, assets, file split, map, sound program and image identity back, and the accesses, routines, seen registers and transfers the renderer reads, and `manifestMismatch` says whether that manifest can direct a run over a given image. `treeRequest(rom, directory, found, error)` is the request a tree's directory gives, which `snes_disasm` disassembles from: a `CartridgeRequest` over `rom` whose `readFile` reads the directory's files and, where the directory holds a `project.snagifest` — `found` says whether it does — whose `entries`, `regions`, `reached`, `ran`, `moved`, `assets` and `derived` are the manifest's, every other field its default; nothing, with `error` the manifest's path, `: ` and what is wrong, when the manifest does not parse or was written for another image.
+
+The bank files and the sound file are `rom/rom_render.h`'s, a library that links nothing able to trace, run or lift: `readRenderInput(directory, program, error)` builds a `RenderInput` from `program.snagir`, `project.snagifest` and, where the manifest names a sound program, `apu.snagir` — each region's listing from the file's nodes, labels and data runs; the register an operand reaches from the `access` lines; the direct registers a run saw from `seen`; the routines from `routine`; the lifted files from `asset`, with the register their bytes went to found in the `moved` and `dma` lines; the sound program's entry and blocks from `sound` and `block`, and its nodes and regions from its own file — and `renderRegion(region, input, program)` writes each instruction from its node in that program, the first at the line's address, through `ir/ir_render.h`, with the labels, the register names and the routine comments attached; the data runs and the sound-program cut are the listing's. `renderSoundFile(input, program)` writes the sound program's file the same way from the `spc700` nodes: the header from the `sound` and `block` lines, each region under its own `ORG` with the gap comment between two, the labels, the data runs, and every instruction through `renderSpc700Line`, a target with a label anywhere in the file written as the label. `renderTree(directory, rendered, error)` does it for every region and for the sound file, and `snes_render` is that call. `renderInputOf(disassembly)`, `renderRegion(region, disassembly)` and `renderSoundFile(disassembly)` in `rom_disasm.h` render the same from the disassembly in memory, which is how a tree rendered from disk is held equal to the disassembly that wrote it.
 
 Verification is `rom/rom_verify.h`:
 
@@ -1848,122 +892,31 @@ const snaggletooth::disasm::VerifyReport report =
 if (!report.identical()) std::cout << snaggletooth::disasm::renderReport(report);
 ```
 
-`verifyTree(directory, rom)` reads the manifest and the files from the
-directory; `verifyProject(manifest, rom, read)` takes a parsed `ManifestInput`
-and reads each file through a function, which is how a front end verifies a
-tree it holds in memory. The `VerifyReport` carries one `VerifiedFile` per file
-— its diagnostics when it did not assemble, the runs and bytes compared, the
-bytes differing — every `VerifyMismatch` with its first differing offset, the
-rebuilt `image`, the totals, and `identical()`. `renderReport` is the text the
-command prints.
+`verifyTree(directory, rom)` reads the manifest and the files from the directory; `verifyProject(manifest, rom, read)` takes a parsed `ManifestInput` and reads each file through a function, which is how a front end verifies a tree it holds in memory. The `VerifyReport` carries one `VerifiedFile` per file — its diagnostics when it did not assemble, the runs and bytes compared, the bytes differing — every `VerifyMismatch` with its first differing offset, the rebuilt `image`, the totals, and `identical()`. `renderReport` is the text the command prints.
 
-The library target is `snaggletooth_rom`, which links both chip backends and
-through them both assemblers; `tools/` is on its public include path.
+The library target is `snaggletooth_rom`, which links both chip backends and through them both assemblers; `tools/` is on its public include path.
 
 ## Status
 
-The tree covers the main CPU's banks and the sound program uploaded at boot. The
-cartridge coprocessors — the SuperFX, the DSP series, the Cx4, the ST018 — have
-no backend, so a cartridge carrying one is traced as far as the main CPU's own
-code goes; a cartridge that cannot boot without its coprocessor yields no sound
-program, and says so in a `note`. Its tree still verifies, since a coprocessor's
-program is data to the main CPU's file and comes back byte for byte.
+The tree covers the main CPU's banks and the sound program uploaded at boot. The cartridge coprocessors — the SuperFX, the DSP series, the Cx4, the ST018 — have no backend, so a cartridge carrying one is traced as far as the main CPU's own code goes; a cartridge that cannot boot without its coprocessor yields no sound program, and says so in a `note`. Its tree still verifies, since a coprocessor's program is data to the main CPU's file and comes back byte for byte.
 
-The run answers the stops it took and no others: a jump the run never reached
-keeps its `stop` alone, and a person's `entry` is still the way past it. A run
-without a script reaches what a cartridge does on its own; with one it reaches
-what the script plays, and no script plays everything — coverage is what a person
-exercises, run by run, and the manifest accumulates it. The same holds for what
-a run moved: a transfer the run never started has its `dma` line and no `moved`
-line, and a byte the CPU carries to a register itself, a store at a time, is
-not a transfer and is not recorded here. And for where a range landed: what
-the memory was used as is read once, at the first frame drawn after the
-bytes landed, so a stretch of VRAM a game uses as tiles in one scene and as a
-map in another is named by the first; a run that ends before a frame is drawn
-says `unshown`; and a file whose landings mix the two, or lie under Mode 7,
-stays under `vram/`, as bytes — the picture's use of every word over a whole
-run is not here. A file under `tiles/`, `maps/`, `cgram/` or `oam/`, and a
-table under `hdma/`, is written in its editable form where the run's facts
-name one, and a source a routine built its data from keeps its bytes with a
-preview of what they became; a source is never re-encoded, since the routine
-that packed it is the game's. And for where the CPU arrived: a return
-the run never took has no `ran` line, and code the program copied into work RAM
-and ran there is checked by the run and lifted from its fetches, but the tree
-has no file to place it in, so a landing there is a `note` and its bytes stay
-in the bank as the data they were copied from.
+The run answers the stops it took and no others: a jump the run never reached keeps its `stop` alone, and a person's `entry` is still the way past it. A run without a script reaches what a cartridge does on its own; with one it reaches what the script plays, and no script plays everything — coverage is what a person exercises, run by run, and the manifest accumulates it. The same holds for what a run moved: a transfer the run never started has its `dma` line and no `moved` line, and a byte the CPU carries to a register itself, a store at a time, is not a transfer and is not recorded here. And for where a range landed: what the memory was used as is read once, at the first frame drawn after the bytes landed, so a stretch of VRAM a game uses as tiles in one scene and as a map in another is named by the first; a run that ends before a frame is drawn says `unshown`; and a file whose landings mix the two, or lie under Mode 7, stays under `vram/`, as bytes — the picture's use of every word over a whole run is not here. A file under `tiles/`, `maps/`, `cgram/` or `oam/`, and a table under `hdma/`, is written in its editable form where the run's facts name one, and a source a routine built its data from keeps its bytes with a preview of what they became; a source is never re-encoded, since the routine that packed it is the game's. And for where the CPU arrived: a return the run never took has no `ran` line, and code the program copied into work RAM and ran there is checked by the run and lifted from its fetches, but the tree has no file to place it in, so a landing there is a `note` and its bytes stay in the bank as the data they were copied from.
 
-The assets are the ranges the run saw leave the image, and the sources of the
-ranges it saw leave work RAM. A range the program built in work RAM before
-sending it — which is most of what a real cartridge sends, whether an engine
-carries it out or the CPU does — is lifted as the image bytes its writer read
-to build it, where the shadow found them; a range built from constants, or
-from a register's values, has no source and no file, and the `origin` line
-says which. A source is the run holding the origin among what the writer's
-invocation read, followed out through the callers whose run grew from it: a
-decoder that reads its stream through a helper is followed into the helper,
-and one called once per chunk is followed out to its caller, so a source can
-be wider than the asset a person would cut and the `staged` lines say which
-parts were used; a range
-staged twice through work RAM keeps only its origin's own intervals, and a
-routine the trace holds no label at is named by its site. A transfer the run
-never started has no `moved` line, and is a file only where the code proves
-it whole — a `dma` line with its source, its step, its count and a
-general-purpose start every path settles; one the code sets up from a table,
-or starts from a handler the paths do not reach, stays in its bank.
+The assets are the ranges the run saw leave the image, and the sources of the ranges it saw leave work RAM. A range the program built in work RAM before sending it — which is most of what a real cartridge sends, whether an engine carries it out or the CPU does — is lifted as the image bytes its writer read to build it, where the shadow found them; a range built from constants, or from a register's values, has no source and no file, and the `origin` line says which. A source is the run holding the origin among what the writer's invocation read, followed out through the callers whose run grew from it: a decoder that reads its stream through a helper is followed into the helper, and one called once per chunk is followed out to its caller, so a source can be wider than the asset a person would cut and the `staged` lines say which parts were used; a range staged twice through work RAM keeps only its origin's own intervals, and a routine the trace holds no label at is named by its site. A transfer the run never started has no `moved` line, and is a file only where the code proves it whole — a `dma` line with its source, its step, its count and a general-purpose start every path settles; one the code sets up from a table, or starts from a handler the paths do not reach, stays in its bank.
 
-What the toolkit runs is the routines a call enters with an index every path
-bounds at the entry. An index a routine loads from work RAM itself, a routine
-only a jump enters, and a transfer from work RAM the run never started are not
-run, and a `note` says which; a transfer whose extent the run never wrote has
-no state to run it from. A value runs from the state the routine's first
-invocation entered with, every other register as it stood there, so a routine
-whose other inputs differ from call to call is run under the first call's. A
-value that writes beyond what the run saw the routine write is refused, so an
-entry larger than any the run built is not lifted. The values run only on a
-disassembly's own run: one handed a host's run (`CartridgeRequest::observed`)
-runs no routine again, and its tree has no `enumerated` line. A tree made from a
-host's run in the middle of a session counts each sighting as of that tree; the
-tree made when the session closes has the session's counts.
+What the toolkit runs is the routines a call enters with an index every path bounds at the entry. An index a routine loads from work RAM itself, a routine only a jump enters, and a transfer from work RAM the run never started are not run, and a `note` says which; a transfer whose extent the run never wrote has no state to run it from. A value runs from the state the routine's first invocation entered with, every other register as it stood there, so a routine whose other inputs differ from call to call is run under the first call's. A value that writes beyond what the run saw the routine write is refused, so an entry larger than any the run built is not lifted. The values run only on a disassembly's own run: one handed a host's run (`CartridgeRequest::observed`) runs no routine again, and its tree has no `enumerated` line. A tree made in the middle of a played session counts each sighting as of that tree; the closing tree's counts are the session's.
 
-What the code reaches is reported for the main CPU's regions. The sound program is
-another chip's, with registers of its own, and has no `access`, `routine` or
-`state` lines; the run holds every instruction the sound CPU executes to the
-audio machine, and what it computes from the sound side is the samples the
-key-ons named — what the driver's data means beyond them, a sequence or an
-instrument table, is the game's format and is not read. A value carries as far as every path proves it and no further, so
-a channel configured from a table, or across a call that does not give the
-register back, leaves the fields it did not settle `none` rather than guessing at
-them. A routine's role counts what the bytes reach and what a run reached; a call
-through a pointer the run did not take contributes nothing to `through`, since
-nothing names its target. A table is derived only where its index is bounded by
-a mask or by a compare and a branch on the carry and the table lies in the
-image; an index that comes from memory, or a table in work RAM, keeps its stop
-for the run or a person to answer.
+What the code reaches is reported for the main CPU's regions. The sound program is another chip's, with registers of its own, and has no `access`, `routine` or `state` lines; the run holds every instruction the sound CPU executes to the audio machine, and what it computes from the sound side is the samples the key-ons named — what the driver's data means beyond them, a sequence or an instrument table, is the game's format and is not read. A value carries as far as every path proves it and no further, so a channel configured from a table, or across a call that does not give the register back, leaves the fields it did not settle `none` rather than guessing at them. A routine's role counts what the bytes reach and what a run reached; a call through a pointer the run did not take contributes nothing to `through`, since nothing names its target. A table is derived only where its index is bounded by a mask or by a compare and a branch on the carry and the table lies in the image; an index that comes from memory, or a table in work RAM, keeps its stop for the run or a person to answer.
 
-Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM,
-from 512 KB to 6 MB — assembles back to its image byte for byte under
-`snes_verify`. The bank files and the sound file are written from the
-intermediate representation, which holds no bytes: the bytes in every comment
-are re-encoded from the instruction layer, and the tree still assembles to
-the image. The trace's own limits stand: a jump through a table stops it, and
-an entry in the manifest is how a person carries it past.
+Every tree in a corpus of thirty-one cartridges — LoROM, HiROM and ExHiROM, from 512 KB to 6 MB — assembles back to its image byte for byte under `snes_verify`. The bank files and the sound file are written from the intermediate representation, which holds no bytes: the bytes in every comment are re-encoded from the instruction layer, and the tree still assembles to the image. The trace's own limits stand: a jump through a table stops it, and an entry in the manifest is how a person carries it past.
 
 ## See also
 
-- [Project manifest](project-manifest.md) — the manifest's grammar, what is read
-  back, and its stability.
-- [Input script](input-script.md) — the recorded run `--input` replays, its
-  grammar and its refusals.
-- [The assemblers](assemblers.md) — the tools `snes_verify` rebuilds the
-  tree's files with, and their diagnostics.
-- [The intermediate representation](ir.md#rendering-source) — what the bank
-  files are written from, and how the writing is held to the listing.
-- [65816 disassembler](65816-disassembler.md) and
-  [SPC700 disassembler](spc700-disassembler.md) — the two backends the tree's
-  listings come from.
-- [Disassembly framework](disassembly-framework.md) — the tracer and renderer,
-  and the cartridge entry points.
-- [SNES cartridge](snes-cartridge.md) — the header, the three maps, and where
-  every bus address lands in the image.
-- [SNES machine](snes-machine.md) — the machine the boot runs on, and the
-  upload handshake.
+- [Project manifest](project-manifest.md) — the manifest's grammar, what is read back, and its stability.
+- [Input script](input-script.md) — the recorded run `--input` replays, its grammar and its refusals.
+- [The assemblers](assemblers.md) — the tools `snes_verify` rebuilds the tree's files with, and their diagnostics.
+- [The intermediate representation](ir.md#rendering-source) — what the bank files are written from, and how the writing is held to the listing.
+- [65816 disassembler](65816-disassembler.md) and [SPC700 disassembler](spc700-disassembler.md) — the two backends the tree's listings come from.
+- [Disassembly framework](disassembly-framework.md) — the tracer and renderer, and the cartridge entry points.
+- [SNES cartridge](snes-cartridge.md) — the header, the three maps, and where every bus address lands in the image.
+- [SNES machine](snes-machine.md) — the machine the boot runs on, and the upload handshake.

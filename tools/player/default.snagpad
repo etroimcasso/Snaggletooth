@@ -51,7 +51,10 @@ y = y
 l = left trigger
 r = right trigger
 
-# The chords that work the console itself. `reset` is the button on its front.
-# `cmdorctrl` is Command on a Mac and Control everywhere else, never both.
+# The chords that work the console and the run. `reset` is the button on the
+# console's front; `pause` stops the game and resumes it, for a run that
+# disassembles as it plays. `cmdorctrl` is Command on a Mac and Control
+# everywhere else, never both.
 [hotkeys]
 reset = cmdorctrl+r
+pause = cmdorctrl+p

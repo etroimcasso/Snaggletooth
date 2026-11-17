@@ -137,13 +137,18 @@ std::optional<PadConfig> parsePadConfig(std::string_view text, std::string& erro
     if (value.empty()) return fail("`" + key + "` is given nothing to be held by");
 
     if (kind == SectionKind::Hotkeys) {
-      if (key != "reset") return fail("`" + key + "` is not a hotkey; the one there is is `reset`");
-      if (config.hotkeys.resetGiven) return fail("`" + key + "` is given twice");
-      config.hotkeys.resetGiven = true;
+      if (key != "reset" && key != "pause") {
+        return fail("`" + key + "` is not a hotkey; they are `reset` and `pause`");
+      }
+      const bool reset = key == "reset";
+      bool& given = reset ? config.hotkeys.resetGiven : config.hotkeys.pauseGiven;
+      std::vector<ChordName>& chords = reset ? config.hotkeys.reset : config.hotkeys.pause;
+      if (given) return fail("`" + key + "` is given twice");
+      given = true;
       for (const std::string_view piece : pieces(value)) {
         const ChordName chord = chordFromText(piece);
         if (chord.key.empty()) return fail("`" + key + "` names an empty key");
-        config.hotkeys.reset.push_back(chord);
+        chords.push_back(chord);
       }
       continue;
     }
@@ -243,7 +248,14 @@ void fillFrom(PadConfig& config, const PadConfig& defaults) {
     config.gamepad = defaults.gamepad;
     config.hasGamepad = defaults.hasGamepad;
   }
-  if (!config.hotkeys.resetGiven) config.hotkeys = defaults.hotkeys;
+  if (!config.hotkeys.resetGiven) {
+    config.hotkeys.reset = defaults.hotkeys.reset;
+    config.hotkeys.resetGiven = defaults.hotkeys.resetGiven;
+  }
+  if (!config.hotkeys.pauseGiven) {
+    config.hotkeys.pause = defaults.hotkeys.pause;
+    config.hotkeys.pauseGiven = defaults.hotkeys.pauseGiven;
+  }
 }
 
 GamepadMap resolve(const PadConfig& config, PadFamily family, const FaceLabels& labels) {
@@ -299,24 +311,36 @@ std::optional<KeyboardMap> resolveKeyboard(
   return map;
 }
 
-std::optional<HotkeyMap> resolveHotkeys(
-    const PadConfig& config, const KeyboardMap& keyboard, KeyboardKind kind,
-    const std::function<std::optional<KeyId>(std::string_view)>& idFor, std::string& error) {
-  HotkeyMap map;
-  for (const ChordName& chord : config.hotkeys.reset) {
+namespace {
+
+// A chord as a file writes it: its modifier words, then its key.
+std::string chordText(const ChordName& chord) {
+  std::string text;
+  if ((chord.modifiers & kModifierCmdOrCtrl) != 0) text += "cmdorctrl+";
+  if ((chord.modifiers & kModifierCmd) != 0) text += "cmd+";
+  if ((chord.modifiers & kModifierCtrl) != 0) text += "ctrl+";
+  if ((chord.modifiers & kModifierAlt) != 0) text += "alt+";
+  if ((chord.modifiers & kModifierShift) != 0) text += "shift+";
+  return text + chord.key;
+}
+
+// One hotkey's chords, as `resolveHotkeys` resolves them.
+bool resolveChords(const std::vector<ChordName>& names, const char* hotkey, const KeyboardMap& keyboard,
+                   KeyboardKind kind, const std::function<std::optional<KeyId>(std::string_view)>& idFor,
+                   std::vector<Chord>& out, std::string& error) {
+  for (const ChordName& chord : names) {
     const std::optional<KeyId> id = idFor(chord.key);
     if (!id) {
       error = "`" + chord.key + "` is not a key this keyboard has";
-      return std::nullopt;
+      return false;
     }
     for (const Button button : buttons()) {
       if (chord.modifiers != 0) break;
       for (const KeyId held : keyboard.keysFor(button)) {
         if (held != *id) continue;
-        error = "`" + chord.key + "` is the reset hotkey and holds " +
-                std::string(buttonName(button)) +
-                " as well; give `reset` a chord or another key under `[hotkeys]`";
-        return std::nullopt;
+        error = "`" + chord.key + "` is the " + hotkey + " hotkey and holds " + std::string(buttonName(button)) +
+                " as well; give `" + hotkey + "` a chord or another key under `[hotkeys]`";
+        return false;
       }
     }
     // `cmdorctrl` becomes the one modifier this keyboard uses for its shortcuts.
@@ -325,7 +349,26 @@ std::optional<HotkeyMap> resolveHotkeys(
       modifiers = static_cast<std::uint8_t>(
           modifiers | (kind == KeyboardKind::Mac ? kModifierCmd : kModifierCtrl));
     }
-    map.reset.push_back(Chord{.modifiers = modifiers, .key = *id});
+    out.push_back(Chord{.modifiers = modifiers, .key = *id});
+  }
+  return true;
+}
+
+}  // namespace
+
+std::optional<HotkeyMap> resolveHotkeys(
+    const PadConfig& config, const KeyboardMap& keyboard, KeyboardKind kind,
+    const std::function<std::optional<KeyId>(std::string_view)>& idFor, std::string& error) {
+  HotkeyMap map;
+  if (!resolveChords(config.hotkeys.reset, "reset", keyboard, kind, idFor, map.reset, error)) return std::nullopt;
+  if (!resolveChords(config.hotkeys.pause, "pause", keyboard, kind, idFor, map.pause, error)) return std::nullopt;
+  // One press would both reset the console and stop the game.
+  for (std::size_t p = 0; p < map.pause.size(); ++p) {
+    for (const Chord& reset : map.reset) {
+      if (reset != map.pause[p]) continue;
+      error = "`" + chordText(config.hotkeys.pause[p]) + "` is both reset and pause";
+      return std::nullopt;
+    }
   }
   return map;
 }

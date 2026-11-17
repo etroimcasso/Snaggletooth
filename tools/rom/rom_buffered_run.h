@@ -15,9 +15,10 @@
 // copy and its samples run on another. The buffer holds what the threads have
 // not reached, in memory to the size the host names and then in files under the
 // directory it names, so a host on a slow CPU runs at its own pace and the
-// threads catch up; the host names both sizes and the run imposes no floor or
-// ceiling on either. Every thread the run starts runs at the lowest scheduling
-// class the platform gives a thread (`lowerThisThread`).
+// threads catch up; the host names both sizes, which are the buffer's ceilings.
+// Every thread the run starts works at a class under the host's thread's while
+// the host runs its machine (`ThreadClass`), and at the class a thread starts
+// with once the host says it has stopped (`hostStopped`).
 //
 // The observation is the one `observeRun` makes of the same play, field for
 // field, with the same notes. Once a frame the host puts the whole machine into
@@ -44,19 +45,48 @@
 
 namespace snaggletooth::disasm {
 
+// What a stream does once what its budget holds stands at the two ceilings.
+enum class AtLimit : std::uint8_t {
+  Refuse,  // `put` answers null from then on: the stream is full
+  Keep,    // `put` goes on answering room for the write in flight, in blocks that stay in RAM
+};
+
+// The scheduling class of a thread that works beside a host's thread.
+enum class ThreadClass : std::uint8_t {
+  // Under the host's thread: `QOS_CLASS_BACKGROUND` on macOS, `SCHED_IDLE` on
+  // Linux, `THREAD_PRIORITY_LOWEST` on Windows. On a host with fewer cores than
+  // threads, every thread at a higher class is scheduled first.
+  Lowered,
+  // The same for a thread that writes and reads files: `QOS_CLASS_UTILITY` on
+  // macOS, whose background class also throttles a thread's file access.
+  LoweredForFiles,
+  // The class a thread starts with: `QOS_CLASS_DEFAULT`, `SCHED_OTHER`,
+  // `THREAD_PRIORITY_NORMAL`.
+  Normal,
+};
+// Sets the calling thread's class.
+void setThisThreadClass(ThreadClass which) noexcept;
+// The class the calling thread last set, `Normal` before it set one.
+[[nodiscard]] ThreadClass thisThreadClass() noexcept;
+
 struct BufferedRunOptions {
   std::uint64_t memoryBytes = 1'000'000'000;  // the most RAM the buffer holds, both streams together
   std::uint64_t diskBytes = 64'000'000'000;   // the most it holds in files
   unsigned threads = 0;  // the pool's threads; 0: two fewer than the host's cores, at least 1
+  // At the ceilings: `Refuse` stops the observers copying, and the observation
+  // is of everything before; `Keep` copies the host's call in flight into RAM
+  // past its ceiling, for a host that stops running its machine when
+  // `atLimit()` says so.
+  AtLimit atLimit = AtLimit::Refuse;
 };
 
 // Bound like ObservedRun — to a machine at power-on, from the image it was built
 // from, with no bus, audio or instruction observer set — it sets the three
 // observers; the host runs the machine as it likes with `step()` or `run()`,
 // presents its own pads, and calls `keyframe()` between two of its calls once a
-// frame. Every member but `progress()`, `full()` and `observation()` is called
-// on the host's thread between two of its calls into the machine, and none from
-// inside a report.
+// frame. Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()`
+// and `observation()` is called on the host's thread between two of its calls
+// into the machine, and none from inside a report.
 class BufferedRun {
  public:
   // Throws `std::logic_error` as `ObservedRun`'s constructor does: a machine that
@@ -87,14 +117,39 @@ class BufferedRun {
   // Whether the buffer filled: what it holds would pass the RAM and the disk
   // together. The observers copy nothing more, and the observation is of
   // everything before. A host that stops calling into the machine before the
-  // buffer fills, by `progress()`, loses nothing.
+  // buffer fills, by `progress()`, loses nothing. Under `AtLimit::Keep` only a
+  // block the system would not allocate fills the buffer.
   [[nodiscard]] bool full() const noexcept;
+
+  // Whether the buffer stands at its ceilings (`StreamBudget::atLimit`). Under
+  // `AtLimit::Keep` nothing is lost past it: the host's call in flight is kept,
+  // and a host that stops running its machine here holds the buffer to its
+  // ceilings.
+  [[nodiscard]] bool atLimit() const noexcept;
+
+  // Whether the buffer's RAM stands past its own ceiling while its files have
+  // room (`StreamBudget::memoryOver`): where the files are written more slowly
+  // than the host fills the buffer. A host that stops running its
+  // machine here until RAM has drained holds RAM to its ceiling.
+  [[nodiscard]] bool memoryOver() const noexcept;
+
+  // New ceilings for the buffer, as `StreamBudget::setLimits` takes them.
+  // Throws `std::logic_error` once the run is finished.
+  void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes);
+
+  // Tells the run the host has stopped running its machine, or runs it again.
+  // While it is stopped every thread of the run works at `ThreadClass::Normal`;
+  // while it runs, at its lowered class. `finish()` tells the run the host has
+  // stopped before it waits. Throws `std::logic_error` once the run is finished.
+  void hostStopped(bool stopped);
 
   // What the threads have reached: the master cycles of the last boundary they
   // played, against the host's; the bytes the buffer holds, the RAM its blocks
-  // take and the bytes in its files now, against the two limits; the bytes
-  // written to files so far; and how many keyframes the work RAM the run keeps
-  // differed from, which is 0 for a record that holds everything the run reads.
+  // take and the bytes in its files now, against the two ceilings; the bytes
+  // written to files so far; how many keyframes the work RAM the run keeps
+  // differed from, which is 0 for a record that holds everything the run reads;
+  // the pool's threads; and how many of the run's threads stand at a lowered
+  // class.
   struct Progress {
     std::uint64_t playedMaster = 0;
     std::uint64_t hostMaster = 0;
@@ -105,6 +160,8 @@ class BufferedRun {
     std::uint64_t diskBytes = 0;
     std::uint64_t diskWritten = 0;
     std::uint64_t keyframesDiffered = 0;
+    unsigned threads = 0;
+    unsigned threadsLowered = 0;
   };
   [[nodiscard]] Progress progress() const noexcept;
 

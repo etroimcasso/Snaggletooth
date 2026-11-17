@@ -6,13 +6,17 @@
 //               [--region ntsc|pal] [--vsync on|off|auto] [--unthrottled]
 //               [--interlace weave|bob|off] [--apu-thread] [--ppu-thread] [--ppu-verify]
 //               [--gpu-ppu] [--gpu-verify] [--mute] [--quiet]
+//               [--disasm <directory>] [--disasm-buffer-memory <GB>] [--disasm-buffer-disk <GB>]
+//               [--disasm-buffer-dir <directory>] [--disasm-threads <n>]
+//               [--disasm-resume-at <percent>]
 //   snes_player --default-config
 //
 // The window shows the picture the machine draws, frame by frame, at the console's
 // own rate, with that rate in its title so what the run costs is visible while it
 // runs, and the DSP's own 32 kHz stereo goes to the default playback device as the
 // machine produces it. It closes when the window is closed or when --seconds of the
-// master clock have been spent; nothing else stops it. --mute leaves the sound where
+// master clock have been spent; nothing else stops it. A run started with --disasm
+// closes when its disassembly is finished, as below. --mute leaves the sound where
 // it is made, and a machine with no playback device runs silent and says so.
 //
 // The buttons come from the keyboard and from whatever gamepads are plugged in, each
@@ -89,6 +93,19 @@
 // ways and compared pixel for pixel, the last line saying how many differed; it is
 // for proving a run, not for playing one. The player's device over SDL's GPU API is
 // `sdl_gpu_device.h`; `docs/gpu-ppu.md` is the GPU PPU itself.
+//
+// --disasm <directory> disassembles the cartridge while it is played, into a tree
+// there (`live_disasm.h`), and turns --apu-thread and --ppu-thread on. The thread
+// that steps the console copies what the machine reports into a buffer; the
+// disassembly's own threads work through it, and one more writes the tree, one
+// tree after another, and runs snes_render and then snes_verify from the
+// player's own directory over each. When the buffer reaches the ceilings the
+// --disasm-buffer-* flags set, the game stops until it has drained to the
+// --disasm-resume-at level (`pause.h`); the pause chord stops the game and
+// resumes it by hand. A request to close — the window's, a signal's — starts the
+// close, which plays the buffer to its end, writes the last tree and runs the two
+// commands with the window still up; further requests are answered and end
+// nothing (`close_requests.h`). Without --disasm none of it exists in the process.
 
 #include <algorithm>
 #include <cstddef>
@@ -96,6 +113,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -105,13 +123,29 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
+
 #include "SDL3/SDL.h"
 #include "SDL3/SDL_main.h"  // SDL_SetMainReady, which the tool calls to keep its own main()
+#include "player/close_requests.h"
 #include "player/default_snagpad.h"
 #include "player/display.h"
 #include "player/interlace.h"
+#include "player/live_disasm.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
+#include "player/pause.h"
 #include "player/sdl_gpu_device.h"
 #include "player/user_files.h"
 #include "rom/input_script.h"
@@ -196,7 +230,53 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
   return true;
 }
 
-[[noreturn]] void usage(const char* program) {
+// ---- the disassembly's commands ----------------------------------------------------
+
+// A process the player started, put under the player's own thread's class: the
+// lowest nice value on macOS and Linux, below-normal on Windows.
+void lowerProcess(Sint64 pid) {
+#if defined(_WIN32)
+  const HANDLE process = OpenProcess(PROCESS_SET_INFORMATION, FALSE, static_cast<DWORD>(pid));
+  if (process == nullptr) return;
+  SetPriorityClass(process, BELOW_NORMAL_PRIORITY_CLASS);
+  CloseHandle(process);
+#else
+  setpriority(PRIO_PROCESS, static_cast<id_t>(pid), 19);
+#endif
+}
+
+// The disassembly's hook for its two commands: the command started with the
+// player's own standard output and error, lowered when asked, and waited for.
+// Nothing when it could not be started.
+std::optional<int> runCommand(const std::vector<std::string>& arguments, bool lowered) {
+  std::vector<const char*> argv;
+  argv.reserve(arguments.size() + 1u);
+  for (const std::string& argument : arguments) argv.push_back(argument.c_str());
+  argv.push_back(nullptr);
+  SDL_Process* const process = SDL_CreateProcess(argv.data(), false);
+  if (process == nullptr) return std::nullopt;
+  if (lowered) {
+    const Sint64 pid = SDL_GetNumberProperty(SDL_GetProcessProperties(process), SDL_PROP_PROCESS_PID_NUMBER, 0);
+    if (pid > 0) lowerProcess(pid);
+  }
+  int status = 0;
+  const bool waited = SDL_WaitProcess(process, true, &status);
+  SDL_DestroyProcess(process);
+  if (!waited) return std::nullopt;
+  return status;
+}
+
+// What ends a process the close refuses to end, as the close's answer names it.
+std::string howToEndThePlayer() {
+#if defined(_WIN32)
+  return "Task Manager's End Task";
+#else
+  return "kill -9 " + std::to_string(getpid());
+#endif
+}
+
+// The options, then what was wrong with the command line, last, where it is read.
+[[noreturn]] void usage(const char* program, const std::string& why) {
   std::cerr
       << "usage: " << program << " <image> [options]\n"
          "\n"
@@ -225,10 +305,23 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
          "  --gpu-ppu                   draw the picture on the GPU with the core's own shader\n"
          "  --gpu-verify                draw every frame on the GPU and on the CPU and compare\n"
          "                              them; for proving a run, not for playing one\n"
+         "  --disasm <directory>        disassemble the game as you play it, into a tree there; turns\n"
+         "                              --apu-thread and --ppu-thread on\n"
+         "  --disasm-buffer-memory <GB> the most RAM the disassembly's buffer takes (default 1)\n"
+         "  --disasm-buffer-disk <GB>   the most its files hold (default 64)\n"
+         "  --disasm-buffer-dir <directory>\n"
+         "                              where those files go (default <directory>/buffer)\n"
+         "  --disasm-threads <n>        the threads that check the game's instructions (default: two\n"
+         "                              fewer than this computer's cores)\n"
+         "  --disasm-resume-at <percent>\n"
+         "                              when the buffer fills and the game stops, how far it drains\n"
+         "                              before the game resumes (default 50)\n"
          "  --mute                      don't play the sound\n"
          "  --quiet                     don't print the run's status lines\n"
          "  --default-config            print the built-in controller mapping and exit\n"
-         "  --user-files                print where the player keeps its files and exit\n";
+         "  --user-files                print where the player keeps its files and exit\n"
+         "\n"
+      << program << ": " << why << "\n";
   std::exit(2);
 }
 
@@ -342,15 +435,13 @@ class Devices {
   }
 
   // Whether `key`, pressed with `held`, is a chord the configuration gives to the
-  // console's reset button. Left and right of a modifier are one, and the locks are
-  // no part of a chord.
+  // console's reset button, or to the pause chord. Left and right of a modifier are
+  // one, and the locks are no part of a chord.
   [[nodiscard]] bool isReset(player::KeyId key, SDL_Keymod held) const {
-    unsigned modifiers = 0;
-    if ((held & SDL_KMOD_GUI) != 0) modifiers |= player::kModifierCmd;
-    if ((held & SDL_KMOD_CTRL) != 0) modifiers |= player::kModifierCtrl;
-    if ((held & SDL_KMOD_ALT) != 0) modifiers |= player::kModifierAlt;
-    if ((held & SDL_KMOD_SHIFT) != 0) modifiers |= player::kModifierShift;
-    return player::pressed(hotkeys_.reset, key, static_cast<std::uint8_t>(modifiers));
+    return player::pressed(hotkeys_.reset, key, modifiersOf(held));
+  }
+  [[nodiscard]] bool isPause(player::KeyId key, SDL_Keymod held) const {
+    return player::pressed(hotkeys_.pause, key, modifiersOf(held));
   }
 
   void opened(SDL_JoystickID id) {
@@ -415,6 +506,15 @@ class Devices {
     player::GamepadMap map;
     snaggletooth::JoypadPort port;
   };
+
+  [[nodiscard]] static std::uint8_t modifiersOf(SDL_Keymod held) {
+    unsigned modifiers = 0;
+    if ((held & SDL_KMOD_GUI) != 0) modifiers |= player::kModifierCmd;
+    if ((held & SDL_KMOD_CTRL) != 0) modifiers |= player::kModifierCtrl;
+    if ((held & SDL_KMOD_ALT) != 0) modifiers |= player::kModifierAlt;
+    if ((held & SDL_KMOD_SHIFT) != 0) modifiers |= player::kModifierShift;
+    return static_cast<std::uint8_t>(modifiers);
+  }
 
   [[nodiscard]] snaggletooth::Joypad keysDown() const {
     int count = 0;
@@ -606,6 +706,64 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
 
   // Whether the reset button was pressed since this last said so.
   [[nodiscard]] bool takeReset() noexcept { return std::exchange(resetAsked_, false); }
+  // Whether the pause chord was pressed since this last said so.
+  [[nodiscard]] bool takePause() noexcept { return std::exchange(pauseAsked_, false); }
+  // The requests to close the window system made since this last said so: the
+  // window's close button, Command-Q, the dock.
+  [[nodiscard]] unsigned takeCloseAsks() noexcept { return std::exchange(closeAsks_, 0u); }
+
+  // Asks the window system to draw the eye to the window until it has the focus.
+  void attention() { SDL_FlashWindow(window_, SDL_FLASH_UNTIL_FOCUSED); }
+
+  // Everything the title says after the game's name, asked for each time the
+  // title is set, with what the title would say there by itself (the rate, or a
+  // stop's phrase), the steady clock, and the characters the title has room for
+  // after the name (`titleRoom`). None unless a run disassembles as it plays.
+  void setTitleExtra(std::function<std::string(const std::string& lead, std::uint64_t nanos, std::size_t room)> extra) {
+    titleExtra_ = std::move(extra);
+  }
+
+  // One pass of a stop or of the close, while the machine runs nothing: the events,
+  // the last picture presented again where the window was exposed, and the title
+  // set to `status` beside the game's name when it changed and half a second has
+  // passed since it was last set. The first pass after `held` sets it at once.
+  void stoppedPass(const std::string& status) {
+    pump();
+    if (std::exchange(exposed_, false)) {
+      if (gpu_ != nullptr) {
+        if (lastShownWidth_ != 0u) static_cast<void>(gpu_->present(lastShownWidth_, lastShownRows_));
+      } else {
+        SDL_RenderClear(renderer_);
+        SDL_RenderTexture(renderer_, texture_, &lastSource_, nullptr);
+        SDL_RenderPresent(renderer_);
+      }
+    }
+    const std::uint64_t now = SDL_GetTicksNS();
+    if (now - stoppedTitleAt_ >= player::kNanosPerSecond / 2u) {
+      std::string text = title_;
+      if (titleExtra_) {
+        text += " — " + titleExtra_(status, now, titleRoom());
+      } else if (!status.empty()) {
+        text += " — " + status;
+      }
+      if (text != stoppedTitle_) SDL_SetWindowTitle(window_, text.c_str());
+      stoppedTitle_ = text;
+      stoppedTitleAt_ = now;
+    }
+  }
+
+  // A stop of `nanos` is over: the pacing, the table's two times and the mean rate
+  // are moved past it, so none of them carries it. A stop runs no cycle, so the
+  // machine's own time is untouched.
+  void held(std::uint64_t nanos) {
+    started_ += nanos;
+    lastFrame_ += nanos;
+    resumed_ += nanos;
+    titleAt_ += nanos;
+    if (frames_ >= 1u) heldNanos_ += nanos;
+    stoppedTitle_.clear();
+    stoppedTitleAt_ = 0;
+  }
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
   // The picture lines over the run, as the machine counted them in each frame
   // report: taken from the frame before, drawn, and the drawn lines that disagreed
@@ -621,10 +779,11 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
   [[nodiscard]] const std::string& gpuFirstDifference() const noexcept { return gpuFirst_; }
   // The rate the run actually held, measured from the end of the first frame: that
   // first one carries opening a window, a device and a cartridge, and a mean that
-  // includes it describes the startup rather than the run.
+  // includes it describes the startup rather than the run. The game's stops are not
+  // part of it.
   [[nodiscard]] std::uint64_t meanMilliFps() const {
     if (frames_ < 2u) return 0u;
-    return milliFps(lastFrame_ - firstFrameEnd_, frames_ - 1u);
+    return milliFps(lastFrame_ - firstFrameEnd_ - heldNanos_, frames_ - 1u);
   }
 
   void frame(const VideoFrame& picture) override {
@@ -676,6 +835,8 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
         presentRefused_ = true;
       }
       lastShown_ = at;
+      lastShownWidth_ = timeline.width;
+      lastShownRows_ = shownRows;
     }
     // A recording takes the shown picture back from the texture.
     const std::uint8_t* pixels = nullptr;
@@ -765,8 +926,8 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
     // reads as though the machine were speeding up, which is not what a rate in a
     // window's title is read as.
     if ((frames_ % kTitleFrames) == 0u) {
-      const std::string text =
-          title_ + " — " + rateText(milliFps(now - titleAt_, frames_ - titleFrames_)) + " fps";
+      const std::string rate = rateText(milliFps(now - titleAt_, frames_ - titleFrames_)) + " fps";
+      const std::string text = title_ + " — " + (titleExtra_ ? titleExtra_(rate, now, titleRoom()) : rate);
       SDL_SetWindowTitle(window_, text.c_str());
       titleAt_ = now;
       titleFrames_ = frames_;
@@ -799,6 +960,34 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
   // taller field's height.
   static constexpr unsigned kTextureHeight = 2u * kTallHeight;
   static constexpr std::uint64_t kTitleFrames = 30u;
+
+  // What a title bar keeps for the window's buttons and its margins, and the width
+  // of a character of its text, in points. Both are estimates: no window system
+  // says how wide a title's text is drawn.
+#if defined(__APPLE__)
+  static constexpr double kTitleButtonsPoints = 80.0;
+  static constexpr double kTitleCharacterPoints = 7.0;
+#elif defined(_WIN32)
+  static constexpr double kTitleButtonsPoints = 180.0;
+  static constexpr double kTitleCharacterPoints = 7.0;
+#else
+  static constexpr double kTitleButtonsPoints = 160.0;
+  static constexpr double kTitleCharacterPoints = 8.0;
+#endif
+
+  // The characters the title has room for after the game's name, from the window's
+  // width in points: its width in window coordinates, times the pixels a coordinate
+  // spans, over the scale the display draws text at.
+  [[nodiscard]] std::size_t titleRoom() const {
+    int width = 0;
+    int height = 0;
+    if (!SDL_GetWindowSize(window_, &width, &height)) return 0;
+    const float density = SDL_GetWindowPixelDensity(window_);
+    const float scale = SDL_GetWindowDisplayScale(window_);
+    const double points =
+        density > 0.0f && scale > 0.0f ? static_cast<double>(width) * density / scale : static_cast<double>(width);
+    return player::titleRoom(points - kTitleButtonsPoints, kTitleCharacterPoints, title_);
+  }
   // How far behind the run may fall before its lateness is written off rather than
   // chased. Under this a single short frame settles it, which keeps the run's own
   // average rate honest; over it, the time is gone and pretending otherwise is what
@@ -861,6 +1050,7 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
     SDL_RenderClear(renderer_);
     SDL_RenderTexture(renderer_, texture_, &source, nullptr);
     SDL_RenderPresent(renderer_);
+    lastSource_ = source;
   }
 
   // Under --gpu-verify: the device's texture, drawn line for line, against the machine's
@@ -925,13 +1115,17 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
     while (SDL_PollEvent(&event)) {
       if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
         closed_ = true;
+        ++closeAsks_;
+      } else if (event.type == SDL_EVENT_WINDOW_EXPOSED) {
+        exposed_ = true;
       } else if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
         devices_.opened(event.gdevice.which);
       } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED) {
         devices_.closed(event.gdevice.which);
-      } else if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
-                 devices_.isReset(static_cast<player::KeyId>(event.key.scancode), event.key.mod)) {
-        pressReset();
+      } else if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+        const player::KeyId key = static_cast<player::KeyId>(event.key.scancode);
+        if (devices_.isReset(key, event.key.mod)) pressReset();
+        if (devices_.isPause(key, event.key.mod)) pauseAsked_ = true;
       }
     }
   }
@@ -1002,7 +1196,18 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
   std::uint64_t titleFrames_ = 0;    // and how many frames had run by then
   bool resetAsked_ = false;    // the reset button was pressed since the machine last took it
   bool resetRefused_ = false;  // and a recorded run has already said it leaves it alone
+  bool pauseAsked_ = false;    // the pause chord was pressed since the loop last took it
   bool closed_ = false;
+  unsigned closeAsks_ = 0;     // the window system's requests to close, since the close's loop last took them
+  bool exposed_ = false;       // the window was exposed since a stop's pass last presented the picture again
+  SDL_FRect lastSource_{};     // the texture's part the window last showed
+  unsigned lastShownWidth_ = 0;  // under --gpu-ppu, what the device last presented
+  unsigned lastShownRows_ = 0;
+  // Everything after the game's name in the title, under --disasm.
+  std::function<std::string(const std::string&, std::uint64_t, std::size_t)> titleExtra_;
+  std::string stoppedTitle_;        // the title last set during a stop or the close
+  std::uint64_t stoppedTitleAt_ = 0;
+  std::uint64_t heldNanos_ = 0;     // the game's stops, past the first frame
 };
 
 }  // namespace
@@ -1026,13 +1231,17 @@ int main(int argc, char** argv) {
   unsigned scale = 3u;
   bool quiet = false;
   bool mute = false;
+  std::string disasmDir;
+  player::LiveOptions liveOptions;
+  // The flag of the five beside --disasm that was given first, which needs it.
+  std::string needsDisasm;
+  std::string needsDisasmThing;
 
   for (int at = 1; at < argc; ++at) {
     const std::string arg = argv[at];
     auto next = [&](const char* name) -> std::string {
       if (at + 1 >= argc) {
-        std::cerr << name << " needs a value\n";
-        usage(argv[0]);
+        usage(argv[0], std::string(name) + " needs a value");
       }
       return argv[++at];
     };
@@ -1061,8 +1270,7 @@ int main(int argc, char** argv) {
     } else if (arg == "--region") {
       regionName = next("--region");
       if (regionName != "ntsc" && regionName != "pal") {
-        std::cerr << "--region is ntsc or pal\n";
-        usage(argv[0]);
+        usage(argv[0], "--region is ntsc or pal, not `" + regionName + "`");
       }
     } else if (arg == "--vsync") {
       const std::string choice = next("--vsync");
@@ -1073,22 +1281,19 @@ int main(int argc, char** argv) {
       } else if (choice == "auto") {
         vsync = player::Vsync::Auto;
       } else {
-        std::cerr << "--vsync is on, off or auto\n";
-        usage(argv[0]);
+        usage(argv[0], "--vsync is on, off or auto, not `" + choice + "`");
       }
     } else if (arg == "--seconds") {
       try {
         seconds = std::stoull(next("--seconds"));
       } catch (const std::exception&) {
-        std::cerr << "--seconds needs a number\n";
-        usage(argv[0]);
+        usage(argv[0], "--seconds needs a number");
       }
     } else if (arg == "--scale") {
       try {
         scale = static_cast<unsigned>(std::stoul(next("--scale")));
       } catch (const std::exception&) {
-        std::cerr << "--scale needs a number\n";
-        usage(argv[0]);
+        usage(argv[0], "--scale needs a number");
       }
     } else if (arg == "--unthrottled") {
       unthrottled = true;
@@ -1106,22 +1311,83 @@ int main(int argc, char** argv) {
     } else if (arg == "--interlace") {
       const std::optional<player::Interlace> mode = player::parseInterlace(next("--interlace"));
       if (!mode) {
-        std::cerr << "--interlace is weave, bob or off\n";
-        usage(argv[0]);
+        usage(argv[0], "--interlace is weave, bob or off");
       }
       interlace = *mode;
     } else if (arg == "--mute") {
       mute = true;
     } else if (arg == "--quiet") {
       quiet = true;
+    } else if (arg == "--disasm") {
+      disasmDir = next("--disasm");
+    } else if (arg == "--disasm-buffer-memory" || arg == "--disasm-buffer-disk") {
+      const bool memory = arg == "--disasm-buffer-memory";
+      const std::optional<std::uint64_t> size = player::parseGigabytes(next(arg.c_str()));
+      if (!size) {
+        usage(argv[0], arg + " needs a size in GB, such as 1 or 0.5");
+      }
+      (memory ? liveOptions.memoryBytes : liveOptions.diskBytes) = *size;
+      if (needsDisasm.empty()) {
+        needsDisasm = arg;
+        needsDisasmThing = memory ? "buffer's RAM ceiling" : "buffer's files' ceiling";
+      }
+    } else if (arg == "--disasm-buffer-dir") {
+      liveOptions.bufferDirectory = next("--disasm-buffer-dir");
+      if (needsDisasm.empty()) {
+        needsDisasm = arg;
+        needsDisasmThing = "buffer's directory";
+      }
+    } else if (arg == "--disasm-threads") {
+      const std::string text = next("--disasm-threads");
+      unsigned threads = 0;
+      if (!text.empty() && text.size() <= 4u &&
+          std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        threads = static_cast<unsigned>(std::stoul(text));
+      }
+      if (threads == 0u) {
+        usage(argv[0], "--disasm-threads needs a number, 1 or more");
+      }
+      liveOptions.threads = threads;
+      if (needsDisasm.empty()) {
+        needsDisasm = arg;
+        needsDisasmThing = "threads";
+      }
+    } else if (arg == "--disasm-resume-at") {
+      const std::string text = next("--disasm-resume-at");
+      unsigned percent = 101;
+      if (!text.empty() && text.size() <= 3u &&
+          std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        percent = static_cast<unsigned>(std::stoul(text));
+      }
+      if (percent > 100u) {
+        usage(argv[0], "--disasm-resume-at is a percent from 0 to 100");
+      }
+      liveOptions.pause.resumePercent = percent;
+      if (needsDisasm.empty()) {
+        needsDisasm = arg;
+        needsDisasmThing = "resume level";
+      }
     } else if (imagePath.empty()) {
       imagePath = arg;
+    } else if (!arg.empty() && arg.front() == '-') {
+      usage(argv[0], "`" + arg + "` is not an option");
     } else {
-      usage(argv[0]);
+      usage(argv[0], "`" + arg + "` is a second image after `" + imagePath +
+                         "`; give one, and put a path with spaces in quotes");
     }
   }
-  if (imagePath.empty()) usage(argv[0]);
+  if (imagePath.empty()) usage(argv[0], "no image: give the cartridge to play");
   if (scale == 0u) scale = 1u;
+  if (!needsDisasm.empty() && disasmDir.empty()) {
+    std::cerr << needsDisasm << " sets the disassembly's " << needsDisasmThing
+              << "; it has nothing to do without --disasm\n";
+    return 2;
+  }
+  // A disassembly takes every thread it can use, the machine's two included.
+  if (!disasmDir.empty()) {
+    apuThread = true;
+    ppuThread = true;
+  }
   // The first thing a run says, and said under --quiet too: every rate the run
   // reports after it is the build's, not the emulator's.
   if constexpr (kDebugBuild) {
@@ -1270,6 +1536,11 @@ int main(int argc, char** argv) {
   const struct Shutdown {
     ~Shutdown() { SDL_Quit(); }
   } shutdown;
+  // Under --disasm the requests to close from outside the window are counted in
+  // place of SDL's own handling, which would end the loop on the first; the close
+  // answers each one.
+  std::optional<player::CloseRequests> requests;
+  if (!disasmDir.empty()) requests.emplace();
 
   Devices devices;
   {
@@ -1340,10 +1611,58 @@ int main(int argc, char** argv) {
   }
   if (save) machine.setSaveObserver(&*save);
 
+  // The disassembly beside the game, bound to the machine at power-on, before the
+  // window opens: a directory whose tree was written for another image refuses the
+  // run here.
+  const auto say = [quiet](const std::string& line) {
+    if (!quiet) std::cerr << (line + "\n");
+  };
+  const auto always = [](const std::string& line) { std::cerr << (line + "\n"); };
+  std::optional<player::LiveDisassembly> live;
+  if (!disasmDir.empty()) {
+    bool found = false;
+    std::size_t entries = 0;
+    std::size_t files = 0;
+    std::string error;
+    if (!player::LiveDisassembly::readable(rom, disasmDir, found, entries, files, error)) {
+      std::cerr << error << "\n";
+      return 1;
+    }
+    const char* const base = SDL_GetBasePath();
+    liveOptions.commands = base != nullptr ? std::filesystem::path(base) : std::filesystem::path();
+    liveOptions.image = imagePath;
+    const std::filesystem::path buffer =
+        liveOptions.bufferDirectory.empty() ? std::filesystem::path(disasmDir) / "buffer" : liveOptions.bufferDirectory;
+    try {
+      live.emplace(machine, rom, disasmDir, liveOptions,
+                   player::LiveHooks{.say = say, .always = always, .run = runCommand});
+    } catch (const std::exception& e) {
+      std::cerr << "the disassembly cannot be bound: " << e.what() << "\n";
+      return 1;
+    }
+    say("disassembling into " + disasmDir + " on " + std::to_string(live->status().buffer.threads) +
+        " threads; the buffer takes up to " + player::sizeText(liveOptions.memoryBytes) + " of RAM and " +
+        player::sizeText(liveOptions.diskBytes) + " of files under " + buffer.string());
+    if (found) {
+      say("read " + std::to_string(entries) + " entries and " + std::to_string(files) + " files from " +
+          (std::filesystem::path(disasmDir) / "project.snagifest").string());
+    }
+    live->start();
+  }
+
   const std::string stem = std::filesystem::path(imagePath).stem().string();
   Player player(machine, region, script, scripted, devices, scale, vsync, unthrottled, interlace,
                 gpuPpu ? &gpuDevice : nullptr, gpuVerify, stem);
   if (!player.open()) return 1;
+  // Under --disasm the title also carries the buffer's RAM and files, the close's
+  // progress, and a spinner that turns while the work moves, a page at a time where
+  // the window is too narrow for all of it.
+  if (live) {
+    player.setTitleExtra(
+        [&live, title = player::LiveTitle{}](const std::string& lead, std::uint64_t now, std::size_t room) mutable {
+          return title.text(lead, live->status(), now, room);
+        });
+  }
   // Which of the two arrangements the run took, before anything else it does: a run
   // that feels wrong is asked this first, and nobody should have to guess at it.
   const snaggletooth::player::Pacing pacing = player.pacing();
@@ -1398,16 +1717,47 @@ int main(int argc, char** argv) {
   // A reset starts the machine's master counter again, so what ran before each one
   // is kept here and the run's length is the two together.
   std::uint64_t beforeResets = 0;
-  while (!player.closed() && (bound == 0u || beforeResets + machine.state().master < bound)) {
+  // A request to close from outside the window, counted under --disasm, is taken
+  // once and kept, so the one that ends the loop is the one that starts the close.
+  bool closeRequested = false;
+  const auto closeAsked = [&] {
+    if (!closeRequested && requests && requests->take() != 0u) closeRequested = true;
+    return closeRequested;
+  };
+  bool pauseRefused = false;  // a run that disassembles nothing has said what the pause chord does
+  while (!player.closed() && !closeAsked() && (bound == 0u || beforeResets + machine.state().master < bound)) {
     machine.run(chunk);
     const std::vector<snaggletooth::StereoFrame> produced = machine.takeFrames();
     speakers.put(produced);
     if (recording) sound.insert(sound.end(), produced.begin(), produced.end());
+    // The game stops here, between two runs of the machine, as the reset is taken:
+    // at the buffer's ceilings, or by the pause chord. A stop runs no cycle.
+    if (live) {
+      if (player.takePause()) live->togglePause();
+      player::Stopped why = live->afterRun(SDL_GetTicksNS());
+      if (why != player::Stopped::No) {
+        const std::uint64_t began = SDL_GetTicksNS();
+        if (why == player::Stopped::AtLimit) player.attention();
+        while (why != player::Stopped::No && !player.closed() && !closeAsked()) {
+          player.stoppedPass(live->statusText());
+          if (player.takePause()) live->togglePause();
+          SDL_DelayNS(20'000'000u);
+          why = live->whileStopped(SDL_GetTicksNS());
+        }
+        player.held(SDL_GetTicksNS() - began);
+      }
+    } else if (player.takePause() && !std::exchange(pauseRefused, true)) {
+      std::cerr << "pause: this run disassembles nothing, so there is nothing to wait for; the game goes on\n";
+    }
     // The button is taken here, between two runs of the machine: the events are
     // pumped from inside one, where the machine is part-way through a cycle.
     if (player.takeReset()) {
       beforeResets += machine.state().master;
-      machine.reset();
+      if (live) {
+        live->reset();
+      } else {
+        machine.reset();
+      }
     }
   }
   machine.setFrameObserver(nullptr);
@@ -1435,6 +1785,37 @@ int main(int argc, char** argv) {
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(wav.data()), static_cast<std::streamsize>(wav.size()));
   }
+
+  // The close of a run that disassembles as it plays: the buffer played to its
+  // end, the last tree written and the two commands run, the window up and
+  // answering every request to close until the work is done.
+  bool treeWritten = true;
+  if (live) {
+    say("finishing the disassembly: " + player::sizeText(live->status().buffer.held) + " to play, then the last tree");
+    live->beginClose();
+    // The window's request that ended the loop is the one that started the close.
+    static_cast<void>(player.takeCloseAsks());
+    const std::string how = howToEndThePlayer();
+    bool systemSaid = false;
+    while (!live->closed()) {
+      // The title says the close's progress itself (`player::LiveTitle`).
+      player.stoppedPass({});
+      unsigned asks = player.takeCloseAsks() + (requests ? requests->take() : 0u);
+      for (; asks != 0u; --asks) live->closeAsked(how);
+      if (requests && requests->systemIsClosing() && !std::exchange(systemSaid, true)) {
+        always("Windows is closing the player and ends it in a few seconds whatever it does; the tree holds what "
+               "was written before");
+      }
+      SDL_DelayNS(20'000'000u);
+    }
+    if (requests) requests->done();
+    std::string error;
+    if (!live->closingTree(error)) {
+      always("the tree was not written: " + error);
+      treeWritten = false;
+    }
+  }
+
   if (!quiet) {
     std::cerr << player.frames() << " frames at " << rateText(player.meanMilliFps()) << " fps\n";
     // How the picture lines were drawn over the run: taken from the frame before or
@@ -1457,5 +1838,5 @@ int main(int argc, char** argv) {
                 << (player.gpuFirstDifference().empty() ? "-" : player.gpuFirstDifference()) << "\n";
     }
   }
-  return 0;
+  return treeWritten ? 0 : 1;
 }

@@ -1,13 +1,8 @@
 # Snaggletooth documentation
 
-Snaggletooth is a clean-room SNES implementation, built audio-first. These pages describe what is
-built and how to use it. Every value in them is derived from public hardware documentation and
-validated against it; where the published documentation disagrees with the hardware, the pages that
-settle the case are [s-dsp-behavior.md](s-dsp-behavior.md) for the audio chip and
-[ppu-behavior.md](ppu-behavior.md) for the picture processor.
+Snaggletooth is a clean-room SNES implementation, built audio-first. These pages describe what is built and how to use it. Every value in them is derived from public hardware documentation and validated against it; where the published documentation disagrees with the hardware, the pages that settle the case are [s-dsp-behavior.md](s-dsp-behavior.md) for the audio chip and [ppu-behavior.md](ppu-behavior.md) for the picture processor.
 
-The [project README](../README.md) carries the status table — what is live, what is partial, and
-what is unstarted.
+The [project README](../README.md) carries the status table — what is live, what is partial, and what is unstarted.
 
 ## Contents
 
@@ -28,6 +23,7 @@ what is unstarted.
 | See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
 | Add the sub screen or the fixed color to the picture, and shape where that happens | [ppu.md §The sub screen and colour math](ppu.md#the-sub-screen-and-colour-math), [ppu-behavior.md §Colour math](ppu-behavior.md#colour-math) |
 | Watch a cartridge run, play it with a controller, and record the run | [tools/player/README.md](../tools/player/README.md) |
+| Disassemble a cartridge by playing it | [tools/player/README.md §Disassembling as you play](../tools/player/README.md#disassembling-as-you-play) |
 | Plug in a controller and play a cartridge, or write an input mapping of your own | [pad-config.md](pad-config.md) |
 | Find where your configs and saves are kept, or keep them somewhere else | [user-files.md](user-files.md) |
 | Keep a cartridge's battery save from a program of your own | [snes-machine.md §The save observer](snes-machine.md#the-save-observer) |
@@ -121,15 +117,10 @@ The chips a cartridge carries on its own board have their pages in [coprocessors
 | [spc700-assembly.md](spc700-assembly.md) | The SPC700 dialect — its addressing modes and what its encoding needs |
 | [65816-assembly.md](65816-assembly.md) | The 65816 dialect — its addressing modes, the width and mode directives, regions, and the long, jump, block-move and stack forms |
 
-The tools themselves, and the libraries behind them, are described beside their
-sources in [tools/README.md](../tools/README.md).
+The tools themselves, and the libraries behind them, are described beside their sources in [tools/README.md](../tools/README.md).
 
 ## Reading these pages
 
-Each page opens with what its subject is and what it is for, then the surface, then worked
-examples, then the gotchas worth knowing before they cost an afternoon. Every page carries a
-Contents list under its opening.
+Each page opens with what its subject is and what it is for, then the surface, then worked examples, then the gotchas worth knowing before they cost an afternoon. Every page carries a Contents list under its opening.
 
-A page describes what the code does now. Where a subject is modelled but incomplete, the page
-says so in place rather than leaving the reader to infer it, and each page's "What remains open"
-lists what the documentation leaves undecided.
+A page describes what the code does now. Where a subject is modelled but incomplete, the page says so in place rather than leaving the reader to infer it, and each page's "What remains open" lists what the documentation leaves undecided.
