@@ -867,7 +867,8 @@ it strictly inside, or no caller's run holds it: a caller that had the bytes
 already leaves the helper's run as the source. `exact` says the origin is; an
 `approximate`
 origin was widened to its hull by the run because it had more intervals than
-the run keeps, and its source is every run the hull overlaps. A writer with
+the run keeps, and its source is every run the hull overlaps among those the
+routine that wrote it read itself, or the hull where it read none within it. A writer with
 several sources has one line each. `from register` names a hardware register
 whose value entered the bytes — the joypads, VRAM read back, the multiplier —
 and `from save` a byte of the save; both stand beside an image source when

@@ -100,7 +100,8 @@ TEST(Progress, TheDisassemblyReportsItsStagesInOrder) {
   for (const Report& r : reports) {
     if (stages.empty() || stages.back() != r.stage) stages.push_back(r.stage);
   }
-  const std::vector<std::string> expected = {"running the cartridge", "tracing", "proving what every path reaches"};
+  const std::vector<std::string> expected = {"running the cartridge", "tracing", "proving what every path reaches",
+                                             "lifting the files", "drawing the previews"};
   EXPECT_EQ(stages, expected);
   expectMeasured(reports, "running the cartridge", request.runMasterCycles);
   for (const Report& r : reports) {

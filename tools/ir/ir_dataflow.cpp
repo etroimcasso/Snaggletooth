@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -52,6 +54,18 @@ Values unionOf(const Values& a, const Values& b) {
   if (!a.known || !b.known) {
     if (!a.known && !b.known && a.symbol && a.symbol == b.symbol) return a;
     return zeros(zeroBitsOf(a, 32) & zeroBitsOf(b, 32));
+  }
+  // Two sets that each stand sorted and distinct, as `settle` leaves a set, are
+  // merged in one pass; any other pair is settled whole.
+  const auto ascending = [](const std::vector<std::uint32_t>& v) {
+    return std::adjacent_find(v.begin(), v.end(), std::greater_equal<>()) == v.end();
+  };
+  if (ascending(a.values) && ascending(b.values)) {
+    std::vector<std::uint32_t> out;
+    out.reserve(a.values.size() + b.values.size());
+    std::set_union(a.values.begin(), a.values.end(), b.values.begin(), b.values.end(), std::back_inserter(out));
+    if (out.size() > kMostValues) return Values::none();
+    return Values{true, std::move(out), std::nullopt, 0};
   }
   std::vector<std::uint32_t> out(a.values);
   out.insert(out.end(), b.values.begin(), b.values.end());

@@ -141,9 +141,10 @@ void Provenance::Runs::place(Run run) {
 
 // A read inside a run changes nothing; any other read starts a run of the
 // one byte, which `place` joins to whatever it touches.
-void Provenance::Runs::read(std::size_t offset) {
-  if (holding(offset)) return;
+bool Provenance::Runs::read(std::size_t offset) {
+  if (holding(offset)) return false;
   place(Run{.first = offset, .last = offset});
+  return true;
 }
 
 // A helper's run joining its caller's: exactly as if the caller had read
@@ -328,7 +329,9 @@ void Provenance::release(std::uint32_t invocation) {
   release(parent);
 }
 
-void Provenance::noteRead(std::size_t offset) { frames_[running_].runs.read(offset); }
+void Provenance::noteRead(std::size_t offset) {
+  if (frames_[running_].runs.read(offset)) ++changed_;
+}
 
 Origin Provenance::read(Address address) {
   address &= 0xFFFFFFu;
@@ -357,6 +360,7 @@ std::uint32_t Provenance::open(std::uint32_t parent) {
 // readable while something holds it, and its slot is free. Its callees and
 // the running slot are settled by the caller of this.
 void Provenance::end(std::uint32_t slot, bool joins) {
+  ++changed_;
   Invocation ended = std::move(frames_[slot]);
   frames_[slot] = Invocation{};
   free_.push_back(slot);
@@ -503,6 +507,12 @@ std::optional<OriginInterval> Provenance::sourceRun(std::uint32_t invocation, st
   return best;
 }
 
+const Provenance::Runs* Provenance::runsOf(std::uint32_t invocation) const {
+  if (const auto kept = kept_.find(invocation); kept != kept_.end()) return &kept->second.runs;
+  if (const auto live = frameIndex_.find(invocation); live != frameIndex_.end()) return &frames_[live->second].runs;
+  return nullptr;
+}
+
 std::vector<OriginInterval> Provenance::sourcesOf(Address address) const {
   std::vector<OriginInterval> out;
   const std::optional<std::size_t> index = workRamIndex(address & 0xFFFFFFu);
@@ -510,6 +520,13 @@ std::vector<OriginInterval> Provenance::sourcesOf(Address address) const {
   const OriginSet& origin = origins_.of(workRam_[*index]);
   if (origin.image.empty()) return out;
   const std::uint32_t id = invocation_[*index];
+  // The same origin under the same invocation, with nothing changed since.
+  const std::uint64_t key = (static_cast<std::uint64_t>(workRam_[*index]) << 32) | id;
+  if (sourcesKept_.at != changed_) {
+    sourcesKept_.answers.clear();
+    sourcesKept_.at = changed_;
+  }
+  if (const auto kept = sourcesKept_.answers.find(key); kept != sourcesKept_.answers.end()) return kept->second;
   std::vector<OriginInterval> found;
   for (const OriginInterval& interval : origin.image) {
     if (!origin.approximate) {
@@ -517,22 +534,33 @@ std::vector<OriginInterval> Provenance::sourcesOf(Address address) const {
       found.push_back(run.value_or(interval));
       continue;
     }
-    // A hull: every run it overlaps, and the hull itself where none does.
+    // A hull: every run of the writing invocation's own that it overlaps, each
+    // followed outward as an exact interval's is, and the hull itself where
+    // none does. Its callers' runs are not searched: an origin this wide says
+    // only that the byte came from somewhere within, and a run a caller read
+    // there is not one the writer was handed.
     bool any = false;
-    for (std::size_t offset = interval.first; offset <= interval.last;) {
-      const std::optional<OriginInterval> run = id != 0 ? sourceRun(id, offset) : std::nullopt;
-      if (run) {
-        found.push_back(*run);
+    if (const Runs* const own = runsOf(id)) {
+      for (std::size_t offset = interval.first; offset <= interval.last;) {
+        // The byte to ask at: this one when a run holds it, or the first byte
+        // of the next run that begins within the hull.
+        std::size_t at = offset;
+        if (!own->holding(offset)) {
+          const auto past = own->byFirst.upper_bound(offset);
+          if (past == own->byFirst.end() || past->first > interval.last) break;
+          at = past->first;
+        }
+        const OriginInterval run = sourceRun(id, at).value();
+        found.push_back(run);
         any = true;
-        offset = run->last + 1u;
-      } else {
-        ++offset;
+        offset = run.last + 1u;
       }
     }
     if (!any) found.push_back(interval);
   }
   std::sort(found.begin(), found.end());
   mergeIntervals(out, found);
+  sourcesKept_.answers.emplace(key, out);
   return out;
 }
 

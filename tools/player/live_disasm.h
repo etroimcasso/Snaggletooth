@@ -82,7 +82,7 @@ struct TreeSummary {
 struct LiveOptions {
   std::filesystem::path bufferDirectory;      // where the buffer's files go; empty: `buffer` under the tree's directory
   std::uint64_t memoryBytes = 1'000'000'000;  // the buffer's RAM ceiling
-  std::uint64_t diskBytes = 64'000'000'000;   // the buffer's files' ceiling
+  std::uint64_t diskBytes = 10'000'000'000;   // the buffer's files' ceiling
   unsigned threads = 0;                       // `BufferedRunOptions::threads`
   PauseSettings pause;
   std::filesystem::path commands;             // the directory `snes_render` and `snes_verify` are in; empty: neither is run
@@ -99,6 +99,10 @@ struct LiveHooks {
   // Runs a command to its end and answers its exit status, or nothing when it
   // could not be started. `lowered` asks for a class under the host's thread's.
   std::function<std::optional<int>(const std::vector<std::string>& arguments, bool lowered)> run;
+  // Told each step of a tree as it begins, on the tree's thread, with the names
+  // `disasm::CartridgeRequest::progress` gives and then `writing the files`;
+  // and nothing, an empty name, when the tree's steps are over.
+  std::function<void(std::string_view step)> step;
 };
 
 // What the tree's thread is doing.
@@ -112,6 +116,8 @@ struct LiveStatus {
   bool memoryStop = false;                        // a stop at the ceilings that is RAM alone past its ceiling
   bool closing = false;
   Work work = Work::Watching;
+  std::string step;                               // the step of the tree being made (`LiveHooks::step`), or empty
+  std::optional<double> treeSecondsLeft;          // what that tree has left (`TreeSteps::secondsLeft`)
   std::size_t trees = 0;                          // trees written so far
   std::uint64_t ceiling = 0;                      // the two ceilings together
   std::uint64_t resumeLevel = 0;
@@ -121,7 +127,60 @@ struct LiveStatus {
   std::optional<double> secondsToResume;          // to the resume level, while stopped at the ceilings without `hold`
   std::optional<double> secondsToEmpty;
   std::optional<double> secondsOfPlayAfter;       // from the resume level to the ceilings at the fill rate
+  std::uint64_t mostHeld = 0;                     // the most the buffer has held at any look of the host's
+  unsigned stops = 0;                             // the times the game has stopped, at the ceilings or by hand
+  std::uint64_t stoppedNanos = 0;                 // how long in all, a stop it is in counted to the host's last look
 };
+
+// The steps of a tree as it is made, and how long each took in the last tree
+// that was written, which is what the tree in progress is measured against: a
+// session's trees go through the same steps, each over a little more of the
+// run than the one before.
+//
+//   player::TreeSteps steps;
+//   steps.begin("tracing", t0);            // each step as it begins
+//   steps.begin("writing the files", t1);
+//   steps.begin({}, t2);                   // the last step ends
+//   steps.finished();                      // the tree was written
+//   steps.begin("tracing", t3);            // the next tree
+//   steps.secondsLeft(t4);                 // what the first tree's steps say is left
+class TreeSteps {
+ public:
+  // The step named begins at `nanos`, on any steady clock, and the one before
+  // it ends there; an empty name ends the last. A name told again while its
+  // step runs changes nothing, and a step a tree returns to is one step.
+  void begin(std::string_view step, std::uint64_t nanos);
+  // The tree in progress was written: its steps are what the next is measured
+  // against.
+  void finished();
+  // The tree in progress was not written: its steps are forgotten.
+  void givenUp();
+  // The seconds the tree in progress has left at `nanos`: what the last
+  // written tree spent in the step this one is in, less what this one has
+  // spent there, and what is left the same way of every step that tree went
+  // through after it. Nothing before a tree has been written, while no step
+  // runs, in a step that tree did not have, and once the step that runs has
+  // run longer than it did in that tree, which measures it no more.
+  [[nodiscard]] std::optional<double> secondsLeft(std::uint64_t nanos) const;
+
+ private:
+  struct Step {
+    std::string name;
+    std::uint64_t nanos = 0;
+  };
+  std::vector<Step> last_;     // the last written tree's steps, in the order it first began each
+  std::vector<Step> now_;      // the tree in progress, the same way, the running step counted to its start
+  std::string running_;        // the step that runs, or empty
+  std::uint64_t runningAt_ = 0;
+};
+
+// The session in one line, for the close: the most the buffer held beside its
+// two ceilings, the bytes that went through its files, and how often and how
+// long the game stopped.
+//
+//   the buffer held at most 412 MB against 1.0 GB of RAM and 10.0 GB of files; 0 MB went through its files; the game never stopped
+//   the buffer held at most 4.1 GB against 4.0 GB of RAM and 10.0 GB of files; 2.6 GB went through its files; the game stopped 2 times for 1 min 40 s
+[[nodiscard]] std::string sessionText(const LiveStatus& status);
 
 // The characters of `text` as a title shows them: its UTF-8 code points.
 [[nodiscard]] std::size_t titleCharacters(std::string_view text) noexcept;
@@ -138,14 +197,19 @@ struct LiveStatus {
 // close's progress while the disassembly closes:
 //
 //   finishing: 3.2 GB of 12.4 GB played, 25 %, about 1 min 40 s left
-//   finishing: writing the last tree
-//   finishing: snes_render
-//   finishing: snes_verify
-//   finishing: closing the buffer
+//   finishing: writing the last tree, proving what every path reaches, about 40 s left
+//   finishing: writing the last tree, proving what every path reaches, 2 min 10 s
+//   finishing: snes_render, 12 s
+//   finishing: snes_verify, 40 s
+//   finishing: closing the buffer, 0 s
 //
 // The first counts from the most the buffer has held since the close began; the
 // time is the buffer's alone, at the rate it is draining, and the tree and the
-// two commands follow it.
+// two commands follow it. The tree names the step it is at (`LiveStatus::step`)
+// and says about how long it has left, by the steps of the last tree the
+// session wrote (`LiveStatus::treeSecondsLeft`); where there is no such time,
+// or it has run out, it says how long the stage has run, as the stages after
+// it do.
 //
 // Where `room` characters hold the three parts, the text is all of them, joined
 // by dashes. Where they do not, it is a page: as many parts in order as `room`
@@ -162,7 +226,7 @@ struct LiveStatus {
 //   player::LiveTitle title;
 //   const std::size_t room = player::titleRoom(barPoints, 7.0, game);
 //   const std::string text = game + " — " + title.text("60.1 fps", live.status(), nowNanos, room);
-//   // "Game — 60.1 fps — RAM 412 MB of 1.0 GB — files 0 MB of 64.0 GB", then a braille dot
+//   // "Game — 60.1 fps — RAM 412 MB of 1.0 GB — files 0 MB of 10.0 GB", then a braille dot
 class LiveTitle {
  public:
   static constexpr std::uint64_t kRefreshNanos = 2'000'000'000;  // how often the two sizes are taken again
@@ -174,7 +238,7 @@ class LiveTitle {
                                  std::size_t room);
 
  private:
-  [[nodiscard]] std::string closeText(const LiveStatus& status) const;
+  [[nodiscard]] std::string closeText(const LiveStatus& status, std::uint64_t stageNanos) const;
 
   std::string ram_;
   std::string files_;
@@ -187,6 +251,7 @@ class LiveTitle {
   std::size_t first_ = 0;        // the first part of the page shown
   std::uint64_t pageAt_ = 0;     // when that page was first shown
   unsigned saying_ = 0;          // what the lead was about at the last call
+  std::uint64_t saidAt_ = 0;     // when it began to be about that
   std::uint64_t closeMost_ = 0;  // the most the buffer has held since the close began
 };
 

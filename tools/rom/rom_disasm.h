@@ -387,11 +387,14 @@ struct CartridgeRequest {
   // Told what the disassembly is doing as it goes, when set: `running the
   // cartridge` with the cycles spent against `runMasterCycles` every tenth of
   // a second of the master clock, then `tracing`, then `proving what every
-  // path reaches`, then `booting the sound program` against `bootMasterCycles`
-  // for each of the two boots, then, where a routine is planned, `running the
-  // cartridge again` the way the first run is told and `enumerating` once a
-  // value (`rom/progress.h`). Nothing is printed by the library; `snes_disasm`
-  // prints these to standard error unless `--quiet`.
+  // path reaches` once for each turn the proof and the trace take, then
+  // `booting the sound program` against `bootMasterCycles` for each of the two
+  // boots, then, where a routine is planned, `running the cartridge again` the
+  // way the first run is told and `enumerating` once a value, then `lifting
+  // the files` and `drawing the previews` (`rom/progress.h`). Nothing is
+  // printed by the library; `snes_disasm` prints these to standard error
+  // unless `--quiet`. An exception the sink throws ends the disassembly and
+  // leaves through `disassembleCartridge`.
   ProgressSink progress;
 };
 

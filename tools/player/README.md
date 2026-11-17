@@ -163,7 +163,7 @@ snes_player drawing.smc --disasm drawing-tree
 The flag turns `--apu-thread` and `--ppu-thread` on, so the thread that steps the console carries the copying and little else. The run says what it started, and each tree as it is written —
 
 ```
-disassembling into drawing-tree on 8 threads; the buffer takes up to 1.0 GB of RAM and 64.0 GB of files under drawing-tree/buffer
+disassembling into drawing-tree on 8 threads; the buffer takes up to 1.0 GB of RAM and 10.0 GB of files under drawing-tree/buffer
 tree: 1 files, 430 instructions, 3 entries, 0 stops, 32768 of 32768 bytes placed, 0 notes -> drawing-tree
 ```
 
@@ -176,7 +176,7 @@ The buffer holds what the disassembly's threads have not reached: in RAM first, 
 | Flag | What it sets | Default |
 |---|---|---|
 | `--disasm-buffer-memory <GB>` | the most RAM the buffer takes | 1 |
-| `--disasm-buffer-disk <GB>` | the most its files hold | 64 |
+| `--disasm-buffer-disk <GB>` | the most its files hold | 10 |
 | `--disasm-buffer-dir <directory>` | where the files go | `buffer` under the tree's directory |
 | `--disasm-threads <n>` | the threads that check the instructions | two fewer than the computer's cores, at least 1 |
 | `--disasm-resume-at <percent>` | how far the buffer drains before a stopped game resumes | 50 |
@@ -198,7 +198,7 @@ resumed after 1 s
 
 A stop that lasts past two seconds also says, once, how fast the buffer is draining and about how long it has to the resume level: `draining at <n> MB a second: about <time> to <level>`.
 
-While the game is stopped the disassembly's threads work at the game's own scheduling class, which they stay under while it runs, so a stop drains several times faster than play does. The game resumes when the buffer has drained to `--disasm-resume-at` percent of its ceilings: a lower level is a longer stop and a longer stretch of play after it, and `0` waits for the buffer to empty.
+While the game runs, one of the disassembly's threads works at the game's own scheduling class — the one that plays the main CPU's records in order, which the rest wait on — and the others work under it. While the game is stopped they all work at the game's class, so a stop drains faster than play does. The game resumes when the buffer has drained to `--disasm-resume-at` percent of its ceilings: a lower level is a longer stop and a longer stretch of play after it, and `0` waits for the buffer to empty.
 
 The pause chord stops the game by hand and resumes it, so a stop can be taken when it suits you and not when the buffer calls it. A resume asked for while the buffer stands at its ceilings is refused, and the run says where the game resumes. A stop runs no cycle of the machine: a recording, the sound, a script and `--seconds` do not see it.
 
@@ -212,6 +212,14 @@ A run with `--disasm` closes when its work is done. Every request to close — t
 still finishing the disassembly: 462 MB to play, then the last tree. It ends by itself when that is done; kill -9 47432 ends it without the last tree
 ```
 
+When the close is done the run says what the session cost the buffer: the most it held beside its two ceilings, how much went through its files, and how often and how long the game stopped —
+
+```
+disassembly: the buffer held at most 412 MB against 1.0 GB of RAM and 10.0 GB of files; 0 MB went through its files; the game never stopped
+```
+
+A session whose buffer stays under its RAM ceiling writes nothing to the disk; one that reads `2.6 GB went through its files; the game stopped 2 times for 1 min 40 s` fell behind the game by that much.
+
 A forced kill — `kill -9`, Force Quit, Task Manager's End Task — is the one thing that ends it early, and it can leave the tree's files part-written. On Windows, closing the console window, logging off and shutting down end the process a few seconds later whatever it does; the player says so when one arrives.
 
 ### The window's title
@@ -219,7 +227,7 @@ A forced kill — `kill -9`, Force Quit, Task Manager's End Task — is the one 
 Under `--disasm` the title says three things after the game's name, in this order: the rate — or, while the game is stopped, why and when it resumes — then the buffer's RAM against its ceiling, then its files against theirs.
 
 ```
-drawing — 60.1 fps — RAM 412 MB of 1.0 GB — files 0 MB of 64.0 GB ⠹
+drawing — 60.1 fps — RAM 412 MB of 1.0 GB — files 0 MB of 10.0 GB ⠹
 ```
 
 The dot at the end turns while the disassembly is working — its threads playing the buffer, the buffer filling or draining, a tree being written or checked — and stands still when none of that changes, so a disassembly that has stalled shows as a dot that has stopped. The two sizes are read every two seconds.
@@ -229,10 +237,22 @@ A window too narrow for all three shows them a page at a time: as many in order 
 While the run closes, the first of the three is the close's progress:
 
 ```
-drawing — finishing: 3.2 GB of 12.4 GB played, 25 %, about 1 min 40 s left — RAM 1.0 GB of 1.0 GB — files 8.2 GB of 64.0 GB ⠼
+drawing — finishing: 3.2 GB of 12.4 GB played, 25 %, about 1 min 40 s left — RAM 1.0 GB of 1.0 GB — files 8.2 GB of 10.0 GB ⠼
 ```
 
-It counts from the most the buffer has held since the close began, and a close with nothing in the buffer says `finishing: nothing left to play`. The time is the buffer's alone, at the rate it is draining. The last tree and the two commands follow, and the title names each as it runs: `finishing: writing the last tree`, `finishing: snes_render`, `finishing: snes_verify`, then `finishing: closing the buffer`. A tree from the middle of the session that is still being written or checked when the close begins is not named: the title goes on counting the buffer until it is played.
+It counts from the most the buffer has held since the close began, and a close with nothing in the buffer says `finishing: nothing left to play`. The time is the buffer's alone, at the rate it is draining.
+
+The last tree and the two commands follow, and the title names each as it runs. The tree names the step it is at — `tracing`, `proving what every path reaches`, `lifting the files`, `drawing the previews`, `writing the files` — and how long it has left:
+
+```
+drawing — finishing: writing the last tree, proving what every path reaches, about 40 s left
+drawing — finishing: writing the last tree, drawing the previews, 2 min 10 s
+drawing — finishing: snes_render, 12 s
+```
+
+The time left is what the last tree the session wrote spent in the step this one is in and in each step after it. The last tree is made from more of the run than that one was, so it tends to run past the figure; once a step has run longer than it did in that tree, and in a session that wrote no tree before its close, the title says how long the stage has run, as it does for `snes_render`, `snes_verify` and `closing the buffer`.
+
+A tree being made when the close is asked for is given up at its next step, since the last tree is made from the whole run after it, and the two commands of one already written are not begun; the run says `quit during a mid-session tree: skipped it, the final tree covers the whole session`.
 
 ## What it is built on
 

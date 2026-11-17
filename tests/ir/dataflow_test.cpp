@@ -677,6 +677,33 @@ TEST(Dataflow, AMaskOverAValueNotKnownBoundsItToTheMasksSubsets) {
   EXPECT_FALSE(wide.after.registers.aLow.known) << "a ten-bit mask admits more values than are worth knowing";
 }
 
+// `XCE` leaves the stack pointer as it was or with its high byte one: the two
+// sets together, each value once and in order, and not known once they are
+// more values than are worth knowing.
+TEST(Dataflow, TwoSetsTogetherAreEachValueOnceAndNotKnownPastTheMost) {
+  const Node xce = nodeOf({0xFBu}, 0x008000u, Cpu65816Mode::native(true, true));
+  State shared;
+  shared.registers.s = Values{true, {0x0100u, 0x0105u, 0x0205u}, std::nullopt, 0};
+  EXPECT_EQ(evaluate(xce, shared, kNoImage).after.registers.s, (Values{true, {0x0100u, 0x0105u, 0x0205u}, std::nullopt, 0}))
+      << "$0205 pinned is $0105, which the set holds";
+  State apart;
+  apart.registers.s = Values{true, {0x0203u, 0x0301u}, std::nullopt, 0};
+  EXPECT_EQ(evaluate(xce, apart, kNoImage).after.registers.s,
+            (Values{true, {0x0101u, 0x0103u, 0x0203u, 0x0301u}, std::nullopt, 0}));
+  // 256 values and the 256 they pin to: the most a set holds.
+  State most;
+  most.registers.s.known = true;
+  for (std::uint32_t v = 0x0200u; v <= 0x02FFu; ++v) most.registers.s.values.push_back(v);
+  const Values atMost = evaluate(xce, most, kNoImage).after.registers.s;
+  ASSERT_TRUE(atMost.known);
+  ASSERT_EQ(atMost.values.size(), kMostValues);
+  EXPECT_EQ(atMost.values.front(), 0x0100u);
+  EXPECT_EQ(atMost.values.back(), 0x02FFu);
+  // One value more, under another page: 257 values and the 256 they pin to.
+  most.registers.s.values.push_back(0x0300u);
+  EXPECT_FALSE(evaluate(xce, most, kNoImage).after.registers.s.known) << "513 values";
+}
+
 // `ASL` then `AND #$01FF` over a value nothing knows admits the even values under
 // the mask and no others — a table indexed by it has no odd slot.
 TEST(Dataflow, AShiftBeforeAMaskKeepsTheBitItClearedOutOfTheBound) {

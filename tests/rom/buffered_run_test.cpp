@@ -596,8 +596,9 @@ TEST_F(RomBufferedRun, TheHostsStopRaisesEveryThreadOfTheRun) {
   const std::vector<std::uint8_t> rom = examples::movingImage();
   Snes machine{SnesConfig{.rom = rom}};
   BufferedRun run{machine, rom, dir_, withThreads(2)};
-  // The pool's two, the shadow and sound threads, and each stream's own.
-  const unsigned all = 2u + 2u + 2u;
+  // The pool's two, the sound thread, and each stream's own. The thread that
+  // plays the main CPU's blocks stays at the class it started with.
+  const unsigned all = 2u + 1u + 2u;
   const auto within = [&](unsigned lowered) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (run.progress().threadsLowered != lowered && std::chrono::steady_clock::now() < deadline) {
@@ -606,7 +607,7 @@ TEST_F(RomBufferedRun, TheHostsStopRaisesEveryThreadOfTheRun) {
     return run.progress().threadsLowered == lowered;
   };
   EXPECT_EQ(run.progress().threads, 2u);
-  EXPECT_TRUE(within(all)) << "every thread lowered while the host runs";
+  EXPECT_TRUE(within(all)) << "every thread but the main CPU's lowered while the host runs";
   std::uint64_t spent = 0;
   while (spent < kFrame) spent += machine.step();
   run.hostStopped(true);

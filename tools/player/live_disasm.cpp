@@ -155,6 +155,10 @@ TreeSummary summaryOf(const disasm::CartridgeDisassembly& disassembly, std::uint
 // The two commands run over each tree, in order.
 constexpr std::array<const char*, 2> kCommands = {"snes_render", "snes_verify"};
 
+// Thrown through the disassembly by its progress sink to end a tree from the
+// middle of the session once the close is asked for.
+struct TreeGivenUp {};
+
 std::filesystem::path commandFile(const std::filesystem::path& directory, const char* name) {
 #if defined(_WIN32)
   return directory / (std::string(name) + ".exe");
@@ -194,6 +198,12 @@ struct LiveDisassembly::Impl {
   std::atomic<double> drainRate{0.0};
   std::atomic<bool> closing{false};
   std::atomic<bool> closedFlag{false};
+  // The session's counts, written by the host's thread at its looks.
+  std::atomic<std::uint64_t> mostHeld{0};
+  std::atomic<unsigned> stops{0};
+  std::atomic<std::uint64_t> endedStopsNanos{0};  // the stops that have ended
+  std::atomic<std::uint64_t> stopBeganAt{0};      // `stopBegan`, for any thread
+  std::atomic<std::uint64_t> lastLook{0};         // the host's clock at its last look
 
   // The tree's thread's, published under `mutex`, which it holds a few words at
   // a time and never across its work.
@@ -202,6 +212,8 @@ struct LiveDisassembly::Impl {
   bool started = false;
   bool closeRequested = false;
   Work work = Work::Watching;
+  std::string step;  // what a tree being made is at, empty otherwise
+  TreeSteps treeSteps;  // that tree's steps beside the last written tree's
   std::size_t trees = 0;
   std::optional<TreeSummary> closingSummary;
   std::string closingError;
@@ -275,6 +287,8 @@ struct LiveDisassembly::Impl {
     const bool atCeilings = run->atLimit();
     const bool ramOver = run->memoryOver();
     const Stopped before = pause.state();
+    lastLook.store(nanos, std::memory_order_release);
+    if (progress.held > mostHeld.load(std::memory_order_relaxed)) mostHeld.store(progress.held, std::memory_order_release);
     // A stop at the ceilings that begins with RAM alone past its ceiling ends
     // when RAM has drained to the resume level of its own ceiling, or the run
     // holds nothing; one with the two ceilings reached ends at their level.
@@ -305,6 +319,8 @@ struct LiveDisassembly::Impl {
     if (before == Stopped::No) {
       run->hostStopped(true);
       stopBegan = nanos;
+      stopBeganAt.store(nanos, std::memory_order_release);
+      stops.fetch_add(1u, std::memory_order_release);
       drain.clear();
       hasDrain.store(false, std::memory_order_release);
       drainSaid = false;
@@ -325,6 +341,7 @@ struct LiveDisassembly::Impl {
       fill.clear();
       hasFill.store(false, std::memory_order_release);
       nudgeTree();
+      endedStopsNanos.fetch_add(nanos - stopBegan, std::memory_order_release);
       say("resumed after " + durationText(static_cast<double>(nanos - stopBegan) / kNanosPerSecond));
     }
     return now;
@@ -388,9 +405,35 @@ struct LiveDisassembly::Impl {
            "was played before it");
   }
 
-  void commands() {
+  // What the tree's thread is at inside a tree, for any thread to read. A
+  // step told again while it runs is the same step, and the hook is not told.
+  void setStep(std::string_view now) {
+    {
+      std::lock_guard lock(mutex);
+      if (step == now) return;
+      step = now;
+      treeSteps.begin(now, steadyNanos());
+    }
+    if (hooks.step) hooks.step(now);
+  }
+
+  [[nodiscard]] bool closeIsRequested() {
+    std::lock_guard lock(mutex);
+    return closeRequested;
+  }
+
+  // A tree that was not written measures nothing.
+  void forgetSteps() {
+    std::lock_guard lock(mutex);
+    treeSteps.givenUp();
+  }
+
+  // The two commands over the tree just written. A tree from the middle of the
+  // session runs neither once the close is asked for: the last tree's follow.
+  void commands(bool last) {
     if (options.commands.empty()) return;
     for (std::size_t i = 0; i < kCommands.size(); ++i) {
+      if (!last && closeIsRequested()) return;
       const char* const name = kCommands[i];
       const std::filesystem::path file = commandFile(options.commands, name);
       std::vector<std::string> arguments = {file.string(), directory.string()};
@@ -419,7 +462,10 @@ struct LiveDisassembly::Impl {
   }
 
   // One tree from `observation`: the session's request, disassembled, written,
-  // said, and the two commands run. False, said, when it was not written.
+  // said, and the two commands run. False, said, when it was not written. A
+  // tree from the middle of the session is given up at the next step it
+  // begins once the close is asked for, since the last tree is made from the
+  // whole run after it: false, with nothing written.
   bool makeTree(const disasm::RunObservation& observation, const std::vector<std::string>& notes,
                 std::uint64_t playedMaster, bool last) {
     setWork(Work::Tree);
@@ -430,7 +476,13 @@ struct LiveDisassembly::Impl {
         request->observed = &observation;
         request->observedNotes = notes;
         request->captureSound = true;
+        request->progress = [this, last](const disasm::Progress& progress) {
+          setStep(progress.stage);
+          if (!last && closeIsRequested()) throw TreeGivenUp{};
+        };
         const disasm::CartridgeDisassembly disassembly = disasm::disassembleCartridge(*request);
+        // The files are a step as the disassembly's own are, told the same way.
+        request->progress(disasm::Progress{.stage = "writing the files", .spent = 0, .budget = 0});
         if (disasm::writeProject(disassembly, directory, error)) {
           const TreeSummary summary = summaryOf(disassembly, playedMaster);
           {
@@ -442,14 +494,27 @@ struct LiveDisassembly::Impl {
               " instructions, " + std::to_string(summary.entries) + " entries, " + std::to_string(summary.stops) +
               " stops, " + std::to_string(summary.placed) + " of " + std::to_string(summary.imageBytes) +
               " bytes placed, " + std::to_string(summary.notes) + " notes -> " + directory.string());
-          commands();
+          setStep({});
+          {
+            std::lock_guard lock(mutex);
+            treeSteps.finished();
+          }
+          commands(last);
           setWork(Work::Watching);
           return true;
         }
       }
+    } catch (const TreeGivenUp&) {
+      setStep({});
+      forgetSteps();
+      setWork(Work::Watching);
+      say("quit during a mid-session tree: skipped it, the final tree covers the whole session");
+      return false;
     } catch (const std::exception& e) {
       error = e.what();
     }
+    setStep({});
+    forgetSteps();
     always(error);
     {
       std::lock_guard lock(mutex);
@@ -560,6 +625,50 @@ struct LiveDisassembly::Impl {
   }
 };
 
+void TreeSteps::begin(std::string_view step, std::uint64_t nanos) {
+  if (step == running_) return;
+  const auto named = [](std::vector<Step>& steps, std::string_view name) {
+    return std::find_if(steps.begin(), steps.end(), [&](const Step& s) { return s.name == name; });
+  };
+  if (!running_.empty()) named(now_, running_)->nanos += nanos - runningAt_;
+  running_ = step;
+  runningAt_ = nanos;
+  if (!step.empty() && named(now_, step) == now_.end()) now_.push_back(Step{.name = std::string(step), .nanos = 0});
+}
+
+void TreeSteps::finished() {
+  last_ = std::move(now_);
+  now_.clear();
+  running_.clear();
+}
+
+void TreeSteps::givenUp() {
+  now_.clear();
+  running_.clear();
+}
+
+std::optional<double> TreeSteps::secondsLeft(std::uint64_t nanos) const {
+  if (last_.empty() || running_.empty()) return std::nullopt;
+  const auto was = std::find_if(last_.begin(), last_.end(), [&](const Step& s) { return s.name == running_; });
+  if (was == last_.end()) return std::nullopt;
+  // What this tree has spent in a step: its visits that ended, and the one
+  // that runs.
+  const auto spentIn = [&](const std::string& name) {
+    const auto is = std::find_if(now_.begin(), now_.end(), [&](const Step& s) { return s.name == name; });
+    std::uint64_t spent = is == now_.end() ? 0u : is->nanos;
+    if (name == running_) spent += nanos - runningAt_;
+    return spent;
+  };
+  // A step that has run longer than it did in that tree is measured by nothing.
+  if (spentIn(running_) > was->nanos) return std::nullopt;
+  std::uint64_t left = 0;
+  for (auto step = was; step != last_.end(); ++step) {
+    const std::uint64_t spent = spentIn(step->name);
+    if (step->nanos > spent) left += step->nanos - spent;
+  }
+  return static_cast<double>(left) / kNanosPerSecond;
+}
+
 std::size_t titleCharacters(std::string_view text) noexcept {
   std::size_t characters = 0;
   // Every byte but a continuation byte begins a code point.
@@ -577,17 +686,27 @@ std::size_t titleRoom(double points, double characterPoints, std::string_view na
   return characters > taken ? characters - taken : 0u;
 }
 
-std::string LiveTitle::closeText(const LiveStatus& status) const {
+std::string LiveTitle::closeText(const LiveStatus& status, std::uint64_t stageNanos) const {
   const std::uint64_t held = status.buffer.held;
   // The last tree begins once the buffer is played, so a tree or a command
   // running over one while the buffer still holds anything is one from the
   // middle of the session, and the buffer is what the close has left.
   if (held == 0u) {
+    // A stage says how long it has run: nothing tells how much of it is left.
+    const std::string sofar = ", " + durationText(static_cast<double>(stageNanos) / kNanosPerSecond);
     switch (status.work) {
-      case Work::Tree: return "finishing: writing the last tree";
-      case Work::Render: return "finishing: snes_render";
-      case Work::Verify: return "finishing: snes_verify";
-      case Work::Done: return "finishing: closing the buffer";
+      case Work::Tree: {
+        const std::string tree =
+            "finishing: writing the last tree" + (status.step.empty() ? std::string() : ", " + status.step);
+        // About how long is left, where the session's last tree says and it has not run out.
+        if (status.treeSecondsLeft && *status.treeSecondsLeft > 0.0) {
+          return tree + ", about " + durationText(*status.treeSecondsLeft) + " left";
+        }
+        return tree + sofar;
+      }
+      case Work::Render: return "finishing: snes_render" + sofar;
+      case Work::Verify: return "finishing: snes_verify" + sofar;
+      case Work::Done: return "finishing: closing the buffer" + sofar;
       case Work::Watching: break;
     }
   }
@@ -626,20 +745,23 @@ std::string LiveTitle::text(std::string_view lead, const LiveStatus& status, std
 
   // What the lead is about: the game running, a stop of either kind, the
   // buffer being played at the close, or one of the close's stages after it.
-  std::string closeLead;
   unsigned saying = static_cast<unsigned>(status.stopped);
   if (status.closing) {
     closeMost_ = std::max(closeMost_, status.buffer.held);
-    closeLead = closeText(status);
-    lead = closeLead;
     saying = status.buffer.held != 0u ? 3u : 4u + static_cast<unsigned>(status.work);
   }
   if (!begun_ || saying != saying_) {
     first_ = 0;
     pageAt_ = nanos;
+    saidAt_ = nanos;
   }
   saying_ = saying;
   begun_ = true;
+  std::string closeLead;
+  if (status.closing) {
+    closeLead = closeText(status, nanos - saidAt_);
+    lead = closeLead;
+  }
 
   std::array<std::string_view, 3> parts;
   std::size_t count = 0;
@@ -733,11 +855,19 @@ LiveStatus LiveDisassembly::status() const {
     s.buffer = i.runGone ? i.lastProgress : i.run->progress();
     s.atLimit = !i.runGone && i.run->atLimit();
     s.work = i.work;
+    s.step = i.step;
+    s.treeSecondsLeft = i.treeSteps.secondsLeft(steadyNanos());
     s.trees = i.trees;
   }
   s.stopped = i.stopped.load(std::memory_order_acquire);
   s.memoryStop = s.stopped == Stopped::AtLimit && i.memoryStopped.load(std::memory_order_acquire);
   s.closing = i.closing.load(std::memory_order_acquire);
+  s.mostHeld = i.mostHeld.load(std::memory_order_acquire);
+  s.stops = i.stops.load(std::memory_order_acquire);
+  s.stoppedNanos = i.endedStopsNanos.load(std::memory_order_acquire);
+  if (s.stopped != Stopped::No) {
+    s.stoppedNanos += i.lastLook.load(std::memory_order_acquire) - i.stopBeganAt.load(std::memory_order_acquire);
+  }
   s.ceiling = s.buffer.memoryBytes + s.buffer.diskBytes;
   s.pause = i.settings();
   s.resumeLevel = PauseControl{s.pause}.resumeLevel(s.ceiling);
@@ -765,6 +895,15 @@ LiveStatus LiveDisassembly::status() const {
     s.secondsOfPlayAfter = static_cast<double>(s.ceiling - s.resumeLevel) / *s.fillBytesPerSecond;
   }
   return s;
+}
+
+std::string sessionText(const LiveStatus& status) {
+  std::string text = "the buffer held at most " + sizeText(status.mostHeld) + " against " +
+                     sizeText(status.buffer.memoryBytes) + " of RAM and " + sizeText(status.buffer.diskBytes) +
+                     " of files; " + sizeText(status.buffer.diskWritten) + " went through its files; ";
+  if (status.stops == 0u) return text + "the game never stopped";
+  text += status.stops == 1u ? "the game stopped once" : "the game stopped " + std::to_string(status.stops) + " times";
+  return text + " for " + durationText(static_cast<double>(status.stoppedNanos) / kNanosPerSecond);
 }
 
 std::string LiveDisassembly::statusText() const {

@@ -249,9 +249,11 @@ class Provenance final : public Shadow {
   // holding the interval among those the invocation that wrote it read,
   // followed out through the callers whose run grew from it, or the interval
   // itself when no run holds it — the byte was staged through work RAM, or an
-  // engine wrote it. An
-  // approximate origin takes every run the hull overlaps. Ascending, no two
-  // touching; empty when the byte has no image origin.
+  // engine wrote it. An approximate origin takes every run of that
+  // invocation's own that its hull overlaps, each followed out the same way,
+  // and no run a caller read; the hull itself when the invocation read none
+  // within it. Ascending, no two touching; empty when the byte has no image
+  // origin.
   [[nodiscard]] std::vector<OriginInterval> sourcesOf(Address address) const;
 
   // A call the CPU made: the invocation it opens is marked with the stack
@@ -354,7 +356,7 @@ class Provenance final : public Shadow {
   // touching.
   struct Runs {
     std::map<std::size_t, Run> byFirst;
-    void read(std::size_t offset);
+    bool read(std::size_t offset);  // whether the byte was in no run, and so the runs changed
     void join(const Run& run);
     [[nodiscard]] std::optional<OriginInterval> holding(std::size_t offset) const;
     void place(Run run);  // enters `run`, taking into it every run it touches or overlaps
@@ -402,6 +404,23 @@ class Provenance final : public Shadow {
   // The run holding `offset` among the invocation's own, followed out through
   // the callers whose run begins or ends where it does.
   [[nodiscard]] std::optional<OriginInterval> sourceRun(std::uint32_t invocation, std::size_t offset) const;
+  // An invocation's own runs, whether it is live or ended and held; nothing
+  // for one that is neither.
+  [[nodiscard]] const Runs* runsOf(std::uint32_t invocation) const;
+
+  // What `sourcesOf` has answered for each origin and invocation since
+  // `changed_` was last counted. The answer is read from the origin's set, the
+  // runs of the invocations `sourceRun` reads and the order it reads them in,
+  // and from nothing else. `changed_` is counted when a read enters a run and
+  // when an invocation ends, which are the two things that change any of them
+  // for an invocation a byte is still tagged with: a new invocation is in no
+  // other's order, and an ended one is dropped only once no byte reaches it.
+  struct SourcesKept {
+    std::uint64_t at = 0;
+    std::unordered_map<std::uint64_t, std::vector<OriginInterval>> answers;  // by origin, then invocation
+  };
+  mutable SourcesKept sourcesKept_;
+  std::uint64_t changed_ = 0;
 
   CartridgeBoard board_;
   std::size_t imageBytes_;

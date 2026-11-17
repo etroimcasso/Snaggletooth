@@ -366,7 +366,7 @@ A host that must not wait binds a `BufferedRun` instead. Its three observers cop
 #include "snaggletooth/snes/snes.h"
 
 snaggletooth::Snes machine{snaggletooth::SnesConfig{.rom = image}};
-snaggletooth::disasm::BufferedRun run{machine, image, "cartridge/buffer", {}};  // 1 GB of RAM, 64 GB of files
+snaggletooth::disasm::BufferedRun run{machine, image, "cartridge/buffer", {}};  // 1 GB of RAM, 10 GB of files
 for (int frame = 0; frame < 3600; ++frame) {
   machine.run(357'366u);  // the host's own loop
   run.keyframe();
@@ -842,7 +842,7 @@ const disasm::RunObservation seen = run.finish(notes);
 | Field | What it is | Default |
 |---|---|---|
 | `memoryBytes` | the most RAM the buffer's blocks take, its two streams together and every block counted whole | 1,000,000,000 |
-| `diskBytes` | the most its files hold | 64,000,000,000 |
+| `diskBytes` | the most its files hold | 10,000,000,000 |
 | `threads` | the pool's threads | 0: two fewer than the host's cores, at least 1 |
 | `atLimit` | what the buffer does at its ceilings: `Refuse` or `Keep` | `Refuse` |
 
@@ -858,14 +858,14 @@ Both sizes are ceilings the host sets. The buffer is at its ceilings when one mo
 | `atLimit()` | the buffer stands at its ceilings. Under `Keep` the observers go on copying the host's call in flight into RAM past them, and a host that stops here holds the buffer to them. |
 | `memoryOver()` | the buffer's RAM stands past its own ceiling by more than the blocks being written and one block more while its files have room for a block: the files are written more slowly than the host fills the buffer. With the files full, RAM past its ceiling holds the rest and `atLimit()` says so. |
 | `setLimits(memoryBytes, diskBytes)` | new ceilings while the run goes. A smaller RAM ceiling moves blocks to files as the files have room; a disk ceiling under what the files hold writes no more files, and those there stay until they are read back. |
-| `hostStopped(stopped)` | moves every thread of the run to `ThreadClass::Normal` while the host is stopped, and back to its lowered class when it runs |
+| `hostStopped(stopped)` | moves every thread of the run to `ThreadClass::Normal` while the host is stopped, and each lowered one back to its lowered class when it runs |
 | `progress()` | the master cycles of the last boundary the threads played against the host's; the bytes the buffer holds; the RAM its blocks take and the bytes in its files, each beside its ceiling; the bytes written to files so far; the keyframes the kept work RAM differed from, 0 for a record that holds everything the run reads; the pool's threads; and how many of the run's threads stand at a lowered class |
 | `observation(notes)` | the observation so far with the run left going, as `ObservedRun::observation` gives it. On the host's thread it first hands over the blocks being written, so it is the observation at the host's boundary; on another thread it is of every block handed over when it was asked. It waits for the threads to reach that point. |
 | `finish(notes)` | tells the threads the host has stopped, clears the observers, ends the buffer, waits for the threads to play all of it, joins them and answers the whole observation. Called once. |
 | `failure()` | the first failure a thread met — a buffer file that could not be written or read, a block that did not play — or nothing |
 | `~BufferedRun()` | clears the observers and joins every thread where `finish` was not called, removes the buffer's files, and removes `directory` when that leaves it empty |
 
-Each thread the run starts works at a class under the host's thread's (`ThreadClass`): `Lowered` for the threads that check and play, `LoweredForFiles` for the two that move the buffer's blocks to files and back. `setThisThreadClass(which)` sets the calling thread's class and `thisThreadClass()` answers the one it last set, `Normal` before it set one.
+The thread that plays the main CPU's blocks in order works at `Normal`, the class a thread starts with: the pool's checks and every observation wait on it. Each other thread the run starts works at a class under the host's thread's (`ThreadClass`): `Lowered` for the pool's threads and the sound CPU's, `LoweredForFiles` for the two that move the buffer's blocks to files and back. `setThisThreadClass(which)` sets the calling thread's class and `thisThreadClass()` answers the one it last set, `Normal` before it set one.
 
 - Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()` and `observation()` is called on the host's thread between two of its calls into the machine. The host makes no call into the guest and restores no state while the run is bound.
 - `keyframe()`, `reset()`, `observation()`, `setLimits()` and `hostStopped()` throw `std::logic_error` once the run is finished, and so does a second `finish()`.

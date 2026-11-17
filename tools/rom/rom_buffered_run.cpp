@@ -654,10 +654,12 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
   // stream cannot hand over ends the taking, and the blocks already taken are
   // still played; a block that does not check or play ends the playing. From
   // then on the thread keeps the run as it stood, and answers every request
-  // with it until the run stops.
+  // with it until the run stops. It works at `whileHostRuns` while the host
+  // runs its machine.
   template <class Checks, class Start, class Play, class Answer>
-  void body(Stream& stream, Start start, Play play, Answer answer, const bool& answeredHere) {
-    ThreadClassKeeper keeper{budget, ThreadClass::Lowered};
+  void body(Stream& stream, ThreadClass whileHostRuns, Start start, Play play, Answer answer,
+            const bool& answeredHere) {
+    ThreadClassKeeper keeper{budget, whileHostRuns};
     struct InFlight {
       std::span<const std::uint8_t> block;
       std::future<Checks> checks;
@@ -724,8 +726,10 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
     try {
       CpuStart start{.file = kept->cpu, .ordinal = 0, .prefix = {}};
       Cpu65816State playedFile = kept->cpu;
+      // The pool's checks and the tree wait on the order this thread plays in,
+      // so it works at the host's own class.
       body<CpuChecks>(
-          *cpuStream, std::move(start),
+          *cpuStream, ThreadClass::Normal, std::move(start),
           [&](std::span<const std::uint8_t> block, const CpuChecks& checks) { playCpu(block, checks, playedFile); },
           [&](std::uint64_t played, bool broken) { answerCpu(played, broken); }, cpuAnswered);
     } catch (const std::exception& e) {
@@ -738,7 +742,7 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
     try {
       SoundStart start{.file = kept->apu.cpu, .window = window, .ordinal = 0, .prefix = {}};
       body<SoundChecks>(
-          *soundStream, std::move(start),
+          *soundStream, ThreadClass::Lowered, std::move(start),
           [&](std::span<const std::uint8_t> block, SoundChecks& checks) { playSound(block, checks); },
           [&](std::uint64_t played, bool broken) { answerSound(played, broken); }, soundAnswered);
     } catch (const std::exception& e) {

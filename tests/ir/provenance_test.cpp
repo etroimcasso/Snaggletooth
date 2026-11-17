@@ -410,6 +410,197 @@ TEST(Provenance, AHelpersReadsJoinItsCallersWhenItReturns) {
   EXPECT_EQ(m.originAt(0x7E0200u), imageSet({{0x1001u, 0x1001u}}));
 }
 
+// ---- the sources of a hull -----------------------------------------------------
+
+// Five bytes sixteen apart, summed: one interval more than the cap holds, so
+// the sum's origin is their hull, $1000-$1040, and says it is approximate.
+TEST(Provenance, AHullsSourcesAreTheRunsItOverlaps) {
+  Machine m;
+  for (std::uint8_t i = 0; i < 5; ++i) m.image(0x009000u + 0x10u * i, {static_cast<std::uint8_t>(i + 1u)});
+  m.run({0xADu, 0x00u, 0x90u});  // LDA !$9000
+  for (std::uint8_t i = 1; i < 5; ++i) m.run({0x6Du, static_cast<std::uint8_t>(0x10u * i), 0x90u});  // ADC !$9010 .. !$9040
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  const OriginSet origin = m.originAt(0x7E0200u);
+  ASSERT_TRUE(origin.approximate);
+  ASSERT_EQ(origin.image, (std::vector<OriginInterval>{{0x1000u, 0x1040u}}));
+  // Each byte read is a run of its own, and nothing between two of them is one.
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u),
+            (std::vector<OriginInterval>{{0x1000u, 0x1000u},
+                                         {0x1010u, 0x1010u},
+                                         {0x1020u, 0x1020u},
+                                         {0x1030u, 0x1030u},
+                                         {0x1040u, 0x1040u}}));
+}
+
+// The hull of a helper's byte overlaps two runs its caller read before the
+// call, each between two of the helper's own, and one a routine the helper
+// called read for it. The helper's own runs are its sources, the one its
+// callee read among them; the caller's two are not, while the helper runs or
+// after it has returned.
+TEST(Provenance, AHullsSourcesAreTheWritingInvocationsOwnRunsAndNotItsCallers) {
+  Machine m;
+  for (std::uint8_t i = 0; i < 6; ++i) m.image(0x009000u + 0x10u * i, {static_cast<std::uint8_t>(i + 1u)});
+  m.image(0x009045u, {0x99u});
+  m.run({0xADu, 0x10u, 0x90u});  // LDA !$9010: the caller's own reads
+  m.run({0xADu, 0x45u, 0x90u});  // LDA !$9045
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100: the helper
+  m.run({0xADu, 0x00u, 0x90u});  // $8100 LDA !$9000
+  m.run({0x20u, 0x00u, 0x82u});  // JSR !$8200: a routine the helper calls
+  m.run({0x6Du, 0x20u, 0x90u});  // $8200 ADC !$9020
+  m.run({0x60u});                // RTS: its run joins the helper's
+  for (std::uint8_t i = 3; i < 6; ++i) m.run({0x6Du, static_cast<std::uint8_t>(0x10u * i), 0x90u});  // ADC !$9030 .. !$9050
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200, in the helper
+  ASSERT_TRUE(m.originAt(0x7E0200u).approximate);
+  ASSERT_EQ(m.originAt(0x7E0200u).image, (std::vector<OriginInterval>{{0x1000u, 0x1050u}}));
+  const std::vector<OriginInterval> own = {{0x1000u, 0x1000u}, {0x1020u, 0x1020u}, {0x1030u, 0x1030u},
+                                           {0x1040u, 0x1040u}, {0x1050u, 0x1050u}};
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), own) << "the helper running";
+  m.run({0x60u});  // RTS
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), own) << "the helper returned, held by its byte";
+}
+
+// A run of the writer's own that a caller's run grew from is followed out to
+// the caller's, as an exact interval's is.
+TEST(Provenance, AHullsRunIsFollowedOutToTheCallerThatReadOnFromIt) {
+  Machine m;
+  for (std::uint8_t i = 0; i < 5; ++i) m.image(0x009000u + 0x10u * i, {static_cast<std::uint8_t>(i + 1u)});
+  m.image(0x009001u, {0x77u});
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  m.run({0xADu, 0x00u, 0x90u});  // $8100 LDA !$9000
+  for (std::uint8_t i = 1; i < 5; ++i) m.run({0x6Du, static_cast<std::uint8_t>(0x10u * i), 0x90u});  // ADC !$9010 .. !$9040
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  m.run({0x60u});                // RTS
+  m.run({0xADu, 0x01u, 0x90u});  // LDA !$9001, in the caller: its run from $1000 reaches $1001
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u),
+            (std::vector<OriginInterval>{{0x1000u, 0x1001u},
+                                         {0x1010u, 0x1010u},
+                                         {0x1020u, 0x1020u},
+                                         {0x1030u, 0x1030u},
+                                         {0x1040u, 0x1040u}}));
+}
+
+// A helper that ended with its runs joining nothing, held by the byte it
+// wrote: its runs are read where they were kept.
+TEST(Provenance, AHullsSourcesAreReadFromAnInvocationThatEndedHeld) {
+  Machine m;
+  for (std::uint8_t i = 0; i < 5; ++i) m.image(0x009000u + 0x10u * i, {static_cast<std::uint8_t>(i + 1u)});
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  m.run({0xADu, 0x00u, 0x90u});  // $8100 LDA !$9000
+  for (std::uint8_t i = 1; i < 5; ++i) m.run({0x6Du, static_cast<std::uint8_t>(0x10u * i), 0x90u});  // ADC !$9010 .. !$9040
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  m.shadow.abandon();
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u),
+            (std::vector<OriginInterval>{{0x1000u, 0x1000u},
+                                         {0x1010u, 0x1010u},
+                                         {0x1020u, 0x1020u},
+                                         {0x1030u, 0x1030u},
+                                         {0x1040u, 0x1040u}}));
+}
+
+// A hull no run overlaps is its own source; a run counts from the byte it
+// shares with the hull, at either end, and is given whole.
+TEST(Provenance, AHullNoRunOverlapsIsItsOwnSource) {
+  Machine m;
+  Origins& origins = m.shadow.origins();
+  Origin hull = kNoOrigin;
+  for (std::size_t offset = 0x1000u; offset <= 0x1040u; offset += 0x10u) hull = origins.unite(hull, origins.image(offset));
+  ASSERT_TRUE(origins.of(hull).approximate);
+  const std::vector<OriginInterval> itself = {{0x1000u, 0x1040u}};
+  // An engine's byte belongs to no invocation.
+  m.shadow.written(0x7F0000u, hull, Writer{.site = 0x008123u, .engine = true});
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0000u), itself);
+  // The running invocation's byte, when it has read nothing.
+  m.shadow.written(0x7F0001u, hull, Writer{.site = 0x008000u, .engine = false});
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0001u), itself);
+  // A run that begins past the hull's last byte is no source of it.
+  m.image(0x009041u, {0x55u});
+  m.run({0xADu, 0x41u, 0x90u});  // LDA !$9041
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0001u), itself);
+  // Once the run reaches the hull's last byte it is one.
+  m.image(0x009040u, {0x66u});
+  m.run({0xADu, 0x40u, 0x90u});  // LDA !$9040
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0001u), (std::vector<OriginInterval>{{0x1040u, 0x1041u}}));
+  // And so is one that begins below the hull and reaches its first byte.
+  m.image(0x008FFFu, {0x77u});
+  m.image(0x009000u, {0x88u});
+  m.run({0xADu, 0xFFu, 0x8Fu});  // LDA !$8FFF
+  m.run({0xADu, 0x00u, 0x90u});  // LDA !$9000
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0001u), (std::vector<OriginInterval>{{0x0FFFu, 0x1000u}, {0x1040u, 0x1041u}}));
+}
+
+// A hull across the whole image, with a run at each end of it and one in the
+// middle.
+TEST(Provenance, AHullAcrossTheImageGivesTheRunsAtItsEndsAndBetween) {
+  Machine m;
+  Origins& origins = m.shadow.origins();
+  Origin hull = kNoOrigin;
+  for (std::size_t i = 0; i < 5; ++i) hull = origins.unite(hull, origins.image(i * (kImageBytes - 1u) / 4u));
+  ASSERT_TRUE(origins.of(hull).approximate);
+  ASSERT_EQ(origins.of(hull).image, (std::vector<OriginInterval>{{0u, kImageBytes - 1u}}));
+  m.image(0x009000u, {0x11u});
+  m.image(0x00C000u, {0x22u});
+  m.image(0x00FFFFu, {0x33u});
+  m.run({0xADu, 0x00u, 0x90u});  // LDA !$9000
+  m.run({0xADu, 0x00u, 0xC0u});  // LDA !$C000
+  m.run({0xADu, 0xFFu, 0xFFu});  // LDA !$FFFF
+  m.shadow.written(0x7F0000u, hull, Writer{.site = 0x008009u, .engine = false});
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0000u),
+            (std::vector<OriginInterval>{{0x1000u, 0x1000u}, {0x4000u, 0x4000u}, {0x7FFFu, 0x7FFFu}}));
+}
+
+// A hull far wider than any image, with a run on its second byte and one
+// further in: the walk goes from run to run, so it answers at once however
+// many bytes lie between two of them.
+TEST(Provenance, AHullsWalkGoesFromRunToRunHoweverWideItIs) {
+  Machine m;
+  Origins& origins = m.shadow.origins();
+  constexpr std::size_t kFar = std::size_t{1} << 40;
+  Origin hull = kNoOrigin;
+  for (std::size_t i = 0; i < 5; ++i) hull = origins.unite(hull, origins.image(i * (kFar / 4u)));
+  ASSERT_EQ(origins.of(hull).image, (std::vector<OriginInterval>{{0u, kFar}}));
+  m.image(0x009000u, {0x11u});
+  m.run({0xADu, 0x00u, 0x90u});  // LDA !$9000
+  m.run({0xADu, 0x01u, 0x80u});  // LDA !$8001: the image's second byte
+  m.shadow.written(0x7F0000u, hull, Writer{.site = 0x008006u, .engine = false});
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0000u), (std::vector<OriginInterval>{{1u, 1u}, {0x1000u, 0x1000u}}));
+}
+
+// ---- an answer asked again -----------------------------------------------------
+
+// A byte's sources are asked for while its helper runs, after the helper has
+// returned and its run has joined the caller's, and after the caller has read
+// on: each answer is the one the shadow gives as it then stands. A byte with
+// the same origin that an engine wrote, and one the same invocation wrote from
+// another byte, are each answered for themselves.
+TEST(Provenance, AnAnswerAskedAgainIsTheShadowsAsItThenStands) {
+  Machine m;
+  m.image(0x009000u, {0x10u, 0x11u, 0x12u, 0x13u});
+  m.image(0x009010u, {0x20u});
+  m.run({0xADu, 0x00u, 0x90u});  // LDA !$9000
+  m.run({0xADu, 0x01u, 0x90u});  // LDA !$9001: the caller's run, $1000-$1001
+  m.run({0x20u, 0x00u, 0x81u});  // JSR !$8100
+  m.run({0xADu, 0x02u, 0x90u});  // $8100 LDA !$9002
+  m.run({0x8Du, 0x00u, 0x02u});  // STA !$0200
+  m.run({0xADu, 0x10u, 0x90u});  // LDA !$9010
+  m.run({0x8Du, 0x01u, 0x02u});  // STA !$0201
+  const std::vector<OriginInterval> alone = {{0x1002u, 0x1002u}};
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), alone) << "the helper running: its own run";
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), alone) << "asked again";
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0201u), (std::vector<OriginInterval>{{0x1010u, 0x1010u}}))
+      << "the same invocation's byte from another origin";
+  m.run({0x60u});  // RTS: the helper's run joins the caller's, which it touches
+  const std::vector<OriginInterval> joined = {{0x1000u, 0x1002u}};
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), joined) << "the helper returned";
+  // An engine's byte with the same origin belongs to no invocation.
+  m.shadow.written(0x7F0000u, *m.shadow.originOf(0x7E0200u), Writer{.site = 0x008123u, .engine = true});
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0000u), alone);
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), joined);
+  m.run({0xADu, 0x03u, 0x90u});  // LDA !$9003, back in the caller: its run reaches $1003
+  // The caller's run now holds the helper's strictly inside, so it is not followed.
+  EXPECT_EQ(m.shadow.sourcesOf(0x7E0200u), alone) << "the caller read on";
+  EXPECT_EQ(m.shadow.sourcesOf(0x7F0000u), alone);
+}
+
 // ---- the runs an invocation reads --------------------------------------------
 
 TEST(Provenance, AReadThatTouchesARunExtendsItWhateverCameBetween) {

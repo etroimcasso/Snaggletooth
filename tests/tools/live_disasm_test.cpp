@@ -150,9 +150,12 @@ struct Played {
   std::size_t trees = 0;
   unsigned stopsAtLimit = 0;
   unsigned stopsByHand = 0;
+  unsigned stops = 0;  // the times a run of the machine ended in a stop of either kind
+  LiveStatus last;     // the status once the close was done
 };
 
-LiveHooks hooksInto(Lines& lines, std::function<std::optional<int>(const std::vector<std::string>&, bool)> run = {}) {
+LiveHooks hooksInto(Lines& lines, std::function<std::optional<int>(const std::vector<std::string>&, bool)> run = {},
+                    std::function<void(std::string_view)> step = {}) {
   return LiveHooks{.say = [&lines](const std::string& line) {
                      std::lock_guard lock(lines.mutex);
                      lines.said.push_back(line);
@@ -161,7 +164,8 @@ LiveHooks hooksInto(Lines& lines, std::function<std::optional<int>(const std::ve
                      std::lock_guard lock(lines.mutex);
                      lines.always.push_back(line);
                    },
-                   .run = std::move(run)};
+                   .run = std::move(run),
+                   .step = std::move(step)};
 }
 
 // E1-10's loop over `rom`, into `directory`.
@@ -182,6 +186,7 @@ Played play(std::span<const std::uint8_t> rom, const std::filesystem::path& dire
       Stopped why = live.afterRun(nowNanos());
       if (why == Stopped::AtLimit) ++out.stopsAtLimit;
       if (why == Stopped::ByHand) ++out.stopsByHand;
+      if (why != Stopped::No) ++out.stops;
       for (unsigned pass = 0; why != Stopped::No; ++pass) {
         if (plan.eachStopPass) plan.eachStopPass(live, why, pass);
         // A stop no case ends by itself in this long fails the case, and is
@@ -213,7 +218,8 @@ Played play(std::span<const std::uint8_t> rom, const std::filesystem::path& dire
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     out.closing = live.closingTree(out.error);
-    out.trees = live.status().trees;
+    out.last = live.status();
+    out.trees = out.last.trees;
     if (plan.afterClose) plan.afterClose(live);
   }
   machine.setFrameObserver(nullptr);
@@ -458,16 +464,21 @@ TEST_F(PlayerLiveDisassembly, TreesInTheMiddleAssembleBackAndLeaveTheClosingTree
   LiveOptions options = quiet();
   options.commands = commandsIn(root_ / "commands", true, true);
   options.treeIntervalNanos = 0;
-  // The game held still, after its first frame and its sixth, until a tree is
-  // written from what it has played: the run is the reference's length.
+  // The game held still, after its first frame and its sixth, until a tree
+  // written from what it has played is verified: the run is the reference's
+  // length.
   Plan plan;
   std::size_t waitedFor = 0;
-  plan.afterEachRun = [&](LiveDisassembly& live, std::uint64_t master) {
+  const auto verifiedSoFar = [&] {
+    std::lock_guard lock(mutex);
+    return verified;
+  };
+  plan.afterEachRun = [&](LiveDisassembly&, std::uint64_t master) {
     const std::size_t want = master >= 6u * kFrame ? 2u : master >= kFrame ? 1u : 0u;
     if (want <= waitedFor) return;
     waitedFor = want;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
-    while (live.status().trees < want && std::chrono::steady_clock::now() < deadline) {
+    while (verifiedSoFar() < want && std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
   };
@@ -475,7 +486,10 @@ TEST_F(PlayerLiveDisassembly, TreesInTheMiddleAssembleBackAndLeaveTheClosingTree
   const Played played = play(rom, root_ / "live", options, hooksInto(lines, run), plan);
   ASSERT_TRUE(played.closing.has_value()) << played.error;
   EXPECT_GE(played.trees, 3u) << "two in the middle and the closing tree";
-  EXPECT_EQ(verified, played.trees) << "each tree verified";
+  // A tree from the middle whose commands had not begun when the close was
+  // asked for is written and not verified; the two waited for and the last are.
+  EXPECT_GE(verified, 3u);
+  EXPECT_LE(verified, played.trees);
   EXPECT_EQ(identical, verified) << "and each assembles back to the image";
   // The rendered bank files are the reference's after rendering it too.
   std::size_t rendered = 0;
@@ -705,16 +719,16 @@ TEST_F(PlayerLiveDisassembly, TheTitleShowsTheLeadAtOnceWhenWhatItSaysChanges) {
       << "the buffer is played";
   static_cast<void>(title.text("", s, 31u * kSecond, 0u));
   s.work = Work::Tree;
-  EXPECT_EQ(page(title.text("", s, 32u * kSecond, 0u)), "finishing: writing the last tree");
+  EXPECT_EQ(page(title.text("", s, 32u * kSecond, 0u)), "finishing: writing the last tree, 0 s");
   static_cast<void>(title.text("", s, 36u * kSecond, 0u));
   s.work = Work::Render;
-  EXPECT_EQ(page(title.text("", s, 37u * kSecond, 0u)), "finishing: snes_render");
+  EXPECT_EQ(page(title.text("", s, 37u * kSecond, 0u)), "finishing: snes_render, 0 s");
   static_cast<void>(title.text("", s, 41u * kSecond, 0u));
   s.work = Work::Verify;
-  EXPECT_EQ(page(title.text("", s, 42u * kSecond, 0u)), "finishing: snes_verify");
+  EXPECT_EQ(page(title.text("", s, 42u * kSecond, 0u)), "finishing: snes_verify, 0 s");
   static_cast<void>(title.text("", s, 46u * kSecond, 0u));
   s.work = Work::Done;
-  EXPECT_EQ(page(title.text("", s, 47u * kSecond, 0u)), "finishing: closing the buffer");
+  EXPECT_EQ(page(title.text("", s, 47u * kSecond, 0u)), "finishing: closing the buffer, 0 s");
 }
 
 TEST_F(PlayerLiveDisassembly, TheClosesProgressCountsFromTheMostTheBufferHeld) {
@@ -744,14 +758,37 @@ TEST_F(PlayerLiveDisassembly, TheClosesProgressCountsFromTheMostTheBufferHeld) {
   s.secondsToEmpty = 0.0;
   EXPECT_EQ(lead(title.text("", s, 5u, kWide)), "finishing: 12.5 GB of 12.5 GB played, 100 %")
       << "nothing is left to time";
+  // Each stage after the buffer says how long it has run, from when it began.
+  constexpr std::uint64_t kSecond = 1'000'000'000u;
   s.work = Work::Tree;
-  EXPECT_EQ(lead(title.text("", s, 6u, kWide)), "finishing: writing the last tree");
+  EXPECT_EQ(lead(title.text("", s, 6u, kWide)), "finishing: writing the last tree, 0 s");
+  s.step = "proving what every path reaches";
+  EXPECT_EQ(lead(title.text("", s, 6u + 70u * kSecond, kWide)),
+            "finishing: writing the last tree, proving what every path reaches, 1 min 10 s")
+      << "the tree names its step, and its time runs through the steps";
+  s.step = "writing the files";
+  EXPECT_EQ(lead(title.text("", s, 6u + 130u * kSecond, kWide)),
+            "finishing: writing the last tree, writing the files, 2 min 10 s");
+  // With a time left from the session's last tree, that is what it says; once
+  // that has run out it says how long the stage has run.
+  s.treeSecondsLeft = 40.0;
+  EXPECT_EQ(lead(title.text("", s, 6u + 130u * kSecond, kWide)),
+            "finishing: writing the last tree, writing the files, about 40 s left");
+  s.treeSecondsLeft = 0.0;
+  EXPECT_EQ(lead(title.text("", s, 6u + 130u * kSecond, kWide)),
+            "finishing: writing the last tree, writing the files, 2 min 10 s");
+  s.treeSecondsLeft.reset();
+  s.step.clear();
   s.work = Work::Render;
-  EXPECT_EQ(lead(title.text("", s, 7u, kWide)), "finishing: snes_render");
+  EXPECT_EQ(lead(title.text("", s, 6u + 131u * kSecond, kWide)), "finishing: snes_render, 0 s")
+      << "a stage's time begins with the stage";
+  EXPECT_EQ(lead(title.text("", s, 6u + 143u * kSecond, kWide)), "finishing: snes_render, 12 s");
   s.work = Work::Verify;
-  EXPECT_EQ(lead(title.text("", s, 8u, kWide)), "finishing: snes_verify");
+  EXPECT_EQ(lead(title.text("", s, 6u + 150u * kSecond, kWide)), "finishing: snes_verify, 0 s");
+  EXPECT_EQ(lead(title.text("", s, 6u + 190u * kSecond, kWide)), "finishing: snes_verify, 40 s");
   s.work = Work::Done;
-  EXPECT_EQ(lead(title.text("", s, 9u, kWide)), "finishing: closing the buffer");
+  EXPECT_EQ(lead(title.text("", s, 6u + 191u * kSecond, kWide)), "finishing: closing the buffer, 0 s");
+  EXPECT_EQ(lead(title.text("", s, 6u + 194u * kSecond, kWide)), "finishing: closing the buffer, 3 s");
 
   // A tree from the middle of the session, still being made and checked while
   // the buffer is played: the buffer is what the close has left.
@@ -791,6 +828,242 @@ TEST_F(PlayerLiveDisassembly, TheTitlesRoomIsItsBarInCharactersLessTheNameAndIts
   EXPECT_EQ(titleRoom(700.0, 0.0, ""), 0u);
   EXPECT_EQ(titleRoom(700.0, -7.0, ""), 0u);
   EXPECT_EQ(titleRoom(1e30, 1.0, ""), 999'999'997u) << "a width past any window's is a billion characters";
+}
+
+TEST_F(PlayerLiveDisassembly, TheSessionIsCountedAndSaidInOneLine) {
+  LiveStatus s;
+  s.buffer.memoryBytes = 1'000'000'000u;
+  s.buffer.diskBytes = 64'000'000'000u;
+  s.mostHeld = 412'000'000u;
+  EXPECT_EQ(sessionText(s), "the buffer held at most 412 MB against 1.0 GB of RAM and 64.0 GB of files; 0 MB went "
+                            "through its files; the game never stopped");
+  s.buffer.memoryBytes = 4'000'000'000u;
+  s.mostHeld = 4'100'000'000u;
+  s.buffer.diskWritten = 2'600'000'000u;
+  s.stops = 1u;
+  s.stoppedNanos = 40'000'000'000u;
+  EXPECT_EQ(sessionText(s), "the buffer held at most 4.1 GB against 4.0 GB of RAM and 64.0 GB of files; 2.6 GB went "
+                            "through its files; the game stopped once for 40 s");
+  s.stops = 2u;
+  s.stoppedNanos = 100'000'000'000u;
+  EXPECT_EQ(sessionText(s), "the buffer held at most 4.1 GB against 4.0 GB of RAM and 64.0 GB of files; 2.6 GB went "
+                            "through its files; the game stopped 2 times for 1 min 40 s");
+
+  // A session that stops at ceilings of five megabytes of RAM and no files.
+  // With the blocks being written counted, the buffer holds more than 1.8 MB
+  // of handed bytes whenever it stands at them.
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  Lines lines;
+  Plan watched;
+  bool looked = false;
+  watched.eachStopPass = [&](LiveDisassembly& live, Stopped why, unsigned pass) {
+    if (why != Stopped::AtLimit || pass != 0u || std::exchange(looked, true)) return;
+    EXPECT_GT(live.status().mostHeld, 1'800'000u) << "kept at the look that found the ceilings";
+    EXPECT_EQ(live.status().stops, 1u) << "counted as it begins";
+  };
+  const Played stopped = play(rom, root_ / "stopped", quiet(5'000'000, 0), hooksInto(lines), watched);
+  ASSERT_TRUE(stopped.closing.has_value()) << stopped.error;
+  EXPECT_TRUE(looked);
+  ASSERT_GT(stopped.stops, 0u);
+  EXPECT_EQ(stopped.last.stops, stopped.stops) << "every stop counted once";
+  EXPECT_GT(stopped.last.stoppedNanos, 0u) << "and its time kept";
+  EXPECT_GT(stopped.last.mostHeld, 1'800'000u);
+  EXPECT_EQ(stopped.last.buffer.held, 0u) << "the close played it all, and the most it held stands";
+  EXPECT_EQ(stopped.last.buffer.diskWritten, 0u) << "no files to write";
+
+  // One that never reaches its ceilings.
+  const Played free = play(rom, root_ / "free", quiet(), hooksInto(lines), Plan{});
+  ASSERT_TRUE(free.closing.has_value()) << free.error;
+  EXPECT_EQ(free.stops, 0u);
+  EXPECT_EQ(free.last.stops, 0u);
+  EXPECT_EQ(free.last.stoppedNanos, 0u);
+  EXPECT_EQ(sessionText(free.last).rfind("the game never stopped"), sessionText(free.last).size() - 22u);
+}
+
+TEST_F(PlayerLiveDisassembly, ATreesTimeLeftIsWhatTheLastWrittenTreeSpentInItsSteps) {
+  constexpr std::uint64_t kSecond = 1'000'000'000u;
+  TreeSteps steps;
+  EXPECT_FALSE(steps.secondsLeft(0u).has_value()) << "no tree yet";
+  // The first tree: 10 s of tracing, 30 s of proving in two visits with 5 s
+  // of booting between them, and 20 s of writing.
+  steps.begin("tracing", 0u);
+  EXPECT_FALSE(steps.secondsLeft(5u * kSecond).has_value()) << "no tree written to measure it against";
+  steps.begin("proving", 10u * kSecond);
+  steps.begin("proving", 12u * kSecond);  // told again while it runs: the same step
+  steps.begin("booting", 25u * kSecond);
+  steps.begin("proving", 30u * kSecond);  // returned to: one step
+  steps.begin("writing", 45u * kSecond);
+  steps.begin({}, 65u * kSecond);
+  EXPECT_FALSE(steps.secondsLeft(65u * kSecond).has_value()) << "no step runs";
+  steps.finished();
+  EXPECT_FALSE(steps.secondsLeft(70u * kSecond).has_value()) << "between two trees";
+
+  // The second tree, from a clock of its own.
+  const std::uint64_t t = 1000u * kSecond;
+  steps.begin("tracing", t);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t), 65.0) << "the whole of the last tree";
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 4u * kSecond), 61.0);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 10u * kSecond), 55.0);
+  EXPECT_FALSE(steps.secondsLeft(t + 10u * kSecond + 1u).has_value())
+      << "a step that has run longer than it did in the last tree is measured by nothing";
+  EXPECT_FALSE(steps.secondsLeft(t + 14u * kSecond).has_value());
+  steps.begin("proving", t + 14u * kSecond);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 24u * kSecond), 45.0) << "20 s of proving, the booting and the writing";
+  steps.begin("booting", t + 24u * kSecond);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 26u * kSecond), 23.0) << "3 s of booting and the writing: proving came before";
+  steps.begin("proving", t + 29u * kSecond);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 34u * kSecond), 35.0) << "back in proving: 15 s of it, booting done, the writing";
+  steps.begin("lifting", t + 34u * kSecond);
+  EXPECT_FALSE(steps.secondsLeft(t + 35u * kSecond).has_value()) << "a step the last tree did not have";
+  steps.begin("writing", t + 40u * kSecond);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 45u * kSecond), 15.0);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(t + 60u * kSecond), 0.0) << "the last step, as long as it was";
+  EXPECT_FALSE(steps.secondsLeft(t + 90u * kSecond).has_value()) << "and past that";
+
+  // Given up, the second tree measures nothing: the next is held to the first.
+  steps.givenUp();
+  EXPECT_FALSE(steps.secondsLeft(t + 91u * kSecond).has_value());
+  steps.begin("writing", 2000u * kSecond);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(2000u * kSecond + 5u * kSecond), 15.0);
+  // Written, it becomes the measure: one step of 30 s.
+  steps.begin({}, 2030u * kSecond);
+  steps.finished();
+  steps.begin("writing", 3000u * kSecond);
+  EXPECT_DOUBLE_EQ(*steps.secondsLeft(3000u * kSecond + 10u * kSecond), 20.0);
+  steps.begin("tracing", 3010u * kSecond);
+  EXPECT_FALSE(steps.secondsLeft(3011u * kSecond).has_value()) << "the first tree's steps are gone with it";
+}
+
+TEST_F(PlayerLiveDisassembly, ATreeBegunInTheMiddleIsGivenUpAtTheClose) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  LiveOptions options = quiet();
+  options.treeIntervalNanos = 20'000'000;  // a look every 20 ms, so a tree begins while the game plays
+  std::mutex mutex;
+  std::vector<std::string> steps;
+  std::atomic<bool> inside{false};
+  std::atomic<bool> release{false};
+  // The first tree is held at its first step until the close has begun.
+  const auto step = [&](std::string_view name) {
+    {
+      std::lock_guard lock(mutex);
+      steps.emplace_back(name);
+    }
+    if (!inside.exchange(true)) {
+      while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+  Plan plan;
+  plan.cycles = 2u * kFrame;
+  plan.playOn = [&](LiveDisassembly&) { return !inside.load(); };
+  bool asked = false;
+  plan.eachClosePass = [&](LiveDisassembly& live) {
+    if (std::exchange(asked, true)) return;
+    EXPECT_EQ(live.status().step, "tracing") << "the status says the step the tree is at";
+    release = true;
+  };
+  Lines lines;
+  const Played played = play(rom, root_ / "live", options, hooksInto(lines, {}, step), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  EXPECT_EQ(lines.count("quit during a mid-session tree: skipped it"), 1u);
+  EXPECT_EQ(lines.count("tree: "), 1u) << "the last tree alone was written";
+  EXPECT_EQ(played.trees, 1u);
+  EXPECT_EQ(played.last.step, "") << "no step once the trees are done";
+  // The tree given up went no further than the step it was at when the close
+  // was asked for; the last tree went through every step, the files after the
+  // disassembly's own.
+  std::lock_guard lock(mutex);
+  ASSERT_GE(steps.size(), 7u);
+  EXPECT_EQ(steps[0], "tracing");
+  EXPECT_EQ(steps[1], "") << "given up there: its steps over";
+  EXPECT_EQ(steps[2], "tracing") << "the last tree, from its first step";
+  EXPECT_EQ(steps[3], "proving what every path reaches");
+  const std::vector<std::string> end(steps.end() - 4, steps.end());
+  EXPECT_EQ(end, (std::vector<std::string>{"lifting the files", "drawing the previews", "writing the files", ""}));
+}
+
+TEST_F(PlayerLiveDisassembly, TheStatusSaysWhatATreeHasLeftByTheLastTreesSteps) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  LiveOptions options = quiet();
+  options.treeIntervalNanos = 20'000'000;
+  std::atomic<unsigned> ended{0};   // trees whose steps are over
+  std::atomic<bool> inside{false};
+  std::atomic<bool> release{false};
+  // The first tree spends two seconds in its first step; the second is held
+  // in the same step, where the first one's two seconds are its measure.
+  const auto step = [&](std::string_view name) {
+    if (name.empty()) {
+      ++ended;
+      return;
+    }
+    if (name != "tracing") return;
+    if (ended == 0u) {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    } else if (!inside.exchange(true)) {
+      while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+  Plan plan;
+  plan.cycles = 2u * kFrame;
+  // The game is held still until the first tree is written, so there is more
+  // for the run to find after it and a second tree begins.
+  bool waited = false;
+  plan.afterEachRun = [&](LiveDisassembly&, std::uint64_t) {
+    if (std::exchange(waited, true)) return;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (ended == 0u && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  plan.playOn = [&](LiveDisassembly&) { return !inside.load(); };
+  bool asked = false;
+  plan.eachClosePass = [&](LiveDisassembly& live) {
+    if (std::exchange(asked, true)) return;
+    const LiveStatus s = live.status();
+    EXPECT_EQ(s.step, "tracing");
+    EXPECT_TRUE(s.treeSecondsLeft.has_value()) << "the first tree is its measure";
+    if (s.treeSecondsLeft) {
+      EXPECT_GT(*s.treeSecondsLeft, 0.5) << "most of the first tree's two seconds of tracing, and its other steps";
+    }
+    release = true;
+  };
+  Lines lines;
+  const Played played = play(rom, root_ / "live", options, hooksInto(lines, {}, step), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  EXPECT_TRUE(asked);
+  EXPECT_FALSE(played.last.treeSecondsLeft.has_value()) << "no tree is being made";
+}
+
+TEST_F(PlayerLiveDisassembly, TheCommandsOfATreeFromTheMiddleStopAtTheClose) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  LiveOptions options = quiet();
+  options.treeIntervalNanos = 20'000'000;
+  options.commands = commandsIn(root_ / "commands", true, true);
+  std::mutex mutex;
+  std::vector<std::size_t> asked;  // each command asked for, by how many arguments it was handed
+  std::atomic<bool> inside{false};
+  std::atomic<bool> release{false};
+  // The first tree's `snes_render` is held until the close has begun.
+  const auto run = [&](const std::vector<std::string>& arguments, bool) -> std::optional<int> {
+    {
+      std::lock_guard lock(mutex);
+      asked.push_back(arguments.size());
+    }
+    if (!inside.exchange(true)) {
+      while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return 0;
+  };
+  Plan plan;
+  plan.cycles = 2u * kFrame;
+  plan.playOn = [&](LiveDisassembly&) { return !inside.load(); };
+  plan.eachClosePass = [&](LiveDisassembly&) { release = true; };
+  Lines lines;
+  const Played played = play(rom, root_ / "live", options, hooksInto(lines, run), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  EXPECT_EQ(played.trees, 2u) << "the tree from the middle was written, and the last";
+  // The first tree's render, held; its verify is not begun; then the last tree's two.
+  std::lock_guard lock(mutex);
+  EXPECT_EQ(asked, (std::vector<std::size_t>{2u, 2u, 3u}));
 }
 
 TEST_F(PlayerLiveDisassembly, ANewTreeBeginsOnlyWhenTheRunHasFoundMore) {
@@ -1020,8 +1293,9 @@ TEST_F(PlayerLiveDisassembly, TheStatusSaysWhereTheStopStands) {
   plan.afterStop = [&](LiveDisassembly& live) {
     if (!seen || loweredAgain) return;
     loweredAgain = true;
-    // The pool's two, the shadow and sound threads and the two streams', lowered again.
-    EXPECT_TRUE(soon([&] { return live.status().buffer.threadsLowered == 6u; })) << "the run lowered once the game runs";
+    // The pool's two, the sound thread and the two streams', lowered again; the
+    // thread that plays the main CPU's blocks is never lowered.
+    EXPECT_TRUE(soon([&] { return live.status().buffer.threadsLowered == 5u; })) << "the run lowered once the game runs";
   };
   plan.eachStopPass = [&](LiveDisassembly& live, Stopped why, unsigned pass) {
     if (seen || why != Stopped::AtLimit) return;

@@ -308,7 +308,7 @@ std::string howToEndThePlayer() {
          "  --disasm <directory>        disassemble the game as you play it, into a tree there; turns\n"
          "                              --apu-thread and --ppu-thread on\n"
          "  --disasm-buffer-memory <GB> the most RAM the disassembly's buffer takes (default 1)\n"
-         "  --disasm-buffer-disk <GB>   the most its files hold (default 64)\n"
+         "  --disasm-buffer-disk <GB>   the most its files hold (default 10)\n"
          "  --disasm-buffer-dir <directory>\n"
          "                              where those files go (default <directory>/buffer)\n"
          "  --disasm-threads <n>        the threads that check the game's instructions (default: two\n"
@@ -1635,7 +1635,7 @@ int main(int argc, char** argv) {
         liveOptions.bufferDirectory.empty() ? std::filesystem::path(disasmDir) / "buffer" : liveOptions.bufferDirectory;
     try {
       live.emplace(machine, rom, disasmDir, liveOptions,
-                   player::LiveHooks{.say = say, .always = always, .run = runCommand});
+                   player::LiveHooks{.say = say, .always = always, .run = runCommand, .step = {}});
     } catch (const std::exception& e) {
       std::cerr << "the disassembly cannot be bound: " << e.what() << "\n";
       return 1;
@@ -1814,6 +1814,8 @@ int main(int argc, char** argv) {
       always("the tree was not written: " + error);
       treeWritten = false;
     }
+    // What the session cost the buffer, so a run that leaves RAM for the files shows.
+    say("disassembly: " + player::sessionText(live->status()));
   }
 
   if (!quiet) {

@@ -1051,11 +1051,21 @@ std::vector<StagedSpan> stagedSpans(const CartridgeDisassembly& out) {
   return spans;
 }
 
+// The staged files, and the file each origin asked about so far came from: an
+// origin's answer is read from the files alone, so it is the answer however
+// many bytes of however many contents carry that origin.
+struct Suppliers {
+  std::vector<StagedSpan> spans;
+  std::map<ir::OriginSet, std::optional<std::size_t>> known;
+};
+
 // The staged file one byte of a content came from: the one holding the most
 // of the byte's origin — the image bytes the byte was computed from — and the
 // first in address order among equals; nothing when no staged file holds any
 // of it, which is a byte the routine made itself.
-std::optional<std::size_t> supplierOf(const ir::OriginSet& origin, const std::vector<StagedSpan>& spans) {
+std::optional<std::size_t> supplierOf(const ir::OriginSet& origin, Suppliers& suppliers) {
+  if (const auto known = suppliers.known.find(origin); known != suppliers.known.end()) return known->second;
+  const std::vector<StagedSpan>& spans = suppliers.spans;
   std::optional<std::size_t> best;
   std::size_t most = 0;
   for (std::size_t s = 0; s < spans.size(); ++s) {
@@ -1070,6 +1080,7 @@ std::optional<std::size_t> supplierOf(const ir::OriginSet& origin, const std::ve
       most = held;
     }
   }
+  suppliers.known.emplace(origin, best);
   return best;
 }
 
@@ -1078,11 +1089,12 @@ std::optional<std::size_t> supplierOf(const ir::OriginSet& origin, const std::ve
 // the first in address order among equals — and only when that file supplied
 // more of the bytes than no file did. A content the routine made more of than
 // any source did is the routine's, and belongs to no file.
-std::optional<std::size_t> sourceOf(const CarriedContent& content, const std::vector<StagedSpan>& spans) {
+std::optional<std::size_t> sourceOf(const CarriedContent& content, Suppliers& suppliers) {
+  const std::vector<StagedSpan>& spans = suppliers.spans;
   std::map<std::size_t, std::uint32_t> supplied;  // by span, so ascending is address order
   std::uint32_t own = 0;
   for (const ContentOrigin& run : content.byteOrigins) {
-    if (const std::optional<std::size_t> supplier = supplierOf(run.origin, spans)) {
+    if (const std::optional<std::size_t> supplier = supplierOf(run.origin, suppliers)) {
       supplied[*supplier] += run.bytes;
     } else {
       own += run.bytes;
@@ -1150,14 +1162,21 @@ std::string combinedText(const std::vector<const SourceContent*>& items) {
 // file, its tiles and its map; and after all of those, beside every file
 // holding a source of what the toolkit's run of a routine built, one per form
 // of what its kept values built.
-void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts) {
+void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts, const ProgressSink& progress) {
+  // The stage, told again as the work goes: a sink that follows the stages
+  // hears from this one throughout.
+  const auto tell = [&] {
+    if (progress) progress(Progress{.stage = "drawing the previews", .spent = 0, .budget = 0});
+  };
+  tell();
   out.previews.clear();
   // Every content with a form, under its one source, in the order carried.
-  const std::vector<StagedSpan> spans = stagedSpans(out);
+  Suppliers suppliers{.spans = stagedSpans(out), .known = {}};
   std::vector<SourceContent> contents;
   for (const StagedRange& range : out.staged) {
+    tell();
     for (const CarriedContent& content : range.contents) {
-      const std::optional<std::size_t> source = sourceOf(content, spans);
+      const std::optional<std::size_t> source = sourceOf(content, suppliers);
       if (!source) continue;
       std::optional<ContentForm> form = formOfContent(out, content);
       if (!form) continue;
@@ -1167,7 +1186,11 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
   std::stable_sort(contents.begin(), contents.end(), [](const SourceContent& a, const SourceContent& b) {
     return a.content->order < b.content->order;
   });
+  // The contents of each source, in that order.
+  std::vector<std::vector<const SourceContent*>> ofSource(out.assets.size());
+  for (const SourceContent& item : contents) ofSource[item.source].push_back(&item);
   for (std::size_t i = 0; i < out.assets.size(); ++i) {
+    tell();
     const AssetFile& asset = out.assets[i];
     const std::string stem = stemOf(asset.file);
     if (asset.kind == MovedKind::Staged) {
@@ -1175,10 +1198,9 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
       // every content of the source in that form.
       std::vector<std::string> forms;
       std::map<std::string, std::vector<const SourceContent*>> byForm;
-      for (const SourceContent& item : contents) {
-        if (item.source != i) continue;
-        if (byForm.find(item.form.form) == byForm.end()) forms.push_back(item.form.form);
-        byForm[item.form.form].push_back(&item);
+      for (const SourceContent* const item : ofSource[i]) {
+        if (byForm.find(item->form.form) == byForm.end()) forms.push_back(item->form.form);
+        byForm[item->form.form].push_back(item);
       }
       for (const std::string& form : forms) {
         const std::vector<const SourceContent*>& items = byForm[form];
@@ -2005,7 +2027,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     out.enumeratedLifts.push_back(CartridgeDisassembly::EnumeratedLift{
         .file = out.assets[lift.asset].file, .run = lift.run, .extent = lift.extent, .cls = lift.cls});
   }
-  writePreviews(out, facts);
+  writePreviews(out, facts, request.progress);
 }
 
 // The file of the tree that holds `length` image bytes from `offset` whole: a
@@ -2476,11 +2498,12 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     traceOwed();
     gatherRegions();
   }
-  if (request.progress) {
-    request.progress(Progress{.stage = "proving what every path reaches", .spent = 0, .budget = 0});
-  }
   std::optional<ProvenProgram> proven;
   for (;;) {
+    // Told at every turn, so a caller that follows the stages hears from each.
+    if (request.progress) {
+      request.progress(Progress{.stage = "proving what every path reaches", .spent = 0, .budget = 0});
+    }
     liftProgram(out, request.rom);
     proven = proveProgram(out, request.rom);
     if (!addDerived(derivedTargets(out, *proven))) break;
@@ -2577,6 +2600,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // the image, and the sources of what they carried out of work RAM, now that
   // the listings say where the instructions are, the sound program says where
   // its blocks are, and the routines say who wrote what.
+  if (request.progress) request.progress(Progress{.stage = "lifting the files", .spent = 0, .budget = 0});
   liftAssets(out, request);
   writeSamples(out, request.rom, keyed);
   return out;

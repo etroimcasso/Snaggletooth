@@ -16,7 +16,9 @@
 // not reached, in memory to the size the host names and then in files under the
 // directory it names, so a host on a slow CPU runs at its own pace and the
 // threads catch up; the host names both sizes, which are the buffer's ceilings.
-// Every thread the run starts works at a class under the host's thread's while
+// The thread that plays the main CPU's blocks in order works at the class a
+// thread starts with, since the pool and the observation wait on it. Every
+// other thread the run starts works at a class under the host's thread's while
 // the host runs its machine (`ThreadClass`), and at the class a thread starts
 // with once the host says it has stopped (`hostStopped`).
 //
@@ -26,7 +28,7 @@
 // it.
 //
 //   Snes machine{SnesConfig{.rom = rom}};
-//   disasm::BufferedRun run{machine, rom, directory, {}};  // 1 GB of RAM, 64 GB of files
+//   disasm::BufferedRun run{machine, rom, directory, {}};  // 1 GB of RAM, 10 GB of files
 //   for (int frame = 0; frame < 3600; ++frame) {
 //     machine.run(357'366u);  // the host's own loop
 //     run.keyframe();
@@ -71,7 +73,7 @@ void setThisThreadClass(ThreadClass which) noexcept;
 
 struct BufferedRunOptions {
   std::uint64_t memoryBytes = 1'000'000'000;  // the most RAM the buffer holds, both streams together
-  std::uint64_t diskBytes = 64'000'000'000;   // the most it holds in files
+  std::uint64_t diskBytes = 10'000'000'000;   // the most it holds in files
   unsigned threads = 0;  // the pool's threads; 0: two fewer than the host's cores, at least 1
   // At the ceilings: `Refuse` stops the observers copying, and the observation
   // is of everything before; `Keep` copies the host's call in flight into RAM
@@ -139,7 +141,8 @@ class BufferedRun {
 
   // Tells the run the host has stopped running its machine, or runs it again.
   // While it is stopped every thread of the run works at `ThreadClass::Normal`;
-  // while it runs, at its lowered class. `finish()` tells the run the host has
+  // while it runs, each but the one that plays the main CPU's blocks works at
+  // its lowered class. `finish()` tells the run the host has
   // stopped before it waits. Throws `std::logic_error` once the run is finished.
   void hostStopped(bool stopped);
 
