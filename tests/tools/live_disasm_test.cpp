@@ -571,15 +571,15 @@ TEST_F(PlayerLiveDisassembly, RamPastItsCeilingStopsTheGameUntilItHasDrained) {
   EXPECT_GT(lines.count("stopped: the disassembly's buffer holds "), 0u);
   {
     std::lock_guard lock(lines.mutex);
-    std::size_t forRam = 0;
+    std::size_t ramStops = 0;
     for (const std::string& line : lines.said) {
       if (line.rfind("stopped: ", 0) != 0u) continue;
       EXPECT_NE(line.find(" of RAM, past its 0 MB ceiling, while its files are written; the game resumes at 0 MB of RAM"),
                 std::string::npos)
           << line;
-      ++forRam;
+      ++ramStops;
     }
-    EXPECT_GT(forRam, 0u);
+    EXPECT_GT(ramStops, 0u);
   }
   expectSameTree(root_ / "live", root_ / "reference", "stops for RAM");
 }
@@ -1033,6 +1033,30 @@ TEST_F(PlayerLiveDisassembly, TheStatusSaysWhatATreeHasLeftByTheLastTreesSteps) 
   ASSERT_TRUE(played.closing.has_value()) << played.error;
   EXPECT_TRUE(asked);
   EXPECT_FALSE(played.last.treeSecondsLeft.has_value()) << "no tree is being made";
+}
+
+// The close asked for as a tree from the middle begins writing its files: it
+// writes none, and the last tree is the one written.
+TEST_F(PlayerLiveDisassembly, ATreeGivenUpAsItsFilesBeginWritesNone) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  LiveOptions options = quiet();
+  options.treeIntervalNanos = 20'000'000;
+  std::atomic<bool> inside{false};
+  std::atomic<bool> release{false};
+  const auto step = [&](std::string_view name) {
+    if (name != "writing the files" || inside.exchange(true)) return;
+    while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  };
+  Plan plan;
+  plan.cycles = 2u * kFrame;
+  plan.playOn = [&](LiveDisassembly&) { return !inside.load(); };
+  plan.eachClosePass = [&](LiveDisassembly&) { release = true; };
+  Lines lines;
+  const Played played = play(rom, root_ / "live", options, hooksInto(lines, {}, step), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  EXPECT_EQ(lines.count("quit during a mid-session tree: skipped it"), 1u);
+  EXPECT_EQ(lines.count("tree: "), 1u) << "the last tree alone was written";
+  EXPECT_EQ(played.trees, 1u);
 }
 
 TEST_F(PlayerLiveDisassembly, TheCommandsOfATreeFromTheMiddleStopAtTheClose) {

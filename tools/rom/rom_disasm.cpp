@@ -1156,25 +1156,34 @@ std::string combinedText(const std::vector<const SourceContent*>& items) {
   return joined;
 }
 
+// Tells the request's sink that `stage` begins, and answers whether the
+// request's `stop` ends the disassembly there.
+bool told(const CartridgeRequest& request, std::string_view stage) {
+  if (request.progress) request.progress(Progress{.stage = stage, .spent = 0, .budget = 0});
+  return request.stop && request.stop();
+}
+
 // Writes the previews: beside a source a routine built its data from, one per
 // form, every distinct content the run attributed to the source and of that
 // form combined in the order the run first carried each; beside a Mode 7
 // file, its tiles and its map; and after all of those, beside every file
 // holding a source of what the toolkit's run of a routine built, one per form
 // of what its kept values built.
-void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts, const ProgressSink& progress) {
-  // The stage, told again as the work goes: a sink that follows the stages
-  // hears from this one throughout.
+void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& facts, const CartridgeRequest& request) {
+  // The stage, told again as the work goes and the request's `stop` asked each
+  // time: true leaves the previews as they stand, with `out.stopped` set.
   const auto tell = [&] {
-    if (progress) progress(Progress{.stage = "drawing the previews", .spent = 0, .budget = 0});
+    if (request.progress) request.progress(Progress{.stage = "drawing the previews", .spent = 0, .budget = 0});
+    if (request.stop && request.stop()) out.stopped = true;
+    return out.stopped;
   };
-  tell();
   out.previews.clear();
+  if (tell()) return;
   // Every content with a form, under its one source, in the order carried.
   Suppliers suppliers{.spans = stagedSpans(out), .known = {}};
   std::vector<SourceContent> contents;
   for (const StagedRange& range : out.staged) {
-    tell();
+    if (tell()) return;
     for (const CarriedContent& content : range.contents) {
       const std::optional<std::size_t> source = sourceOf(content, suppliers);
       if (!source) continue;
@@ -1190,7 +1199,7 @@ void writePreviews(CartridgeDisassembly& out, const std::vector<FormFacts>& fact
   std::vector<std::vector<const SourceContent*>> ofSource(out.assets.size());
   for (const SourceContent& item : contents) ofSource[item.source].push_back(&item);
   for (std::size_t i = 0; i < out.assets.size(); ++i) {
-    tell();
+    if (tell()) return;
     const AssetFile& asset = out.assets[i];
     const std::string stem = stemOf(asset.file);
     if (asset.kind == MovedKind::Staged) {
@@ -2027,7 +2036,7 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     out.enumeratedLifts.push_back(CartridgeDisassembly::EnumeratedLift{
         .file = out.assets[lift.asset].file, .run = lift.run, .extent = lift.extent, .cls = lift.cls});
   }
-  writePreviews(out, facts, request.progress);
+  writePreviews(out, facts, request);
 }
 
 // The file of the tree that holds `length` image bytes from `offset` whole: a
@@ -2486,7 +2495,10 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     return any;
   };
 
-  if (request.progress) request.progress(Progress{.stage = "tracing", .spent = 0, .budget = 0});
+  if (told(request, "tracing")) {
+    out.stopped = true;
+    return out;
+  }
   traceOwed();
   gatherRegions();
   std::vector<DerivedTarget> readBack = request.derived;
@@ -2501,8 +2513,9 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   std::optional<ProvenProgram> proven;
   for (;;) {
     // Told at every turn, so a caller that follows the stages hears from each.
-    if (request.progress) {
-      request.progress(Progress{.stage = "proving what every path reaches", .spent = 0, .budget = 0});
+    if (told(request, "proving what every path reaches")) {
+      out.stopped = true;
+      return out;
     }
     liftProgram(out, request.rom);
     proven = proveProgram(out, request.rom);
@@ -2537,6 +2550,10 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     std::string reason;
     std::optional<UploadCapture> capture =
         captureUpload(request.rom, request.bootMasterCycles, reason, request.progress);
+    if (request.stop && request.stop()) {
+      out.stopped = true;
+      return out;
+    }
     if (!capture) {
       out.notes.push_back("no sound program: " + reason);
     } else {
@@ -2600,8 +2617,12 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // the image, and the sources of what they carried out of work RAM, now that
   // the listings say where the instructions are, the sound program says where
   // its blocks are, and the routines say who wrote what.
-  if (request.progress) request.progress(Progress{.stage = "lifting the files", .spent = 0, .budget = 0});
+  if (told(request, "lifting the files")) {
+    out.stopped = true;
+    return out;
+  }
   liftAssets(out, request);
+  if (out.stopped) return out;
   writeSamples(out, request.rom, keyed);
   return out;
 }

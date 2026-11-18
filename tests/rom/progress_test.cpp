@@ -112,6 +112,76 @@ TEST(Progress, TheDisassemblyReportsItsStagesInOrder) {
   }
 }
 
+// A stop asked as each stage after the run begins ends the disassembly there:
+// the stages told are the ones up to it, and the result says it stopped. A
+// stop that never answers true leaves the tree as it is with none set.
+TEST(Progress, AStopAnsweredAtAStageEndsTheDisassemblyThere) {
+  const std::vector<std::uint8_t> rom = examples::uploadingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = true;
+  request.runMasterCycles = kProgressTick + kFrame;
+  std::vector<std::string> all;
+  request.progress = [&](const Progress& p) {
+    if (all.empty() || all.back() != p.stage) all.emplace_back(p.stage);
+  };
+  const CartridgeDisassembly whole = disassembleCartridge(request);
+  EXPECT_FALSE(whole.stopped);
+  const std::vector<std::string> expected = {"running the cartridge", "tracing", "proving what every path reaches",
+                                             "booting the sound program", "lifting the files", "drawing the previews"};
+  ASSERT_EQ(all, expected);
+  request.stop = [] { return false; };
+  const CartridgeDisassembly unstopped = disassembleCartridge(request);
+  EXPECT_FALSE(unstopped.stopped);
+  EXPECT_EQ(renderManifest(unstopped), renderManifest(whole)) << "a stop that never answers true changes nothing";
+  // Each stage the stop is asked at, from the second: the run's own is not.
+  for (std::size_t at = 1; at < expected.size(); ++at) {
+    std::vector<std::string> told;
+    CartridgeRequest r = request;
+    r.progress = [&](const Progress& p) {
+      if (told.empty() || told.back() != p.stage) told.emplace_back(p.stage);
+    };
+    r.stop = [&] { return told.size() > at; };
+    const CartridgeDisassembly stopped = disassembleCartridge(r);
+    EXPECT_TRUE(stopped.stopped) << expected[at];
+    const std::vector<std::string> upTo(expected.begin(), expected.begin() + static_cast<std::ptrdiff_t>(at) + 1);
+    EXPECT_EQ(told, upTo) << "stopped at " << expected[at];
+  }
+}
+
+// Inside the previews the stop is asked as the stage begins, at each staged
+// range and at each file: a stop at any of them is the last thing asked, and
+// what follows it is not made.
+TEST(Progress, AStopInsideThePreviewsEndsThemWhereItIsAnswered) {
+  const std::vector<std::uint8_t> rom = examples::drawingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = true;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * kFrame;
+  const CartridgeDisassembly whole = disassembleCartridge(request);
+  ASSERT_FALSE(whole.stopped);
+  ASSERT_GE(whole.staged.size(), 1u);
+  ASSERT_GE(whole.assets.size(), 1u);
+  ASSERT_GE(whole.previews.size(), 1u);
+  ASSERT_FALSE(whole.samples.empty());
+  // The asks inside the stage: one as it begins, one a range, one a file.
+  const std::size_t asks = 1u + whole.staged.size() + whole.assets.size();
+  for (const std::size_t at : {std::size_t{2}, 1u + whole.staged.size() + 1u}) {
+    bool previews = false;
+    std::size_t asked = 0;
+    CartridgeRequest r = request;
+    r.progress = [&](const Progress& p) { previews = p.stage == "drawing the previews"; };
+    r.stop = [&] { return previews && ++asked >= at; };
+    const CartridgeDisassembly partway = disassembleCartridge(r);
+    EXPECT_TRUE(partway.stopped) << "the ask " << at << " of " << asks;
+    EXPECT_EQ(asked, at) << "nothing asked after the stop";
+    EXPECT_LT(partway.previews.size(), whole.previews.size() + 1u);
+    EXPECT_TRUE(partway.samples.empty()) << "the samples come after the previews";
+  }
+}
+
 TEST(Progress, TheBootReportsBothBootsAndWhatEachTook) {
   std::vector<Report> reports;
   std::string reason;

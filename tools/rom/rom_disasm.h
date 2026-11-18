@@ -333,6 +333,9 @@ struct CartridgeDisassembly {
     RegisterClass cls = RegisterClass::Display;
   };
   std::vector<EnumeratedLift> enumeratedLifts;
+  // The request's `stop` answered true: the disassembly ended at that point
+  // and holds what it had made by then, which is no tree to write.
+  bool stopped = false;
 };
 
 // The text of one of the tree's files, by the path the manifest names, or
@@ -393,9 +396,14 @@ struct CartridgeRequest {
   // way the first run is told and `enumerating` once a value, then `lifting
   // the files` and `drawing the previews` (`rom/progress.h`). Nothing is
   // printed by the library; `snes_disasm` prints these to standard error
-  // unless `--quiet`. An exception the sink throws ends the disassembly and
-  // leaves through `disassembleCartridge`.
+  // unless `--quiet`.
   ProgressSink progress;
+  // Asked, when set, as `tracing`, each turn of `proving what every path
+  // reaches`, `lifting the files` and each range and file of `drawing the
+  // previews` begin, and once the two boots of the sound program are done:
+  // true ends the disassembly there, and `disassembleCartridge` answers what it
+  // holds with `stopped` set. A host that gives up a disassembly asks here.
+  std::function<bool()> stop;
 };
 
 // Disassembles the cartridge: the header, the regions traced from every entry with

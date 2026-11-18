@@ -1734,15 +1734,15 @@ int main(int argc, char** argv) {
     // at the buffer's ceilings, or by the pause chord. A stop runs no cycle.
     if (live) {
       if (player.takePause()) live->togglePause();
-      player::Stopped why = live->afterRun(SDL_GetTicksNS());
-      if (why != player::Stopped::No) {
+      player::Stopped stop = live->afterRun(SDL_GetTicksNS());
+      if (stop != player::Stopped::No) {
         const std::uint64_t began = SDL_GetTicksNS();
-        if (why == player::Stopped::AtLimit) player.attention();
-        while (why != player::Stopped::No && !player.closed() && !closeAsked()) {
+        if (stop == player::Stopped::AtLimit) player.attention();
+        while (stop != player::Stopped::No && !player.closed() && !closeAsked()) {
           player.stoppedPass(live->statusText());
           if (player.takePause()) live->togglePause();
           SDL_DelayNS(20'000'000u);
-          why = live->whileStopped(SDL_GetTicksNS());
+          stop = live->whileStopped(SDL_GetTicksNS());
         }
         player.held(SDL_GetTicksNS() - began);
       }

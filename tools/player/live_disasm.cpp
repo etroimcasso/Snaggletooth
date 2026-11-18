@@ -11,6 +11,11 @@
 #include <thread>
 #include <utility>
 
+// The toolkit's headers before the platform's: <windows.h> defines
+// `RegisterClass` as a macro, and the toolkit names a type so.
+#include "rom/rom_disasm.h"
+#include "rom/rom_observe.h"
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -23,9 +28,6 @@
 #else
 #include <pthread.h>
 #endif
-
-#include "rom/rom_disasm.h"
-#include "rom/rom_observe.h"
 
 namespace snaggletooth::player {
 
@@ -154,10 +156,6 @@ TreeSummary summaryOf(const disasm::CartridgeDisassembly& disassembly, std::uint
 
 // The two commands run over each tree, in order.
 constexpr std::array<const char*, 2> kCommands = {"snes_render", "snes_verify"};
-
-// Thrown through the disassembly by its progress sink to end a tree from the
-// middle of the session once the close is asked for.
-struct TreeGivenUp {};
 
 std::filesystem::path commandFile(const std::filesystem::path& directory, const char* name) {
 #if defined(_WIN32)
@@ -464,8 +462,8 @@ struct LiveDisassembly::Impl {
   // One tree from `observation`: the session's request, disassembled, written,
   // said, and the two commands run. False, said, when it was not written. A
   // tree from the middle of the session is given up at the next step it
-  // begins once the close is asked for, since the last tree is made from the
-  // whole run after it: false, with nothing written.
+  // begins once the close is asked for (`CartridgeRequest::stop`), since the
+  // last tree is made from the whole run after it: false, with nothing written.
   bool makeTree(const disasm::RunObservation& observation, const std::vector<std::string>& notes,
                 std::uint64_t playedMaster, bool last) {
     setWork(Work::Tree);
@@ -476,13 +474,23 @@ struct LiveDisassembly::Impl {
         request->observed = &observation;
         request->observedNotes = notes;
         request->captureSound = true;
-        request->progress = [this, last](const disasm::Progress& progress) {
-          setStep(progress.stage);
-          if (!last && closeIsRequested()) throw TreeGivenUp{};
-        };
+        request->progress = [this](const disasm::Progress& progress) { setStep(progress.stage); };
+        if (!last) request->stop = [this] { return closeIsRequested(); };
         const disasm::CartridgeDisassembly disassembly = disasm::disassembleCartridge(*request);
-        // The files are a step as the disassembly's own are, told the same way.
-        request->progress(disasm::Progress{.stage = "writing the files", .spent = 0, .budget = 0});
+        // The files are a step as the disassembly's own are, told and asked
+        // the same way.
+        bool givenUp = disassembly.stopped;
+        if (!givenUp) {
+          request->progress(disasm::Progress{.stage = "writing the files", .spent = 0, .budget = 0});
+          givenUp = request->stop && request->stop();
+        }
+        if (givenUp) {
+          setStep({});
+          forgetSteps();
+          setWork(Work::Watching);
+          say("quit during a mid-session tree: skipped it, the final tree covers the whole session");
+          return false;
+        }
         if (disasm::writeProject(disassembly, directory, error)) {
           const TreeSummary summary = summaryOf(disassembly, playedMaster);
           {
@@ -504,12 +512,6 @@ struct LiveDisassembly::Impl {
           return true;
         }
       }
-    } catch (const TreeGivenUp&) {
-      setStep({});
-      forgetSteps();
-      setWork(Work::Watching);
-      say("quit during a mid-session tree: skipped it, the final tree covers the whole session");
-      return false;
     } catch (const std::exception& e) {
       error = e.what();
     }
