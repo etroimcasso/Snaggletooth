@@ -1101,6 +1101,19 @@ struct CheckHook {
 // move. Its one state between steps is the interpreter's file, which equals the
 // machine's at every boundary, so a check begun at any boundary from
 // `registersOf(before)` is the check begun at power-on.
+// Two byte strings in the order `std::less` gives them — the first byte that
+// differs decides, and a string that is a prefix of the other comes first —
+// compared a byte at a time. `std::less` over a byte vector compiles to a
+// `memcmp` that GCC 13 refuses under `-Werror` (`stringop-overread`) when it
+// is inlined into a map's lookup; the node keys below are ordered by this.
+inline bool bytesBefore(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) noexcept {
+  const std::size_t shorter = a.size() < b.size() ? a.size() : b.size();
+  for (std::size_t i = 0; i < shorter; ++i) {
+    if (a[i] != b[i]) return a[i] < b[i];
+  }
+  return a.size() < b.size();
+}
+
 struct StepCheck {
   CartridgeBoard board;
   std::size_t imageBytes;
@@ -1113,7 +1126,15 @@ struct StepCheck {
   // program rewrote at an address are a second node there, and a mirror bank
   // shares the node of the bank the tree places the bytes in.
   using NodeKey = std::tuple<Address, std::uint32_t, std::vector<std::uint8_t>>;
-  std::map<NodeKey, ir::Node> nodes;
+  // `NodeKey`'s order under `std::less`, its bytes compared by `bytesBefore`.
+  struct NodeKeyBefore {
+    bool operator()(const NodeKey& a, const NodeKey& b) const noexcept {
+      if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
+      if (std::get<1>(a) != std::get<1>(b)) return std::get<1>(a) < std::get<1>(b);
+      return bytesBefore(std::get<2>(a), std::get<2>(b));
+    }
+  };
+  std::map<NodeKey, ir::Node, NodeKeyBefore> nodes;
 
   StepCheck(const CartridgeBoard& b, std::size_t bytes, const Cpu65816State& start, ir::Shadow* shadow)
       : board(b), imageBytes(bytes) {
@@ -1224,7 +1245,7 @@ struct Lockstep final : CheckHook {
   // Every node the checks lifted, by address, mode and bytes: a step's node
   // joins when the check that met it lifted it then.
   using NodeKey = StepCheck::NodeKey;
-  std::set<NodeKey> nodeKeys;
+  std::set<NodeKey, StepCheck::NodeKeyBefore> nodeKeys;
 
   // Where the run's own flow says execution may arrive without an instruction
   // naming it: the address after every call taken, for its return, and every
@@ -1755,7 +1776,14 @@ struct Spc700Check {
   // rewrote at an address are a second node there — and the keys lifted since
   // the last step was answered.
   using NodeKey = std::pair<std::uint16_t, std::vector<std::uint8_t>>;
-  std::map<NodeKey, ir::Node> nodes;
+  // `NodeKey`'s order under `std::less`, its bytes compared by `bytesBefore`.
+  struct NodeKeyBefore {
+    bool operator()(const NodeKey& a, const NodeKey& b) const noexcept {
+      if (a.first != b.first) return a.first < b.first;
+      return bytesBefore(a.second, b.second);
+    }
+  };
+  std::map<NodeKey, ir::Node, NodeKeyBefore> nodes;
   std::vector<NodeKey> lifted;
 
   // The instruction about to run, decoded at the last boundary; nothing when
@@ -1897,7 +1925,7 @@ struct AudioLockstep final : ApuObserver {
   std::array<std::uint8_t, kDspRegisters> dsp{};
   std::vector<KeyedSample> samples;
   std::set<std::uint16_t> unendedStarts;      // a start already noted as having no end flag
-  std::set<Spc700Check::NodeKey> nodeKeys;    // every node a check lifted
+  std::set<Spc700Check::NodeKey, Spc700Check::NodeKeyBefore> nodeKeys;  // every node a check lifted
   std::set<std::uint16_t> notedSites;         // a site already named in the notes
   std::vector<ir::Divergence> divergences;    // each step's last, in order
   std::uint64_t instructions = 0;

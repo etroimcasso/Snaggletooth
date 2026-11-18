@@ -690,8 +690,8 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
         // waited for before its block is returned.
         InFlight& front = inflight.front();
         try {
-          Checks answered = front.checks.get();
-          if (!broken) play(front.block, answered);
+          Checks results = front.checks.get();
+          if (!broken) play(front.block, results);
         } catch (const std::exception& e) {
           if (!broken) failed(e.what());
           broken = true;
@@ -702,11 +702,11 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
         answer(played, broken);
         continue;
       }
-      const bool stopped = broken || !taking;
-      answer(played, stopped);
-      if (ended && !stopped) return;
+      const bool halted = broken || !taking;
+      answer(played, halted);
+      if (ended && !halted) return;
       idle(answeredHere);
-      if (stopped && isStopping()) return;
+      if (halted && isStopping()) return;
     }
   }
 
