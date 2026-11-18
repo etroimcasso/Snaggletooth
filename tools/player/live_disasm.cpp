@@ -342,7 +342,7 @@ struct LiveDisassembly::Impl {
       hasFill.store(false, std::memory_order_release);
       nudgeTree();
       endedStopsNanos.fetch_add(nanos - stopBegan, std::memory_order_release);
-      say("resumed after " + durationText(static_cast<double>(nanos - stopBegan) / kNanosPerSecond));
+      say("resumed after " + durationText(static_cast<double>(nanos - stopBegan) / static_cast<double>(kNanosPerSecond)));
     }
     return now;
   }
@@ -666,7 +666,7 @@ std::optional<double> TreeSteps::secondsLeft(std::uint64_t nanos) const {
     const std::uint64_t spent = spentIn(step->name);
     if (step->nanos > spent) left += step->nanos - spent;
   }
-  return static_cast<double>(left) / kNanosPerSecond;
+  return static_cast<double>(left) / static_cast<double>(kNanosPerSecond);
 }
 
 std::size_t titleCharacters(std::string_view text) noexcept {
@@ -693,7 +693,7 @@ std::string LiveTitle::closeText(const LiveStatus& status, std::uint64_t stageNa
   // middle of the session, and the buffer is what the close has left.
   if (held == 0u) {
     // A stage says how long it has run: nothing tells how much of it is left.
-    const std::string sofar = ", " + durationText(static_cast<double>(stageNanos) / kNanosPerSecond);
+    const std::string sofar = ", " + durationText(static_cast<double>(stageNanos) / static_cast<double>(kNanosPerSecond));
     switch (status.work) {
       case Work::Tree: {
         const std::string tree =
@@ -903,7 +903,7 @@ std::string sessionText(const LiveStatus& status) {
                      " of files; " + sizeText(status.buffer.diskWritten) + " went through its files; ";
   if (status.stops == 0u) return text + "the game never stopped";
   text += status.stops == 1u ? "the game stopped once" : "the game stopped " + std::to_string(status.stops) + " times";
-  return text + " for " + durationText(static_cast<double>(status.stoppedNanos) / kNanosPerSecond);
+  return text + " for " + durationText(static_cast<double>(status.stoppedNanos) / static_cast<double>(kNanosPerSecond));
 }
 
 std::string LiveDisassembly::statusText() const {

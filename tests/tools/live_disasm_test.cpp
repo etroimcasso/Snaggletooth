@@ -550,7 +550,9 @@ TEST_F(PlayerLiveDisassembly, RamPastItsCeilingStopsTheGameUntilItHasDrained) {
   bool forRam = false;  // the current stop is one for RAM
   // With no RAM to drain to, a stop for RAM lasts until the buffer holds nothing.
   plan.afterStop = [&](LiveDisassembly& live) {
-    if (std::exchange(forRam, false)) EXPECT_EQ(live.status().buffer.held, 0u) << "a stop for RAM ended early";
+    if (std::exchange(forRam, false)) {
+      EXPECT_EQ(live.status().buffer.held, 0u) << "a stop for RAM ended early";
+    }
   };
   plan.eachStopPass = [&](LiveDisassembly& live, Stopped why, unsigned pass) {
     if (why != Stopped::AtLimit || pass != 0u) return;

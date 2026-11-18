@@ -3280,7 +3280,9 @@ TEST(RomDisasm, AHostsRunWritesTheTreeTheDisassemblysOwnRunWrites) {
     EXPECT_EQ(manifest.find("\nnote     enumerate "), std::string::npos) << example.name << ": no plan is made";
     EXPECT_EQ(manifest, withoutPlanNotes(renderManifest(ran))) << example.name;
     ASSERT_EQ(handed.sound.has_value(), ran.sound.has_value()) << example.name;
-    if (ran.sound) EXPECT_EQ(renderSoundProgramFile(handed), renderSoundProgramFile(ran)) << example.name;
+    if (ran.sound) {
+      EXPECT_EQ(renderSoundProgramFile(handed), renderSoundProgramFile(ran)) << example.name;
+    }
     const CartridgeDisassembly unasked = disassembleHanded(rom, hosted, false);
     EXPECT_EQ(renderProgramFile(unasked), renderProgramFile(handed)) << example.name << ", not asked to run";
     EXPECT_EQ(renderManifest(unasked), manifest) << example.name << ", not asked to run";
