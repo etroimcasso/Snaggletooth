@@ -528,7 +528,7 @@ MovedKey keyOf(const MovedRange& r) {
 // A landing's identity: every field but its palette, which is the first sighting's.
 using PortKey = std::tuple<bool, std::uint8_t, std::uint16_t, std::uint16_t, bool, std::uint16_t, std::uint8_t>;
 PortKey keyOf(const std::optional<PortLanding>& landing) {
-  if (!landing) return {false, 0, 0, 0, false, 0, 0};
+  if (!landing) return PortKey{};
   return {true,           static_cast<std::uint8_t>(landing->memory), landing->lowest, landing->highest,
           landing->shown, landing->areas,                             landing->depths};
 }
