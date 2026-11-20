@@ -387,6 +387,7 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
     tools/rom/rom_enumerate.cpp
     tools/rom/rom_facts.cpp
     tools/rom/rom_observe.cpp
+    tools/rom/rom_record.cpp
     tools/rom/rom_verify.cpp
   )
   target_link_libraries(snaggletooth_rom PUBLIC
@@ -695,6 +696,7 @@ if(SNAGGLETOOTH_BUILD_TESTS)
     tests/rom/input_script_test.cpp
     tests/rom/observe_test.cpp
     tests/rom/progress_test.cpp
+    tests/rom/record_test.cpp
     tests/rom/rom_disasm_test.cpp
     tests/rom/routines_test.cpp
     tests/rom/verify_test.cpp

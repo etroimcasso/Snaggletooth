@@ -115,6 +115,7 @@ struct ReachedTarget {
   // a person's entry names the same target under the same mode, whose name wins.
   // Empty as the run reports it; the disassembler fills it in.
   std::string name;
+  friend bool operator==(const ReachedTarget&, const ReachedTarget&) = default;
 };
 
 // Two sightings are the same when the same site reached the same target under
@@ -167,6 +168,7 @@ struct MovedRange {
   std::uint32_t bytes = 0;
   MovedKind kind = MovedKind::Dma;
   std::uint32_t times = 1;
+  friend bool operator==(const MovedRange&, const MovedRange&) = default;
 };
 
 // Two sightings are the same range when every field but the count agrees.
@@ -196,6 +198,7 @@ struct Landing {
   Cpu65816Mode mode;
   Address site = 0;
   std::string name;
+  friend bool operator==(const Landing&, const Landing&) = default;
 };
 
 // Two landings are the same when the same site arrived at the same target under
@@ -209,6 +212,7 @@ struct SeenState {
   Address address = 0;
   std::vector<std::uint16_t> d;
   std::vector<std::uint8_t> dbr;
+  friend bool operator==(const SeenState&, const SeenState&) = default;
 };
 
 // One writer of a staged range's bytes — an instruction, as the tree places it,
@@ -223,6 +227,7 @@ struct StagedWriter {
   std::uint64_t bytes = 0;
   ir::OriginSet origin;
   std::vector<ir::OriginInterval> sources;
+  friend bool operator==(const StagedWriter&, const StagedWriter&) = default;
 };
 
 // The video memory a data port reaches: `VMDATAL`/`VMDATAH` VRAM, `CGDATA`
@@ -282,6 +287,7 @@ struct PortLanding {
   std::uint16_t areas = 0;
   std::uint8_t depths = 0;
   std::optional<std::size_t> palette;
+  friend bool operator==(const PortLanding&, const PortLanding&) = default;
 };
 
 // The areas as a manifest writes them: the names joined by `+`, `none` for a
@@ -313,6 +319,7 @@ struct PortLanding {
 struct ContentOrigin {
   std::uint32_t bytes = 0;
   ir::OriginSet origin;  // empty for bytes with no image origin: cleared, computed, read from a register
+  friend bool operator==(const ContentOrigin&, const ContentOrigin&) = default;
 };
 
 struct CarriedContent {
@@ -325,6 +332,7 @@ struct CarriedContent {
   bool indirect = false;
   std::vector<ContentOrigin> byteOrigins;
   std::uint32_t order = 0;
+  friend bool operator==(const CarriedContent&, const CarriedContent&) = default;
 };
 
 // Two contents are the same when the same bytes went to the same class the
@@ -344,6 +352,7 @@ struct StagedRange {
   ir::OriginSet origin;
   std::vector<StagedWriter> writers;
   std::vector<CarriedContent> contents;
+  friend bool operator==(const StagedRange&, const StagedRange&) = default;
 };
 
 // Two staged ranges are the same extent when they begin at the same address
@@ -366,6 +375,7 @@ struct LandedRange {
   MovedKind kind = MovedKind::Dma;
   PortLanding landing;
   std::uint32_t times = 1;
+  friend bool operator==(const LandedRange&, const LandedRange&) = default;
 };
 
 // The order landings are reported and written in: their ranges' order, then
@@ -390,6 +400,7 @@ struct WalkedRange {
   unsigned unit = 1;
   bool indirect = false;
   std::uint32_t times = 1;
+  friend bool operator==(const WalkedRange&, const WalkedRange&) = default;
 };
 
 // The bytes one line of an HDMA table transfers under a `DMAP` transfer
@@ -428,6 +439,7 @@ struct StreamedRange {
   ir::OriginInterval source;
   std::optional<Address> memory;
   std::optional<PortLanding> landing;
+  friend bool operator==(const StreamedRange&, const StreamedRange&) = default;
 };
 
 // Two streams are the same when every field but the count and the source agrees.
@@ -514,6 +526,7 @@ struct EnumeratedRun {
   std::vector<std::uint32_t> values;
   Address enteredFrom = 0;
   std::vector<EnumeratedExtent> extents;
+  friend bool operator==(const EnumeratedRun&, const EnumeratedRun&) = default;
 };
 
 // One sample a key-on named: the address in the audio memory its first block
@@ -528,6 +541,7 @@ struct KeyedSample {
   std::uint16_t loop = 0;
   std::vector<std::uint8_t> bytes;
   std::uint32_t times = 1;
+  friend bool operator==(const KeyedSample&, const KeyedSample&) = default;
 };
 
 // Two samples are the same when they begin at the same address and hold the
@@ -587,6 +601,7 @@ struct RunObservation {
   std::uint64_t variantsReturned = 0;
   std::uint64_t variantsConfined = 0;
   std::uint64_t enumerationCycles = 0;
+  friend bool operator==(const RunObservation&, const RunObservation&) = default;
 };
 
 // The run on a machine the host runs. Built over a machine at power-on, it sets

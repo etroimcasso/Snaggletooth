@@ -8,7 +8,7 @@ The command-line tools that ship with Snaggletooth, and the libraries behind the
 | [`assembler/`](assembler/README.md) | `snaggletooth_assembler` | — | [assemblers.md](../docs/assemblers.md) |
 | [`spc700/`](spc700/README.md) | `snaggletooth_spc700` | `spc700_disasm`, `spc700_asm` | [spc700-disassembler.md](../docs/spc700-disassembler.md), [assemblers.md](../docs/assemblers.md) |
 | [`cpu65816/`](cpu65816/README.md) | `snaggletooth_cpu65816` | `cpu65816_disasm`, `cpu65816_asm` | [65816-disassembler.md](../docs/65816-disassembler.md), [assemblers.md](../docs/assemblers.md) |
-| [`rom/`](rom/README.md) | `snaggletooth_rom`, `snaggletooth_rom_render` | `snes_disasm`, `snes_render`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [input-script.md](../docs/input-script.md), [spc-rendering.md](../docs/spc-rendering.md) |
+| [`rom/`](rom/README.md) | `snaggletooth_rom`, `snaggletooth_rom_render` | `snes_disasm`, `snes_render`, `snes_verify`, `rom_render` | [snes-disassembler.md](../docs/snes-disassembler.md), [project-manifest.md](../docs/project-manifest.md), [run-record.md](../docs/run-record.md), [input-script.md](../docs/input-script.md), [spc-rendering.md](../docs/spc-rendering.md) |
 | [`ir/`](ir/README.md) | `snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential` | `snes_lift`, `snes_differential` | [ir.md](../docs/ir.md) |
 | [`examples/`](examples/README.md) | — (header-only) | `snes_examples` | one README per cartridge |
 | [`spc/`](spc/README.md) | `snaggletooth_spc` | `spc_render` | [spc-rendering.md](../docs/spc-rendering.md) |
