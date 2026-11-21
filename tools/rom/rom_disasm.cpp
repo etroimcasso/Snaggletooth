@@ -395,20 +395,21 @@ std::vector<PortLanding> landingsOf(const CartridgeDisassembly& out, const Moved
   return landings;
 }
 
-// The directory a VRAM file takes from where its bytes landed: `maps` when
-// every landing the run saw drawn lies in a layer's screen, `tiles` when every
-// one lies in a name base or the sprite tiles, and `vram` when a landing was
-// never drawn (and so has no area), lies in no area, lies under Mode 7, mixes
-// the two, or when there is none.
+// The directory a VRAM file takes from where its bytes were drawn: `maps` when
+// every landing the runs saw drawn lies in a layer's screen, `tiles` when every
+// one lies in a name base or the sprite tiles, and `vram` when a drawn landing
+// lies in no area, lies under Mode 7, or mixes the two, or when no landing was
+// drawn. A landing never drawn says nothing of what the memory was used as, and
+// is passed over.
 std::string_view vramDirectory(const std::vector<Piece>& group) {
   bool any = false;
   bool maps = true;
   bool tiles = true;
   for (const Piece& piece : group) {
     for (const PortLanding& landing : piece.landings) {
-      if (landing.memory != PortMemory::Vram) continue;
+      if (landing.memory != PortMemory::Vram || !landing.shown) continue;
       any = true;
-      if (landing.areas == 0u) return "vram";  // shown in no area, or never shown, which has none
+      if (landing.areas == 0u) return "vram";  // drawn, and in no area
       if ((landing.areas & ~kAreaTilemaps) != 0u) maps = false;
       if ((landing.areas & ~kAreaTiles) != 0u) tiles = false;
     }
@@ -674,10 +675,12 @@ std::vector<std::uint8_t> sheetPalette(std::span<const std::uint8_t> cgram, unsi
 }
 
 // What a group of pieces says about the form their file can take: the depths
-// every VRAM landing was read at together, whether the tile areas met are
-// the sprite tiles alone, the palette the first read landing names, whether
-// every shown VRAM landing lies under Mode 7, the distinct walks of the table
-// pieces, and whether every stream piece is exactly the bytes it carried.
+// every VRAM landing was read at together, whether the tile areas the drawn
+// landings met are the sprite tiles alone, the palette the first read landing
+// names, whether every drawn VRAM landing lies under Mode 7, the distinct walks
+// of the table pieces, and whether every stream piece is exactly the bytes it
+// carried. A landing never drawn says nothing of the areas, the palette or Mode
+// 7, and is passed over for them.
 struct FormFacts {
   std::uint8_t depths = 0;
   bool anyVram = false;
@@ -697,9 +700,10 @@ FormFacts factsOf(std::vector<Piece>::const_iterator first, std::vector<Piece>::
       if (landing.memory != PortMemory::Vram) continue;
       facts.anyVram = true;
       facts.depths |= landing.depths;
+      if (!landing.shown) continue;
+      facts.anyShownVram = true;
       if ((landing.areas & kAreaTiles) != kAreaSprites || (landing.areas & ~kAreaTiles) != 0u) facts.spritesOnly = false;
-      if (landing.shown) facts.anyShownVram = true;
-      if (!landing.shown || landing.areas != kAreaMode7) facts.mode7Only = false;
+      if (landing.areas != kAreaMode7) facts.mode7Only = false;
       if (!facts.palette && landing.palette) facts.palette = landing.palette;
     }
     for (const Walk& walk : piece->walks) {
@@ -826,13 +830,68 @@ std::optional<Form> formOfExtension(const std::string& extension) {
   return std::nullopt;
 }
 
-// Whether the disassembly has a run: one it makes, or one a host handed it.
-bool hasRun(const CartridgeRequest& r) { return r.observeRun || r.observed != nullptr; }
+// Whether the disassembly has a run of its own: one it makes, or one a host
+// handed it.
+bool ownRun(const CartridgeRequest& r) { return r.observeRun || r.observed != nullptr; }
+
+// Whether the disassembly is made from any run: its own, or one a record the
+// tree holds kept.
+bool hasRun(const CartridgeRequest& r) { return ownRun(r) || (r.records && !r.records->empty()); }
+
+// The depth and the palette of a tile sheet, read from the file on disk, or
+// the reason it cannot be: false with `reason` set.
+bool sheetFromDisk(AssetFile& asset, const CartridgeRequest& request, std::string& reason) {
+  const std::optional<std::string> file = request.readFile ? request.readFile(asset.file) : std::nullopt;
+  if (!file) {
+    reason = "the tree holds no such file to take the depth and the palette from";
+    return false;
+  }
+  const formats::PngImage image = formats::decodePng(
+      std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(file->data()), file->size()));
+  if (!image.ok() || (image.image.bitDepth != 2u && image.image.bitDepth != 4u && image.image.bitDepth != 8u)) {
+    reason = image.ok() ? "the file on disk is a " + std::to_string(image.image.bitDepth) + "-bit sheet, not 2, 4 or 8"
+                        : "the file on disk does not read as a tile sheet: " + image.error;
+    return false;
+  }
+  asset.depth = image.image.bitDepth;
+  asset.palette = image.image.palette;
+  if (asset.palette.size() < (std::size_t{4} << asset.depth)) {
+    std::vector<std::uint8_t> filled = ramp(std::size_t{1} << asset.depth);
+    std::copy(asset.palette.begin(), asset.palette.end(), filled.begin());
+    asset.palette = std::move(filled);
+  }
+  return true;
+}
+
+// The unit and the form of a table, read from the first line of its file on
+// disk, or the reason they cannot be: false with `reason` set.
+bool tableFromDisk(AssetFile& asset, const CartridgeRequest& request, std::string& reason) {
+  const std::optional<std::string> file = request.readFile ? request.readFile(asset.file) : std::nullopt;
+  if (!file) {
+    reason = "the tree holds no such file to take the unit from";
+    return false;
+  }
+  // The first line: `unit <1|2|4> direct|indirect`.
+  const std::string firstLine = file->substr(0, file->find('\n'));
+  const std::vector<std::string> words = text::tokens(firstLine);
+  const bool wellFormed = words.size() == 3 && words[0] == "unit" &&
+                          (words[1] == "1" || words[1] == "2" || words[1] == "4") &&
+                          (words[2] == "direct" || words[2] == "indirect");
+  if (!wellFormed) {
+    reason = "the file on disk does not open with `unit <1|2|4> direct|indirect`";
+    return false;
+  }
+  asset.unit = static_cast<unsigned>(words[1][0] - '0');
+  asset.indirect = words[2] == "indirect";
+  return true;
+}
 
 // With a run, the form follows from the directory the landings named and the
-// facts the run kept. Without one, the manifest's path names the form — the
+// facts the runs kept. Without one, the manifest's path names the form — the
 // run that wrote it chose it — and the facts a tile sheet and a table need
-// are read from the file on disk.
+// are read from the file on disk. A sheet no landing describes and a table no
+// walk describes, with a run or without, take those facts from the file on
+// disk.
 FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeDisassembly& out,
                       const CartridgeRequest& request) {
   FormChoice choice;
@@ -860,7 +919,22 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
     return choice;  // `vram/`, `apu/`, `staged/`, a block an entry points at: bytes as they are
   }
   if (choice.form == Form::Tiles) {
-    if (hasRun(request)) {
+    if (!hasRun(request)) {
+      // Without a run the sheet on disk says its depth and its palette.
+      if (!sheetFromDisk(asset, request, choice.reason)) {
+        choice.form = Form::Bin;
+        return choice;
+      }
+    } else if (facts.depths == 0u) {
+      // No landing describes the sheet: the file on disk does, where the tree
+      // holds one that reads.
+      std::string unread;
+      if (!sheetFromDisk(asset, request, unread)) {
+        choice.form = Form::Bin;
+        choice.reason = "no landing names its depth";
+        return choice;
+      }
+    } else {
       const std::optional<unsigned> depth = landingDepth(PortLanding{.memory = PortMemory::Vram,
                                                                      .lowest = 0,
                                                                      .highest = 0,
@@ -870,65 +944,36 @@ FormChoice chooseForm(AssetFile& asset, const FormFacts& facts, const CartridgeD
                                                                      .palette = std::nullopt});
       if (!depth) {
         choice.form = Form::Bin;
-        choice.reason = facts.depths == 0u ? "no landing names its depth" : "its landings were read at two depths";
+        choice.reason = "its landings were read at two depths";
         return choice;
       }
       asset.depth = *depth;
       asset.palette = facts.palette ? sheetPalette(out.palettes[*facts.palette], *depth, facts.spritesOnly)
                                     : ramp(std::size_t{1} << *depth);
-    } else {
-      // Without a run the sheet on disk says its depth and its palette.
-      const std::optional<std::string> file = request.readFile ? request.readFile(asset.file) : std::nullopt;
-      if (!file) {
-        choice.form = Form::Bin;
-        choice.reason = "the tree holds no such file to take the depth and the palette from";
-        return choice;
-      }
-      const formats::PngImage image = formats::decodePng(
-          std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(file->data()), file->size()));
-      if (!image.ok() || (image.image.bitDepth != 2u && image.image.bitDepth != 4u && image.image.bitDepth != 8u)) {
-        choice.form = Form::Bin;
-        choice.reason = image.ok() ? "the file on disk is a " + std::to_string(image.image.bitDepth) + "-bit sheet, not 2, 4 or 8"
-                                   : "the file on disk does not read as a tile sheet: " + image.error;
-        return choice;
-      }
-      asset.depth = image.image.bitDepth;
-      asset.palette = image.image.palette;
-      if (asset.palette.size() < (std::size_t{4} << asset.depth)) {
-        std::vector<std::uint8_t> filled = ramp(std::size_t{1} << asset.depth);
-        std::copy(asset.palette.begin(), asset.palette.end(), filled.begin());
-        asset.palette = std::move(filled);
-      }
     }
   } else if (choice.form == Form::Hdma) {
-    if (hasRun(request)) {
+    if (!hasRun(request)) {
+      if (!tableFromDisk(asset, request, choice.reason)) {
+        choice.form = Form::Bin;
+        return choice;
+      }
+    } else if (facts.walks.empty()) {
+      // No walk describes the table: the file on disk does, where the tree
+      // holds one that reads.
+      std::string unread;
+      if (!tableFromDisk(asset, request, unread)) {
+        choice.form = Form::Bin;
+        choice.reason = "no walk names its unit";
+        return choice;
+      }
+    } else {
       if (facts.walks.size() != 1u) {
         choice.form = Form::Bin;
-        choice.reason = facts.walks.empty() ? "no walk names its unit" : "the engine walked it under two units";
+        choice.reason = "the engine walked it under two units";
         return choice;
       }
       asset.unit = facts.walks.front().unit;
       asset.indirect = facts.walks.front().indirect;
-    } else {
-      const std::optional<std::string> file = request.readFile ? request.readFile(asset.file) : std::nullopt;
-      if (!file) {
-        choice.form = Form::Bin;
-        choice.reason = "the tree holds no such file to take the unit from";
-        return choice;
-      }
-      // The first line: `unit <1|2|4> direct|indirect`.
-      const std::string firstLine = file->substr(0, file->find('\n'));
-      const std::vector<std::string> words = text::tokens(firstLine);
-      const bool wellFormed = words.size() == 3 && words[0] == "unit" &&
-                              (words[1] == "1" || words[1] == "2" || words[1] == "4") &&
-                              (words[2] == "direct" || words[2] == "indirect");
-      if (!wellFormed) {
-        choice.form = Form::Bin;
-        choice.reason = "the file on disk does not open with `unit <1|2|4> direct|indirect`";
-        return choice;
-      }
-      asset.unit = static_cast<unsigned>(words[1][0] - '0');
-      asset.indirect = words[2] == "indirect";
     }
   }
   if (asset.bytes.size() < unitOf(choice.form, asset.depth, asset.unit, asset.indirect)) {
@@ -1660,21 +1705,15 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
   }
 
-  // A file the shadow named in an earlier run, kept as its line records it
-  // when nothing this pass lifted covers its bytes: its evidence is written
-  // fresh by a run, and the line is what keeps the file. A `staged` or
-  // `stream` line's `also` classes are kept with it, by the file's first byte.
+  // A file the shadow named in an earlier run is lifted again as its line
+  // records it. Where a piece this pass lifts shares a byte with it, the two
+  // are one file holding the bytes of both. A `staged` or `stream` line's
+  // `also` classes are kept with it, by the file's first byte.
   std::map<std::size_t, std::vector<RegisterClass>> keptAlso;
   for (const ManifestAsset& kept : request.assets) {
     if (kept.kind != MovedKind::Staged && kept.kind != MovedKind::Stream && kept.kind != MovedKind::Enumerated) continue;
     const std::optional<std::size_t> offset = romOffset(board, kept.first, imageBytes);
     if (!offset || *offset + kept.bytes > imageBytes) continue;
-    const auto overlaps = [&](const Piece& piece) {
-      return piece.offset < *offset + kept.bytes && *offset < piece.offset + piece.length;
-    };
-    const bool covered = std::any_of(pieces.begin(), pieces.end(), overlaps) ||
-                         std::any_of(toolkit.begin(), toolkit.end(), overlaps);
-    if (covered) continue;
     if ((kept.kind == MovedKind::Staged || kept.kind == MovedKind::Stream) && !kept.also.empty()) {
       keptAlso[*offset] = kept.also;
     }
@@ -2007,9 +2046,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     for (PendingLift& lift : lifts) lift.asset = placeOf[lift.asset];
   }
 
-  // A person's path for a file lifted again. A file the shadow named that
-  // nothing lifted again was re-lifted from its line above, or was covered by
-  // a wider file this pass lifted, whose name is its own.
+  // A person's path for a file lifted again. A file the shadow named that is
+  // not lifted again as its line records it was joined above to a wider file
+  // this pass lifted, whose name is its own, or was refused with a note.
   std::vector<bool> namedByAPerson(out.assets.size(), false);
   for (const ManifestAsset& named : request.assets) {
     const auto found = std::find_if(out.assets.begin(), out.assets.end(), [&](const AssetFile& a) {
@@ -2262,25 +2301,61 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // this run's over them — a range this run saw again carries this run's count,
   // one it did not see is kept as it was.
   out.moved = request.moved;
-  // The samples the run's key-ons named, written once the files that could
+  // The samples the runs' key-ons named, written once the files that could
   // hold their bytes are known.
   std::vector<KeyedSample> keyed;
   // The first run's counts, which the second run is held to.
   std::uint64_t firstInstructions = 0;
   std::uint64_t firstDivergences = 0;
+  // This disassembly's own run, as the run gave it: the first run's
+  // observation and notes, and later the second run's outcomes, counts and
+  // notes. Empty without a run of its own.
+  std::optional<RunRecord> own;
+  // The notes every run over the tree made, the records' in order and then
+  // this run's: each run's as it made them, without a note an earlier run made.
+  const std::span<const RunRecord> records =
+      request.records ? std::span<const RunRecord>(*request.records) : std::span<const RunRecord>();
+  const auto sayRunNotes = [&](std::vector<std::string> RunRecord::*kind, const std::vector<std::string>* last) {
+    std::set<std::string> earlier;
+    const auto say = [&](const std::vector<std::string>& notes) {
+      for (const std::string& note : notes) {
+        if (earlier.count(note) == 0) out.notes.push_back(note);
+      }
+      earlier.insert(notes.begin(), notes.end());
+    };
+    for (const RunRecord& record : records) say(record.*kind);
+    if (last != nullptr) say(*last);
+  };
   if (hasRun(request)) {
     // A host's run is taken as it was handed over, its notes where this
     // disassembly's own run would put them.
+    if (ownRun(request)) {
+      own.emplace();
+      if (request.observed != nullptr) {
+        own->observation = *request.observed;
+        own->notes.assign(request.observedNotes.begin(), request.observedNotes.end());
+      } else {
+        own->observation =
+            observeRun(request.rom, request.runMasterCycles, request.input, own->notes, request.progress);
+      }
+      firstInstructions = own->observation.instructions;
+      firstDivergences = own->observation.divergences;
+    }
+    sayRunNotes(&RunRecord::notes, own ? &own->notes : nullptr);
+    // What the tree is made from: every record joined in order, and this run
+    // joined to them — unless it is a run a record already holds, which is
+    // not counted twice (`foldRecords`).
     RunObservation observation;
-    if (request.observed != nullptr) {
-      observation = *request.observed;
-      out.notes.insert(out.notes.end(), request.observedNotes.begin(), request.observedNotes.end());
+    if (records.empty()) {
+      observation = request.recordRun ? own->observation : std::move(own->observation);
+    } else if (!own) {
+      observation = foldRecords(records).observation;
     } else {
-      observation = observeRun(request.rom, request.runMasterCycles, request.input, out.notes, request.progress);
+      std::vector<RunRecord> runs(records.begin(), records.end());
+      runs.push_back(RunRecord{.observation = own->observation, .notes = {}, .enumerationNotes = {}});
+      observation = foldRecords(runs).observation;
     }
     keyed = std::move(observation.samples);
-    firstInstructions = observation.instructions;
-    firstDivergences = observation.divergences;
     for (const ReachedTarget& seen : observation.reached) {
       const bool known = std::any_of(reached.begin(), reached.end(), [&](const ReachedTarget& r) {
         return sameSighting(r, seen);
@@ -2299,6 +2374,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     out.landed = std::move(observation.landed);
     out.walked = std::move(observation.walked);
     out.palettes = std::move(observation.palettes);
+    out.enumerated = std::move(observation.enumerated);
     for (const MovedRange& range : observation.moved) {
       const auto known = std::find_if(out.moved.begin(), out.moved.end(),
                                       [&](const MovedRange& m) { return sameRange(m, range); });
@@ -2457,7 +2533,12 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // each an entry the trace starts from, after the vectors, the person's entries
   // and the run's sightings, so a name any of those gave a target is the one it
   // keeps. Deriving can reach code that derives more, so the trace and the
-  // analysis take turns until neither adds anything.
+  // analysis take turns until neither adds anything. Each turn derives every
+  // destination again; one the tree cannot trace is said once.
+  std::set<std::string> derivedRefused;
+  const auto refuseDerived = [&](std::string note) {
+    if (derivedRefused.insert(note).second) out.notes.push_back(std::move(note));
+  };
   auto addDerived = [&](const std::vector<DerivedTarget>& found) {
     bool any = false;
     for (const DerivedTarget& derived : found) {
@@ -2466,21 +2547,21 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       });
       if (known) continue;
       if (repeatedHalf(board, derived.target)) {
-        out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
-                            " is a LoROM bank's lower half; not traced");
+        refuseDerived("derived " + address24(derived.target) + " from " + address24(derived.site) +
+                      " is a LoROM bank's lower half; not traced");
         continue;
       }
       const std::optional<Address> home = canonical(board, imageBytes, derived.target);
       if (!home) {
-        out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
-                            " is not in the image; not traced");
+        refuseDerived("derived " + address24(derived.target) + " from " + address24(derived.site) +
+                      " is not in the image; not traced");
         continue;
       }
       const std::string name = (derived.call ? "sub_" : "loc_") + hex(*home, 6);
       const std::optional<bool> added = add(*home, contextOf(derived.mode), name);
       if (!added) {
-        out.notes.push_back("derived " + address24(derived.target) + " from " + address24(derived.site) +
-                            " lies in no region; not traced");
+        refuseDerived("derived " + address24(derived.target) + " from " + address24(derived.site) +
+                      " lies in no region; not traced");
         continue;
       }
       any = any || *added;
@@ -2595,21 +2676,41 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // as the run entered them; and what the code proves about a transfer from
   // work RAM the run never started. The second run's other findings are the
   // first run's, which stand. A host's run has no second run: nothing is
-  // planned over it.
+  // planned over it. Without a run of its own the plan is made and nothing is
+  // run. The second run's outcomes join those the records hold, and its notes
+  // stand after the plan's, after the records' notes of the same kind.
   if (hasRun(request)) {
+    std::vector<std::string> enumerationNotes;
     if (request.observed == nullptr) {
       const EnumerationPlan plan = enumerationPlan(out, *proven, out.notes);
-      if (!plan.routines.empty()) {
-        const RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, out.notes,
-                                                 request.progress, plan, firstInstructions, firstDivergences);
-        out.enumerated = second.enumerated;
+      if (own && !plan.routines.empty()) {
+        RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, enumerationNotes,
+                                           request.progress, plan, firstInstructions, firstDivergences);
         out.enumeration = EnumerationCount{.planned = second.variantsPlanned,
                                            .run = second.variantsRun,
                                            .returned = second.variantsReturned,
                                            .confined = second.variantsConfined,
                                            .cycles = second.enumerationCycles};
+        if (out.enumerated.empty()) {
+          out.enumerated = second.enumerated;
+        } else {
+          RunObservation joined;
+          joined.enumerated = std::move(out.enumerated);
+          RunObservation more;
+          more.enumerated = second.enumerated;
+          joinObservation(joined, more);
+          out.enumerated = std::move(joined.enumerated);
+        }
+        own->observation.enumerated = std::move(second.enumerated);
+        own->observation.variantsPlanned = second.variantsPlanned;
+        own->observation.variantsRun = second.variantsRun;
+        own->observation.variantsReturned = second.variantsReturned;
+        own->observation.variantsConfined = second.variantsConfined;
+        own->observation.enumerationCycles = second.enumerationCycles;
       }
     }
+    sayRunNotes(&RunRecord::enumerationNotes, own ? &enumerationNotes : nullptr);
+    if (own) own->enumerationNotes = std::move(enumerationNotes);
     noteProvenFromWorkRam(out);
   }
 
@@ -2624,6 +2725,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   liftAssets(out, request);
   if (out.stopped) return out;
   writeSamples(out, request.rom, keyed);
+  if (own && request.recordRun) out.record = std::move(own);
   return out;
 }
 
@@ -2667,8 +2769,9 @@ std::string renderManifest(const CartridgeDisassembly& disassembly) {
   std::string out;
   out += "; A Snaggletooth cartridge project. The next run reads the `entry`, `reached`,\n"
          "; `ran`, `derived`, `moved`, `asset` and `file` lines; snes_verify reads `map`,\n"
-         "; `save`, `chip`, `file`, `sound` and `block`; everything else is written fresh\n"
-         "; from what the run found.\n";
+         "; `save`, `chip`, `file`, `sound` and `block`, and the paths `asset`, `preview`\n"
+         "; and `sample` name; everything else is worked out from the trace and from\n"
+         "; what the runs over the tree found, which the records under runs/ keep.\n";
   out += "image    " + std::to_string(disassembly.imageBytes) + "\n";
   out += "map      " + mapName(disassembly.board.map) + "\n";
   out += "save     " + std::to_string(disassembly.board.saveRamBytes) + "\n";
@@ -3153,7 +3256,7 @@ std::string renderSoundProgramFile(const CartridgeDisassembly& disassembly) {
 }
 
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
-                  std::string& error) {
+                  std::string& error, const ProgressSink& progress) {
   std::error_code ec;
   std::filesystem::create_directories(directory, ec);
   if (ec) {
@@ -3167,6 +3270,12 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
     return false;
   }
   if (!writeFile(directory / "project.snagifest", renderManifest(disassembly), error)) return false;
+  if (disassembly.record) {
+    if (progress) progress(Progress{.stage = "compressing the run's record", .spent = 0, .budget = 0});
+    if (!writeRecord(*disassembly.record, disassembly.imageBytes, disassembly.header.checksum, directory, error)) {
+      return false;
+    }
+  }
   for (const AssetFile& asset : disassembly.assets) {
     const std::string_view bytes(reinterpret_cast<const char*>(asset.written.data()), asset.written.size());
     if (!writeFile(directory / asset.file, bytes, error)) return false;
@@ -3183,17 +3292,30 @@ bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem
 }
 
 std::optional<CartridgeRequest> treeRequest(std::span<const std::uint8_t> rom, const std::filesystem::path& directory,
-                                            bool& found, std::string& error) {
+                                            bool& found, std::string& error, const ProgressSink& progress,
+                                            TreeRecords records) {
   CartridgeRequest request;
   request.rom = rom;
   // A lifted file the manifest names is read from the tree as it lies, for a
   // disassembly without a run to take a sheet's depth and palette and a
   // table's unit from.
   request.readFile = [directory](const std::string& file) { return readText(directory / file); };
+  // The records under `runs/`, read after the manifest and whether or not the
+  // directory holds one.
+  const auto withRecords = [&](CartridgeRequest& made) -> std::optional<CartridgeRequest> {
+    if (records == TreeRecords::Checked) {
+      if (!checkRecords(directory, rom, error)) return std::nullopt;
+      return std::move(made);
+    }
+    std::optional<std::vector<RunRecord>> read = readRecords(directory, rom, error, progress);
+    if (!read) return std::nullopt;
+    if (!read->empty()) made.records = std::make_shared<const std::vector<RunRecord>>(std::move(*read));
+    return std::move(made);
+  };
   const std::filesystem::path manifestPath = directory / "project.snagifest";
   const std::optional<std::string> manifestText = readText(manifestPath);
   found = manifestText.has_value();
-  if (!found) return request;
+  if (!found) return withRecords(request);
   std::string why;
   const std::optional<ManifestInput> input = parseManifest(*manifestText, why);
   if (!input) {
@@ -3212,7 +3334,7 @@ std::optional<CartridgeRequest> treeRequest(std::span<const std::uint8_t> rom, c
   request.moved = input->moved;
   request.assets = input->assets;
   request.derived = input->derived;
-  return request;
+  return withRecords(request);
 }
 
 }  // namespace snaggletooth::disasm

@@ -1523,6 +1523,24 @@ TEST(RomEnumerate, LandingsThatMoveAFileOrChangeItsFormAreRefused) {
   EXPECT_FALSE(landingsKeepTheFile(twoBit, std::vector<PortLanding>{tiles4})) << "two bits and four: the form changes";
   EXPECT_TRUE(landingsKeepTheFile(twoBit, std::vector<PortLanding>{tiles2}));
   EXPECT_TRUE(landingsKeepTheFile(twoBit, std::vector<PortLanding>{palette})) << "a palette landing says nothing of VRAM";
+  // A landing never drawn says nothing of what the memory was used as: it keeps
+  // a map a map, tiles tiles at their depth, sprite tiles under the sprites'
+  // palette and a Mode 7 file under Mode 7; and a file only such landings name
+  // moves once one of its landings is drawn.
+  PortLanding undrawn = map;
+  undrawn.shown = false;
+  undrawn.areas = 0;
+  PortLanding sprites = tiles4;
+  sprites.areas = kAreaSprites;
+  PortLanding mode7 = map;
+  mode7.areas = kAreaMode7;
+  mode7.depths = kDepth8;
+  const std::vector<PortLanding> never{undrawn};
+  EXPECT_TRUE(landingsKeepTheFile(maps, never)) << "a map and a landing never drawn";
+  EXPECT_TRUE(landingsKeepTheFile(twoBit, never)) << "tiles and a landing never drawn";
+  EXPECT_TRUE(landingsKeepTheFile(std::vector<PortLanding>{sprites}, never)) << "sprite tiles and a landing never drawn";
+  EXPECT_TRUE(landingsKeepTheFile(std::vector<PortLanding>{mode7}, never)) << "Mode 7 and a landing never drawn";
+  EXPECT_FALSE(landingsKeepTheFile(never, std::vector<PortLanding>{tiles2})) << "never drawn, then drawn as tiles";
 }
 
 }  // namespace

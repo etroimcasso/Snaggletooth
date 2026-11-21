@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -38,6 +39,7 @@
 #include "ir/ir.h"
 #include "rom/rom_facts.h"
 #include "rom/rom_observe.h"
+#include "rom/rom_record.h"
 #include "rom/rom_render.h"
 #include "snaggletooth/snes/cartridge.h"
 
@@ -132,10 +134,11 @@ struct SoundProgram {
 // under a directory named for the memory they went to — `vram/`, `cgram/`,
 // `oam/`, `apu/`, `hdma/` for a table and for a block an indirect entry pointed
 // at, and `staged/` for a source whose bytes were built into data for two
-// classes — and, for VRAM, for what the PPU used that memory as where the run
-// saw every landing of the file's bytes drawn: `maps/` when every landing lies
-// in a layer's screen, `tiles/` when every one lies in a name base or the
-// sprite tiles, `vram/` otherwise — and named by the address of its first
+// classes — and, for VRAM, for what the PPU used that memory as where the runs
+// saw the file's bytes drawn: `maps/` when every drawn landing lies in a
+// layer's screen, `tiles/` when every one lies in a name base or the sprite
+// tiles, `vram/` otherwise and when no landing was drawn, a landing never drawn
+// passed over — and named by the address of its first
 // byte. The bank file refers to it with `INCBIN` where the bytes were. Ranges
 // that share a byte are one file, the union; ranges that touch are not.
 //
@@ -206,10 +209,10 @@ struct SampleFile {
 // An asset as the manifest records it, read back for its path — a person's
 // rename survives a run when the file it names is lifted again with the same
 // first byte and length — and, for a file the run's shadow named (`staged`,
-// `stream`, `enumerated`), for the file itself: its evidence is written fresh
-// by a run, so the line is what keeps it from one disassembly to the next —
-// and, for a file whose line says `also`, the classes the toolkit's runs built
-// it into, kept with the line.
+// `stream`, `enumerated`), for the file itself, which is lifted again as the
+// line records it and joined to any file the run lifts over its bytes — and,
+// for a file whose line says `also`, the classes the toolkit's runs built it
+// into, kept with the line.
 struct ManifestAsset {
   std::string file;
   Address first = 0;
@@ -252,39 +255,41 @@ struct CartridgeDisassembly {
   // What the traced code reaches, attached to the addresses that reach it, the
   // routines those addresses belong to, and what every path proves about the
   // direct register, the data bank and the stack pointer at each label. All
-  // four are written fresh on every run and read back by nothing — see
-  // `rom_facts.h`.
+  // four are worked out again from the trace by every disassembly, and no
+  // later disassembly reads them back — see `rom_facts.h`.
   std::vector<HardwareAccess> accesses;
   std::vector<DmaTransfer> dmas;
   std::vector<Routine> routines;
   std::vector<StateFact> states;
-  // The targets a run saw the indirect jumps take, this run's and every earlier
-  // manifest's, each traced from as an entry — see `rom_observe.h`.
+  // The targets the runs saw the indirect jumps take — this disassembly's own
+  // run's, every record's and every earlier manifest's — each traced from as
+  // an entry; see `rom_observe.h`.
   std::vector<ReachedTarget> reached;
-  // The landings a run saw the instructions not name — a return to an address
-  // the code put on the stack, an `RTI` into flow the bytes do not carry — this
-  // run's and every earlier manifest's, each traced from as a reached target is.
+  // The landings the runs saw the instructions not name — a return to an
+  // address the code put on the stack, an `RTI` into flow the bytes do not
+  // carry — this run's, every record's and every earlier manifest's, each
+  // traced from as a reached target is.
   std::vector<Landing> ran;
-  // The direct register and the data bank the run saw at every site it executed
-  // in the image. Written fresh on every run and read back by nothing: the next
-  // run sees it again. Empty without a run.
+  // The direct register and the data bank the runs saw at every site they
+  // executed in the image: this run's and every record's. Empty without a run
+  // or a record.
   std::vector<SeenState> seen;
-  // The ranges a run saw the transfer engines move, this run's and every earlier
-  // manifest's, each once with how many times it was seen — see `rom_observe.h`.
-  // Nothing is traced from them; they say where the bytes the hardware received
-  // came from.
+  // The ranges the runs saw the transfer engines move, this run's, every
+  // record's and every earlier manifest's, each once with how many times it was
+  // seen — see `rom_observe.h`. Nothing is traced from them; they say where the
+  // bytes the hardware received came from.
   std::vector<MovedRange> moved;
-  // Where the ranges this run moved landed on the other side of the port, and
-  // what the PPU used that memory as — see `rom_observe.h`. Written fresh on
-  // every run and read back by nothing; the directory a VRAM file takes from
-  // them is kept by its `asset` line. Empty without a run.
+  // Where the ranges the runs moved landed on the other side of the port, and
+  // what the PPU used that memory as — this run's and every record's; see
+  // `rom_observe.h`. The directory a VRAM file takes from them is kept by its
+  // `asset` line as well. Empty without a run or a record.
   std::vector<LandedRange> landed;
-  // How every HDMA table and indirect block the run moved was walked — the
+  // How every HDMA table and indirect block the runs moved was walked — the
   // transfer unit and the form — see `rom_observe.h`; and the palette RAM as
   // it stood at each drawn frame a landing was read at, which the landings
-  // name by index. Both written fresh on every run, `walked` as its line and
-  // the palettes through the tile sheets that carry them; empty without a
-  // run.
+  // name by index. Both this run's and every record's, `walked` written as its
+  // line and the palettes through the tile sheets that carry them; empty
+  // without a run or a record.
   std::vector<WalkedRange> walked;
   std::vector<std::vector<std::uint8_t>> palettes;
   // The files lifted out of the bank files, in address order: every `moved`
@@ -296,36 +301,38 @@ struct CartridgeDisassembly {
   // proven transfer the run moved another way.
   std::vector<AssetFile> assets;
   // The previews written beside the lifted files, in the assets' order and,
-  // within a file, in the order the run first carried each content. Written
-  // fresh by a run and read back by nothing; empty without one.
+  // within a file, in the order the runs first carried each content. Drawn
+  // from what this run and every record carried, and read back by nothing;
+  // empty without a run or a record.
   std::vector<PreviewFile> previews;
-  // The samples the run's key-ons named, in the run's order (`rom_observe.h`),
-  // each matched whole to the image and written as a WAV. Written fresh by a
-  // run and read back by nothing; empty without one.
+  // The samples the runs' key-ons named, this run's and every record's, in the
+  // order `rom_observe.h` states, each matched whole to the image and written
+  // as a WAV. Read back by nothing; empty without a run or a record.
   std::vector<SampleFile> samples;
   // The targets the bytes prove the indirect jumps take — a pointer in the image
   // selected by an index every path bounds — this run's and every earlier
   // manifest's, each traced from as an entry — see `rom_facts.h`. A jump every
   // one of whose destinations is derived is not among `stops`.
   std::vector<DerivedTarget> derived;
-  // Where every range the run saw carried out of work RAM came from, and the
+  // Where every range the runs saw carried out of work RAM came from, and the
   // streams the CPU carried a byte at a time — see `rom_observe.h`. Both are
-  // written fresh on every run and read back by nothing; a staged range with
-  // an image source is lifted as that source, and a stream as the run its
-  // carrier read — or, for a buffer the CPU carried out, as the buffer's source.
+  // this run's and every record's; a staged range with an image source is
+  // lifted as that source, and a stream as the run its carrier read — or, for a
+  // buffer the CPU carried out, as the buffer's source.
   std::vector<StagedRange> staged;
   std::vector<StreamedRange> streamed;
   // The outcomes of the values the toolkit ran each planned routine for and
-  // kept, and how many values it planned, ran and kept — see
-  // `rom/rom_enumerate.h` and `rom/rom_observe.h`. Written fresh by the second
-  // run and read back by nothing; empty without a run. An outcome's sources
-  // join a file the run recorded only where they leave its classes, its
-  // directory and its form as they are, and are otherwise lifted as files of
-  // their own kind, `enumerated`, or refused with a note.
+  // kept — see `rom/rom_enumerate.h` and `rom/rom_observe.h` — this
+  // disassembly's second run's and every record's; empty without a run or a
+  // record. An outcome's sources join a file the runs recorded only where they
+  // leave its classes, its directory and its form as they are, and are
+  // otherwise lifted as files of their own kind, `enumerated`, or refused with
+  // a note. `enumeration` counts how many values this disassembly's second run
+  // planned, ran and kept, and is zero without one.
   std::vector<EnumeratedRun> enumerated;
   EnumerationCount enumeration;
   // One lift of what the toolkit's run of a routine built: the file its sources were lifted into, the run and the extent
-  // (indices into `enumerated`), and the class; written fresh by the lift and read back by nothing.
+  // (indices into `enumerated`), and the class; made by the lift and read back by nothing.
   struct EnumeratedLift {
     std::string file;
     std::size_t run = 0;
@@ -336,6 +343,12 @@ struct CartridgeDisassembly {
   // The request's `stop` answered true: the disassembly ended at that point
   // and holds what it had made by then, which is no tree to write.
   bool stopped = false;
+  // This disassembly's own run, as `writeProject` writes it under `runs/`: set
+  // when the request made or was handed a run and asked for it to be kept
+  // (`CartridgeRequest::recordRun`), and the disassembly was not stopped. The
+  // observation is the run's as it gave it, with the outcomes and counts of the
+  // second run, and the notes are the two runs' own.
+  std::optional<RunRecord> record;
 };
 
 // The text of one of the tree's files, by the path the manifest names, or
@@ -357,11 +370,12 @@ struct CartridgeRequest {
   std::vector<MovedRange> moved;       // what earlier runs saw move, read back the same way
   std::vector<ManifestAsset> assets;   // the paths the manifest gives the lifted files
   std::vector<DerivedTarget> derived;  // what earlier runs derived, read back the same way
-  // Reads a lifted file the manifest names, as it lies in the tree, for a
-  // disassembly without a run: the depth and the palette of a tile sheet and
-  // the unit of a table are the run's facts, and without a run they are read
-  // from the file the path names before it is written again. Nothing, or a
-  // reader that finds nothing, writes every such file as bytes.
+  // Reads a lifted file the manifest names, as it lies in the tree: the depth
+  // and the palette of a tile sheet and the unit of a table are the runs'
+  // facts, and for a sheet no landing describes and a table no walk describes —
+  // every such file without a run or a record — they are read from the file
+  // the path names before it is written again. Nothing, or a reader that finds
+  // nothing, writes every such file as bytes.
   FileReader readFile;
   bool captureSound = true;
   std::uint64_t bootMasterCycles = 15u * 21'477'272u;
@@ -379,10 +393,18 @@ struct CartridgeRequest {
   // `runMasterCycles` and `input` are not read, and `observedNotes` join the
   // notes where the run's own notes would. The tree is the one the disassembly
   // writes from a run of its own that saw what the host's run saw, except that
-  // no routine is run again for the values its index takes: the tree carries no
-  // `enumerated` line.
+  // no routine is run again for the values its index takes: its `enumerated`
+  // lines are those the tree's records hold.
   const RunObservation* observed = nullptr;
   std::span<const std::string> observedNotes;
+  // The records the tree holds (`rom/rom_record.h`), which `treeRequest` reads:
+  // the disassembly is made from them and its own run together, so the tree
+  // holds what every run over it found. A disassembly without a run of its own
+  // is made from the records alone.
+  std::shared_ptr<const std::vector<RunRecord>> records;
+  // Whether this disassembly's own run is kept as a record. A host that makes
+  // several trees from one run as it goes clears this for all but the last.
+  bool recordRun = true;
   // The recorded run replayed into the controller ports while the machine runs —
   // see `rom/input_script.h`. Empty, the ports stay empty and the run is the boot
   // alone. `snes_disasm --input <script>` supplies one.
@@ -470,9 +492,10 @@ struct ManifestDma {
 // entries, the reached and derived targets, the landings, the moved ranges, the
 // assets' paths and the file split; a verification takes the board — the map,
 // the save and the chip — the file split, the sound program and its blocks,
-// which together say where every file's bytes land; both take the image
-// identity. Everything else in a
-// manifest is what the last run found, and is written fresh.
+// which together say where every file's bytes land, and the paths the assets,
+// previews and samples name; both take the image identity. Everything else in
+// a manifest is worked out again from the trace or is what the runs over the
+// tree found, which the tree's records keep (`rom/rom_record.h`).
 struct ManifestInput {
   std::vector<TraceEntry> entries;
   std::vector<SourceRegion> regions;
@@ -481,6 +504,8 @@ struct ManifestInput {
   std::vector<MovedRange> moved;
   std::vector<ManifestAsset> assets;
   std::vector<DerivedTarget> derived;
+  std::vector<std::string> previews;  // the paths the `preview` lines name, in the manifest's order
+  std::vector<std::string> samples;   // the paths the `sample` lines name, in the manifest's order
   std::optional<CartridgeMap> map;
   std::optional<std::size_t> saveRamBytes;   // the `save` line, when the manifest carries one
   std::optional<Coprocessor> coprocessor;     // the `chip` line, when the manifest carries one
@@ -517,16 +542,29 @@ struct ManifestInput {
 [[nodiscard]] std::string manifestMismatch(const ManifestInput& input,
                                            std::span<const std::uint8_t> rom);
 
+// How `treeRequest` takes the records under the tree's `runs/`: every one read
+// and parsed into `records`, which takes seconds over a long session's records;
+// or only checked, each file read as far as its first two lines
+// (`checkRecords`), which refuses a record written for another image and
+// leaves `records` empty for the caller to read when it can wait.
+enum class TreeRecords : std::uint8_t { Read, Checked };
+
 // The request a tree's directory gives a disassembly over `rom`: `readFile`
 // reads the directory's files, and when the directory holds a
 // `project.snagifest` — `found` says whether it does — the entries, the file
 // split, the reached targets, the landings, the moved ranges, the assets' paths
-// and the derived targets are the manifest's. Nothing, with `error` the
-// manifest's path, `": "` and what is wrong, when the manifest does not parse or
-// was written for another image. The request's other fields are their defaults.
+// and the derived targets are the manifest's; and `records` are the records
+// under the directory's `runs/` (`readRecords`), read whether or not the
+// directory holds a manifest, or only checked (`TreeRecords::Checked`).
+// `progress`, when given, is told each record as it is decompressed. Nothing,
+// with `error` the manifest's path, `": "` and what is wrong, when the manifest
+// does not parse or was written for another image, and with `error` a record's
+// path, `": "` and what is wrong, when a record does not read or was written for
+// another image. The request's other fields are their defaults.
 [[nodiscard]] std::optional<CartridgeRequest> treeRequest(std::span<const std::uint8_t> rom,
                                                           const std::filesystem::path& directory, bool& found,
-                                                          std::string& error);
+                                                          std::string& error, const ProgressSink& progress = {},
+                                                          TreeRecords records = TreeRecords::Read);
 
 // The renderer's input as a disassembly holds it in memory: every region with
 // its listing, and the facts. What `readRenderInput` (`rom/rom_render.h`)
@@ -564,11 +602,14 @@ struct ManifestInput {
 
 // Writes what the disassembly found under `directory`, creating it and its
 // directories: `program.snagir` first, then `apu.snagir` where a sound program
-// was captured, `project.snagifest`, every lifted file in its form, every
-// preview, and every sample's WAV. No bank file and no sound file is written here; `snes_render`
-// writes those from the program files and the manifest. False, with `error`
+// was captured, `project.snagifest`, the run's record under `runs/` where
+// `disassembly.record` is set (`writeRecord`) — `progress`, when given, told
+// `compressing the run's record` as it begins — every lifted file in its form,
+// every preview, and every sample's WAV. No bank file and no sound file is
+// written here; `snes_render` writes those from the program files and the
+// manifest. No file already in the directory is removed. False, with `error`
 // set, when a file cannot be written.
 bool writeProject(const CartridgeDisassembly& disassembly, const std::filesystem::path& directory,
-                  std::string& error);
+                  std::string& error, const ProgressSink& progress = {});
 
 }  // namespace snaggletooth::disasm

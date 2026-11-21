@@ -154,7 +154,7 @@ at is the data itself and stays bytes.
 ## Which form a lifted file takes
 
 The disassembler names a file's form by what the run saw its bytes become, and writes the form only
-where the facts allow it. A file under `tiles/` — every landing in a name base or the sprite tiles —
+where the facts allow it. A file under `tiles/` — every drawn landing in a name base or the sprite tiles —
 is a `.png` when every landing was read at one depth, at that depth, with the palette above; a file
 under `maps/` is a `.map`, under `cgram/` a `.pal`, under `oam/` an `.oam`; an HDMA table under
 `hdma/` is a `.hdma` when the engine walked it under one unit and one mode. Everything else stays
@@ -194,8 +194,9 @@ asset    vram/00_A600.bin Vram as dma from $00:A600 bytes 128
 The three sheets are at four, two and four bits a pixel — BG1's name base, BG3's and the sprite
 tiles under Mode 1; the eleven blobs are sources, and the Mode 7 block is a map and tiles in one
 file.
-A tree disassembled without a run writes each file in the form its manifest path names, reading a
-sheet's depth and palette and a table's unit from the file already on disk.
+A tree disassembled with no run and no [run record](run-record.md) writes each file in the form its
+manifest path names, reading a sheet's depth and palette and a table's unit from the file already on
+disk; with one, a sheet no landing describes and a table no walk describes are read the same way.
 
 ## Previews
 

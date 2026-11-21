@@ -624,6 +624,18 @@ TEST_F(PlayerLiveDisassembly, TheTitleSaysTheBuffersSizesAndTurnsWhileTheWorkMov
     const std::string text = title.text("", s, 2u * kSecond, kWide);
     EXPECT_EQ(text.substr(text.size() - 3u), frames[step % 10u]) << "step " << step;
   }
+  // The tree's records being read beside the game stand after the lead, and,
+  // at the close, are what the close is at.
+  s.work = Work::Records;
+  s.step = "decompressing runs/0002.snagrun.zst (20.3 MB)";
+  const std::string reading = title.text("60.1 fps", s, 2u * kSecond, kWide);
+  EXPECT_EQ(reading.rfind("60.1 fps" + kDash + "decompressing runs/0002.snagrun.zst (20.3 MB)" + kDash + "RAM ", 0), 0u)
+      << reading;
+  s.closing = true;
+  s.buffer.held = 0u;
+  const std::string closing = title.text("60.1 fps", s, 3u * kSecond, kWide);
+  EXPECT_EQ(closing.rfind("finishing: reading the run records, decompressing runs/0002.snagrun.zst (20.3 MB), ", 0), 0u)
+      << closing;
 }
 
 TEST_F(PlayerLiveDisassembly, TheTitleIsAPageAtATimeWhereTheRoomDoesNotHoldIt) {
@@ -972,15 +984,16 @@ TEST_F(PlayerLiveDisassembly, ATreeBegunInTheMiddleIsGivenUpAtTheClose) {
   EXPECT_EQ(played.last.step, "") << "no step once the trees are done";
   // The tree given up went no further than the step it was at when the close
   // was asked for; the last tree went through every step, the files after the
-  // disassembly's own.
+  // disassembly's own and the session's record after the files.
   std::lock_guard lock(mutex);
-  ASSERT_GE(steps.size(), 7u);
+  ASSERT_GE(steps.size(), 8u);
   EXPECT_EQ(steps[0], "tracing");
   EXPECT_EQ(steps[1], "") << "given up there: its steps over";
   EXPECT_EQ(steps[2], "tracing") << "the last tree, from its first step";
   EXPECT_EQ(steps[3], "proving what every path reaches");
-  const std::vector<std::string> end(steps.end() - 4, steps.end());
-  EXPECT_EQ(end, (std::vector<std::string>{"lifting the files", "drawing the previews", "writing the files", ""}));
+  const std::vector<std::string> end(steps.end() - 5, steps.end());
+  EXPECT_EQ(end, (std::vector<std::string>{"lifting the files", "drawing the previews", "writing the files",
+                                           "compressing the run's record", ""}));
 }
 
 TEST_F(PlayerLiveDisassembly, TheStatusSaysWhatATreeHasLeftByTheLastTreesSteps) {
@@ -1394,6 +1407,125 @@ TEST_F(PlayerLiveDisassembly, TheTreeIsTheSameUnderEitherMachineThreadAndBoth) {
       expectSameTree(root_ / "live", root_ / "reference", what);
     }
   }
+}
+
+TEST_F(PlayerLiveDisassembly, OnlyTheClosingTreeKeepsTheSessionsRunAsARecord) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  LiveOptions options = quiet();
+  options.treeIntervalNanos = 0;
+  Plan plan;
+  bool waited = false;
+  bool recordInTheMiddle = true;
+  plan.afterEachRun = [&](LiveDisassembly& live, std::uint64_t) {
+    if (waited) return;
+    waited = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    while (live.status().trees == 0u && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    recordInTheMiddle = std::filesystem::exists(root_ / "live" / "runs");
+  };
+  Lines lines;
+  const Played played = play(rom, root_ / "live", options, hooksInto(lines), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  ASSERT_GE(played.trees, 2u) << "a tree from the middle, and the closing tree";
+  EXPECT_FALSE(recordInTheMiddle) << "a tree from the middle keeps no record";
+  std::vector<std::string> records;
+  for (const auto& [name, bytes] : filesUnder(root_ / "live")) {
+    if (name.rfind("runs/", 0) == 0) records.push_back(name);
+  }
+  EXPECT_EQ(records, std::vector<std::string>{"runs/0001.snagrun.zst"});
+}
+
+TEST_F(PlayerLiveDisassembly, ASecondSessionsFirstTreeHoldsWhatOnlyTheFirstSessionFound) {
+  // The dispatching cartridge jumps through a table its run reads; a quarter
+  // frame of a second session reaches none of it.
+  const std::vector<std::uint8_t> rom = examples::dispatchingImage();
+  Lines lines;
+  const Played first = play(rom, root_ / "live", quiet(), hooksInto(lines), Plan{});
+  ASSERT_TRUE(first.closing.has_value()) << first.error;
+  const auto manifestIn = [&](const std::filesystem::path& directory) {
+    std::ifstream in(directory / "project.snagifest", std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  };
+  const auto linesOf = [](const std::string& text, const std::string& kind) {
+    std::vector<std::string> out;
+    std::istringstream in(text);
+    for (std::string line; std::getline(in, line);) {
+      if (line.rfind(kind + " ", 0) == 0) out.push_back(line.substr(0, line.find(' ', line.find_first_not_of(' ', kind.size()))));
+    }
+    return out;
+  };
+  const std::string before = manifestIn(root_ / "live");
+  const std::vector<std::string> reached = linesOf(before, "reached");
+  const std::vector<std::string> seen = linesOf(before, "seen");
+  ASSERT_FALSE(reached.empty());
+  ASSERT_FALSE(seen.empty());
+
+  LiveOptions options = quiet();
+  options.treeIntervalNanos = 0;
+  Plan plan;
+  plan.cycles = 2u * kFrame;
+  std::string firstTree;
+  plan.afterEachRun = [&](LiveDisassembly& live, std::uint64_t) {
+    if (!firstTree.empty()) return;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    while (live.status().trees == 0u && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    firstTree = manifestIn(root_ / "live");
+  };
+  const Played second = play(rom, root_ / "live", options, hooksInto(lines), plan);
+  ASSERT_TRUE(second.closing.has_value()) << second.error;
+  ASSERT_FALSE(firstTree.empty());
+  const std::vector<std::string> reachedThen = linesOf(firstTree, "reached");
+  const std::vector<std::string> seenThen = linesOf(firstTree, "seen");
+  for (const std::string& line : reached) {
+    EXPECT_NE(std::find(reachedThen.begin(), reachedThen.end(), line), reachedThen.end()) << line;
+  }
+  // A site the run saw the registers at is kept by the records alone: no
+  // manifest line of the kind is read back.
+  for (const std::string& line : seen) {
+    EXPECT_NE(std::find(seenThen.begin(), seenThen.end(), line), seenThen.end()) << line;
+  }
+  EXPECT_EQ(filesUnder(root_ / "live").count("runs/0002.snagrun.zst"), 1u) << "each session keeps its run";
+  // Each session's record is said as it is compressed and kept, and the second
+  // session says the first's as it is decompressed and read.
+  EXPECT_EQ(lines.count("compressing the run's record"), 2u);
+  EXPECT_EQ(lines.count("kept the session's run as runs/0001.snagrun.zst ("), 1u);
+  EXPECT_EQ(lines.count("kept the session's run as runs/0002.snagrun.zst ("), 1u);
+  EXPECT_EQ(lines.count("decompressing runs/0001.snagrun.zst ("), 1u);
+  EXPECT_EQ(lines.count("read 1 run record in "), 1u);
+
+  // The second session again: its run is the one the second record holds, and
+  // no file is written for it. While a record is read, the status says so: the
+  // first record's step is held until the game's thread has looked.
+  Plan again;
+  again.cycles = 2u * kFrame;
+  std::atomic<bool> reading{false};
+  std::atomic<bool> looked{false};
+  std::string readingStep;
+  const auto step = [&](std::string_view name) {
+    if (name.rfind("decompressing runs/0001", 0) != 0) return;
+    reading = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    while (!looked && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  };
+  Work seenWork = Work::Watching;
+  again.afterEachRun = [&](LiveDisassembly& live, std::uint64_t) {
+    if (!reading || looked) return;
+    const LiveStatus status = live.status();
+    seenWork = status.work;
+    readingStep = status.step;
+    looked = true;
+  };
+  const Played third = play(rom, root_ / "live", quiet(), hooksInto(lines, {}, step), again);
+  EXPECT_TRUE(seenWork == Work::Records) << "the status says the records are being read";
+  EXPECT_EQ(readingStep.rfind("decompressing runs/0001.snagrun.zst (", 0), 0u) << readingStep;
+  ASSERT_TRUE(third.closing.has_value()) << third.error;
+  EXPECT_EQ(lines.count("the session's run is already kept as runs/0002.snagrun.zst ("), 1u);
+  EXPECT_EQ(lines.count("read 2 run records in "), 1u);
+  EXPECT_EQ(filesUnder(root_ / "live").count("runs/0003.snagrun.zst"), 0u);
 }
 
 }  // namespace snaggletooth::player

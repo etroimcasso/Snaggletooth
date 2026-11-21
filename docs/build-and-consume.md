@@ -246,6 +246,13 @@ answered.
   `third_party/lodepng/`, built as its own static target with a system include so its warnings
   are its own, and linked privately into `snaggletooth_formats`; no lodepng symbol reaches a
   header of this project. The library never links it. zlib license.
+- **[zstd](https://facebook.github.io/zstd/)** — the compressor and decompressor a tree's run
+  records are written and read through. Vendored as the release 1.5.7 library sources at
+  `third_party/zstd/`, built from them on every platform as its own static C target, single-
+  threaded and without its x86 assembly, with a system include so its warnings are its own, and
+  linked privately into `snaggletooth_rom`; no zstd symbol reaches a header of this project. The
+  library never links it. BSD license: a binary distribution of the tools reproduces its notice
+  ([third_party/zstd/README.md](../third_party/zstd/README.md)).
 - **[GoogleTest](https://github.com/google/googletest)** — fetched at configure time, version
   1.14.0, only when `SNAGGLETOOTH_BUILD_TESTS` is on. Never part of the library or the tools.
 

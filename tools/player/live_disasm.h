@@ -16,7 +16,12 @@
 // The trees of one session never read each other, so the closing tree is the
 // one the directory takes from the whole run. A lifted file a tree in the
 // middle wrote under a name the closing tree does not use stays in the
-// directory beside it; the closing tree's manifest does not name it.
+// directory beside it; the closing tree's manifest does not name it, and
+// `snes_verify` counts it. Every tree is made from the records the directory
+// held when the session began (`rom/rom_record.h`) and the run so far, so a
+// tree holds what every earlier session found; only the closing tree keeps
+// the session's run as a record under `runs/`, and a session ended by a forced
+// kill keeps none.
 //
 // The game stops when the buffer stands at its ceilings, when its RAM stands
 // past its own ceiling because the files are written more slowly than the game
@@ -100,13 +105,18 @@ struct LiveHooks {
   // could not be started. `lowered` asks for a class under the host's thread's.
   std::function<std::optional<int>(const std::vector<std::string>& arguments, bool lowered)> run;
   // Told each step of a tree as it begins, on the tree's thread, with the names
-  // `disasm::CartridgeRequest::progress` gives and then `writing the files`;
-  // and nothing, an empty name, when the tree's steps are over.
+  // `disasm::CartridgeRequest::progress` gives, then `writing the files` and,
+  // where the tree keeps the session's run, `compressing the run's record`;
+  // told `decompressing runs/<name> (<size>)` as each of the tree's records is
+  // read before the first tree; and nothing, an empty name, when the steps are
+  // over.
   std::function<void(std::string_view step)> step;
 };
 
 // What the tree's thread is doing.
-enum class Work : std::uint8_t { Watching, Tree, Render, Verify, Done };
+// `Records` is the reading of the tree's run records, which comes before the
+// session's first tree.
+enum class Work : std::uint8_t { Watching, Tree, Render, Verify, Done, Records };
 
 // One look at the disassembly, for a title, a line or a panel.
 struct LiveStatus {

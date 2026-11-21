@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <span>
@@ -666,6 +667,87 @@ TEST(RomVerify, TheTreeOnDiskVerifiesWithItsFormsAndPreviews) {
   ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
   const VerifyReport report = verifyTree(dir, rom);
   EXPECT_TRUE(report.identical()) << renderReport(report);
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(RomVerify, AFileUnderTheTreeThatNoLineNamesIsCountedListedAndLeft) {
+  // The sound program's file lies under `apu/` beside the samples, and is
+  // named by its own line.
+  const std::vector<std::uint8_t> rom = drawingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.bootMasterCycles = 20u * 357'954u;
+  request.observeRun = true;
+  request.runMasterCycles = 4u * 357'954u;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_FALSE(d.previews.empty());
+  ASSERT_TRUE(d.sound.has_value());
+  ASSERT_FALSE(d.samples.empty());
+  // The manifest's reader holds the two kinds' paths apart, in their order.
+  std::string parsed;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(d), parsed);
+  ASSERT_TRUE(input.has_value()) << parsed;
+  std::vector<std::string> previews;
+  for (const PreviewFile& preview : d.previews) previews.push_back(preview.file);
+  std::vector<std::string> samples;
+  for (const SampleFile& sample : d.samples) samples.push_back(sample.file);
+  EXPECT_EQ(input->previews, previews);
+  EXPECT_EQ(input->samples, samples);
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth_verify_unlisted_tree";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  std::size_t rendered = 0;
+  ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
+  ASSERT_TRUE(std::filesystem::exists(dir / "runs" / "0001.snagrun.zst")) << "the run's record, which no line names";
+  const auto put = [&](const std::filesystem::path& file) {
+    std::filesystem::create_directories((dir / file).parent_path());
+    std::ofstream out(dir / file, std::ios::binary);
+    out << "an earlier tree's";
+  };
+  put("tiles/00_8F00.png");
+  put("elsewhere/00_8F00.bin");  // in a directory no line names a file in
+
+  const VerifyReport report = verifyTree(dir, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  EXPECT_EQ(report.unlisted, std::vector<std::string>{"tiles/00_8F00.png"});
+  const std::string text = renderReport(report);
+  EXPECT_TRUE(text.ends_with("the tree assembles to the image\n1 file under the tree is named by no line of the manifest\n"))
+      << text;
+  EXPECT_TRUE(std::filesystem::exists(dir / "tiles" / "00_8F00.png"));
+
+  put("staged/00_8F00-tiles.png");
+  const VerifyReport two = verifyTree(dir, rom);
+  EXPECT_EQ(two.unlisted, (std::vector<std::string>{"staged/00_8F00-tiles.png", "tiles/00_8F00.png"}));
+  EXPECT_NE(renderReport(two).find("\n2 files under the tree are named by no line of the manifest\n"), std::string::npos);
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(RomVerify, ATreeWhoseFilesAreAllNamedSaysNothingOfThem) {
+  // The bank file a person's split places under `apu/`, beside the sound
+  // program's file and the samples, is named by its own line.
+  const std::vector<std::uint8_t> rom = drawingImage();
+  CartridgeRequest request;
+  request.rom = rom;
+  request.bootMasterCycles = 20u * 357'954u;
+  request.regions = {SourceRegion{.file = "apu/bank_00.asm", .first = 0x008000u, .last = 0x00FFFFu}};
+  request.observeRun = true;
+  request.runMasterCycles = 4u * 357'954u;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth_verify_listed_tree";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::string error;
+  ASSERT_TRUE(writeProject(d, dir, error)) << error;
+  std::size_t rendered = 0;
+  ASSERT_TRUE(renderTree(dir, rendered, error)) << error;
+  ASSERT_TRUE(std::filesystem::exists(dir / "apu" / "bank_00.asm"));
+  ASSERT_FALSE(d.samples.empty());
+  const VerifyReport report = verifyTree(dir, rom);
+  EXPECT_TRUE(report.identical()) << renderReport(report);
+  EXPECT_TRUE(report.unlisted.empty());
+  EXPECT_EQ(renderReport(report).find("named by no line"), std::string::npos);
   std::filesystem::remove_all(dir, ec);
 }
 

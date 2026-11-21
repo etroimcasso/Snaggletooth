@@ -11,12 +11,15 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <tuple>
 #include <utility>
 
 #include "rom/rom_text.h"
 #include "snaggletooth/snes/cartridge.h"
+
+#include "zstd.h"
 
 namespace snaggletooth::disasm {
 
@@ -29,7 +32,7 @@ using text::tokens;
 namespace {
 
 constexpr std::string_view kFirstLine = "snagrun 1";
-constexpr std::string_view kExtension = ".snagrun";
+constexpr std::string_view kExtension = ".snagrun.zst";
 
 // ---------------------------------------------------------------------------
 // The text of a record.
@@ -131,9 +134,10 @@ std::string valuesText(unsigned bits, const std::vector<std::uint32_t>& values) 
   return values.empty() ? std::string("none") : inputValuesText(bits, values);
 }
 
-std::string checksumText(std::span<const std::uint8_t> rom) {
+// The checksum the header of `rom` names, or nothing for an image with no header.
+std::optional<std::uint16_t> imageChecksum(std::span<const std::uint8_t> rom) {
   const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
-  return header ? "$" + hex(header->checksum, 4) : std::string("none");
+  return header ? std::optional<std::uint16_t>(header->checksum) : std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +652,7 @@ bool sameRun(const RunObservation& a, const RunObservation& b) {
 }
 
 // The number a file under `runs/` carries, or nothing when its name is not
-// `<digits>.snagrun`.
+// `<digits>.snagrun.zst`.
 std::optional<std::uint64_t> recordNumber(const std::filesystem::path& file) {
   const std::string name = file.filename().string();
   if (name.size() <= kExtension.size() || name.substr(name.size() - kExtension.size()) != kExtension) {
@@ -666,6 +670,93 @@ std::optional<std::string> readText(const std::filesystem::path& path) {
   return text.str();
 }
 
+// The zstd parameters every record is written with: level 19, long-distance
+// matching over a 128 MB window, the frame's content size and checksum
+// written, on one thread, so one text has one file wherever it is written.
+constexpr int kZstdLevel = 19;
+constexpr int kZstdWindowLog = 27;
+
+// A record's text as a zstd file: one frame.
+std::string zstdOf(std::string_view text) {
+  ZSTD_CCtx* const context = ZSTD_createCCtx();
+  if (context == nullptr) throw std::runtime_error("zstd could not begin a compression");
+  ZSTD_CCtx_setParameter(context, ZSTD_c_compressionLevel, kZstdLevel);
+  ZSTD_CCtx_setParameter(context, ZSTD_c_enableLongDistanceMatching, 1);
+  ZSTD_CCtx_setParameter(context, ZSTD_c_windowLog, kZstdWindowLog);
+  ZSTD_CCtx_setParameter(context, ZSTD_c_checksumFlag, 1);
+  ZSTD_CCtx_setParameter(context, ZSTD_c_contentSizeFlag, 1);
+  ZSTD_CCtx_setPledgedSrcSize(context, text.size());
+  std::string out;
+  std::string part(ZSTD_CStreamOutSize(), '\0');
+  ZSTD_inBuffer in{text.data(), text.size(), 0};
+  for (;;) {
+    ZSTD_outBuffer to{part.data(), part.size(), 0};
+    const std::size_t left = ZSTD_compressStream2(context, &to, &in, ZSTD_e_end);
+    if (ZSTD_isError(left)) {
+      ZSTD_freeCCtx(context);
+      throw std::runtime_error(std::string("zstd could not compress a record: ") + ZSTD_getErrorName(left));
+    }
+    out.append(part.data(), to.pos);
+    if (left == 0u) break;
+  }
+  ZSTD_freeCCtx(context);
+  return out;
+}
+
+// What a zstd file holds, or nothing, with `error` set, when the bytes are not
+// one whole frame. With `most`, only that many bytes of what it holds are read
+// out, and a frame cut short past them is not looked at.
+std::optional<std::string> unzstd(std::string_view bytes, std::string& error,
+                                  std::optional<std::size_t> most = std::nullopt) {
+  ZSTD_DCtx* const context = ZSTD_createDCtx();
+  if (context == nullptr) {
+    error = "zstd could not begin a decompression";
+    return std::nullopt;
+  }
+  ZSTD_DCtx_setParameter(context, ZSTD_d_windowLogMax, kZstdWindowLog);
+  std::string out;
+  const unsigned long long declared = ZSTD_getFrameContentSize(bytes.data(), bytes.size());
+  if (!most && declared != ZSTD_CONTENTSIZE_UNKNOWN && declared != ZSTD_CONTENTSIZE_ERROR &&
+      declared <= bytes.size() * 1024u) {
+    out.reserve(static_cast<std::size_t>(declared));
+  }
+  std::string part(ZSTD_DStreamOutSize(), '\0');
+  ZSTD_inBuffer in{bytes.data(), bytes.size(), 0};
+  std::size_t left = 1;
+  for (;;) {
+    ZSTD_outBuffer to{part.data(), part.size(), 0};
+    left = ZSTD_decompressStream(context, &to, &in);
+    if (ZSTD_isError(left)) break;
+    out.append(part.data(), to.pos);
+    if (most && out.size() >= *most) {
+      ZSTD_freeDCtx(context);
+      out.resize(*most);
+      return out;
+    }
+    if (left == 0u) break;                              // the frame is whole
+    if (in.pos == in.size && to.pos < to.size) break;   // nothing more to read, and nothing more came out
+  }
+  ZSTD_freeDCtx(context);
+  if (ZSTD_isError(left) || left != 0u) {
+    if (most) return out;  // a head shorter than `most`: what there is
+    error = "not a whole zstd file";
+    return std::nullopt;
+  }
+  if (in.pos != in.size) {
+    error = "bytes follow the zstd frame";
+    return std::nullopt;
+  }
+  return out;
+}
+
+// A size as the tools say one: decimal megabytes to a tenth, or whole decimal
+// kilobytes under a megabyte.
+std::string sizeText(std::uintmax_t bytes) {
+  if (bytes < 1'000'000u) return std::to_string((bytes + 500u) / 1000u) + " kB";
+  const std::uintmax_t tenths = (bytes + 50'000u) / 100'000u;
+  return std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u) + " MB";
+}
+
 // The record files under `runs/`, in the order of their numbers, then by name.
 std::vector<std::pair<std::uint64_t, std::filesystem::path>> recordFiles(const std::filesystem::path& runs,
                                                                          std::error_code& ec) {
@@ -681,10 +772,15 @@ std::vector<std::pair<std::uint64_t, std::filesystem::path>> recordFiles(const s
 }  // namespace
 
 std::string renderRecord(const RunRecord& record, std::span<const std::uint8_t> rom) {
+  return renderRecord(record, rom.size(), imageChecksum(rom));
+}
+
+std::string renderRecord(const RunRecord& record, std::size_t imageBytes, std::optional<std::uint16_t> checksum) {
   const RunObservation& o = record.observation;
   std::string out;
   out += std::string(kFirstLine) + "\n";
-  out += "image " + std::to_string(rom.size()) + " checksum " + checksumText(rom) + "\n";
+  out += "image " + std::to_string(imageBytes) + " checksum " + (checksum ? "$" + hex(*checksum, 4) : std::string("none")) +
+         "\n";
 
   out += "\ncounts instructions " + std::to_string(o.instructions) + " interrupts " + std::to_string(o.interrupts) +
          " nodes " + std::to_string(o.nodes) + " divergences " + std::to_string(o.divergences) +
@@ -697,6 +793,8 @@ std::string renderRecord(const RunRecord& record, std::span<const std::uint8_t> 
 
   if (!record.notes.empty()) out += "\n";
   for (const std::string& note : record.notes) out += "note " + note + "\n";
+  if (!record.enumerationNotes.empty()) out += "\n";
+  for (const std::string& note : record.enumerationNotes) out += "enumeration-note " + note + "\n";
 
   if (!o.reached.empty()) out += "\n";
   for (const ReachedTarget& seen : o.reached) {
@@ -822,6 +920,11 @@ std::optional<RunRecord> parseRecord(std::string_view text, std::string& error) 
     const std::string_view body = line.substr(first);
     if (body == "note" || body.rfind("note ", 0) == 0) {
       record.notes.emplace_back(body.size() > 5u ? body.substr(5) : std::string_view{});
+      block = "note";
+      continue;
+    }
+    if (body == "enumeration-note" || body.rfind("enumeration-note ", 0) == 0) {
+      record.enumerationNotes.emplace_back(body.size() > 17u ? body.substr(17) : std::string_view{});
       block = "note";
       continue;
     }
@@ -1121,9 +1224,7 @@ std::string recordMismatch(std::string_view text, std::span<const std::uint8_t> 
     return "the record was written for an image of " + std::to_string(image->bytes) + " bytes; this one is " +
            std::to_string(rom.size());
   }
-  const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
-  const std::optional<std::uint16_t> checksum =
-      header ? std::optional<std::uint16_t>(header->checksum) : std::nullopt;
+  const std::optional<std::uint16_t> checksum = imageChecksum(rom);
   if (image->checksum != checksum) {
     const auto named = [](const std::optional<std::uint16_t>& value) {
       return value ? "checksum $" + hex(*value, 4) : std::string("no header");
@@ -1300,7 +1401,8 @@ void joinObservation(RunObservation& into, const RunObservation& from) {
 }
 
 std::optional<std::vector<RunRecord>> readRecords(const std::filesystem::path& directory,
-                                                  std::span<const std::uint8_t> rom, std::string& error) {
+                                                  std::span<const std::uint8_t> rom, std::string& error,
+                                                  const ProgressSink& progress) {
   std::vector<RunRecord> records;
   const std::filesystem::path runs = directory / "runs";
   std::error_code ec;
@@ -1312,12 +1414,21 @@ std::optional<std::vector<RunRecord>> readRecords(const std::filesystem::path& d
   }
   for (const auto& file : files) {
     const std::filesystem::path& path = file.second;
-    const std::optional<std::string> text = readText(path);
-    if (!text) {
+    const std::optional<std::string> bytes = readText(path);
+    if (!bytes) {
       error = path.string() + ": cannot be read";
       return std::nullopt;
     }
+    if (progress) {
+      const std::string stage = "decompressing runs/" + path.filename().string() + " (" + sizeText(bytes->size()) + ")";
+      progress(Progress{.stage = stage, .spent = 0, .budget = 0});
+    }
     std::string problem;
+    const std::optional<std::string> text = unzstd(*bytes, problem);
+    if (!text) {
+      error = path.string() + ": " + problem;
+      return std::nullopt;
+    }
     std::optional<RunRecord> record = parseRecord(*text, problem);
     if (!record) {
       error = path.string() + ": " + problem;
@@ -1332,10 +1443,47 @@ std::optional<std::vector<RunRecord>> readRecords(const std::filesystem::path& d
   return records;
 }
 
+std::optional<std::size_t> checkRecords(const std::filesystem::path& directory, std::span<const std::uint8_t> rom,
+                                        std::string& error) {
+  const std::filesystem::path runs = directory / "runs";
+  std::error_code ec;
+  if (!std::filesystem::is_directory(runs, ec)) return std::size_t{0};
+  const auto files = recordFiles(runs, ec);
+  if (ec) {
+    error = runs.string() + ": " + ec.message();
+    return std::nullopt;
+  }
+  // The two head lines of a record fit in this much of its text.
+  constexpr std::size_t kHead = 256;
+  for (const auto& file : files) {
+    const std::filesystem::path& path = file.second;
+    std::ifstream in(path, std::ios::binary);
+    std::string bytes(std::size_t{64} * 1024u, '\0');
+    in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    bytes.resize(static_cast<std::size_t>(in.gcount()));
+    std::string problem;
+    const std::optional<std::string> head = unzstd(bytes, problem, kHead);
+    if (!head || head->empty()) {
+      error = path.string() + ": not a whole zstd file";
+      return std::nullopt;
+    }
+    if (head->rfind(std::string(kFirstLine) + "\n", 0) != 0) {
+      error = path.string() + ": a record begins `" + std::string(kFirstLine) + "`";
+      return std::nullopt;
+    }
+    if (const std::string mismatch = recordMismatch(*head, rom); !mismatch.empty()) {
+      error = path.string() + ": " + mismatch;
+      return std::nullopt;
+    }
+  }
+  return files.size();
+}
+
 RunRecord foldRecords(std::span<const RunRecord> records) {
   RunRecord out;
   std::vector<const RunObservation*> runs;
   std::set<std::string> notes;
+  std::set<std::string> enumerationNotes;
   for (const RunRecord& record : records) {
     const bool again = std::any_of(runs.begin(), runs.end(),
                                    [&](const RunObservation* run) { return sameRun(*run, record.observation); });
@@ -1349,13 +1497,21 @@ RunRecord foldRecords(std::span<const RunRecord> records) {
     for (const std::string& note : record.notes) {
       if (notes.insert(note).second) out.notes.push_back(note);
     }
+    for (const std::string& note : record.enumerationNotes) {
+      if (enumerationNotes.insert(note).second) out.enumerationNotes.push_back(note);
+    }
   }
   return out;
 }
 
 bool writeRecord(const RunRecord& record, std::span<const std::uint8_t> rom, const std::filesystem::path& directory,
                  std::string& error) {
-  const std::string text = renderRecord(record, rom);
+  return writeRecord(record, rom.size(), imageChecksum(rom), directory, error);
+}
+
+bool writeRecord(const RunRecord& record, std::size_t imageBytes, std::optional<std::uint16_t> checksum,
+                 const std::filesystem::path& directory, std::string& error) {
+  const std::string text = renderRecord(record, imageBytes, checksum);
   const std::filesystem::path runs = directory / "runs";
   std::error_code ec;
   std::filesystem::create_directories(runs, ec);
@@ -1368,16 +1524,26 @@ bool writeRecord(const RunRecord& record, std::span<const std::uint8_t> rom, con
     error = runs.string() + ": " + ec.message();
     return false;
   }
+  // A file holds the text when its bytes are the ones written here, or when
+  // they decompress to it.
+  const std::string packed = zstdOf(text);
   std::uint64_t highest = 0;
   for (const auto& [number, path] : files) {
-    if (readText(path) == text) return true;
     highest = std::max(highest, number);
+    const std::optional<std::string> bytes = readText(path);
+    if (!bytes) continue;
+    if (*bytes == packed) return true;
+    // Another compressor's file of the same text: its frame says the length, and
+    // only a file of the text's length is read out to compare.
+    if (ZSTD_getFrameContentSize(bytes->data(), bytes->size()) != text.size()) continue;
+    std::string unread;
+    if (unzstd(*bytes, unread) == text) return true;
   }
   std::string name = std::to_string(highest + 1u);
   if (name.size() < 4u) name.insert(0, 4u - name.size(), '0');
   const std::filesystem::path path = runs / (name + std::string(kExtension));
   std::ofstream out(path, std::ios::binary);
-  out << text;
+  out << packed;
   out.close();
   if (!out) {
     error = "cannot write " + path.string();

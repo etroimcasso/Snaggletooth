@@ -9,7 +9,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -326,11 +328,12 @@ TEST(RomDisasm, ADerivedDestinationInARepeatedLowerHalfIsANote) {
   const Listing& bank40 = regionNamed(d, "bank_40.asm").listing;
   EXPECT_NE(codeLineAt(bank40, 0x409000u), nullptr);
   EXPECT_EQ(codeLineAt(bank40, 0x409234u), nullptr);
-  const bool noted = std::any_of(d.notes.begin(), d.notes.end(), [](const std::string& note) {
+  const auto noted = std::count_if(d.notes.begin(), d.notes.end(), [](const std::string& note) {
     return note.find("derived $40:1234") != std::string::npos &&
            note.find("lower half; not traced") != std::string::npos;
   });
-  EXPECT_TRUE(noted);
+  // Said once, though every turn of the trace and the analysis derives it again.
+  EXPECT_EQ(noted, 1);
 }
 
 TEST(RomDisasm, AnEntryAPersonAddsIsTracedUnderItsMode) {
@@ -3385,6 +3388,42 @@ TEST(RomDisasm, TheTreesRequestIsReadFromItsDirectory) {
   EXPECT_EQ(error, (dir / "project.snagifest").string() + ": " + manifestMismatch(*input, other)) << error;
   EXPECT_FALSE(manifestMismatch(*input, other).empty());
 
+  // The records under `runs/`: the run's own, read with the manifest and
+  // without it, and one written for another image refused by its path.
+  ASSERT_TRUE(d.record.has_value());
+  const std::optional<CartridgeRequest> recorded = treeRequest(rom, dir, found, error);
+  ASSERT_TRUE(recorded.has_value()) << error;
+  ASSERT_TRUE(recorded->records != nullptr);
+  ASSERT_EQ(recorded->records->size(), 1u);
+  EXPECT_TRUE(recorded->records->front() == *d.record);
+  std::filesystem::remove(dir / "project.snagifest", ec);
+  const std::optional<CartridgeRequest> unnamed = treeRequest(rom, dir, found, error);
+  ASSERT_TRUE(unnamed.has_value()) << error;
+  EXPECT_FALSE(found);
+  ASSERT_TRUE(unnamed->records != nullptr) << "read with no manifest";
+  EXPECT_EQ(unnamed->records->size(), 1u);
+  // Only checked, the records are not read, and the request holds none.
+  const std::optional<CartridgeRequest> checked = treeRequest(rom, dir, found, error, {}, TreeRecords::Checked);
+  ASSERT_TRUE(checked.has_value()) << error;
+  EXPECT_TRUE(checked->records == nullptr);
+  // Each record decompressed is told.
+  std::vector<std::string> told;
+  ASSERT_TRUE(treeRequest(rom, dir, found, error, [&](const Progress& p) { told.emplace_back(p.stage); }).has_value());
+  ASSERT_EQ(told.size(), 1u);
+  // The size is the file's, in whole kB under a megabyte.
+  const std::uintmax_t packed = std::filesystem::file_size(dir / "runs" / "0001.snagrun.zst");
+  ASSERT_LT(packed, 1'000'000u);
+  EXPECT_EQ(told[0], "decompressing runs/0001.snagrun.zst (" + std::to_string((packed + 500u) / 1000u) + " kB)");
+  ASSERT_TRUE(writeRecord(*d.record, other, dir, error)) << error;
+  error.clear();
+  EXPECT_FALSE(treeRequest(rom, dir, found, error, {}, TreeRecords::Checked).has_value());
+  EXPECT_EQ(error.rfind((dir / "runs" / "0002.snagrun.zst").string() + ": the record was written for an image with", 0), 0u)
+      << error;
+  error.clear();
+  EXPECT_FALSE(treeRequest(rom, dir, found, error).has_value());
+  EXPECT_EQ(error.rfind((dir / "runs" / "0002.snagrun.zst").string() + ": the record was written for an image with", 0), 0u)
+      << error;
+
   std::filesystem::remove_all(dir, ec);
 }
 
@@ -3448,6 +3487,335 @@ TEST(RomDisasm, TheTreesRequestCarriesEveryLineTheManifestKeeps) {
   EXPECT_GT(moved, 0u);
   EXPECT_GT(assets, 0u);
   EXPECT_GT(derived, 0u);
+}
+
+// ---- the records a tree keeps ---------------------------------------------------
+
+namespace {
+
+// Every file under `dir` by its path relative to it, and its bytes.
+std::map<std::string, std::string> filesUnder(const std::filesystem::path& dir) {
+  std::map<std::string, std::string> files;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(dir)) {
+    if (!entry.is_regular_file()) continue;
+    std::ifstream in(entry.path(), std::ios::binary);
+    files[std::filesystem::relative(entry.path(), dir).generic_string()] =
+        std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
+  return files;
+}
+
+// The records under a tree's `runs/`.
+std::size_t recordsUnder(const std::filesystem::path& dir) {
+  std::size_t count = 0;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(dir / "runs", ec), end; !ec && it != end; it.increment(ec)) ++count;
+  return count;
+}
+
+// A disassembly over the tree in `dir`, made from its request as the tools
+// make one, with a run of `runFrames` under `script` — none for zero — and
+// written there.
+CartridgeDisassembly intoTree(const std::vector<std::uint8_t>& rom, const std::filesystem::path& dir,
+                              const InputScript& script, std::uint64_t runFrames = 12u) {
+  bool found = false;
+  std::string error;
+  std::optional<CartridgeRequest> request = treeRequest(rom, dir, found, error);
+  EXPECT_TRUE(request.has_value()) << error;
+  if (!request) return {};
+  request->bootMasterCycles = 20u * kRunFrame;
+  request->observeRun = runFrames != 0u;
+  request->runMasterCycles = std::max<std::uint64_t>(runFrames * kRunFrame, 1u);
+  request->input = script;
+  const CartridgeDisassembly d = disassembleCartridge(*request);
+  EXPECT_TRUE(writeProject(d, dir, error)) << error;
+  return d;
+}
+
+InputScript scriptOf(std::string_view text) {
+  std::string error;
+  const std::optional<InputScript> parsed = parseInputScript(text, error);
+  EXPECT_TRUE(parsed.has_value()) << error;
+  return parsed.value_or(InputScript{});
+}
+
+// A manifest's lines of the kinds the runs found, each without its count.
+std::vector<std::string> foundLines(const std::string& manifest) {
+  static const std::set<std::string> kKinds = {"reached", "ran",    "moved",    "seen",   "landed", "walked",
+                                               "staged",  "origin", "streamed", "sample", "asset"};
+  std::vector<std::string> lines;
+  std::size_t at = 0;
+  while (at < manifest.size()) {
+    const std::size_t end = manifest.find('\n', at);
+    std::string line = manifest.substr(at, end == std::string::npos ? std::string::npos : end - at);
+    at = end == std::string::npos ? manifest.size() : end + 1u;
+    const std::vector<std::string> words = text::tokens(line);
+    if (words.empty() || kKinds.count(words[0]) == 0) continue;
+    std::string kept;
+    for (std::size_t i = 0; i < words.size(); ++i) {
+      if (words[i] == "times" && i + 1u < words.size()) {
+        ++i;
+        continue;
+      }
+      kept += (kept.empty() ? "" : " ") + words[i];
+    }
+    lines.push_back(kept);
+  }
+  return lines;
+}
+
+// Whether `joined` holds the line, or, for a `seen` line, a line of its site
+// holding every value it names.
+bool holdsLine(const std::vector<std::string>& joined, const std::string& line) {
+  if (std::find(joined.begin(), joined.end(), line) != joined.end()) return true;
+  const std::vector<std::string> words = text::tokens(line);
+  if (words.size() != 4u || words[0] != "seen") return false;
+  const auto values = [](const std::string& field) {
+    std::set<std::string> out;
+    const std::size_t equals = field.find('=');
+    std::size_t from = equals + 1u;
+    while (from <= field.size()) {
+      const std::size_t bar = field.find('|', from);
+      out.insert(field.substr(from, bar == std::string::npos ? std::string::npos : bar - from));
+      if (bar == std::string::npos) break;
+      from = bar + 1u;
+    }
+    return out;
+  };
+  return std::any_of(joined.begin(), joined.end(), [&](const std::string& other) {
+    const std::vector<std::string> theirs = text::tokens(other);
+    if (theirs.size() != 4u || theirs[0] != "seen" || theirs[1] != words[1]) return false;
+    for (std::size_t f = 2; f < 4; ++f) {
+      const std::set<std::string> mine = values(words[f]);
+      const std::set<std::string> held = values(theirs[f]);
+      if (!std::includes(held.begin(), held.end(), mine.begin(), mine.end())) return false;
+    }
+    return true;
+  });
+}
+
+// Every image byte a disassembly lifts into a file.
+std::set<std::size_t> liftedBytes(const CartridgeDisassembly& d) {
+  std::set<std::size_t> bytes;
+  for (const AssetFile& asset : d.assets) {
+    for (std::size_t i = 0; i < asset.bytes.size(); ++i) bytes.insert(asset.romOffset + i);
+  }
+  return bytes;
+}
+
+}  // namespace
+
+TEST(RomRecords, TheSameRunTwiceIntoOneDirectoryWritesTheSameTreeAndOneRecord) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-records-same-test";
+  for (const examples::Example& example : examples::examples()) {
+    const std::string name(example.name);
+    if (name != "enumerating" && name != "drawing" && name != "button_dispatch") continue;
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    const std::vector<std::uint8_t> rom = example.build();
+    const InputScript script = scriptOf("frame 2 1 start\nframe 4 1 none\n");
+    const CartridgeDisassembly first = intoTree(rom, dir, script);
+    ASSERT_TRUE(first.record.has_value()) << name;
+    const std::map<std::string, std::string> before = filesUnder(dir);
+    EXPECT_EQ(recordsUnder(dir), 1u) << name;
+    const CartridgeDisassembly second = intoTree(rom, dir, script);
+    const std::map<std::string, std::string> after = filesUnder(dir);
+    EXPECT_EQ(after.size(), before.size()) << name;
+    for (const auto& [file, bytes] : before) {
+      const auto again = after.find(file);
+      ASSERT_NE(again, after.end()) << name << ": " << file;
+      EXPECT_EQ(again->second, bytes) << name << ": " << file;
+    }
+    EXPECT_EQ(recordsUnder(dir), 1u) << name;
+    if (name == "enumerating") {
+      EXPECT_FALSE(second.enumerated.empty()) << "the outcomes are joined once";
+      EXPECT_EQ(before.count("runs/0001.snagrun.zst"), 1u);
+      EXPECT_FALSE(first.record->enumerationNotes.empty());
+    }
+    std::filesystem::remove_all(dir, ec);
+  }
+}
+
+TEST(RomRecords, ATreeOfTwoRunsHoldsWhatEachRunFound) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-records-two-test";
+  const std::filesystem::path alone = std::filesystem::temp_directory_path() / "snaggletooth-records-alone-test";
+  struct Pair {
+    std::vector<std::uint8_t> rom;
+    std::string first;
+    std::string second;
+    std::uint64_t secondFrames;
+  };
+  const std::vector<Pair> pairs = {
+      {examples::buttonDispatchImage(), "frame 2 1 start\nframe 4 1 none\n", "frame 2 1 a\nframe 4 1 none\n", 12u},
+      {examples::drawingImage(), "", "", 3u},
+      {examples::enumeratingImage(), "", "", 3u},
+  };
+  bool differed = false;
+  for (const Pair& pair : pairs) {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::remove_all(alone, ec);
+    // Each run alone, then both into one directory.
+    const CartridgeDisassembly firstAlone = intoTree(pair.rom, alone, scriptOf(pair.first));
+    std::filesystem::remove_all(alone, ec);
+    const CartridgeDisassembly secondAlone = intoTree(pair.rom, alone, scriptOf(pair.second), pair.secondFrames);
+    intoTree(pair.rom, dir, scriptOf(pair.first));
+    const CartridgeDisassembly joined = intoTree(pair.rom, dir, scriptOf(pair.second), pair.secondFrames);
+    EXPECT_EQ(recordsUnder(dir), 2u);
+    const std::vector<std::string> joinedLines = foundLines(renderManifest(joined));
+    const std::set<std::size_t> joinedBytes = liftedBytes(joined);
+    for (const CartridgeDisassembly* own : {&firstAlone, &secondAlone}) {
+      for (const std::string& line : foundLines(renderManifest(*own))) {
+        const bool asset = line.rfind("asset ", 0) == 0;
+        EXPECT_TRUE(holdsLine(joinedLines, line) || asset) << line;
+      }
+      for (const std::size_t byte : liftedBytes(*own)) EXPECT_EQ(joinedBytes.count(byte), 1u) << byte;
+    }
+    differed = differed || foundLines(renderManifest(firstAlone)) != foundLines(renderManifest(secondAlone));
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::remove_all(alone, ec);
+  }
+  EXPECT_TRUE(differed) << "two of the runs found different things";
+}
+
+TEST(RomRecords, ARecordsOutcomesAndTheEnumerationsNotesStandInTheTree) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-records-outcomes-test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  const std::vector<std::uint8_t> rom = examples::enumeratingImage();
+  const CartridgeDisassembly first = intoTree(rom, dir, InputScript{});
+  ASSERT_TRUE(first.record.has_value());
+  ASSERT_FALSE(first.record->enumerationNotes.empty());
+  ASSERT_FALSE(first.enumerated.empty());
+  // The enumeration's notes stand in the tree of the run that made them.
+  for (const std::string& note : first.record->enumerationNotes) EXPECT_TRUE(anyNote(first, note)) << note;
+
+  // A record whose first outcome holds a value no run gives: the next tree's
+  // outcome holds it beside the second run's own.
+  std::string error;
+  std::optional<std::vector<RunRecord>> records = readRecords(dir, rom, error);
+  ASSERT_TRUE(records.has_value()) << error;
+  ASSERT_EQ(records->size(), 1u);
+  RunRecord edited = records->front();
+  EnumeratedRun& outcome = edited.observation.enumerated.front();
+  const std::uint32_t extra = outcome.bits == 8u ? 0xFEu : 0xFFFEu;
+  ASSERT_EQ(std::find(outcome.values.begin(), outcome.values.end(), extra), outcome.values.end());
+  outcome.values.push_back(extra);
+  edited.enumerationNotes.push_back("enumerate sub_008100: a note only the record holds");
+  std::filesystem::remove(dir / "runs" / "0001.snagrun.zst", ec);
+  ASSERT_TRUE(writeRecord(edited, rom, dir, error)) << error;
+
+  const CartridgeDisassembly again = intoTree(rom, dir, InputScript{});
+  ASSERT_GT(again.enumeration.planned, 0u) << "the second run ran";
+  const auto held = std::find_if(again.enumerated.begin(), again.enumerated.end(), [&](const EnumeratedRun& run) {
+    return run.routine == outcome.routine && run.extents == outcome.extents;
+  });
+  ASSERT_NE(held, again.enumerated.end());
+  EXPECT_NE(std::find(held->values.begin(), held->values.end(), extra), held->values.end());
+  EXPECT_TRUE(anyNote(again, "enumerate sub_008100: a note only the record holds"));
+  for (const std::string& note : first.record->enumerationNotes) EXPECT_TRUE(anyNote(again, note)) << note;
+
+  // Made from the records alone, the tree says both the records' notes.
+  const CartridgeDisassembly kept = intoTree(rom, dir, InputScript{}, 0u);
+  EXPECT_TRUE(anyNote(kept, "enumerate sub_008100: a note only the record holds"));
+  for (const std::string& note : first.record->enumerationNotes) EXPECT_TRUE(anyNote(kept, note)) << note;
+  std::filesystem::remove_all(dir, ec);
+}
+
+TEST(RomRecords, ATreeMadeFromItsRecordsAloneIsTheTreeTheRunWrote) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-records-norun-test";
+  for (const std::vector<std::uint8_t>& rom : {examples::buttonDispatchImage(), examples::enumeratingImage()}) {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    const CartridgeDisassembly ran = intoTree(rom, dir, scriptOf("frame 2 1 start\nframe 4 1 none\n"));
+    const std::map<std::string, std::string> before = filesUnder(dir);
+    const CartridgeDisassembly kept = intoTree(rom, dir, InputScript{}, 0u);
+    EXPECT_FALSE(kept.record.has_value()) << "a disassembly with no run of its own keeps no record";
+    EXPECT_EQ(kept.enumeration.planned, 0u);
+    EXPECT_EQ(filesUnder(dir), before);
+    EXPECT_EQ(renderManifest(kept), renderManifest(ran));
+    std::filesystem::remove_all(dir, ec);
+  }
+}
+
+TEST(RomRecords, AKeptStagedLineWiderThanThePieceTheRunLiftsKeepsItsBytes) {
+  const CartridgeDisassembly ran = stagedLift();
+  const AssetFile* narrow = assetNamed(ran, "vram/00_9100.bin");
+  ASSERT_NE(narrow, nullptr) << renderManifest(ran);
+  CartridgeRequest request;
+  request.assets = {ManifestAsset{.file = "vram/wide.bin",
+                                  .first = 0x009100u,
+                                  .bytes = narrow->bytes.size() + 4u,
+                                  .classes = {RegisterClass::Vram},
+                                  .also = {},
+                                  .kind = MovedKind::Staged}};
+  const CartridgeDisassembly d = stagedLift(request);
+  const AssetFile* wide = assetNamed(d, "vram/wide.bin");
+  ASSERT_NE(wide, nullptr) << renderManifest(d);
+  EXPECT_EQ(wide->first, 0x009100u);
+  EXPECT_GE(wide->bytes.size(), narrow->bytes.size() + 4u);
+  EXPECT_EQ(assetNamed(d, "vram/00_9100.bin"), nullptr) << "the two are one file";
+}
+
+TEST(RomRecords, ASheetNoLandingAndATableNoWalkDescribesKeepTheFormTheyHaveOnDisk) {
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth-records-sheet-test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  const std::vector<std::uint8_t> rom = examples::drawingImage();
+  const CartridgeDisassembly drawn = intoTree(rom, dir, InputScript{});
+  std::vector<const AssetFile*> sheets;
+  std::vector<const AssetFile*> tables;
+  for (const AssetFile& asset : drawn.assets) {
+    if (asset.file.rfind("tiles/", 0) == 0 && asset.file.ends_with(".png")) sheets.push_back(&asset);
+    if (asset.file.rfind("hdma/", 0) == 0 && asset.file.ends_with(".hdma")) tables.push_back(&asset);
+  }
+  ASSERT_FALSE(sheets.empty()) << renderManifest(drawn);
+  ASSERT_FALSE(tables.empty()) << renderManifest(drawn);
+  std::filesystem::remove_all(dir / "runs", ec);
+  ASSERT_FALSE(std::filesystem::exists(dir / "runs"));
+
+  // A run too short to carry anything: the sheets' lines are all that is left.
+  bool found = false;
+  std::string error;
+  std::optional<CartridgeRequest> request = treeRequest(rom, dir, found, error);
+  ASSERT_TRUE(request.has_value()) << error;
+  request->observeRun = true;
+  request->runMasterCycles = 1u;
+  request->bootMasterCycles = 20u * kRunFrame;
+  const CartridgeDisassembly uncarried = disassembleCartridge(*request);
+  EXPECT_TRUE(uncarried.landed.empty());
+  EXPECT_TRUE(uncarried.walked.empty());
+  for (const AssetFile* table : tables) {
+    const AssetFile* kept = assetNamed(uncarried, table->file);
+    ASSERT_NE(kept, nullptr) << table->file << "\n" << renderManifest(uncarried);
+    EXPECT_EQ(kept->unit, table->unit) << table->file;
+    EXPECT_EQ(kept->indirect, table->indirect) << table->file;
+    EXPECT_EQ(kept->written, table->written) << table->file;
+    EXPECT_FALSE(anyNote(uncarried, table->file)) << table->file;
+  }
+  for (const AssetFile* sheet : sheets) {
+    const AssetFile* kept = assetNamed(uncarried, sheet->file);
+    ASSERT_NE(kept, nullptr) << sheet->file << "\n" << renderManifest(uncarried);
+    EXPECT_EQ(kept->depth, sheet->depth) << sheet->file;
+    EXPECT_EQ(kept->palette, sheet->palette) << sheet->file;
+    EXPECT_EQ(kept->written, sheet->written) << sheet->file;
+    EXPECT_FALSE(anyNote(uncarried, sheet->file)) << sheet->file;
+  }
+  // Without the file on disk the sheet and the table are bytes, and say why.
+  for (const AssetFile* sheet : sheets) std::filesystem::remove(dir / sheet->file, ec);
+  for (const AssetFile* table : tables) std::filesystem::remove(dir / table->file, ec);
+  const CartridgeDisassembly missing = disassembleCartridge(*request);
+  for (const AssetFile* sheet : sheets) {
+    const std::string bin = sheet->file.substr(0, sheet->file.size() - 4u) + ".bin";
+    EXPECT_NE(assetNamed(missing, bin), nullptr) << bin;
+    EXPECT_TRUE(anyNote(missing, bin + ": no landing names its depth; written as bytes")) << bin;
+  }
+  for (const AssetFile* table : tables) {
+    const std::string bin = table->file.substr(0, table->file.size() - 5u) + ".bin";
+    EXPECT_NE(assetNamed(missing, bin), nullptr) << bin;
+    EXPECT_TRUE(anyNote(missing, bin + ": no walk names its unit; written as bytes")) << bin;
+  }
+  std::filesystem::remove_all(dir, ec);
 }
 
 }  // namespace snaggletooth::disasm

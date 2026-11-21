@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <set>
+#include <system_error>
 
 #include "cpu65816/cpu65816_asm.h"
 #include "formats/reader.h"
@@ -20,6 +22,36 @@ std::string hex(std::uint32_t value, int digits) {
 
 std::string offsetText(std::size_t offset) {
   return "$" + hex(static_cast<std::uint32_t>(offset), 6);
+}
+
+// The files under `directory` that no line of `manifest` names: every regular
+// file under a directory an `asset`, `preview` or `sample` line names a file
+// in, other than a file any line names — those, a `file` line's and the
+// `sound` line's — by path relative to the tree, ascending.
+std::vector<std::string> unlistedFiles(const std::filesystem::path& directory, const ManifestInput& manifest) {
+  std::set<std::string> lifted;
+  for (const ManifestAsset& asset : manifest.assets) lifted.insert(asset.file);
+  lifted.insert(manifest.previews.begin(), manifest.previews.end());
+  lifted.insert(manifest.samples.begin(), manifest.samples.end());
+  std::set<std::string> directories;
+  for (const std::string& file : lifted) {
+    const std::string parent = std::filesystem::path(file).parent_path().generic_string();
+    if (!parent.empty()) directories.insert(parent);
+  }
+  std::set<std::string> named = lifted;
+  for (const SourceRegion& region : manifest.regions) named.insert(region.file);
+  if (manifest.sound) named.insert(manifest.sound->file);
+  std::set<std::string> unlisted;
+  for (const std::string& under : directories) {
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(directory / under, ec), end; !ec && it != end;
+         it.increment(ec)) {
+      if (!it->is_regular_file(ec)) continue;
+      const std::string file = std::filesystem::relative(it->path(), directory, ec).generic_string();
+      if (!ec && named.count(file) == 0) unlisted.insert(file);
+    }
+  }
+  return std::vector<std::string>(unlisted.begin(), unlisted.end());
 }
 
 // The image being rebuilt from the tree, and what each byte's placement found.
@@ -227,7 +259,9 @@ VerifyReport verifyTree(const std::filesystem::path& directory, std::span<const 
     report.error = (directory / "project.snagifest").string() + ": " + error;
     return report;
   }
-  return verifyProject(*manifest, rom, read);
+  VerifyReport verified = verifyProject(*manifest, rom, read);
+  if (verified.error.empty()) verified.unlisted = unlistedFiles(directory, *manifest);
+  return verified;
 }
 
 std::string renderReport(const VerifyReport& report) {
@@ -267,6 +301,11 @@ std::string renderReport(const VerifyReport& report) {
   out += "\n";
   out += report.identical() ? "the tree assembles to the image\n"
                             : "the tree does not assemble to the image\n";
+  if (!report.unlisted.empty()) {
+    out += std::to_string(report.unlisted.size()) +
+           (report.unlisted.size() == 1 ? " file under the tree is" : " files under the tree are") +
+           " named by no line of the manifest\n";
+  }
   return out;
 }
 

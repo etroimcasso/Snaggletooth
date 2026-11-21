@@ -1,6 +1,6 @@
 # Run record
 
-A run record is a text file holding what one run of a cartridge saw: the destinations its indirect jumps took, the places the CPU arrived that no instruction named, the ranges the transfer engines moved and where each landed, how each HDMA table was walked, the palettes a landing was read under, the registers seen at every site, every extent carried out of work RAM with the image bytes it was built from and every content it was carried out with, the runs of bytes the CPU carried itself, the samples the key-ons named, and the outcomes of the routines the toolkit ran. It is the [run's observation](snes-disassembler.md#running-the-cartridge) and the run's notes, whole, written so that it reads back to the same observation. A tree keeps its records as numbered files under `runs/`, one a run, and the records of several runs join into one observation.
+A run record is a file holding what one run of a cartridge saw: the destinations its indirect jumps took, the places the CPU arrived that no instruction named, the ranges the transfer engines moved and where each landed, how each HDMA table was walked, the palettes a landing was read under, the registers seen at every site, every extent carried out of work RAM with the image bytes it was built from and every content it was carried out with, the runs of bytes the CPU carried itself, the samples the key-ons named, and the outcomes of the routines the toolkit ran. It is the [run's observation](snes-disassembler.md#running-the-cartridge) and the run's notes, whole, written so that it reads back to the same observation. A tree keeps its records as numbered zstd files under `runs/`, one a run, and the records of several runs join into one observation. The disassembler writes one when a run ends, and every later disassembly over the tree is made from every record there and its own run together, so what a run found stays in the tree whether or not a later run finds it again (§3).
 
 The library is `rom/rom_record.h`, in the `snaggletooth_rom` target.
 
@@ -28,7 +28,7 @@ The library is `rom/rom_record.h`, in the `snaggletooth_rom` target.
 
 ## 1. Form
 
-A record is UTF-8 text, one line per fact:
+A record is UTF-8 text, kept in its file compressed with zstd (§3), one line per fact:
 
 ```
 <kind> <field> <field> …
@@ -38,7 +38,7 @@ The first word names the kind of line; the fields follow, separated by spaces. F
 
 Addresses are written in the 65816 dialect's long form, `$BB:XXXX`, and the sound program's in the SPC700 dialect's, `$XXXX`. An image offset is `$` and six hexadecimal digits, and a run of image offsets is `<first>-<last>`, both inclusive. A count is decimal. Bytes are an unbroken run of hexadecimal digits, two a byte, in address order. A field with nothing in it is `none`.
 
-The kinds stand in this order, each group behind a blank line: the head, `counts`, `note`, `reached`, `ran`, `moved`, `palette`, `landed`, `walked`, `seen`, `staged`, `streamed`, `sample`, `enumerated`. Within a kind the lines stand in the order the observation states for it ([`rom/rom_observe.h`](../tools/rom/rom_observe.h)), so one observation has one text.
+The kinds stand in this order, each group behind a blank line: the head, `counts`, `note`, `enumeration-note`, `reached`, `ran`, `moved`, `palette`, `landed`, `walked`, `seen`, `staged`, `streamed`, `sample`, `enumerated`. Within a kind the lines stand in the order the observation states for it ([`rom/rom_observe.h`](../tools/rom/rom_observe.h)), so one observation has one text.
 
 A record of twelve frames of the `drawing` example cartridge, which sends one of everything an editable form has a grammar for, begins:
 
@@ -72,12 +72,20 @@ One line, every count named in this order: the steps the interpreter ran a node 
 
 ```
 note <text>
+enumeration-note <text>
 ```
 
-One of the run's notes, the text running to the end of the line, in the order the run made them. Twelve frames of the `unreadable_pointer` example cartridge make one:
+A `note` line is one of the notes the run made as it played, the text running to the end of the line, in the order the run made them. Twelve frames of the `unreadable_pointer` example cartridge make one:
 
 ```
 note run: the jump at $00:8000 reads its pointer from memory the run cannot see; not recorded
+```
+
+An `enumeration-note` line is one of the notes the toolkit's runs of the routines made (§2.10), in the order made. The two kinds are kept apart because a manifest says them in two places: the run's notes before the trace's, the enumeration's after the notes of the plan ([project-manifest.md §2.5](project-manifest.md#25-stops-warnings-and-notes)). A second of the `enumerating` example cartridge makes seven, among them:
+
+```
+enumeration-note enumerate sub_008100 X=$000C: did not return within 21477272 cycles; not lifted
+enumeration-note enumerate sub_008800: 4 values wrote $7E:0000-$7E:0001, extents the run never carried; not lifted
 ```
 
 ### 2.4 Where the run went
@@ -206,9 +214,21 @@ enumerated $00:8100 X bits 16 values $0000 entered-from $00:804A
 
 ## 3. The records under a tree
 
-A tree's records are the files under its `runs/` directory named `<digits>.snagrun`: `runs/0001.snagrun`, `runs/0002.snagrun`, and on, numbered from `0001` in four digits or as many more as a number needs. They are read in the order of their numbers. A record is written once, as the number one past the highest there, and never rewritten; a record whose text a file there already holds is not written again. A file under `runs/` with any other name is not a record and is left alone.
+A tree's records are the files under its `runs/` directory named `<digits>.snagrun.zst`: `runs/0001.snagrun.zst`, `runs/0002.snagrun.zst`, and on, numbered from `0001` in four digits or as many more as a number needs. They are read in the order of their numbers. A record is written once, as the number one past the highest there, and never rewritten; a record whose text a file there already holds is not written again. A file under `runs/` with any other name is not a record and is left alone.
+
+Each file is one [zstd](../third_party/zstd/README.md) frame ([RFC 8878](https://www.rfc-editor.org/rfc/rfc8878)) holding one record's text, so `zstd -dc` shows the text: compressed at level 19 with long-distance matching over a 128 MB window, the frame carrying its content's size and a checksum, on one thread, so one text is one file's bytes on every platform. A reader takes any zstd frame of a record's text, whatever compressed it, within that window; a file that is not a whole frame, or has bytes after it, is refused with its path. A second of the `drawing` example cartridge is 26,027 bytes of text in a file of 2,040; a minute of a commercial cartridge's play, 5 to 54 MB of text, is a file of 0.1 to 0.6 MB, and a long session gains more, since its repeated lines lie within the window: about thirteen minutes of play, 416 MB of text, are a file of 2.6 MB.
+
+```
+$ zstd -dc --long=27 drawing-tree/runs/0001.snagrun.zst | head -2
+snagrun 1
+image 32768 checksum $EDCB
+```
 
 A record names the image its run played, and a record read over another image is refused with the file's path: a tree's records are of one cartridge.
+
+A disassembly over a tree reads every record there, whether or not the tree holds a manifest, joins them in the order of their numbers (§4), joins its own run to them, and makes the tree from the whole: every `reached`, `ran`, `moved`, `seen`, `landed`, `walked`, `staged`, `origin`, `streamed`, `sample` and `enumerated` line of the manifest, every lifted file and every preview is what all the runs found together. A run that agrees with a record in everything but its outcomes and the enumeration's counts is that record's run again, and is not counted twice. A disassembly with no run of its own is made from the records alone, and runs no routine: its outcomes are the records'. When the disassembly made or was handed a run and asks for it to be kept, its run is written as the next record after the manifest; a host that makes several trees from one run as it goes keeps only the last (`CartridgeRequest::recordRun`), and [`snes_player --disasm`](../tools/player/README.md#disassembling-as-you-play) keeps the closing tree's.
+
+A person may delete a record, a file at a time, to drop what that run found: the next disassembly is made from the records that are left. No tool removes a record.
 
 ## 4. Joining records
 
@@ -222,7 +242,7 @@ Two observations join into one by the identity the run itself keeps each kind un
 - Outcomes that agree in everything but their values are one outcome holding the values of both.
 - The instruction, interrupt and divergence counts and the enumeration's are added; the node counts, the origin count and the cap take the larger.
 
-Joining an observation to an empty one gives that observation. Records that agree in everything but their outcomes and the enumeration's counts are two records of one run: folded together, the run's sightings count once and the outcomes join. The notes of every record are joined each once, in the order first made.
+Joining an observation to an empty one gives that observation. Records that agree in everything but their outcomes and the enumeration's counts are two records of one run: folded together, the run's sightings count once and the outcomes join. The notes of every record are joined each once, in the order first made, and the enumeration's notes apart from them in the same way.
 
 ## 5. Library
 
@@ -237,7 +257,7 @@ std::vector<std::string> notes;
 const RunObservation seen = observeRun(rom, 60u * 21'477'272u, script, notes);
 
 std::string error;
-if (!writeRecord(RunRecord{.observation = seen, .notes = notes}, rom, tree, error)) {
+if (!writeRecord(RunRecord{.observation = seen, .notes = notes, .enumerationNotes = {}}, rom, tree, error)) {
   // `error` names the file that could not be written.
 }
 const std::optional<std::vector<RunRecord>> records = readRecords(tree, rom, error);
@@ -247,14 +267,19 @@ if (!records) {
 const RunRecord all = foldRecords(*records);  // every run the tree holds, as one
 ```
 
-- `RunRecord` — `observation`, a `RunObservation`, and `notes`, the run's notes in the order made. Two records compare equal field for field.
+- `RunRecord` — `observation`, a `RunObservation`; `notes`, the run's notes in the order made; and `enumerationNotes`, the notes of the toolkit's runs of the routines in the order made. Two records compare equal field for field.
 - `renderRecord(record, rom)` — the record's text, its head naming `rom`.
+- `renderRecord(record, imageBytes, checksum)` — the same text for an image known by its size and the checksum its header names, `std::nullopt` for an image with no header, as a disassembly holds them (`CartridgeDisassembly::imageBytes`, `header.checksum`).
 - `parseRecord(text, error)` — the record a text holds, or nothing with `error` set to `line <n>: ` and what the line was expected to be. A register's name and class are those of its address, and a destination's and a landing's names are empty, as a run reports them. Reading what `renderRecord` wrote gives the record back, and rendering that gives the same text.
 - `recordMismatch(text, rom)` — why the record cannot be read over `rom`, its size or its checksum, or an empty string when it can.
 - `joinObservation(into, from)` — `from` joined into `into` in place, by the rules of §4, every list standing afterward in the order the observation states for it.
-- `readRecords(directory, rom, error)` — the records under `<directory>/runs/`, in the order of their numbers; none for a tree with no `runs/`; nothing, with `error` the file's path, `": "` and what is wrong, for one that does not read or was written for another image.
+- `readRecords(directory, rom, error, progress)` — the records under `<directory>/runs/`, in the order of their numbers, each file decompressed; none for a tree with no `runs/`; nothing, with `error` the file's path, `": "` and what is wrong, for one that is not a whole zstd file, does not read or was written for another image. `progress`, a `ProgressSink` from `rom/progress.h`, is told `decompressing runs/<name> (<size>)` as each file begins, the size in decimal MB to a tenth or whole kB under a megabyte.
+- `checkRecords(directory, rom, error)` — how many records the tree holds, each file decompressed only as far as its first two lines; nothing, with `error` set as `readRecords` sets it, for one that is not a zstd file, does not begin `snagrun 1` or was written for another image. A fraction of a second where reading the records takes seconds; what a record's body holds it does not look at.
 - `foldRecords(records)` — every record joined into one, two records of one run counted once.
-- `writeRecord(record, rom, directory, error)` — the record written as the next file under `<directory>/runs/`, the directory made where there is none; true without writing when a file there holds the same text; false, with `error` set, when the file cannot be written.
+- `writeRecord(record, rom, directory, error)` — the record written as the next file under `<directory>/runs/`, compressed with zstd (§3), the directory made where there is none; true without writing when a file there holds the same text; false, with `error` set, when the file cannot be written.
+- `writeRecord(record, imageBytes, checksum, directory, error)` — the same, for an image known by its size and checksum; `writeProject` writes a disassembly's record this way.
+
+The disassembler's part is in `rom/rom_disasm.h`: `treeRequest` reads a tree's records into `CartridgeRequest::records`, or with `TreeRecords::Checked` only checks them, `disassembleCartridge` makes the tree from them and its own run and holds its own run as `CartridgeDisassembly::record`, and `writeProject` writes that record under `runs/`.
 
 Joining a record to itself with `joinObservation` doubles its counts: it is two runs to the join. `foldRecords` is the call that knows two records of one run.
 
@@ -266,6 +291,6 @@ This document defines a published surface, held to the same rule as the [assembl
 
 ## See also
 
-- [Project manifest](project-manifest.md) — the tree's manifest, whose run lines are written from the run's observation, and the lexical conventions a record shares.
+- [Project manifest](project-manifest.md) — the tree's manifest, whose run lines are written from the runs' observations, and the lexical conventions a record shares.
 - [Cartridge disassembler](snes-disassembler.md) — the run on the machine and what it records.
 - [Input script](input-script.md) — the recorded presses a run replays into the controller ports.

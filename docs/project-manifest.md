@@ -4,8 +4,9 @@
 [cartridge disassembler](snes-disassembler.md) writes: the one file that says
 which image the tree is of, which files make it up and which bytes of the image
 each produces, where the trace began and where it stopped. Seven of its line kinds are read
-back on the next run — which is how a person directs the trace, how a run's
-findings outlive it, and how a name a person gives a file survives.
+back on the next run — which is how a person directs the trace and how a name a
+person gives a file survives — and what each run found is kept beside it in the
+tree's [run records](run-record.md), so a finding outlives the run that made it.
 
 > **Status.** The disassembler writes the manifest and reads it back on the next
 > run; `snes_verify` executes it — assembles every file it names, places the
@@ -233,7 +234,12 @@ instruction and the reason; a person answers it with an `entry`. A `warning` is 
 listing's own warning, prefixed with the file it heads: an address two paths read
 two ways, an operand no width settles. A `note` is what the run could not do at
 all: no sound program within the boot's time, an entry that lies in no file, a
-`file` line that does not read consecutive bytes.
+`file` line that does not read consecutive bytes. The notes stand in the order
+they were made. What the runs said as they played stands where the run's notes
+are made, before the trace's: each record's, in the order of the records, then
+this run's, a note an earlier run already said not said again. What the
+toolkit's runs of the routines said stands after the notes of the plan
+(§2.21), the records' first in the same way.
 
 ### 2.6 What the code reaches
 
@@ -501,7 +507,9 @@ line; a jump the bytes bound but whose pointers lie outside the image keeps its
 `stop`. The target and the pointer are written in the bank the CPU runs the jump
 in — the program bank [every path proves](#29-what-every-path-proves) there — and
 the trace places the target to start from it, so the label is the placed
-address's.
+address's. A destination the tree cannot trace — one outside the image, in a
+LoROM bank's repeated lower half, or in no file — is a `note` and no line, said
+once however many turns of the trace and the analysis derive it again.
 
 The same cartridge's reset code masks a value nothing knows to three bits,
 doubles it, and dispatches through an eight-entry table at `$00:8200`:
@@ -623,9 +631,11 @@ channel was set up to carry from the image and no run has moved, or the run
 of image bytes a routine read when the toolkit ran it for an entry the run did
 not select — written once, as the bytes are,
 under a directory named for the memory it went to — and, for VRAM, for what the
-PPU used that memory as when the run saw the bytes drawn: `maps/` for a file
-every landing of which lies in a tilemap, `tiles/` for one every landing of
-which lies in a name base or the sprite tiles, `vram/` for the rest (§2.17) —
+PPU used that memory as when the runs saw the bytes drawn: `maps/` for a file
+every drawn landing of which lies in a tilemap, `tiles/` for one every drawn
+landing of which lies in a name base or the sprite tiles, `vram/` for the rest
+and for a file no landing of which was drawn, a landing never drawn passed over
+(§2.17) —
 and included from the bank
 file where it was with [`INCBIN`](assembly-lexicon.md#54-incbin). The path is
 relative to the manifest; then the
@@ -696,20 +706,20 @@ The line is read back for its path: a person renames the file, changes the path
 here to match, and the next run lifts the same range — the same `from` and
 `bytes` — under that name. The extension is the form's, not the person's: a
 run that finds a different form writes the file with that form's extension
-under the same name, and says so in a `note`. A tree disassembled without a
-run writes an encoded file again from the image bytes at the depth, the
-palette and the unit the file on disk carries — the PNG's header and palette,
-the `.hdma`'s first line — since those facts were the run's and the line
-keeps only the path; a named file that is missing, or does not read as its
-form, is written as `.bin`, the path here changes to say so, and a `note`
-says why. For a `dma`, `table` or `indirect` file the class,
-the kind and the range are the run's and are written fresh, the `moved` lines
-being what keeps the file, and for a `proven` file they are the trace's, which
-finds the same transfer every time; a `staged`, `stream` or `enumerated` file's
-evidence is written fresh (§2.15, §2.16, §2.21), so its line is read back whole
-and keeps the file from one disassembly to the next until a run lifts a wider
-file over its bytes. The `also` classes are read back with a `staged` or
-`stream` line and written fresh with the rest of any other line; an
+under the same name, and says so in a `note`. A tile sheet no landing
+describes and a table no walk describes — every one, in a tree disassembled
+with no run and no record — are written again from the image bytes at the
+depth, the palette and the unit the file on disk carries: the PNG's header and
+palette, the `.hdma`'s first line. A named file that is missing, or does not
+read as its form, is written as `.bin`, the path here changes to say so, and a
+`note` says why. For a `dma`, `table` or `indirect` file the class, the kind
+and the range are what the runs saw, which the tree's [records](run-record.md)
+and its `moved` lines keep, and for a `proven` file they are the trace's,
+which finds the same transfer every time. A `staged`, `stream` or `enumerated`
+line is read back whole: the file is lifted again as the line records it, and
+where a file a run lifts shares a byte with it, the two are one file holding
+the bytes of both. The `also` classes are read back with a `staged` or
+`stream` line and worked out again with the rest of any other line; an
 `enumerated` line's class field already names every class its file's pieces
 have, so it is never written with them, and `also` read on one is dropped.
 
@@ -777,10 +787,11 @@ seen     <address> D=<value|…> DBR=<value|…>
 At a site in the image the run executed an instruction: every value the direct
 register and the data bank held before it ran, each value once, ascending,
 joined by `|`. One line per site, in address order, and every value the run
-saw is written, however many. The line is written fresh on every run and read
-back by no disassembly — the next run sees it again — and a disassembly without
-a run writes none; `snes_render` reads it for the `(run)` comment on a plain
-direct-page operand.
+saw is written, however many: this run's and every record's the tree keeps
+([run-record.md](run-record.md)). No disassembly reads the line back — the
+records keep what it says — and a disassembly with no run and no record writes
+none; `snes_render` reads it for the `(run)` comment on a plain direct-page
+operand.
 
 `seen` and [`state`](#29-what-every-path-proves) say different things about
 the same registers: `state` is what every path into a label proves, `seen` is
@@ -922,8 +933,10 @@ with a `staged` line per class. The sixteen at `$7F:0800` were copied from
 `$9600` and carried out by the CPU itself, a word at a time (§2.16): an extent
 like any other, lifted as its source.
 
-Every line here is written fresh from the run and read back by no disassembly;
-a `staged` or `stream` file outlives the run through its `asset` line (§2.12).
+Every line here is the runs' — this run's and every record's the tree keeps
+([run-record.md](run-record.md)) — and no disassembly reads it back: the
+records keep it, and a `staged` or `stream` file's `asset` line is read back
+whole (§2.12).
 
 ### 2.16 What the CPU streamed
 
@@ -1079,10 +1092,10 @@ tiles; the sixty-four bytes from `$9200` reach BG3's name base as well, whose
 layer is 2 bits a pixel in that mode, so their depth is `none`; the Mode 7
 upload is 8.
 
-The line is written fresh and read back by nothing: the next run sees the
-landings again, and the two things that follow from them — the directory a
-VRAM file lives under and the form it is written in — are kept by the file's
-`asset` line, whose path names both.
+The line is the runs' — this run's and every record's — and no disassembly
+reads it back: the records keep the landings, and the two things that follow
+from them — the directory a VRAM file lives under and the form it is written
+in — are kept by the file's `asset` line as well, whose path names both.
 
 
 ### 2.18 How a table was walked
@@ -1117,8 +1130,9 @@ walked   $00:81A8 channel 2 memory $00:A410 bytes 7 as table unit 1 indirect tim
 walked   $00:81A8 channel 2 memory $00:A420 bytes 4 as indirect unit 1 indirect times 60
 ```
 
-The line is written fresh and read back by nothing. A tree disassembled
-without a run takes a table's unit from the `.hdma` file on disk
+The line is the runs' and no disassembly reads it back; the records keep it.
+A table no walk describes — every one, in a tree disassembled with no run and
+no record — takes its unit from the `.hdma` file on disk
 ([§2.12](#212-assets)).
 
 ### 2.19 Previews
@@ -1152,7 +1166,7 @@ a range that landed in tiles of one depth, in a tilemap, in the palette or in
 the sprite table, or a table walked under one unit; a content whose landing
 mixes a screen with tiles, lies in no area or was never shown is left out. A
 Mode 7 file under `vram/` — one range holding a map in its even bytes and
-tiles in its odd — gets two, `<name>-tiles.png` and `<name>-map.map`. Beside a
+tiles in its odd, every drawn landing of it under Mode 7 — gets two, `<name>-tiles.png` and `<name>-map.map`. Beside a
 file holding a source of what the toolkit's run of a routine built (§2.21),
 after the run's own previews, `<name>-enumerated-<form>.<ext>` holds what each
 kept value built, once each, in the form the recorded extent's first content
@@ -1188,9 +1202,10 @@ routine cleared has no preview, since the routine made more of that content
 than the blob did; and of the two blobs summed into one buffer, the one that
 supplied two of every byte's three owns it.
 
-The line is written fresh and read back by nothing; a run that had no
-machine leaves the previews on disk as they were, since the disassembler
-never deletes a file.
+The line is the runs' and no disassembly reads it back: the previews are
+drawn from what this run and every record carried. A disassembly with no run
+and no record writes no preview and leaves those on disk as they were, since
+the disassembler never deletes a file.
 
 ### 2.20 Samples
 
@@ -1233,9 +1248,9 @@ sample   apu/driver-0308.wav of $0308 bytes 18 loop $0311 in apu/driver.asm at $
 sample   apu/samples/0330.wav of $0330 bytes 18 loop $0330 unplaced times 1
 ```
 
-The line is written fresh and read back by nothing; the WAV is a listening
-copy, which nothing includes and the verifier never reads. A run that had no
-machine leaves the WAVs on disk as they were.
+The line is the runs' and no disassembly reads it back; the WAV is a listening
+copy, which nothing includes and the verifier never reads. A disassembly with
+no run and no record writes no WAV and leaves those on disk as they were.
 
 ### 2.21 What the toolkit ran
 
@@ -1426,8 +1441,11 @@ across the widened palette file and the sprite file, and is refused.
 The second loader loads its own index from work RAM, and its caller bounds
 nothing.
 
-Every line here is written fresh from the run and read back by no disassembly;
-an `enumerated` file outlives the run through its `asset` line (§2.12).
+Every line here is the runs' — this disassembly's second run's and every
+record's — and no disassembly reads it back: the records keep it, and an
+`enumerated` file's `asset` line is read back whole (§2.12). A disassembly
+without a run of its own runs no routine, and its `enumerated` lines are those
+the records hold.
 
 
 ## 3. What is read back
@@ -1446,18 +1464,22 @@ When the disassembler runs over a directory that holds a manifest, it reads:
 - every `derived` line, and traces from each as it traces from a `reached`
   line — and derives them again from the bytes, so the set is kept and grows
   with the tree;
-- every `moved` line, and keeps it — a range this run saw again carries this
-  run's count, one it did not see is kept as it was — so what a run saw move
-  outlives it, and a tree disassembled without a run still says where the
+- every `moved` line, and keeps it — a range the runs saw carries the count
+  they saw it together, one no run saw is kept as it was — so what a run saw
+  move outlives it, and a tree disassembled without a run still says where the
   hardware's bytes came from, and lifts the same files;
 - every `asset` line, for its path — a file lifted again with the same first
   address and length takes the path the line gives it, so a name a person gave
   a file survives; a `dma`, `table`, `indirect` or `proven` line matching no file this
   run lifts is dropped, and a `note` says so — and a `staged`, `stream` or
   `enumerated` line whole, its `also` classes with it, the file lifted again as
-  the line records it unless this run lifts a file over its bytes;
+  the line records it and joined to any file this run lifts over its bytes;
 - every `file` line, and writes exactly those files — a file split with a gap
   leaves the gap's bytes unplaced, which the run reports;
+- every record under `runs/` ([run-record.md](run-record.md)), whether or not
+  the directory holds a manifest, and makes the tree from all of them and its
+  own run together; a record written for another image stops it, as a manifest
+  written for one does;
 - `image` and `checksum`, and refuses to run when the image it was given is not
   the one the manifest was written for.
 
@@ -1470,13 +1492,20 @@ directory, it reads:
   each block `at` an offset is placed there; an `unplaced` block is the bank's
   and is not compared;
 - `image` and `checksum`, refusing a manifest written for another image as the
-  disassembler does.
+  disassembler does;
+- the paths the `asset`, `preview` and `sample` lines name: a file under a
+  directory one of them names a file in that no line names is counted after
+  the verdict, and `--unlisted` prints each; nothing removes one.
 
-Everything else is what the last run found and is written fresh — the `access`,
-`dma`, `routine`, `state`, `seen`, `origin`, `staged`, `enumerated`, `streamed`,
-`landed`, `walked`, `preview` and `sample` lines among them — and the next disassembly reads none of it back: they are what
-the trace and the run saw, and the next sees it again. A `stop` line records;
-only an `entry` line directs. `snes_render` reads `map`, `save` and `chip`, and the `access`, `routine`,
+Everything else in a manifest is written from what the runs over the tree
+found: this disassembly's own run and every record the tree holds
+([run-record.md](run-record.md)). The `access`, `dma`, `routine` and `state`
+lines follow from the trace and are worked out again each time. The `seen`,
+`origin`, `staged`, `enumerated`, `streamed`, `landed`, `walked`, `preview` and
+`sample` lines are the runs' findings, and a finding stays in the manifest
+whether or not the latest run made it again. No disassembly reads these lines
+back: the records are what keeps them. A `stop` line records; only an `entry`
+line directs. `snes_render` reads `map`, `save` and `chip`, and the `access`, `routine`,
 `seen`, `asset`, `moved`, `dma`, `sound` and `block` lines when it writes the
 bank files from `program.snagir` and the sound file from `apu.snagir`, for
 the board a lifted file's address is placed on, the register names, the
@@ -1484,7 +1513,7 @@ routine comments, the `INCBIN` lines and the sound file's header ([snes-disassem
 `snes_lift` and `snes_differential` read the program files beside the
 manifest and nothing of the manifest itself ([snagir.md](snagir.md)).
 The disassembler writes the manifest, the program files and the lifted files
-fresh, and the renderer writes the bank files and the sound file fresh: an
+anew each time, and the renderer writes the bank files and the sound file anew: an
 edit to a source file or to a program file is not read back by the next
 disassembly, so a person's changes to the trace belong in the manifest, and
 their changes to the code in the sources, which `snes_verify` assembles as

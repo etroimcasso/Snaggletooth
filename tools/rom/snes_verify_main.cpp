@@ -1,6 +1,6 @@
 // snes_verify — verifies a source tree against the cartridge image it came from.
 //
-//   snes_verify <directory> <image> [-o <rebuilt>]
+//   snes_verify <directory> <image> [-o <rebuilt>] [--unlisted]
 //
 // Reads the directory's `project.snagifest`, assembles every file it names —
 // the bank files under the 65816 dialect, the sound program under the SPC700
@@ -11,9 +11,15 @@
 // byte, the bytes no file produced, and the verdict. `-o` writes the image the
 // tree assembled to, whatever the verdict.
 //
+// A file under a directory the manifest's lifted files, previews and samples
+// lie in that no line of the manifest names is counted after the verdict:
+// what an earlier disassembly wrote and the latest did not write again.
+// Nothing reads such a file and no tool removes one. `--unlisted` prints each
+// path after the count, one a line.
+//
 // The exit status is 0 only when the tree assembles to the image: every file
-// assembled, every byte produced exactly once, none differing. A manifest
-// written for another image is refused.
+// assembled, every byte produced exactly once, none differing — whatever files
+// no line names. A manifest written for another image is refused.
 //
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
@@ -35,8 +41,9 @@
 namespace {
 
 [[noreturn]] void usage(const char* prog) {
-  std::cerr << "usage: " << prog << " <directory> <image> [-o <rebuilt>]\n"
-               "  assembles the tree under the directory and compares it with the image\n";
+  std::cerr << "usage: " << prog << " <directory> <image> [-o <rebuilt>] [--unlisted]\n"
+               "  assembles the tree under the directory and compares it with the image\n"
+               "  --unlisted  print every file under the tree that no line of the manifest names\n";
   std::exit(2);
 }
 
@@ -46,9 +53,12 @@ int main(int argc, char** argv) {
   std::string directory;
   std::string imagePath;
   std::string outPath;
+  bool listUnlisted = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "-o") {
+    if (arg == "--unlisted") {
+      listUnlisted = true;
+    } else if (arg == "-o") {
       if (i + 1 >= argc) {
         std::cerr << "-o needs a value\n";
         usage(argv[0]);
@@ -85,6 +95,9 @@ int main(int argc, char** argv) {
   const snaggletooth::disasm::VerifyReport report =
       snaggletooth::disasm::verifyTree(std::filesystem::path(directory), rom);
   std::cout << snaggletooth::disasm::renderReport(report);
+  if (listUnlisted) {
+    for (const std::string& file : report.unlisted) std::cout << file << "\n";
+  }
 
   if (!outPath.empty() && report.error.empty()) {
     std::ofstream out(outPath, std::ios::binary);

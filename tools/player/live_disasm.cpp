@@ -237,7 +237,9 @@ struct LiveDisassembly::Impl {
         resumePercent(options.pause.resumePercent),
         hold(options.pause.hold) {
     bool found = false;
-    sessionRequest = disasm::treeRequest(rom, directory, found, sessionError);
+    // The records are only checked here; the tree's thread reads them, beside
+    // the game, before its first tree.
+    sessionRequest = disasm::treeRequest(rom, directory, found, sessionError, {}, disasm::TreeRecords::Checked);
     const std::filesystem::path buffer =
         options.bufferDirectory.empty() ? directory / "buffer" : options.bufferDirectory;
     run = std::make_unique<disasm::BufferedRun>(machine, rom, buffer,
@@ -473,6 +475,9 @@ struct LiveDisassembly::Impl {
       if (request) {
         request->observed = &observation;
         request->observedNotes = notes;
+        // Only the last tree keeps the session's run as a record: it is the
+        // whole run, of which every tree before it held a part.
+        request->recordRun = last;
         request->captureSound = true;
         request->progress = [this](const disasm::Progress& progress) { setStep(progress.stage); };
         if (!last) request->stop = [this] { return closeIsRequested(); };
@@ -491,7 +496,20 @@ struct LiveDisassembly::Impl {
           say("quit during a mid-session tree: skipped it, the final tree covers the whole session");
           return false;
         }
-        if (disasm::writeProject(disassembly, directory, error)) {
+        // The record is compressed as the files are written, a step of its own,
+        // said where the session's lines go.
+        const disasm::ProgressSink writing = [this](const disasm::Progress& progress) {
+          setStep(progress.stage);
+          say(std::string(progress.stage));
+        };
+        const std::string before = disassembly.record ? newestRecord() : std::string();
+        if (disasm::writeProject(disassembly, directory, error, writing)) {
+          // A run the tree already holds, its text the same, is not written again.
+          if (disassembly.record) {
+            const std::string after = newestRecord();
+            say(after == before ? "the session's run is already kept as " + after
+                                : "kept the session's run as " + after);
+          }
           const TreeSummary summary = summaryOf(disassembly, playedMaster);
           {
             std::lock_guard lock(mutex);
@@ -564,7 +582,65 @@ struct LiveDisassembly::Impl {
     wake.notify_all();
   }
 
+  // The records under the tree's `runs/`, read into the session's request
+  // before the first tree, each said as it is decompressed. A record that does
+  // not read is the session's error, said, and no tree is made.
+  void readRecords() {
+    if (!sessionRequest) return;
+    setWork(Work::Records);
+    const std::uint64_t began = steadyNanos();
+    std::string error;
+    std::optional<std::vector<disasm::RunRecord>> records =
+        disasm::readRecords(directory, rom, error, [this](const disasm::Progress& progress) {
+          setStep(progress.stage);
+          say(std::string(progress.stage));
+        });
+    setStep({});
+    forgetSteps();
+    if (!records) {
+      sessionError = error;
+      sessionRequest.reset();
+      always(error);
+    } else if (!records->empty()) {
+      const std::size_t count = records->size();
+      sessionRequest->records = std::make_shared<const std::vector<disasm::RunRecord>>(std::move(*records));
+      say("read " + std::to_string(count) + (count == 1u ? " run record" : " run records") + " in " +
+          durationText(static_cast<double>(steadyNanos() - began) / static_cast<double>(kNanosPerSecond)));
+    }
+    setWork(Work::Watching);
+  }
+
+  // The highest-numbered record under the tree's `runs/`, as `runs/<name> (<size>)`.
+  [[nodiscard]] std::string newestRecord() const {
+    std::filesystem::path newest;
+    std::uint64_t highest = 0;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(directory / "runs", ec), end; !ec && it != end; it.increment(ec)) {
+      const std::string name = it->path().filename().string();
+      const std::size_t dot = name.find('.');
+      if (dot == 0u || dot == std::string::npos || name.substr(dot) != ".snagrun.zst") continue;
+      if (!std::all_of(name.begin(), name.begin() + static_cast<std::ptrdiff_t>(dot),
+                       [](char c) { return c >= '0' && c <= '9'; })) {
+        continue;
+      }
+      const std::uint64_t number = std::stoull(name.substr(0, dot));
+      if (newest.empty() || number > highest) {
+        highest = number;
+        newest = it->path();
+      }
+    }
+    if (newest.empty()) return "a record under runs/";
+    // The size as the library says a record's: decimal MB to a tenth, or kB
+    // under a megabyte.
+    const std::uintmax_t bytes = std::filesystem::file_size(newest, ec);
+    const std::uintmax_t tenths = (bytes + 50'000u) / 100'000u;
+    const std::string size = bytes < 1'000'000u ? std::to_string((bytes + 500u) / 1000u) + " kB"
+                                                : std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u) + " MB";
+    return "runs/" + newest.filename().string() + " (" + size + ")";
+  }
+
   void treeBody() {
+    readRecords();
     std::optional<Found> last;
     for (;;) {
       {
@@ -617,6 +693,7 @@ struct LiveDisassembly::Impl {
 
   [[nodiscard]] std::string whatIsLeft(const LiveStatus& status) const {
     switch (status.work) {
+      case Work::Records: return "the run records are being read, then the last tree";
       case Work::Tree: return "the last tree is being made";
       case Work::Render: return "snes_render is running";
       case Work::Verify: return "snes_verify is running";
@@ -709,6 +786,8 @@ std::string LiveTitle::closeText(const LiveStatus& status, std::uint64_t stageNa
       case Work::Render: return "finishing: snes_render" + sofar;
       case Work::Verify: return "finishing: snes_verify" + sofar;
       case Work::Done: return "finishing: closing the buffer" + sofar;
+      case Work::Records:
+        return "finishing: reading the run records" + (status.step.empty() ? std::string() : ", " + status.step) + sofar;
       case Work::Watching: break;
     }
   }
@@ -765,9 +844,11 @@ std::string LiveTitle::text(std::string_view lead, const LiveStatus& status, std
     lead = closeLead;
   }
 
-  std::array<std::string_view, 3> parts;
+  std::array<std::string_view, 4> parts;
   std::size_t count = 0;
   if (!lead.empty()) parts[count++] = lead;
+  // The records being read beside the game, before the session's first tree.
+  if (!status.closing && status.work == Work::Records && !status.step.empty()) parts[count++] = status.step;
   parts[count++] = ram_;
   parts[count++] = files_;
   // How many parts the page beginning at `from` holds: that one, and each one

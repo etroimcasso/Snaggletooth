@@ -170,7 +170,8 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       else if (words[14] == "indirect") range.kind = MovedKind::Indirect;
       else if (words[14] != "dma") return fail(words[14] + " is not dma, table or indirect");
       // The name and the class are the register table's, from the address; the
-      // words on the line are what the last run wrote from the same table.
+      // words on the line are what the disassembly that wrote it took from the
+      // same table.
       if (const std::optional<Cpu65816Register> reg = cpu65816Register(*registerAddress)) {
         range.registerName = reg->name;
         range.registerClass = reg->cls;
@@ -428,9 +429,16 @@ std::optional<ManifestInput> parseManifest(std::string_view text, std::string& e
       input.seen.push_back(std::move(seen));
       continue;
     }
-    static const std::set<std::string> kKnown = {"title",   "stop",       "warning", "note",   "state",
-                                                 "origin",  "staged",     "streamed", "landed", "walked",
-                                                 "preview", "sample",     "enumerated"};
+    if (words[0] == "preview" || words[0] == "sample") {
+      // preview <file> of <file> as <form> …, sample <file> of <address> …: the
+      // path is all a verification reads of either.
+      if (words.size() < 4 || words[2] != "of") return fail("a " + words[0] + " line is a path, `of` and what it is of");
+      (words[0] == "preview" ? input.previews : input.samples).push_back(words[1]);
+      continue;
+    }
+    static const std::set<std::string> kKnown = {"title",  "stop",   "warning",  "note",   "state",
+                                                 "origin", "staged", "streamed", "landed", "walked",
+                                                 "enumerated"};
     if (kKnown.find(words[0]) == kKnown.end()) return fail(words[0] + " is not a manifest line");
   }
   std::map<std::string, Address> routineAddresses;

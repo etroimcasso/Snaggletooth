@@ -19,6 +19,14 @@
 // split it names is the one written. That is how the trace is carried past a
 // jump table or a computed pointer — the manifest's `stop` lines say where.
 //
+// Each run is kept as a record under the directory's `runs/`
+// (`docs/run-record.md`), and every later disassembly over the directory is made
+// from all the records and its own run together: a second run over a directory
+// keeps everything the first found, whether or not it finds it again, and adds
+// what it finds itself. A run the directory already holds is not kept twice. No
+// file in the directory is removed; `snes_verify` counts the files no line of the
+// manifest names.
+//
 // The sound program is found by booting the cartridge on the machine and reading
 // what reached the audio unit before its program started. --no-sound skips the
 // boot; --boot-seconds bounds it (fifteen seconds of the master clock by default).
@@ -27,8 +35,9 @@
 // and the landings its instructions do not name become entries, and so the
 // lifted files can be written in their editable forms — a tile sheet at the
 // depth the picture used it, with the palette the run held; a table under the
-// unit the engine walked it. --no-run skips it, and a tree written without a
-// run takes those facts from the files already on disk; --run-seconds bounds
+// unit the engine walked it. --no-run skips it: the tree is made from the
+// records the directory holds, and a sheet no landing describes and a table no
+// walk describes take those facts from the files already on disk; --run-seconds bounds
 // it (sixty by default); --input replays a recorded run
 // into the controller ports while it goes, so the run reaches what a player
 // would; --input-dir names a directory of recorded runs, and the one named for
@@ -42,12 +51,14 @@
 // A copier's header ahead of the image is dropped, and the report says which
 // copier wrote it and what it declares.
 //
-// What the tool is doing is written to standard error as it goes — the run,
-// the second run and each boot with the seconds of the master clock spent
-// against the bound, refreshed in place on a terminal and one line per ten
-// seconds otherwise, and the trace, the analysis, the values and the writing
-// each as one line — so a minute of emulation is not a minute of silence. --quiet turns it off; the results on
-// standard output are the same either way.
+// What the tool is doing is written to standard error as it goes — each of the
+// directory's run records as it is decompressed, the run, the second run and
+// each boot with the seconds of the master clock spent against the bound,
+// refreshed in place on a terminal and one line per ten seconds otherwise, and
+// the trace, the analysis, the values, the writing and the compressing of the
+// run's record each as one line — so a minute of emulation is not a minute of
+// silence. --quiet turns it off; the results on standard output are the same
+// either way.
 
 #include <algorithm>
 #include <cstddef>
@@ -82,6 +93,7 @@ constexpr std::uint64_t kMasterPerSecond = 21'477'272ull;
             << " <image> -o <directory> [--no-sound] [--boot-seconds N] [--no-run] [--run-seconds N]"
                " [--input <script> | --input-dir <directory>] [--quiet]\n"
                "  the directory's project.snagifest, when present, supplies entries and the file split\n"
+               "  the directory's runs/ keeps every run's record; the tree is made from all of them and this run\n"
                "  --input replays a recorded run into the controller ports while the cartridge runs;\n"
                "  --input-dir replays the run named for the image under that directory, if there is one\n"
                "  --quiet keeps the progress off standard error\n";
@@ -209,13 +221,17 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // The tree's own request: its files, and the manifest's entries, file split
-  // and earlier runs' findings when it holds one.
+  // The tree's own request: its files, the manifest's entries, file split and
+  // earlier runs' findings when it holds one, and the records of its runs, each
+  // said on standard error as it is decompressed.
   const std::filesystem::path directory(outDir);
   bool found = false;
   std::string error;
+  snaggletooth::disasm::ProgressPrinter printer(std::cerr, errorIsTerminal());
+  const snaggletooth::disasm::ProgressSink told =
+      quiet ? snaggletooth::disasm::ProgressSink{} : snaggletooth::disasm::ProgressSink(std::ref(printer));
   std::optional<snaggletooth::disasm::CartridgeRequest> tree =
-      snaggletooth::disasm::treeRequest(rom, directory, found, error);
+      snaggletooth::disasm::treeRequest(rom, directory, found, error, told);
   if (!tree) {
     std::cerr << error << "\n";
     return 1;
@@ -225,18 +241,21 @@ int main(int argc, char** argv) {
     std::cout << "read " << request.entries.size() << " entries and " << request.regions.size() << " files from "
               << (directory / "project.snagifest").string() << "\n";
   }
+  if (request.records) {
+    std::cout << "read " << request.records->size() << (request.records->size() == 1u ? " run record" : " run records")
+              << " from " << (directory / "runs").string() << "\n";
+  }
   request.captureSound = sound;
   request.observeRun = run;
   request.runMasterCycles = runSeconds * kMasterPerSecond;
   request.input = script;
   request.bootMasterCycles = bootSeconds * kMasterPerSecond;
-  snaggletooth::disasm::ProgressPrinter printer(std::cerr, errorIsTerminal());
-  if (!quiet) request.progress = std::ref(printer);
+  request.progress = told;
 
   const snaggletooth::disasm::CartridgeDisassembly disassembly =
       snaggletooth::disasm::disassembleCartridge(request);
   if (!quiet) printer.stage("writing " + directory.string());
-  if (!snaggletooth::disasm::writeProject(disassembly, directory, error)) {
+  if (!snaggletooth::disasm::writeProject(disassembly, directory, error, told)) {
     std::cerr << error << "\n";
     return 1;
   }

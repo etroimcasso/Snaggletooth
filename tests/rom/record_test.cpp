@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -276,7 +277,39 @@ RunRecord everyKind() {
   o.variantsConfined = 2;
   o.enumerationCycles = 12345;
   r.notes = {"run: a note; with a semicolon", "a note with \"quotes\" in it"};
+  r.enumerationNotes = {"enumerate sub_0080C0: 2 values wrote $7E:0000-$7E:0001, extents the run never carried; not lifted"};
   return r;
+}
+
+// A file's bytes, and a file written with `bytes`.
+std::string fileText(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+void putFile(const std::filesystem::path& path, const std::string& bytes) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  out << bytes;
+}
+
+// A zstd file of `text` written as another compressor might: one frame of raw
+// blocks, no compression at all, no checksum.
+std::string rawZstd(const std::string& text) {
+  std::string out("\x28\xB5\x2F\xFD", 4);
+  // The frame header: one segment, its content size in four bytes.
+  out += static_cast<char>(0xA0);
+  const std::uint32_t size = static_cast<std::uint32_t>(text.size());
+  for (int i = 0; i < 4; ++i) out += static_cast<char>((size >> (8 * i)) & 0xFFu);
+  std::size_t at = 0;
+  do {
+    const std::size_t take = std::min<std::size_t>(std::size_t{128} * 1024u, text.size() - at);
+    const bool last = at + take == text.size();
+    const std::uint32_t header = (static_cast<std::uint32_t>(take) << 3) | (last ? 1u : 0u);  // a raw block
+    for (int i = 0; i < 3; ++i) out += static_cast<char>((header >> (8 * i)) & 0xFFu);
+    out.append(text, at, take);
+    at += take;
+  } while (at < text.size());
+  return out;
 }
 
 // A record's first four lines, which hold no finding, with `line` as its fifth.
@@ -304,6 +337,16 @@ TEST(RomRecord, ARecordOfEveryKindReadsBackEqualAndRendersAgainToItsOwnText) {
   EXPECT_EQ(read->observation.moved[0].registerName, "VMDATAL");
   EXPECT_EQ(read->observation.streamed[1].registerName, "APUIO0");
   EXPECT_NE(text.find("\nnote run: a note; with a semicolon\n"), std::string::npos);
+  EXPECT_NE(text.find("\nenumeration-note enumerate sub_0080C0: 2 values wrote $7E:0000-$7E:0001, extents the run "
+                      "never carried; not lifted\n"),
+            std::string::npos);
+  EXPECT_EQ(read->enumerationNotes.size(), 1u);
+  EXPECT_EQ(read->notes.size(), 2u);
+
+  // The image known by its size and checksum, as a disassembly holds it, gives
+  // the same text; an image with no header names no checksum.
+  EXPECT_EQ(renderRecord(record, rom.size(), header->checksum), text);
+  EXPECT_EQ(renderRecord(RunRecord{}, 4096u, std::nullopt).rfind("snagrun 1\nimage 4096 checksum none\n", 0), 0u);
   EXPECT_NE(text.find("\nenumerated $00:80C0 X bits 8 values $00-$06/2,$09 entered-from $00:8011\n"),
             std::string::npos);
   EXPECT_NE(text.find(" at vram $1000-$101F shown areas tilemap2+tiles1 depths 2+4 palette 1\n"), std::string::npos);
@@ -603,6 +646,7 @@ TEST(RomRecord, RecordsOfOneRunCountItsSightingsOnceAndJoinTheirOutcomes) {
   second.observation.enumerated = {outcome({7}, 0x7E7000)};
   second.observation.variantsRun = 1;
   second.notes.push_back("enumerate sub_0080C0: a note only the second holds");
+  second.enumerationNotes.push_back("enumerate sub_0080C0: the second run did not enter it; nothing run");
 
   const RunRecord one = foldRecords(std::vector<RunRecord>{first, second});
   EXPECT_EQ(one.observation.instructions, first.observation.instructions);
@@ -611,6 +655,8 @@ TEST(RomRecord, RecordsOfOneRunCountItsSightingsOnceAndJoinTheirOutcomes) {
   EXPECT_EQ(one.observation.enumerated[1].values, (std::vector<std::uint32_t>{7}));
   EXPECT_EQ(one.observation.variantsRun, 5u);
   EXPECT_EQ(one.notes.size(), 3u);
+  EXPECT_EQ(one.enumerationNotes,
+            (std::vector<std::string>{first.enumerationNotes[0], second.enumerationNotes[1]}));
 
   RunRecord other = first;
   other.observation.instructions += 1;
@@ -618,6 +664,7 @@ TEST(RomRecord, RecordsOfOneRunCountItsSightingsOnceAndJoinTheirOutcomes) {
   EXPECT_EQ(two.observation.instructions, 2u * first.observation.instructions + 1u);
   EXPECT_EQ(two.observation.moved[0].times, 2u * first.observation.moved[0].times);
   EXPECT_EQ(two.notes, first.notes);
+  EXPECT_EQ(two.enumerationNotes, first.enumerationNotes);
 
   // A run that differs only in one sighting is another run, counted as well.
   RunRecord sighted = first;
@@ -637,6 +684,8 @@ TEST(RomRecord, ARecordOfARunOfEachExampleCartridgeReadsBackEqual) {
   bool noted = false;
   bool streamed = false;
   bool sampled = false;
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth_record_examples_test";
+  std::uint64_t files = 0xCBF29CE484222325u;  // FNV-1a over every record's file
   for (const examples::Example& example : examples::examples()) {
     const std::vector<std::uint8_t> rom = example.build();
     RunRecord record;
@@ -652,8 +701,19 @@ TEST(RomRecord, ARecordOfARunOfEachExampleCartridgeReadsBackEqual) {
     ASSERT_TRUE(read.has_value()) << example.name << ": " << error;
     EXPECT_TRUE(*read == record) << example.name;
     EXPECT_EQ(renderRecord(*read, rom), text) << example.name;
+    // Each record's file, as `writeRecord` writes it, into one hash.
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    ASSERT_TRUE(writeRecord(record, rom, dir, error)) << error;
+    for (const char c : fileText(dir / "runs" / "0001.snagrun.zst")) {
+      files = (files ^ static_cast<std::uint8_t>(c)) * 0x100000001B3u;
+    }
+    std::filesystem::remove_all(dir, ec);
   }
   EXPECT_TRUE(reached && ran && noted && streamed && sampled);
+  // The parameters — level 19, the long window, one thread — give these files,
+  // byte for byte, on every platform.
+  EXPECT_EQ(files, 4680697128569359145u) << "the 28 records' files, byte for byte";
 }
 
 TEST(RomRecord, RecordsAreNumberedFilesUnderTheTreesRunsAndATextIsWrittenOnce) {
@@ -673,18 +733,36 @@ TEST(RomRecord, RecordsAreNumberedFilesUnderTheTreesRunsAndATextIsWrittenOnce) {
   ASSERT_TRUE(writeRecord(first, rom, dir, error)) << error;
   ASSERT_TRUE(writeRecord(second, rom, dir, error)) << error;
   ASSERT_TRUE(writeRecord(first, rom, dir, error)) << error;
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "runs" / "0001.snagrun"));
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "runs" / "0002.snagrun"));
-  EXPECT_FALSE(std::filesystem::exists(dir / "runs" / "0003.snagrun"));
+  const std::optional<CartridgeHeader> header = parseCartridgeHeader(rom);
+  ASSERT_TRUE(header.has_value());
+  ASSERT_TRUE(writeRecord(second, rom.size(), header->checksum, dir, error)) << error;
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "runs" / "0001.snagrun.zst"));
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "runs" / "0002.snagrun.zst"));
+  EXPECT_FALSE(std::filesystem::exists(dir / "runs" / "0003.snagrun.zst"));
+
+  // A record is one zstd frame that says its content's size and carries its
+  // checksum: the magic 28 B5 2F FD, then a descriptor with the checksum flag.
+  const std::string packed = fileText(dir / "runs" / "0001.snagrun.zst");
+  ASSERT_GE(packed.size(), 9u);
+  EXPECT_EQ(packed.substr(0, 4), std::string("\x28\xB5\x2F\xFD", 4));
+  EXPECT_EQ(static_cast<std::uint8_t>(packed[4]) & 0x04u, 0x04u) << "the checksum flag";
+  EXPECT_NE(static_cast<std::uint8_t>(packed[4]) & 0xC0u, 0u) << "the content size is written";
+  EXPECT_LT(packed.size(), renderRecord(first, rom).size()) << "compressed";
+  // The parameters — level 19, the long window, one thread — give this record
+  // exactly this file, on every platform.
+  EXPECT_EQ(packed.size(), 1679u) << "the record's file";
+  std::uint64_t hash = 0xCBF29CE484222325u;  // FNV-1a over the file's bytes
+  for (const char c : packed) hash = (hash ^ static_cast<std::uint8_t>(c)) * 0x100000001B3u;
+  EXPECT_EQ(hash, 7592184046074743795u) << "the record's file, byte for byte";
 
   // Past four digits a number takes as many as it needs, and the records stand
   // in the order of their numbers.
-  std::filesystem::copy_file(dir / "runs" / "0002.snagrun", dir / "runs" / "9999.snagrun", ec);
+  std::filesystem::copy_file(dir / "runs" / "0002.snagrun.zst", dir / "runs" / "9999.snagrun.zst", ec);
   ASSERT_FALSE(ec) << ec.message();
   RunRecord third = first;
   third.observation.instructions = 3;
   ASSERT_TRUE(writeRecord(third, rom, dir, error)) << error;
-  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "runs" / "10000.snagrun"));
+  EXPECT_TRUE(std::filesystem::is_regular_file(dir / "runs" / "10000.snagrun.zst"));
   const std::optional<std::vector<RunRecord>> read = readRecords(dir, rom, error);
   ASSERT_TRUE(read.has_value()) << error;
   ASSERT_EQ(read->size(), 4u);
@@ -693,15 +771,61 @@ TEST(RomRecord, RecordsAreNumberedFilesUnderTheTreesRunsAndATextIsWrittenOnce) {
   EXPECT_TRUE((*read)[2] == second);
   EXPECT_TRUE((*read)[3] == third);
 
+  // Any zstd file of a record's text is the record: one another compressor
+  // wrote is read, and the same text is not written again beside it.
+  RunRecord fourth = first;
+  fourth.observation.instructions = 4;
+  putFile(dir / "runs" / "10001.snagrun.zst", rawZstd(renderRecord(fourth, rom)));
+  const std::optional<std::vector<RunRecord>> stored = readRecords(dir, rom, error);
+  ASSERT_TRUE(stored.has_value()) << error;
+  ASSERT_EQ(stored->size(), 5u);
+  EXPECT_TRUE(stored->back() == fourth);
+  ASSERT_TRUE(writeRecord(fourth, rom, dir, error)) << error;
+  EXPECT_FALSE(std::filesystem::exists(dir / "runs" / "10002.snagrun.zst"));
+  // A file under `runs/` named otherwise is not a record, and is left alone.
+  putFile(dir / "runs" / "0005.snagrun", renderRecord(fourth, rom));
+  ASSERT_EQ(readRecords(dir, rom, error)->size(), 5u) << error;
+  EXPECT_TRUE(std::filesystem::exists(dir / "runs" / "0005.snagrun"));
+
+  // A zstd file of text that is not a record is refused by its head.
+  putFile(dir / "runs" / "0099.snagrun.zst", rawZstd("a file of something else\n"));
+  EXPECT_FALSE(checkRecords(dir, rom, error).has_value());
+  EXPECT_EQ(error, (dir / "runs" / "0099.snagrun.zst").string() + ": a record begins `snagrun 1`") << error;
+  std::filesystem::remove(dir / "runs" / "0099.snagrun.zst", ec);
+
+  // Checking the records reads each as far as its head, and counts them.
+  const std::optional<std::size_t> checked = checkRecords(dir, rom, error);
+  ASSERT_TRUE(checked.has_value()) << error;
+  EXPECT_EQ(*checked, 5u);
+
+  // A file that is not one whole zstd frame, or holds bytes past it, is
+  // refused by its path.
+  const std::string bad = (dir / "runs" / "10002.snagrun.zst").string();
+  putFile(dir / "runs" / "10002.snagrun.zst", renderRecord(fourth, rom));
+  EXPECT_FALSE(readRecords(dir, rom, error).has_value());
+  EXPECT_EQ(error, bad + ": not a whole zstd file") << error;
+  EXPECT_FALSE(checkRecords(dir, rom, error).has_value());
+  EXPECT_EQ(error, bad + ": not a whole zstd file") << error;
+  // A frame cut short past its head reads as a record's head, so the check
+  // passes it, and reading the record refuses it.
+  const std::string whole = rawZstd(renderRecord(fourth, rom));
+  putFile(dir / "runs" / "10002.snagrun.zst", whole.substr(0, whole.size() / 2u));
+  EXPECT_EQ(checkRecords(dir, rom, error), std::optional<std::size_t>(6u)) << error;
+  EXPECT_FALSE(readRecords(dir, rom, error).has_value());
+  EXPECT_EQ(error, bad + ": not a whole zstd file") << error;
+  putFile(dir / "runs" / "10002.snagrun.zst", rawZstd(renderRecord(fourth, rom)) + "x");
+  EXPECT_FALSE(readRecords(dir, rom, error).has_value());
+  EXPECT_EQ(error, bad + ": bytes follow the zstd frame") << error;
+  std::filesystem::remove(dir / "runs" / "10002.snagrun.zst", ec);
+
   // A record written for another image is refused by its path.
   std::vector<std::uint8_t> longer = rom;
   longer.resize(rom.size() * 2u, 0xFF);
-  {
-    std::ofstream out(dir / "runs" / "10001.snagrun", std::ios::binary);
-    out << renderRecord(first, longer);
-  }
+  ASSERT_TRUE(writeRecord(first, longer, dir, error)) << error;
   EXPECT_FALSE(readRecords(dir, rom, error).has_value());
-  const std::string path = (dir / "runs" / "10001.snagrun").string();
+  const std::string path = (dir / "runs" / "10002.snagrun.zst").string();
+  EXPECT_EQ(error.rfind(path + ": the record was written for an image of", 0), 0u) << error;
+  EXPECT_FALSE(checkRecords(dir, rom, error).has_value());
   EXPECT_EQ(error.rfind(path + ": the record was written for an image of", 0), 0u) << error;
 
   std::filesystem::remove_all(dir, ec);

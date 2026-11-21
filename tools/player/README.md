@@ -167,7 +167,19 @@ disassembling into drawing-tree on 8 threads; the buffer takes up to 1.0 GB of R
 tree: 1 files, 430 instructions, 3 entries, 0 stops, 32768 of 32768 bytes placed, 0 notes -> drawing-tree
 ```
 
-A second session over the same directory reads the tree that is there and adds what it reaches ([Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)). A directory whose tree was written for another image refuses the run before the window opens. A tree made while you play counts each sighting as of that tree; the closing tree's counts are the session's.
+A second session over the same directory reads the tree that is there and adds what it reaches ([Running the cartridge](../../docs/snes-disassembler.md#running-the-cartridge)). Each session's run is kept in the tree as a record when the session closes, and every tree of a later session is made from all of them ([run-record.md](../../docs/run-record.md)). A session ended by a forced kill keeps no record.
+
+The records are read beside the game, before the session's first tree, so the window opens at once however many the tree holds: before it opens they are only checked, each as far as the image it names. Each is said in the terminal as it is decompressed, and the title shows it after the frame rate until the records are read. At the close the session's run is compressed into its record as a step of the last tree, which the title shows and the terminal says, and the record's file is named once it is written — here the `drawing` example cartridge's second session over its tree:
+
+```
+decompressing runs/0001.snagrun.zst (2 kB)
+read 1 run record in 1 s
+…
+compressing the run's record
+kept the session's run as runs/0002.snagrun.zst (2 kB)
+```
+
+A session whose run a record already holds, its text the same, writes no new file and says `the session's run is already kept as` that record. A directory whose tree or records were written for another image refuses the run before the window opens. A tree made while you play counts each sighting as of that tree; the closing tree's counts are the session's and every earlier session's together.
 
 ### The buffer
 
@@ -177,7 +189,7 @@ The buffer holds what the disassembly's threads have not reached: in RAM first, 
 |---|---|---|
 | `--disasm-buffer-memory <GB>` | the most RAM the buffer takes | 1 |
 | `--disasm-buffer-disk <GB>` | the most its files hold | 10 |
-| `--disasm-buffer-dir <directory>` | where the files go | `buffer` under the tree's directory |
+| `--disasm-buffer-dir <directory>` | the directory the files go in, used as given | `buffer` under the tree's directory |
 | `--disasm-threads <n>` | the threads that check the instructions | two fewer than the computer's cores, at least 1 |
 | `--disasm-resume-at <percent>` | how far the buffer drains before a stopped game resumes | 50 |
 

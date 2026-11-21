@@ -58,6 +58,13 @@ struct VerifyReport {
   std::size_t unplaced = 0;          // image bytes no file produced
   std::size_t placedTwice = 0;       // image bytes two files produced
   std::string error;                 // what stopped the run before any file was read
+  // The files under the tree that no line of the manifest names, by path in
+  // ascending order: every regular file under a directory the manifest's
+  // `asset`, `preview` and `sample` lines name a file in, other than a file
+  // any line names, the `file` and `sound` lines' among them. They are what an
+  // earlier disassembly wrote and this one did not write again. Nothing reads
+  // them and nothing removes them.
+  std::vector<std::string> unlisted;
 
   // Whether the tree assembles to the image: every file assembled, every byte
   // produced exactly once, none differing.
@@ -76,12 +83,14 @@ using SourceReader = std::function<std::optional<std::string>(const std::string&
                                          const SourceReader& read);
 
 // Reads `project.snagifest` under `directory` and verifies the tree it describes,
-// with every file read from the same directory.
+// with every file read from the same directory, and lists the files under it
+// that no line names (`VerifyReport::unlisted`).
 [[nodiscard]] VerifyReport verifyTree(const std::filesystem::path& directory,
                                       std::span<const std::uint8_t> rom);
 
 // The report as the command prints it: one line per file, one per mismatching
-// run, then the totals and the verdict.
+// run, then the totals and the verdict, and last, when the tree holds any,
+// how many files no line of the manifest names.
 [[nodiscard]] std::string renderReport(const VerifyReport& report);
 
 }  // namespace snaggletooth::disasm

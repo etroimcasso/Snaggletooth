@@ -198,6 +198,23 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
   target_compile_features(snaggletooth_lodepng PUBLIC cxx_std_20)
   set_target_properties(snaggletooth_lodepng PROPERTIES CXX_EXTENSIONS OFF)
 
+  # zstd, vendored under third_party/zstd, is the compressor and decompressor a
+  # tree's run records are written and read through. It is built from those sources
+  # on every platform, single-threaded and without its x86 assembly, so a record's
+  # bytes are the same wherever they are written; as its own static C library with
+  # a SYSTEM include so its warnings are not the toolkit's; and linked privately into
+  # the cartridge library so no zstd symbol reaches a toolkit header.
+  enable_language(C)
+  file(GLOB SNAGGLETOOTH_ZSTD_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/zstd/lib/common/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/zstd/lib/compress/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/zstd/lib/decompress/*.c)
+  add_library(snaggletooth_zstd STATIC ${SNAGGLETOOTH_ZSTD_SOURCES})
+  target_compile_definitions(snaggletooth_zstd PRIVATE ZSTD_DISABLE_ASM)
+  target_include_directories(snaggletooth_zstd SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/zstd/lib>
+  )
+
   # The asset codecs — the tile sheet, the palette, the tilemap, the OAM and HDMA
   # tables, the WAV of a BRR sample, and the reader that turns an included asset
   # back into the SNES bytes it was made from. Its own library over the standard
@@ -396,6 +413,9 @@ if(SNAGGLETOOTH_BUILD_TOOLS OR SNAGGLETOOTH_BUILD_TESTS)
   # The codecs: the disassembler writes a lifted file in its form, and the
   # verifier reads one back through the encoding reader.
   target_link_libraries(snaggletooth_rom PRIVATE snaggletooth_formats)
+  # The run records are zstd files: the cartridge library writes and reads them
+  # through zstd.
+  target_link_libraries(snaggletooth_rom PRIVATE snaggletooth_zstd)
   target_include_directories(snaggletooth_rom PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools>
   )
