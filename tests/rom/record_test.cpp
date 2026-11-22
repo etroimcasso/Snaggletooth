@@ -685,7 +685,8 @@ TEST(RomRecord, ARecordOfARunOfEachExampleCartridgeReadsBackEqual) {
   bool streamed = false;
   bool sampled = false;
   const std::filesystem::path dir = std::filesystem::temp_directory_path() / "snaggletooth_record_examples_test";
-  std::uint64_t files = 0xCBF29CE484222325u;  // FNV-1a over every record's file
+  std::uint64_t files = 0xCBF29CE484222325u;       // FNV-1a over the first 28 examples' record files
+  std::uint64_t secondPass = 0xCBF29CE484222325u;  // and over `second_pass`'s, on its own
   for (const examples::Example& example : examples::examples()) {
     const std::vector<std::uint8_t> rom = example.build();
     RunRecord record;
@@ -705,8 +706,9 @@ TEST(RomRecord, ARecordOfARunOfEachExampleCartridgeReadsBackEqual) {
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     ASSERT_TRUE(writeRecord(record, rom, dir, error)) << error;
+    std::uint64_t& hash = example.name == "second_pass" ? secondPass : files;
     for (const char c : fileText(dir / "runs" / "0001.snagrun.zst")) {
-      files = (files ^ static_cast<std::uint8_t>(c)) * 0x100000001B3u;
+      hash = (hash ^ static_cast<std::uint8_t>(c)) * 0x100000001B3u;
     }
     std::filesystem::remove_all(dir, ec);
   }
@@ -714,6 +716,7 @@ TEST(RomRecord, ARecordOfARunOfEachExampleCartridgeReadsBackEqual) {
   // The parameters — level 19, the long window, one thread — give these files,
   // byte for byte, on every platform.
   EXPECT_EQ(files, 4680697128569359145u) << "the 28 records' files, byte for byte";
+  EXPECT_EQ(secondPass, 8570390983280928726u) << "second_pass's record file, byte for byte";
 }
 
 TEST(RomRecord, RecordsAreNumberedFilesUnderTheTreesRunsAndATextIsWrittenOnce) {

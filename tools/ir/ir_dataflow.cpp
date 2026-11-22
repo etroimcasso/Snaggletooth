@@ -1243,10 +1243,21 @@ void probe(const Graph& graph, const ImageReader& image, const StackReach& stack
 
 }  // namespace
 
-Dataflow::Dataflow(const Program& program, const std::vector<FlowEntry>& entries,
-                   const std::vector<Sighting>& sightings, ImageReader image, Canonical canonical,
+Dataflow::Dataflow(const Program& program, const std::vector<FlowEntry>& givenEntries,
+                   const std::vector<Sighting>& givenSightings, ImageReader image, Canonical canonical,
                    StackReach stack)
     : program_(program), before_(program.nodes.size()) {
+  // The entries by address, two at one address in the order given, and the
+  // sightings by site then target, so the order the caller found them in does
+  // not reach the worklist.
+  std::vector<FlowEntry> entries = givenEntries;
+  std::stable_sort(entries.begin(), entries.end(),
+                   [](const FlowEntry& a, const FlowEntry& b) { return a.address < b.address; });
+  std::vector<Sighting> sightings = givenSightings;
+  std::sort(sightings.begin(), sightings.end(), [](const Sighting& a, const Sighting& b) {
+    if (a.site != b.site) return a.site < b.site;
+    return a.target < b.target;
+  });
   const std::size_t count = program.nodes.size();
   Graph graph{program, canonical, {}, {}, {}};
   graph.sightingsOf.resize(count);

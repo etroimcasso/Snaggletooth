@@ -235,6 +235,8 @@ class Dataflow {
   // Runs to a fixed point from `entries`, following the program's own flow and
   // `sightings`. `canonical` places every successor the way the program places
   // its nodes, so a jump through a mirror finds the node in the home bank.
+  // `entries` and `sightings` are taken as sets: their order does not change
+  // what is proven or derived.
   Dataflow(const Program& program, const std::vector<FlowEntry>& entries,
            const std::vector<Sighting>& sightings, ImageReader image, Canonical canonical,
            StackReach stack = {});

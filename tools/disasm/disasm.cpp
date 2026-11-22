@@ -70,6 +70,8 @@ Listing trace(const Backend& backend, const Request& request) {
   std::map<Address, Instruction> decoded;
   std::map<Address, Context> contextAt;
   std::map<Address, Context> contextAfter;
+  std::set<Address> targeted;    // every in-range target an instruction names
+  std::set<Address> calledHere;  // the targets a call names
 
   auto inRange = [&](Address address) {
     return address >= base && static_cast<std::size_t>(address - base) < size;
@@ -178,14 +180,20 @@ Listing trace(const Backend& backend, const Request& request) {
     }
 
     if (instruction.target && inRange(*instruction.target)) {
-      const Address destination = *instruction.target;
-      if (listing.labels.find(destination) == listing.labels.end()) {
-        listing.labels[destination] = (instruction.flow == Flow::Call ? "sub_" : "loc_") +
-                                      labelDigits(destination, bits);
-      }
+      targeted.insert(*instruction.target);
+      if (instruction.flow == Flow::Call) calledHere.insert(*instruction.target);
     }
 
     decoded.emplace(address, std::move(result->instruction));
+  }
+
+  // A target's label is decided by everything that reaches it, not by the first
+  // instruction decoded: `sub_` when any call reaches it, `loc_` otherwise. An
+  // entry keeps its `entry_` label.
+  for (const Address destination : targeted) {
+    if (listing.labels.find(destination) != listing.labels.end()) continue;
+    listing.labels[destination] = (calledHere.count(destination) != 0 ? "sub_" : "loc_") +
+                                  labelDigits(destination, bits);
   }
 
   // Supplied symbols win over generated labels.

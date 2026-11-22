@@ -111,7 +111,8 @@ struct Line {
 // width its addresses print at. Every label is at the address of one of the
 // listing's instructions — a target that landed in data or inside another
 // instruction carries none — so an operand written as a label names a line the
-// same source defines.
+// same source defines. A target something calls is `sub_`, whatever else reaches
+// it; one nothing calls is `loc_`.
 struct Listing {
   std::vector<Line> lines;
   std::map<Address, std::string> labels;

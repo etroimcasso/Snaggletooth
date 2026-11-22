@@ -10,8 +10,9 @@
 // send in work RAM first, declare transfers the run never takes, upload to
 // every video memory and set the bases afterwards, send one of everything
 // an editable form has a grammar for, read, send and call through a save
-// window with no save behind it, call into a coprocessor's half, or build
-// what they send from tables of entries they select only some of. The
+// window with no save behind it, call into a coprocessor's half, build what
+// they send from tables of entries they select only some of, or reach one
+// address under two widths from two banks. The
 // tests of the cartridge tools read them, and `snes_examples` writes them to disk, so every
 // example a page shows is the real output of a tool on a cartridge that is ours
 // to publish.
@@ -47,6 +48,7 @@
 #include "examples/bare_window/bare_window.h"
 #include "examples/chip_half/chip_half.h"
 #include "examples/enumerating/enumerating.h"
+#include "examples/second_pass/second_pass.h"
 
 namespace snaggletooth::examples {
 
@@ -88,6 +90,7 @@ inline const std::vector<Example>& examples() {
       {"bare_window", "a byte read and a range sent through a save window with no save behind it, and a call into it taken only with B down", &bareWindowImage},
       {"chip_half", "a byte read from a DSP board's lower half, and a call into it and a jump into the expansion area taken only with B down", &chipHalfImage},
       {"enumerating", "loaders that build what they send from tables of entries, called for only some of the entries", &enumeratingImage},
+      {"second_pass", "a derivation and a cross-bank jump reaching one address under two widths", &secondPassImage},
   };
   return all;
 }

@@ -43,6 +43,7 @@ using examples::loRomImage;
 using examples::ramCodeImage;
 using examples::wrappingImage;
 using examples::put;
+using examples::secondPassImage;
 using examples::threeBankImage;
 using examples::uploadingImage;
 
@@ -765,6 +766,309 @@ TEST(RomDisasm, ReadingTheManifestBackDoesNotDoubleTheVectors) {
   const CartridgeDisassembly second = disassembleCartridge(request);
   EXPECT_EQ(second.entries.size(), first.entries.size());
   EXPECT_EQ(renderManifest(second), renderManifest(first));
+}
+
+namespace {
+
+// A disassembly over what `first` wrote, nothing added: its manifest parsed and
+// handed back whole, as `treeRequest` hands back a tree's.
+CartridgeDisassembly againFromTheManifest(std::span<const std::uint8_t> rom, const CartridgeDisassembly& first) {
+  std::string error;
+  const std::optional<ManifestInput> input = parseManifest(renderManifest(first), error);
+  EXPECT_TRUE(input.has_value()) << error;
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  if (input) {
+    request.entries = input->entries;
+    request.regions = input->regions;
+    request.reached = input->reached;
+    request.ran = input->ran;
+    request.derived = input->derived;
+    request.assets = input->assets;
+  }
+  return disassembleCartridge(request);
+}
+
+}  // namespace
+
+// A second disassembly over a tree, with nothing new to add, writes the same
+// tree: the manifest, and every line and label of every region. `$02:8008`
+// reads under the width the derivation of `$02:8004` brings in both passes,
+// though the first pass finds that derivation a round after the trace carried
+// bank $02 its other entry.
+TEST(RomDisasm, ASecondPassOverATreeWritesTheSameTree) {
+  const std::vector<std::uint8_t> rom = secondPassImage();
+  const CartridgeDisassembly first = disassembleWithoutSound(rom);
+  const CartridgeDisassembly second = againFromTheManifest(rom, first);
+  const std::string text = renderManifest(first);
+  EXPECT_EQ(renderManifest(second), text);
+  ASSERT_EQ(second.regions.size(), first.regions.size());
+  for (std::size_t i = 0; i < first.regions.size(); ++i) {
+    EXPECT_EQ(render(second.regions[i].listing), render(first.regions[i].listing)) << first.regions[i].region.file;
+  }
+  std::set<std::string> lines;
+  std::size_t at = 0;
+  while (at < text.size()) {
+    const std::size_t end = text.find('\n', at);
+    const std::string line = text.substr(at, end - at);
+    at = end == std::string::npos ? text.size() : end + 1;
+    if (line.empty() || line[0] == '#') continue;
+    EXPECT_TRUE(lines.insert(line).second) << "a line twice: " << line;
+  }
+  for (const CartridgeDisassembly* d : {&first, &second}) {
+    const Listing& bank2 = regionNamed(*d, "bank_02.asm").listing;
+    const Line* ldx = codeLineAt(bank2, 0x028008u);
+    ASSERT_NE(ldx, nullptr);
+    EXPECT_EQ(ldx->instruction.text, "LDX #$EA12");
+    EXPECT_NE(std::find(bank2.warnings.begin(), bank2.warnings.end(),
+                        "$02:8008 is reached with e=0 m=8 x=16 and with e=0 m=8 x=8"),
+              bank2.warnings.end());
+  }
+}
+
+// What the bytes derive stands before what the trace carried in from another
+// bank, whichever was found first: one pass over `second_pass` reads `$02:8008`
+// under the derived entry's width.
+TEST(RomDisasm, TheDerivationsStandBeforeTheTracesOwnEntries) {
+  const std::vector<std::uint8_t> rom = secondPassImage();
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  ASSERT_NE(std::find_if(d.derived.begin(), d.derived.end(),
+                         [](const DerivedTarget& t) { return t.target == 0x028004u; }),
+            d.derived.end());
+  const Line* ldx = codeLineAt(regionNamed(d, "bank_02.asm").listing, 0x028008u);
+  ASSERT_NE(ldx, nullptr);
+  EXPECT_EQ(ldx->instruction.text, "LDX #$EA12");
+  EXPECT_EQ(ldx->instruction.length, 3u);
+  EXPECT_EQ(modeOf(ldx->context), Cpu65816Mode::native(true, false));
+}
+
+namespace {
+
+// One bank whose jump through the table at `$00:8100` derives `$00:8030` with
+// the index registers sixteen bits; the bytes there read `LDX #$EA12` under
+// that width and `LDX #$12` then `NOP` under eight, both ending in `STP`.
+std::vector<std::uint8_t> twoWidthTargetImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {0x18u,                 // $00:8000 CLC
+                     0xFBu,                 //          XCE
+                     0xC2u, 0x30u,          //          REP #$30
+                     0xE2u, 0x20u,          //          SEP #$20      (m=8, x=16)
+                     0xA2u, 0x00u, 0x00u,   // $00:8006 LDX #$0000
+                     0x7Cu, 0x00u, 0x81u}); // $00:8009 JMP (!$8100,X)
+  put(rom, 0x0100u, {0x30u, 0x80u});        // $00:8100 the table: $00:8030
+  put(rom, 0x0030u, {0xA2u, 0x12u, 0xEAu,   // $00:8030 LDX #$EA12, or LDX #$12 and NOP
+                     0xDBu});               // $00:8033 STP
+  return rom;
+}
+
+// The text the trace reads at `$00:8030` with `request` over the image.
+std::string readingAt8030(CartridgeRequest request) {
+  const std::vector<std::uint8_t> rom = twoWidthTargetImage();
+  request.rom = rom;
+  request.captureSound = false;
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  const Line* line = codeLineAt(regionNamed(d, "bank_00.asm").listing, 0x008030u);
+  return line != nullptr ? line->instruction.text : std::string("no line");
+}
+
+}  // namespace
+
+// The entries stand in the order of their evidence: a person's before what a
+// run reached, what a run reached before where it landed, and both before what
+// the bytes derive. Each pair reaches `$00:8030` under two widths, and the
+// reading that stands is the earlier class's.
+TEST(RomDisasm, TheEntriesStandInTheOrderOfTheirEvidence) {
+  const Cpu65816Mode narrow = Cpu65816Mode::native(true, true);  // m=8 x=8
+  const Cpu65816Mode wide = Cpu65816Mode::native(true, false);   // m=8 x=16, the derived width
+  const ReachedTarget reachedNarrow{.target = 0x008030u, .mode = narrow, .site = 0x008009u, .call = false, .name = {}};
+  const Landing ranNarrow{.target = 0x008030u, .mode = narrow, .site = 0x008009u, .name = {}};
+  const Landing ranWide{.target = 0x008030u, .mode = wide, .site = 0x008009u, .name = {}};
+
+  EXPECT_EQ(readingAt8030({}), "LDX #$EA12") << "the derivation alone";
+  CartridgeRequest reached;
+  reached.reached = {reachedNarrow};
+  EXPECT_EQ(readingAt8030(reached), "LDX #$12") << "a sighting before a derivation";
+  CartridgeRequest ran;
+  ran.ran = {ranNarrow};
+  EXPECT_EQ(readingAt8030(ran), "LDX #$12") << "a landing before a derivation";
+  CartridgeRequest both;
+  both.reached = {reachedNarrow};
+  both.ran = {ranWide};
+  EXPECT_EQ(readingAt8030(both), "LDX #$12") << "a sighting before a landing";
+  CartridgeRequest person;
+  person.entries = {TraceEntry{.address = 0x008030u, .mode = wide, .name = "wide_entry"}};
+  person.reached = {reachedNarrow};
+  EXPECT_EQ(readingAt8030(person), "LDX #$EA12") << "a person's entry before a sighting";
+}
+
+// Two derived lines that differ only in their mode are written in the mode's
+// order, whatever order the manifest gave them in.
+TEST(RomDisasm, TwoDerivationsThatDifferOnlyInTheirModeStandInModeOrder) {
+  const std::vector<std::uint8_t> rom = twoWidthTargetImage();
+  DerivedTarget a{.target = 0x008030u,
+                  .mode = Cpu65816Mode::native(true, true),
+                  .site = 0x008009u,
+                  .pointer = 0x008100u,
+                  .call = false,
+                  .name = {}};
+  DerivedTarget b = a;
+  b.mode = Cpu65816Mode::native(true, false);
+  if (contextOf(a.mode).bits < contextOf(b.mode).bits) std::swap(a, b);
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  request.derived = {a, b};  // the higher mode first
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.derived.size(), 2u) << renderManifest(d);
+  EXPECT_LT(contextOf(d.derived[0].mode).bits, contextOf(d.derived[1].mode).bits);
+  EXPECT_EQ(contextOf(d.derived[0].mode).bits, contextOf(b.mode).bits);
+}
+
+// An entry the trace carried into another bank from a reading a later
+// derivation replaces is not kept: when the derivations grow, what the trace
+// carried in is found again from what stands. Here bank $02 first reads
+// `$02:8020` under eight-bit index registers, where `JML $03:80DB` follows;
+// the derivation of `$02:8010` reaches it first under sixteen, where the same
+// bytes end in `STP`, and bank $03 is left as data — as a pass that read the
+// derivation back from the start writes it.
+TEST(RomDisasm, AnEntryOnlyAReplacedReadingCarriedInIsNotKept) {
+  std::vector<std::uint8_t> rom = loRomImage(4);
+  put(rom, 0x0000u, {0x18u,                          // $00:8000 CLC
+                     0xFBu,                          //          XCE
+                     0xC2u, 0x30u,                   //          REP #$30
+                     0xE2u, 0x30u,                   //          SEP #$30      (m=8, x=8)
+                     0x5Cu, 0x00u, 0x80u, 0x02u});   //          JML $02:8000
+  put(rom, 0x10000u, {0xA2u, 0x00u,                  // $02:8000 LDX #$00
+                      0xF0u, 0x1Cu,                  // $02:8002 BEQ $02:8020
+                      0x7Cu, 0x00u, 0x81u});         // $02:8004 JMP (!$8100,X)
+  put(rom, 0x10010u, {0xC2u, 0x10u,                  // $02:8010 REP #$10      (x=16)
+                      0x80u, 0x0Cu});                // $02:8012 BRA $02:8020
+  put(rom, 0x10020u, {0xA2u, 0x12u, 0x5Cu, 0xDBu, 0x80u, 0x03u});  // $02:8020 LDX #$12, JML $03:80DB; or LDX #$5C12, STP
+  put(rom, 0x10100u, {0x10u, 0x80u});                // $02:8100 the table: $02:8010
+  put(rom, 0x180DBu, {0xDBu});                       // $03:80DB STP
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const Line* ldx = codeLineAt(regionNamed(d, "bank_02.asm").listing, 0x028020u);
+  ASSERT_NE(ldx, nullptr);
+  EXPECT_EQ(ldx->instruction.text, "LDX #$5C12");
+  EXPECT_EQ(codeLineAt(regionNamed(d, "bank_03.asm").listing, 0x0380DBu), nullptr) << renderManifest(d);
+  const CartridgeDisassembly second = againFromTheManifest(rom, d);
+  EXPECT_EQ(renderManifest(second), renderManifest(d));
+  EXPECT_EQ(render(regionNamed(second, "bank_03.asm").listing), render(regionNamed(d, "bank_03.asm").listing));
+}
+
+// An address anything calls is `sub_`, whichever evidence reached it first:
+// here a run's sightings of jumps to `$00:8100`, `$00:8200` and `$01:8000`,
+// read before the trace decodes the `JSL $01:8000` and the `JSR !$8200` in bank
+// $00 and the `JSL $00:8100` in bank $01. Bank $00 is not traced again for the
+// last, which brings no new entry; its labels are named once the last trace is
+// done.
+TEST(RomDisasm, ANameIsSubWhenAnythingCallsTheAddress) {
+  std::vector<std::uint8_t> rom = loRomImage(2);
+  put(rom, 0x0000u, {0x18u,                          // $00:8000 CLC
+                     0xFBu,                          //          XCE
+                     0xC2u, 0x30u,                   //          REP #$30
+                     0x22u, 0x00u, 0x80u, 0x01u,     // $00:8004 JSL $01:8000
+                     0x20u, 0x00u, 0x82u,            // $00:8008 JSR !$8200
+                     0x7Cu, 0x00u, 0x90u});          // $00:800B JMP (!$9000,X)
+  put(rom, 0x0100u, {0x6Bu});                        // $00:8100 RTL
+  put(rom, 0x0200u, {0x60u});                        // $00:8200 RTS
+  put(rom, 0x8000u, {0x22u, 0x00u, 0x81u, 0x00u,     // $01:8000 JSL $00:8100
+                     0x6Bu});                        //          RTL
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  for (const Address target : {0x008100u, 0x008200u, 0x018000u}) {
+    request.reached.push_back(ReachedTarget{.target = target,
+                                            .mode = Cpu65816Mode::native(false, false),
+                                            .site = 0x00800Bu,
+                                            .call = false,
+                                            .name = {}});
+  }
+  const CartridgeDisassembly d = disassembleCartridge(request);
+  ASSERT_EQ(d.reached.size(), 3u);
+  EXPECT_EQ(d.reached[0].name, "sub_008100");
+  EXPECT_EQ(d.reached[1].name, "sub_008200");
+  EXPECT_EQ(d.reached[2].name, "sub_018000");
+  const Listing& bank0 = regionNamed(d, "bank_00.asm").listing;
+  ASSERT_TRUE(bank0.labels.count(0x008100u));
+  EXPECT_EQ(bank0.labels.at(0x008100u), "sub_008100");
+  ASSERT_TRUE(bank0.labels.count(0x008200u));
+  EXPECT_EQ(bank0.labels.at(0x008200u), "sub_008200");
+  const Listing& bank1 = regionNamed(d, "bank_01.asm").listing;
+  ASSERT_TRUE(bank1.labels.count(0x018000u));
+  EXPECT_EQ(bank1.labels.at(0x018000u), "sub_018000");
+}
+
+// A destination the tree cannot trace is said once, after every turn of the
+// trace and the analysis, in the order of the derived lines: by site. The
+// jump at `$40:8806` is derived from first and the one at `$40:8406`, which
+// only its target reaches, a turn later; the lower site's note stands first.
+TEST(RomDisasm, ADerivedRefusalIsNotedInTheDerivedLinesOrder) {
+  std::vector<std::uint8_t> rom = loRomImage(128);
+  put(rom, 0x0000u, {0x5Cu, 0x00u, 0x80u, 0x40u});  // JML $40:8000
+  put(rom, 0x200000u, {0x4Cu, 0x00u, 0x88u});       // $40:8000: JMP $8800
+  put(rom, 0x200800u, {0xA5u, 0x10u,                // $40:8800: LDA $10
+                       0x29u, 0x01u,                //           AND #$01
+                       0x0Au,                       //           ASL
+                       0xAAu,                       //           TAX
+                       0x7Cu, 0x00u, 0x81u});       //           JMP (!$8100,X)
+  put(rom, 0x200100u, {0x00u, 0x84u,                // the table: $8400
+                       0x34u, 0x12u});              //            $1234, in the repeated half
+  put(rom, 0x200400u, {0xA5u, 0x11u,                // $40:8400: LDA $11
+                       0x29u, 0x01u,                //           AND #$01
+                       0x0Au,                       //           ASL
+                       0xAAu,                       //           TAX
+                       0x7Cu, 0x00u, 0x82u});       //           JMP (!$8200,X)
+  put(rom, 0x200200u, {0x00u, 0x90u,                // the table: $9000
+                       0x78u, 0x56u});              //            $5678, in the repeated half
+  put(rom, 0x201000u, {0xDBu});                     // $40:9000: STP
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const auto noteAt = [&](const std::string& text) {
+    return std::find_if(d.notes.begin(), d.notes.end(),
+                        [&](const std::string& note) { return note.find(text) != std::string::npos; });
+  };
+  const auto lower = noteAt("derived $40:5678 from $40:8406 is a LoROM bank's lower half; not traced");
+  const auto higher = noteAt("derived $40:1234 from $40:8806 is a LoROM bank's lower half; not traced");
+  ASSERT_NE(lower, d.notes.end()) << renderManifest(d);
+  ASSERT_NE(higher, d.notes.end()) << renderManifest(d);
+  EXPECT_LT(lower, higher);
+}
+
+// A refusal only an earlier turn derived is not said. Bank $02's first turn
+// reads `$02:8008` under the eight-bit index registers the call from bank $00
+// carries in, `LDX #$12`, and the jump at `$02:800B` reads its pointer at
+// `$02:8112`, which leads to `$02:0000`, outside the image. The same turn derives
+// `$02:8008` under sixteen from the jump at `$02:8005`; from then on it reads
+// `LDX #$EA12`, whose pointer lies outside the image and derives nothing. The
+// note is said by neither pass.
+TEST(RomDisasm, ARefusalOnlyAnEarlierTurnDerivedIsNotSaid) {
+  std::vector<std::uint8_t> rom = loRomImage(3);
+  put(rom, 0x0000u, {0x18u,                          // $00:8000 CLC
+                     0xFBu,                          //          XCE
+                     0xE2u, 0x30u,                   //          SEP #$30      (m=8, x=8)
+                     0x22u, 0x08u, 0x80u, 0x02u,     // $00:8004 JSL $02:8008
+                     0x5Cu, 0x00u, 0x80u, 0x02u});   // $00:8008 JML $02:8000
+  put(rom, 0x10000u, {0xC2u, 0x10u,                  // $02:8000 REP #$10      (x=16)
+                      0xA2u, 0x00u, 0x00u,           // $02:8002 LDX #$0000
+                      0x7Cu, 0x00u, 0x81u,           // $02:8005 JMP (!$8100,X)
+                      0xA2u, 0x12u, 0xEAu,           // $02:8008 LDX #$EA12, or LDX #$12 and NOP
+                      0x7Cu, 0x00u, 0x81u});         // $02:800B JMP (!$8100,X)
+  put(rom, 0x10100u, {0x08u, 0x80u});                // $02:8100 the table: $02:8008
+  put(rom, 0x10112u, {0x00u, 0x00u});                // $02:8112 $02:0000
+  const CartridgeDisassembly d = disassembleWithoutSound(rom);
+  const Line* ldx = codeLineAt(regionNamed(d, "bank_02.asm").listing, 0x028008u);
+  ASSERT_NE(ldx, nullptr);
+  EXPECT_EQ(ldx->instruction.text, "LDX #$EA12");
+  const auto refused = [](const CartridgeDisassembly& t) {
+    return std::count_if(t.notes.begin(), t.notes.end(), [](const std::string& note) {
+      return note.rfind("derived $02:0000 from $02:800B", 0) == 0;
+    });
+  };
+  EXPECT_EQ(refused(d), 0) << renderManifest(d);
+  const CartridgeDisassembly second = againFromTheManifest(rom, d);
+  EXPECT_EQ(refused(second), 0);
+  EXPECT_EQ(renderManifest(second), renderManifest(d));
 }
 
 TEST(RomDisasm, TheManifestNamesTheImageItWasWrittenFor) {
@@ -2903,6 +3207,44 @@ TEST(RomDisasm, AnEnumeratedPieceOfAnotherClassJoinsTheRecordedFile) {
   EXPECT_EQ(manifest.find(" by sub_008D00 A=$0004 "), std::string::npos);
 }
 
+// A refused piece's note names a file as the tree finally writes it. Over the
+// lifting cartridge's run, a kept line from `$00:9040` lies across the VRAM
+// file at `$00:9000` and the palette at `$00:9200`, and is refused; a kept line
+// from `$00:9100` then joins the palette and widens it to start at `$00:9100`,
+// which renames it, and its form names it a palette again. The note names the
+// file under that path, once.
+TEST(RomDisasm, ARefusedPieceNamesTheFileTheTreeFinallyWrites) {
+  const std::vector<std::uint8_t> rom = liftingImage();
+  CartridgeRequest request;
+  request.assets = {
+      ManifestAsset{.file = "enumerated/00_9040.bin",
+                    .first = 0x009040u,
+                    .bytes = 0x1C8u,
+                    .classes = {RegisterClass::Vram},
+                    .also = {},
+                    .kind = MovedKind::Enumerated},
+      ManifestAsset{.file = "enumerated/00_9100.bin",
+                    .first = 0x009100u,
+                    .bytes = 0x108u,
+                    .classes = {RegisterClass::Vram},
+                    .also = {},
+                    .kind = MovedKind::Enumerated},
+  };
+  const CartridgeDisassembly d = lifted(rom, request);
+  const AssetFile* widened = assetNamed(d, "cgram/00_9100.pal");
+  ASSERT_NE(widened, nullptr) << renderManifest(d);
+  EXPECT_EQ(widened->first, 0x009100u);
+  EXPECT_EQ(assetNamed(d, "cgram/00_9200.pal"), nullptr);
+  const auto refused = std::count_if(d.notes.begin(), d.notes.end(),
+                                     [](const std::string& note) { return note.find("lies across") != std::string::npos; });
+  EXPECT_EQ(refused, 1);
+  EXPECT_NE(std::find(d.notes.begin(), d.notes.end(),
+                      "asset enumerated/00_9040.bin: its source at $00:9040 lies across vram/00_9000.bin and "
+                      "cgram/00_9100.pal; not lifted"),
+            d.notes.end())
+      << renderManifest(d);
+}
+
 TEST(RomDisasm, AnEnumeratedLineIsWrittenPerFileExtentClassAndOutcome) {
   const std::vector<std::string> lines = linesStarting(renderManifest(enumeratingLift()), "enumerated ");
   EXPECT_EQ(lines.size(), 17u);
@@ -3179,9 +3521,9 @@ TEST(RomDisasm, TheToolkitsRunsLeaveTheRecordedRangesAsTheyWere) {
 //
 // A host that ran the cartridge itself hands the disassembly its ObservedRun's
 // observation: the program file and the manifest are the ones the disassembly
-// writes making the same run itself, but for what the plan of routines to run
-// again adds — its notes, and the values a planned routine is run for — since
-// no plan is made over a handed run.
+// writes making the same run itself, the plan of routines to run again and its
+// notes among them, but for the values a planned routine is run for, since no
+// routine is run again over a handed run.
 
 namespace {
 
@@ -3224,24 +3566,6 @@ HandedRun hostsRun(std::span<const std::uint8_t> rom, std::uint64_t cycles, cons
   return out;
 }
 
-// The manifest without the notes the plan of routines to run again writes,
-// `note     enumerate …`, which a disassembly handed a run makes no plan to
-// write, and without a blank line those notes leave standing alone.
-std::string withoutPlanNotes(const std::string& manifest) {
-  std::string out;
-  std::size_t position = 0;
-  while (position < manifest.size()) {
-    const std::size_t end = manifest.find('\n', position);
-    const std::string line =
-        manifest.substr(position, end == std::string::npos ? std::string::npos : end - position + 1);
-    position = end == std::string::npos ? manifest.size() : end + 1;
-    if (line.rfind("note     enumerate ", 0) == 0) continue;
-    if (line == "\n" && out.size() >= 2 && out.compare(out.size() - 2, 2, "\n\n") == 0) continue;
-    out += line;
-  }
-  return out;
-}
-
 CartridgeRequest exampleRequest(std::span<const std::uint8_t> rom) {
   CartridgeRequest request;
   request.rom = rom;
@@ -3280,8 +3604,7 @@ TEST(RomDisasm, AHostsRunWritesTheTreeTheDisassemblysOwnRunWrites) {
     const CartridgeDisassembly handed = disassembleHanded(rom, hosted);
     EXPECT_EQ(renderProgramFile(handed), renderProgramFile(ran)) << example.name;
     const std::string manifest = renderManifest(handed);
-    EXPECT_EQ(manifest.find("\nnote     enumerate "), std::string::npos) << example.name << ": no plan is made";
-    EXPECT_EQ(manifest, withoutPlanNotes(renderManifest(ran))) << example.name;
+    EXPECT_EQ(manifest, renderManifest(ran)) << example.name;
     ASSERT_EQ(handed.sound.has_value(), ran.sound.has_value()) << example.name;
     if (ran.sound) {
       EXPECT_EQ(renderSoundProgramFile(handed), renderSoundProgramFile(ran)) << example.name;
@@ -3294,7 +3617,7 @@ TEST(RomDisasm, AHostsRunWritesTheTreeTheDisassemblysOwnRunWrites) {
                                                  "stalled_jump", "unreadable_pointer", "button_dispatch", "mixed", "waiting",
                                                  "transfer", "ram_code", "hdma", "irq", "frame_press", "proving", "moving",
                                                  "lifting", "wrapping", "mirrored", "running_bank", "staging", "declaring",
-                                                 "landing", "drawing", "bare_window", "chip_half"}));
+                                                 "landing", "drawing", "bare_window", "chip_half", "second_pass"}));
 }
 
 TEST(RomDisasm, AHostsRunPlansNoRoutine) {

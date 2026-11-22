@@ -119,7 +119,7 @@ inline void expectSameObservation(const RunObservation& a, const RunObservation&
   EXPECT_EQ(a.spc700Divergences, b.spc700Divergences) << what;
   EXPECT_EQ(a.originSets, b.originSets) << what;
   EXPECT_EQ(a.originCap, b.originCap) << what;
-  // A host's run makes no plan, so neither side holds an outcome to compare.
+  // A host's run runs no routine again, so neither side holds an outcome to compare.
   EXPECT_EQ(a.enumerated.size(), b.enumerated.size()) << what;
   EXPECT_EQ(a.variantsPlanned, b.variantsPlanned) << what;
   EXPECT_EQ(a.variantsRun, b.variantsRun) << what;

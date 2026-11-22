@@ -1133,4 +1133,113 @@ TEST(RomFacts, TheTreeStillAssemblesToItsImage) {
   EXPECT_EQ(report.placedTwice, 0u);
 }
 
+namespace {
+
+// A cartridge whose proof depends on the order its inputs are taken in. Two
+// entries a person adds reach the table jump at `$00:8800`, and two targets a run
+// saw the jump at `$00:8004` take reach the table jump at `$00:8300`: in each
+// pair the lower one loads X with zero and arrives a step sooner, the higher one
+// knows nothing of X. Taken lower first, the jump is visited with X zero, and its
+// destination is derived before the other path's arrival leaves X unknown; taken
+// higher first, nothing is ever known of X there.
+CartridgeDisassembly racingTree(std::span<const std::uint8_t> rom) {
+  CartridgeRequest request;
+  request.rom = rom;
+  request.captureSound = false;
+  for (const Address entry : {0x008600u, 0x008700u}) {
+    request.entries.push_back(TraceEntry{.address = entry, .mode = Cpu65816Mode::native(false, false), .name = {}});
+  }
+  request.entries[0].name = "zero_first";
+  request.entries[1].name = "unknown_later";
+  for (const Address target : {0x008100u, 0x008200u}) {
+    request.reached.push_back(ReachedTarget{
+        .target = target, .mode = Cpu65816Mode::native(false, false), .site = 0x008004u, .call = false, .name = {}});
+  }
+  return disassembleCartridge(request);
+}
+
+std::vector<std::uint8_t> racingImage() {
+  std::vector<std::uint8_t> rom = loRomImage(1);
+  put(rom, 0x0000u, {0x18u, 0xFBu, 0xC2u, 0x30u,     // $8000 CLC, XCE, REP #$30
+                     0x6Cu, 0x00u, 0x90u});          // $8004 JMP (!$9000)
+  put(rom, 0x0100u, {0xA2u, 0x00u, 0x00u,            // $8100 LDX #$0000
+                     0x4Cu, 0x00u, 0x83u});          // $8103 JMP $8300
+  put(rom, 0x0200u, {0xEAu, 0xEAu,                   // $8200 NOP, NOP
+                     0x4Cu, 0x00u, 0x83u});          // $8202 JMP $8300
+  put(rom, 0x0300u, {0x7Cu, 0x00u, 0x84u});          // $8300 JMP (!$8400,X)
+  put(rom, 0x0400u, {0x00u, 0x85u});                 // $8400 the table: $8500
+  put(rom, 0x0500u, {0xDBu});                        // $8500 STP
+  put(rom, 0x0600u, {0xA2u, 0x00u, 0x00u,            // $8600 LDX #$0000
+                     0x4Cu, 0x00u, 0x88u});          // $8603 JMP $8800
+  put(rom, 0x0700u, {0xEAu, 0xEAu,                   // $8700 NOP, NOP
+                     0x4Cu, 0x00u, 0x88u});          // $8702 JMP $8800
+  put(rom, 0x0800u, {0x7Cu, 0x00u, 0x89u});          // $8800 JMP (!$8900,X)
+  put(rom, 0x0900u, {0x00u, 0x8Au});                 // $8900 the table: $8A00
+  put(rom, 0x0A00u, {0xDBu});                        // $8A00 STP
+  return rom;
+}
+
+}  // namespace
+
+// The proof takes the entries and what reached the program as sets: a tree
+// proven with its entries, sightings, landings and derivations in reverse order
+// derives the same destinations and proves the same facts and states — the
+// proving cartridge's after a run, and one whose proof turns on which of two
+// paths reaches a table jump first.
+TEST(RomFacts, TheOrderOfSightingsAndEntriesDoesNotChangeTheProof) {
+  const std::vector<std::uint8_t> proving = examples::provingImage();
+  CartridgeRequest request;
+  request.rom = proving;
+  request.captureSound = false;
+  request.observeRun = true;
+  request.runMasterCycles = 3u * 357'954u;
+  const std::vector<std::uint8_t> racing = racingImage();
+  const CartridgeDisassembly trees[] = {disassembleCartridge(request), racingTree(racing)};
+  const std::span<const std::uint8_t> roms[] = {proving, racing};
+  for (std::size_t t = 0; t < 2; ++t) {
+    const CartridgeDisassembly& d = trees[t];
+    const std::span<const std::uint8_t> rom = roms[t];
+    ASSERT_GE(d.entries.size(), 2u) << t;
+    ASSERT_GE(d.derived.size(), 2u) << t;
+    CartridgeDisassembly reversed = d;
+    std::reverse(reversed.entries.begin(), reversed.entries.end());
+    std::reverse(reversed.reached.begin(), reversed.reached.end());
+    std::reverse(reversed.ran.begin(), reversed.ran.end());
+    std::reverse(reversed.derived.begin(), reversed.derived.end());
+    const ProvenProgram given = proveProgram(d, rom);
+    const ProvenProgram backwards = proveProgram(reversed, rom);
+    const std::vector<DerivedTarget> derived = derivedTargets(d, given);
+    const std::vector<DerivedTarget> derivedBackwards = derivedTargets(reversed, backwards);
+    ASSERT_EQ(derivedBackwards.size(), derived.size()) << t;
+    for (std::size_t i = 0; i < derived.size(); ++i) {
+      EXPECT_TRUE(sameDerivation(derivedBackwards[i], derived[i])) << t << " " << i;
+      EXPECT_EQ(derivedBackwards[i].call, derived[i].call) << t << " " << i;
+    }
+    const std::vector<StateFact> facts = stateFacts(d, given);
+    const std::vector<StateFact> factsBackwards = stateFacts(reversed, backwards);
+    ASSERT_EQ(factsBackwards.size(), facts.size()) << t;
+    for (std::size_t i = 0; i < facts.size(); ++i) {
+      EXPECT_EQ(factsBackwards[i].address, facts[i].address) << t << " " << i;
+      EXPECT_EQ(factsBackwards[i].d, facts[i].d) << t << " " << i;
+      EXPECT_EQ(factsBackwards[i].dbr, facts[i].dbr) << t << " " << i;
+      EXPECT_EQ(factsBackwards[i].s, facts[i].s) << t << " " << i;
+    }
+    for (std::size_t node = 0; node < d.program.nodes.size(); ++node) {
+      const ir::State* before = given.flow->before(node);
+      const ir::State* beforeBackwards = backwards.flow->before(node);
+      ASSERT_EQ(beforeBackwards == nullptr, before == nullptr) << t << " " << node;
+      if (before != nullptr) {
+        EXPECT_TRUE(*beforeBackwards == *before) << t << " " << node;
+      }
+    }
+  }
+  // Both table jumps of the racing tree are derived from, the lower path first.
+  const auto derivedFrom = [&](Address site) {
+    return std::count_if(trees[1].derived.begin(), trees[1].derived.end(),
+                         [&](const DerivedTarget& t) { return t.site == site; });
+  };
+  EXPECT_EQ(derivedFrom(0x008300u), 1);
+  EXPECT_EQ(derivedFrom(0x008800u), 1);
+}
+
 }  // namespace snaggletooth::disasm

@@ -1,54 +1,16 @@
 # The intermediate representation
 
-`tools/ir/ir.h` is a program as its meaning: one node per instruction, each
-carrying what source says about the instruction and what the chip does for it,
-with no bytes anywhere. It serves the cartridge's two chips in one vocabulary:
-the main CPU's program is the 65816's, and the sound program the cartridge
-uploads to the audio unit is the SPC700's. `tools/ir/cpu65816_lift.h` builds
-the first from a listing the [65816 disassembler](65816-disassembler.md)
-traced and `tools/ir/spc700_lift.h` the second from a listing the
-[SPC700 disassembler](spc700-disassembler.md) traced, `tools/ir/ir_interpret.h`
-runs either, `tools/ir/ir_render.h` writes SNES assembly from either,
-`tools/ir/ir_differential.h` runs the main CPU's beside the machine and
-reports every place the two disagree, and `tools/ir/ir_dataflow.h` runs it
-over every path at once and says what each instruction can rely on. Two
-commands put those in a person's hands: `snes_lift` reads a tree's program
-file back and prints it, and `snes_differential` reads the same file and
-replays the cartridge's recorded run beside it; the
-[cartridge disassembler](snes-disassembler.md#the-tree) writes the two
-program files — the main CPU's and the sound program's — and `snes_render`
-writes the bank files and the sound file from them through the renderer.
+`tools/ir/ir.h` is a program as its meaning: one node per instruction, each carrying what source says about the instruction and what the chip does for it, with no bytes anywhere. It serves the cartridge's two chips in one vocabulary: the main CPU's program is the 65816's, and the sound program the cartridge uploads to the audio unit is the SPC700's. `tools/ir/cpu65816_lift.h` builds the first from a listing the [65816 disassembler](65816-disassembler.md) traced and `tools/ir/spc700_lift.h` the second from a listing the [SPC700 disassembler](spc700-disassembler.md) traced, `tools/ir/ir_interpret.h` runs either, `tools/ir/ir_render.h` writes SNES assembly from either, `tools/ir/ir_differential.h` runs the main CPU's beside the machine and reports every place the two disagree, and `tools/ir/ir_dataflow.h` runs it over every path at once and says what each instruction can rely on. Two commands put those in a person's hands: `snes_lift` reads a tree's program file back and prints it, and `snes_differential` reads the same file and replays the cartridge's recorded run beside it; the [cartridge disassembler](snes-disassembler.md#the-tree) writes the two program files — the main CPU's and the sound program's — and `snes_render` writes the bank files and the sound file from them through the renderer.
 
 Three properties shape everything below.
 
-**It holds no bytes.** A node names its instruction the way source does — address,
-mnemonic, addressing mode or operand form, operand value, the mode it reads
-under — and says what the instruction does as a sequence of typed effects over
-the CPU's registers, a few temporaries and a bus. The mnemonic and the
-addressing mode together name one opcode, and the operand with its width names
-the operand bytes, so a renderer can reproduce the bytes without holding them;
-an interpreter runs the effects and nothing else. The lift is the one place
-bytes enter, and it is where they stop.
+**It holds no bytes.** A node names its instruction the way source does — address, mnemonic, addressing mode or operand form, operand value, the mode it reads under — and says what the instruction does as a sequence of typed effects over the CPU's registers, a few temporaries and a bus. The mnemonic and the addressing mode together name one opcode, and the operand with its width names the operand bytes, so a renderer can reproduce the bytes without holding them; an interpreter runs the effects and nothing else. The lift is the one place bytes enter, and it is where they stop.
 
-**It models the CPU and nothing else.** A memory access is a load or a store at an
-address the effects before it computed, with every wrap the chip has written into
-the address arithmetic. Whether that address is a hardware register is the memory
-map's answer, and the memory map belongs to whatever runs the program. A register
-name is attached to a node only where the instruction's own bytes name the bank —
-or, on the sound CPU, name one of the audio unit's own sixteen registers.
+**It models the CPU and nothing else.** A memory access is a load or a store at an address the effects before it computed, with every wrap the chip has written into the address arithmetic. Whether that address is a hardware register is the memory map's answer, and the memory map belongs to whatever runs the program. A register name is attached to a node only where the instruction's own bytes name the bank — or, on the sound CPU, name one of the audio unit's own sixteen registers.
 
-**One vocabulary, two chips.** The 65816 and the SPC700 share a lineage, and
-the effect layer is written so that a word means the same thing on both
-wherever both chips do the same thing: a load, a store, a compare, a shift.
-Where a chip's rule differs — the flags an add sets, the page a direct operand
-lives in — the rule is stated per chip below, and each chip's interpreter
-honours its own. A sound-CPU node carries no mode, addresses the audio unit's
-16-bit space, and lives in the program's second node list.
+**One vocabulary, two chips.** The 65816 and the SPC700 share a lineage, and the effect layer is written so that a word means the same thing on both wherever both chips do the same thing: a load, a store, a compare, a shift. Where a chip's rule differs — the flags an add sets, the page a direct operand lives in — the rule is stated per chip below, and each chip's interpreter honours its own. A sound-CPU node carries no mode, addresses the audio unit's 16-bit space, and lives in the program's second node list.
 
-**A width is a type where the trace settled it, and a selection by the live flag
-where it did not.** After `PLP` or `RTI` in native mode the flags are whatever came
-off the stack; the node says its loads and stores are as wide as the flag makes
-them, and the interpreter reads the flag when it runs.
+**A width is a type where the trace settled it, and a selection by the live flag where it did not.** After `PLP` or `RTI` in native mode the flags are whatever came off the stack; the node says its loads and stores are as wide as the flag makes them, and the interpreter reads the flag when it runs.
 
 ---
 
@@ -81,35 +43,13 @@ them, and the interpreter reads the flag when it runs.
 
 A `Node` is one instruction at one address under one mode.
 
-The **instruction layer** (`Node::instruction`) is what source says: the address,
-the length, the mnemonic, the addressing mode, the operand's value, and the
-constant successor of a branch, jump or call when the instruction names one. The
-operand is the value as the dialect writes it — an immediate, a direct-page
-offset, an absolute or long address, the target address of a relative form, the
-value `PEA` pushes, the address `PER` names, or a block move's source bank with the
-destination bank beside it. `Node::mode` is the mode the instruction reads under:
-the emulation flag, and each register width with whether the trace knew it.
+The **instruction layer** (`Node::instruction`) is what source says: the address, the length, the mnemonic, the addressing mode, the operand's value, and the constant successor of a branch, jump or call when the instruction names one. The operand is the value as the dialect writes it — an immediate, a direct-page offset, an absolute or long address, the target address of a relative form, the value `PEA` pushes, the address `PER` names, or a block move's source bank with the destination bank beside it. `Node::mode` is the mode the instruction reads under: the emulation flag, and each register width with whether the trace knew it.
 
-The **effect layer** (`Node::effects`) is what the chip does: effects in the order
-the chip makes their accesses. Every node begins by stepping the program counter
-past the instruction; what follows may move it again. A load or store names the
-address it reaches through a temporary an earlier effect computed, so the address
-arithmetic is on the page rather than inside an operation.
+The **effect layer** (`Node::effects`) is what the chip does: effects in the order the chip makes their accesses. Every node begins by stepping the program counter past the instruction; what follows may move it again. A load or store names the address it reaches through a temporary an earlier effect computed, so the address arithmetic is on the page rather than inside an operation.
 
-Beside the two layers a node carries its measured cost, the hardware register
-its operand names when a long operand names one, and whether it was lifted from
-bytes that differ from the image the code started as.
+Beside the two layers a node carries its measured cost, the hardware register its operand names when a long operand names one, and whether it was lifted from bytes that differ from the image the code started as.
 
-A `Program` is nodes in address order — an address two paths read two ways is
-two nodes, the first reading first — with the two hardware interrupt sequences
-attached, which are the chip's rather than the program's. Its second list,
-`Program::spc700`, is the sound program: the SPC700's nodes in the audio
-unit's own address order, one per address, in a space of their own, which
-`findSpc700` looks up. A sound-CPU node names its opcode by its mnemonic and
-its operand form — `MOV` and `A,[dp+X]`, `BBS` and `dp.3,rel` — as the
-[SPC700 disassembler](spc700-disassembler.md#library) has them, and carries no
-mode: its instructions always read the same way, and the page a direct operand
-lives in is the P flag's choice when it runs.
+A `Program` is nodes in address order — an address two paths read two ways is two nodes, the first reading first — with the two hardware interrupt sequences attached, which are the chip's rather than the program's. Its second list, `Program::spc700`, is the sound program: the SPC700's nodes in the audio unit's own address order, one per address, in a space of their own, which `findSpc700` looks up. A sound-CPU node names its opcode by its mnemonic and its operand form — `MOV` and `A,[dp+X]`, `BBS` and `dp.3,rel` — as the [SPC700 disassembler](spc700-disassembler.md#library) has them, and carries no mode: its instructions always read the same way, and the page a direct operand lives in is the P flag's choice when it runs.
 
 ## Vocabulary
 
@@ -117,9 +57,7 @@ Everything lives in `snaggletooth::ir`.
 
 ### Places and widths
 
-An effect names its operands as places. The registers are the CPU's own; the four
-temporaries belong to the node and start at zero each time it runs; a flag is one
-bit of the status register; `Imm` is a constant carried in the operand's value.
+An effect names its operands as places. The registers are the CPU's own; the four temporaries belong to the node and start at zero each time it runs; a flag is one bit of the status register; `Imm` is a constant carried in the operand's value.
 
 | Place | Meaning |
 |---|---|
@@ -142,9 +80,7 @@ A width sizes the values an effect works on:
 | `ByM` | 8 under emulation or with the M flag set; 16 otherwise |
 | `ByX` | 8 under emulation or with the X flag set; 16 otherwise |
 
-The lift writes `Byte` or `Word` where the trace settled a width and `ByM` or
-`ByX` where it did not, so a node lifted after `PLP` is right whichever way the
-flag falls. A sound-CPU node uses `Byte` and `Word` alone.
+The lift writes `Byte` or `Word` where the trace settled a width and `ByM` or `ByX` where it did not, so a node lifted after `PLP` is right whichever way the flag falls. A sound-CPU node uses `Byte` and `Word` alone.
 
 ### Steps, accesses and conditions
 
@@ -159,11 +95,7 @@ A multi-byte access finds its second and third bytes by a `Step`:
 | `DirectPointer` | Within bank zero — or within the page, under emulation with the direct register zero |
 | `Page` | The next address within the first byte's page: the sound CPU's direct-page words and pointers |
 
-An `Access` says what a bus access is for — `Data`, `Rmw` for a read-modify-write's
-read and write-back, `RmwUnmodified` for the write of the byte just read that
-emulation mode drives before the write-back, `Vector` for an interrupt vector
-pull. A run compares addresses, values and order alike whatever the kind; the kind
-says which pins the chip drives.
+An `Access` says what a bus access is for — `Data`, `Rmw` for a read-modify-write's read and write-back, `RmwUnmodified` for the write of the byte just read that emulation mode drives before the write-back, `Vector` for an interrupt vector pull. A run compares addresses, values and order alike whatever the kind; the kind says which pins the chip drives.
 
 A `Cond` guards an effect, and `Always` is the default:
 
@@ -179,9 +111,7 @@ A `Cond` guards an effect, and `Always` is the default:
 
 ### Operations
 
-Each effect is `dst ← f(a, b)` where it has a destination. A register written at
-eight bits follows the register's own rule: the accumulator keeps its high byte,
-an index register clears its own, and the rest take the value as it is.
+Each effect is `dst ← f(a, b)` where it has a destination. A register written at eight bits follows the register's own rule: the accumulator keeps its high byte, an index register clears its own, and the rest take the value as it is.
 
 | Op | Meaning |
 |---|---|
@@ -220,197 +150,47 @@ an index register clears its own, and the rest take the value as it is.
 
 ## The rules
 
-What the lift writes for each construct, and what the interpreter honours. Each is
-the chip's own behaviour, and the [core](65816-cpu.md) over a flat bus is what the
-lift is held to.
+What the lift writes for each construct, and what the interpreter honours. Each is the chip's own behaviour, and the [core](65816-cpu.md) over a flat bus is what the lift is held to.
 
-- **Register widths.** A load, store, transfer or arithmetic effect carries a
-  width; an eight-bit accumulator effect leaves B alone, an eight-bit index load
-  clears the index's high byte. `REP` and `SEP` are `And` or `Or` on a copy of P
-  followed by `WriteP`, which is the one write that re-establishes the invariants;
-  under emulation the mask's M and X bits are inert. `PLP` and `RTI` end in the
-  same `WriteP`. `XCE` entering emulation forces both widths, pins S to page one and
-  clears the index high bytes.
-- **The flags.** N, Z, V, C, D and I are places, and each operation writes exactly
-  the flags the chip does: `Cmp` moves N Z C and not V; `BitImm` moves Z alone
-  while `Bit` takes N and V from the operand's top bits; `Tsb` and `Trb` move Z
-  only; `Inc` and `Dec` move N Z only; `Xba` sets N Z from the new low byte; the
-  `SetNZ` of `PLB` and `PLD` sets them on what was loaded.
-- **Decimal mode.** `Adc` and `Sbc` read the D flag: a nibble-adjusted add or
-  subtract at eight or sixteen bits, C from the adjusted result, V from the binary
-  sum for a subtract and from the high-nibble sum before the final adjust for an
-  add.
-- **The direct page.** `DirectAddress` is `(D + dp + index) & $FFFF` in bank zero,
-  except under emulation with D's low byte zero, where the addition stays within
-  the page; a direct operand's second byte steps by `Direct`, which follows the
-  same rule.
-- **Direct-page pointers.** The pointer of `(dp)`, `(dp,X)` and `(dp),Y` steps by
-  `DirectPointer`: within the page only under emulation with the whole direct
-  register zero. The pointers of `[dp]`, `[dp],Y`, `(sr,S),Y` and `PEI` step by
-  `Bank0`, out of the page whatever the mode.
-- **Absolute and long addressing.** `BankAddress` adds an index into all 24 bits,
-  so `DBR:$FFFF,X` reaches the next bank rather than wrapping; so does
-  `LongAddress`. The pointer of `JMP (abs)` and `JML [abs]` is in bank zero and
-  wraps within it; the pointer of `JMP (abs,X)` and `JSR (abs,X)` is in the program
-  bank and wraps within that.
-- **The program counter.** It wraps within the program bank on every step; a
-  relative form's target is computed by the lift and carried as an address; only
-  `JML`, `JSL`, `RTL` and the interrupt sequences move PBR.
-- **The stack.** A push writes at S and steps it down, a word high byte first; a
-  pull steps S up and reads. Under emulation a `pinned` push or pull keeps S in
-  page one on every byte — the registers the 6502 pushed and pulled, `JSR`, `RTS`,
-  `RTI`, `BRK`, `COP` and the hardware sequences, and `JSR (abs,X)` — while the
-  rest step out and `SettleStack` puts S back afterwards. `TXS` and `TCS` write S
-  and settle it, so under emulation only the low byte moves.
-- **Calls and returns.** `JSR` and `JSR (abs,X)` push the address of the
-  instruction's last byte and `RTS` adds one to what it pulls; `JSL` pushes PBR
-  first; `RTL` pulls three bytes; `PEA`, `PEI` and `PER` push sixteen bits whatever
-  M says, so `PEA target-1` followed by `RTS` dispatches with no special case.
-- **`BRK` and `COP`.** PBR under native mode, then the address after the signature
-  byte, then P, are pushed pinned; I is set and D cleared; the vector the emulation
-  flag selects is read from bank zero; PBR becomes zero.
-- **Hardware interrupts.** Not effects of the program: `Program::nmi` and
-  `Program::irq` are sequences the interpreter runs between two nodes when its host
-  asks. Each reads the interrupted instruction and throws it away, pushes PBR under
-  native mode, the program counter as it stands, and P — with bit 4 cleared under
-  emulation, where it is the break flag — then enters the handler as `BRK` does.
-- **`WAI` and `STP`.** A `Halt` effect. A waiting interpreter is released by an
-  interrupt sequence, or by `Interpreter::release` when a masked request wakes the
-  chip without being taken; a stopped one only by a reset, which reaches it as fresh
-  registers.
-- **Read-modify-write.** `Load` under `Rmw`, then — under emulation, for a node
-  narrower than a word — a `Store` of the unmodified byte under `RmwUnmodified`,
-  then the operation, then `StoreRmw`, whose sixteen-bit write-back goes high byte
-  first.
-- **Block moves.** One byte per run of the node: DBR takes the destination bank,
-  the byte moves from the source bank at X to the data bank at Y, both indexes step
-  at their width, the whole sixteen-bit accumulator counts down, and the program
-  counter goes back on the instruction unless the count ran past zero. An interrupt
-  between bytes is only an interrupt.
-- **Loads and stores against hardware.** Always a `Load` or `Store` at the computed
-  address. `Node::registerName` is set only for a long operand, from the same
-  table the disassembler names registers from; for every other form the runtime
-  classifies the address.
-- **Reads.** A read's value is the bus's to answer. The effects assert the address
-  and the width, never the value.
-- **Cycle placement.** A node's effects account for every cycle the instruction
-  spends, in the chip's order. It opens with a `Fetch` of its own bytes — most read
-  all of them first, while `JSL`, `JSR (abs,X)` and `WDM` read some later, after a
-  push or an internal cycle — and an `Idle` stands for every cycle the chip spends
-  with no access: an implied instruction's internal cycle, the index cycle of an
-  indexed form (only on a page cross under an eight-bit index, always under a
-  sixteen-bit one, always for a write or a modify), a read-modify-write's middle
-  cycle (a dummy write under emulation, an idle otherwise), and the internal cycles
-  of the stack forms, the branches, the block moves and the returns. `Fetch` and
-  `Idle` place cycles and cost nothing, so a run's `Fetch`, `Idle` and access
-  cycles together number the cycles the node cost; `Cycles` costs and places
-  nothing (see [Cost](#cost)). A hardware interrupt sequence opens with one
-  `Fetch`, the interrupted opcode read on opcode-fetch pins, and spends no idle.
-- **Immediates under an unknown width.** No node: the trace stops there, and the
-  bytes have no length to lift.
+- **Register widths.** A load, store, transfer or arithmetic effect carries a width; an eight-bit accumulator effect leaves B alone, an eight-bit index load clears the index's high byte. `REP` and `SEP` are `And` or `Or` on a copy of P followed by `WriteP`, which is the one write that re-establishes the invariants; under emulation the mask's M and X bits are inert. `PLP` and `RTI` end in the same `WriteP`. `XCE` entering emulation forces both widths, pins S to page one and clears the index high bytes.
+- **The flags.** N, Z, V, C, D and I are places, and each operation writes exactly the flags the chip does: `Cmp` moves N Z C and not V; `BitImm` moves Z alone while `Bit` takes N and V from the operand's top bits; `Tsb` and `Trb` move Z only; `Inc` and `Dec` move N Z only; `Xba` sets N Z from the new low byte; the `SetNZ` of `PLB` and `PLD` sets them on what was loaded.
+- **Decimal mode.** `Adc` and `Sbc` read the D flag: a nibble-adjusted add or subtract at eight or sixteen bits, C from the adjusted result, V from the binary sum for a subtract and from the high-nibble sum before the final adjust for an add.
+- **The direct page.** `DirectAddress` is `(D + dp + index) & $FFFF` in bank zero, except under emulation with D's low byte zero, where the addition stays within the page; a direct operand's second byte steps by `Direct`, which follows the same rule.
+- **Direct-page pointers.** The pointer of `(dp)`, `(dp,X)` and `(dp),Y` steps by `DirectPointer`: within the page only under emulation with the whole direct register zero. The pointers of `[dp]`, `[dp],Y`, `(sr,S),Y` and `PEI` step by `Bank0`, out of the page whatever the mode.
+- **Absolute and long addressing.** `BankAddress` adds an index into all 24 bits, so `DBR:$FFFF,X` reaches the next bank rather than wrapping; so does `LongAddress`. The pointer of `JMP (abs)` and `JML [abs]` is in bank zero and wraps within it; the pointer of `JMP (abs,X)` and `JSR (abs,X)` is in the program bank and wraps within that.
+- **The program counter.** It wraps within the program bank on every step; a relative form's target is computed by the lift and carried as an address; only `JML`, `JSL`, `RTL` and the interrupt sequences move PBR.
+- **The stack.** A push writes at S and steps it down, a word high byte first; a pull steps S up and reads. Under emulation a `pinned` push or pull keeps S in page one on every byte — the registers the 6502 pushed and pulled, `JSR`, `RTS`, `RTI`, `BRK`, `COP` and the hardware sequences, and `JSR (abs,X)` — while the rest step out and `SettleStack` puts S back afterwards. `TXS` and `TCS` write S and settle it, so under emulation only the low byte moves.
+- **Calls and returns.** `JSR` and `JSR (abs,X)` push the address of the instruction's last byte and `RTS` adds one to what it pulls; `JSL` pushes PBR first; `RTL` pulls three bytes; `PEA`, `PEI` and `PER` push sixteen bits whatever M says, so `PEA target-1` followed by `RTS` dispatches with no special case.
+- **`BRK` and `COP`.** PBR under native mode, then the address after the signature byte, then P, are pushed pinned; I is set and D cleared; the vector the emulation flag selects is read from bank zero; PBR becomes zero.
+- **Hardware interrupts.** Not effects of the program: `Program::nmi` and `Program::irq` are sequences the interpreter runs between two nodes when its host asks. Each reads the interrupted instruction and throws it away, pushes PBR under native mode, the program counter as it stands, and P — with bit 4 cleared under emulation, where it is the break flag — then enters the handler as `BRK` does.
+- **`WAI` and `STP`.** A `Halt` effect. A waiting interpreter is released by an interrupt sequence, or by `Interpreter::release` when a masked request wakes the chip without being taken; a stopped one only by a reset, which reaches it as fresh registers.
+- **Read-modify-write.** `Load` under `Rmw`, then — under emulation, for a node narrower than a word — a `Store` of the unmodified byte under `RmwUnmodified`, then the operation, then `StoreRmw`, whose sixteen-bit write-back goes high byte first.
+- **Block moves.** One byte per run of the node: DBR takes the destination bank, the byte moves from the source bank at X to the data bank at Y, both indexes step at their width, the whole sixteen-bit accumulator counts down, and the program counter goes back on the instruction unless the count ran past zero. An interrupt between bytes is only an interrupt.
+- **Loads and stores against hardware.** Always a `Load` or `Store` at the computed address. `Node::registerName` is set only for a long operand, from the same table the disassembler names registers from; for every other form the runtime classifies the address.
+- **Reads.** A read's value is the bus's to answer. The effects assert the address and the width, never the value.
+- **Cycle placement.** A node's effects account for every cycle the instruction spends, in the chip's order. It opens with a `Fetch` of its own bytes — most read all of them first, while `JSL`, `JSR (abs,X)` and `WDM` read some later, after a push or an internal cycle — and an `Idle` stands for every cycle the chip spends with no access: an implied instruction's internal cycle, the index cycle of an indexed form (only on a page cross under an eight-bit index, always under a sixteen-bit one, always for a write or a modify), a read-modify-write's middle cycle (a dummy write under emulation, an idle otherwise), and the internal cycles of the stack forms, the branches, the block moves and the returns. `Fetch` and `Idle` place cycles and cost nothing, so a run's `Fetch`, `Idle` and access cycles together number the cycles the node cost; `Cycles` costs and places nothing (see [Cost](#cost)). A hardware interrupt sequence opens with one `Fetch`, the interrupted opcode read on opcode-fetch pins, and spends no idle.
+- **Immediates under an unknown width.** No node: the trace stops there, and the bytes have no length to lift.
 
 ### The sound CPU
 
-What the SPC700 lift writes, and what its interpreter honours. Each is the
-chip's own behaviour, and the [core](spc700-cpu.md) over a flat bus is what the
-lift is held to.
+What the SPC700 lift writes, and what its interpreter honours. Each is the chip's own behaviour, and the [core](spc700-cpu.md) over a flat bus is what the lift is held to.
 
-- **The direct page.** `PageAddress` is the page the P flag selects — `$0000`
-  or `$0100` — plus the offset and any index, within the page: `dp+X` at `$F5`
-  with X at `$10` is `$05` of the page, not the page after. A direct-page word's
-  second byte and a pointer's second byte step by `Page`, inside the page.
-- **Pointers.** `[dp+X]` reads its pointer at the indexed offset and the byte
-  after it, inside the page, and the address is the pointer as read; `[dp]+Y`
-  adds Y to the pointer as a 16-bit sum, so `$FFFF + 2` is `$0001`. `(X)` and
-  `(X)+` address the page at X; the incrementing form steps X after its access.
-  `JMP [!abs+X]` reads its two pointer bytes at consecutive 16-bit addresses,
-  the one address in the chip that leaves a page.
-- **The reads a store makes.** A store reads its destination before writing it,
-  and the read is an effect: `MOV dp,A`, `MOV !abs,A`, `MOV [dp]+Y,A` and
-  `MOV dp,#imm` each `Load` the byte they are about to overwrite, into `T3`,
-  and then `Store`. `MOV (X)+,A` makes no such read; `MOV dp,dp` reads its
-  source and never its destination; `MOVW dp,YA` reads the low byte alone
-  before writing both. A read-modify-write reads once, then writes; `TSET1`
-  and `TCLR1` reach their operand twice and keep the first byte.
-- **The byte after the opcode.** A one-byte instruction — a register move, an
-  increment, a shift, `MUL`, `DIV`, the decimal adjusts, the flag instructions,
-  `NOP`, the `(X)` forms, `TCALL`, `BRK`, `RET`, `RETI`, `PUSH`, `POP` — reads
-  the byte after the opcode and throws it away, and the lift writes that read
-  as a `Load` into `T3`, because on a register that clears when read the read
-  is not nothing. `SLEEP` and `STOP` read it three times. `DBNZ Y` reads its
-  displacement's address a second time.
-- **The flags.** `Adc` and `Sbc` set N, V, H, Z and C and know no decimal
-  mode; `Cmp` moves N Z C and leaves V and H; the logic operations, the moves
-  into a register, the increments, `MOV X,SP` and `XCN` set N Z; `MOV SP,X`,
-  a store, `SET1`, `CLR1`, `NOT1` and `MOV1 m.b,C` move no flag; `TSET1` and
-  `TCLR1` set N Z from `A − m`; the shifts and rotates put the bit shifted out
-  in C; `MUL` sets N Z from Y, `DIV` sets N V H Z; `CLRV` clears H with V;
-  `NOTC` inverts C. `XCN` is `Shr`, `Shl` and `Or` on the nibbles followed by
-  the `SetNZ`; the bit instructions through the carry — `AND1`, `OR1`, `EOR1`,
-  `MOV1` — shift the byte down by the bit and mask it, invert it for the `/`
-  forms, and apply the operation to `P.C`; `TSET1` and `TCLR1` compute the
-  flags into a temporary and the new byte into another.
-- **The word instructions.** `MOVW YA,dp`, `ADDW` and `SUBW` read the low byte,
-  spend a cycle inside the chip, and read the high byte one past it inside the
-  page — two byte `Load`s, joined into the word with `Shl` and `Or`; `CMPW`
-  reads both bytes with no cycle between, one word `Load` with the `Page` step.
-  `ADDW` clears C and adds, `SUBW` sets C
-  and subtracts, so the sixteen-bit `Adc` and `Sbc` take no carry in and set
-  H from the high byte's nibble. `INCW` and `DECW` read and write the low byte,
-  then read and write the high byte, which moves only when the low byte wrapped,
-  and set N Z from the word they leave. `MOVW dp,YA` reads the low byte and
-  writes A then Y.
-- **The branches.** A relative branch is a `Set` of PC under its flag; `BBS`
-  and `BBC` load the byte, mask the bit and branch on the temporary being zero
-  or not; `CBNE` subtracts A from the byte into the temporary and branches on
-  it being non-zero; `DBNZ` decrements the byte or Y without touching a flag
-  and branches on the result. A taken branch's `Cycles` effect carries the
-  difference between the measured taken and untaken costs, and an `Idle` of two
-  under the same condition places those cycles after the displacement.
-- **The stack.** Page one, addressed by the eight-bit stack pointer, which
-  wraps inside the page: every `Push` and `Pull` is `pinned`. `CALL`,
-  `PCALL` and `TCALL` push the address after the instruction, high byte first,
-  and `RET` pulls it low byte first; `BRK` pushes the address after the opcode,
-  then the status word as it stands, then sets B and clears I after reading
-  its vector; `RETI` pulls the status word first. `TCALL n` reads its
-  destination from `$FFDE − 2n`, `BRK` from `$FFDE`, `PCALL` goes to `$FF00`
-  plus its byte.
-- **The halts.** `SLEEP` is a `Halt` with 0 and `STOP` with 1; the sound CPU
-  takes no interrupt, so only a reset ends either.
-- **Cycle placement.** A node's effects account for every cycle the instruction
-  spends, in the chip's order, as a main-CPU node's do. It opens with a `Fetch`
-  of the opcode and the operand bytes that follow it; `MOV dp,dp` fetches its
-  destination offset after reading its source byte, and `BBS`, `BBC`, `CBNE`
-  and `DBNZ dp` fetch their displacement after the byte they test. An `Idle`
-  stands for every cycle the chip spends with no bus access: the indexing cycle
-  of `dp+X`, `dp+Y`, `!abs+X`, `!abs+Y`, `[dp+X]`, `CBNE dp+X` and
-  `JMP [!abs+X]`; the internal cycle of `[dp]+Y`, before the pointer for a read
-  and after it for `MOV [dp]+Y,A`; the cycle `MOV A,(X)+` spends stepping X and
-  the one `MOV (X)+,A` spends before its write; the cycle `MOV1 m.b,C` spends
-  between its read and its write; the last cycle of `CMP (X),(Y)`, `CMP dp,dp`,
-  `CMP dp,#imm`, `OR1` and `EOR1`; the cycles an implied instruction computes
-  for after its discarded read — three for `XCN`, seven for `MUL`, ten for
-  `DIV`, one for `DAA`, `DAS`, `NOTC`, `EI` and `DI`; the cycle between the two
-  bytes of `MOVW YA,dp`, `ADDW` and `SUBW`; the cycle `BBS`, `BBC` and `CBNE`
-  spend between their byte and their displacement, and the one `DBNZ Y` spends
-  on its decrement; a taken branch's two; and the internal cycles of `CALL`,
-  `PCALL`, `TCALL`, `BRK`, `RET`, `RETI`, `PUSH`, `POP`, `SLEEP` and `STOP`.
+- **The direct page.** `PageAddress` is the page the P flag selects — `$0000` or `$0100` — plus the offset and any index, within the page: `dp+X` at `$F5` with X at `$10` is `$05` of the page, not the page after. A direct-page word's second byte and a pointer's second byte step by `Page`, inside the page.
+- **Pointers.** `[dp+X]` reads its pointer at the indexed offset and the byte after it, inside the page, and the address is the pointer as read; `[dp]+Y` adds Y to the pointer as a 16-bit sum, so `$FFFF + 2` is `$0001`. `(X)` and `(X)+` address the page at X; the incrementing form steps X after its access. `JMP [!abs+X]` reads its two pointer bytes at consecutive 16-bit addresses, the one address in the chip that leaves a page.
+- **The reads a store makes.** A store reads its destination before writing it, and the read is an effect: `MOV dp,A`, `MOV !abs,A`, `MOV [dp]+Y,A` and `MOV dp,#imm` each `Load` the byte they are about to overwrite, into `T3`, and then `Store`. `MOV (X)+,A` makes no such read; `MOV dp,dp` reads its source and never its destination; `MOVW dp,YA` reads the low byte alone before writing both. A read-modify-write reads once, then writes; `TSET1` and `TCLR1` reach their operand twice and keep the first byte.
+- **The byte after the opcode.** A one-byte instruction — a register move, an increment, a shift, `MUL`, `DIV`, the decimal adjusts, the flag instructions, `NOP`, the `(X)` forms, `TCALL`, `BRK`, `RET`, `RETI`, `PUSH`, `POP` — reads the byte after the opcode and throws it away, and the lift writes that read as a `Load` into `T3`, because on a register that clears when read the read is not nothing. `SLEEP` and `STOP` read it three times. `DBNZ Y` reads its displacement's address a second time.
+- **The flags.** `Adc` and `Sbc` set N, V, H, Z and C and know no decimal mode; `Cmp` moves N Z C and leaves V and H; the logic operations, the moves into a register, the increments, `MOV X,SP` and `XCN` set N Z; `MOV SP,X`, a store, `SET1`, `CLR1`, `NOT1` and `MOV1 m.b,C` move no flag; `TSET1` and `TCLR1` set N Z from `A − m`; the shifts and rotates put the bit shifted out in C; `MUL` sets N Z from Y, `DIV` sets N V H Z; `CLRV` clears H with V; `NOTC` inverts C. `XCN` is `Shr`, `Shl` and `Or` on the nibbles followed by the `SetNZ`; the bit instructions through the carry — `AND1`, `OR1`, `EOR1`, `MOV1` — shift the byte down by the bit and mask it, invert it for the `/` forms, and apply the operation to `P.C`; `TSET1` and `TCLR1` compute the flags into a temporary and the new byte into another.
+- **The word instructions.** `MOVW YA,dp`, `ADDW` and `SUBW` read the low byte, spend a cycle inside the chip, and read the high byte one past it inside the page — two byte `Load`s, joined into the word with `Shl` and `Or`; `CMPW` reads both bytes with no cycle between, one word `Load` with the `Page` step. `ADDW` clears C and adds, `SUBW` sets C and subtracts, so the sixteen-bit `Adc` and `Sbc` take no carry in and set H from the high byte's nibble. `INCW` and `DECW` read and write the low byte, then read and write the high byte, which moves only when the low byte wrapped, and set N Z from the word they leave. `MOVW dp,YA` reads the low byte and writes A then Y.
+- **The branches.** A relative branch is a `Set` of PC under its flag; `BBS` and `BBC` load the byte, mask the bit and branch on the temporary being zero or not; `CBNE` subtracts A from the byte into the temporary and branches on it being non-zero; `DBNZ` decrements the byte or Y without touching a flag and branches on the result. A taken branch's `Cycles` effect carries the difference between the measured taken and untaken costs, and an `Idle` of two under the same condition places those cycles after the displacement.
+- **The stack.** Page one, addressed by the eight-bit stack pointer, which wraps inside the page: every `Push` and `Pull` is `pinned`. `CALL`, `PCALL` and `TCALL` push the address after the instruction, high byte first, and `RET` pulls it low byte first; `BRK` pushes the address after the opcode, then the status word as it stands, then sets B and clears I after reading its vector; `RETI` pulls the status word first. `TCALL n` reads its destination from `$FFDE − 2n`, `BRK` from `$FFDE`, `PCALL` goes to `$FF00` plus its byte.
+- **The halts.** `SLEEP` is a `Halt` with 0 and `STOP` with 1; the sound CPU takes no interrupt, so only a reset ends either.
+- **Cycle placement.** A node's effects account for every cycle the instruction spends, in the chip's order, as a main-CPU node's do. It opens with a `Fetch` of the opcode and the operand bytes that follow it; `MOV dp,dp` fetches its destination offset after reading its source byte, and `BBS`, `BBC`, `CBNE` and `DBNZ dp` fetch their displacement after the byte they test. An `Idle` stands for every cycle the chip spends with no bus access: the indexing cycle of `dp+X`, `dp+Y`, `!abs+X`, `!abs+Y`, `[dp+X]`, `CBNE dp+X` and `JMP [!abs+X]`; the internal cycle of `[dp]+Y`, before the pointer for a read and after it for `MOV [dp]+Y,A`; the cycle `MOV A,(X)+` spends stepping X and the one `MOV (X)+,A` spends before its write; the cycle `MOV1 m.b,C` spends between its read and its write; the last cycle of `CMP (X),(Y)`, `CMP dp,dp`, `CMP dp,#imm`, `OR1` and `EOR1`; the cycles an implied instruction computes for after its discarded read — three for `XCN`, seven for `MUL`, ten for `DIV`, one for `DAA`, `DAS`, `NOTC`, `EI` and `DI`; the cycle between the two bytes of `MOVW YA,dp`, `ADDW` and `SUBW`; the cycle `BBS`, `BBC` and `CBNE` spend between their byte and their displacement, and the one `DBNZ Y` spends on its decrement; a taken branch's two; and the internal cycles of `CALL`, `PCALL`, `TCALL`, `BRK`, `RET`, `RETI`, `PUSH`, `POP`, `SLEEP` and `STOP`.
 - **Hardware interrupts.** None: the sound program has no `nmi` or `irq`.
-- **A register-named operand.** `Node::registerName` is set where the
-  operand's address is one of the audio unit's registers at `$00F0`–`$00FF`,
-  from the same table the disassembler names them from — a direct-page offset
-  in that range, an absolute address there, or a two-operand form's
-  destination.
+- **A register-named operand.** `Node::registerName` is set where the operand's address is one of the audio unit's registers at `$00F0`–`$00FF`, from the same table the disassembler names them from — a direct-page offset in that range, an absolute address there, or a two-operand form's destination.
 
 ## Cost
 
-`Node::cost.base` holds the instruction's measured cost under each setting of the
-widths, indexed by `costIndex(accumulator8, index8)`, from the same tables the
-disassembler prints. The interpreter takes the base for the live widths when the
-node starts and adds every `Cycles` effect that fires. A sound-CPU node has one
-measured cost, held in all four slots, and its interpreter takes the first. The
-lift writes those effects for the increments the tables leave out, each guarded
-by the condition that charges it:
+`Node::cost.base` holds the instruction's measured cost under each setting of the widths, indexed by `costIndex(accumulator8, index8)`, from the same tables the disassembler prints. The interpreter takes the base for the live widths when the node starts and adds every `Cycles` effect that fires. A sound-CPU node has one measured cost, held in all four slots, and its interpreter takes the first. The lift writes those effects for the increments the tables leave out, each guarded by the condition that charges it:
 
 | Increment | Guard | Where |
 |---|---|---|
@@ -419,19 +199,11 @@ by the condition that charges it:
 | A branch taken | The branch's own flag | The eight conditional branches |
 | A taken branch crossing a page under emulation | The flag, `andEmulation` | The nine relative branches, where the lift finds the target's page differs from the address after the branch |
 
-A hardware interrupt sequence carries its own `Cycles` effects: seven, and one
-more under native mode.
+A hardware interrupt sequence carries its own `Cycles` effects: seven, and one more under native mode.
 
-On the sound CPU the one increment is a taken branch: the difference between
-the taken and untaken costs the SPC700 disassembler measured, under the
-branch's own condition, with an `Idle` under the same condition beside it.
+On the sound CPU the one increment is a taken branch: the difference between the taken and untaken costs the SPC700 disassembler measured, under the branch's own condition, with an `Idle` under the same condition beside it.
 
-Cost and placement are kept apart. `Cycles` is the only operation that adds to
-the count; `Fetch` and `Idle` are the only ones that say where the cycles fall,
-and they add nothing. So the base and the increments are what they were, and a
-node's placed cycles — every `Fetch`, every `Idle` and every access — number the
-cycles `execute` returns. Where an increment fires, an `Idle` under the same
-condition stands where that cycle falls.
+Cost and placement are kept apart. `Cycles` is the only operation that adds to the count; `Fetch` and `Idle` are the only ones that say where the cycles fall, and they add nothing. So the base and the increments are what they were, and a node's placed cycles — every `Fetch`, every `Idle` and every access — number the cycles `execute` returns. Where an increment fires, an `Idle` under the same condition stands where that cycle falls.
 
 ## Lifting a listing
 
@@ -455,17 +227,11 @@ for (const ir::Node& node : program.nodes) {
 }
 ```
 
-`lift65816` makes one node per code line, in address order. The trace reports an
-address two paths read two ways as a warning; given the image the listing was
-traced from, the lift decodes the second reading and places it after the first,
-and `Program::find(address, emulation, accumulator8, index8)` answers the node for
-the live flags. Without the image, an address reads one way only.
+`lift65816` makes one node per code line, in address order. The trace reports an address two paths read two ways as a warning; given the image the listing was traced from, the lift decodes the second reading and places it after the first, and `Program::find(address, emulation, accumulator8, index8)` answers the node for the live flags. Without the image, an address reads one way only.
 
-`liftInstruction(instruction, mode)` lifts one decoded instruction on its own —
-what a harness does with an instruction it decoded itself.
+`liftInstruction(instruction, mode)` lifts one decoded instruction on its own — what a harness does with an instruction it decoded itself.
 
-The sound program is lifted the same way from the SPC700 disassembler's
-listing:
+The sound program is lifted the same way from the SPC700 disassembler's listing:
 
 ```cpp
 #include "ir/spc700_lift.h"
@@ -484,15 +250,11 @@ for (const ir::Node& node : program.spc700) {
 }
 ```
 
-`liftSpc700` makes one node per code line, in address order; the sound CPU's
-instructions read one way only, so no image is asked for and no address has
-two readings. `liftSpc700Instruction(instruction)` lifts one decoded
-instruction on its own.
+`liftSpc700` makes one node per code line, in address order; the sound CPU's instructions read one way only, so no image is asked for and no address has two readings. `liftSpc700Instruction(instruction)` lifts one decoded instruction on its own.
 
 ## Running a program
 
-The interpreter holds the registers and reads memory through a `Bus` its host
-implements:
+The interpreter holds the registers and reads memory through a `Bus` its host implements:
 
 ```cpp
 #include "ir/ir_interpret.h"
@@ -519,19 +281,11 @@ const snaggletooth::ir::Node* node =
 const std::uint32_t cycles = interpreter.execute(*node, bus);
 ```
 
-`execute` re-establishes the invariants the chip holds between instructions —
-the index high bytes zero while the index registers are eight bits wide, the
-stack in page one under emulation — runs every effect whose condition holds, in
-order, and returns the cycles. A block move leaves the program counter on itself
-while bytes remain; the host runs the node again for each. `interrupt(program.nmi,
-bus)` runs a hardware sequence the same way and releases a wait first.
+`execute` re-establishes the invariants the chip holds between instructions — the index high bytes zero while the index registers are eight bits wide, the stack in page one under emulation — runs every effect whose condition holds, in order, and returns the cycles. A block move leaves the program counter on itself while bytes remain; the host runs the node again for each. `interrupt(program.nmi, bus)` runs a hardware sequence the same way and releases a wait first.
 
-The interpreter's own sources include no decoder and no listing, and name no
-byte: the node is all it gets.
+The interpreter's own sources include no decoder and no listing, and name no byte: the node is all it gets.
 
-The sound program runs on `Spc700Interpreter`, over the same `Bus`, with the
-sound CPU's registers — `pc`, `a`, `x`, `y`, `sp`, `psw` and the run state —
-and every address asked of the bus as a 16-bit one:
+The sound program runs on `Spc700Interpreter`, over the same `Bus`, with the sound CPU's registers — `pc`, `a`, `x`, `y`, `sp`, `psw` and the run state — and every address asked of the bus as a 16-bit one:
 
 ```cpp
 snaggletooth::ir::Spc700Interpreter sound;
@@ -540,28 +294,13 @@ const snaggletooth::ir::Node* node = program.findSpc700(sound.registers.pc);
 const std::uint32_t cycles = sound.execute(*node, bus);
 ```
 
-It honours the vocabulary with the sound CPU's rules and refuses, by throwing,
-a word that has no meaning there — a bank address, a width by a flag, an
-emulation-mode condition. Its sources, too, include no decoder and no listing.
+It honours the vocabulary with the sound CPU's rules and refuses, by throwing, a word that has no meaning there — a bank address, a width by a flag, an emulation-mode condition. Its sources, too, include no decoder and no listing.
 
 ## The shadow
 
-The interpreter computes values. A host that wants to follow something else
-about them — where each one came from — sets a `Shadow`, and the interpreter
-tells it every move a value makes: into a place from other places (`copy`,
-`combine`), into a place from the bus (`load`), onto the bus from a place
-(`store`), and the accumulator's halves exchanged. The interpreter never reads
-a shadow back, so a shadow cannot change a value, and a run with none costs one
-null check per effect. Every call names bytes — a place's byte `n` is bits `8n`
-to `8n+7` — and a move `bits` wide touches the low `bits / 8` bytes; a register
-written narrower than it is follows its own rule, which a shadow mirrors for
-what it carries. A flag, the status register and the emulation flag carry
-nothing.
+The interpreter computes values. A host that wants to follow something else about them — where each one came from — sets a `Shadow`, and the interpreter tells it every move a value makes: into a place from other places (`copy`, `combine`), into a place from the bus (`load`), onto the bus from a place (`store`), and the accumulator's halves exchanged. The interpreter never reads a shadow back, so a shadow cannot change a value, and a run with none costs one null check per effect. Every call names bytes — a place's byte `n` is bits `8n` to `8n+7` — and a move `bits` wide touches the low `bits / 8` bytes; a register written narrower than it is follows its own rule, which a shadow mirrors for what it carries. A flag, the status register and the emulation flag carry nothing.
 
-`tools/ir/ir_provenance.h` is the shadow the cartridge disassembler runs: an
-origin beside every value — the image offsets it was computed from, as interned
-interval sets; a mark for a hardware register or the save; nothing for a
-constant — and, byte by byte, the origin and the last writer of work RAM.
+`tools/ir/ir_provenance.h` is the shadow the cartridge disassembler runs: an origin beside every value — the image offsets it was computed from, as interned interval sets; a mark for a hardware register or the save; nothing for a constant — and, byte by byte, the origin and the last writer of work RAM.
 
 ```cpp
 #include "ir/ir_provenance.h"
@@ -574,60 +313,11 @@ const std::optional<snaggletooth::ir::Origin> origin = shadow.originOf(0x7F0000u
 const snaggletooth::ir::OriginSet& set = shadow.origins().of(*origin);  // set.image: the intervals
 ```
 
-The rules are data dependence: a load takes the origin of the bytes at the
-address, never of the address; an operation's result takes the union of its
-operands' origins; a constant and a flag have none; a read from a hardware
-register or the save carries the mark. Which addresses are the image, the save
-and nothing is the board's: a LoROM save window with no save behind it reads the
-image through the upper half and carries that byte's origin, and a coprocessor's
-half carries nothing, as open bus does. A union wider than the cap is widened to
-its hull and marked `approximate`, and the mark is carried through every union
-after. The shadow also follows the invocations — `called` at every call,
-`interrupted` at every hardware interrupt taken, `stackMoved` at every push and
-pull, each told the stack pointer before and after the step — and keeps each
-invocation's image reads as runs, by the rule
-[project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from)
-states — a read inside a run changes nothing, any other read starts one, runs
-that touch are one, a helper's runs join its caller's as if the caller had
-read them — which is what makes a
-decoded range's source the whole stream it read, and a chunked decoder's the
-whole file its caller read; `sourcesOf` answers it for a work-RAM byte with the
-run holding its origin, followed outward through each caller whose run begins
-or ends where it does. An invocation lives until the stack pointer passes the
-place its return address was pushed: a pull past it ends the invocation and
-leaves its caller running, a push past it overwrites the address and ends it
-where it stands, and a transfer into the pointer (`TCS`, `TXS`, `XCE` into
-emulation mode; `loadsStackPointer`) passes nothing — a routine that pulls its
-own return address ends there, a `PEA`/`RTS` jump ends nothing, a handler on a
-stack of its own is one invocation until its `RTI`, and two tasks on two stacks
-keep their own chains. `within` says whether the running invocation is one or
-was called from it with no interrupt between. The interpreter tells the shadow
-every move through `Shadow`'s five calls and reads nothing back, so a `Tape`
-(`ir/ir_lockstep.h`) keeps the calls of a step for a shadow on another thread to
-play in that step's place (`play`); a run split across threads checks each step
-where it is checked and keeps every origin where the shadow is. A console reset leaves no caller to return to:
-`abandon()` ends every invocation above the root with its runs joining
-nothing, and one still held — by a byte of work RAM it wrote, or a stream left
-open — keeps its runs, so a source followed out from it stops there. A byte loaded from work RAM keeps the
-address it came from until something computes with it, so a store of it to a
-data register is the buffer being carried out, told to a `CarrySink` the host
-sets byte by byte; `streams()` is every sequence of such stores, from a buffer
-or from the image, an image stream carrying the run its carrier read as its
-`source`, and every stream the lowest and highest address the port put a byte
-at, which the sink answers for each store from what the machine reported and
-is told of each stream as it closes. What the disassembler does with all of it is
-[snes-disassembler.md §Where the bytes came from](snes-disassembler.md#where-the-bytes-came-from);
-the rules are held by `tests/ir/provenance_test.cpp`, one case each.
+The rules are data dependence: a load takes the origin of the bytes at the address, never of the address; an operation's result takes the union of its operands' origins; a constant and a flag have none; a read from a hardware register or the save carries the mark. Which addresses are the image, the save and nothing is the board's: a LoROM save window with no save behind it reads the image through the upper half and carries that byte's origin, and a coprocessor's half carries nothing, as open bus does. A union wider than the cap is widened to its hull and marked `approximate`, and the mark is carried through every union after. The shadow also follows the invocations — `called` at every call, `interrupted` at every hardware interrupt taken, `stackMoved` at every push and pull, each told the stack pointer before and after the step — and keeps each invocation's image reads as runs, by the rule [project-manifest.md §2.15](project-manifest.md#215-where-a-staged-range-came-from) states — a read inside a run changes nothing, any other read starts one, runs that touch are one, a helper's runs join its caller's as if the caller had read them — which is what makes a decoded range's source the whole stream it read, and a chunked decoder's the whole file its caller read; `sourcesOf` answers it for a work-RAM byte with the run holding its origin, followed outward through each caller whose run begins or ends where it does. An invocation lives until the stack pointer passes the place its return address was pushed: a pull past it ends the invocation and leaves its caller running, a push past it overwrites the address and ends it where it stands, and a transfer into the pointer (`TCS`, `TXS`, `XCE` into emulation mode; `loadsStackPointer`) passes nothing — a routine that pulls its own return address ends there, a `PEA`/`RTS` jump ends nothing, a handler on a stack of its own is one invocation until its `RTI`, and two tasks on two stacks keep their own chains. `within` says whether the running invocation is one or was called from it with no interrupt between. The interpreter tells the shadow every move through `Shadow`'s five calls and reads nothing back, so a `Tape` (`ir/ir_lockstep.h`) keeps the calls of a step for a shadow on another thread to play in that step's place (`play`); a run split across threads checks each step where it is checked and keeps every origin where the shadow is. A console reset leaves no caller to return to: `abandon()` ends every invocation above the root with its runs joining nothing, and one still held — by a byte of work RAM it wrote, or a stream left open — keeps its runs, so a source followed out from it stops there. A byte loaded from work RAM keeps the address it came from until something computes with it, so a store of it to a data register is the buffer being carried out, told to a `CarrySink` the host sets byte by byte; `streams()` is every sequence of such stores, from a buffer or from the image, an image stream carrying the run its carrier read as its `source`, and every stream the lowest and highest address the port put a byte at, which the sink answers for each store from what the machine reported and is told of each stream as it closes. What the disassembler does with all of it is [snes-disassembler.md §Where the bytes came from](snes-disassembler.md#where-the-bytes-came-from); the rules are held by `tests/ir/provenance_test.cpp`, one case each.
 
 ## The clock
 
-The interpreter places every cycle a node spends. A host that wants to follow
-where the chip spends its time sets a `Clock`, and the interpreter tells it each
-program fetch (`fetch`) and each cycle with no access (`idle`), in the order they
-fall. Every access is already reported in order through the `Bus`, so a host given
-both sees the whole instruction cycle by cycle, in the order the chip spends
-them. The interpreter never reads a clock back, so a clock cannot change a value
-or a count, and a run with none costs one null check per `Fetch` or `Idle`.
+The interpreter places every cycle a node spends. A host that wants to follow where the chip spends its time sets a `Clock`, and the interpreter tells it each program fetch (`fetch`) and each cycle with no access (`idle`), in the order they fall. Every access is already reported in order through the `Bus`, so a host given both sees the whole instruction cycle by cycle, in the order the chip spends them. The interpreter never reads a clock back, so a clock cannot change a value or a count, and a run with none costs one null check per `Fetch` or `Idle`.
 
 ```cpp
 struct CountingClock final : snaggletooth::ir::Clock {
@@ -643,50 +333,19 @@ const std::uint32_t cycles = interpreter.execute(*node, bus);
 // program + idleCycles + the bus's accesses == cycles
 ```
 
-`Spc700Interpreter` carries a `clock` too, and tells it the sound CPU's program
-fetches and idle cycles the same way.
+`Spc700Interpreter` carries a `clock` too, and tells it the sound CPU's program fetches and idle cycles the same way.
 
 ## Reading a program
 
-`tools/ir/ir_text.h` names every value of the vocabulary — `opName`, `placeName`,
-`widthName`, `stepName`, `accessName`, `whenName`, `flowName`, `addressingName`,
-`modeName` — and writes and reads the program file: `renderProgram` writes one
-chip's whole program with what the program does not carry — the chip, the
-image, each region's file and range, its labels, its data runs and its
-warnings — as a `.snagir` file, and `parseProgram` reads one back into the
-same program. The file's grammar, record by record, is [snagir.md](snagir.md):
-braces open a region, a node's effects and each interrupt sequence, a
-semicolon ends every record and every effect, and whitespace separates words
-and means nothing else. The main CPU's file carries `Program::nodes` and the
-interrupt sequences; the sound program's, whose version record says `apu`,
-carries `Program::spc700` at sixteen-bit addresses and no sequence.
-`renderNode` and `renderEffect` write one node and one effect as the file has
-them, and `equivalent` compares two programs as the files carry them.
-`selectFile` cuts a parsed file to the regions written to one source file,
-with the nodes they hold, and `countProgram` counts what a parsed file
-carries — the regions, the code lines (one per address a node stands at),
-the nodes, the nodes that select a width by the live flag, the nodes naming a
-hardware register, the nodes lifted from patched bytes, and the effects.
+`tools/ir/ir_text.h` names every value of the vocabulary — `opName`, `placeName`, `widthName`, `stepName`, `accessName`, `whenName`, `flowName`, `addressingName`, `modeName` — and writes and reads the program file: `renderProgram` writes one chip's whole program with what the program does not carry — the chip, the image, each region's file and range, its labels, its data runs and its warnings — as a `.snagir` file, and `parseProgram` reads one back into the same program. The file's grammar, record by record, is [snagir.md](snagir.md): braces open a region, a node's effects and each interrupt sequence, a semicolon ends every record and every effect, and whitespace separates words and means nothing else. The main CPU's file carries `Program::nodes` and the interrupt sequences; the sound program's, whose version record says `apu`, carries `Program::spc700` at sixteen-bit addresses and no sequence. `renderNode` and `renderEffect` write one node and one effect as the file has them, and `equivalent` compares two programs as the files carry them. `selectFile` cuts a parsed file to the regions written to one source file, with the nodes they hold, and `countProgram` counts what a parsed file carries — the regions, the code lines (one per address a node stands at), the nodes, the nodes that select a width by the live flag, the nodes naming a hardware register, the nodes lifted from patched bytes, and the effects.
 
-`snes_disasm` writes the main CPU's file as `program.snagir` and the sound
-program's as `apu.snagir` at the root of every tree, and `snes_render` writes
-the tree's source files from them. `snes_lift` reads either back and prints
-it, for a person to read:
+`snes_disasm` writes the main CPU's file as `program.snagir` and the sound program's as `apu.snagir` at the root of every tree, and `snes_render` writes the tree's source files from them. `snes_lift` reads either back and prints it, for a person to read:
 
 ```
 snes_lift <directory> [--apu] [-o <file.snagir>] [--file <name>]
 ```
 
-It reads the directory's `program.snagir` — or, with `--apu`, its
-`apu.snagir` — and writes the summary `countProgram` gives, then the program
-file written again from what it read. `--file` limits both to the regions
-written to one source file and `-o` writes the file there, standard output
-keeping the summary. It reads no image and runs nothing; a file the reader
-refuses is named with its line, and the exit status is 2. A whole cartridge's
-file is large — ten times the image, since every instruction is written with
-each of its effects. On the `mixed` cartridge from
-[`tools/examples/`](../tools/examples/README.md), after
-`snes_disasm mixed.smc -o mixed --no-run --no-sound`:
+It reads the directory's `program.snagir` — or, with `--apu`, its `apu.snagir` — and writes the summary `countProgram` gives, then the program file written again from what it read. `--file` limits both to the regions written to one source file and `-o` writes the file there, standard output keeping the summary. It reads no image and runs nothing; a file the reader refuses is named with its line, and the exit status is 2. A whole cartridge's file is large — ten times the image, since every instruction is written with each of its effects. On the `mixed` cartridge from [`tools/examples/`](../tools/examples/README.md), after `snes_disasm mixed.smc -o mixed --no-run --no-sound`:
 
 ```
 snes_lift mixed
@@ -732,18 +391,9 @@ region bank_00.asm $00:8000-$00:FFFF {
   }
 ```
 
-Each effect's bracket carries the width, then the step for a load or store and
-the access kind where it is not plain data, or `pinned` / `unpinned` for a push
-or pull; a condition follows the bracket, and the semicolon ends the effect. The
-four costs are the measured base under each setting of the widths, in
-`costIndex` order: both eight, index sixteen, accumulator sixteen, both sixteen.
+Each effect's bracket carries the width, then the step for a load or store and the access kind where it is not plain data, or `pinned` / `unpinned` for a push or pull; a condition follows the bracket, and the semicolon ends the effect. The four costs are the measured base under each setting of the widths, in `costIndex` order: both eight, index sixteen, accumulator sixteen, both sixteen.
 
-The sound program's file reads the same way with the sound CPU's header: on
-the `uploading` cartridge, after `snes_disasm uploading.smc -o uploading --no-run`,
-`snes_lift uploading --apu` prints a summary of one region, twenty code lines
-and no node selecting a width, then the file — `snagir 1 apu;`, the region
-`apu/driver.asm $0200-$022B`, and each node with its form in place of an
-addressing mode, no mode and one cost:
+The sound program's file reads the same way with the sound CPU's header: on the `uploading` cartridge, after `snes_disasm uploading.smc -o uploading --no-run`, `snes_lift uploading --apu` prints a summary of one region, twenty code lines and no node selecting a width, then the file — `snagir 1 apu;`, the region `apu/driver.asm $0200-$022B`, and each node with its form in place of an addressing mode, no mode and one cost:
 
 ```
   $0202 MOV abs,A operand $250 length 3 flow continue base 5 {
@@ -757,10 +407,7 @@ addressing mode, no mode and one cost:
 
 ## Rendering source
 
-`tools/ir/ir_render.h` writes SNES assembly from the instruction layer alone.
-The mnemonic and the addressing mode name one opcode, and the operand with the
-node's length names the operand bytes, so the instruction layer is enough to
-write the source line and to write the bytes back:
+`tools/ir/ir_render.h` writes SNES assembly from the instruction layer alone. The mnemonic and the addressing mode name one opcode, and the operand with the node's length names the operand bytes, so the instruction layer is enough to write the source line and to write the bytes back:
 
 ```cpp
 #include "ir/ir_render.h"
@@ -773,36 +420,11 @@ renderCost(node);                               // "4", "2/3" for a branch, "?" 
 renderLine(node, {}, 9);                        // "        STA !$2100   …  ; $00:8018  8D 00 21  4\n"
 ```
 
-`renderInstruction` writes the text the listing carries, and takes names to
-write in place of addresses through `SourceNames`: `target`, the label of the
-target of a branch, jump or call, written behind the marker its form needs
-(`JSR !sub_008040`, `JSL >sub_018000`, `BNE loc_008023`); `operand`, the
-hardware register an absolute data operand addresses (`STA !INIDISP`,
-`LDA !VMDATAL,X`); and `annotation`, text for the trailing comment. Which label
-an address carries and which register it reaches are facts attached to the
-program rather than part of it, so the names are the caller's — the
-[cartridge disassembler](snes-disassembler.md#the-tree) supplies them from its
-manifest. A long operand keeps its address; its register name, which the node
-carries, goes in the comment.
+`renderInstruction` writes the text the listing carries, and takes names to write in place of addresses through `SourceNames`: `target`, the label of the target of a branch, jump or call, written behind the marker its form needs (`JSR !sub_008040`, `JSL >sub_018000`, `BNE loc_008023`); `operand`, the hardware register an absolute data operand addresses (`STA !INIDISP`, `LDA !VMDATAL,X`); and `annotation`, text for the trailing comment. Which label an address carries and which register it reaches are facts attached to the program rather than part of it, so the names are the caller's — the [cartridge disassembler](snes-disassembler.md#the-tree) supplies them from its manifest. A long operand keeps its address; its register name, which the node carries, goes in the comment.
 
-`renderLine` is one line of source: the instruction under the indent, then the
-comment with the address, the bytes from `encode` padded to the width the
-caller chose, the cost, and the annotation, the long operand's register name,
-and `PATCHED at run time` for a node lifted from patched bytes.
+`renderLine` is one line of source: the instruction under the indent, then the comment with the address, the bytes from `encode` padded to the width the caller chose, the cost, and the annotation, the long operand's register name, and `PATCHED at run time` for a node lifted from patched bytes.
 
-The sound program's source comes from the same layer through the SPC700
-table: a sound-CPU node's mnemonic and form name its row, `opcodeOfSpc700`
-answers the opcode, `encodeSpc700` the bytes — a relative form's displacement
-from the instruction after it, a bit form's address and bit index packed into
-one word — and `renderSpc700Instruction` the text, the row's own with the
-operands as the [SPC700 disassembler](spc700-disassembler.md) prints them,
-or with a label in place of the target of a branch, an absolute call or an
-absolute jump where the caller gives one (a `PCALL` keeps its byte).
-`renderSpc700Cost` is the one measured base with `/taken` where a `Cycles`
-effect fires under a condition, and `renderSpc700Line` the line with its
-comment: the sixteen-bit address, the bytes, the cost, and the note — the
-audio register the operand names, the page-`$FF` address a `PCALL` reaches,
-`PATCHED at run time`.
+The sound program's source comes from the same layer through the SPC700 table: a sound-CPU node's mnemonic and form name its row, `opcodeOfSpc700` answers the opcode, `encodeSpc700` the bytes — a relative form's displacement from the instruction after it, a bit form's address and bit index packed into one word — and `renderSpc700Instruction` the text, the row's own with the operands as the [SPC700 disassembler](spc700-disassembler.md) prints them, or with a label in place of the target of a branch, an absolute call or an absolute jump where the caller gives one (a `PCALL` keeps its byte). `renderSpc700Cost` is the one measured base with `/taken` where a `Cycles` effect fires under a condition, and `renderSpc700Line` the line with its comment: the sixteen-bit address, the bytes, the cost, and the note — the audio register the operand names, the page-`$FF` address a `PCALL` reaches, `PATCHED at run time`.
 
 ```cpp
 renderSpc700Instruction(node.instruction);            // "BBS $88.7,$02DF"
@@ -812,25 +434,11 @@ renderSpc700Cost(node);                                // "5/7"
 renderSpc700Line(node, "loc_02DF", 9);                 // "        BBS $88.7,loc_02DF   …  ; $02C2  E3 88 1A  5/7\n"
 ```
 
-The directives an assembler needs — `EMULATION`, `NATIVE`, `A8`, `A16`, `X8`,
-`X16` — are written by `SourceMode`, which carries the mode a region of source
-holds from one instruction to the next in file order, exactly as the
-[assembler](65816-assembly.md#3-directives) reads it: `reset()` at the start of
-a file, at an `ORG` and after a run of data, then `directives(node)` for each
-instruction, which answers the lines the instruction needs against what the
-line above left and carries what this one leaves through `cpu65816ModeAfter`,
-the one function the disassembler and the assembler both follow the widths
-through. Over the example cartridges the directives land exactly where the
-listing put them.
+The directives an assembler needs — `EMULATION`, `NATIVE`, `A8`, `A16`, `X8`, `X16` — are written by `SourceMode`, which carries the mode a region of source holds from one instruction to the next in file order, exactly as the [assembler](65816-assembly.md#3-directives) reads it: `reset()` at the start of a file, at an `ORG` and after a run of data, then `directives(node)` for each instruction, which answers the lines the instruction needs against what the line above left and carries what this one leaves through `cpu65816ModeAfter`, the one function the disassembler and the assembler both follow the widths through. Over the example cartridges the directives land exactly where the listing put them.
 
 ## Running beside the machine
 
-The vector suite proves a node at unit grain: one instruction from a given
-state over a sparse memory. A cartridge running on the [machine](snes-machine.md)
-is the other grain — every instruction the program takes, under the memory map,
-the interrupts, the transfers and the timing the console has — and
-`differential` in `tools/ir/ir_differential.h` runs the interpreter beside the
-machine through a whole recorded run and reports every place the two disagree.
+The vector suite proves a node at unit grain: one instruction from a given state over a sparse memory. A cartridge running on the [machine](snes-machine.md) is the other grain — every instruction the program takes, under the memory map, the interrupts, the transfers and the timing the console has — and `differential` in `tools/ir/ir_differential.h` runs the interpreter beside the machine through a whole recorded run and reports every place the two disagree.
 
 ```cpp
 #include "ir/ir_differential.h"
@@ -844,129 +452,31 @@ const snaggletooth::ir::DifferentialReport report =
 report.divergences.empty();                  // the verdict
 ```
 
-`program` is the cartridge's nodes in address order, every region's lifted
-program joined and sorted, so `Program::find` answers the node at the live
-program counter for the live flags at every step. The lookup is made at the
-address the tree places the instruction — the one home of the image bytes the
-CPU fetched, under the cartridge's map — so a program that runs through a
-mirror of its bank, `$80:8010` for bytes the tree writes at `$00:8010`, is
-checked against those nodes, and every site the report names is the address a
-reader finds in the tree. An address outside the image is its own. Its
-`spc700` nodes are the sound program's, and `Program::findSpc700` answers the
-node at the sound CPU's program counter at every boundary the audio machine
-crosses; a program with no sound nodes replays the main CPU alone.
+`program` is the cartridge's nodes in address order, every region's lifted program joined and sorted, so `Program::find` answers the node at the live program counter for the live flags at every step. The lookup is made at the address the tree places the instruction — the one home of the image bytes the CPU fetched, under the cartridge's map — so a program that runs through a mirror of its bank, `$80:8010` for bytes the tree writes at `$00:8010`, is checked against those nodes, and every site the report names is the address a reader finds in the tree. An address outside the image is its own. Its `spc700` nodes are the sound program's, and `Program::findSpc700` answers the node at the sound CPU's program counter at every boundary the audio machine crosses; a program with no sound nodes replays the main CPU alone.
 
 ### What is checked
 
-The machine is the oracle and the interpreter owns no memory. The machine's
-[observer](snes-machine.md#the-bus-observer) reports every access the CPU makes
-in a step; the interpreter then runs the node for that instruction through a bus
-that answers each read with the value the machine read and checks its address,
-and checks each write's address and value — in the order the machine made them,
-one access to one. After the instruction the registers, the flags, the emulation
-bit and the run state are checked, and the cycles the interpreter reports are
-checked against the CPU cycles the observer counted. The access kind is checked
-too: a read-modify-write's write-back must be what the chip drove as one. So is
-the cycle order: a `Clock` beside the bus builds the node's cycles — its program
-fetches, its idle cycles and its accesses — in the order the effects place them,
-held against the order the observer saw the chip spend them; and the node must
-place exactly as many cycles as it cost.
+The machine is the oracle and the interpreter owns no memory. The machine's [observer](snes-machine.md#the-bus-observer) reports every access the CPU makes in a step; the interpreter then runs the node for that instruction through a bus that answers each read with the value the machine read and checks its address, and checks each write's address and value — in the order the machine made them, one access to one. After the instruction the registers, the flags, the emulation bit and the run state are checked, and the cycles the interpreter reports are checked against the CPU cycles the observer counted. The access kind is checked too: a read-modify-write's write-back must be what the chip drove as one. So is the cycle order: a `Clock` beside the bus builds the node's cycles — its program fetches, its idle cycles and its accesses — in the order the effects place them, held against the order the observer saw the chip spend them; and the node must place exactly as many cycles as it cost.
 
-The interpreter cannot copy a write through, because it never sees one; it has
-to compute every value from the effects. A run with no divergence says the
-effects carry the instruction's whole meaning, for every instruction the run
-took.
+The interpreter cannot copy a write through, because it never sees one; it has to compute every value from the effects. A run with no divergence says the effects carry the instruction's whole meaning, for every instruction the run took.
 
-The sound CPU is held the same way, through the audio machine's
-[observer](apu-machine.md#the-observer). It reports every access the sound CPU
-makes and every instruction boundary it crosses; at each boundary the node at
-the program counter is looked up among the sound program's nodes, the
-instruction's own fetches are set apart from the accesses since the boundary
-before — the first read at each of its addresses in order, which is how the
-core fetches them — and the sound interpreter runs the node through a bus that
-answers each read with what the machine read and checks every access's
-address, direction and written value in order. After it the registers, the
-status word and the run state are checked, the cycles against the boundary's
-count, and that the node places exactly as many cycles as it cost. The audio
-machine's observer reports no cycle the sound CPU spends with no access, so the
-order of the sound CPU's cycles is held by its vectors (see
-[How it is checked](#how-it-is-checked)) rather than here. The audio bus has no
-cycle kinds, so an access's declared purpose is not checked there. The node's bytes are held to the bytes the
-machine fetched too: a node of other bytes than the machine ran is another
-program than the file's, and is counted rather than checked against the
-wrong node.
+The sound CPU is held the same way, through the audio machine's [observer](apu-machine.md#the-observer). It reports every access the sound CPU makes and every instruction boundary it crosses; at each boundary the node at the program counter is looked up among the sound program's nodes, the instruction's own fetches are set apart from the accesses since the boundary before — the first read at each of its addresses in order, which is how the core fetches them — and the sound interpreter runs the node through a bus that answers each read with what the machine read and checks every access's address, direction and written value in order. After it the registers, the status word and the run state are checked, the cycles against the boundary's count, and that the node places exactly as many cycles as it cost. The audio machine's observer reports no cycle the sound CPU spends with no access, so the order of the sound CPU's cycles is held by its vectors (see [How it is checked](#how-it-is-checked)) rather than here. The audio bus has no cycle kinds, so an access's declared purpose is not checked there. The node's bytes are held to the bytes the machine fetched too: a node of other bytes than the machine ran is another program than the file's, and is counted rather than checked against the wrong node.
 
 ### What is an input
 
-Three things reach the interpreter from the machine rather than from a node. A
-hardware interrupt the machine takes between two instructions — the observer
-shows the sequence's accesses, and the interpreter runs `Program::nmi` or
-`Program::irq` and is checked the same way. A wait that an interrupt line
-releases — the interpreter's wait is released with it, and the halted cycles
-while the CPU sat are counted, not checked. And a step the CPU spent held off
-the bus while a transfer ran — nothing ran, so nothing is checked, and the step
-is counted as held. A transfer's own accesses, and the work-RAM port's, are
-never held against the interpreter: they are the engines', not the program's.
+Three things reach the interpreter from the machine rather than from a node. A hardware interrupt the machine takes between two instructions — the observer shows the sequence's accesses, and the interpreter runs `Program::nmi` or `Program::irq` and is checked the same way. A wait that an interrupt line releases — the interpreter's wait is released with it, and the halted cycles while the CPU sat are counted, not checked. And a step the CPU spent held off the bus while a transfer ran — nothing ran, so nothing is checked, and the step is counted as held. A transfer's own accesses, and the work-RAM port's, are never held against the interpreter: they are the engines', not the program's.
 
-An instruction at an address the program has no node for — code the trace never
-reached, code copied into RAM — is counted as unlifted, the address recorded as
-the tree places it, and the interpreter realigned to the machine's registers,
-since there is nothing to run. The sound CPU has its own such count: the
-upload stub it runs before the program arrives is in no tree, so its
-instructions are unlifted on every cartridge, at addresses in the boot-ROM
-window. A halted sound CPU's idle cycles are not checked; nothing but a reset
-ends its halt.
+An instruction at an address the program has no node for — code the trace never reached, code copied into RAM — is counted as unlifted, the address recorded as the tree places it, and the interpreter realigned to the machine's registers, since there is nothing to run. The sound CPU has its own such count: the upload stub it runs before the program arrives is in no tree, so its instructions are unlifted on every cartridge, at addresses in the boot-ROM window. A halted sound CPU's idle cycles are not checked; nothing but a reset ends its halt.
 
-The check itself — the observer that collects a step, the bus that answers the
-interpreter with what the machine read and holds every access to it, and the
-register and cycle checks after — is `ir/ir_lockstep.h`, for both CPUs, and
-the differential is one of two things that drive it. The other is the
-cartridge disassembler's
-[run on the machine](snes-disassembler.md#where-the-cpu-arrived-and-what-it-saw),
-which needs no program: it lifts every instruction the CPU executes from the
-bytes the CPU fetched, wherever they lay, and every instruction the sound CPU
-executes from the bytes at its program counter, and holds each node to the
-same check, so a node the run computes a fact from is a node the machine
-agreed with. Both name a disagreement the same way, as a `Divergence`, whose
-`processor` says which CPU it is on. After a divergence the interpreter is realigned the same way, so the run
-goes on from the machine's truth rather than compounding one disagreement into
-every step after it; `Replay::divergenceLimit` ends the run once that many have
-been recorded, on either CPU together. The run also ends once the main CPU has
-stopped, unless the program holds sound nodes and the sound CPU is still
-running — a sound program started just before the main CPU stops is still on
-its way through the stub, and is checked to its end; a program with no sound
-nodes leaves the sound CPU looping in the stub with nothing to check.
-`Replay::progress`, a `ProgressSink` from `rom/progress.h`, is
-told `replaying the run` with the master cycles spent against `masterCycles`
-every tenth of a second when set, and once more as the run ends — short of the
-budget when it ended early; the library prints nothing.
+The check itself — the observer that collects a step, the bus that answers the interpreter with what the machine read and holds every access to it, and the register and cycle checks after — is `ir/ir_lockstep.h`, for both CPUs, and the differential is one of two things that drive it. The other is the cartridge disassembler's [run on the machine](snes-disassembler.md#where-the-cpu-arrived-and-what-it-saw), which needs no program: it lifts every instruction the CPU executes from the bytes the CPU fetched, wherever they lay, and every instruction the sound CPU executes from the bytes at its program counter, and holds each node to the same check, so a node the run computes a fact from is a node the machine agreed with. Both name a disagreement the same way, as a `Divergence`, whose `processor` says which CPU it is on. After a divergence the interpreter is realigned the same way, so the run goes on from the machine's truth rather than compounding one disagreement into every step after it; `Replay::divergenceLimit` ends the run once that many have been recorded, on either CPU together. The run also ends once the main CPU has stopped, unless the program holds sound nodes and the sound CPU is still running — a sound program started just before the main CPU stops is still on its way through the stub, and is checked to its end; a program with no sound nodes leaves the sound CPU looping in the stub with nothing to check. `Replay::progress`, a `ProgressSink` from `rom/progress.h`, is told `replaying the run` with the master cycles spent against `masterCycles` every tenth of a second when set, and once more as the run ends — short of the budget when it ended early; the library prints nothing.
 
 ### The report
 
-`DifferentialReport` carries what was checked — instructions, hardware
-interrupts, CPU cycles, master cycles — what was skipped or counted — held
-steps, halted cycles, released waits, unlifted instructions and their distinct
-addresses — whether the CPU stopped, and the divergences. Each `Divergence`
-names the step, the node's address and mnemonic (or `NMI` / `IRQ`), the mode,
-the effect that made the access for an access divergence, what disagreed (`read
-address`, `write value`, `register p`, `cycles`, `a read the machine did not
-make`, `accesses the machine made that the node did not`, …), and the two
-values — the machine's and the interpreter's.
+`DifferentialReport` carries what was checked — instructions, hardware interrupts, CPU cycles, master cycles — what was skipped or counted — held steps, halted cycles, released waits, unlifted instructions and their distinct addresses — whether the CPU stopped, and the divergences. Each `Divergence` names the step, the node's address and mnemonic (or `NMI` / `IRQ`), the mode, the effect that made the access for an access divergence, what disagreed (`read address`, `write value`, `register p`, `cycles`, `a read the machine did not make`, `accesses the machine made that the node did not`, …), and the two values — the machine's and the interpreter's.
 
-Two histograms say what the run exercised: `forms`, how many times each
-instruction form ran under each mode (`LDA abs,X e=0 m=8 x=16`), and
-`constructs`, how many times each named construct was exercised — a
-read-modify-write under emulation, a block move re-entered, a page-crossing
-cycle charged, a wait released. Every construct is present, so one the run never
-reached reads zero, and is known to rest on the vector proof alone.
+Two histograms say what the run exercised: `forms`, how many times each instruction form ran under each mode (`LDA abs,X e=0 m=8 x=16`), and `constructs`, how many times each named construct was exercised — a read-modify-write under emulation, a block move re-entered, a page-crossing cycle charged, a wait released. Every construct is present, so one the run never reached reads zero, and is known to rest on the vector proof alone.
 
-The sound CPU's side is the `spc700` fields: the nodes run and checked and the
-cycles checked, the instructions at an audio address with no node and those
-addresses, the instructions whose node's bytes are not what the machine
-fetched and those addresses, and `spc700Forms`, how many times each sound
-instruction form ran (`MOV A,dp`, the mnemonic and the form word). Its
-divergences are among `divergences` with the processor set and the site in the
-audio unit's space.
+The sound CPU's side is the `spc700` fields: the nodes run and checked and the cycles checked, the instructions at an audio address with no node and those addresses, the instructions whose node's bytes are not what the machine fetched and those addresses, and `spc700Forms`, how many times each sound instruction form ran (`MOV A,dp`, the mnemonic and the form word). Its divergences are among `divergences` with the processor set and the site in the audio unit's space.
 
 `snes_differential` does all of it from a tree:
 
@@ -974,26 +484,7 @@ audio unit's space.
 snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
-It reads the directory's `program.snagir` as `snes_lift` does — the image
-must be the one the file is a program of, and one of another size is refused
-before anything runs — and its `apu.snagir` where the tree has one, runs the
-machine for
-`--seconds` of the master clock (sixty by default), replays `--input` into the
-controller ports exactly as `snes_disasm --input` does — so the run checked is
-the run that produced the tree — or finds the run named for the image under
-`--input-dir`, or that directory's `default.snaginput`, as `snes_disasm --input-dir` does, and writes the report under `-o`:
-`summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt`,
-`unlifted.txt` and `patched.txt`. The sound CPU's lines follow the main
-CPU's in `summary.txt`; a sound divergence names its site `apu $XXXX`, a
-sound form is listed as `apu MOV A,dp`, an unlifted audio address as `apu
-$XXXX`, and `patched.txt` holds the audio addresses where the bytes the sound
-CPU fetched are not the sound file's node's. One line on standard output sums
-it up, and the exit status is
-0 only when the run diverged nowhere. While it replays, standard error carries
-`replaying the run: 23.5 of 60.0 s`, refreshed in place on a terminal and one
-line per ten seconds in a log; `--quiet` turns it off. On the `mixed`
-cartridge, which stops on its own after three interrupts and uploads no sound
-program, so the sound CPU runs the upload stub alone:
+It reads the directory's `program.snagir` as `snes_lift` does — the image must be the one the file is a program of, and one of another size is refused before anything runs — and its `apu.snagir` where the tree has one, runs the machine for `--seconds` of the master clock (sixty by default), replays `--input` into the controller ports exactly as `snes_disasm --input` does — so the run checked is the run that produced the tree — or finds the run named for the image under `--input-dir`, or that directory's `default.snaginput`, as `snes_disasm --input-dir` does, and writes the report under `-o`: `summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt`, `unlifted.txt` and `patched.txt`. The sound CPU's lines follow the main CPU's in `summary.txt`; a sound divergence names its site `apu $XXXX`, a sound form is listed as `apu MOV A,dp`, an unlifted audio address as `apu $XXXX`, and `patched.txt` holds the audio addresses where the bytes the sound CPU fetched are not the sound file's node's. One line on standard output sums it up, and the exit status is 0 only when the run diverged nowhere. While it replays, standard error carries `replaying the run: 23.5 of 60.0 s`, refreshed in place on a terminal and one line per ten seconds in a log; `--quiet` turns it off. On the `mixed` cartridge, which stops on its own after three interrupts and uploads no sound program, so the sound CPU runs the upload stub alone:
 
 ```
 snes_differential mixed mixed.smc -o mixed/differential --seconds 0.1
@@ -1022,11 +513,7 @@ sound instructions with no node 16240 at 8 addresses
 sound instructions with other bytes than the file's 0 at 0 addresses
 ```
 
-The main CPU stops after its three interrupts, and the replay ends with it:
-the tree holds no sound program, and the sound CPU is looping in the stub,
-polling its port through eight addresses. The `uploading` cartridge sends a
-twenty-instruction program and starts it just before its own `STP`; the
-replay runs on until the sound program halts, and its summary ends:
+The main CPU stops after its three interrupts, and the replay ends with it: the tree holds no sound program, and the sound CPU is looping in the stub, polling its port through eight addresses. The `uploading` cartridge sends a twenty-instruction program and starts it just before its own `STP`; the replay runs on until the sound program halts, and its summary ends:
 
 ```
 sound code lines 20
@@ -1037,8 +524,7 @@ sound instructions with no node 573 at 29 addresses
 sound instructions with other bytes than the file's 0 at 0 addresses
 ```
 
-`constructs.txt` lists every construct with its count; the ones this cartridge
-reaches include:
+`constructs.txt` lists every construct with its count; the ones this cartridge reaches include:
 
 ```
 3       NMI
@@ -1054,8 +540,7 @@ reaches include:
 8797    a taken branch
 ```
 
-The `ram_code` cartridge calls a routine it copied into work RAM; its report
-diverges nowhere and names the two addresses it could not check:
+The `ram_code` cartridge calls a routine it copied into work RAM; its report diverges nowhere and names the two addresses it could not check:
 
 ```
 cat ram_code/differential/unlifted.txt
@@ -1065,153 +550,35 @@ $7E2001
 
 ## What every path proves
 
-`tools/ir/ir_dataflow.h` runs the effect layer over a whole program at once,
-with every register a set of the values it can hold rather than one of them, and
-answers what is true at each instruction however execution reached it. The
-[cartridge disassembler](snes-disassembler.md#what-every-path-proves) is its
-consumer: the `state`, `derived` and widened `access` lines of a manifest come
-from it.
+`tools/ir/ir_dataflow.h` runs the effect layer over a whole program at once, with every register a set of the values it can hold rather than one of them, and answers what is true at each instruction however execution reached it. The [cartridge disassembler](snes-disassembler.md#what-every-path-proves) is its consumer: the `state`, `derived` and widened `access` lines of a manifest come from it.
 
-A `Values` is a register's possibilities: not known, or a sorted set of at most
-512 values — one is a fact, several are what different paths prove or the values
-a mask bounded an index to. A value that is not known may still carry the bits
-known to be zero (a shift left clears the low bit; a mask says which bits it
-admits) or a `Symbol`, a name for what the register held when the routine under
-examination was entered. A `RegisterState` holds the accumulator and the index
-registers as two bytes each, the direct register and the stack pointer whole,
-the data bank, and the program bank — the bank the CPU runs in, which is the
-bank the program places the instruction in only when the code does not run
-through a mirror, so what `PHK` pushes is what the chip pushes; a `State` adds
-the compare the last instruction made against an immediate, for the branch on
-the carry after it, and the bytes the path has pushed and has not pulled.
+A `Values` is a register's possibilities: not known, or a sorted set of at most 512 values — one is a fact, several are what different paths prove or the values a mask bounded an index to. A value that is not known may still carry the bits known to be zero (a shift left clears the low bit; a mask says which bits it admits) or a `Symbol`, a name for what the register held when the routine under examination was entered. A `RegisterState` holds the accumulator and the index registers as two bytes each, the direct register and the stack pointer whole, the data bank, and the program bank — the bank the CPU runs in, which is the bank the program places the instruction in only when the code does not run through a mirror, so what `PHK` pushes is what the chip pushes; a `State` adds the compare the last instruction made against an immediate, for the branch on the carry after it, and the bytes the path has pushed and has not pulled.
 
-`evaluate(node, before, image)` runs one node's effects over a state. It follows
-`Set`, the address arithmetic, the shifts, `Inc`, `Dec`, `And`, `Or`, `Xor`,
-`Tsb`, `Trb` and `Xba` exactly over the sets; answers a `Load` from the image
-where every address lies in it and from nothing else; records every `Load`,
-`Store` and `StoreRmw` as a `ProvenAccess` with the addresses it can reach and
-the values it can move; pushes and pulls through the path's own stack; and
-forgets a register an `Adc`, `Sbc`, `Rol` or `Ror` writes, since the carry is not
-followed. Under a width the trace did not settle, the register written is not
-known. The invariants the chip holds between instructions — the index high bytes
-zero while the index registers are eight bits wide, the stack in page one under
-emulation — are re-established before every node from the node's own mode.
+`evaluate(node, before, image)` runs one node's effects over a state. It follows `Set`, the address arithmetic, the shifts, `Inc`, `Dec`, `And`, `Or`, `Xor`, `Tsb`, `Trb` and `Xba` exactly over the sets; answers a `Load` from the image where every address lies in it and from nothing else; records every `Load`, `Store` and `StoreRmw` as a `ProvenAccess` with the addresses it can reach and the values it can move; pushes and pulls through the path's own stack; and forgets a register an `Adc`, `Sbc`, `Rol` or `Ror` writes, since the carry is not followed. Under a width the trace did not settle, the register written is not known. The invariants the chip holds between instructions — the index high bytes zero while the index registers are eight bits wide, the stack in page one under emulation — are re-established before every node from the node's own mode.
 
-`Dataflow(program, entries, sightings, image, canonical)` runs to a fixed point
-from the entries — `resetState()` for the reset vector, with the direct
-register, the data bank and the program bank zero; `handlerState()` for an
-interrupt vector, with the program bank zero, which the chip clears to take the
-interrupt; `entryState(address)` for an entry a person added, with the program
-bank the address names; `nothingProven()` knows nothing — along the program's
-own flow and the `Sighting`s a run saw or an earlier analysis derived: the
-destinations of the indirect jumps and calls, the places the returns landed, and
-the table slots the bytes bound, each from the instruction that took it. A
-sighting's target is where the CPU arrived, in the bank it arrived in, and the
-path arrives there in that bank; a long jump or call writes its operand's bank;
-a fall-through, a branch and a jump within the bank keep it. Two paths meeting take the union of what each proves; a value one
-path does not know is not known. A branch on the carry after `CMP #n`, `CPX #n`
-or `CPY #n` bounds the compared register on each edge. A call carries the
-caller's state into the routine and brings back what every return of the
-routine proves, except a register the routine gives back as it took it, which
-comes back as the caller left it: each routine is run once from a named entry,
-and a register whose name comes back whole — never written, or pushed and
-pulled around the routine's own work — is one it gives back; a stack pointer
-whose name comes back moved by exactly the return's own pull makes the routine
-balanced, and the caller's stack pointer comes back too; the caller's program
-bank always comes back, since a routine returns to the bank it was called from.
-A call the bytes do not resolve, a `BRK` or `COP`, and a routine that reaches a
-jump the bytes do not name bring back nothing known but that bank.
+`Dataflow(program, entries, sightings, image, canonical)` runs to a fixed point from the entries — `resetState()` for the reset vector, with the direct register, the data bank and the program bank zero; `handlerState()` for an interrupt vector, with the program bank zero, which the chip clears to take the interrupt; `entryState(address)` for an entry a person added, with the program bank the address names; `nothingProven()` knows nothing — along the program's own flow and the `Sighting`s a run saw or an earlier analysis derived: the destinations of the indirect jumps and calls, the places the returns landed, and the table slots the bytes bound, each from the instruction that took it. A sighting's target is where the CPU arrived, in the bank it arrived in, and the path arrives there in that bank; a long jump or call writes its operand's bank; a fall-through, a branch and a jump within the bank keep it. Two paths meeting take the union of what each proves; a value one path does not know is not known. A branch on the carry after `CMP #n`, `CPX #n` or `CPY #n` bounds the compared register on each edge. A call carries the caller's state into the routine and brings back what every return of the routine proves, except a register the routine gives back as it took it, which comes back as the caller left it: each routine is run once from a named entry, and a register whose name comes back whole — never written, or pushed and pulled around the routine's own work — is one it gives back; a stack pointer whose name comes back moved by exactly the return's own pull makes the routine balanced, and the caller's stack pointer comes back too; the caller's program bank always comes back, since a routine returns to the bank it was called from. A call the bytes do not resolve, a `BRK` or `COP`, and a routine that reaches a jump the bytes do not name bring back nothing known but that bank. `entries` and `sightings` are taken as sets: their order does not change what is proven or derived.
 
-`before(address)` is what is proven before the first node at an address, or
-nothing for an address no path reached; read at a routine's entry, its A, X and
-Y with two values or more are the index values the disassembler runs the
-routine for ([snes-disassembler.md §What the toolkit ran](snes-disassembler.md#what-the-toolkit-ran)). `derived()` is every `DerivedTarget` —
-site, pointer, target, whether the site calls — of a `JMP (abs,X)` or `JSR (abs,X)`
-whose index every path bounds and whose table lies in the image: each slot the
-index selects is read as the chip reads it. The plain and long indirect forms
-read a value in memory rather than a slot of a table and derive nothing.
+`before(address)` is what is proven before the first node at an address, or nothing for an address no path reached; read at a routine's entry, its A, X and Y with two values or more are the index values the disassembler runs the routine for ([snes-disassembler.md §What the toolkit ran](snes-disassembler.md#what-the-toolkit-ran)). `derived()` is every `DerivedTarget` — site, pointer, target, whether the site calls — of a `JMP (abs,X)` or `JSR (abs,X)` whose index every path bounds and whose table lies in the image: each slot the index selects is read as the chip reads it. The plain and long indirect forms read a value in memory rather than a slot of a table and derive nothing.
 
-The `proving` cartridge under [`tools/examples/`](../tools/examples/README.md)
-runs every rule above, and `running_bank` runs a HiROM program through the
-mirror of the bank the tree places it in, proving its data bank from every kind
-of arrival; `tests/ir/dataflow_test.cpp` pins each.
+The `proving` cartridge under [`tools/examples/`](../tools/examples/README.md) runs every rule above, and `running_bank` runs a HiROM program through the mirror of the bank the tree places it in, proving its data bank from every kind of arrival; `tests/ir/dataflow_test.cpp` pins each.
 
 ## How it is checked
 
 Three suites hold the lift to the core, at three grains.
 
-`tests/ir/lift_test.cpp` runs one scenario per rule above through the interpreter
-and through the core over the same flat memory from the same state, and holds the
-two equal on the registers, every data access in order with its address, value
-and direction, the memory after, and the cycle count. Every opcode under every
-mode lifts, and the interpreter's sources are read to confirm they reach no bytes.
+`tests/ir/lift_test.cpp` runs one scenario per rule above through the interpreter and through the core over the same flat memory from the same state, and holds the two equal on the registers, every data access in order with its address, value and direction, the memory after, and the cycle count. Every opcode under every mode lifts, and the interpreter's sources are read to confirm they reach no bytes.
 
-`tests/ir/ir_vector_test.cpp` replays the SingleStepTests 65816 vectors — the
-cases the [core](65816-cpu.md#testing-against-the-vectors) is proven by — through the
-interpreter: each case's instruction is decoded from the bytes at its program
-counter, lifted under the case's mode, and run from its registers over its sparse
-memory, then held to the recorded final registers, writes, data-read addresses,
-memory and cycle count — and, cycle by cycle, the order of its program fetches,
-idle cycles and accesses against the recording, and the count of cycles it placed
-against the count it cost. A native case whose instruction has no immediate runs a
-second time lifted with both widths unknown, so the width selected by the live
-flag is proven on the same cases as the typed one. The runner registers one case
-per opcode per mode and skips visibly without the vectors, exactly as the core's
-does; `SNAGGLETOOTH_REQUIRE_65816_VECTORS` turns the skip into a failure.
+`tests/ir/ir_vector_test.cpp` replays the SingleStepTests 65816 vectors — the cases the [core](65816-cpu.md#testing-against-the-vectors) is proven by — through the interpreter: each case's instruction is decoded from the bytes at its program counter, lifted under the case's mode, and run from its registers over its sparse memory, then held to the recorded final registers, writes, data-read addresses, memory and cycle count — and, cycle by cycle, the order of its program fetches, idle cycles and accesses against the recording, and the count of cycles it placed against the count it cost. A native case whose instruction has no immediate runs a second time lifted with both widths unknown, so the width selected by the live flag is proven on the same cases as the typed one. The runner registers one case per opcode per mode and skips visibly without the vectors, exactly as the core's does; `SNAGGLETOOTH_REQUIRE_65816_VECTORS` turns the skip into a failure.
 
-`tests/ir/spc700_vector_test.cpp` replays the SingleStepTests SPC700 vectors
-through the sound interpreter the same way: each case's instruction is decoded,
-lifted and run, then held to the recorded registers, writes, data-read
-addresses, memory and cycle count, to the count of cycles it placed against
-the count it cost, and cycle by cycle to the recording's order — a wait is an
-idle cycle, a read the core makes as a fetch is a program cycle, and every
-other read or write is a data cycle. The recording does not mark its fetches,
-so the core runs each case beside it to tell them. The runner registers one
-case per opcode and skips visibly without the vectors;
-`SNAGGLETOOTH_REQUIRE_VECTORS` turns the skip into a failure.
+`tests/ir/spc700_vector_test.cpp` replays the SingleStepTests SPC700 vectors through the sound interpreter the same way: each case's instruction is decoded, lifted and run, then held to the recorded registers, writes, data-read addresses, memory and cycle count, to the count of cycles it placed against the count it cost, and cycle by cycle to the recording's order — a wait is an idle cycle, a read the core makes as a fetch is a program cycle, and every other read or write is a data cycle. The recording does not mark its fetches, so the core runs each case beside it to tell them. The runner registers one case per opcode and skips visibly without the vectors; `SNAGGLETOOTH_REQUIRE_VECTORS` turns the skip into a failure.
 
-`tests/ir/differential_test.cpp` replays the example cartridges on the machine
-through `differential` — a clean run with its counts, a wait released by an
-interrupt, a transfer holding the CPU, an HDMA event holding it for a whole
-step, a routine run from work RAM — and then breaks one effect at a time in a
-lifted program to see each break named: a wrong stored value, a wrong read
-address, a dropped flag write, a dropped cycle, a missing access, an extra one,
-a wrong access kind, a cycle moved across an access, a cycle dropped from a
-node's placement, a break in the interrupt sequence — and, in the sound program,
-a wrong stored value, a wrong register write, a dropped cycle and a node that
-places fewer cycles than it costs. `tests/snes/observer_test.cpp`
-holds the machine's observer, which the replay rests on, to what the core and
-the engines drive.
+`tests/ir/differential_test.cpp` replays the example cartridges on the machine through `differential` — a clean run with its counts, a wait released by an interrupt, a transfer holding the CPU, an HDMA event holding it for a whole step, a routine run from work RAM — and then breaks one effect at a time in a lifted program to see each break named: a wrong stored value, a wrong read address, a dropped flag write, a dropped cycle, a missing access, an extra one, a wrong access kind, a cycle moved across an access, a cycle dropped from a node's placement, a break in the interrupt sequence — and, in the sound program, a wrong stored value, a wrong register write, a dropped cycle and a node that places fewer cycles than it costs. `tests/snes/observer_test.cpp` holds the machine's observer, which the replay rests on, to what the core and the engines drive.
 
-`tests/ir/placement_test.cpp` proves the placement itself: a split fetch told to
-a clock in order, the index cycle under each width and both live-flag settings, a
-read-modify-write's middle cycle under native and emulation, `WDM`, the interrupt
-sequences' opening fetch and invariant, that a node's first effect is its fetch,
-and that a null clock changes nothing. On the sound CPU it proves the cycle
-between a word read's two bytes and none in `CMPW`, the displacement `BBS`
-fetches after its read taken and not, `DBNZ Y` taken and not, the destination
-offset `MOV dp,dp` fetches after its source byte, `MUL`'s seven cycles, the
-internal cycle of `[dp]+Y` on either side of its pointer, `CALL`, that a
-node's first effect is its fetch, and that a null clock changes nothing.
+`tests/ir/placement_test.cpp` proves the placement itself: a split fetch told to a clock in order, the index cycle under each width and both live-flag settings, a read-modify-write's middle cycle under native and emulation, `WDM`, the interrupt sequences' opening fetch and invariant, that a node's first effect is its fetch, and that a null clock changes nothing. On the sound CPU it proves the cycle between a word read's two bytes and none in `CMPW`, the displacement `BBS` fetches after its read taken and not, `DBNZ Y` taken and not, the destination offset `MOV dp,dp` fetches after its source byte, `MUL`'s seven cycles, the internal cycle of `[dp]+Y` on either side of its pointer, `CALL`, that a node's first effect is its fetch, and that a null clock changes nothing.
 
-`tests/ir/render_test.cpp` holds the renderer to the listing over every example
-cartridge: the bytes `encode` writes back from a node are the bytes the node was
-lifted from, the text it writes with no names is the listing's own, the cost
-reads the same, and the directives land where the listing put them. Then the
-bank file: the prologue names what the file uses and nothing else, a register
-stands as an operand only where its name can be a symbol and the file defines
-no label of that name, a call into another file names its label, a routine's
-header says its size, role, calls and callers, an address read two ways renders
-as the first reading, a run of data is written as the framework writes it, and
-every example tree assembles back to its image.
+`tests/ir/render_test.cpp` holds the renderer to the listing over every example cartridge: the bytes `encode` writes back from a node are the bytes the node was lifted from, the text it writes with no names is the listing's own, the cost reads the same, and the directives land where the listing put them. Then the bank file: the prologue names what the file uses and nothing else, a register stands as an operand only where its name can be a symbol and the file defines no label of that name, a call into another file names its label, a routine's header says its size, role, calls and callers, an address read two ways renders as the first reading, a run of data is written as the framework writes it, and every example tree assembles back to its image.
 
-The two proofs are independent by construction, and that is checked: a
-deliberate wrong rule in one effect reddens the replay and leaves `snes_verify`
-green, since the bytes are unchanged; a deliberate wrong character in rendered
-source — an absolute form's `!` dropped, `,X` written as `,Y`, a label's `EQU`
-truncated to its offset — reddens `snes_verify` and leaves the replay green,
-since the replay never reads the text. A break that reddened both, or neither,
-would mean the layers depend on each other.
+The two proofs are independent by construction, and that is checked: a deliberate wrong rule in one effect reddens the replay and leaves `snes_verify` green, since the bytes are unchanged; a deliberate wrong character in rendered source — an absolute form's `!` dropped, `,X` written as `,Y`, a label's `EQU` truncated to its offset — reddens `snes_verify` and leaves the replay green, since the replay never reads the text. A break that reddened both, or neither, would mean the layers depend on each other.
 
 ## Library
 
@@ -1255,75 +622,23 @@ would mean the layers depend on each other.
 | `evaluate(node, before, image)` | One node over a state: the state after, every access as a `ProvenAccess`, and the program counter and bank its effects leave. |
 | `Dataflow(program, entries, sightings, image, canonical)`, `before(address)`, `derived()`, `reachedNodes()` | The fixed point over a program from `FlowEntry`s along the flow and the `Sighting`s; what is proven before an address; every `DerivedTarget`; how many nodes a path reached. |
 
-The library target is `snaggletooth_ir`; `tools/` is on its public include path,
-so the headers are `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/spc700_lift.h`,
-`ir/ir_interpret.h`, `ir/ir_render.h`, `ir/ir_text.h` and `ir/ir_dataflow.h`.
-It links the 65816 disassembler for that lift and the renderer, and the SPC700
-disassembler for the sound program's lift. The shadow is `snaggletooth_ir_provenance`, header
-`ir/ir_provenance.h`, which links the representation and the cartridge map.
-The lockstep is `snaggletooth_ir_lockstep`, header `ir/ir_lockstep.h`, which
-links the representation and the machine for the two observers it reads.
-The differential is `snaggletooth_ir_differential`,
-header `ir/ir_differential.h`, which links the lockstep and the
-cartridge tools for the recorded run it replays; the cartridge tools link the
-representation for the bank files they render, the lockstep for the run, and the shadow for the run. The
-commands are `snes_lift`, which links `snaggletooth_ir` alone and so reads a
-program file and cannot trace a cartridge, and `snes_differential`.
+The library target is `snaggletooth_ir`; `tools/` is on its public include path, so the headers are `ir/ir.h`, `ir/cpu65816_lift.h`, `ir/spc700_lift.h`, `ir/ir_interpret.h`, `ir/ir_render.h`, `ir/ir_text.h` and `ir/ir_dataflow.h`. It links the 65816 disassembler for that lift and the renderer, and the SPC700 disassembler for the sound program's lift. The shadow is `snaggletooth_ir_provenance`, header `ir/ir_provenance.h`, which links the representation and the cartridge map. The lockstep is `snaggletooth_ir_lockstep`, header `ir/ir_lockstep.h`, which links the representation and the machine for the two observers it reads. The differential is `snaggletooth_ir_differential`, header `ir/ir_differential.h`, which links the lockstep and the cartridge tools for the recorded run it replays; the cartridge tools link the representation for the bank files they render, the lockstep for the run, and the shadow for the run. The commands are `snes_lift`, which links `snaggletooth_ir` alone and so reads a program file and cannot trace a cartridge, and `snes_differential`.
 
 ## Stability
 
-The vocabulary is a published surface. An operation, place, width, step, access
-or condition is never renamed or given a different meaning; a new one may be
-added, and a node lifted before the addition still runs. The effect sequence the
-lift writes for a construct may change where the core's behaviour is found to
-differ from it, and such a change is reported with the case that found it.
+The vocabulary is a published surface. An operation, place, width, step, access or condition is never renamed or given a different meaning; a new one may be added, and a node lifted before the addition still runs. The effect sequence the lift writes for a construct may change where the core's behaviour is found to differ from it, and such a change is reported with the case that found it.
 
 ## Status
 
-The lift covers the 65816: every opcode under every mode. The interpreter runs a
-node, a hardware interrupt sequence and a halt, and is held to the core at unit
-grain by the vector suite and at cartridge grain by the replay beside the
-machine, which checks every instruction a run takes. The renderer writes SNES
-assembly from the instruction layer, and the source tree the
-[cartridge disassembler](snes-disassembler.md) writes comes through it: every
-tree in a corpus of thirty-one cartridges still assembles back to its image
-byte for byte. The dataflow runs the effects over every path of a program and
-proves the direct register, the data bank, the stack pointer and the values
-stored where the paths settle them, and the destinations of every jump through
-a table whose index the bytes bound; it follows the registers by the byte and
-does not follow the carry or the decimal flag, so an `ADC` result is never
-known. The sound CPU's lift covers every SPC700 opcode, and its interpreter is
-held to that core at unit grain by the SPC700 vector suite and by a case per
-construct against the core over a flat bus, and at cartridge grain by the
-replay beside the audio machine, which checks every sound instruction a run
-takes, and by the cartridge disassembler's own run, which lifts every
-instruction the sound CPU executes and holds it to the machine; the cartridge
-disassembler lifts the sound program it captures into `apu.snagir`, and the
-sound file is rendered from that file through the renderer, byte for byte
-what the listing prints. The dataflow, the shadow and the facts are the main
-CPU's; nothing is yet computed from a sound node beyond the check. The replay
-reports an instruction at an address the tree has no node for, but does not
-trace from it; those addresses are the person's to answer with entries, and
-on the sound CPU they include the upload stub on every cartridge.
+The lift covers the 65816: every opcode under every mode. The interpreter runs a node, a hardware interrupt sequence and a halt, and is held to the core at unit grain by the vector suite and at cartridge grain by the replay beside the machine, which checks every instruction a run takes. The renderer writes SNES assembly from the instruction layer, and the source tree the [cartridge disassembler](snes-disassembler.md) writes comes through it: every tree in a corpus of thirty-one cartridges still assembles back to its image byte for byte. The dataflow runs the effects over every path of a program and proves the direct register, the data bank, the stack pointer and the values stored where the paths settle them, and the destinations of every jump through a table whose index the bytes bound; it follows the registers by the byte and does not follow the carry or the decimal flag, so an `ADC` result is never known. The sound CPU's lift covers every SPC700 opcode, and its interpreter is held to that core at unit grain by the SPC700 vector suite and by a case per construct against the core over a flat bus, and at cartridge grain by the replay beside the audio machine, which checks every sound instruction a run takes, and by the cartridge disassembler's own run, which lifts every instruction the sound CPU executes and holds it to the machine; the cartridge disassembler lifts the sound program it captures into `apu.snagir`, and the sound file is rendered from that file through the renderer, byte for byte what the listing prints. The dataflow, the shadow and the facts are the main CPU's; nothing is yet computed from a sound node beyond the check. The replay reports an instruction at an address the tree has no node for, but does not trace from it; those addresses are the person's to answer with entries, and on the sound CPU they include the upload stub on every cartridge.
 
 ## See also
 
-- [65816 disassembler](65816-disassembler.md) — the listing the lift reads, and the
-  register widths carried along every path.
-- [65816 CPU core](65816-cpu.md) — the chip the effects model, and the vector suite
-  both are held to.
-- [SPC700 disassembler](spc700-disassembler.md) and [SPC700 CPU core](spc700-cpu.md)
-  — the listing the sound program's lift reads, the mnemonic and form that
-  name its opcodes, and the chip its effects are held to.
-- [Disassembly framework](disassembly-framework.md) — the listing's shape, the
-  context beside every address, and how a conflict is reported.
-- [Cartridge disassembler](snes-disassembler.md) — a whole cartridge traced into
-  the listings the two programs are lifted from, and its bank files and sound
-  file written back from them.
-- [65816 assembly language](65816-assembly.md) — the dialect the renderer
-  writes, and the directives `SourceMode` places.
-- [The SNES machine](snes-machine.md#the-bus-observer) and
-  [the APU machine](apu-machine.md#the-observer) — the two observers the
-  replay reads the machine's accesses through.
-- [The example cartridges](../tools/examples/README.md) — the cartridges this
-  page's output comes from, and the ones the replay is tested on.
+- [65816 disassembler](65816-disassembler.md) — the listing the lift reads, and the register widths carried along every path.
+- [65816 CPU core](65816-cpu.md) — the chip the effects model, and the vector suite both are held to.
+- [SPC700 disassembler](spc700-disassembler.md) and [SPC700 CPU core](spc700-cpu.md) — the listing the sound program's lift reads, the mnemonic and form that name its opcodes, and the chip its effects are held to.
+- [Disassembly framework](disassembly-framework.md) — the listing's shape, the context beside every address, and how a conflict is reported.
+- [Cartridge disassembler](snes-disassembler.md) — a whole cartridge traced into the listings the two programs are lifted from, and its bank files and sound file written back from them.
+- [65816 assembly language](65816-assembly.md) — the dialect the renderer writes, and the directives `SourceMode` places.
+- [The SNES machine](snes-machine.md#the-bus-observer) and [the APU machine](apu-machine.md#the-observer) — the two observers the replay reads the machine's accesses through.
+- [The example cartridges](../tools/examples/README.md) — the cartridges this page's output comes from, and the ones the replay is tested on.

@@ -1,6 +1,7 @@
 #include "rom/rom_disasm.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
@@ -1897,8 +1898,12 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // first byte. A class of the piece the run's transfers never reached is
   // written after `also` on the file's line. A piece that overlaps two files,
   // or would move or reform the one it overlaps, is refused with a note naming
-  // the file. Pieces that overlap no such file are grouped among
-  // themselves into files of their own kind, `enumerated`. Every piece of an
+  // the file as the tree finally writes it, said once every file has its path:
+  // a later piece can widen and rename the file a refusal names, a person's
+  // path can replace its name and its form sets its extension, and two
+  // refusals that then read alike are one note. Pieces that overlap no such
+  // file are grouped among themselves into files of their own kind,
+  // `enumerated`. Every piece of an
   // outcome that is lifted records its file once per extent and class, in the
   // order the pieces are taken.
   std::sort(toolkit.begin(), toolkit.end(), pieceBefore);
@@ -1928,6 +1933,15 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     }
     return "asset " + address24(romAddress(board.map, piece.offset).value_or(0));
   };
+  // A refusal waiting for the files' final names: the text before the files,
+  // the files it names, and the text after, each `{}` in it the place of the
+  // next file.
+  struct Refusal {
+    std::string head;
+    std::vector<std::size_t> assets;
+    std::string tail;
+  };
+  std::vector<Refusal> refusals;
   std::vector<Piece> rest;
   for (const Piece& piece : toolkit) {
     const std::size_t pieceEnd = piece.offset + piece.length;
@@ -1943,8 +1957,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     const std::string head = pieceHead(piece) + ": its source at " +
                              address24(romAddress(board.map, piece.offset).value_or(0)) + " ";
     if (overlapping.size() > 1) {
-      refuse(head + "lies across " + out.assets[overlapping[0]].file + " and " + out.assets[overlapping[1]].file +
-             "; not lifted");
+      refusals.push_back(Refusal{.head = head,
+                                 .assets = {overlapping[0], overlapping[1]},
+                                 .tail = "lies across {} and {}; not lifted"});
       continue;
     }
     const std::size_t g = overlapping.front();
@@ -1958,9 +1973,10 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
       with.push_back(piece);
       const std::string_view moved = vramDirectory(with);
       if (vramDirectory(groups[g]) != moved) {
-        refuse(head + "would move " + asset.file + " to " + std::string(moved) + "/; not lifted");
+        refusals.push_back(Refusal{
+            .head = head, .assets = {g}, .tail = "would move {} to " + std::string(moved) + "/; not lifted"});
       } else {
-        refuse(head + "would change the form of " + asset.file + "; not lifted");
+        refusals.push_back(Refusal{.head = head, .assets = {g}, .tail = "would change the form of {}; not lifted"});
       }
       continue;
     }
@@ -2044,6 +2060,9 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
     out.assets = std::move(sortedAssets);
     facts = std::move(sortedFacts);
     for (PendingLift& lift : lifts) lift.asset = placeOf[lift.asset];
+    for (Refusal& refusal : refusals) {
+      for (std::size_t& asset : refusal.assets) asset = placeOf[asset];
+    }
   }
 
   // A person's path for a file lifted again. A file the shadow named that is
@@ -2070,6 +2089,21 @@ void liftAssets(CartridgeDisassembly& out, const CartridgeRequest& request) {
   // written beside a file the run could not turn into a source.
   for (std::size_t i = 0; i < out.assets.size(); ++i) {
     applyForm(out, out.assets[i], facts[i], request, namedByAPerson[i]);
+  }
+  // The toolkit's refused pieces, each naming its files by the paths the tree
+  // writes them under.
+  for (const Refusal& refusal : refusals) {
+    std::string text = refusal.head;
+    std::size_t next = 0;
+    for (std::size_t at = 0; at < refusal.tail.size(); ++at) {
+      if (refusal.tail.compare(at, 2, "{}") == 0 && next < refusal.assets.size()) {
+        text += out.assets[refusal.assets[next++]].file;
+        ++at;
+      } else {
+        text += refusal.tail[at];
+      }
+    }
+    refuse(text);
   }
   for (const PendingLift& lift : lifts) {
     out.enumeratedLifts.push_back(CartridgeDisassembly::EnumeratedLift{
@@ -2245,14 +2279,24 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     it = regions.erase(it);
   }
 
-  // Per region: the entries gathered so far, and whether a trace is owed.
+  // Per region: the entries gathered so far, each in the class of the evidence
+  // that found it, and whether a trace is owed. The list a trace starts from is
+  // built from the classes in a fixed order (`entryList`), so the first arrival
+  // at an address is decided by what reached it and not by when.
   struct Pending {
-    std::vector<Address> entries;
-    std::vector<Context> contexts;
-    std::set<std::pair<Address, std::uint32_t>> seen;
-    std::map<Address, std::string> symbols;
+    using Key = std::pair<Address, std::uint32_t>;  // the placed address and the context's bits
+    std::vector<Key> fixed;        // the vectors, then a person's entries, in their order
+    std::set<Key> reached;         // what the runs saw the indirect jumps take
+    std::set<Key> ran;             // where the runs landed without an instruction naming it
+    std::set<Key> derived;         // what the bytes prove, read back and derived
+    std::set<Key> own;             // what this trace carried in from another region
+    std::set<Key> seen;            // every key above
+    std::array<std::map<Key, bool>, 5> calls;  // per class: whether an arrival of that class at the key calls it
+    std::map<Address, bool> called;  // whether anything that reaches the address calls it
+    std::map<Address, std::string> given;  // a vector's or a person's name, the first given
     bool owed = false;
   };
+  enum class EntryClass { Fixed, Reached, Ran, Derived, Own };
   std::vector<Pending> pending(regions.size());
   auto regionOf = [&](Address address) -> std::optional<std::size_t> {
     for (std::size_t i = 0; i < regions.size(); ++i) {
@@ -2260,19 +2304,66 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
     return std::nullopt;
   };
-  // Adds an entry to the region that holds it: nothing when no region does, false
-  // when the region already had that address under that context, true when it
-  // is new and the region is owed a trace for it.
-  auto add = [&](Address home, Context context, const std::string& name) -> std::optional<bool> {
+  // Adds an entry, in its class, to the region that holds it: nothing when no
+  // region does, false when the region already had that address under that
+  // context in any class, true when it is new and the region is owed a trace
+  // for it. `call` says whether the evidence calls the address; `givenName` is
+  // a vector's or a person's name, kept for the fixed class alone.
+  auto add = [&](EntryClass kind, Address home, Context context, bool call,
+                 const std::string& givenName) -> std::optional<bool> {
     const std::optional<std::size_t> index = regionOf(home);
     if (!index) return std::nullopt;
     Pending& p = pending[*index];
-    if (!name.empty() && p.symbols.find(home) == p.symbols.end()) p.symbols[home] = name;
-    if (!p.seen.insert({home, context.bits}).second) return false;
-    p.entries.push_back(home);
-    p.contexts.push_back(context);
+    const Pending::Key key{home, context.bits};
+    switch (kind) {
+      case EntryClass::Fixed:
+        if (!givenName.empty()) p.given.emplace(home, givenName);
+        if (std::find(p.fixed.begin(), p.fixed.end(), key) == p.fixed.end()) p.fixed.push_back(key);
+        break;
+      case EntryClass::Reached:
+        p.reached.insert(key);
+        break;
+      case EntryClass::Ran:
+        p.ran.insert(key);
+        break;
+      case EntryClass::Derived:
+        p.derived.insert(key);
+        break;
+      case EntryClass::Own:
+        p.own.insert(key);
+        break;
+    }
+    bool& classCalls = p.calls[static_cast<std::size_t>(kind)][key];
+    classCalls = classCalls || call;
+    bool& anyCalls = p.called[home];
+    anyCalls = anyCalls || call;
+    if (!p.seen.insert(key).second) return false;
     p.owed = true;
     return true;
+  };
+  // The entries a region's trace starts from: the vectors and a person's
+  // entries as given, then what the runs reached, where they landed, what the
+  // bytes derive and what the trace carried in from other regions, each of the
+  // last four by placed address then context. A key already listed is not
+  // listed again.
+  const auto entryList = [](const Pending& p) {
+    std::vector<Pending::Key> list;
+    std::set<Pending::Key> listed;
+    const auto take = [&](const Pending::Key& key) {
+      if (listed.insert(key).second) list.push_back(key);
+    };
+    for (const Pending::Key& key : p.fixed) take(key);
+    for (const std::set<Pending::Key>* kind : {&p.reached, &p.ran, &p.derived, &p.own}) {
+      for (const Pending::Key& key : *kind) take(key);
+    }
+    return list;
+  };
+  // The name an address carries: a vector's or a person's; else `sub_` when
+  // anything that reaches it calls it, and `loc_` otherwise.
+  const auto resolveName = [](const Pending& p, Address home) -> std::string {
+    if (const auto found = p.given.find(home); found != p.given.end()) return found->second;
+    const auto flag = p.called.find(home);
+    return (flag != p.called.end() && flag->second ? "sub_" : "loc_") + hex(home, 6);
   };
 
   std::vector<TraceEntry> entries = vectorTraceEntries(*header);
@@ -2290,7 +2381,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   }
   // What a run saw the indirect jumps take: this run's, when asked for one, and
   // every earlier run's from the manifest. Each is an entry the trace starts
-  // from, after the vectors and the person's entries, so a name a person gave a
+  // from, after the vectors and the person's entries; a name a person gave a
   // target is the one it keeps.
   std::vector<ReachedTarget> reached = request.reached;
   // Where a run landed without an instruction naming it: this run's, when
@@ -2408,7 +2499,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
                           " is not in the image; not traced");
       continue;
     }
-    const std::optional<bool> added = add(*home, contextOf(entry.mode), entry.name);
+    const std::optional<bool> added = add(EntryClass::Fixed, *home, contextOf(entry.mode), false, entry.name);
     if (!added) {
       out.notes.push_back("entry " + entry.name + " at " + address24(entry.address) +
                           " lies in no region; not traced");
@@ -2420,7 +2511,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   }
   // A target a run reached, a place it landed and a destination the bytes derive
   // are each kept as the CPU arrives there, in the bank it runs in; the tree
-  // places each to trace it and to name it.
+  // places each to trace it. Each is named once the last trace is done.
   for (const ReachedTarget& seen : reached) {
     const std::optional<Address> home = canonical(board, imageBytes, seen.target);
     if (!home) {
@@ -2428,17 +2519,14 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
                           " is not in the image; not traced");
       continue;
     }
-    const std::string name = (seen.call ? "sub_" : "loc_") + hex(*home, 6);
-    const std::optional<bool> added = add(*home, contextOf(seen.mode), name);
+    const std::optional<bool> added = add(EntryClass::Reached, *home, contextOf(seen.mode), seen.call, {});
     if (!added) {
       out.notes.push_back("reached " + address24(seen.target) + " from " + address24(seen.site) +
                           " lies in no region; not traced");
       continue;
     }
-    // The label the target carries: a person's, when their entry named it first.
-    const std::string label = pending[*regionOf(*home)].symbols[*home];
     out.reached.push_back(ReachedTarget{
-        .target = seen.target, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = label});
+        .target = seen.target, .mode = seen.mode, .site = seen.site, .call = seen.call, .name = {}});
   }
   for (const Landing& landing : ran) {
     const std::optional<Address> home = canonical(board, imageBytes, landing.target);
@@ -2447,23 +2535,24 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
                           " is not in the image; not traced");
       continue;
     }
-    // The CPU arrived: a location, whatever instruction took it there.
-    const std::optional<bool> added = add(*home, contextOf(landing.mode), "loc_" + hex(*home, 6));
+    // The CPU arrived: no call, whatever instruction took it there.
+    const std::optional<bool> added = add(EntryClass::Ran, *home, contextOf(landing.mode), false, {});
     if (!added) {
       out.notes.push_back("ran " + address24(landing.target) + " from " + address24(landing.site) +
                           " lies in no region; not traced");
       continue;
     }
-    const std::string label = pending[*regionOf(*home)].symbols[*home];
     out.ran.push_back(
-        Landing{.target = landing.target, .mode = landing.mode, .site = landing.site, .name = label});
+        Landing{.target = landing.target, .mode = landing.mode, .site = landing.site, .name = {}});
   }
 
   // Trace every region that is owed one, and carry each call or jump that leaves
-  // a region into the region it lands in, under the mode it was made in — until
-  // no region has a new entry.
+  // a region into the trace's own class of the region it lands in, under the
+  // mode it was made in — until no region has a new entry. A call or jump whose
+  // target lies in no region is a stop, said once.
   const Cpu65816Backend& backend = cpu65816Backend();
   std::vector<Listing> listings(regions.size());
+  std::set<std::pair<Address, std::string>> traceStops;
   auto traceOwed = [&]() {
     bool owed = true;
     while (owed) {
@@ -2477,9 +2566,11 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
         Request traceRequest;
         traceRequest.image = request.rom.subspan(start, length);
         traceRequest.base = region.first;
-        traceRequest.entries = pending[i].entries;
-        traceRequest.entryContexts = pending[i].contexts;
-        traceRequest.symbols = pending[i].symbols;
+        for (const auto& [place, bits] : entryList(pending[i])) {
+          traceRequest.entries.push_back(place);
+          traceRequest.entryContexts.push_back(Context{.bits = bits});
+          traceRequest.symbols[place] = resolveName(pending[i], place);
+        }
         listings[i] = trace(backend, traceRequest);
         for (const Line& line : listings[i].lines) {
           if (!line.isCode) continue;
@@ -2492,15 +2583,13 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
           const std::optional<Decoded> again =
               backend.decode(traceRequest.image, region.first, line.address, line.context);
           const Context after = again ? again->next : line.context;
-          const std::string prefix = instruction.flow == Flow::Call ? "sub_" : "loc_";
-          const std::optional<bool> added = add(*home, after, prefix + hex(*home, 6));
+          const std::optional<bool> added =
+              add(EntryClass::Own, *home, after, instruction.flow == Flow::Call, {});
           if (added) {
             if (*added) owed = true;
           } else {
-            out.stops.push_back(TraceStop{
-                .address = line.address,
-                .reason = "`" + instruction.text + "`: the target " + address24(*instruction.target) +
-                          " lies in no region"});
+            traceStops.emplace(line.address, "`" + instruction.text + "`: the target " +
+                                                 address24(*instruction.target) + " lies in no region");
           }
         }
       }
@@ -2513,7 +2602,7 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     out.regions.clear();
     for (std::size_t i = 0; i < regions.size(); ++i) {
       Listing listing = listings[i];
-      if (pending[i].entries.empty()) {
+      if (pending[i].seen.empty()) {
         const std::size_t start = *romOffset(board, regions[i].first, imageBytes);
         const std::size_t length = static_cast<std::size_t>(regions[i].last - regions[i].first) + 1u;
         Line line;
@@ -2530,14 +2619,45 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
 
   // What the bytes prove the indirect jumps take: every earlier run's, read back
   // from the manifest, and then this run's, derived over the traced program —
-  // each an entry the trace starts from, after the vectors, the person's entries
-  // and the run's sightings, so a name any of those gave a target is the one it
-  // keeps. Deriving can reach code that derives more, so the trace and the
-  // analysis take turns until neither adds anything. Each turn derives every
-  // destination again; one the tree cannot trace is said once.
-  std::set<std::string> derivedRefused;
-  const auto refuseDerived = [&](std::string note) {
-    if (derivedRefused.insert(note).second) out.notes.push_back(std::move(note));
+  // each an entry in the derived class, which the trace starts from after the
+  // vectors, the person's entries and the run's sightings. Deriving can reach
+  // code that derives more, so the trace and the analysis take turns until
+  // neither adds anything. Each turn derives every destination again. One the
+  // tree cannot trace is said once, after the last turn, in the order of the
+  // derived lines: a destination a read-back line names, and one the last
+  // turn's proof derives. An earlier turn's proof can derive a destination from
+  // a reading a later turn replaces; no line keeps a refusal for a later pass to
+  // read back, so one only an earlier turn derived is not said.
+  using Refusals = std::set<std::tuple<Address, Address, std::string>>;
+  Refusals readBackRefused;  // what the read-back lines name that the tree cannot trace
+  Refusals provenRefused;    // what the latest turn's proof derives that the tree cannot trace
+  Refusals* refusing = &readBackRefused;
+  const auto refuseDerived = [&](Address site, Address target, std::string note) {
+    refusing->emplace(site, target, std::move(note));
+  };
+  // The trace's own class follows from the derivations: when they grow it is
+  // emptied in every region, with every listing, and the closure that follows
+  // finds it again from the other four classes alone.
+  const auto restartOwn = [&]() {
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+      Pending& p = pending[i];
+      p.own.clear();
+      p.calls[static_cast<std::size_t>(EntryClass::Own)].clear();
+      p.seen.clear();
+      p.seen.insert(p.fixed.begin(), p.fixed.end());
+      for (const std::set<Pending::Key>* kind : {&p.reached, &p.ran, &p.derived}) {
+        p.seen.insert(kind->begin(), kind->end());
+      }
+      p.called.clear();
+      for (std::size_t kind = 0; kind < static_cast<std::size_t>(EntryClass::Own); ++kind) {
+        for (const auto& [key, call] : p.calls[kind]) {
+          bool& anyCalls = p.called[key.first];
+          anyCalls = anyCalls || call;
+        }
+      }
+      listings[i] = Listing{};
+      p.owed = !p.seen.empty();
+    }
   };
   auto addDerived = [&](const std::vector<DerivedTarget>& found) {
     bool any = false;
@@ -2547,33 +2667,40 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       });
       if (known) continue;
       if (repeatedHalf(board, derived.target)) {
-        refuseDerived("derived " + address24(derived.target) + " from " + address24(derived.site) +
-                      " is a LoROM bank's lower half; not traced");
+        refuseDerived(derived.site, derived.target,
+                      "derived " + address24(derived.target) + " from " + address24(derived.site) +
+                          " is a LoROM bank's lower half; not traced");
         continue;
       }
       const std::optional<Address> home = canonical(board, imageBytes, derived.target);
       if (!home) {
-        refuseDerived("derived " + address24(derived.target) + " from " + address24(derived.site) +
-                      " is not in the image; not traced");
+        refuseDerived(derived.site, derived.target,
+                      "derived " + address24(derived.target) + " from " + address24(derived.site) +
+                          " is not in the image; not traced");
         continue;
       }
-      const std::string name = (derived.call ? "sub_" : "loc_") + hex(*home, 6);
-      const std::optional<bool> added = add(*home, contextOf(derived.mode), name);
+      const std::optional<bool> added =
+          add(EntryClass::Derived, *home, contextOf(derived.mode), derived.call, {});
       if (!added) {
-        refuseDerived("derived " + address24(derived.target) + " from " + address24(derived.site) +
-                      " lies in no region; not traced");
+        refuseDerived(derived.site, derived.target,
+                      "derived " + address24(derived.target) + " from " + address24(derived.site) +
+                          " lies in no region; not traced");
         continue;
       }
       any = any || *added;
-      const std::string label = pending[*regionOf(*home)].symbols[*home];
       out.derived.push_back(DerivedTarget{.target = derived.target,
                                           .mode = derived.mode,
                                           .site = derived.site,
                                           .pointer = derived.pointer,
                                           .call = derived.call,
-                                          .name = label});
+                                          .name = {}});
     }
     return any;
+  };
+  // The full key every derived line is ordered by.
+  const auto derivedBefore = [](const DerivedTarget& a, const DerivedTarget& b) {
+    return std::tuple(a.site, a.target, a.pointer, contextOf(a.mode).bits) <
+           std::tuple(b.site, b.target, b.pointer, contextOf(b.mode).bits);
   };
 
   if (told(request, "tracing")) {
@@ -2583,11 +2710,9 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   traceOwed();
   gatherRegions();
   std::vector<DerivedTarget> readBack = request.derived;
-  std::sort(readBack.begin(), readBack.end(), [](const DerivedTarget& a, const DerivedTarget& b) {
-    if (a.site != b.site) return a.site < b.site;
-    return a.target < b.target;
-  });
+  std::sort(readBack.begin(), readBack.end(), derivedBefore);
   if (addDerived(readBack)) {
+    restartOwn();
     traceOwed();
     gatherRegions();
   }
@@ -2600,15 +2725,48 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
     }
     liftProgram(out, request.rom);
     proven = proveProgram(out, request.rom);
+    refusing = &provenRefused;
+    provenRefused.clear();
     if (!addDerived(derivedTargets(out, *proven))) break;
+    restartOwn();
     traceOwed();
     gatherRegions();
   }
-  std::sort(out.derived.begin(), out.derived.end(), [](const DerivedTarget& a, const DerivedTarget& b) {
-    if (a.site != b.site) return a.site < b.site;
-    if (a.target != b.target) return a.target < b.target;
-    return a.pointer < b.pointer;
-  });
+  std::sort(out.derived.begin(), out.derived.end(), derivedBefore);
+
+  // Every name, resolved once the last closure is done from everything that
+  // reached each address: the reached, ran and derived lines', and the label of
+  // every entry that heads an instruction. A call a listing decoded into its own
+  // region counts as a call of its target, as one from another region does.
+  for (std::size_t i = 0; i < regions.size(); ++i) {
+    for (const Line& line : listings[i].lines) {
+      const Instruction& instruction = line.instruction;
+      if (!line.isCode || instruction.flow != Flow::Call || !instruction.target) continue;
+      if (within(regions[i], *instruction.target)) pending[i].called[*instruction.target] = true;
+    }
+  }
+  const auto nameOf = [&](Address target) -> std::string {
+    const std::optional<Address> home = canonical(board, imageBytes, target);
+    if (!home) return {};
+    const std::optional<std::size_t> index = regionOf(*home);
+    return index ? resolveName(pending[*index], *home) : std::string();
+  };
+  for (ReachedTarget& seen : out.reached) seen.name = nameOf(seen.target);
+  for (Landing& landing : out.ran) landing.name = nameOf(landing.target);
+  for (DerivedTarget& derived : out.derived) derived.name = nameOf(derived.target);
+  for (std::size_t i = 0; i < regions.size(); ++i) {
+    std::set<Address> code;
+    for (const Line& line : listings[i].lines) {
+      if (line.isCode) code.insert(line.address);
+    }
+    for (const Pending::Key& key : pending[i].seen) {
+      if (code.count(key.first) != 0) listings[i].labels[key.first] = resolveName(pending[i], key.first);
+    }
+  }
+  gatherRegions();
+  Refusals refusals = readBackRefused;
+  refusals.insert(provenRefused.begin(), provenRefused.end());
+  for (const auto& refused : refusals) out.notes.push_back(std::get<2>(refused));
 
   // The stops: every jump or call whose successors the bytes do not name —
   // except one every destination of which the analysis derived, which is
@@ -2624,8 +2782,10 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
       }
     }
   }
-  std::sort(out.stops.begin(), out.stops.end(),
-            [](const TraceStop& a, const TraceStop& b) { return a.address < b.address; });
+  for (const auto& [address, reason] : traceStops) out.stops.push_back(TraceStop{.address = address, .reason = reason});
+  std::sort(out.stops.begin(), out.stops.end(), [](const TraceStop& a, const TraceStop& b) {
+    return std::tie(a.address, a.reason) < std::tie(b.address, b.reason);
+  });
 
   if (request.captureSound) {
     std::string reason;
@@ -2675,39 +2835,36 @@ CartridgeDisassembly disassembleCartridge(const CartridgeRequest& request) {
   // once for every value every path bounds their index to, from the machine
   // as the run entered them; and what the code proves about a transfer from
   // work RAM the run never started. The second run's other findings are the
-  // first run's, which stand. A host's run has no second run: nothing is
-  // planned over it. Without a run of its own the plan is made and nothing is
-  // run. The second run's outcomes join those the records hold, and its notes
+  // first run's, which stand. Over a host's run, and without a run of its own,
+  // the plan is made and its notes said, and nothing is run. The second run's outcomes join those the records hold, and its notes
   // stand after the plan's, after the records' notes of the same kind.
   if (hasRun(request)) {
     std::vector<std::string> enumerationNotes;
-    if (request.observed == nullptr) {
-      const EnumerationPlan plan = enumerationPlan(out, *proven, out.notes);
-      if (own && !plan.routines.empty()) {
-        RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, enumerationNotes,
-                                           request.progress, plan, firstInstructions, firstDivergences);
-        out.enumeration = EnumerationCount{.planned = second.variantsPlanned,
-                                           .run = second.variantsRun,
-                                           .returned = second.variantsReturned,
-                                           .confined = second.variantsConfined,
-                                           .cycles = second.enumerationCycles};
-        if (out.enumerated.empty()) {
-          out.enumerated = second.enumerated;
-        } else {
-          RunObservation joined;
-          joined.enumerated = std::move(out.enumerated);
-          RunObservation more;
-          more.enumerated = second.enumerated;
-          joinObservation(joined, more);
-          out.enumerated = std::move(joined.enumerated);
-        }
-        own->observation.enumerated = std::move(second.enumerated);
-        own->observation.variantsPlanned = second.variantsPlanned;
-        own->observation.variantsRun = second.variantsRun;
-        own->observation.variantsReturned = second.variantsReturned;
-        own->observation.variantsConfined = second.variantsConfined;
-        own->observation.enumerationCycles = second.enumerationCycles;
+    const EnumerationPlan plan = enumerationPlan(out, *proven, out.notes);
+    if (request.observed == nullptr && own && !plan.routines.empty()) {
+      RunObservation second = observeRun(request.rom, request.runMasterCycles, request.input, enumerationNotes,
+                                         request.progress, plan, firstInstructions, firstDivergences);
+      out.enumeration = EnumerationCount{.planned = second.variantsPlanned,
+                                         .run = second.variantsRun,
+                                         .returned = second.variantsReturned,
+                                         .confined = second.variantsConfined,
+                                         .cycles = second.enumerationCycles};
+      if (out.enumerated.empty()) {
+        out.enumerated = second.enumerated;
+      } else {
+        RunObservation joined;
+        joined.enumerated = std::move(out.enumerated);
+        RunObservation more;
+        more.enumerated = second.enumerated;
+        joinObservation(joined, more);
+        out.enumerated = std::move(joined.enumerated);
       }
+      own->observation.enumerated = std::move(second.enumerated);
+      own->observation.variantsPlanned = second.variantsPlanned;
+      own->observation.variantsRun = second.variantsRun;
+      own->observation.variantsReturned = second.variantsReturned;
+      own->observation.variantsConfined = second.variantsConfined;
+      own->observation.enumerationCycles = second.enumerationCycles;
     }
     sayRunNotes(&RunRecord::enumerationNotes, own ? &enumerationNotes : nullptr);
     if (own) own->enumerationNotes = std::move(enumerationNotes);

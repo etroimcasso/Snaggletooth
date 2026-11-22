@@ -1,18 +1,12 @@
 # Example cartridges
 
-Twenty-eight cartridges, each built by hand to do one thing, each in its own
-directory with the source that builds it and a README saying what it does and
-who reads it. They are the cartridges the tests run the tools on, and the
-cartridges every page's example output comes from — a page shows what a tool
-prints for a cartridge that is ours to publish, and anyone can produce the same
-output by writing the cartridge to disk and running the tool on it.
+Twenty-nine cartridges, each built by hand to do one thing, each in its own directory with the source that builds it and a README saying what it does and who reads it. They are the cartridges the tests run the tools on, and the cartridges every page's example output comes from — a page shows what a tool prints for a cartridge that is ours to publish, and anyone can produce the same output by writing the cartridge to disk and running the tool on it.
 
 ```
 snes_examples <directory>
 ```
 
-writes every one under the directory as `<name>.smc` and lists them. From there
-the toolkit reads them like any cartridge:
+writes every one under the directory as `<name>.smc` and lists them. From there the toolkit reads them like any cartridge:
 
 ```
 snes_disasm examples/mixed.smc -o mixed --no-run --no-sound
@@ -51,18 +45,11 @@ snes_differential mixed examples/mixed.smc -o mixed/differential --seconds 0.1
 | [`bare_window/`](bare_window/README.md) | A byte read and a range sent through a save window with no save behind it, and a call into it taken only with B down |
 | [`chip_half/`](chip_half/README.md) | A byte read from a DSP board's lower half, and a call into it and a jump into the expansion area taken only with B down |
 | [`enumerating/`](enumerating/README.md) | Five loaders that build what they send from tables of entries, called for only some of the entries, one of them called from the vertical-blank handler |
+| [`second_pass/`](second_pass/README.md) | A derivation and a cross-bank jump reaching one address under two widths, found in opposite orders by a first and a second pass |
 
-Each directory's header builds its image as a function in
-`snaggletooth::examples`; `common.h` holds what they share — a LoROM or a HiROM
-image with a valid header, `put` to place bytes in it, and the vector layout the
-replay cartridges use — and `example_cartridges.h` includes them all and lists them for
-`snes_examples`. A test includes a cartridge's header and calls its function; a
-page names the cartridge and shows the tool's output on it. The code in each
-image is commented instruction by instruction with its address, so the source
-reads like a listing.
+Each directory's header builds its image as a function in `snaggletooth::examples`; `common.h` holds what they share — a LoROM or a HiROM image with a valid header, `put` to place bytes in it, and the vector layout the replay cartridges use — and `example_cartridges.h` includes them all and lists them for `snes_examples`. A test includes a cartridge's header and calls its function; a page names the cartridge and shows the tool's output on it. The code in each image is commented instruction by instruction with its address, so the source reads like a listing.
 
 ## See also
 
 - [`../README.md`](../README.md) — the tools and the libraries behind them.
-- [`../../docs/README.md`](../../docs/README.md) — the pages, each with the
-  cartridge its examples come from.
+- [`../../docs/README.md`](../../docs/README.md) — the pages, each with the cartridge its examples come from.

@@ -105,15 +105,17 @@ namespace snaggletooth::disasm {
 // the bank the CPU arrived in — the disassembler places it to trace from it and
 // to name it — the mode it arrived in, and the instruction that took it, as the
 // tree places it. `call` says which of the four forms it was — a call's target
-// is a routine, a jump's a location — which is what names the label.
+// is a routine, a jump's a location.
 struct ReachedTarget {
   Address target = 0;
   Cpu65816Mode mode;
   Address site = 0;
   bool call = false;
-  // The label the target carries in the tree: `sub_`/`loc_` and its address unless
-  // a person's entry names the same target under the same mode, whose name wins.
-  // Empty as the run reports it; the disassembler fills it in.
+  // The label the target carries in the tree: a vector's or a person's entry's
+  // name for the address; otherwise `sub_` and its address when anything that
+  // reaches it calls it — a sighting of a call, a derived call or a call the
+  // trace decoded — and `loc_` and its address when nothing does. Empty as the
+  // run reports it; the disassembler fills it in.
   std::string name;
   friend bool operator==(const ReachedTarget&, const ReachedTarget&) = default;
 };
@@ -190,9 +192,9 @@ struct MovedRange {
 // arrived in — the disassembler places it to trace from it — and `site` the
 // instruction that took it, as the tree places it; `mode` is the mode the CPU
 // arrived in. A landing outside the image is a note, not a landing. The
-// name is what a reached target's is: `loc_` and the address, unless a person's
-// entry names the same target under the same mode. Empty as the run reports it;
-// the disassembler fills it in.
+// name is given as a reached target's is; a landing itself calls nothing, so it
+// is `loc_` and the address unless something else calls the address or an entry
+// names it. Empty as the run reports it; the disassembler fills it in.
 struct Landing {
   Address target = 0;
   Cpu65816Mode mode;

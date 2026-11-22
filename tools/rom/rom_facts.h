@@ -58,9 +58,10 @@ struct ProvenProgram {
 // A destination the bytes prove a jump or a call through a pointer takes: where
 // it leads, the mode the jump carries in, the site, the address the pointer was
 // read from, and whether the site calls or jumps. `name` is the label the target
-// carries in the tree: a person's entry naming the same target under the same
-// mode wins; otherwise `sub_` or `loc_` with the address. Empty as the analysis
-// reports it; the disassembler fills it in.
+// carries in the tree, given as a reached target's is (`rom/rom_observe.h`): a
+// vector's or a person's entry's name for the address; otherwise `sub_` with the
+// address when anything that reaches it calls it, and `loc_` when nothing does.
+// Empty as the analysis reports it; the disassembler fills it in.
 struct DerivedTarget {
   Address target = 0;
   Cpu65816Mode mode;

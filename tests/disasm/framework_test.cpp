@@ -227,6 +227,24 @@ TEST(DisasmFramework, ConflictingContextsAreReportedNotGuessed) {
   EXPECT_TRUE(found);
 }
 
+// A target is `sub_` when any instruction calls it, whichever reached it
+// first: here a branch to `$00:8008` is decoded before the call to it.
+TEST(DisasmFramework, ATargetBothCalledAndJumpedToIsASubWhicheverArrivedFirst) {
+  const std::vector<std::uint8_t> image = {
+      0x04, 0x06,              // $8000  BR $00:8008
+      0x03, 0x08, 0x80, 0x00,  // $8002  CALL $00:8008
+      0xFF,                    // $8006  HALT
+      0x00,                    // $8007  never reached
+      0x05,                    // $8008  RET
+  };
+  Request request;
+  request.image = image;
+  request.base = 0x008000;
+  const Listing listing = trace(toy(), request);
+  ASSERT_TRUE(listing.labels.count(0x008008u));
+  EXPECT_EQ(listing.labels.at(0x008008u), "sub_008008");
+}
+
 // Reaching an address twice under the same context is a loop, not a conflict.
 TEST(DisasmFramework, ALoopUnderOneContextIsNotAConflict) {
   const std::vector<std::uint8_t> image = {
