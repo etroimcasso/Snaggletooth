@@ -394,6 +394,7 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
         rom(image),
         directory(std::move(where)),
         budget(options.memoryBytes, options.diskBytes, options.atLimit) {
+    budget.setMemoryLevel(options.memoryLevelPercent);
     std::error_code error;
     std::filesystem::create_directories(directory, error);
     if (error || !std::filesystem::is_directory(directory)) {
@@ -539,6 +540,11 @@ struct BufferedRun::Impl final : BusObserver, InstructionObserver, ApuObserver {
   void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) {
     if (stopped) throw std::logic_error("new ceilings for a run that is finished");
     budget.setLimits(memoryBytes, diskBytes);
+  }
+
+  void setMemoryLevel(unsigned percent) {
+    if (stopped) throw std::logic_error("a new level for a run that is finished");
+    budget.setMemoryLevel(percent);
   }
 
   void hostStopped(bool stoppedHere) {
@@ -937,6 +943,10 @@ void BufferedRun::setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) 
   impl_->setLimits(memoryBytes, diskBytes);
 }
 
+bool BufferedRun::memoryAtLevel() const noexcept { return impl_->budget.memoryAtLevel(); }
+
+void BufferedRun::setMemoryLevel(unsigned percent) { impl_->setMemoryLevel(percent); }
+
 void BufferedRun::hostStopped(bool stopped) { impl_->hostStopped(stopped); }
 
 BufferedRun::Progress BufferedRun::progress() const noexcept {
@@ -946,6 +956,7 @@ BufferedRun::Progress BufferedRun::progress() const noexcept {
                   .held = budget.held(),
                   .memoryUsed = budget.memoryUsed(),
                   .memoryBytes = budget.memoryBytes(),
+                  .memoryLevel = budget.memoryLevel(),
                   .diskUsed = budget.diskUsed(),
                   .diskBytes = budget.diskBytes(),
                   .diskWritten = impl_->cpuStream->diskWritten() + impl_->soundStream->diskWritten(),

@@ -191,13 +191,15 @@ The buffer holds what the disassembly's threads have not reached: in RAM first, 
 | `--disasm-buffer-disk <GB>` | the most its files hold | 10 |
 | `--disasm-buffer-dir <directory>` | the directory the files go in, used as given | `buffer` under the tree's directory |
 | `--disasm-threads <n>` | the threads that check the instructions | two fewer than the computer's cores, at least 1 |
-| `--disasm-resume-at <percent>` | how far the buffer drains before a stopped game resumes | 50 |
+| `--disasm-resume-at <percent>` | how far the buffer drains before a stopped game resumes, and how far its RAM is written to files once RAM passes its ceiling | 50 |
 
-A size is in GB of 1,000,000,000 bytes and takes a fraction: `0.5` is 500,000,000 bytes. Each file is removed as it is read back, and the directory when the run closes. On a computer whose threads keep up with the game the buffer stays in RAM; on a slower one it grows through the files while you play and drains while you do not. The files never hold more than their ceiling. Where the files are written more slowly than the game fills the buffer, RAM holds the blocks the files have not taken yet; once that passes the RAM ceiling by more than the blocks being written and one more while the files have room, the game stops until RAM has drained to `--disasm-resume-at` percent of its own ceiling, or the buffer holds nothing, and the run says so —
+A size is in GB of 1,000,000,000 bytes and takes a fraction: `0.5` is 500,000,000 bytes. Each file is removed as it is read back, and the directory when the run closes. On a computer whose threads keep up with the game the buffer stays in RAM; on a slower one it grows through the files while you play and drains while you do not. The files never hold more than their ceiling. RAM takes what the game writes up to its ceiling. One block past it, the buffer writes its newest blocks to files until RAM is down at `--disasm-resume-at` percent of the RAM ceiling, and it reads them back only up to that level, so the room above the level takes what the game writes next: a higher percent writes less at a time and leaves less room. Where RAM stands past its ceiling by more than the blocks being written and one more while the files have room, the game stops until the files have taken RAM down to that level, or the buffer holds nothing, and the run says so —
 
 ```
 stopped: the disassembly's buffer holds 503 MB of RAM, past its 500 MB ceiling, while its files are written; the game resumes at 250 MB of RAM
 ```
+
+A RAM ceiling of a few tens of megabytes is less than the disassembly's threads hold for themselves, and a stop there lasts until the buffer holds nothing.
 
 ### When the buffer reaches its ceilings
 

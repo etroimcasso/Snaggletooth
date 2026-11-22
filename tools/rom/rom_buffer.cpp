@@ -171,7 +171,8 @@ struct Stream::Impl {
     bool moving = false;  // the stream's thread is writing or reading its file
   };
 
-  // Free blocks kept for the writer to reuse, at most, within the RAM limit.
+  // Free blocks kept for the writer to reuse, at most, while RAM stands at or
+  // under the level.
   static constexpr std::size_t kSpareBlocks = 8;
 
   std::filesystem::path directory;
@@ -250,10 +251,10 @@ struct Stream::Impl {
     budget.blocks_.fetch_sub(1u, std::memory_order_relaxed);
   }
 
-  // A free block goes to the writer while the RAM limit has room for it, and
-  // is freed otherwise.
+  // A free block goes to the writer while RAM stands at or under the level,
+  // and is freed otherwise.
   void spare(Block* block) noexcept {
-    if (ram() <= budget.memoryBytes() && spareRing.push(block)) return;
+    if (ram() <= budget.memoryLevel() && spareRing.push(block)) return;
     release(block);
   }
 
@@ -365,10 +366,10 @@ struct Stream::Impl {
     }
   }
 
-  // Moves the newest block in RAM to its file while RAM holds more than its
-  // limit and the disk has room for it; the free blocks go first.
+  // Moves the newest block in RAM to its file while the budget says a write is
+  // due and the disk has room for it; the free blocks go first.
   bool writeOne(std::unique_lock<std::mutex>& lock) {
-    if (ram() <= budget.memoryBytes()) return false;
+    if (!budget.writeDue()) return false;
     // The oldest stays for the reader, which takes it next.
     for (std::size_t i = queue.size(); i-- > 1u;) {
       Entry& entry = queue[i];
@@ -397,14 +398,14 @@ struct Stream::Impl {
     return false;
   }
 
-  // Reads the oldest block in a file back while RAM has room for it, and the
-  // one the reader takes next whether or not it has.
+  // Reads the oldest block in a file back while RAM stays at or under the level
+  // with it, and the one the reader takes next whatever RAM holds.
   bool readOne(std::unique_lock<std::mutex>& lock) {
     for (std::size_t i = 0; i < queue.size(); ++i) {
       Entry& entry = queue[i];
       if (entry.moving) return false;
       if (entry.block != nullptr) continue;
-      if (i != 0u && ram() + sizeof(Block) > budget.memoryBytes()) return false;
+      if (i != 0u && ram() + sizeof(Block) > budget.memoryLevel()) return false;
       entry.moving = true;
       const std::uint64_t serial = entry.serial;
       const std::size_t used = entry.used;
@@ -588,6 +589,37 @@ std::uint64_t Stream::memoryUsed() const noexcept {
 
 std::uint64_t StreamBudget::memoryUsed() const noexcept {
   return blocks_.load(std::memory_order_relaxed) * sizeof(Block);
+}
+
+void StreamBudget::setMemoryLevel(unsigned percent) noexcept {
+  levelPercent_.store(percent > 100u ? 100u : percent, std::memory_order_relaxed);
+}
+
+std::uint64_t StreamBudget::memoryLevel() const noexcept {
+  const std::uint64_t ceiling = memoryBytes();
+  const std::uint64_t percent = levelPercent_.load(std::memory_order_relaxed);
+  // ceiling * percent / 100, exact and rounded down without the product's overflow.
+  return ceiling / 100u * percent + ceiling % 100u * percent / 100u;
+}
+
+bool StreamBudget::memoryAtLevel() const noexcept { return memoryUsed() <= memoryLevel(); }
+
+bool StreamBudget::writingDown() const noexcept { return writingDown_.load(std::memory_order_acquire); }
+
+// Whether a stream's thread moves a block to a file now: always while RAM is
+// past its ceiling, never while it stands at or under the level, and between
+// the two only from RAM passing the ceiling until it comes down to the level.
+bool StreamBudget::writeDue() noexcept {
+  const std::uint64_t ram = memoryUsed();
+  if (ram > memoryBytes()) {
+    writingDown_.store(true, std::memory_order_release);
+    return true;
+  }
+  if (ram <= memoryLevel()) {
+    writingDown_.store(false, std::memory_order_release);
+    return false;
+  }
+  return writingDown_.load(std::memory_order_acquire);
 }
 
 std::uint64_t Stream::diskUsed() const noexcept { return impl_->onDisk.load(std::memory_order_relaxed); }

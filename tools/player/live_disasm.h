@@ -27,9 +27,10 @@
 // past its own ceiling because the files are written more slowly than the game
 // fills the buffer (`disasm::BufferedRun::memoryOver`), and when the person
 // stops it (`pause.h`). A stop of the first kind ends at the resume level of the
-// two ceilings together; one of the second, when RAM has drained to the resume
-// level of its own ceiling or nothing is held. The host asks after every run of
-// its machine, and while the answer is a stop it runs nothing and asks again:
+// two ceilings together; one of the second, when the files have taken RAM down
+// to the resume level of its own ceiling (`disasm::BufferedRun::memoryAtLevel`)
+// or nothing is held. The host asks after every run of its machine, and while
+// the answer is a stop it runs nothing and asks again:
 //
 //   player::LiveDisassembly live{machine, rom, "tree", {}, hooks};
 //   live.start();
@@ -89,7 +90,7 @@ struct LiveOptions {
   std::uint64_t memoryBytes = 1'000'000'000;  // the buffer's RAM ceiling
   std::uint64_t diskBytes = 10'000'000'000;   // the buffer's files' ceiling
   unsigned threads = 0;                       // `BufferedRunOptions::threads`
-  PauseSettings pause;
+  PauseSettings pause;  // the resume percent is the buffer's RAM level too (`BufferedRunOptions::memoryLevelPercent`)
   std::filesystem::path commands;             // the directory `snes_render` and `snes_verify` are in; empty: neither is run
   std::filesystem::path image;                // the image's path, as `snes_verify` is handed it
   std::uint64_t treeIntervalNanos = 5'000'000'000;  // the least time from one tree's end to the next look at the run, a year at most
@@ -301,6 +302,9 @@ class LiveDisassembly {
   // The console's reset line, through the run (`disasm::BufferedRun::reset`).
   void reset();
   [[nodiscard]] PauseSettings pauseSettings() const;
+  // New pause settings for the rest of the session. The resume percent is the
+  // level the buffer's RAM is kept to as well
+  // (`disasm::BufferedRun::setMemoryLevel`), until the close begins.
   void setPauseSettings(PauseSettings settings);
   // New ceilings for the buffer, for the rest of the session.
   void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes);

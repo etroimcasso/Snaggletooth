@@ -4,8 +4,9 @@
 // threads check it; a reset and an observation midway as `ObservedRun` takes
 // them; the refusals; a buffer that reaches its bound, one that goes through
 // files, and a keyframe the kept work RAM differs from; a buffer that keeps
-// the host's records past its ceilings, ceilings changed in the middle, and
-// the classes the host's stop moves the run's threads to.
+// the host's records past its ceilings, ceilings changed in the middle, the
+// level the host sets for the buffer's RAM, and the classes the host's stop
+// moves the run's threads to.
 
 #include <atomic>
 #include <chrono>
@@ -55,7 +56,8 @@ struct Hosted {
 
 BufferedRunOptions withThreads(unsigned threads) {
   return BufferedRunOptions{
-      .memoryBytes = 1'000'000'000, .diskBytes = 64'000'000'000, .threads = threads, .atLimit = AtLimit::Refuse};
+      .memoryBytes = 1'000'000'000, .diskBytes = 64'000'000'000, .threads = threads, .atLimit = AtLimit::Refuse,
+      .memoryLevelPercent = 100};
 }
 
 // The host `observeRun` is: the machine stepped to the budget, each frame's pads
@@ -468,7 +470,7 @@ TEST_F(RomBufferedRun, ABufferThatGoesThroughFilesPlaysEveryRecord) {
   const RunObservation own = observeRun(rom, 12u * kFrame, script, ownNotes);
   const Hosted throughFiles = bufferedSteps(rom, 12u * kFrame, script, dir_,
                                         BufferedRunOptions{.memoryBytes = 1'000'000, .diskBytes = 256'000'000, .threads = 1,
-                                                           .atLimit = AtLimit::Refuse});
+                                                           .atLimit = AtLimit::Refuse, .memoryLevelPercent = 100});
   expectSameObservation(own, throughFiles.observation, "1 MB of RAM");
   EXPECT_EQ(throughFiles.notes, ownNotes);
   EXPECT_GT(throughFiles.progress.diskWritten, 0u) << "the run went through files";
@@ -486,7 +488,7 @@ TEST_F(RomBufferedRun, ABufferThatFillsLeavesTheObservationOfWhatCameBefore) {
   Snes machine{SnesConfig{.rom = rom}};
   BufferedRun run{machine, rom, dir_,
                   BufferedRunOptions{.memoryBytes = 1'000'000, .diskBytes = 3'000'000, .threads = 2,
-                                     .atLimit = AtLimit::Refuse}};
+                                     .atLimit = AtLimit::Refuse, .memoryLevelPercent = 100}};
   std::uint64_t spent = 0;
   std::uint32_t frame = 0;
   std::uint32_t wraps = 0;  // the beam's wraps, counted here
@@ -548,7 +550,7 @@ TEST_F(RomBufferedRun, AKeepingHostThatStopsAtTheCeilingsGetsTheWholeObservation
     const std::string what = std::to_string(memory / 1'000'000u) + " MB and no files";
     const Kept kept = keepingSteps(rom, 12u * kFrame, script, dir_,
                                    BufferedRunOptions{.memoryBytes = memory, .diskBytes = 0, .threads = 2,
-                                                      .atLimit = AtLimit::Keep},
+                                                      .atLimit = AtLimit::Keep, .memoryLevelPercent = 100},
                                    KeepingHost{.stops = true, .limitsAt = 0, .larger = {}, .smaller = {}});
     EXPECT_GT(kept.stopsMade, 0u) << what;
     expectSameObservation(own, kept.hosted.observation, what);
@@ -564,7 +566,7 @@ TEST_F(RomBufferedRun, AKeepingHostThatNeverStopsKeepsEveryCallsRecords) {
   const RunObservation own = observeRun(rom, 12u * kFrame, script, ownNotes);
   const Kept kept = keepingSteps(rom, 12u * kFrame, script, dir_,
                                  BufferedRunOptions{.memoryBytes = 3'000'000, .diskBytes = 0, .threads = 2,
-                                                    .atLimit = AtLimit::Keep},
+                                                    .atLimit = AtLimit::Keep, .memoryLevelPercent = 100},
                                  KeepingHost{.stops = false, .limitsAt = 0, .larger = {}, .smaller = {}});
   EXPECT_TRUE(kept.atLimitSeen) << "the ceilings were passed";
   expectSameObservation(own, kept.hosted.observation, "past the ceilings");
@@ -580,7 +582,7 @@ TEST_F(RomBufferedRun, CeilingsChangedInTheMiddleLoseNothing) {
     const std::string what = stops ? "stopping" : "never stopping";
     const Kept kept = keepingSteps(rom, 12u * kFrame, script, dir_,
                                    BufferedRunOptions{.memoryBytes = 8'000'000, .diskBytes = 0, .threads = 2,
-                                                      .atLimit = AtLimit::Keep},
+                                                      .atLimit = AtLimit::Keep, .memoryLevelPercent = 100},
                                    KeepingHost{.stops = stops,
                                                .limitsAt = 4u * kFrame,
                                                .larger = {64'000'000, 64'000'000},
@@ -636,6 +638,32 @@ TEST_F(RomBufferedRun, AFinishedRunHasNoThreadLoweredAndRefusesNewCeilingsAndSto
   EXPECT_THROW(run.hostStopped(true), std::logic_error);
 }
 
+TEST_F(RomBufferedRun, TheRamLevelIsTheHostsToSet) {
+  const std::vector<std::uint8_t> rom = examples::threeBankImage();
+  {
+    Snes machine{SnesConfig{.rom = rom}};
+    BufferedRunOptions options = withThreads(1);
+    options.memoryLevelPercent = 50;
+    BufferedRun run{machine, rom, dir_ / "set", options};
+    EXPECT_EQ(run.progress().memoryLevel, 500'000'000u) << "half of 1 GB";
+    EXPECT_TRUE(run.memoryAtLevel()) << "nothing held";
+    run.setMemoryLevel(80);
+    EXPECT_EQ(run.progress().memoryLevel, 800'000'000u);
+    run.setLimits(2'000'000'000, 64'000'000'000);
+    EXPECT_EQ(run.progress().memoryLevel, 1'600'000'000u) << "the level follows the ceiling";
+    std::vector<std::string> notes;
+    static_cast<void>(run.finish(notes));
+    EXPECT_THROW(run.setMemoryLevel(10), std::logic_error) << "a finished run";
+  }
+  Snes machine{SnesConfig{.rom = rom}};
+  BufferedRunOptions defaults;
+  defaults.threads = 1;
+  BufferedRun run{machine, rom, dir_ / "default", defaults};
+  EXPECT_EQ(run.progress().memoryLevel, run.progress().memoryBytes) << "the default level is the ceiling";
+  std::vector<std::string> notes;
+  static_cast<void>(run.finish(notes));
+}
+
 TEST_F(RomBufferedRun, AFailureKeepsWhatWasPlayedBeforeIt) {
   // The CPU stream's directory is made a file once the run is bound, and the
   // buffer holds no RAM of its own, so the first block it moves to a file
@@ -645,7 +673,7 @@ TEST_F(RomBufferedRun, AFailureKeepsWhatWasPlayedBeforeIt) {
   Snes machine{SnesConfig{.rom = rom}};
   BufferedRun run{machine, rom, dir_,
                   BufferedRunOptions{.memoryBytes = 0, .diskBytes = 256'000'000, .threads = 1,
-                                     .atLimit = AtLimit::Refuse}};
+                                     .atLimit = AtLimit::Refuse, .memoryLevelPercent = 100}};
   std::filesystem::remove_all(dir_ / "cpu");
   { std::ofstream(dir_ / "cpu") << "a file, not a directory"; }
   std::uint64_t spent = 0;

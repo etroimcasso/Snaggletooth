@@ -182,6 +182,22 @@ class StreamBudget {
   // files full, RAM past its ceiling is what holds the rest, and `atLimit()`
   // says so.
   [[nodiscard]] bool memoryOver() const noexcept;
+  // The level RAM is kept to while files hold blocks: `percent` of the RAM
+  // ceiling, over 100 taken as 100, and 100 until a host sets another. Once RAM
+  // has passed its ceiling the streams' threads move blocks to files until RAM
+  // stands at the level, and they read blocks back from files only while RAM
+  // stays at or under it, so the room between the level and the ceiling takes
+  // what the writer hands over next. At 100 the level is the ceiling. From the
+  // thread that writes the streams, between two of its writes.
+  void setMemoryLevel(unsigned percent) noexcept;
+  // The level in bytes: the RAM ceiling times the percent over a hundred,
+  // rounded down. It follows the ceiling `setLimits` sets.
+  [[nodiscard]] std::uint64_t memoryLevel() const noexcept;
+  // Whether RAM stands at or under the level.
+  [[nodiscard]] bool memoryAtLevel() const noexcept;
+  // Whether the streams' threads are moving blocks to files to bring RAM down
+  // to the level: from RAM passing its ceiling until it stands at the level.
+  [[nodiscard]] bool writingDown() const noexcept;
   // Bytes of RAM in blocks, every block counted whole.
   [[nodiscard]] std::uint64_t memoryUsed() const noexcept;
   [[nodiscard]] std::uint64_t diskUsed() const noexcept { return onDisk_.load(std::memory_order_relaxed); }
@@ -200,6 +216,7 @@ class StreamBudget {
  private:
   friend class Stream;
   friend class ThreadClassKeeper;
+  [[nodiscard]] bool writeDue() noexcept;
   std::atomic<std::uint64_t> memoryBytes_;
   std::atomic<std::uint64_t> diskBytes_;
   AtLimit atLimit_;
@@ -210,6 +227,8 @@ class StreamBudget {
   std::atomic<std::uint64_t> open_{0};  // blocks being written, each charged whole
   std::atomic<bool> hostStopped_{false};
   std::atomic<unsigned> lowered_{0};
+  std::atomic<unsigned> levelPercent_{100};
+  std::atomic<bool> writingDown_{false};
 };
 
 // Keeps the calling thread at the class it works at beside a host: `lowered`
@@ -248,15 +267,18 @@ class ThreadClassKeeper {
 // The writer fills a block of `kBlockBytes` and hands it to the reader when the
 // next record does not fit, at `flush()` and at `end()`; a record never spans
 // two blocks. The stream's own thread keeps the stream's RAM within
-// `memoryBytes`: while every block it holds — the one being written, those
+// `memoryBytes`: once every block it holds — the one being written, those
 // handed that the reader has not taken, those it holds, and the free ones
 // kept for reuse — passes that, it frees the free ones and moves the newest
 // handed blocks to files `<directory>/<n>.snagbuf`, as long as the files stay
-// within `diskBytes`; it reads them back ahead of the reader, oldest first, as
-// RAM has room, and the one the reader takes next whether or not it has; each
-// file is removed as it is read. A block the writer needs is taken from the free
-// ones or allocated, never waited for, so RAM passes `memoryBytes` by the blocks
-// the writer takes before the stream's thread next runs, and always holds the
+// within `diskBytes`, until RAM stands at the budget's level
+// (`StreamBudget::setMemoryLevel`), which is `memoryBytes` until a host sets a
+// lower one. It reads them back ahead of the reader, oldest first, while RAM
+// stays at or under the level, and the one the reader takes next whatever RAM
+// holds; each file is removed as it is read. A block the writer needs is taken
+// from the free ones or allocated, never waited for, so RAM passes
+// `memoryBytes` by the blocks the writer takes before the stream's thread next
+// runs, and always holds the
 // block being written and the one being read. A block the writer opens is
 // charged whole, and the stream is full when one more would bring what it holds
 // past `memoryBytes` and `diskBytes` together, so what it holds never passes

@@ -101,11 +101,13 @@
 // tree after another, and runs snes_render and then snes_verify from the
 // player's own directory over each. When the buffer reaches the ceilings the
 // --disasm-buffer-* flags set, the game stops until it has drained to the
-// --disasm-resume-at level (`pause.h`); the pause chord stops the game and
-// resumes it by hand. A request to close — the window's, a signal's — starts the
-// close, which plays the buffer to its end, writes the last tree and runs the two
-// commands with the window still up; further requests are answered and end
-// nothing (`close_requests.h`). Without --disasm none of it exists in the process.
+// --disasm-resume-at level (`pause.h`), which is also the level the buffer's
+// RAM is written down to in files once RAM passes its own ceiling; the pause
+// chord stops the game and resumes it by hand. A request to close — the
+// window's, a signal's — starts the close, which plays the buffer to its end,
+// writes the last tree and runs the two commands with the window still up;
+// further requests are answered and end nothing (`close_requests.h`). Without
+// --disasm none of it exists in the process.
 
 #include <algorithm>
 #include <cstddef>
@@ -316,7 +318,8 @@ std::string howToEndThePlayer() {
          "                              fewer than this computer's cores)\n"
          "  --disasm-resume-at <percent>\n"
          "                              when the buffer fills and the game stops, how far it drains\n"
-         "                              before the game resumes (default 50)\n"
+         "                              before the game resumes, and how far its RAM is written to\n"
+         "                              files once RAM passes its ceiling (default 50)\n"
          "  --mute                      don't play the sound\n"
          "  --quiet                     don't print the run's status lines\n"
          "  --default-config            print the built-in controller mapping and exit\n"

@@ -1,7 +1,8 @@
 // The buffer a run on another thread is fed through: every record kind written
 // and read back as it was, and the stream that holds them — blocks handed over
-// in order, held in files once memory holds its share, taken back in order, a
-// writer that never waits, ceilings past which it takes nothing or, built to
+// in order, held in files once memory holds its share, RAM written down to the
+// level a host sets and read back only to it, taken back in order, a writer
+// that never waits, ceilings past which it takes nothing or, built to
 // keep, takes the writer's records all the same, ceilings changed while it
 // runs, the classes its threads work at, and a directory left as it was found.
 
@@ -744,6 +745,103 @@ TEST_F(RomBuffer, RamPastItsCeilingWhileTheFilesLagIsSaid) {
   StreamTesting::start(*few);
   few->end();
   EXPECT_EQ(readNumbered(*few).records, 2u * perBlock + 1u);
+}
+
+TEST_F(RomBuffer, TheLevelIsAPercentOfTheRamCeiling) {
+  StreamBudget budget{1'000'000'000u, 64u * kMB};
+  EXPECT_EQ(budget.memoryLevel(), 1'000'000'000u) << "the ceiling before a host sets a level";
+  budget.setMemoryLevel(50);
+  EXPECT_EQ(budget.memoryLevel(), 500'000'000u);
+  EXPECT_TRUE(budget.memoryAtLevel()) << "nothing held, at 50";
+  budget.setMemoryLevel(0);
+  EXPECT_EQ(budget.memoryLevel(), 0u);
+  EXPECT_TRUE(budget.memoryAtLevel()) << "nothing held, at 0";
+  budget.setMemoryLevel(100);
+  EXPECT_EQ(budget.memoryLevel(), 1'000'000'000u);
+  budget.setMemoryLevel(250);
+  EXPECT_EQ(budget.memoryLevel(), 1'000'000'000u) << "over 100 is 100";
+  budget.setMemoryLevel(50);
+  budget.setLimits(2'000'000'000u, 64u * kMB);
+  EXPECT_EQ(budget.memoryLevel(), 1'000'000'000u) << "the level follows the ceiling";
+  StreamBudget small{199u, 64u * kMB};
+  small.setMemoryLevel(33);
+  EXPECT_EQ(small.memoryLevel(), 65u) << "199 * 33 / 100, rounded down";
+  budget.setMemoryLevel(0);
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget);
+  ASSERT_EQ(writeNumbered(*stream, 1u), 1u);
+  EXPECT_FALSE(budget.memoryAtLevel()) << "one block open, over a level of 0";
+  EXPECT_FALSE(budget.writingDown()) << "no stream's thread has found RAM past its ceiling";
+}
+
+TEST_F(RomBuffer, RamPastItsCeilingIsWrittenDownToTheLevelAndNoFurther) {
+  // A ceiling of eight blocks and a level of four (a block in RAM is
+  // `kBlockBytes` and sixteen bytes more).
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  StreamBudget budget{8u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  budget.setMemoryLevel(50);
+  Stream stream{dir_, budget};
+  std::uint32_t written = 0;
+  ASSERT_EQ(writeNumberedFrom(stream, written, 7u * perBlock + 1u), 7u * perBlock + 1u);
+  written += 7u * perBlock + 1u;
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(stream.diskWritten(), 0u) << "seven full blocks and the open one are within the ceiling";
+  EXPECT_FALSE(budget.writingDown());
+  // The last of these opens the ninth block: RAM passes its ceiling once, and
+  // the writer allocates nothing after.
+  ASSERT_EQ(writeNumberedFrom(stream, written, perBlock), perBlock);
+  written += perBlock;
+  EXPECT_TRUE(within([&] { return budget.memoryAtLevel(); })) << "RAM written down to the level";
+  EXPECT_TRUE(within([&] { return !budget.writingDown(); })) << "and the write-down over";
+  EXPECT_LE(budget.memoryUsed(), budget.memoryLevel());
+  EXPECT_GE(budget.diskUsed(), 5u * (Stream::kBlockBytes - kRecord)) << "nine blocks held, four in RAM";
+  const std::uint64_t diskWritten = stream.diskWritten();
+  // Six blocks in RAM: over the level, within the ceiling.
+  ASSERT_EQ(writeNumberedFrom(stream, written, 2u * perBlock), 2u * perBlock);
+  written += 2u * perBlock;
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EXPECT_EQ(stream.diskWritten(), diskWritten) << "nothing written while RAM is within its ceiling";
+  stream.end();
+  const Numbered read = readNumbered(stream);
+  EXPECT_EQ(read.records, written);
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
+}
+
+TEST_F(RomBuffer, BlocksAreReadBackOnlyToTheLevelAndFreeOnesKeptOnlyToIt) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  StreamBudget budget{8u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  budget.setMemoryLevel(50);
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget);
+  // Every block stands in RAM before the thread runs: one write-down, from
+  // thirteen blocks to four.
+  ASSERT_EQ(writeNumbered(*stream, 12u * perBlock + 1u), 12u * perBlock + 1u);
+  stream->end();
+  StreamTesting::start(*stream);
+  EXPECT_TRUE(within([&] { return budget.memoryAtLevel(); })) << "RAM written down to the level";
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_TRUE(budget.memoryAtLevel()) << "no block read back past the level";
+  const Numbered read = readNumbered(*stream);
+  EXPECT_EQ(read.records, 12u * perBlock + 1u);
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
+  EXPECT_TRUE(within([&] { return budget.held() == 0u; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_LE(budget.memoryUsed(), budget.memoryLevel()) << "the free blocks kept are within the level";
+}
+
+TEST_F(RomBuffer, AtAHundredTheLevelIsTheCeilingAndRamStaysFull) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  StreamBudget budget{8u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget);
+  ASSERT_EQ(writeNumbered(*stream, 12u * perBlock + 1u), 12u * perBlock + 1u);
+  stream->end();
+  StreamTesting::start(*stream);
+  EXPECT_TRUE(within([&] { return budget.diskUsed() > 0u && budget.memoryUsed() <= budget.memoryBytes(); }))
+      << "RAM written down to its ceiling";
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_GT(budget.memoryUsed(), 6u * Stream::kBlockBytes) << "RAM stays full of the oldest blocks";
+  EXPECT_FALSE(budget.writingDown());
+  const Numbered read = readNumbered(*stream);
+  EXPECT_EQ(read.records, 12u * perBlock + 1u);
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
 }
 
 TEST_F(RomBuffer, ThreadsTakeTheClassTheHostsStopAsksFor) {

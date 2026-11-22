@@ -849,7 +849,8 @@ disasm::BufferedRun run{machine, image, "cartridge/buffer",
                         disasm::BufferedRunOptions{.memoryBytes = 500'000'000,
                                                    .diskBytes = 8'000'000'000,
                                                    .threads = 0,
-                                                   .atLimit = disasm::AtLimit::Keep}};
+                                                   .atLimit = disasm::AtLimit::Keep,
+                                                   .memoryLevelPercent = 50}};
 std::uint32_t frame = 0;
 while (playing) {
   machine.run(89'341u);  // a quarter frame
@@ -860,6 +861,10 @@ while (playing) {
   if (run.atLimit()) {
     run.hostStopped(true);
     while (run.progress().held > 250'000'000u) wait();  // the host's own wait
+    run.hostStopped(false);
+  } else if (run.memoryOver()) {
+    run.hostStopped(true);
+    while (!run.memoryAtLevel() && run.progress().held != 0u) wait();
     run.hostStopped(false);
   }
 }
@@ -875,6 +880,7 @@ const disasm::RunObservation seen = run.finish(notes);
 | `diskBytes` | the most its files hold | 10,000,000,000 |
 | `threads` | the pool's threads | 0: two fewer than the host's cores, at least 1 |
 | `atLimit` | what the buffer does at its ceilings: `Refuse` or `Keep` | `Refuse` |
+| `memoryLevelPercent` | the level the buffer's RAM is kept to while its files hold blocks, a percent of `memoryBytes`; over 100 is 100 | 100 |
 
 Both sizes are ceilings the host sets. The buffer is at its ceilings when one more block would bring what it holds past the two together: every byte handed to the threads that they have not played, and every block being written counted whole.
 
@@ -887,9 +893,11 @@ Both sizes are ceilings the host sets. The buffer is at its ceilings when one mo
 | `full()` | the buffer filled. Under `Refuse` that is at the ceilings: the observers copy nothing more, the frames are still counted, and the observation is of everything before. Under `Keep` only a block the system will not allocate fills it. |
 | `atLimit()` | the buffer stands at its ceilings. Under `Keep` the observers go on copying the host's call in flight into RAM past them, and a host that stops here holds the buffer to them. |
 | `memoryOver()` | the buffer's RAM stands past its own ceiling by more than the blocks being written and one block more while its files have room for a block: the files are written more slowly than the host fills the buffer. With the files full, RAM past its ceiling holds the rest and `atLimit()` says so. |
+| `memoryAtLevel()` | the buffer's RAM stands at or under its level: where a host that stopped at `memoryOver()` runs its machine again |
 | `setLimits(memoryBytes, diskBytes)` | new ceilings while the run goes. A smaller RAM ceiling moves blocks to files as the files have room; a disk ceiling under what the files hold writes no more files, and those there stay until they are read back. |
+| `setMemoryLevel(percent)` | a new level while the run goes |
 | `hostStopped(stopped)` | moves every thread of the run to `ThreadClass::Normal` while the host is stopped, and each lowered one back to its lowered class when it runs |
-| `progress()` | the master cycles of the last boundary the threads played against the host's; the bytes the buffer holds; the RAM its blocks take and the bytes in its files, each beside its ceiling; the bytes written to files so far; the keyframes the kept work RAM differed from, 0 for a record that holds everything the run reads; the pool's threads; and how many of the run's threads stand at a lowered class |
+| `progress()` | the master cycles of the last boundary the threads played against the host's; the bytes the buffer holds; the RAM its blocks take and the bytes in its files, each beside its ceiling, and the level its RAM is kept to; the bytes written to files so far; the keyframes the kept work RAM differed from, 0 for a record that holds everything the run reads; the pool's threads; and how many of the run's threads stand at a lowered class |
 | `observation(notes)` | the observation so far with the run left going, as `ObservedRun::observation` gives it. On the host's thread it first hands over the blocks being written, so it is the observation at the host's boundary; on another thread it is of every block handed over when it was asked. It waits for the threads to reach that point. |
 | `finish(notes)` | tells the threads the host has stopped, clears the observers, ends the buffer, waits for the threads to play all of it, joins them and answers the whole observation. Called once. |
 | `failure()` | the first failure a thread met — a buffer file that could not be written or read, a block that did not play — or nothing |
@@ -897,11 +905,11 @@ Both sizes are ceilings the host sets. The buffer is at its ceilings when one mo
 
 The thread that plays the main CPU's blocks in order works at `Normal`, the class a thread starts with: the pool's checks and every observation wait on it. Each other thread the run starts works at a class under the host's thread's (`ThreadClass`): `Lowered` for the pool's threads and the sound CPU's, `LoweredForFiles` for the two that move the buffer's blocks to files and back. `setThisThreadClass(which)` sets the calling thread's class and `thisThreadClass()` answers the one it last set, `Normal` before it set one.
 
-- Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()` and `observation()` is called on the host's thread between two of its calls into the machine. The host makes no call into the guest and restores no state while the run is bound.
-- `keyframe()`, `reset()`, `observation()`, `setLimits()` and `hostStopped()` throw `std::logic_error` once the run is finished, and so does a second `finish()`.
+- Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()`, `memoryAtLevel()` and `observation()` is called on the host's thread between two of its calls into the machine. The host makes no call into the guest and restores no state while the run is bound.
+- `keyframe()`, `reset()`, `observation()`, `setLimits()`, `setMemoryLevel()` and `hostStopped()` throw `std::logic_error` once the run is finished, and so does a second `finish()`.
 - From a failure on the threads play nothing more: `observation()` and `finish()` answer everything played before it, their notes ending with `run: <failure>; the observation holds what was played before it`.
 - The call into the machine that reaches the ceilings is finished first, since the host cannot interrupt one; under `Keep` its records stay in RAM.
-- RAM takes the newest blocks while the files' thread moves older ones out, so where the files are written more slowly than the host fills the buffer, RAM holds more than its own ceiling until they catch up; the files never pass theirs. `memoryOver()` says RAM stands past its ceiling by more than the blocks being written and one block more while the files have room, and a host that stops there until RAM has drained holds RAM to its ceiling, as `snes_player --disasm` does.
+- RAM takes the host's blocks up to its ceiling. One block past it, the files' threads move the newest blocks to files until RAM stands at the level — `memoryLevelPercent` of the ceiling — and they read blocks back only while RAM stays at or under it, so the room between the level and the ceiling takes what the host writes next. At 100 the level is the ceiling: RAM stays full of the oldest blocks, and while the files hold any, each block the host hands over goes through a file. The files never pass their ceiling. `memoryOver()` says RAM stands past its ceiling by more than the blocks being written and one block more while the files have room, and a host that stops there until `memoryAtLevel()` holds RAM to its ceiling, as `snes_player --disasm` does. The run's threads hold blocks of their own — the ones being checked, the one each stream is writing, the free ones kept for the writer — and a level under what they hold is reached only when the buffer holds nothing.
 - The record and the stream the buffer is made of are in `rom/rom_buffer.h`, for the run's own use.
 
 `CartridgeRequest::observeRun` asks for the run — off unless asked, since it costs about as long as it emulates; `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and `CartridgeRequest::input` is the script it replays. `CartridgeRequest::observed` is a host's run in place of that one: set, the cartridge is not booted for a run, `observeRun`, `runMasterCycles` and `input` are not read, `CartridgeRequest::observedNotes` join the notes where the run's own would, and the plan of routines to run again is made and its notes said, but no routine is run again. `CartridgeRequest::reached`, `CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs found, read back from the manifest, which the disassembly merges with this run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`), told what the disassembly is doing as it goes when set — `running the cartridge` with the master cycles spent against `runMasterCycles` every tenth of a second, then `tracing`, `proving what every path reaches`, and `booting the sound program` against `bootMasterCycles` for each boot; the library prints nothing, and `ProgressPrinter` in the same header is what the command line prints with.

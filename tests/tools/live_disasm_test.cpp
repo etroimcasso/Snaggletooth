@@ -2,7 +2,8 @@
 // player drives it: the closing tree held file for file to the tree the
 // disassembly writes from the same run handed back, however the game stopped
 // on the way — at the ceilings at any resume level, under hold, by hand, with
-// the ceilings changed — and with trees made in the middle, a reset, a second
+// the ceilings changed, for RAM until RAM is at the resume percent's level —
+// and with trees made in the middle, a reset, a second
 // session, and either machine thread; the directory refused for another image;
 // the two commands asked for after each tree; the close answering a request
 // and ending only when its work is done; the status through a stop; the
@@ -582,6 +583,57 @@ TEST_F(PlayerLiveDisassembly, RamPastItsCeilingStopsTheGameUntilItHasDrained) {
     EXPECT_GT(ramStops, 0u);
   }
   expectSameTree(root_ / "live", root_ / "reference", "stops for RAM");
+}
+
+TEST_F(PlayerLiveDisassembly, TheResumePercentIsTheLevelTheBuffersRamIsKeptTo) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  Plan plan;
+  bool checked = false;
+  plan.afterEachRun = [&](LiveDisassembly& live, std::uint64_t) {
+    if (std::exchange(checked, true)) return;
+    EXPECT_EQ(live.status().buffer.memoryLevel, 500'000'000u) << "50 % of 1 GB";
+    live.setPauseSettings({.resumePercent = 80, .hold = false});
+    EXPECT_EQ(live.status().buffer.memoryLevel, 800'000'000u) << "a new resume percent is a new level";
+    live.setLimits(2'000'000'000, 64'000'000'000);
+    EXPECT_EQ(live.status().buffer.memoryLevel, 1'600'000'000u) << "the level follows the RAM ceiling";
+  };
+  plan.afterClose = [&](LiveDisassembly& live) {
+    EXPECT_NO_THROW(live.setPauseSettings({.resumePercent = 10, .hold = false}));
+    EXPECT_EQ(live.pauseSettings().resumePercent, 10u);
+    EXPECT_EQ(live.status().buffer.memoryLevel, 1'600'000'000u) << "the run is not reached once the close begins";
+  };
+  Lines lines;
+  const Played played = play(rom, root_ / "live",
+                             quiet(1'000'000'000, 64'000'000'000, {.resumePercent = 50, .hold = false}),
+                             hooksInto(lines), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  EXPECT_TRUE(checked);
+}
+
+TEST_F(PlayerLiveDisassembly, AStopForRamEndsAtTheNextLookOnceRamIsAtItsLevel) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  const Plan reference;
+  referenceTree(rom, root_ / "reference", reference);
+  Plan plan;
+  bool raised = false;
+  bool counting = false;
+  unsigned passes = 0;  // the passes of the stop the larger RAM ceiling was set in
+  plan.eachStopPass = [&](LiveDisassembly& live, Stopped why, unsigned pass) {
+    if (!raised && why == Stopped::AtLimit && pass == 0u && live.status().memoryStop) {
+      // With no RAM the level is 0; at 1 GB it is 500 MB, which RAM stands under.
+      raised = true;
+      counting = true;
+      live.setLimits(1'000'000'000, 64'000'000);
+    }
+    if (counting) ++passes;
+  };
+  plan.afterStop = [&](LiveDisassembly&) { counting = false; };
+  Lines lines;
+  const Played played = play(rom, root_ / "live", quiet(0, 64'000'000), hooksInto(lines), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  ASSERT_TRUE(raised) << "the game stopped for RAM";
+  EXPECT_EQ(passes, 1u) << "RAM at its level resumed the stop at its next look";
+  expectSameTree(root_ / "live", root_ / "reference", "a stop for RAM resumed at its level");
 }
 
 TEST_F(PlayerLiveDisassembly, TheTitleSaysTheBuffersSizesAndTurnsWhileTheWorkMoves) {

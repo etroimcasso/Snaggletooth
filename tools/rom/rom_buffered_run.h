@@ -80,15 +80,21 @@ struct BufferedRunOptions {
   // past its ceiling, for a host that stops running its machine when
   // `atLimit()` says so.
   AtLimit atLimit = AtLimit::Refuse;
+  // The level the buffer's RAM is kept to while its files hold blocks, a
+  // percent of `memoryBytes`, over 100 taken as 100
+  // (`StreamBudget::setMemoryLevel`): once RAM has passed its ceiling, blocks
+  // are moved to files until RAM stands at the level, and read back only up to
+  // it. At 100 the level is the ceiling.
+  unsigned memoryLevelPercent = 100;
 };
 
 // Bound like ObservedRun — to a machine at power-on, from the image it was built
 // from, with no bus, audio or instruction observer set — it sets the three
 // observers; the host runs the machine as it likes with `step()` or `run()`,
 // presents its own pads, and calls `keyframe()` between two of its calls once a
-// frame. Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()`
-// and `observation()` is called on the host's thread between two of its calls
-// into the machine, and none from inside a report.
+// frame. Every member but `progress()`, `full()`, `atLimit()`, `memoryOver()`,
+// `memoryAtLevel()` and `observation()` is called on the host's thread between
+// two of its calls into the machine, and none from inside a report.
 class BufferedRun {
  public:
   // Throws `std::logic_error` as `ObservedRun`'s constructor does: a machine that
@@ -132,12 +138,21 @@ class BufferedRun {
   // Whether the buffer's RAM stands past its own ceiling while its files have
   // room (`StreamBudget::memoryOver`): where the files are written more slowly
   // than the host fills the buffer. A host that stops running its
-  // machine here until RAM has drained holds RAM to its ceiling.
+  // machine here until `memoryAtLevel()` holds RAM to its ceiling.
   [[nodiscard]] bool memoryOver() const noexcept;
 
   // New ceilings for the buffer, as `StreamBudget::setLimits` takes them.
   // Throws `std::logic_error` once the run is finished.
   void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes);
+
+  // Whether the buffer's RAM stands at or under its level
+  // (`StreamBudget::memoryAtLevel`): where a host that stopped at
+  // `memoryOver()` runs its machine again.
+  [[nodiscard]] bool memoryAtLevel() const noexcept;
+
+  // A new level for the buffer's RAM, as `StreamBudget::setMemoryLevel` takes
+  // it. Throws `std::logic_error` once the run is finished.
+  void setMemoryLevel(unsigned percent);
 
   // Tells the run the host has stopped running its machine, or runs it again.
   // While it is stopped every thread of the run works at `ThreadClass::Normal`;
@@ -148,8 +163,9 @@ class BufferedRun {
 
   // What the threads have reached: the master cycles of the last boundary they
   // played, against the host's; the bytes the buffer holds, the RAM its blocks
-  // take and the bytes in its files now, against the two ceilings; the bytes
-  // written to files so far; how many keyframes the work RAM the run keeps
+  // take and the bytes in its files now, against the two ceilings, and the
+  // level its RAM is kept to while files hold blocks; the bytes written to
+  // files so far; how many keyframes the work RAM the run keeps
   // differed from, which is 0 for a record that holds everything the run reads;
   // the pool's threads; and how many of the run's threads stand at a lowered
   // class.
@@ -159,6 +175,7 @@ class BufferedRun {
     std::uint64_t held = 0;
     std::uint64_t memoryUsed = 0;
     std::uint64_t memoryBytes = 0;
+    std::uint64_t memoryLevel = 0;
     std::uint64_t diskUsed = 0;
     std::uint64_t diskBytes = 0;
     std::uint64_t diskWritten = 0;

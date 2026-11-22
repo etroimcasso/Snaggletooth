@@ -246,7 +246,8 @@ struct LiveDisassembly::Impl {
                                                 disasm::BufferedRunOptions{.memoryBytes = options.memoryBytes,
                                                                            .diskBytes = options.diskBytes,
                                                                            .threads = options.threads,
-                                                                           .atLimit = disasm::AtLimit::Keep});
+                                                                           .atLimit = disasm::AtLimit::Keep,
+                                                                           .memoryLevelPercent = options.pause.resumePercent});
   }
 
   void say(const std::string& line) const {
@@ -300,7 +301,7 @@ struct LiveDisassembly::Impl {
     const std::uint64_t ramLevel = pause.resumeLevel(progress.memoryBytes);
     std::uint64_t heldForPause = progress.held;
     if (memoryStop && before == Stopped::AtLimit) {
-      const bool drained = progress.memoryUsed <= ramLevel || progress.held == 0u;
+      const bool drained = run->memoryAtLevel() || progress.held == 0u;
       heldForPause = drained ? 0u : ~std::uint64_t{0};
     }
     const bool wasAsked = asked;
@@ -927,6 +928,7 @@ void LiveDisassembly::setPauseSettings(PauseSettings settings) {
   impl_->pause.set(settings);
   impl_->resumePercent.store(settings.resumePercent, std::memory_order_relaxed);
   impl_->hold.store(settings.hold, std::memory_order_relaxed);
+  if (!impl_->closing.load(std::memory_order_acquire)) impl_->run->setMemoryLevel(settings.resumePercent);
 }
 
 void LiveDisassembly::setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) {
