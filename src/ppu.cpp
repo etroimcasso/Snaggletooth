@@ -124,7 +124,7 @@ static_assert(vramRotatedMatchesTranslation());
   return reversed;
 }
 
-// A sprite's character is always sixteen colours, so four bitplanes, and a
+// A sprite's character is always sixteen colors, so four bitplanes, and a
 // character is eight pixels on a side.
 constexpr unsigned kSpritePlanes = 4u;
 constexpr unsigned kCharacterSide = 8u;
@@ -177,7 +177,7 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
   return x == -static_cast<int>(kPictureWidth) ? 0 : x;
 }
 
-// A 256-colour background's pixel read as a colour rather than as a palette
+// A 256-color background's pixel read as a color rather than as a palette
 // index: the pixel is BBGGGRRR and its tile's three palette bits are bgr, and
 // each channel takes its own field shifted up with the tile's own bit under it.
 // Every value it can make is even, and the low bits it cannot reach are zero.
@@ -194,7 +194,7 @@ constexpr std::array<SizePair, 8> kSpriteSizes{{
   return (low & 0x1000) != 0 ? low - 0x2000 : low;
 }
 
-// The scroll less the centre as the matrix takes it: the difference's low ten
+// The scroll less the center as the matrix takes it: the difference's low ten
 // bits under the difference's own sign, so 1024 is 0 and -1025 is -1.
 [[nodiscard]] std::int32_t clippedOffset(std::int32_t difference) noexcept {
   return (difference & 0x2000) != 0 ? (difference | ~0x3FF) : (difference & 0x3FF);
@@ -544,7 +544,7 @@ void Ppu::timeSprites(std::uint16_t line, std::uint8_t field) noexcept {
             static_cast<unsigned>(pixels >> (8u * (source % kCharacterSide))) & 0xFFu;
         if (index == 0u) continue;  // color 0 of a sprite's palette is transparent too
 
-        // Eight sixteen-colour palettes, beginning at CGRAM word 128.
+        // Eight sixteen-color palettes, beginning at CGRAM word 128.
         s_.sprites.word[static_cast<std::size_t>(x)] =
             static_cast<std::uint8_t>(128u + palette * 16u + index);
         s_.sprites.priority[static_cast<std::size_t>(x)] = priority;
@@ -619,10 +619,10 @@ const Ppu::Derived::Descriptions& Ppu::rebuildDescriptions() const noexcept {
 
 std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
   // What the mode makes of a background: how deep its characters are, and where in
-  // the palette its colours are read. A sixteen-colour background's palette field
-  // steps sixteen words and a four-colour one's steps four; Mode 0 gives each of
+  // the palette its colors are read. A sixteen-color background's palette field
+  // steps sixteen words and a four-color one's steps four; Mode 0 gives each of
   // its four thirty-two words of its own, one subset after another, which is the
-  // only mode that offsets a background at all; and a 256-colour background has no
+  // only mode that offsets a background at all; and a 256-color background has no
   // palette field, its pixel being the word itself.
   struct Depth {
     unsigned planes;
@@ -638,7 +638,7 @@ std::optional<Ppu::Background> Ppu::background(Layer layer) const noexcept {
   Depth depth = kNone;
   switch (s_.bgmode & 0x07u) {
     case 0u:
-      // Four four-colour backgrounds, each reading the thirty-two words after the
+      // Four four-color backgrounds, each reading the thirty-two words after the
       // last one's.
       depth = Depth{.planes = kFour.planes,
                     .paletteStride = kFour.paletteStride,
@@ -933,7 +933,7 @@ void Ppu::readCharacter(unsigned layer, unsigned column) noexcept {
   // of a word: each bitplane's byte spread so its bit 7 is the first pixel's
   // bit, then placed at the plane's bit of every pixel. The character the tile
   // names sits under the base, eight bytes a bitplane, so sixteen for a
-  // four-colour character and thirty-two for a sixteen-colour one; the planes
+  // four-color character and thirty-two for a sixteen-color one; the planes
   // are 0 and 1 in the low and high bytes of the row's word, then each further
   // pair sixteen bytes on.
   const auto row = [&](unsigned character) {
@@ -983,11 +983,11 @@ std::optional<Ppu::Shown> Ppu::sample(const Background& background, std::uint16_
   const TileRead& read = along < 8u ? reads[column] : reads[column + 1u];
   const unsigned inTile = along < 8u ? along : along - 8u;
   const unsigned index = read.hires ? read.pixel[2u * inTile + (half ? 1u : 0u)] : read.pixel[inTile];
-  if (index == 0u) return std::nullopt;  // colour 0 of any palette is transparent
+  if (index == 0u) return std::nullopt;  // color 0 of any palette is transparent
 
-  // The palette word: the first word this background's colours begin at, its
+  // The palette word: the first word this background's colors begin at, its
   // tile's palette field as many words on as that field steps, and the pixel. A
-  // 256-colour background steps by none, so its pixel is the word.
+  // 256-color background steps by none, so its pixel is the word.
   const unsigned palette = (read.entry >> 10) & 0x07u;
   const auto colourWord = static_cast<std::uint8_t>(
       background.wordBase + palette * background.paletteStride + index);
@@ -1011,8 +1011,8 @@ Ppu::FieldPoint Ppu::fieldPoint(std::uint16_t x, std::uint16_t line) const noexc
   const std::int32_t sx = (s_.m7sel & 0x01u) != 0u ? (x ^ 0xFF) : x;
   const std::int32_t sy = (s_.m7sel & 0x02u) != 0u ? (line ^ 0xFF) : line;
 
-  // The four matrix terms, 8.8 signed; the centre; and the scroll less the centre,
-  // clipped. The centre is added back whole, as pixels.
+  // The four matrix terms, 8.8 signed; the center; and the scroll less the center,
+  // clipped. The center is added back whole, as pixels.
   const std::int32_t a = static_cast<std::int16_t>(s_.m7a);
   const std::int32_t b = static_cast<std::int16_t>(s_.m7b);
   const std::int32_t c = static_cast<std::int16_t>(s_.m7c);
@@ -1062,13 +1062,13 @@ std::optional<Ppu::Shown> Ppu::sampleField(Layer layer, std::uint16_t x,
   const std::uint8_t pixel = fieldPixel(fieldPoint(x, line));
   if (layer == Layer::Bg2) {
     // The second layer: bit 7 is the pixel's priority and the low seven bits its
-    // word, so it has 128 colours and never a composed one.
+    // word, so it has 128 colors and never a composed one.
     const auto word = static_cast<std::uint8_t>(pixel & 0x7Fu);
     if (word == 0u) return std::nullopt;
     return Shown{.word = word, .priority = (pixel & 0x80u) != 0u, .direct = std::nullopt};
   }
   if (pixel == 0u) return std::nullopt;
-  // The field's own layer: the byte is the word, or with $2130 bit 0 the colour
+  // The field's own layer: the byte is the word, or with $2130 bit 0 the color
   // itself — with no tile bits, since this map has no palette field.
   if ((s_.cgwsel & 0x01u) != 0u) {
     return Shown{.word = pixel, .priority = false, .direct = directColour(pixel, 0u)};
@@ -1251,9 +1251,9 @@ std::optional<Ppu::Resolved> Ppu::resolve(Screen screen, std::uint16_t x,
 }
 
 bool Ppu::regionCovers(unsigned region, std::uint16_t x) const noexcept {
-  // Each of $2130's two-bit fields names where it applies against the colour
+  // Each of $2130's two-bit fields names where it applies against the color
   // window: nowhere, outside it, inside it, or everywhere. With neither of the
-  // colour window's own windows enabled nothing is inside, so "outside" covers the
+  // color window's own windows enabled nothing is inside, so "outside" covers the
   // whole line and "inside" covers none of it, which falls out of the resolution
   // rather than being a case of its own.
   switch (region & 0x03u) {
@@ -1271,7 +1271,7 @@ std::uint16_t Ppu::paletteColour(std::uint8_t word) const noexcept {
 }
 
 std::uint16_t Ppu::fixedColour() const noexcept {
-  // $2132 keeps its three channels apart, five bits each, in the order a colour
+  // $2132 keeps its three channels apart, five bits each, in the order a color
   // word holds them.
   return static_cast<std::uint16_t>(s_.fixedRed | (s_.fixedGreen << 5) |
                                     (s_.fixedBlue << 10));
@@ -1322,7 +1322,7 @@ Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
     return Dot{.left = colour, .right = colour, .hires = false};
   }
 
-  // The left half: the sub screen's own front-most pixel, or colour 0 where it shows
+  // The left half: the sub screen's own front-most pixel, or color 0 where it shows
   // nothing, drawn under the decision the main pixel to its left made. The same
   // pixel is the main pixel's addend where its math takes one from the sub screen.
   const std::optional<Resolved> sub = resolve(Screen::Sub, x, in, false);
@@ -1344,14 +1344,14 @@ Ppu::Dot Ppu::dot(std::uint16_t x, const PpuInputs& in) noexcept {
 
 Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half,
                               const std::optional<Resolved>* subScreen) const noexcept {
-  // The front-most pixel of the main screen, and the colour it stands for — unless
-  // $2130's upper region covers this position, which replaces that colour with
+  // The front-most pixel of the main screen, and the color it stands for — unless
+  // $2130's upper region covers this position, which replaces that color with
   // black before any arithmetic and is remembered, because a pixel clipped this way
   // is not halved afterwards.
   //
-  // A pixel read as a colour rather than as an index names no palette word, so it
-  // carries its own colour and is taken in place of one — on either screen, because
-  // direct colour is how the character data was read and not a main-screen effect.
+  // A pixel read as a color rather than as an index names no palette word, so it
+  // carries its own color and is taken in place of one — on either screen, because
+  // direct color is how the character data was read and not a main-screen effect.
   const std::optional<Resolved> main = resolve(Screen::Main, x, in, half);
   const bool clipped = regionCovers((s_.cgwsel >> 6) & 0x03u, x);
   const auto colourOf = [this](const std::optional<Resolved>& shown) {
@@ -1378,10 +1378,10 @@ Ppu::MainPixel Ppu::mainPixel(std::uint16_t x, const PpuInputs& in, bool half,
                      !regionCovers((s_.cgwsel >> 4) & 0x03u, x);
   if (!maths) return MainPixel{.colour = mainColour, .decision = decision};
 
-  // The addend. $2130 bit 1 clear names the fixed colour, and half applies to it as
+  // The addend. $2130 bit 1 clear names the fixed color, and half applies to it as
   // bit 6 asks; set, it names the front-most pixel of the sub screen — and where
-  // the sub screen shows nothing there, its backdrop is the fixed colour and half
-  // is not applied. The two paths reach the same colour by different arithmetic,
+  // the sub screen shows nothing there, its backdrop is the fixed color and half
+  // is not applied. The two paths reach the same color by different arithmetic,
   // which is why the exception is worth stating rather than folding together.
   const bool fromSubScreen = (s_.cgwsel & 0x02u) != 0u;
   std::uint16_t addend = fixedColour();

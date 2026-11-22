@@ -5,8 +5,8 @@
 // Every expectation is computed by hand from the register pages, fullsnes and
 // anomie. A hires line is 512 half-pixels: half-pixel h belongs to full pixel h / 2,
 // the sub screen's pixel is on the even half and the main screen's on the odd one.
-// The tiles are drawn so that each of a tile's sixteen pixels is its own colour, so
-// which screen a half-pixel shows, and which of the tile's pixels, reads as a colour.
+// The tiles are drawn so that each of a tile's sixteen pixels is its own color, so
+// which screen a half-pixel shows, and which of the tile's pixels, reads as a color.
 
 #include <array>
 #include <cstdint>
@@ -50,16 +50,16 @@ constexpr Rgba kBlack{0u, 0u, 0u, 255u};
 // hires line.
 constexpr std::uint16_t kBackdrop = 0x0C41u;  // red 1, green 2, blue 3
 
-// BG1's sixteen-colour characters take palette 1, words 16-31, and word 16 + i is
-// colour i: fifteen colours, every one different.
+// BG1's sixteen-color characters take palette 1, words 16-31, and word 16 + i is
+// color i: fifteen colors, every one different.
 constexpr unsigned kBg1Palette = 1u;
 constexpr unsigned kBg1Words = 16u;
 std::uint16_t bg1Colour(unsigned index) {
   return word((index * 2u) & 0x1Fu, 31u - index * 2u, (index * 5u) & 0x1Fu);
 }
-// BG2's four-colour characters take palette 0: words 1-3.
+// BG2's four-color characters take palette 0: words 1-3.
 constexpr std::array<std::uint16_t, 4> kBg2Colours{0u, 0x7C1Fu, 0x7FE0u, 0x01FFu};
-// Sprite palette 0's colour 1.
+// Sprite palette 0's color 1.
 constexpr unsigned kSpriteWord = 129u;
 constexpr std::uint16_t kSpriteColour = 0x5294u;
 
@@ -245,8 +245,8 @@ void putWideTile(PpuState& ppu, std::uint32_t characters, unsigned planes, unsig
                [&index](unsigned column, unsigned row) { return index(column + 8u, row); });
 }
 
-// The colour index of pixel p of the ruler tile: p + 1 for the first fifteen, and
-// the sixteenth shares colour 1 with the first, since a character has fifteen.
+// The color index of pixel p of the ruler tile: p + 1 for the first fifteen, and
+// the sixteenth shares color 1 with the first, since a character has fifteen.
 unsigned rulerIndex(unsigned p) { return p < 15u ? p + 1u : 1u; }
 
 void putSprite(PpuState& ppu, unsigned index, int x, std::uint8_t y, std::uint8_t tile,
@@ -265,7 +265,7 @@ void parkSprites(PpuState& ppu) {
   for (unsigned index = 0u; index < kSprites; ++index) putSprite(ppu, index, -64, 0u, 0u, 0u);
 }
 
-// A solid 8x8 sprite in the colour at word 129 at x, standing on lines 41-48.
+// A solid 8x8 sprite in the color at word 129 at x, standing on lines 41-48.
 constexpr unsigned kSpriteLine = 41u;
 void spriteAt(PpuState& ppu, int x, unsigned priority) {
   putSprite(ppu, 0u, x, 40u, 0u, static_cast<std::uint8_t>(priority << 4));
@@ -274,7 +274,7 @@ void spriteAt(PpuState& ppu, int x, unsigned priority) {
 
 // A PPU at full brightness in `mode` with the maps and characters placed, nothing on
 // either screen, every vertical offset -1 so a map's first row is on the picture's
-// first line, every sprite parked, and every colour these cases name in the palette.
+// first line, every sprite parked, and every color these cases name in the palette.
 PpuState placed(std::uint8_t mode) {
   PpuState ppu;
   ppu.inidisp = 0x0Fu;
@@ -310,7 +310,7 @@ Rgba ruler(unsigned p) { return out(bg1Colour(rulerIndex(p % 16u))); }
 // ---- the two modes -------------------------------------------------------------
 
 TEST(SnesPpuHiresModes, ModeFiveDrawsBg1AtSixteenColoursAndBg2AtFour) {
-  // BG1's colour 7 in palette 1 is word 1 x 16 + 7 = 23; BG2's colour 3 in palette 0
+  // BG1's color 7 in palette 1 is word 1 x 16 + 7 = 23; BG2's color 3 in palette 0
   // is word 3. BG1 on the main screen shows on the odd halves, BG2 on the sub
   // screen on the even ones.
   PpuState ppu = placed(0x05u);
@@ -359,7 +359,7 @@ TEST(SnesPpuHiresModes, ModeFivesBg3BitNamesNoPlace) {
 }
 
 TEST(SnesPpuHiresModes, ModeSixDrawsBg1AloneAndNoBg2) {
-  // BG1 at sixteen colours on the left eight full pixels and transparent after; BG2
+  // BG1 at sixteen colors on the left eight full pixels and transparent after; BG2
   // on both screens with a solid tile shows nowhere, so the backdrop does.
   PpuState ppu = placed(0x06u);
   ppu.tm = 0x03u;
@@ -383,7 +383,7 @@ struct Place {
   unsigned priority;
 };
 
-// A picture holding exactly the two places, on both screens, and the colour each
+// A picture holding exactly the two places, on both screens, and the color each
 // one shows. Every tile solid, so each half of a full pixel shows the same place.
 PpuState twoPlaces(std::uint8_t mode, Place front, Place back) {
   PpuState ppu = placed(mode);
@@ -437,7 +437,7 @@ TEST(SnesPpuHiresModes, ModeSixsChartHasBg1Alone) {
 }
 
 TEST(SnesPpuHiresModes, DirectColourReachesNeitherMode) {
-  // Neither mode has a 256-colour background, so $2130 bit 0 changes nothing.
+  // Neither mode has a 256-color background, so $2130 bit 0 changes nothing.
   for (const std::uint8_t mode : {std::uint8_t{0x05u}, std::uint8_t{0x06u}}) {
     PpuState ppu = rulerPicture(mode, 0x01u, 0x01u);
     const Picture plain = draw(ppu);
@@ -567,7 +567,7 @@ TEST(SnesPpuHiresTile, TheHorizontalOffsetCountsFullPixels) {
   ASSERT_EQ(one.width, 512u);
   for (unsigned h = 0u; h < 32u; ++h) EXPECT_EQ(one.at(h, 1u), ruler(h + 2u)) << "half-pixel " << h;
 
-  // A second tile beside the ruler, at map column 1, in colour 12 throughout.
+  // A second tile beside the ruler, at map column 1, in color 12 throughout.
   ppu = rulerPicture(0x05u, 0x01u, 0x01u);
   putWideTile(ppu, kBg1Chars, 4u, 4u, [](unsigned, unsigned) { return 12u; });
   putEntry(ppu, kBg1Map, 1u, 0u, entry(4u, kBg1Palette, false));
@@ -595,7 +595,7 @@ TEST(SnesPpuHiresTile, TheVerticalOffsetCountsLines) {
 
 // ---- the width -----------------------------------------------------------------
 
-// Whether every full pixel of line `line` shows its colour on both halves, and what
+// Whether every full pixel of line `line` shows its color on both halves, and what
 // the line holds read that way.
 bool doubled(const Picture& picture, unsigned line, unsigned from, unsigned to) {
   for (unsigned x = from; x < to; ++x) {
@@ -765,8 +765,8 @@ TEST(SnesPpuHiresLine, AnEmptySubScreenShowsColourZeroNotTheFixedColour) {
 
 TEST(SnesPpuHiresLine, TheMainHalfAddsTheFixedColourUnhalvedWhereTheSubScreenIsEmpty) {
   // Math from the sub screen, halved, on BG1, with nothing on the sub screen: the
-  // addend is the fixed colour and no half is taken — the rule a line that is not
-  // hires keeps. Ruler pixel 1 is colour 2, red 4 green 27 blue 10; the fixed colour
+  // addend is the fixed color and no half is taken — the rule a line that is not
+  // hires keeps. Ruler pixel 1 is color 2, red 4 green 27 blue 10; the fixed color
   // adds red 3, green 1 and blue 2.
   PpuState ppu = rulerPicture(0x05u, 0x01u, 0x00u);
   ppu.cgwsel = 0x02u;
@@ -794,7 +794,7 @@ TEST(SnesPpuHiresLine, ForcedBlankAndBrightnessZeroAreBlackOnBothHalves) {
 
 // ---- mode 6's offset table -------------------------------------------------------
 
-// Mode 6's BG1 on both screens: map column C holds a tile of one colour, colour
+// Mode 6's BG1 on both screens: map column C holds a tile of one color, color
 // 1 + C mod 15, and every row alike unless the case says otherwise.
 PpuState columnsPicture(std::uint8_t mode) {
   PpuState ppu = placed(mode);
@@ -868,7 +868,7 @@ TEST(SnesPpuHiresOffsets, ASixteenBySixteenTableGivesBothAxesFromOneWord) {
   // Provisional until band b is read. With BG3's vertical offset 0 the vertical
   // entry's row, eight lines below, is inside the same sixteen-line tile, so entry 0
   // moves BG1 sixteen pixels across and puts its vertical offset at 16: line 1 reads
-  // map row 2, column 3. Map row R column C is colour 1 + (C + 3R) mod 15.
+  // map row 2, column 3. Map row R column C is color 1 + (C + 3R) mod 15.
   PpuState ppu = columnsPicture(0x46u);
   for (unsigned index = 1u; index < 16u; ++index) {
     putWideTile(ppu, kBg1Chars, 4u, 2u * index, [index](unsigned, unsigned) { return index; });
@@ -887,8 +887,8 @@ TEST(SnesPpuHiresOffsets, ASixteenBySixteenTableGivesBothAxesFromOneWord) {
 
 // ---- pseudo-hires ---------------------------------------------------------------
 
-// Mode 1's BG1 on the main screen, character 6 with pixel c in colour 1 + c of
-// palette 1, and BG2 on the sub screen, a solid character in colour 2 of palette 0.
+// Mode 1's BG1 on the main screen, character 6 with pixel c in color 1 + c of
+// palette 1, and BG2 on the sub screen, a solid character in color 2 of palette 0.
 PpuState pseudoPicture(std::uint8_t mode, std::uint8_t setini) {
   PpuState ppu = placed(mode);
   ppu.setini = setini;
@@ -913,7 +913,7 @@ TEST(SnesPpuPseudoHires, Bit3SplitsAModeOneLineBetweenTheScreens) {
 }
 
 TEST(SnesPpuPseudoHires, Bit3SplitsAModeZeroLine) {
-  // Mode 0: BG1's colour 3 in palette 4 is word 4 x 4 + 3 = 19; BG2's colour 1 in
+  // Mode 0: BG1's color 3 in palette 4 is word 4 x 4 + 3 = 19; BG2's color 1 in
   // palette 0 is word 32 + 1 = 33.
   PpuState ppu = placed(0x00u);
   ppu.setini = 0x08u;
@@ -993,7 +993,7 @@ TEST(SnesPpuPseudoHires, AnEmptySubScreenShowsColourZeroOnEveryLeftHalf) {
   }
 }
 
-// ---- colour math on a sub half-pixel -----------------------------------------------
+// ---- color math on a sub half-pixel -----------------------------------------------
 
 // Mode 5 with BG1 on the main screen alone and BG2 on the sub screen alone. BG1's
 // tile shows kEvenMain on full pixels whose index in the tile is even and kOddMain
@@ -1107,8 +1107,8 @@ TEST(SnesPpuHiresMath, NoMathOnTheMainPixelMeansNoneOnTheSubHalfAfterIt) {
 
 TEST(SnesPpuHiresMath, TheSubHalfIsHalvedWhereTheMainPixelToItsLeftWas) {
   // Provisional until band d is read. Where the sub screen is empty the main pixel
-  // takes the fixed colour and no half, so the sub half after it — colour 0 there —
-  // takes the fixed colour and no half too.
+  // takes the fixed color and no half, so the sub half after it — color 0 there —
+  // takes the fixed color and no half too.
   PpuState ppu = mathPicture(kEvenMain, kOddMain, kSub);
   setFixed(ppu);
   ppu.cgwsel = 0x02u;
@@ -1128,7 +1128,7 @@ TEST(SnesPpuHiresMath, TheSubHalfIsHalvedWhereTheMainPixelToItsLeftWas) {
 }
 
 TEST(SnesPpuHiresMath, TheSubHalfTakesTheOperationOfTheMainPixelToItsLeft) {
-  // Adding the fixed colour until $2131 bit 7 is written part-way along line 50,
+  // Adding the fixed color until $2131 bit 7 is written part-way along line 50,
   // subtracting it after. The first main pixel that subtracts has an adding one to
   // its left, so the sub half beside it still adds; the sub half after it subtracts.
   PpuState ppu = mathPicture(kEvenMain, kOddMain, kSub);
@@ -1210,9 +1210,9 @@ TEST(SnesPpuHiresMath, ARestoredSnapshotDrawsTheNextSubHalfAsTheUnbrokenLine) {
   }
 }
 
-// ---- the colour window on a sub half-pixel ---------------------------------------
+// ---- the color window on a sub half-pixel ---------------------------------------
 
-// Window 1 is full pixel 8 alone, and it is the colour window.
+// Window 1 is full pixel 8 alone, and it is the color window.
 void colourWindowAtEight(PpuState& ppu) {
   ppu.wh0 = 8u;
   ppu.wh1 = 8u;
@@ -1275,7 +1275,7 @@ TEST(SnesPpuHiresWindow, ColumnZerosSubHalfTakesNoMathAndNoBlack) {
 
 TEST(SnesPpuHiresWindow, ALayerMaskActsAtTheSubHalfsOwnFullPixel) {
   // BG2 masked on the sub screen by window 1 at full pixel 8: its sub half shows
-  // colour 0, the ones either side BG2.
+  // color 0, the ones either side BG2.
   PpuState ppu = mathPicture(kEvenMain, kOddMain, kSub);
   ppu.wh0 = 8u;
   ppu.wh1 = 8u;
@@ -1424,7 +1424,7 @@ TEST(SnesPpuInterlace, TheVerticalOffsetCountsHalfLines) {
 }
 
 TEST(SnesPpuInterlace, ATileCoversFourLinesOfAFieldAndAScreenOfMapOneHundredAndTwentyEight) {
-  // Map row R holds the ruler where R is even and a tile of colour 12 where it is
+  // Map row R holds the ruler where R is even and a tile of color 12 where it is
   // odd. Eight half-lines a row are four lines of a field, and thirty-two rows are
   // 256 half-lines, so line 129 is row 0 again.
   PpuState ppu = rowedPicture(0x05u, 0x01u, 0x3FEu);
@@ -1510,7 +1510,7 @@ TEST(SnesPpuInterlace, TheTallerInterlacedPictureIsTwoHundredAndThirtyNineLinesA
 
 // ---- sprites at half height -----------------------------------------------------
 
-// A 16x16 sprite at (40, y) whose row r is colour 1 + r mod 15 of sprite palette 0,
+// A 16x16 sprite at (40, y) whose row r is color 1 + r mod 15 of sprite palette 0,
 // on the main screen alone, in mode 1.
 PpuState rowedSprite(std::uint8_t setini, std::uint8_t y, bool flip) {
   PpuState ppu = placed(0x01u);
@@ -1775,7 +1775,7 @@ TEST(PpuHiresCartridges, AModeFiveMosaicCartridgeDrawsBlocksCountedInHalfPixels)
   // What the cartridge does was learned by running it: it settles in mode 5 with BG1
   // on both screens, interlaced, mosaic enabled on BG1, and R steps the size up every
   // eight frames. After a second of R, in the brightest frame, every block of
-  // 2 x (size + 1) half-pixels counted from each line's first is one colour.
+  // 2 x (size + 1) half-pixels counted from each line's first is one color.
   std::vector<std::uint8_t> rom;
   bool ran = false;
   loadRom("MosaicMode5.sfc", rom, ran);
@@ -1810,7 +1810,7 @@ TEST(PpuHiresCartridges, AModeFiveMosaicCartridgeDrawsBlocksCountedInHalfPixels)
   }
   EXPECT_GT(blocks, 0u);
   EXPECT_EQ(uneven, 0u) << "of " << blocks << " blocks of " << block << " half-pixels";
-  EXPECT_GT(colours.size(), 1u) << "the frame is one flat colour";
+  EXPECT_GT(colours.size(), 1u) << "the frame is one flat color";
 }
 
 TEST(PpuHiresCartridges, AHiresDemoReachesModeFiveAndDrawsInHalfPixels) {
@@ -1844,7 +1844,7 @@ TEST(PpuHiresCartridges, APseudoHiresTransferImageDrawsInHalfPixels) {
   EXPECT_TRUE(watch.halvesDiffer);
 }
 
-// The three colour-blend images, learned by running them: mode 3, BG1 on the main
+// The three color-blend images, learned by running them: mode 3, BG1 on the main
 // screen and BG2 on the sub screen, the sub screen added to BG1, and $2133 written
 // only with 0 — so no line is drawn in half-pixels. The sum is what they show: the
 // last frame drawn again from the same state with $2131 cleared is a different

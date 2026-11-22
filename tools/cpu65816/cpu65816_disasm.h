@@ -252,9 +252,9 @@ enum class RegisterClass : std::uint8_t {
   Vram,        // the video RAM port: address, increment mode, data
   Cgram,       // the palette port: address and data
   Oam,         // the sprite table port, and sprite size and character base
-  Mode7,       // the Mode 7 matrix, centre and settings
+  Mode7,       // the Mode 7 matrix, center and settings
   Window,      // the two windows: positions, per-layer enable, mask logic
-  ColorMath,   // colour addition and subtraction, and the fixed colour
+  ColorMath,   // color addition and subtraction, and the fixed color
   Apu,         // the four ports the CPU talks to the audio unit through
   WramPort,    // the work-RAM port: address and data
   Joypad,      // the controller ports, both serial and auto-read

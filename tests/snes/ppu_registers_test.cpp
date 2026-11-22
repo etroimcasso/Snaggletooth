@@ -536,7 +536,7 @@ TEST(SnesPpuRegisters, AnInidispWriteWhoseBusByteIsTheValueDrawsNoOddDot) {
   EXPECT_EQ(blackDots(frame, 99u), 0u);
 }
 
-// ---- the fixed colour and the plain registers ------------------------------------------
+// ---- the fixed color and the plain registers ------------------------------------------
 
 TEST(SnesPpuRegisters, TheFixedColourTakesEachChannelItsWriteSelects) {
   Snes m = run(join({store(0x32u, 0x3Fu), store(0x32u, 0x4Au), store(0x32u, 0x95u)}));

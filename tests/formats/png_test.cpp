@@ -1,6 +1,6 @@
 // The indexed PNG face: an image round-trips through encode and decode at each
 // bit depth keeping its indexes and palette, and a PNG that is not an indexed
-// image is refused with a message naming the colour type.
+// image is refused with a message naming the color type.
 
 #include <cstdint>
 #include <vector>
@@ -12,7 +12,7 @@
 namespace snaggletooth::formats {
 namespace {
 
-// A ramp of `count` opaque colours, black to white, as RGBA quadruples.
+// A ramp of `count` opaque colors, black to white, as RGBA quadruples.
 std::vector<std::uint8_t> ramp(unsigned count) {
   std::vector<std::uint8_t> out;
   for (unsigned i = 0; i < count; ++i) {
@@ -83,7 +83,7 @@ TEST(Png, TwoEntriesOfOneColourKeepTheirOwnIndexes) {
 }
 
 TEST(Png, TruecolourIsRefused) {
-  // Force a real RGB PNG: with auto_convert on, lodepng would optimise a low-colour
+  // Force a real RGB PNG: with auto_convert on, lodepng would optimize a low-color
   // image down to a palette, which is exactly what this test must not produce.
   std::vector<unsigned char> rgb(4 * 4 * 3, 128);
   lodepng::State state;

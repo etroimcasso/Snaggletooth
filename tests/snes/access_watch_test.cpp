@@ -311,7 +311,7 @@ TEST(SnesAccessWatch, ATwoRegisterTransferTellsEachByteItsPositionInThePattern) 
 
 TEST(SnesAccessWatch, AnHdmaAccessIsToldWithSourceHdmaAndATableReadCarriesZero) {
   // Channel 0 delivers a one-line direct table to $2100; arming the table's count
-  // byte hears the HDMA engine's read at initialisation, cycle 0 for a count.
+  // byte hears the HDMA engine's read at initialization, cycle 0 for a count.
   Snes m = programMachine({kNop, kBra, 0xFDu});  // NOP ; BRA back
   SnesState s = m.state();
   s.hdmaen = 0x01u;

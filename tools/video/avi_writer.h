@@ -10,7 +10,7 @@
 // A run can change its picture's shape — a frame drawn in half-pixels is twice as
 // wide, the taller picture fifteen lines taller. Every picture is written at its own
 // shape as it arrives; a recording that saw more than one shape is laid out again as
-// it closes, at the widest and tallest it saw, every other picture centred in black.
+// it closes, at the widest and tallest it saw, every other picture centered in black.
 //
 // The pictures are stored exactly as the machine drove them — blue, green and red a
 // byte each, with no encoder between — so a recording is an oracle to set beside a
@@ -57,7 +57,7 @@ class AviRecording {
 
   // Writes the index and the sizes the whole recording decides, and closes the file.
   // A recording whose pictures were not all the shape it opened with is then written
-  // again at the largest width and height among them, each smaller picture centred —
+  // again at the largest width and height among them, each smaller picture centered —
   // the spare columns split with the odd one on the right, the spare lines with the
   // odd one below — and the result takes the file's name. A recording of one shape is
   // left exactly as it was written. Doing it twice does nothing the second time; the

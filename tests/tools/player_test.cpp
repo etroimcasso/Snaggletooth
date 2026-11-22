@@ -266,7 +266,7 @@ TEST(PlayerPads, APinnedPortIsTakenBeforeAnAutoOne) {
 // converts them leaves the build and the repository disagreeing about nothing, on
 // one platform, over a difference no reader of the configuration can observe.
 // `.gitattributes` asks for the file verbatim so a fresh clone is consistent, but
-// this case does not lean on that having been honoured.
+// this case does not lean on that having been honored.
 TEST(PlayerConfig, TheDefaultConfigParsesAndIsTheEmbeddedText) {
   const auto lines = [](std::string text) {
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
@@ -745,7 +745,7 @@ TEST(PlayerDisplay, TheWindowIsTheFramesOwnPixelsTimesTheScale) {
   EXPECT_EQ(windowSize(512u, 224u, 5u), (WindowSize{.width = 2560u, .height = 1120u}));
 
   // The factor is the scale in both axes for every shape, whether the scale is odd or even,
-  // so a nearest-neighbour present lands each source pixel on a whole block of output pixels.
+  // so a nearest-neighbor present lands each source pixel on a whole block of output pixels.
   for (const unsigned scale : {2u, 3u, 4u, 5u, 6u}) {
     for (const auto& [w, h] : {std::pair{256u, 224u}, std::pair{256u, 448u}, std::pair{512u, 448u}}) {
       const WindowSize window = windowSize(w, h, scale);

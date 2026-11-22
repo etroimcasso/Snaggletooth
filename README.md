@@ -113,11 +113,11 @@ Beyond the per-cycle vector suites, the machine runs self-checking SPC test ROMs
 
 | Sub-test still failing | What it exercises |
 |---|---|
-| `Random/envelope` | envelope rates and phase transitions under randomised writes |
+| `Random/envelope` | envelope rates and phase transitions under randomized writes |
 | `Random/kon pitch` | eight voices keyed together and re-keyed at random, read back through the echo ring |
 | `Random/brr while playing` | BRR sample content decoded while voices are already sounding |
 
-All three drive long randomised sequences and compare a single checksum at the end, so each run reports only whether the whole sequence matched. [s-dsp-behavior.md](docs/s-dsp-behavior.md) records what the sub-tests constrain and what they leave open; the three above turn on a rare coincidence — a voice re-keyed at the instant its own output crosses zero — which ordinary music does not reach, so a rendered comparison cannot arbitrate them either.
+All three drive long randomized sequences and compare a single checksum at the end, so each run reports only whether the whole sequence matched. [s-dsp-behavior.md](docs/s-dsp-behavior.md) records what the sub-tests constrain and what they leave open; the three above turn on a rare coincidence — a voice re-keyed at the instant its own output crosses zero — which ordinary music does not reach, so a rendered comparison cannot arbitrate them either.
 
 The suite is built and run on macOS, Linux and Windows, on x64 and ARM64, before any change reaches `main`.
 

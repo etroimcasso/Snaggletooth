@@ -1,8 +1,8 @@
 #pragma once
 
-// A palette as text. CGRAM holds one 15-bit colour per word — five bits each of
+// A palette as text. CGRAM holds one 15-bit color per word — five bits each of
 // blue, green and red, low to high — so the text writes each word verbatim as a
-// hexadecimal number and, as a comment a person can read, its colour at eight
+// hexadecimal number and, as a comment a person can read, its color at eight
 // bits a channel. The number is the data; the comment is not read back, so a
 // person may recolour by editing the word. A run of an odd number of bytes ends
 // with its lone byte.

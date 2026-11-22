@@ -2494,7 +2494,7 @@ TEST(RomLandedFiles, ATileSheetCarriesItsDepthAndTheRunsPalette) {
   EXPECT_EQ(fourBit->depth, 4u);
   EXPECT_EQ(twoBit->depth, 2u);
   EXPECT_EQ(sprites->depth, 4u);
-  // Palette 0 of the depth, as the run held it: sixteen greys, five bits
+  // Palette 0 of the depth, as the run held it: sixteen grays, five bits
   // spread to eight, the top bit of entry five ignored.
   ASSERT_EQ(fourBit->palette.size(), 16u * 4u);
   for (std::size_t i = 0; i < 16; ++i) {

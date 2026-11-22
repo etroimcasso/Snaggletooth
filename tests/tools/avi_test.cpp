@@ -86,7 +86,7 @@ constexpr std::size_t kMovieTag = 220u;
 constexpr std::size_t kHeaderBytes = 224u;
 
 // A picture whose pixel at (x, y) is (x, y, x + y) with an opaque fourth byte, so
-// every position is its own colour and a row read back out names itself.
+// every position is its own color and a row read back out names itself.
 struct Pixels {
   unsigned width = 0;
   unsigned height = 0;
@@ -308,7 +308,7 @@ TEST_F(Recording, ARecordingNobodyFinishesIsFinishedWhenItGoesAway) {
   return out;
 }
 
-// `picture` centred in a black picture `width` by `height`, `left` and `top` in.
+// `picture` centered in a black picture `width` by `height`, `left` and `top` in.
 [[nodiscard]] std::vector<std::uint8_t> boxed(const Pixels& picture, unsigned width, unsigned height,
                                               unsigned left, unsigned top) {
   std::vector<std::uint8_t> out(static_cast<std::size_t>(width) * height * 4u, 0u);

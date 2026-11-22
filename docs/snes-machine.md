@@ -1,21 +1,8 @@
 # The SNES machine
 
-The `Snes` class wires the 5A22's 65816 core to the console's memory: the cartridge under its map, the
-128 KB of work RAM, and the APU across the communication ports. Where the [65816 core](65816-cpu.md)
-runs over any bus you hand it, the machine *is* the bus — it maps a 24-bit address the way the
-hardware does, prices every cycle by the region it reaches, and paces the [APU](apu-machine.md)
-against the CPU on its own clock.
+The `Snes` class wires the 5A22's 65816 core to the console's memory: the cartridge under its map, the 128 KB of work RAM, and the APU across the communication ports. Where the [65816 core](65816-cpu.md) runs over any bus you hand it, the machine *is* the bus — it maps a 24-bit address the way the hardware does, prices every cycle by the region it reaches, and paces the [APU](apu-machine.md) against the CPU on its own clock.
 
-The machine is the system minus the picture. It does not draw. What it has is a complete memory map, an
-exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ, the DMA and HDMA
-engines, the hardware multiply/divide unit, the two controller ports, the [PPU's](ppu.md) complete
-register file and the three video memories it fills through its ports, the picture it draws from
-them, and the audio machine running underneath — enough to load a cartridge, run its code under
-interrupts, play it, watch it and hear it. A host that wants to watch the bus rather than the state
-sets an [observer](#the-bus-observer), and is told every access in order; one that wants the picture
-sets a frame observer ([ppu.md §The picture](ppu.md#the-picture)) and is handed every frame the PPU
-finishes; one that draws the picture itself sets a [timeline observer](#the-timeline-observer) and is
-handed each frame as what it is drawn from.
+The machine is the system minus the picture. It does not draw. What it has is a complete memory map, an exact clock, the video counters with their vertical-blank NMI and H/V-timer IRQ, the DMA and HDMA engines, the hardware multiply/divide unit, the two controller ports, the [PPU's](ppu.md) complete register file and the three video memories it fills through its ports, the picture it draws from them, and the audio machine running underneath — enough to load a cartridge, run its code under interrupts, play it, watch it and hear it. A host that wants to watch the bus rather than the state sets an [observer](#the-bus-observer), and is told every access in order; one that wants the picture sets a frame observer ([ppu.md §The picture](ppu.md#the-picture)) and is handed every frame the PPU finishes; one that draws the picture itself sets a [timeline observer](#the-timeline-observer) and is handed each frame as what it is drawn from.
 
 ## Contents
 
@@ -76,8 +63,7 @@ handed each frame as what it is drawn from.
 
 ## Building a machine
 
-A machine is built from a value: the cartridge image and the console clock rate. The image is copied
-in, so the span it comes from need not outlive the call.
+A machine is built from a value: the cartridge image and the console clock rate. The image is copied in, so the span it comes from need not outlive the call.
 
 ```cpp
 #include "snaggletooth/snes/snes.h"
@@ -87,30 +73,13 @@ std::vector<std::uint8_t> cartridge = /* a cartridge image */;
 Snes machine(SnesConfig{.rom = cartridge, .region = Region::Ntsc});
 ```
 
-Construction seeds the power-on state: work RAM cleared, the APU in its post-boot ready state, and the
-CPU in emulation mode with the interrupt-disable flag set and its program counter at the cartridge's
-reset vector (the 16-bit word at `$00:$FFFC`). The machine is ready to run its first instruction.
+Construction seeds the power-on state: work RAM cleared, the APU in its post-boot ready state, and the CPU in emulation mode with the interrupt-disable flag set and its program counter at the cartridge's reset vector (the 16-bit word at `$00:$FFFC`). The machine is ready to run its first instruction.
 
-`Region::Ntsc` and `Region::Pal` select the console clock rate. The choice is fixed for the machine's
-life, like the cartridge, and `region()` reports it back.
+`Region::Ntsc` and `Region::Pal` select the console clock rate. The choice is fixed for the machine's life, like the cartridge, and `region()` reports it back.
 
-`SnesConfig::iplStub` seeds the APU's upload stub, on by default. With it on, the APU boots the small
-program that runs the upload handshake, the way the console does; with it off, the APU boots straight
-into its ready state and a host loads a program into audio RAM directly. See
-[The audio upload stub](#the-audio-upload-stub).
+`SnesConfig::iplStub` seeds the APU's upload stub, on by default. With it on, the APU boots the small program that runs the upload handshake, the way the console does; with it off, the APU boots straight into its ready state and a host loads a program into audio RAM directly. See [The audio upload stub](#the-audio-upload-stub).
 
-`SnesConfig::apuThread` runs the audio machine's cycles on a thread the machine owns, off by default.
-With it off they run inside the console's cycles on the calling thread; the bytes are the same either
-way. See [The audio thread](#the-audio-thread). `SnesConfig::ppuThread` draws the picture on a second
-thread the machine owns the same way, off by default; see [The picture thread](#the-picture-thread).
-The picture thread is the one to turn on first; the audio thread joins it only where the picture thread
-alone does not hold the console's frame rate. `SnesConfig::ppuVerify`, off by default, makes the machine
-draw every picture line and check it against the frame before, which it otherwise takes a line from
-when nothing the line reads has changed; see
-[A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes).
-`SnesConfig::gpuPpu`, null by default, takes a GPU device the host implements, and the machine then
-draws every frame on it with the core's own compute shader, its own option beside the two threads;
-see [gpu-ppu.md](gpu-ppu.md).
+`SnesConfig::apuThread` runs the audio machine's cycles on a thread the machine owns, off by default. With it off they run inside the console's cycles on the calling thread; the bytes are the same either way. See [The audio thread](#the-audio-thread). `SnesConfig::ppuThread` draws the picture on a second thread the machine owns the same way, off by default; see [The picture thread](#the-picture-thread). The picture thread is the one to turn on first; the audio thread joins it only where the picture thread alone does not hold the console's frame rate. `SnesConfig::ppuVerify`, off by default, makes the machine draw every picture line and check it against the frame before, which it otherwise takes a line from when nothing the line reads has changed; see [A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes). `SnesConfig::gpuPpu`, null by default, takes a GPU device the host implements, and the machine then draws every frame on it with the core's own compute shader, its own option beside the two threads; see [gpu-ppu.md](gpu-ppu.md).
 
 ## The memory map
 
@@ -130,95 +99,40 @@ The bus maps a 24-bit address the way the console does:
 | `$20-$3F` / `$A0-$BF:$6000-$7FFF` | save RAM, under HiROM |
 | `$80-$BF:$6000-$7FFF` | save RAM, under ExHiROM |
 
-A read of an address the machine does not map returns the last value the data bus carried — the open-bus
-behavior real hardware shows. The cartridge is read-only: a write to a ROM address changes nothing.
+A read of an address the machine does not map returns the last value the data bus carried — the open-bus behavior real hardware shows. The cartridge is read-only: a write to a ROM address changes nothing.
 
-The machine reads the bus through a table of its 2048 pages, one entry per 8 KB, built once from the
-[cartridge functions](snes-cartridge.md) when the machine is constructed. Every window in the table
-above is whole pages, so an entry says which memory a page's bytes are in and where its first byte
-lands, and an access finds its byte with one load of the entry and an add. The entry also carries what
-an access to the page costs in master cycles, at either [MEMSEL](#memory-speed) setting, so the access
-reads its price from the same entry; the one page with two prices, a system bank's `$4000-$5FFF`, whose
-first 512 bytes are the manual joypad ports, is priced by the offset at the access. `peek`, `poke`, `physical`
-and the access watch read the same table, so every path agrees on what an address reaches. An image
-whose size is not a multiple of 8 KB carries a chip smaller than a page, whose repeat can begin inside
-one; its pages are found through `romOffset` at each access instead, so every image reads exactly. The
-save's size is not in the table and is applied at each access.
+The machine reads the bus through a table of its 2048 pages, one entry per 8 KB, built once from the [cartridge functions](snes-cartridge.md) when the machine is constructed. Every window in the table above is whole pages, so an entry says which memory a page's bytes are in and where its first byte lands, and an access finds its byte with one load of the entry and an add. The entry also carries what an access to the page costs in master cycles, at either [MEMSEL](#memory-speed) setting, so the access reads its price from the same entry; the one page with two prices, a system bank's `$4000-$5FFF`, whose first 512 bytes are the manual joypad ports, is priced by the offset at the access. `peek`, `poke`, `physical` and the access watch read the same table, so every path agrees on what an address reaches. An image whose size is not a multiple of 8 KB carries a chip smaller than a page, whose repeat can begin inside one; its pages are found through `romOffset` at each access instead, so every image reads exactly. The save's size is not in the table and is applied at each access.
 
 ### How a cartridge lays across the bus
 
-The three layouts differ in how much of a bank the cartridge gets and how much image the bus can
-reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end; the board leaves
-the cartridge's A15 unconnected, so a cartridge bank's lower half reads what its upper half reads.
-**HiROM** gives
-each of `$40-$7D` and `$C0-$FF` a whole 64 KB and lays those end to end, reaching the same bytes
-through the matching system bank's upper half. **ExHiROM** is HiROM with a second 4 MB: banks
-`$80-$FF` serve the first 4 MB as HiROM does and banks `$00-$7D` serve the second. The bus reads the
-image through the [cartridge functions](snes-cartridge.md), which is where each map is spelled out
-address by address.
+The three layouts differ in how much of a bank the cartridge gets and how much image the bus can reach. **LoROM** gives each bank its upper 32 KB and lays those halves end to end; the board leaves the cartridge's A15 unconnected, so a cartridge bank's lower half reads what its upper half reads. **HiROM** gives each of `$40-$7D` and `$C0-$FF` a whole 64 KB and lays those end to end, reaching the same bytes through the matching system bank's upper half. **ExHiROM** is HiROM with a second 4 MB: banks `$80-$FF` serve the first 4 MB as HiROM does and banks `$00-$7D` serve the second. The bus reads the image through the [cartridge functions](snes-cartridge.md), which is where each map is spelled out address by address.
 
-`SnesConfig::map` chooses among them. Left absent it is read from the image's own header, which is
-what lets any cartridge boot without the caller knowing its layout; set it to run an image whose
-header is wrong, absent, or not a header at all.
+`SnesConfig::map` chooses among them. Left absent it is read from the image's own header, which is what lets any cartridge boot without the caller knowing its layout; set it to run an image whose header is wrong, absent, or not a header at all.
 
 ```cpp
 Snes machine(SnesConfig{.rom = image});                              // the header decides
 Snes forced(SnesConfig{.rom = image, .map = CartridgeMap::HiRom});   // the caller decides
 ```
 
-`detectCartridgeMap` answers the same question on its own, without building a machine, and
-`parseCartridgeHeader` reads the whole header.
+`detectCartridgeMap` answers the same question on its own, without building a machine, and `parseCartridgeHeader` reads the whole header.
 
-**An image repeats across the window it does not fill.** A cartridge carries one ROM chip per power of
-two in its size, wired one after another, and the board leaves the address lines above a chip
-undecoded — so an address past a chip reads that chip again rather than running into the next one. A
-512 KB image is one chip and repeats whole. A 3 MB image is a 2 MB chip and a 1 MB chip, and the
-megabyte above it repeats **the second** chip, not the image.
+**An image repeats across the window it does not fill.** A cartridge carries one ROM chip per power of two in its size, wired one after another, and the board leaves the address lines above a chip undecoded — so an address past a chip reads that chip again rather than running into the next one. A 512 KB image is one chip and repeats whole. A 3 MB image is a 2 MB chip and a 1 MB chip, and the megabyte above it repeats **the second** chip, not the image.
 
 ### Save RAM
 
-`SnesState::sram` is the cartridge's save, as large as its header declares and empty when it declares
-none. It is machine state rather than configuration: a snapshot carries the save and `restore()` puts
-it back, so a game persists one by reading it out. The save travels in [the state's bytes](#the-state-as-bytes)
-too, last. Its size is the cartridge's, fixed for the machine's life, and `restore()` refuses a state
-whose save is another size.
+`SnesState::sram` is the cartridge's save, as large as its header declares and empty when it declares none. It is machine state rather than configuration: a snapshot carries the save and `restore()` puts it back, so a game persists one by reading it out. The save travels in [the state's bytes](#the-state-as-bytes) too, last. Its size is the cartridge's, fixed for the machine's life, and `restore()` refuses a state whose save is another size.
 
-The size comes from the header, and it matters that it is exact — an address past the end of the save
-repeats it from the start, and a game that writes twice and reads back once is measuring how much save
-RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `declaredSaveRamBytes`
-answers what an image asks for without building a machine. Each map keeps the save in its own window,
-listed in the table above and described in [the cartridge page](snes-cartridge.md#save-ram).
+The size comes from the header, and it matters that it is exact — an address past the end of the save repeats it from the start, and a game that writes twice and reads back once is measuring how much save RAM the cartridge really has. `SnesConfig::saveRamBytes` overrides the header; `declaredSaveRamBytes` answers what an image asks for without building a machine. Each map keeps the save in its own window, listed in the table above and described in [the cartridge page](snes-cartridge.md#save-ram).
 
-The machine is built on the [board](snes-cartridge.md#the-board) the header declares — `cartridgeBoard`,
-with `SnesConfig::map` and `SnesConfig::saveRamBytes` standing in for the header's map and save when
-they are set — and reads what the board decodes in a save window and in a cartridge bank's lower half
-through `cartridgeRegion` and `romOffset`, so the machine and every tool built over the same functions
-answer alike. Two rules follow from the board and are the chip's, not the machine's own.
+The machine is built on the [board](snes-cartridge.md#the-board) the header declares — `cartridgeBoard`, with `SnesConfig::map` and `SnesConfig::saveRamBytes` standing in for the header's map and save when they are set — and reads what the board decodes in a save window and in a cartridge bank's lower half through `cartridgeRegion` and `romOffset`, so the machine and every tool built over the same functions answer alike. Two rules follow from the board and are the chip's, not the machine's own.
 
-A LoROM cartridge whose header declares a coprocessor is on that chip's board, which gives lower
-halves of its cartridge banks to the chip — `$60-$6F` to a DSP on the 2 MB boards, and to an ST010's
-ports and RAM. The machine carries no coprocessor, so on such a cartridge every cartridge bank's lower
-half reads open bus, as an absent chip's ports do, and the image is read through the upper halves
-alone.
+A LoROM cartridge whose header declares a coprocessor is on that chip's board, which gives lower halves of its cartridge banks to the chip — `$60-$6F` to a DSP on the 2 MB boards, and to an ST010's ports and RAM. The machine carries no coprocessor, so on such a cartridge every cartridge bank's lower half reads open bus, as an absent chip's ports do, and the image is read through the upper halves alone.
 
-A cartridge with no save answers in the window as its board does. HiROM's and ExHiROM's windows sit in
-the expansion area and read open bus. LoROM's sits in cartridge banks, where a board with no save RAM
-decodes nothing, so the window's lower halves repeat their upper halves like every other cartridge
-bank's: on a LoROM cartridge with no save, `$70:1234` reads the byte at `$70:9234`, and a store there
-changes nothing. Whether there is a save is settled when the machine is built, by the header or by
-`SnesConfig::saveRamBytes`, and no restore changes it.
+A cartridge with no save answers in the window as its board does. HiROM's and ExHiROM's windows sit in the expansion area and read open bus. LoROM's sits in cartridge banks, where a board with no save RAM decodes nothing, so the window's lower halves repeat their upper halves like every other cartridge bank's: on a LoROM cartridge with no save, `$70:1234` reads the byte at `$70:9234`, and a store there changes nothing. Whether there is a save is settled when the machine is built, by the header or by `SnesConfig::saveRamBytes`, and no restore changes it.
 
-Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through
-the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address
-in `$2181` (low), `$2182` (middle), and `$2183` (bit 16); each read or write of `$2180` moves a byte at
-that address and steps it, so a block of work RAM streams through one register.
+Work RAM is reachable three ways that all name the same 128 KB: directly in banks `$7E-$7F`, through the low-page mirror of any system bank, and through the data port. The data port holds a 17-bit address in `$2181` (low), `$2182` (middle), and `$2183` (bit 16); each read or write of `$2180` moves a byte at that address and steps it, so a block of work RAM streams through one register.
 
-Work RAM is one chip on both buses, and a DMA or HDMA byte that names it on both — a work-RAM address
-on the A bus and `$2180-$2183` on the B bus — is not copied. The port's side of the byte is open bus:
-from work RAM into `$2180` nothing is written, from `$2180` into work RAM the byte written is the one
-the data bus already held, and the port's address steps in neither case. From work RAM into
-`$2181-$2183` the address registers keep what they had. A transfer into the port from the cartridge, or
-out of it into save RAM, copies as any other does.
+Work RAM is one chip on both buses, and a DMA or HDMA byte that names it on both — a work-RAM address on the A bus and `$2180-$2183` on the B bus — is not copied. The port's side of the byte is open bus: from work RAM into `$2180` nothing is written, from `$2180` into work RAM the byte written is the one the data bus already held, and the port's address steps in neither case. From work RAM into `$2181-$2183` the address registers keep what they had. A transfer into the port from the cartridge, or out of it into save RAM, copies as any other does.
 
 ```cpp
 // Point the port at $00100 and stream two bytes into work RAM.
@@ -227,8 +141,7 @@ out of it into save RAM, copies as any other does.
 
 ## Stepping and running
 
-The machine advances two ways. `step()` runs one whole CPU instruction and returns the master cycles
-it took:
+The machine advances two ways. `step()` runs one whole CPU instruction and returns the master cycles it took:
 
 ```cpp
 std::uint32_t cost = machine.step();  // e.g. 16 for an immediate load from slow ROM
@@ -240,13 +153,7 @@ std::uint32_t cost = machine.step();  // e.g. 16 for an immediate load from slow
 machine.run(357'368);  // one NTSC frame's worth of master cycles (262 lines of 1364)
 ```
 
-A cycle is priced by its region, so a budget rarely lands on a cycle boundary. When it falls
-part-way through a cycle, the machine finishes that cycle and carries the small overshoot into the
-next call — so `run(a)` followed by `run(b)` advances the machine exactly as `run(a + b)` would,
-and `run(0)` does nothing. `step()` always finishes on an instruction boundary; called after a `run()`
-stopped mid-instruction, it completes the instruction in progress rather than starting a new one. A
-host that runs a budget at a time and still wants every boundary `step()` would have returned at sets
-an [instruction observer](#the-instruction-observer).
+A cycle is priced by its region, so a budget rarely lands on a cycle boundary. When it falls part-way through a cycle, the machine finishes that cycle and carries the small overshoot into the next call — so `run(a)` followed by `run(b)` advances the machine exactly as `run(a + b)` would, and `run(0)` does nothing. `step()` always finishes on an instruction boundary; called after a `run()` stopped mid-instruction, it completes the instruction in progress rather than starting a new one. A host that runs a budget at a time and still wants every boundary `step()` would have returned at sets an [instruction observer](#the-instruction-observer).
 
 ## The reset line
 
@@ -256,11 +163,7 @@ an [instruction observer](#the-instruction-observer).
 machine.reset();
 ```
 
-The machine starts again where construction starts it in time — the CPU about to fetch the first opcode
-at the cartridge's reset vector, the beam at H = 0, V = 0 with the frame parity clear, which is where
-the console starts after the line is released, and the master counter at zero, since every grid the
-console counts "since reset" counts from there. What a reset initialises takes its value, and
-everything else keeps what it held:
+The machine starts again where construction starts it in time — the CPU about to fetch the first opcode at the cartridge's reset vector, the beam at H = 0, V = 0 with the frame parity clear, which is where the console starts after the line is released, and the master counter at zero, since every grid the console counts "since reset" counts from there. What a reset initializes takes its value, and everything else keeps what it held:
 
 | | After `reset()` |
 |---|---|
@@ -273,20 +176,13 @@ everything else keeps what it held:
 | the PPU | forced blank, at the brightness it had; every other register and the three video memories as they were |
 | the audio machine | `Apu::reset()` ([apu-machine.md](apu-machine.md)): the timer outputs clear, the targets, the divider and RAM above zero page kept — then the boot program again, when the machine was built to run one. The program is fetched from the image mapped over `$FFC0-$FFFF`; the RAM beneath the window is not rewritten. |
 
-A transfer, a multiplication or division, an auto-read or a counter latch in progress is abandoned, and
-the picture the beam was part-way down is never delivered: the next frame the frame observer is handed
-is the first whole one drawn afterwards, black until the program lifts the forced blank. The observers
-stay set.
+A transfer, a multiplication or division, an auto-read or a counter latch in progress is abandoned, and the picture the beam was part-way down is never delivered: the next frame the frame observer is handed is the first whole one drawn afterwards, black until the program lifts the forced blank. The observers stay set.
 
-The reset sequence's seven cycles are not spent and its five reads — three of the stack, two of the
-vector — are not made or reported, as construction does not make them: both leave the machine at the
-instant the sequence ends.
+The reset sequence's seven cycles are not spent and its five reads — three of the stack, two of the vector — are not made or reported, as construction does not make them: both leave the machine at the instant the sequence ends.
 
-Call it between `step()` and `run()` calls, never from inside an observer's call, which arrives
-part-way through a cycle. A budget `run()` was still owed is dropped with the counter.
+Call it between `step()` and `run()` calls, never from inside an observer's call, which arrives part-way through a cycle. A budget `run()` was still owed is dropped with the counter.
 
-A cartridge that pulls the slot's reset pin itself resets the CPU, the APU and the work-RAM chip and
-leaves the PPU alone. Nothing the machine carries does that, and `reset()` is not it.
+A cartridge that pulls the slot's reset pin itself resets the CPU, the APU and the work-RAM chip and leaves the PPU alone. Nothing the machine carries does that, and `reset()` is not it.
 
 ## Memory speed
 
@@ -298,42 +194,27 @@ The console runs three memory speeds, counted in master cycles per access:
 | slow | 8 | work RAM, the expansion region, and the first LoROM region |
 | extra slow | 12 | the manual joypad ports `$4000-$41FF` |
 
-MEMSEL (`$420D` bit 0) selects the speed of the second region — banks `$80-$BF:$8000-$FFFF` and
-`$C0-$FF` — between slow (its power-on default) and fast. Internal CPU cycles, which drive an address
-without reaching memory, run at the fast rate. The map is the same in both regions; only the master
-clock's absolute rate differs.
+MEMSEL (`$420D` bit 0) selects the speed of the second region — banks `$80-$BF:$8000-$FFFF` and `$C0-$FF` — between slow (its power-on default) and fast. Internal CPU cycles, which drive an address without reaching memory, run at the fast rate. The map is the same in both regions; only the master clock's absolute rate differs.
 
 ## The APU clock
 
-The APU keeps its own clock, and it runs at the same speed on every console: a 24.576 MHz crystal
-divided by 24, a 1,024,000 Hz cycle rate. Only the master clock changes by region, and only slightly —
-21,477,273 Hz on NTSC versus 21,281,370 Hz on PAL, about a 1% difference. So the APU advances at very
-nearly the same pace either way: roughly one APU cycle for every 21 master cycles, and precisely
+The APU keeps its own clock, and it runs at the same speed on every console: a 24.576 MHz crystal divided by 24, a 1,024,000 Hz cycle rate. Only the master clock changes by region, and only slightly — 21,477,273 Hz on NTSC versus 21,281,370 Hz on PAL, about a 1% difference. So the APU advances at very nearly the same pace either way: roughly one APU cycle for every 21 master cycles, and precisely
 
 | Region | Master clock | Master cycles per APU cycle |
 |---|---|---|
 | NTSC | 236,250,000 / 11 Hz (≈ 21.477 MHz) | ≈ 20.97 |
 | PAL | 21,281,370 Hz (≈ 21.281 MHz) | ≈ 20.78 |
 
-PAL's master clock is a touch slower, so its APU runs a touch faster relative to it. The machine paces the APU by exact integer
-arithmetic rather than by these decimals, so a run is reproducible to the byte and never drifts: it
-carries the exact ratio `5632 / 118125` on NTSC and `102400 / 2128137` on PAL (each just
-`1,024,000 / master clock` reduced to lowest terms).
+PAL's master clock is a touch slower, so its APU runs a touch faster relative to it. The machine paces the APU by exact integer arithmetic rather than by these decimals, so a run is reproducible to the byte and never drifts: it carries the exact ratio `5632 / 118125` on NTSC and `102400 / 2128137` on PAL (each just `1,024,000 / master clock` reduced to lowest terms).
 
-Frames the APU produces accumulate as the machine runs; drain them with `takeFrames()`, which returns
-the 32 kHz stereo frames delivered since the last drain and empties the queue.
+Frames the APU produces accumulate as the machine runs; drain them with `takeFrames()`, which returns the 32 kHz stereo frames delivered since the last drain and empties the queue.
 
 ```cpp
 machine.run(21'477'273);                      // about one NTSC second of master cycles
 auto frames = machine.takeFrames();           // 32000 stereo frames — the APU's 32 kHz rate, one second's worth
 ```
 
-Communication with the APU is the CPU's job: a store to `$2140-$2143` reaches the APU's input latches,
-and a read returns its output latches — the two ready bytes `$AA` and `$BB` on ports 0 and 1 at
-power-on. The APU runs its share of each cycle at the cycle's end, so a value written on one cycle is
-in the latch before the APU runs that cycle's share, and a read answers the latch as the APU left it by
-the read's cycle. [The audio thread](#the-audio-thread) keeps both exact when the APU runs beside the
-console instead.
+Communication with the APU is the CPU's job: a store to `$2140-$2143` reaches the APU's input latches, and a read returns its output latches — the two ready bytes `$AA` and `$BB` on ports 0 and 1 at power-on. The APU runs its share of each cycle at the cycle's end, so a value written on one cycle is in the latch before the APU runs that cycle's share, and a read answers the latch as the APU left it by the read's cycle. [The audio thread](#the-audio-thread) keeps both exact when the APU runs beside the console instead.
 
 ### The audio thread
 
@@ -343,43 +224,20 @@ A machine built with `apuThread` on runs the audio machine's cycles on a thread 
 Snes machine(SnesConfig{.rom = rom, .apuThread = true});  // the APU runs beside the calling thread
 ```
 
-While `step()`, `run()` or a call into the guest is in progress, the console releases the APU's share of
-each cycle to that thread and runs on, and the thread runs the audio machine beside it, never past the
-cycles the console has released. When the call returns, both machines stand at one master time and
-nothing runs until the next call: `state()`, `restore()`, `reset()`, `takeFrames()` and every face below
-see the whole machine at the cycle the call ended on.
+While `step()`, `run()` or a call into the guest is in progress, the console releases the APU's share of each cycle to that thread and runs on, and the thread runs the audio machine beside it, never past the cycles the console has released. When the call returns, both machines stand at one master time and nothing runs until the next call: `state()`, `restore()`, `reset()`, `takeFrames()` and every face below see the whole machine at the cycle the call ended on.
 
 The two machines meet where the console's do, at the ports:
 
-- A read of `$2140-$217F` waits for the audio machine to reach the read's cycle, so it answers the
-  latch the sound CPU had written by then.
-- A write to `$2140-$217F`, the CPU's or a transfer engine's, lands in the input latch at its own cycle,
-  before the audio machine runs that cycle's share.
-- `peekApu`, `peekApuRegister` and `peekRegister` on a port wait the same way when a host calls them from
-  inside a call, from a bus observer say.
-- The frame, timeline and save reports wait for the audio machine before they are made, so `state()`
-  and `takeFrames()` inside a report see both machines at the report's cycle.
+- A read of `$2140-$217F` waits for the audio machine to reach the read's cycle, so it answers the latch the sound CPU had written by then.
+- A write to `$2140-$217F`, the CPU's or a transfer engine's, lands in the input latch at its own cycle, before the audio machine runs that cycle's share.
+- `peekApu`, `peekApuRegister` and `peekRegister` on a port wait the same way when a host calls them from inside a call, from a bus observer say.
+- The frame, timeline and save reports wait for the audio machine before they are made, so `state()` and `takeFrames()` inside a report see both machines at the report's cycle.
 
-The bytes are the same as on a machine built with it off, the default: the same state at every return,
-the same audio frames, the same byte from every read of a port.
+The bytes are the same as on a machine built with it off, the default: the same state at every return, the same audio frames, the same byte from every read of a port.
 
-The thread starts at a machine's first call and runs whenever the console has released cycles it has not
-run. The console releases them in batches of about a millisecond of the audio machine's time, and at
-every point that depends on them: a port write, a port read, a report, a call's return. Once the thread
-has nothing to run, and the console has not waited for it in the last short while, it sleeps, through a
-host's sleep inside a report as between calls. The next batch, the next read that waits for it, or the
-start of the next call wakes it, so a read after a quiet stretch waits for the thread to wake and catch
-up. Moving a machine stops the moved machine's thread,
-and the machine in its new place starts its own at its first call. Destroying a machine stops its thread
-and waits for it to end. The [audio machine's observer](#the-bus-observer) is told on this thread.
+The thread starts at a machine's first call and runs whenever the console has released cycles it has not run. The console releases them in batches of about a millisecond of the audio machine's time, and at every point that depends on them: a port write, a port read, a report, a call's return. Once the thread has nothing to run, and the console has not waited for it in the last short while, it sleeps, through a host's sleep inside a report as between calls. The next batch, the next read that waits for it, or the start of the next call wakes it, so a read after a quiet stretch waits for the thread to wake and catch up. Moving a machine stops the moved machine's thread, and the machine in its new place starts its own at its first call. Destroying a machine stops its thread and waits for it to end. The [audio machine's observer](#the-bus-observer) is told on this thread.
 
-The thread takes work off the calling thread and adds work to the process. The calling thread spends
-less time per emulated second, which is what a host needs whose cores are each too slow to run the whole
-machine at speed. The process spends more: the audio thread's own work, its wakes, and the waits where
-the two threads meet, at every port read and every call's return. A host whose one core
-runs the machine at speed leaves the thread off. A host whose calling thread falls behind turns on
-[the picture thread](#the-picture-thread) first, which takes the larger share of the work off it, and
-this one beside it only where the picture thread alone does not hold the console's frame rate.
+The thread takes work off the calling thread and adds work to the process. The calling thread spends less time per emulated second, which is what a host needs whose cores are each too slow to run the whole machine at speed. The process spends more: the audio thread's own work, its wakes, and the waits where the two threads meet, at every port read and every call's return. A host whose one core runs the machine at speed leaves the thread off. A host whose calling thread falls behind turns on [the picture thread](#the-picture-thread) first, which takes the larger share of the work off it, and this one beside it only where the picture thread alone does not hold the console's frame rate.
 
 ### The picture thread
 
@@ -389,61 +247,17 @@ A machine built with `ppuThread` on draws the picture on a thread it owns:
 Snes machine(SnesConfig{.rom = rom, .ppuThread = true});  // the picture is drawn beside the calling thread
 ```
 
-While `step()`, `run()` or a call into the guest is in progress, the calling thread keeps the chip's
-registers, its three memories, the beam and the two sprite passes, and logs every access to the chip —
-each write and each read of `$2100-$213F`, with the beam position it was applied at — and the start of
-every line, with the sprites Time gathered for it. The thread keeps a second copy of the chip's state,
-replays each access on it with the same call, so the copy's registers, latches and memories are the
-console's by the same accesses, and draws the dots between one access and the next from that copy: a
-write lands at the dot it landed at on the console. The thread never draws past what the console has
-logged.
+While `step()`, `run()` or a call into the guest is in progress, the calling thread keeps the chip's registers, its three memories, the beam and the two sprite passes, and logs every access to the chip — each write and each read of `$2100-$213F`, with the beam position it was applied at — and the start of every line, with the sprites Time gathered for it. The thread keeps a second copy of the chip's state, replays each access on it with the same call, so the copy's registers, latches and memories are the console's by the same accesses, and draws the dots between one access and the next from that copy: a write lands at the dot it landed at on the console. The thread never draws past what the console has logged.
 
-The console waits for the thread, and sleeps while it waits, at a call's return, before the frame,
-timeline and save reports, and before a restore or a reset. There the thread has drawn every dot the
-beam has passed, and recorded every line of the frame's timeline where a timeline observer is set, and
-the console copies the two fields of the chip's state the picture writes, the tile reads and the last
-main-screen decision, back into `state()`. So at every return both stand at one picture and
-`state()` is what the machine built with the thread off would hold; inside a call, from a bus observer
-or a watcher, those two fields are the thread's and are not read. The frame still arrives on the calling
-thread, from inside the call, and the raster it hands over is the finished frame: a frame is never shown
-half drawn.
+The console waits for the thread, and sleeps while it waits, at a call's return, before the frame, timeline and save reports, and before a restore or a reset. There the thread has drawn every dot the beam has passed, and recorded every line of the frame's timeline where a timeline observer is set, and the console copies the two fields of the chip's state the picture writes, the tile reads and the last main-screen decision, back into `state()`. So at every return both stand at one picture and `state()` is what the machine built with the thread off would hold; inside a call, from a bus observer or a watcher, those two fields are the thread's and are not read. The frame still arrives on the calling thread, from inside the call, and the raster it hands over is the finished frame: a frame is never shown half drawn.
 
-The thread starts at a machine's first call and parks, as the audio thread does, once it has had nothing
-to draw for a short while, inside a call — through a host's sleep in a frame report — or between calls;
-the next entry logged wakes it. Moving a machine stops the moved machine's thread, and the machine in its
-new place starts its own at its first call. Destroying a machine stops its thread and waits for it to
-end. The two switches combine: a machine built with both on runs the audio unit on one thread and draws
-the picture on another, beside the calling thread.
+The thread starts at a machine's first call and parks, as the audio thread does, once it has had nothing to draw for a short while, inside a call — through a host's sleep in a frame report — or between calls; the next entry logged wakes it. Moving a machine stops the moved machine's thread, and the machine in its new place starts its own at its first call. Destroying a machine stops its thread and waits for it to end. The two switches combine: a machine built with both on runs the audio unit on one thread and draws the picture on another, beside the calling thread.
 
-The pixels are the same as on a machine built with it off, the default: every frame handed over is the
-frame the calling thread would have drawn, and every byte a program reads is the same, since nothing a
-program can read comes from a drawn pixel. The thread takes the drawing off the calling thread and adds
-work to the process: the thread's own, its wakes, and the waits where the two meet. The process as a
-whole spends a little more CPU in total, and each thread has less to do, so each core carries a lighter
-load; a host whose cores are each too slow to run the whole machine at speed keeps up by running the
-work in parallel. A host whose one core runs the machine at speed leaves the thread off.
+The pixels are the same as on a machine built with it off, the default: every frame handed over is the frame the calling thread would have drawn, and every byte a program reads is the same, since nothing a program can read comes from a drawn pixel. The thread takes the drawing off the calling thread and adds work to the process: the thread's own, its wakes, and the waits where the two meet. The process as a whole spends a little more CPU in total, and each thread has less to do, so each core carries a lighter load; a host whose cores are each too slow to run the whole machine at speed keeps up by running the work in parallel. A host whose one core runs the machine at speed leaves the thread off.
 
 ### A line drawn again only when it changes
 
-A picture line's pixels, and the two things the chip carries out of a line, the tile reads and the
-last main-screen decision, are a function of what the line reads: the registers the picture reads as
-they stand at the line's first read dot, the sprites Time gathered for the line, the pages of VRAM
-and the groups of palette words the line's reads touch, the frame parity where the picture reads it
-(modes 5 and 6 under `$2133` bit 0), under forced blank the decision the line is handed, and every
-write to the chip that lands inside the line's picture dots. The machine records each of these for
-every picture line it draws, with the line's outputs, and when the next frame's same line reads the
-same it takes the line from the record and draws nothing: the pixels, the tile reads and the decision
-are the record's. A frame taking a line a picture dot of which was drawn in half-pixels is 512 wide,
-as it is with the line drawn; a write to `$2133` or `$2105` landing in a line's horizontal blank
-reaches no picture dot and widens nothing. A page or group counts as changed when a write through the port, or a host's
-`writeVram` or `writeCgram`, changed a byte in it since the line read it; a write that stores the byte
-already there changes nothing. A write landing inside the line's picture dots to a register the line
-reads, or to a palette word while the palette is open and the screen is on, draws the line from its
-first read dot up to the beam, from the state the write has not yet changed, and on to its end, and
-the line is not kept for the next frame. Where a call returns inside a line the frame before could
-stand in for, the line is drawn up to the beam there too, so `state()` at the return holds the tile
-reads and the decision the beam's dots left, and it draws on to its end. The picture is the same as
-with every line drawn, and so is every byte a program reads.
+A picture line's pixels, and the two things the chip carries out of a line, the tile reads and the last main-screen decision, are a function of what the line reads: the registers the picture reads as they stand at the line's first read dot, the sprites Time gathered for the line, the pages of VRAM and the groups of palette words the line's reads touch, the frame parity where the picture reads it (modes 5 and 6 under `$2133` bit 0), under forced blank the decision the line is handed, and every write to the chip that lands inside the line's picture dots. The machine records each of these for every picture line it draws, with the line's outputs, and when the next frame's same line reads the same it takes the line from the record and draws nothing: the pixels, the tile reads and the decision are the record's. A frame taking a line a picture dot of which was drawn in half-pixels is 512 wide, as it is with the line drawn; a write to `$2133` or `$2105` landing in a line's horizontal blank reaches no picture dot and widens nothing. A page or group counts as changed when a write through the port, or a host's `writeVram` or `writeCgram`, changed a byte in it since the line read it; a write that stores the byte already there changes nothing. A write landing inside the line's picture dots to a register the line reads, or to a palette word while the palette is open and the screen is on, draws the line from its first read dot up to the beam, from the state the write has not yet changed, and on to its end, and the line is not kept for the next frame. Where a call returns inside a line the frame before could stand in for, the line is drawn up to the beam there too, so `state()` at the return holds the tile reads and the decision the beam's dots left, and it draws on to its end. The picture is the same as with every line drawn, and so is every byte a program reads.
 
 `lineReuse()` answers how the lines of the last finished frame were drawn:
 
@@ -475,65 +289,35 @@ struct Counting final : FrameObserver {
 };
 ```
 
-`SnesConfig::ppuVerify`, off by default, draws every line whether or not the frame before could stand
-in for it, and where it could, compares the drawn line with the record — the tile reads, the decision
-and, on a watched machine, the pixels — counting a disagreement in `mismatches`; nothing is thrown and
-the picture is the drawn one. It costs the reuse, so it is for proving the machine over a library of
-cartridges and never for running it: on a machine that reuses exactly, `mismatches` is 0 on every
-frame of every cartridge.
+`SnesConfig::ppuVerify`, off by default, draws every line whether or not the frame before could stand in for it, and where it could, compares the drawn line with the record — the tile reads, the decision and, on a watched machine, the pixels — counting a disagreement in `mismatches`; nothing is thrown and the picture is the drawn one. It costs the reuse, so it is for proving the machine over a library of cartridges and never for running it: on a machine that reuses exactly, `mismatches` is 0 on every frame of every cartridge.
 
 Gotchas:
 
-- Inside a call, on a machine built with the picture thread, the tile reads and the decision are the
-  thread's, as [the picture thread](#the-picture-thread) says; a line pending on the frame before is
-  drawn up to the beam at every wait the console makes, so a bus observer or a watcher reading them
-  there reads what the beam's dots left.
-- A host that steps the machine an instruction at a time, or runs it in budgets that end inside a
-  line, draws the line each return falls inside; `returned` counts them. A host that runs whole
-  frames, or quarter frames as the player does, draws almost none.
-- A line recorded by a machine nobody watched holds no pixels, so a frame observer set afterwards
-  draws every line of its first frame; a line recorded watched serves an unwatched machine.
+- Inside a call, on a machine built with the picture thread, the tile reads and the decision are the thread's, as [the picture thread](#the-picture-thread) says; a line pending on the frame before is drawn up to the beam at every wait the console makes, so a bus observer or a watcher reading them there reads what the beam's dots left.
+- A host that steps the machine an instruction at a time, or runs it in budgets that end inside a line, draws the line each return falls inside; `returned` counts them. A host that runs whole frames, or quarter frames as the player does, draws almost none.
+- A line recorded by a machine nobody watched holds no pixels, so a frame observer set afterwards draws every line of its first frame; a line recorded watched serves an unwatched machine.
 - A restore or a reset drops every record: the next frame draws every line.
 - The record is about 1.5 MB a machine, held beside the state and never in a snapshot.
 - `lineReuse()` waits for the picture thread, as a report does.
 
-See [the picture](ppu.md#the-picture) for what a line is drawn from, and
-[Snapshot and restore](#snapshot-and-restore).
+See [the picture](ppu.md#the-picture) for what a line is drawn from, and [Snapshot and restore](#snapshot-and-restore).
 
 ## The audio upload stub
 
-When the machine boots with `iplStub` on, the APU starts where the console starts it: a small program
-in the top of audio RAM that waits for the main CPU to hand it a driver. The main CPU sends a program
-across the four communication ports, and the stub writes it into audio RAM and jumps to it.
+When the machine boots with `iplStub` on, the APU starts where the console starts it: a small program in the top of audio RAM that waits for the main CPU to hand it a driver. The main CPU sends a program across the four communication ports, and the stub writes it into audio RAM and jumps to it.
 
 The handshake runs entirely through the ports at `$2140-$2143` (the APU reads them as `$F4-$F7`):
 
 1. The stub posts `$AA` to port 0 and `$BB` to port 1 to signal it is ready.
-2. The main CPU writes a destination address to ports 2 and 3, a non-zero value to port 1, and `$CC`
-   to port 0. The stub acknowledges by echoing port 0.
-3. For each byte, the main CPU writes the byte to port 1 and the running index to port 0; the stub
-   stores the byte and echoes the index. The index counts every byte, and the destination follows it
-   past a page boundary, so a block of any length lands where it was addressed.
-4. To start the program, the main CPU writes zero to port 1 and a fresh value to port 0; the stub jumps
-   to the address in ports 2 and 3.
+2. The main CPU writes a destination address to ports 2 and 3, a non-zero value to port 1, and `$CC` to port 0. The stub acknowledges by echoing port 0.
+3. For each byte, the main CPU writes the byte to port 1 and the running index to port 0; the stub stores the byte and echoes the index. The index counts every byte, and the destination follows it past a page boundary, so a block of any length lands where it was addressed.
+4. To start the program, the main CPU writes zero to port 1 and a fresh value to port 0; the stub jumps to the address in ports 2 and 3.
 
-Every step waits for the stub's echo before the next, so the two processors stay in step whatever their
-relative speed. The echo is the last thing a step does, and it is what releases the main CPU: once it
-appears, every input port is the main CPU's again, and a game that rewrites ports 2 and 3 on the same
-instruction it reads the acknowledgement cannot disturb a command already taken. A command reads the
-destination from ports 2 and 3 as a single 16-bit word, so no address is ever assembled from two
-different values.
+Every step waits for the stub's echo before the next, so the two processors stay in step whatever their relative speed. The echo is the last thing a step does, and it is what releases the main CPU: once it appears, every input port is the main CPU's again, and a game that rewrites ports 2 and 3 on the same instruction it reads the acknowledgement cannot disturb a command already taken. A command reads the destination from ports 2 and 3 as a single 16-bit word, so no address is ever assembled from two different values.
 
-The stub occupies `$FFC0-$FFFF`, the window the console maps its boot program to. The
-APU serves the stub image over that window while CONTROL bit 7 is set (the APU machine's
-[boot-ROM window](apu-machine.md#the-boot-rom-window)): a driver may scratch-write the RAM beneath the
-window and still re-enter `$FFC0` to receive more code, because a read there returns the mapped image,
-not the driver's scratch bytes — the way the console's boot ROM reads back after an upload writes over
-the RAM under it. Entering the stub at `$FFC0` clears the ports and re-runs the handshake from the
-ready bytes.
+The stub occupies `$FFC0-$FFFF`, the window the console maps its boot program to. The APU serves the stub image over that window while CONTROL bit 7 is set (the APU machine's [boot-ROM window](apu-machine.md#the-boot-rom-window)): a driver may scratch-write the RAM beneath the window and still re-enter `$FFC0` to receive more code, because a read there returns the mapped image, not the driver's scratch bytes — the way the console's boot ROM reads back after an upload writes over the RAM under it. Entering the stub at `$FFC0` clears the ports and re-runs the handshake from the ready bytes.
 
-With `iplStub` off, none of this runs: the APU keeps the state it booted with, which is how a program
-placed directly into audio RAM skips the handshake.
+With `iplStub` off, none of this runs: the APU keeps the state it booted with, which is how a program placed directly into audio RAM skips the handshake.
 
 ### Running a console's own boot ROM
 
@@ -544,29 +328,19 @@ std::array<std::uint8_t, kIplWindowBytes> image = readBootRom();  // your own du
 Snes machine(SnesConfig{.rom = cartridge, .bootRom = image});
 ```
 
-The supplied image is seeded into audio RAM and mapped over the `$FFC0` window exactly as the stub is,
-so everything above applies unchanged — the audio unit simply executes those bytes instead. Left absent,
-the machine runs the stub. The field is ignored when `iplStub` is off, which skips the boot sequence
-entirely.
+The supplied image is seeded into audio RAM and mapped over the `$FFC0` window exactly as the stub is, so everything above applies unchanged — the audio unit simply executes those bytes instead. Left absent, the machine runs the stub. The field is ignored when `iplStub` is off, which skips the boot sequence entirely.
 
-The image is configuration rather than machine state: it is not part of `SnesState`, and it survives
-`restore()`. A snapshot therefore carries the RAM beneath the window, never the mapped image.
+The image is configuration rather than machine state: it is not part of `SnesState`, and it survives `restore()`. A snapshot therefore carries the RAM beneath the window, never the mapped image.
 
-Snaggletooth ships no console boot code and none is required — the stub runs the same documented
-handshake. Supplying a dump matters when a program checks the window's contents rather than its
-behaviour: test software that checksums the boot ROM is satisfied only by the console's own bytes.
+Snaggletooth ships no console boot code and none is required — the stub runs the same documented handshake. Supplying a dump matters when a program checks the window's contents rather than its behavior: test software that checksums the boot ROM is satisfied only by the console's own bytes.
 
 ## The video counters and interrupts
 
-The machine tracks where the beam is even though it draws nothing. `hpos` is the master cycle within the
-current scanline and `vpos` is the scanline down the frame; both advance as the machine runs, so a
-mid-frame snapshot resumes on the exact cycle.
+The machine tracks where the beam is even though it draws nothing. `hpos` is the master cycle within the current scanline and `vpos` is the scanline down the frame; both advance as the machine runs, so a mid-frame snapshot resumes on the exact cycle.
 
 ### The line and the frame
 
-A scanline is 1364 master cycles and carries 340 dots. Most dots are four cycles, but **dots 323 and 327
-are six**, which is what the counter latch at `$213C` answers and why a dot is not a quarter of `hpos`
-past dot 322. Two lines a frame are not 1364 cycles long:
+A scanline is 1364 master cycles and carries 340 dots. Most dots are four cycles, but **dots 323 and 327 are six**, which is what the counter latch at `$213C` answers and why a dot is not a quarter of `hpos` past dot 322. Two lines a frame are not 1364 cycles long:
 
 | Line | Length | When |
 |---|---|---|
@@ -576,68 +350,34 @@ past dot 322. Two lines a frame are not 1364 cycles long:
 
 Dot 340 therefore exists only on that one PAL line; no read anywhere else latches it.
 
-A frame is 262 lines on NTSC and 312 on PAL, and an **interlaced frame of even parity runs one line
-longer** — NTSC's line 262, PAL's line 312, which belongs to vertical blank like the lines before it. The
-parity is `field`, which `$213F` bit 7 reports: 0 names the first frame of an interlaced pair and 1 the
-second. It toggles as each frame's first line reaches H = 1, four master cycles in, whether or not
-`$2133` bit 0 asks for interlace. The console leaves reset at H = 0 of line 0 with the flag clear, so the
-first frame it runs is the pair's second.
+A frame is 262 lines on NTSC and 312 on PAL, and an **interlaced frame of even parity runs one line longer** — NTSC's line 262, PAL's line 312, which belongs to vertical blank like the lines before it. The parity is `field`, which `$213F` bit 7 reports: 0 names the first frame of an interlaced pair and 1 the second. It toggles as each frame's first line reaches H = 1, four master cycles in, whether or not `$2133` bit 0 asks for interlace. The console leaves reset at H = 0 of line 0 with the flag clear, so the first frame it runs is the pair's second.
 
-Two frames together are a whole number of colour clocks, which is what the irregular lines are for:
-714,732 master cycles on NTSC and 716,100 interlaced; 851,136 on PAL and 852,504 interlaced.
+Two frames together are a whole number of color clocks, which is what the irregular lines are for: 714,732 master cycles on NTSC and 716,100 interlaced; 851,136 on PAL and 852,504 interlaced.
 
-fullsnes's 426,936 for a PAL interlaced frame sums the extra line and the long line into one frame. They
-fall in different fields — the long line is the odd field's and the extra line the even field's — so it is
-a figure for neither frame of the pair, whose two lengths are 425,572 and 426,932.
+fullsnes's 426,936 for a PAL interlaced frame sums the extra line and the long line into one frame. They fall in different fields — the long line is the odd field's and the extra line the even field's — so it is a figure for neither frame of the pair, whose two lengths are 425,572 and 426,932.
 
 ### Vertical blank
 
-`$2133` bit 2 chooses the line vertical blank begins on, 225 or 240. Beginning is a latched fact rather
-than a comparison of `vpos`: the machine decides at the start of every line from 225 on while the blank
-has not begun, and begins it if the line is 240 or later or if the bit is clear as that line starts. Once
-begun it holds to the frame's end and clears at the start of line 0.
+`$2133` bit 2 chooses the line vertical blank begins on, 225 or 240. Beginning is a latched fact rather than a comparison of `vpos`: the machine decides at the start of every line from 225 on while the blank has not begun, and begins it if the line is 240 or later or if the bit is clear as that line starts. Once begun it holds to the frame's end and clears at the start of line 0.
 
-That gives the bit three useful behaviours. Set before line 225, it moves the blank to line 240. Set and
-then cleared between the two lines, it begins the blank at the start of the next line. Set *after* the
-blank has begun, it resumes nothing — but the PPU holds its video memories shut as though the picture
-were still running, to line 240 ([the PPU's windows](ppu.md#the-memories-and-their-windows)).
+That gives the bit three useful behaviors. Set before line 225, it moves the blank to line 240. Set and then cleared between the two lines, it begins the blank at the start of the next line. Set *after* the blank has begun, it resumes nothing — but the PPU holds its video memories shut as though the picture were still running, to line 240 ([the PPU's windows](ppu.md#the-memories-and-their-windows)).
 
-From the line the blank begins on, in order: the vertical-blank flag at the line's start, the NMI flag two
-master cycles later, the HDMA channels deactivating for the rest of the frame, the sprite table's address
-returning to its reload value at dot 10, and the [auto-read](#the-controller-ports) of the controllers
-beginning between H = 32.5 and H = 95.5. A later change to `$2133` re-fires none of them.
+From the line the blank begins on, in order: the vertical-blank flag at the line's start, the NMI flag two master cycles later, the HDMA channels deactivating for the rest of the frame, the sprite table's address returning to its reload value at dot 10, and the [auto-read](#the-controller-ports) of the controllers beginning between H = 32.5 and H = 95.5. A later change to `$2133` re-fires none of them.
 
-The finished picture and a changed save are reported at the end of the cycle this line begins
-([the picture](ppu.md#the-picture), [the save observer](#the-save-observer)). No instruction of the NMI
-handler has run there and the auto-read has not begun, so a pad a host sets inside either report is
-what this frame's auto-read latches.
+The finished picture and a changed save are reported at the end of the cycle this line begins ([the picture](ppu.md#the-picture), [the save observer](#the-save-observer)). No instruction of the NMI handler has run there and the auto-read has not begun, so a pad a host sets inside either report is what this frame's auto-read latches.
 
 ### The blank flags
 
-`$4212` reports the beam directly. Bit 7 is the vertical-blank fact above. **Bit 6 is raised when the beam
-passes H = 274 and lowered when it passes H = 1 of the next line** — on every line of the frame, vertical
-blank's own lines and a forced-blank frame included. The line's first four master cycles still carry the
-previous line's blank. Bit 0 is set while the auto-read is busy.
+`$4212` reports the beam directly. Bit 7 is the vertical-blank fact above. **Bit 6 is raised when the beam passes H = 274 and lowered when it passes H = 1 of the next line** — on every line of the frame, vertical blank's own lines and a forced-blank frame included. The line's first four master cycles still carry the previous line's blank. Bit 0 is set while the auto-read is busy.
 
 ### The interrupts
 
 Two interrupt sources reach the CPU, both driven from these counters:
 
-- **The vertical-blank NMI.** The flag at `$4210` bit 7 sets two master cycles into the blank's first
-  line and clears at the start of line 0, and reading `$4210` acknowledges it. While the flag is set and
-  `$4200` bit 7 enables NMIs, the NMI line is asserted; enabling NMIs mid-blank raises the line there and
-  then. The CPU latches the NMI on the flag's rise, so a program polling `$4210` that reads it in the
-  very cycle the flag sets gets the flag set, clears it, and takes the NMI at the end of that instruction
-  all the same. Reading the flag before re-enabling avoids taking an old NMI twice.
-- **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: a horizontal position (`$4207/$4208`), a
-  vertical line (`$4209/$420A`), or both. The flag at `$4211` bit 7 is raised when the beam passes the
-  point the mode names, and the IRQ line follows it; reading `$4211`, writing it, or selecting no compare
-  acknowledges it. A handler that does none of them runs again. A read in the very cycle the flag rises
-  is the exception: it receives bit 7 set and acknowledges nothing, so the flag still stands after it
-  and the IRQ is taken.
+- **The vertical-blank NMI.** The flag at `$4210` bit 7 sets two master cycles into the blank's first line and clears at the start of line 0, and reading `$4210` acknowledges it. While the flag is set and `$4200` bit 7 enables NMIs, the NMI line is asserted; enabling NMIs mid-blank raises the line there and then. The CPU latches the NMI on the flag's rise, so a program polling `$4210` that reads it in the very cycle the flag sets gets the flag set, clears it, and takes the NMI at the end of that instruction all the same. Reading the flag before re-enabling avoids taking an old NMI twice.
+- **The H/V-timer IRQ.** `$4200` bits 5-4 pick the compare: a horizontal position (`$4207/$4208`), a vertical line (`$4209/$420A`), or both. The flag at `$4211` bit 7 is raised when the beam passes the point the mode names, and the IRQ line follows it; reading `$4211`, writing it, or selecting no compare acknowledges it. A handler that does none of them runs again. A read in the very cycle the flag rises is the exception: it receives bit 7 set and acknowledges nothing, so the flag still stands after it and the IRQ is taken.
 
-  *The write is documented and uncorroborated.* anomie's register document states it, and no reading
-  has confirmed it.
+  *The write is documented and uncorroborated.* anomie's register document states it, and no reading has confirmed it.
 
   | Mode | The point |
   |---|---|
@@ -645,13 +385,9 @@ Two interrupt sources reach the CPU, both driven from these counters:
   | H and V | the same point, on line VTIME |
   | V only, and either H mode with HTIME = 0 | 1374 master cycles after the previous line began — ten into a line following a normal one, fourteen after the short line, six after the long one |
 
-  The crossing is noted as the cycle ticks and the flag is raised at the cycle's end under the mode the
-  cycle leaves behind, so a write to `$4200` that arms the timer in the very cycle its point is crossed
-  is in time, and one that disarms it in that cycle keeps the flag down.
+  The crossing is noted as the cycle ticks and the flag is raised at the cycle's end under the mode the cycle leaves behind, so a write to `$4200` that arms the timer in the very cycle its point is crossed is in time, and one that disarms it in that cycle keeps the flag down.
 
-  **HTIME = 153 raises no flag on the short line, nor on a frame's last line** — anomie's measurement,
-  with no mechanism documented. The exception is that dot on those lines; every other HTIME raises its
-  flag there, and the V-only point keeps its own place.
+  **HTIME = 153 raises no flag on the short line, nor on a frame's last line** — anomie's measurement, with no mechanism documented. The exception is that dot on those lines; every other HTIME raises its flag there, and the V-only point keeps its own place.
 
 ```cpp
 // A minimal vblank-NMI loop: enable the NMI, then let the machine run into vblank.
@@ -660,34 +396,21 @@ Two interrupt sources reach the CPU, both driven from these counters:
 
 ### The memory refresh
 
-Once a line the CPU is paused for **40 master cycles** while memory refreshes. The point walks
-an eight-cycle grid near the middle of the line — 538 cycles into line 0 of the first frame, then the
-point on that grid nearest 536 into each line after it, so consecutive ordinary lines come up 538 and 534
-and a line of another length re-phases the pair. `SnesState::refreshAt` names the next one and
-`refreshLeft` the cycles left in one under way.
+Once a line the CPU is paused for **40 master cycles** while memory refreshes. The point walks an eight-cycle grid near the middle of the line — 538 cycles into line 0 of the first frame, then the point on that grid nearest 536 into each line after it, so consecutive ordinary lines come up 538 and 534 and a line of another length re-phases the pair. `SnesState::refreshAt` names the next one and `refreshLeft` the cycles left in one under way.
 
-fullsnes's latch histogram — dot 133 three times, 134 once, 135 to 142 never, 143 once, 144 three times —
-is this alternation seen without its grid: averaged over the two parities, the dots a pause covers are the
-dots no read ever latches.
+fullsnes's latch histogram — dot 133 three times, 134 once, 135 to 142 never, 143 once, 144 three times — is this alternation seen without its grid: averaged over the two parities, the dots a pause covers are the dots no read ever latches.
 
 What it means for a caller:
 
-- **An instruction whose cycles span the point costs 40 more**, and `step()` returns that. A program runs
-  about 3 % slower against the beam, the APU and every HDMA and IRQ event, which is the console.
-- **`run()` may stop inside a pause** and carries the rest of it, so its overshoot stays within one
-  access and `run(a)` then `run(b)` still advances the machine exactly as `run(a + b)`.
-- **A halted core is paused as well.** A machine waiting on WAI whose interrupt arrives inside a pause
-  wakes when the pause ends; a machine stopped on STP keeps its place and spends the pause as any core
-  does.
-- **The observer is told nothing.** A pause is neither an access nor a CPU cycle, any more than a
-  transfer's overhead cycles are, so cycle counts taken through the observer are unchanged.
+- **An instruction whose cycles span the point costs 40 more**, and `step()` returns that. A program runs about 3 % slower against the beam, the APU and every HDMA and IRQ event, which is the console.
+- **`run()` may stop inside a pause** and carries the rest of it, so its overshoot stays within one access and `run(a)` then `run(b)` still advances the machine exactly as `run(a + b)`.
+- **A halted core is paused as well.** A machine waiting on WAI whose interrupt arrives inside a pause wakes when the pause ends; a machine stopped on STP keeps its place and spends the pause as any core does.
+- **The observer is told nothing.** A pause is neither an access nor a CPU cycle, any more than a transfer's overhead cycles are, so cycle counts taken through the observer are unchanged.
 - **A snapshot taken inside a pause restores into the rest of it.**
 
 ## The controller ports
 
-A controller is a value, `Joypad` — the twelve buttons of a standard pad, each a `bool`, true when
-pressed — and a port holds one or nothing. The machine starts with both ports empty. `setJoypad` plugs a
-pad in or pulls it out; `joypad` reads back what a port holds.
+A controller is a value, `Joypad` — the twelve buttons of a standard pad, each a `bool`, true when pressed — and a port holds one or nothing. The machine starts with both ports empty. `setJoypad` plugs a pad in or pulls it out; `joypad` reads back what a port holds.
 
 ```cpp
 machine.setJoypad(JoypadPort::One, Joypad{.start = true});   // Start held on port 1
@@ -698,54 +421,18 @@ machine.setJoypad(JoypadPort::One, std::nullopt);              // unplugged
 
 The program reads a pad the two ways the console offers, and both see the same value:
 
-- **The auto-read.** With `$4200` bit 0 set, the machine reads all sixteen bits of each port once a
-  frame, on the first line of vertical blank. The machine's first read begins at H = 74.5 of that line;
-  every later one begins at the first point on a 256-master-cycle grid, carried from the previous read's
-  start, that lies at or past H = 32.5 — so the start wanders between H = 32.5 and H = 95.5 from frame
-  to frame. `$4212` bit 0 is busy for the 4224 master cycles the read takes: the strobe pulse for 128,
-  then one bit every 256. **The registers shift as each bit arrives.** Every clock moves each port's
-  register up one place and puts the bit it read at bit 0, so the sixteenth bit, 4224 cycles after the
-  start, is what leaves the result in place: port 1 in `$4218/$4219`, port 2 in `$421A/$421B`, the high
-  byte carrying B, Y, Select, Start, Up, Down, Left and Right from bit 7 down, the low byte A, X, L and R
-  from bit 7 to bit 4 and the pad's identity code, zero for a standard pad, in bits 3-0. A program that
-  reads the registers while the busy flag is set sees the previous frame's bits shifted part-way out
-  above this frame's shifted part-way in; a program reads them after the flag clears. `$421C-$421F`,
-  the ports' second data lines, stay zero — nothing is modelled on them.
-- **The serial ports.** A write of 1 then 0 to `$4016` bit 0 strobes both pads, latching their sixteen
-  bits; each read of `$4016` returns port 1's next bit in bit 0, and each read of `$4017` port 2's, in
-  the order above — B first, the identity bits last. Past the sixteenth bit a pad returns 1, and an
-  empty port returns 0 on every read. `$4017` bits 4-2 are wired low and read as 1; the bits neither
-  port drives are open bus.
+- **The auto-read.** With `$4200` bit 0 set, the machine reads all sixteen bits of each port once a frame, on the first line of vertical blank. The machine's first read begins at H = 74.5 of that line; every later one begins at the first point on a 256-master-cycle grid, carried from the previous read's start, that lies at or past H = 32.5 — so the start wanders between H = 32.5 and H = 95.5 from frame to frame. `$4212` bit 0 is busy for the 4224 master cycles the read takes: the strobe pulse for 128, then one bit every 256. **The registers shift as each bit arrives.** Every clock moves each port's register up one place and puts the bit it read at bit 0, so the sixteenth bit, 4224 cycles after the start, is what leaves the result in place: port 1 in `$4218/$4219`, port 2 in `$421A/$421B`, the high byte carrying B, Y, Select, Start, Up, Down, Left and Right from bit 7 down, the low byte A, X, L and R from bit 7 to bit 4 and the pad's identity code, zero for a standard pad, in bits 3-0. A program that reads the registers while the busy flag is set sees the previous frame's bits shifted part-way out above this frame's shifted part-way in; a program reads them after the flag clears. `$421C-$421F`, the ports' second data lines, stay zero — nothing is modeled on them.
+- **The serial ports.** A write of 1 then 0 to `$4016` bit 0 strobes both pads, latching their sixteen bits; each read of `$4016` returns port 1's next bit in bit 0, and each read of `$4017` port 2's, in the order above — B first, the identity bits last. Past the sixteenth bit a pad returns 1, and an empty port returns 0 on every read. `$4017` bits 4-2 are wired low and read as 1; the bits neither port drives are open bus.
 
-`Joypad::bits()` is the sixteen-bit word in the auto-read's layout, `$4219` in the high byte and
-`$4218` in the low. A snapshot carries the pads with the rest of the machine, so a restore resumes with
-the same controllers plugged in.
+`Joypad::bits()` is the sixteen-bit word in the auto-read's layout, `$4219` in the high byte and `$4218` in the low. A snapshot carries the pads with the rest of the machine, so a restore resumes with the same controllers plugged in.
 
-Three consequences of the hardware sharing one set of lines are modelled. The auto-read strobes and
-clocks the same shift register the serial ports read, so after it runs a program reading `$4016`
-without strobing first is past the sixteenth bit and sees padding; a program that uses both paths
-strobes before it reads. A serial read made while the auto-read is busy takes a bit the auto-read then
-never sees: every bit after it lands one place higher in `$4218-$421B` and the padding enters last, so
-the identity code comes out as 1. And while the strobe is held high the pads reload continuously, so
-every bit read — by the serial ports or by the auto-read — is the B button's state; a program that
-leaves `$4016` at 1 sees `$4218/$4219` as all ones or all zeros.
+Three consequences of the hardware sharing one set of lines are modeled. The auto-read strobes and clocks the same shift register the serial ports read, so after it runs a program reading `$4016` without strobing first is past the sixteenth bit and sees padding; a program that uses both paths strobes before it reads. A serial read made while the auto-read is busy takes a bit the auto-read then never sees: every bit after it lands one place higher in `$4218-$421B` and the padding enters last, so the identity code comes out as 1. And while the strobe is held high the pads reload continuously, so every bit read — by the serial ports or by the auto-read — is the B button's state; a program that leaves `$4016` at 1 sees `$4218/$4219` as all ones or all zeros.
 
 ## The multiply/divide unit
 
-The unsigned multiply and divide are the CPU's, not the PPU's. Set the multiplicand at `$4202` and write
-the multiplier to `$4203` to start a multiply; the 16-bit product is at `$4216/$4217` eight cycles later.
-Set the 16-bit dividend at `$4204/$4205` and write the divisor to `$4206` to start a divide; the quotient
-is at `$4214/$4215` and the remainder at `$4216/$4217` sixteen cycles later. The unit is clocked by the
-CPU, so the wait is the same number of instructions regardless of the memory speed. The operation runs
-on the operands as they stand at the write that starts it: a program can load the next dividend into
-`$4204/$4205` while a division runs and still read that division's quotient, which is how a game
-pipelines the four divisions of a Mode 7 matrix.
+The unsigned multiply and divide are the CPU's, not the PPU's. Set the multiplicand at `$4202` and write the multiplier to `$4203` to start a multiply; the 16-bit product is at `$4216/$4217` eight cycles later. Set the 16-bit dividend at `$4204/$4205` and write the divisor to `$4206` to start a divide; the quotient is at `$4214/$4215` and the remainder at `$4216/$4217` sixteen cycles later. The unit is clocked by the CPU, so the wait is the same number of instructions regardless of the memory speed. The operation runs on the operands as they stand at the write that starts it: a program can load the next dividend into `$4204/$4205` while a division runs and still read that division's quotient, which is how a game pipelines the four divisions of a Mode 7 matrix.
 
-A read before the result lands returns the register's previous contents — the intermediate is not
-modelled, because it is not documented; wait the cycles the way hardware programs do. Two quirks are
-modelled: starting a multiply immediately loads the quotient register with the multiplier (the two
-operations share the unit), and dividing by zero yields an all-ones quotient with the dividend as the
-remainder.
+A read before the result lands returns the register's previous contents — the intermediate is not modeled, because it is not documented; wait the cycles the way hardware programs do. Two quirks are modeled: starting a multiply immediately loads the quotient register with the multiplier (the two operations share the unit), and dividing by zero yields an all-ones quotient with the dividend as the remainder.
 
 ```cpp
 // LDA #7 ; STA $4202 ; LDA #9 ; STA $4203   start 7 * 9
@@ -755,46 +442,17 @@ remainder.
 
 ## The PPU register file
 
-The PPU is reached at `$2100-$213F`, and its whole register file is here, kept exactly as the console
-keeps it: every write with the latches it passes through, every read with the value it answers, and
-the windows in which the video memories can be reached. Its state is one value inside the machine's,
-`state().ppu`, so a snapshot carries it. Nothing renders; [ppu.md](ppu.md) describes the register file
-in full — the scroll and Mode 7 latches, the multiplier, the counter latch, the status registers, the
-open-bus values, the power-on state. This section covers the three memory ports, which the machine's
-read faces are the other side of: `vram()` returns the 64 KB of video RAM, `cgram()` the 512-byte
-palette and `oam()` the 544-byte sprite table.
+The PPU is reached at `$2100-$213F`, and its whole register file is here, kept exactly as the console keeps it: every write with the latches it passes through, every read with the value it answers, and the windows in which the video memories can be reached. Its state is one value inside the machine's, `state().ppu`, so a snapshot carries it. Nothing renders; [ppu.md](ppu.md) describes the register file in full — the scroll and Mode 7 latches, the multiplier, the counter latch, the status registers, the open-bus values, the power-on state. This section covers the three memory ports, which the machine's read faces are the other side of: `vram()` returns the 64 KB of video RAM, `cgram()` the 512-byte palette and `oam()` the 544-byte sprite table.
 
-The VRAM port is a word address at `$2116/$2117` and a data pair at `$2118/$2119`. `$2115` selects the
-increment (after the low or the high byte, by 1, 32, or 128 words) and an optional address translation
-for bitmap layouts. Reads come through `$2139/$213A` and carry the hardware's prefetch behaviour: the
-first word after setting the address is returned twice, because the prefetch register fills before the
-address steps rather than after. The palette port is an address at `$2121` and a two-write word at `$2122`
-(read back through `$213B`); the high byte keeps seven bits.
+The VRAM port is a word address at `$2116/$2117` and a data pair at `$2118/$2119`. `$2115` selects the increment (after the low or the high byte, by 1, 32, or 128 words) and an optional address translation for bitmap layouts. Reads come through `$2139/$213A` and carry the hardware's prefetch behavior: the first word after setting the address is returned twice, because the prefetch register fills before the address steps rather than after. The palette port is an address at `$2121` and a two-write word at `$2122` (read back through `$213B`); the high byte keeps seven bits.
 
-The OAM port is an address at `$2102/$2103` and a byte at `$2104` (read back through `$2138`). The
-address written is a nine-bit reload value, doubled into the ten-bit byte address the port is at, so a
-write always lands on an even byte; each access steps the address. Below `$200` a write to an even byte
-is held and the odd byte after it commits the pair, as the palette port does; from `$200` a write is one
-byte, and `$220-$3FF` mirror the thirty-two bytes of high bits at `$200-$21F`. The PPU takes the address
-back to the reload value at the start of every vertical blank while the screen is on, and when forced
-blank is released during the first line of vertical blank — so a program that sets the address once and
-sends its sprite table every frame lands it at the same place every frame, and one that sends while the
-screen is off continues from wherever the last access left the address.
+The OAM port is an address at `$2102/$2103` and a byte at `$2104` (read back through `$2138`). The address written is a nine-bit reload value, doubled into the ten-bit byte address the port is at, so a write always lands on an even byte; each access steps the address. Below `$200` a write to an even byte is held and the odd byte after it commits the pair, as the palette port does; from `$200` a write is one byte, and `$220-$3FF` mirror the thirty-two bytes of high bits at `$200-$21F`. The PPU takes the address back to the reload value at the start of every vertical blank while the screen is on, and when forced blank is released during the first line of vertical blank — so a program that sets the address once and sends its sprite table every frame lands it at the same place every frame, and one that sends while the screen is off continues from wherever the last access left the address.
 
-Each port reaches its memory only in the window the hardware allows — VRAM and OAM in vertical blank or
-forced blank, the palette at every dot the picture is not being drawn on. Outside it a write is ignored and the access reported
-to the [observer](#the-bus-observer) carries no landing, while the address steps as it would have; the
-rule is stated in full in [ppu.md](ppu.md#the-memories-and-their-windows). The screen powers on in
-forced blank, so a program that fills the memories before turning the picture on reaches them freely.
+Each port reaches its memory only in the window the hardware allows — VRAM and OAM in vertical blank or forced blank, the palette at every dot the picture is not being drawn on. Outside it a write is ignored and the access reported to the [observer](#the-bus-observer) carries no landing, while the address steps as it would have; the rule is stated in full in [ppu.md](ppu.md#the-memories-and-their-windows). The screen powers on in forced blank, so a program that fills the memories before turning the picture on reaches them freely.
 
 ## DMA and HDMA
 
-DMA copies bytes between the A bus (memory) and the B bus (the `$2100-$21FF` registers) far faster than
-the CPU can. A read on one bus is a write on the other, so a transfer always crosses buses. There are
-eight channels, shared between two modes: general-purpose DMA, which halts the CPU and runs a block in one
-burst, and HDMA, which delivers a table's values to a register once per visible scanline while the picture
-draws. Each channel is a sixteen-byte register file at `$43n0-$43nF` (channel `n` = 0..7), and
-`state().dma[n]` exposes it:
+DMA copies bytes between the A bus (memory) and the B bus (the `$2100-$21FF` registers) far faster than the CPU can. A read on one bus is a write on the other, so a transfer always crosses buses. There are eight channels, shared between two modes: general-purpose DMA, which halts the CPU and runs a block in one burst, and HDMA, which delivers a table's values to a register once per visible scanline while the picture draws. Each channel is a sixteen-byte register file at `$43n0-$43nF` (channel `n` = 0..7), and `state().dma[n]` exposes it:
 
 | Register | Address | Meaning |
 |---|---|---|
@@ -807,8 +465,7 @@ draws. Each channel is a sixteen-byte register file at `$43n0-$43nF` (channel `n
 | `nltr` | `$43nA` | the HDMA line counter (bits 6-0) and the repeat flag (bit 7) |
 | `unused` | `$43nB`/`$43nF` | one spare byte, at two addresses; `$43nC-$43nE` read open bus |
 
-The transfer pattern (bits 2-0 of `dmap`) chooses which B-bus registers a unit touches, as offsets from
-`bbad`, and so how many bytes a unit is:
+The transfer pattern (bits 2-0 of `dmap`) chooses which B-bus registers a unit touches, as offsets from `bbad`, and so how many bytes a unit is:
 
 | Pattern | Bytes | B offsets | Typical use |
 |---|---|---|---|
@@ -822,20 +479,9 @@ The transfer pattern (bits 2-0 of `dmap`) chooses which B-bus registers a unit t
 
 ### General-purpose DMA
 
-Set a channel's registers, then write `$420B` with a bit set for each channel to run. The transfer engages
-after one more CPU cycle — in the middle of the following instruction — and the CPU is halted until every
-selected channel is done, lowest channel number first. The address step (bits 4-3 of `dmap`) walks the
-A-bus address after each byte: increment (0), decrement (2), or hold it fixed (1 or 3) to fill from one
-source byte. A byte count of zero means the whole 65536; when the transfer finishes, `das` is zero and the
-channel's `$420B` bit clears. DMA cannot reach the memory-mapped registers on the A bus
-(`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus. Nor can it
-copy work RAM through the work-RAM port, in either direction; see [the memory map](#the-memory-map).
+Set a channel's registers, then write `$420B` with a bit set for each channel to run. The transfer engages after one more CPU cycle — in the middle of the following instruction — and the CPU is halted until every selected channel is done, lowest channel number first. The address step (bits 4-3 of `dmap`) walks the A-bus address after each byte: increment (0), decrement (2), or hold it fixed (1 or 3) to fill from one source byte. A byte count of zero means the whole 65536; when the transfer finishes, `das` is zero and the channel's `$420B` bit clears. DMA cannot reach the memory-mapped registers on the A bus (`$2100-$21FF`, `$4000-$41FF`, `$4200-$421F`, `$4300-$437F`): a read there returns open bus. Nor can it copy work RAM through the work-RAM port, in either direction; see [the memory map](#the-memory-map).
 
-HDMA outranks a DMA in progress. An HDMA event on other channels holds the transfer for as long as the
-event takes and the transfer then goes on. An event that involves the channel the transfer is on —
-the frame's initialisation of it, or a line's delivery from it — ends that channel's transfer where it
-stands: its `$420B` bit clears, `das` keeps the count that was left, the HDMA runs on the channel's
-registers as the transfer left them, and any other selected channel runs after it as it would have.
+HDMA outranks a DMA in progress. An HDMA event on other channels holds the transfer for as long as the event takes and the transfer then goes on. An event that involves the channel the transfer is on — the frame's initialization of it, or a line's delivery from it — ends that channel's transfer where it stands: its `$420B` bit clears, `das` keeps the count that was left, the HDMA runs on the channel's registers as the transfer left them, and any other selected channel runs after it as it would have.
 
 ```cpp
 // A ROM->VRAM copy: channel 0, pattern 1, source $7E:0010, 8 bytes to $2118.
@@ -846,44 +492,21 @@ registers as the transfer left them, and any other selected channel runs after i
 //   $420B = $01                               ; run channel 0
 ```
 
-Each transferred byte is eight master cycles regardless of the region it reaches, on top of eight per
-channel and eight for the whole transfer; the transfer also aligns to an eight-cycle boundary before it
-starts and rounds up to a whole CPU cycle before the CPU resumes. Because the CPU is halted a byte at a
-time, a snapshot taken with `run()` mid-transfer resumes on the exact byte.
+Each transferred byte is eight master cycles regardless of the region it reaches, on top of eight per channel and eight for the whole transfer; the transfer also aligns to an eight-cycle boundary before it starts and rounds up to a whole CPU cycle before the CPU resumes. Because the CPU is halted a byte at a time, a snapshot taken with `run()` mid-transfer resumes on the exact byte.
 
 ### HDMA
 
-Write `$420C` with a bit set per channel to arm HDMA. At the start of each frame the armed channels
-initialise from `a1t`, and on every visible scanline each active channel delivers one entry to its B-bus
-register, so a table can change a register — a scroll position, the brightness, a Mode 7 matrix — as the
-beam moves down the screen. All channels deactivate at the start of vblank.
+Write `$420C` with a bit set per channel to arm HDMA. At the start of each frame the armed channels initialize from `a1t`, and on every visible scanline each active channel delivers one entry to its B-bus register, so a table can change a register — a scroll position, the brightness, a Mode 7 matrix — as the beam moves down the screen. All channels deactivate at the start of vblank.
 
-A table entry is a line-count byte followed by data. The line-count byte is `$00` to stop the channel for
-the frame, `$01-$80` to write one unit and then wait that many scanlines, or `$81-$FF` (the repeat flag)
-to write a unit on each of the next `count` lines. A direct table holds the data inline; an indirect table
-(bit 6 of `dmap`) holds a 16-bit pointer per entry, and the data is read from `dasb:das`.
+A table entry is a line-count byte followed by data. The line-count byte is `$00` to stop the channel for the frame, `$01-$80` to write one unit and then wait that many scanlines, or `$81-$FF` (the repeat flag) to write a unit on each of the next `count` lines. A direct table holds the data inline; an indirect table (bit 6 of `dmap`) holds a 16-bit pointer per entry, and the data is read from `dasb:das`.
 
-When an indirect channel's count runs out part-way down the picture, the engine reads the next count and
-then the pointer after it, whatever the count was. A `$00` therefore ends the channel with `das` loaded
-from the two bytes that follow it and `a2a` three bytes on. The last channel delivering on the line is
-the exception: on a `$00` it reads one byte, into the high half of `das` over a low half of `$00`, which
-leaves `a2a` two bytes on and takes eight master cycles fewer. At the frame's initialisation a `$00`
-first count ends the channel with no pointer read.
+When an indirect channel's count runs out part-way down the picture, the engine reads the next count and then the pointer after it, whatever the count was. A `$00` therefore ends the channel with `das` loaded from the two bytes that follow it and `a2a` three bytes on. The last channel delivering on the line is the exception: on a `$00` it reads one byte, into the high half of `das` over a low half of `$00`, which leaves `a2a` two bytes on and takes eight master cycles fewer. At the frame's initialization a `$00` first count ends the channel with no pointer read.
 
-*The pointer read after a `$00` is documented and uncorroborated.* anomie's register document states
-it, and no reading has confirmed it.
+*The pointer read after a `$00` is documented and uncorroborated.* anomie's register document states it, and no reading has confirmed it.
 
-`$420C` is read on every line, not only at the frame's start, so a program can take a channel out of the
-picture part-way down and put it back. A channel taken out delivers nothing while its bit is clear and
-keeps its place in its table, so putting it back resumes where it stood — and a channel whose table has
-already stopped stays stopped until the next frame.
+`$420C` is read on every line, not only at the frame's start, so a program can take a channel out of the picture part-way down and put it back. A channel taken out delivers nothing while its bit is clear and keeps its place in its table, so putting it back resumes where it stood — and a channel whose table has already stopped stays stopped until the next frame.
 
-A channel armed part-way down a picture has missed the initialisation, so it is not reloaded: it runs from
-the cursor in `a2a` and the count in `nltr` exactly as the program leaves them, and `a1t` is not consulted
-until the next frame begins. Set both before arming it. Whether its first line delivers depends on what
-else is running: a channel that joins channels already delivering writes a unit before it fetches anything,
-so point `a2a` one unit below the table; a channel armed while `$420C` is empty fetches first, so point
-`a2a` at the table itself.
+A channel armed part-way down a picture has missed the initialization, so it is not reloaded: it runs from the cursor in `a2a` and the count in `nltr` exactly as the program leaves them, and `a1t` is not consulted until the next frame begins. Set both before arming it. Whether its first line delivers depends on what else is running: a channel that joins channels already delivering writes a unit before it fetches anything, so point `a2a` one unit below the table; a channel armed while `$420C` is empty fetches first, so point `a2a` at the table itself.
 
 ```cpp
 // Armed part-way down a picture, with nothing else running: give the channel its own
@@ -899,12 +522,7 @@ so point `a2a` one unit below the table; a channel armed while `$420C` is empty 
 
 ## The bus observer
 
-`state()` says what the machine holds after a step. An observer says what the machine *did* to get
-there: every access that crossed the bus, in order, and every CPU cycle that drove an address without
-one. A host that needs the order of two writes inside one instruction, the address of every read, or a
-count of CPU cycles between two instruction boundaries sets one; a host that needs none of that never
-pays for it — with no observer set, an access costs one check, and the machine runs exactly as it does
-without the feature.
+`state()` says what the machine holds after a step. An observer says what the machine *did* to get there: every access that crossed the bus, in order, and every CPU cycle that drove an address without one. A host that needs the order of two writes inside one instruction, the address of every read, or a count of CPU cycles between two instruction boundaries sets one; a host that needs none of that never pays for it — with no observer set, an access costs one check, and the machine runs exactly as it does without the feature.
 
 ```cpp
 #include "snaggletooth/snes/snes.h"
@@ -927,13 +545,7 @@ machine.step();               // one instruction: every access it made is in log
 machine.setObserver(nullptr);
 ```
 
-A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what the bus answered for a
-read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an
-opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and
-write-back, a vector pull — who made it, for an engine's access, which of the eight channels it
-served (`channel`), whether the HDMA engine was reading its own table (`table`) and whether that read
-lay past the table's end (`pastTableEnd`), and, for a write through a video data port, where the port
-put the byte (`landed`):
+A `BusAccess` carries the 24-bit address, the byte that crossed the bus (what the bus answered for a read, what the source drove for a write), which way it went, the `CycleKind` the core drove — an opcode or operand fetch, a data read or write, a read-modify-write's read, unmodified write and write-back, a vector pull — who made it, for an engine's access, which of the eight channels it served (`channel`), whether the HDMA engine was reading its own table (`table`) and whether that read lay past the table's end (`pastTableEnd`), and, for a write through a video data port, where the port put the byte (`landed`):
 
 | `AccessSource` | Who |
 |---|---|
@@ -942,54 +554,19 @@ put the byte (`landed`):
 | `Hdma` | The HDMA engine, its table reads and each byte it delivers the same way |
 | `WramPort` | The work-RAM data port, reaching work RAM on its own behalf when a byte moves through `$2180` |
 
-`channel` is 0–7 on a `Dma` or `Hdma` access and 0 on the CPU's and the port's. `table` is true on the
-HDMA engine's reads of the table it is walking — a line count, a direct table's inline value, an
-indirect entry's two pointer bytes — and false on every other access: the byte an indirect entry
-points at is read from where the pointer says and is not the table's, and a write never is. The two
-together let a host follow every byte an engine moves back to the channel and the table it came from,
-which is how the [cartridge disassembler](snes-disassembler.md#what-a-run-moved) records what a run
-moved.
+`channel` is 0–7 on a `Dma` or `Hdma` access and 0 on the CPU's and the port's. `table` is true on the HDMA engine's reads of the table it is walking — a line count, a direct table's inline value, an indirect entry's two pointer bytes — and false on every other access: the byte an indirect entry points at is read from where the pointer says and is not the table's, and a write never is. The two together let a host follow every byte an engine moves back to the channel and the table it came from, which is how the [cartridge disassembler](snes-disassembler.md#what-a-run-moved) records what a run moved.
 
-`pastTableEnd` is true on the one or two `table` reads an indirect channel makes after a `$00` count:
-the engine reads where an entry's pointer would be, and those bytes belong to whatever follows the
-table. A host collecting a table's bytes leaves them out; see [HDMA](#hdma).
+`pastTableEnd` is true on the one or two `table` reads an indirect channel makes after a `$00` count: the engine reads where an entry's pointer would be, and those bytes belong to whatever follows the table. A host collecting a table's bytes leaves them out; see [HDMA](#hdma).
 
-`landed` is set on a write through a video data port, whoever made it, and says where the port put
-the byte: the VRAM word address for a write to `$2118` or `$2119`, after any address translation; the
-palette word for a write to `$2122`, on both halves; the OAM byte for a write to `$2104`, on both
-halves, within the 544. It is absent on every other access — a read, a write to any other register, a
-write to memory. The address and the value alone cannot tell it, since the port's address steps and
-translates as it goes; the port can, and the disassembler reads it to say
-[where a transfer landed](snes-disassembler.md#what-a-run-moved).
+`landed` is set on a write through a video data port, whoever made it, and says where the port put the byte: the VRAM word address for a write to `$2118` or `$2119`, after any address translation; the palette word for a write to `$2122`, on both halves; the OAM byte for a write to `$2104`, on both halves, within the 544. It is absent on every other access — a read, a write to any other register, a write to memory. The address and the value alone cannot tell it, since the port's address steps and translates as it goes; the port can, and the disassembler reads it to say [where a transfer landed](snes-disassembler.md#what-a-run-moved).
 
-`internal` is called for a CPU cycle that drives an address without a valid access; `kind` is set when
-the pins say what the cycle was for — a read-modify-write's modify cycle — and absent for a plain
-internal cycle. A halted cycle, while the CPU waits or has stopped, drives nothing and reports nothing;
-so do a transfer engine's overhead cycles. Every CPU access plus every internal cycle is therefore the
-CPU's cycle count, which is what `tests/snes/observer_test.cpp` holds it to instruction by
-instruction.
+`internal` is called for a CPU cycle that drives an address without a valid access; `kind` is set when the pins say what the cycle was for — a read-modify-write's modify cycle — and absent for a plain internal cycle. A halted cycle, while the CPU waits or has stopped, drives nothing and reports nothing; so do a transfer engine's overhead cycles. Every CPU access plus every internal cycle is therefore the CPU's cycle count, which is what `tests/snes/observer_test.cpp` holds it to instruction by instruction.
 
-A byte moved through the data port is reported twice: the port's own access to work RAM, at the
-bank-`$7E` address it reached, and then the access to `$2180` that moved it — the CPU's or an
-engine's. The port's comes first, because it completes inside the cycle that caused it and the
-causing access is reported once its value is settled.
+A byte moved through the data port is reported twice: the port's own access to work RAM, at the bank-`$7E` address it reached, and then the access to `$2180` that moved it — the CPU's or an engine's. The port's comes first, because it completes inside the cycle that caused it and the causing access is reported once its value is settled.
 
-The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()`
-leaves it in place, and it must outlive every step it is set for. `observer()` reads back what is
-set; the machine starts with none.
+The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()` leaves it in place, and it must outlive every step it is set for. `observer()` reads back what is set; the machine starts with none.
 
-The audio machine has an observer of its own, the [`ApuObserver`](apu-machine.md#the-observer), told
-every access the sound CPU makes and every instruction boundary it crosses. `setApuObserver` sets it
-on the audio machine inside the console — the host's object, not part of the state, none by default,
-set between calls — and `apuObserver()` reads it back. Its reports arrive from inside `step()`, `run()`
-and the calls into the guest, in the order the sound CPU made them, on the calling thread from inside
-the console's cycles. On a machine built with `apuThread` on they arrive on the
-[audio thread](#the-audio-thread) while the console runs on beside it: the object must be safe to call
-on that thread, a report does not throw, and inside a report `state().apu`, `peekApu` and
-`peekApuRegister` answer the audio machine as it stands, while the rest of `state()` is the console's,
-moving on the calling thread, and is not read there. `peekApu` answers the byte the sound CPU's memory holds at an address, without a fetch —
-the boot-ROM image while the window is mapped, the RAM byte otherwise, and at `$00F0`–`$00FF` the RAM
-beneath the registers — so a host can decode the instruction the sound CPU is about to run.
+The audio machine has an observer of its own, the [`ApuObserver`](apu-machine.md#the-observer), told every access the sound CPU makes and every instruction boundary it crosses. `setApuObserver` sets it on the audio machine inside the console — the host's object, not part of the state, none by default, set between calls — and `apuObserver()` reads it back. Its reports arrive from inside `step()`, `run()` and the calls into the guest, in the order the sound CPU made them, on the calling thread from inside the console's cycles. On a machine built with `apuThread` on they arrive on the [audio thread](#the-audio-thread) while the console runs on beside it: the object must be safe to call on that thread, a report does not throw, and inside a report `state().apu`, `peekApu` and `peekApuRegister` answer the audio machine as it stands, while the rest of `state()` is the console's, moving on the calling thread, and is not read there. `peekApu` answers the byte the sound CPU's memory holds at an address, without a fetch — the boot-ROM image while the window is mapped, the RAM byte otherwise, and at `$00F0`–`$00FF` the RAM beneath the registers — so a host can decode the instruction the sound CPU is about to run.
 
 ```cpp
 struct AudioLog final : ApuObserver {
@@ -1004,19 +581,11 @@ machine.run(21'477'272);      // one second: every instruction the sound CPU ran
 machine.setApuObserver(nullptr);
 ```
 
-The [intermediate representation](ir.md#running-beside-the-machine) is the first consumer of both:
-a run replayed instruction by instruction with an interpreter beside each core, held to every access
-the two observers report.
+The [intermediate representation](ir.md#running-beside-the-machine) is the first consumer of both: a run replayed instruction by instruction with an interpreter beside each core, held to every access the two observers report.
 
 ## The instruction observer
 
-The bus observer says what every cycle did. The instruction observer says where the main CPU stood
-between them: it is told every boundary `step()` returns at, from inside `step()`, from inside `run()`
-and from inside the calls into the guest, so a host that runs the machine a budget at a time is told
-exactly the boundaries a host stepping it would see returned. It is the console's twin of the audio
-machine's `ApuObserver::instruction`, and the observing side of the
-[instruction watch](#standing-in-for-a-routine): told after the fact, at every boundary, with no
-answer to give.
+The bus observer says what every cycle did. The instruction observer says where the main CPU stood between them: it is told every boundary `step()` returns at, from inside `step()`, from inside `run()` and from inside the calls into the guest, so a host that runs the machine a budget at a time is told exactly the boundaries a host stepping it would see returned. It is the console's twin of the audio machine's `ApuObserver::instruction`, and the observing side of the [instruction watch](#standing-in-for-a-routine): told after the fact, at every boundary, with no answer to give.
 
 ```cpp
 #include "snaggletooth/snes/snes.h"
@@ -1048,8 +617,7 @@ while (steps < count.boundaries) {
 
 ### What it is told
 
-`instruction(before, after, masterCycles)` is called once a boundary. A boundary is one of three
-things, the same three `step()` returns after:
+`instruction(before, after, masterCycles)` is called once a boundary. A boundary is one of three things, the same three `step()` returns after:
 
 | Boundary | `after` |
 |---|---|
@@ -1057,44 +625,21 @@ things, the same three `step()` returns after:
 | One idle cycle of a core halted by `WAI` or `STP` | the file unchanged, `run` not `Running` |
 | A cycle an engine held the bus for while the CPU stood between instructions: an HDMA event | the file unchanged, the program counter where it was |
 
-A [memory refresh](#the-memory-refresh) is not a boundary: the CPU is held off the bus for it, no report
-is made, and its cycles count toward the boundary after it. A general-purpose transfer runs inside the
-instruction that started it, so its cycles land in that instruction's report.
+A [memory refresh](#the-memory-refresh) is not a boundary: the CPU is held off the bus for it, no report is made, and its cycles count toward the boundary after it. A general-purpose transfer runs inside the instruction that started it, so its cycles land in that instruction's report.
 
-`before` is the register file at the boundary before. Where there was none to count from, it is the file
-as it stood when the observer was set, or after the last `restore()`, `reset()` or `setCpuState()`, each
-of which marks the boundary again. `masterCycles` is the master cycles from `before` to `after`: what
-`step()` returns for the instruction it runs, and the sum over every report is the master cycles the
-machine spent since the mark.
+`before` is the register file at the boundary before. Where there was none to count from, it is the file as it stood when the observer was set, or after the last `restore()`, `reset()` or `setCpuState()`, each of which marks the boundary again. `masterCycles` is the master cycles from `before` to `after`: what `step()` returns for the instruction it runs, and the sum over every report is the master cycles the machine spent since the mark.
 
 ### Inside the report
 
-The call comes on the calling thread, once the cycle has closed and after any frame, timeline or save
-report the cycle owed. `state()` inside it is the machine at the boundary, `state().cpu` equal to
-`after`. On a machine built with either thread, the audio machine and the two fields of `ppu` the
-picture writes read as they read inside a bus observer's call: the audio machine through `peekApu` and
-`peekApuRegister`, the picture's two fields not at all (`state()`'s comment in `snes.h`). The threads
-are not waited for, so a report costs the host's own work and nothing more.
+The call comes on the calling thread, once the cycle has closed and after any frame, timeline or save report the cycle owed. `state()` inside it is the machine at the boundary, `state().cpu` equal to `after`. On a machine built with either thread, the audio machine and the two fields of `ppu` the picture writes read as they read inside a bus observer's call: the audio machine through `peekApu` and `peekApuRegister`, the picture's two fields not at all (`state()`'s comment in `snes.h`). The threads are not waited for, so a report costs the host's own work and nothing more.
 
-The call does not throw, and it runs nothing on the machine: no `step()`, `run()`, `restore()`,
-`reset()` or `setCpuState()`. A [call into the guest](#calling-into-the-guest) made from inside it is
-refused and returns false with nothing done. A call made between calls reports its own boundaries, the
-guest's instruction it finishes first and every instruction of the routine, and the report after it
-counts from the guest's file, put back.
+The call does not throw, and it runs nothing on the machine: no `step()`, `run()`, `restore()`, `reset()` or `setCpuState()`. A [call into the guest](#calling-into-the-guest) made from inside it is refused and returns false with nothing done. A call made between calls reports its own boundaries, the guest's instruction it finishes first and every instruction of the routine, and the report after it counts from the guest's file, put back.
 
-The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()`
-and `reset()` leave it in place, and a move carries it to the new machine. `instructionObserver()`
-reads back what is set; the machine starts with none. With none set, `step()` and `run()` each make one
-test a call and the machine runs exactly as it does without the feature; `tests/snes/instruction_observer_test.cpp`
-holds a machine with an observer that keeps nothing to the same state at every return and the same
-frames as one with none.
+The observer is the host's object, not part of the state: a snapshot does not carry it, `restore()` and `reset()` leave it in place, and a move carries it to the new machine. `instructionObserver()` reads back what is set; the machine starts with none. With none set, `step()` and `run()` each make one test a call and the machine runs exactly as it does without the feature; `tests/snes/instruction_observer_test.cpp` holds a machine with an observer that keeps nothing to the same state at every return and the same frames as one with none.
 
 ## The save observer
 
-A cartridge with a battery keeps what it writes, in a window the machine holds as state
-([snes-cartridge.md](snes-cartridge.md)). Reading that window says what it holds; the save observer
-says when it *changed*, so a program keeping the save for a person does not have to compare the whole
-window against a copy of its own to find out.
+A cartridge with a battery keeps what it writes, in a window the machine holds as state ([snes-cartridge.md](snes-cartridge.md)). Reading that window says what it holds; the save observer says when it *changed*, so a program keeping the save for a person does not have to compare the whole window against a copy of its own to find out.
 
 ```cpp
 struct Keeper final : SaveObserver {
@@ -1107,34 +652,17 @@ Keeper keeper;
 machine.setSaveObserver(&keeper);
 ```
 
-It is told once as the vertical blank of a frame that changed the window begins, however many stores
-landed in it, and not at all in a frame where none did — and again after `restore()`, a caller
-replacing the window having changed it as surely as a store would. A store that lands in vertical blank,
-after that blank's report, is told as the next frame's blank begins. The span is the machine's own
-storage, valid for the call.
+It is told once as the vertical blank of a frame that changed the window begins, however many stores landed in it, and not at all in a frame where none did — and again after `restore()`, a caller replacing the window having changed it as surely as a store would. A store that lands in vertical blank, after that blank's report, is told as the next frame's blank begins. The span is the machine's own storage, valid for the call.
 
-The report is made at the end of the cycle in which the frame's vertical blank begins, after that
-cycle has closed and after the frame observer's and [the timeline observer's](#the-timeline-observer)
-reports of the same frame. What a host does
-with a save — writing a file, most plainly — may fail, and the report may throw: `step()` or `run()`
-returns through the throw with the machine at that cycle's end and `state()` coherent there, and the
-report is not made again. The next `run()` finishes the budget the throw interrupted before it spends
-its own, so `run(a)` then `run(b)` lands where `run(a + b)` does. A frame observer's report and a
-timeline observer's may throw on the same terms; a report the same cycle owes after the one that threw
-is then made at the end of the next cycle.
+The report is made at the end of the cycle in which the frame's vertical blank begins, after that cycle has closed and after the frame observer's and [the timeline observer's](#the-timeline-observer) reports of the same frame. What a host does with a save — writing a file, most plainly — may fail, and the report may throw: `step()` or `run()` returns through the throw with the machine at that cycle's end and `state()` coherent there, and the report is not made again. The next `run()` finishes the budget the throw interrupted before it spends its own, so `run(a)` then `run(b)` lands where `run(a + b)` does. A frame observer's report and a timeline observer's may throw on the same terms; a report the same cycle owes after the one that threw is then made at the end of the next cycle.
 
-On the same terms as the others: the host's object, not part of the state, so a snapshot does not
-carry it and `restore()` leaves it in place; `saveObserver()` reads back what is set; the machine
-starts with none, and one that has none runs exactly as it would have.
+On the same terms as the others: the host's object, not part of the state, so a snapshot does not carry it and `restore()` leaves it in place; `saveObserver()` reads back what is set; the machine starts with none, and one that has none runs exactly as it would have.
 
-Nothing here knows where a save goes. `snes_player` keeps one as the file other emulators read —
-[user-files.md](user-files.md) — which is the whole of what a tool built on this has to decide.
+Nothing here knows where a save goes. `snes_player` keeps one as the file other emulators read — [user-files.md](user-files.md) — which is the whole of what a tool built on this has to decide.
 
 ## The timeline observer
 
-A host that draws the picture itself sets a timeline observer, and is handed every finished frame as
-a `PpuTimeline` — the registers, memories and writes the frame is drawn from, laid out for a GPU
-([ppu.md §The picture as a timeline](ppu.md#the-picture-as-a-timeline)).
+A host that draws the picture itself sets a timeline observer, and is handed every finished frame as a `PpuTimeline` — the registers, memories and writes the frame is drawn from, laid out for a GPU ([ppu.md §The picture as a timeline](ppu.md#the-picture-as-a-timeline)).
 
 ```cpp
 struct Drawer final : PpuTimelineObserver {
@@ -1147,31 +675,15 @@ Drawer drawer;
 machine.setPpuTimelineObserver(&drawer);
 ```
 
-The machine records the timeline only while one is set or the GPU PPU is on (`SnesConfig::gpuPpu`,
-[gpu-ppu.md](gpu-ppu.md)), on the side that draws: the calling thread, or the picture thread on a
-machine built with `SnesConfig::ppuThread` on. It records whether or not a frame observer is set, and
-draws pixels only while a frame observer is set, whether or not this one is; with neither and no GPU
-device, a machine draws nothing and records nothing. Its state, and everything a program can observe,
-are the same either way.
+The machine records the timeline only while one is set or the GPU PPU is on (`SnesConfig::gpuPpu`, [gpu-ppu.md](gpu-ppu.md)), on the side that draws: the calling thread, or the picture thread on a machine built with `SnesConfig::ppuThread` on. It records whether or not a frame observer is set, and draws pixels only while a frame observer is set, whether or not this one is; with neither and no GPU device, a machine draws nothing and records nothing. Its state, and everything a program can observe, are the same either way.
 
-The report is made on the calling thread at the end of the cycle in which the frame's vertical blank
-begins, after that cycle has closed, after the frame observer's report of the same frame, after the
-GPU PPU, where it is on, has drawn the frame, and before the save observer's. It waits for the picture thread and the audio thread first, so `state()` inside
-it is the whole machine at that cycle's end. It is made for a frame of which at least one line was
-recorded. The spans are the machine's own storage and are valid for the call, and the report may
-throw, on the save observer's terms above.
+The report is made on the calling thread at the end of the cycle in which the frame's vertical blank begins, after that cycle has closed, after the frame observer's report of the same frame, after the GPU PPU, where it is on, has drawn the frame, and before the save observer's. It waits for the picture thread and the audio thread first, so `state()` inside it is the whole machine at that cycle's end. It is made for a frame of which at least one line was recorded. The spans are the machine's own storage and are valid for the call, and the report may throw, on the save observer's terms above.
 
-On the same terms as the others: the host's object, not part of the state, so a snapshot does not
-carry it and `restore()` leaves it in place; `ppuTimelineObserver()` reads back what is set; the
-machine starts with none. Set it between calls. Setting it, a restore and a reset each drop the frame
-in progress, which is then recorded from the first line whose first read dot the beam reaches.
+On the same terms as the others: the host's object, not part of the state, so a snapshot does not carry it and `restore()` leaves it in place; `ppuTimelineObserver()` reads back what is set; the machine starts with none. Set it between calls. Setting it, a restore and a reset each drop the frame in progress, which is then recorded from the first line whose first read dot the beam reaches.
 
 ## Snapshot and restore
 
-The whole mutable machine is a value. `state()` returns a `SnesState` coherent at any cycle the machine
-has stopped on, mid-instruction included; `restore()` replaces the mutable machine and resumes exactly
-there. The cartridge and clock rate are the machine's fixed identity and are not part of the snapshot —
-restoring a state keeps them in place.
+The whole mutable machine is a value. `state()` returns a `SnesState` coherent at any cycle the machine has stopped on, mid-instruction included; `restore()` replaces the mutable machine and resumes exactly there. The cartridge and clock rate are the machine's fixed identity and are not part of the snapshot — restoring a state keeps them in place.
 
 ```cpp
 SnesState saved = machine.state();
@@ -1179,44 +691,17 @@ machine.run(100'000);
 machine.restore(saved);   // back to the saved cycle, exactly
 ```
 
-`restore()` answers `true` once the state is in place. It answers `false`, and leaves the machine
-exactly as it was, when the state's save is another size than the machine's: the save's size is the
-cartridge's, fixed for the machine's life like the cartridge, so a state with another is not a state
-of this machine. A state taken from a machine built from the same cartridge always has the size.
+`restore()` answers `true` once the state is in place. It answers `false`, and leaves the machine exactly as it was, when the state's save is another size than the machine's: the save's size is the cartridge's, fixed for the machine's life like the cartridge, so a state with another is not a state of this machine. A state taken from a machine built from the same cartridge always has the size.
 
-`state()` returns the machine's own state, not a copy of it: the audio machine runs inside
-`state().apu` (the [APU machine](apu-machine.md#running-in-storage-you-hold) built over that
-object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is
-moved, never copied; a moved machine carries its audio machine after its state. On a machine built
-with [the audio thread](#the-audio-thread), `state()` is read between calls, when both machines stand at
-one master time, and inside the frame, timeline and save reports, which wait for the audio machine; a bus observer
-or a watcher there reads the audio machine through `peekApu` and `peekApuRegister`, which wait for it.
-On a machine built with [the picture thread](#the-picture-thread), the two fields of `state().ppu` the
-picture writes, `tiles` and `lastMain`, are the thread's inside a call and are read between calls and
-inside the reports, which wait for the picture; the rest of the chip's state is the calling thread's
-throughout. A restore drops the machine's record of what each picture line read
-([A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes)), so the next
-frame draws every line, and the timeline of the frame in progress
-([the timeline observer](#the-timeline-observer)), which is recorded again from the next line drawn
-from its start.
+`state()` returns the machine's own state, not a copy of it: the audio machine runs inside `state().apu` (the [APU machine](apu-machine.md#running-in-storage-you-hold) built over that object), so reading the state after every step costs no copy of its 64 KB of sound RAM. A machine is moved, never copied; a moved machine carries its audio machine after its state. On a machine built with [the audio thread](#the-audio-thread), `state()` is read between calls, when both machines stand at one master time, and inside the frame, timeline and save reports, which wait for the audio machine; a bus observer or a watcher there reads the audio machine through `peekApu` and `peekApuRegister`, which wait for it. On a machine built with [the picture thread](#the-picture-thread), the two fields of `state().ppu` the picture writes, `tiles` and `lastMain`, are the thread's inside a call and are read between calls and inside the reports, which wait for the picture; the rest of the chip's state is the calling thread's throughout. A restore drops the machine's record of what each picture line read ([A line drawn again only when it changes](#a-line-drawn-again-only-when-it-changes)), so the next frame draws every line, and the timeline of the frame in progress ([the timeline observer](#the-timeline-observer)), which is recorded again from the next line drawn from its start.
 
-The machine is deterministic: the same state and the same trace give the same bytes. The trace is
-everything that reaches the machine from outside — the pads presented before each run, and whatever a
-host does through [the faces below](#reaching-into-the-machine): the bytes it pokes, the register files
-it writes, its answers to watched accesses, the stand-ins it arms and the routines it calls. Two
-machines restored from one snapshot and driven by one trace end on equal `SnesState` values and hand
-over the same audio frames; `tests/snes/host_surface_test.cpp` holds the whole host face to that on one
-running cartridge.
+The machine is deterministic: the same state and the same trace give the same bytes. The trace is everything that reaches the machine from outside — the pads presented before each run, and whatever a host does through [the faces below](#reaching-into-the-machine): the bytes it pokes, the register files it writes, its answers to watched accesses, the stand-ins it arms and the routines it calls. Two machines restored from one snapshot and driven by one trace end on equal `SnesState` values and hand over the same audio frames; `tests/snes/host_surface_test.cpp` holds the whole host face to that on one running cartridge.
 
-What a host sets up is its own and not part of the state: the observers, the watchers, the places
-armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()`
-leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set —
-the routine a stand-in held off runs there.
+What a host sets up is its own and not part of the state: the observers, the watchers, the places armed for a watch and the stand-ins armed for a routine. A snapshot carries none of them, `restore()` leaves them in place, and a snapshot restored into a machine with nothing set runs with nothing set — the routine a stand-in held off runs there.
 
 ### The state as bytes
 
-A host that keeps a state past the process, or carries it to another machine, takes it as bytes. The
-bytes are the same for the same state on every platform, and come back as the same state.
+A host that keeps a state past the process, or carries it to another machine, takes it as bytes. The bytes are the same for the same state on every platform, and come back as the same state.
 
 ```cpp
 // Taken between calls, into a buffer the host sizes once: the size is fixed for the machine's life.
@@ -1234,20 +719,9 @@ const std::vector<std::uint8_t> bytes = machine.state().asBytes();
 const std::optional<SnesState> state = SnesState::fromBytes(bytes);
 ```
 
-`byteSize()` is 268858 plus the save's size: 268858 for a cartridge with no save, 399930 for one with
-the largest, `kMaxSaveRamBytes`. The save's size is the cartridge's, so a machine's `byteSize()` is one
-value from construction on, through every run and every restore. `asBytes(out)` writes `byteSize()`
-bytes from the start of `out` and answers how many it wrote; given a shorter buffer it writes nothing
-and answers 0. `asBytes()` answers the bytes in a vector of their own. Take them between calls, where
-`state()` is coherent with either thread on.
+`byteSize()` is 268858 plus the save's size: 268858 for a cartridge with no save, 399930 for one with the largest, `kMaxSaveRamBytes`. The save's size is the cartridge's, so a machine's `byteSize()` is one value from construction on, through every run and every restore. `asBytes(out)` writes `byteSize()` bytes from the start of `out` and answers how many it wrote; given a shorter buffer it writes nothing and answers 0. `asBytes()` answers the bytes in a vector of their own. Take them between calls, where `state()` is coherent with either thread on.
 
-The bytes begin with a header: `SnesState::kBytesVersion` as two bytes, then the save's length as four.
-`SnesState`'s own fields follow in the order the struct declares them, work RAM first, then its parts
-in the order it declares them, each laid out by the same rule, and the save comes last. Every value is
-little-endian at its fixed width. A `bool` is one byte, 0 or 1; an enum is one byte, its value; an
-`int` is four bytes. Nothing is taken from the host's own representation of a value, so no padding,
-byte order or size of a type reaches the bytes. A controller port is one byte, 1 with a pad in it and
-0 without, then the pad's twelve buttons, or twelve zeros.
+The bytes begin with a header: `SnesState::kBytesVersion` as two bytes, then the save's length as four. `SnesState`'s own fields follow in the order the struct declares them, work RAM first, then its parts in the order it declares them, each laid out by the same rule, and the save comes last. Every value is little-endian at its fixed width. A `bool` is one byte, 0 or 1; an enum is one byte, its value; an `int` is four bytes. Nothing is taken from the host's own representation of a value, so no padding, byte order or size of a type reaches the bytes. A controller port is one byte, 1 with a pad in it and 0 without, then the pad's twelve buttons, or twelve zeros.
 
 | Offset | Bytes | What |
 |---|---|---|
@@ -1261,9 +735,7 @@ byte order or size of a type reaches the bytes. A controller port is one byte, 1
 | 268762 | 96 | `dma`: eight channels of 12 |
 | 268858 | the save's length | the save |
 
-`fromBytes(bytes, into)` reads the bytes into a state the host holds and answers whether it did. It
-allocates nothing when `into`'s save already has the length the bytes carry. `fromBytes(bytes)` answers
-a new state, or nothing. Both refuse any bytes `asBytes()` could not have written:
+`fromBytes(bytes, into)` reads the bytes into a state the host holds and answers whether it did. It allocates nothing when `into`'s save already has the length the bytes carry. `fromBytes(bytes)` answers a new state, or nothing. Both refuse any bytes `asBytes()` could not have written:
 
 - another `kBytesVersion`;
 - a save longer than `kMaxSaveRamBytes`;
@@ -1271,32 +743,19 @@ a new state, or nothing. Both refuse any bytes `asBytes()` could not have writte
 - a `bool` byte other than 0 or 1, or an enum byte past its type's last value, anywhere in the state;
 - a port marked empty with a button byte set.
 
-A refusal leaves `into` exactly as it was: every byte is checked before the first is written. Bytes
-that are accepted are the bytes `asBytes()` gives back for the state they build, so two equal states
-have equal bytes and the bytes can be compared or hashed in place of the state. A later layout takes
-the next `kBytesVersion`, and bytes of any other version are refused rather than read forward.
+A refusal leaves `into` exactly as it was: every byte is checked before the first is written. Bytes that are accepted are the bytes `asBytes()` gives back for the state they build, so two equal states have equal bytes and the bytes can be compared or hashed in place of the state. A later layout takes the next `kBytesVersion`, and bytes of any other version are refused rather than read forward.
 
-Decoding never touches a machine. The host hands the state it built to `restore()`, which refuses one
-whose save is another size than the machine's.
+Decoding never touches a machine. The host hands the state it built to `restore()`, which refuses one whose save is another size than the machine's.
 
-Every part of the state has the same functions: `Cpu65816State`, `Spc700State`, `DspState`, `ApuState`,
-`PpuState`, `DmaChannel` and `Joypad` each carry a `static constexpr byteSize()`, both `asBytes()` forms
-and both `fromBytes()` forms, on the same terms, so a host can carry one part alone. A part has no
-header of its own; its bytes are the slice the table above gives it. Each part's layout is held by the
-`state_bytes_test.cpp` beside its other tests, and `tests/snes/state_bytes_test.cpp` holds the
-machine's, restoring the bytes into a second machine that then runs on to the same state and the same
-audio frames with each thread off and on.
+Every part of the state has the same functions: `Cpu65816State`, `Spc700State`, `DspState`, `ApuState`, `PpuState`, `DmaChannel` and `Joypad` each carry a `static constexpr byteSize()`, both `asBytes()` forms and both `fromBytes()` forms, on the same terms, so a host can carry one part alone. A part has no header of its own; its bytes are the slice the table above gives it. Each part's layout is held by the `state_bytes_test.cpp` beside its other tests, and `tests/snes/state_bytes_test.cpp` holds the machine's, restoring the bytes into a second machine that then runs on to the same state and the same audio frames with each thread off and on.
 
 ## Reaching into the machine
 
-Beside the whole-state snapshot, a host reaches into individual places the machine holds, reading and
-writing them without spending a cycle and without a register's side effect. This is for a host that
-edits memory, seeds a value, or reads one out between runs — not for the program the machine runs.
+Beside the whole-state snapshot, a host reaches into individual places the machine holds, reading and writing them without spending a cycle and without a register's side effect. This is for a host that edits memory, seeds a value, or reads one out between runs — not for the program the machine runs.
 
 ### Memory by bus address
 
-`peek` answers the byte a 24-bit bus address holds, `poke` writes it, and `addressable` says whether a
-span is memory the face reaches. The three agree, because `addressable` is `peek`'s own answer.
+`peek` answers the byte a 24-bit bus address holds, `poke` writes it, and `addressable` says whether a span is memory the face reaches. The three agree, because `addressable` is `peek`'s own answer.
 
 ```cpp
 std::optional<std::uint8_t> byte = machine.peek(0x7E0000);  // a work-RAM byte
@@ -1304,22 +763,11 @@ machine.poke(0x008000, 0x42);                               // a byte of the car
 bool ok = machine.addressable(0x008000, 2);                 // two ROM bytes: true
 ```
 
-`peek` reaches work RAM, the cartridge's ROM and its save, and answers `std::nullopt` for anything the
-face does not reach as memory — a register, or an address the cartridge leaves open. `poke` returns
-whether the byte landed. A `poke` to ROM changes the machine's own copy of the image, not a file, and no
-snapshot carries it; a `poke` to the save writes the save without reporting it to the save observer,
-which reports the program's stores rather than the host's own edits. A register address is refused by
-both: `peek` and `poke` reach memory, and a register's value is
-[`peekRegister`](#a-registers-value)'s.
+`peek` reaches work RAM, the cartridge's ROM and its save, and answers `std::nullopt` for anything the face does not reach as memory — a register, or an address the cartridge leaves open. `poke` returns whether the byte landed. A `poke` to ROM changes the machine's own copy of the image, not a file, and no snapshot carries it; a `poke` to the save writes the save without reporting it to the save observer, which reports the program's stores rather than the host's own edits. A register address is refused by both: `peek` and `poke` reach memory, and a register's value is [`peekRegister`](#a-registers-value)'s.
 
 ### The memories the bus cannot name
 
-Video RAM, the palette, the sprite table and the audio machine's RAM are written by name, each the way
-the chip reads it: no port address steps, no latch moves, no increment happens. A write shows where
-the chip next reads the byte: video RAM at [the next tile read](ppu.md#the-tile-reads) of a column
-that names it, the next sprite pass that loads it, or in Mode 7 the next pixel; the palette at the
-next pixel; the sprite table at the next line's passes over it; the audio machine's RAM at its next
-access.
+Video RAM, the palette, the sprite table and the audio machine's RAM are written by name, each the way the chip reads it: no port address steps, no latch moves, no increment happens. A write shows where the chip next reads the byte: video RAM at [the next tile read](ppu.md#the-tile-reads) of a column that names it, the next sprite pass that loads it, or in Mode 7 the next pixel; the palette at the next pixel; the sprite table at the next line's passes over it; the audio machine's RAM at its next access.
 
 ```cpp
 machine.writeVram(0x1234, 0xAB);    // 64 KB
@@ -1328,17 +776,11 @@ machine.writeOam(0x00, 0x80);       // 544 bytes
 machine.writeApuRam(0x0200, 0x5C);  // the audio machine's RAM
 ```
 
-An address past a memory's end is ignored. The read-only spans `vram()`, `cgram()`, `oam()` and
-`peekApu()` hand the same bytes back.
+An address past a memory's end is ignored. The read-only spans `vram()`, `cgram()`, `oam()` and `peekApu()` hand the same bytes back.
 
 ### A communication port from the console's side
 
-A store to `$2140-$2143` is how the CPU talks to the APU: it sets the input latch the sound CPU reads
-at `$F4-$F7`. `writeApuPort` makes that store from the host's side, so a host standing where the CPU
-stands hands the sound program a byte without running code to do it. `index` is `0-3`, taken modulo
-four the way the bus mirrors the ports across `$2140-$217F`; the output latch the sound CPU wrote —
-[`peekRegister`](#a-registers-value) at `$2140 + index` reads it — is left alone, and nothing else
-moves.
+A store to `$2140-$2143` is how the CPU talks to the APU: it sets the input latch the sound CPU reads at `$F4-$F7`. `writeApuPort` makes that store from the host's side, so a host standing where the CPU stands hands the sound program a byte without running code to do it. `index` is `0-3`, taken modulo four the way the bus mirrors the ports across `$2140-$217F`; the output latch the sound CPU wrote — [`peekRegister`](#a-registers-value) at `$2140 + index` reads it — is left alone, and nothing else moves.
 
 ```cpp
 machine.writeApuPort(0, 0xCC);  // port 0's input latch, which the sound CPU reads at $F4
@@ -1348,12 +790,7 @@ Like the memory writes, it lands where the machine stands between `run()`s.
 
 ### A DSP register from the host's side
 
-`writeApuDspRegister` writes one of the 128 DSP registers (`$00-$7F`) the way the sound program's own
-`MOV DSPDATA` write does: the byte is stored, an ENDX (`$7C`) write acknowledges every end flag instead,
-a KON (`$4C`) write arms the key-on the next poll consumes, and a write to a register the DSP itself
-writes carries the DSP's standing cycle. An index above `$7F` is ignored, the way `DSPDATA` ignores it,
-and a register's value is read back from `state().apu.dsp[index]`. The register file itself is the
-[audio machine](apu-machine.md#dsp-register-file)'s.
+`writeApuDspRegister` writes one of the 128 DSP registers (`$00-$7F`) the way the sound program's own `MOV DSPDATA` write does: the byte is stored, an ENDX (`$7C`) write acknowledges every end flag instead, a KON (`$4C`) write arms the key-on the next poll consumes, and a write to a register the DSP itself writes carries the DSP's standing cycle. An index above `$7F` is ignored, the way `DSPDATA` ignores it, and a register's value is read back from `state().apu.dsp[index]`. The register file itself is the [audio machine](apu-machine.md#dsp-register-file)'s.
 
 ```cpp
 machine.writeApuDspRegister(0x4C, 0x01);  // KON: key voice 0 on, as MOV DSPDATA would
@@ -1363,9 +800,7 @@ Like the memory writes, it lands where the machine stands between `run()`s.
 
 ### The CPU register file
 
-`cpuState()` reads the 65816's registers whole, and `setCpuState()` writes them, reloading the live core
-so the written set is live on the next cycle. Instruction progress is part of the value, so a machine
-written mid-instruction resumes exactly where the value says.
+`cpuState()` reads the 65816's registers whole, and `setCpuState()` writes them, reloading the live core so the written set is live on the next cycle. Instruction progress is part of the value, so a machine written mid-instruction resumes exactly where the value says.
 
 ```cpp
 Cpu65816State regs = machine.cpuState();
@@ -1375,10 +810,7 @@ machine.setCpuState(regs);  // the next step runs from $8000
 
 ### Draining audio without allocating
 
-`takeFrames()` returns the stereo frames produced since the last drain in a fresh vector.
-`takeFrames(std::span<StereoFrame>)` drains into the caller's own storage instead and returns how many
-it wrote; frames past the end of the span stay queued for the next drain, and nothing is allocated — a
-host producing sound on a callback that must not allocate drains through this form.
+`takeFrames()` returns the stereo frames produced since the last drain in a fresh vector. `takeFrames(std::span<StereoFrame>)` drains into the caller's own storage instead and returns how many it wrote; frames past the end of the span stay queued for the next drain, and nothing is allocated — a host producing sound on a callback that must not allocate drains through this form.
 
 ```cpp
 std::array<StereoFrame, 512> buffer;
@@ -1387,11 +819,7 @@ std::size_t written = machine.takeFrames(buffer);
 
 ### A register's value
 
-`peekRegister` answers the byte a read of a register would return, computed as the read computes it,
-and moves nothing: no flag is cleared, no port is clocked, no address steps, no flip-flop or latch
-changes, no counter is latched, and the data bus keeps the byte it held. The bits a read takes from
-open bus come from that byte. An address that is not a register — one [`physical`](#a-watch-is-on-the-byte)
-does not place in `Space::Register` — answers `std::nullopt`: memory and open bus are `peek`'s.
+`peekRegister` answers the byte a read of a register would return, computed as the read computes it, and moves nothing: no flag is cleared, no port is clocked, no address steps, no flip-flop or latch changes, no counter is latched, and the data bus keeps the byte it held. The bits a read takes from open bus come from that byte. An address that is not a register — one [`physical`](#a-watch-is-on-the-byte) does not place in `Space::Register` — answers `std::nullopt`: memory and open bus are `peek`'s.
 
 ```cpp
 std::optional<std::uint8_t> rdnmi = machine.peekRegister(0x004210);  // the NMI flag, left set
@@ -1400,16 +828,9 @@ std::optional<std::uint8_t> vram = machine.peekRegister(0x002139);   // the pref
 std::optional<std::uint8_t> none = machine.peekRegister(0x7E0000);   // work RAM: std::nullopt
 ```
 
-A register answers at its offset in every system bank, as a read does. One whose read answers with the
-data bus alone — a write-only PPU register other than those that answer with the chip's first-half
-value ([ppu.md](ppu.md#the-status-registers-and-the-three-open-buses)), `$2137`, `$2181`–`$2183`, `$4200`–`$420F`, a
-channel's `$43xC`–`$43xE` — answers the bus's byte. A peek between
-two `run()` calls leaves the machine exactly as it was, so the run after it lands where it would have.
+A register answers at its offset in every system bank, as a read does. One whose read answers with the data bus alone — a write-only PPU register other than those that answer with the chip's first-half value ([ppu.md](ppu.md#the-status-registers-and-the-three-open-buses)), `$2137`, `$2181`–`$2183`, `$4200`–`$420F`, a channel's `$43xC`–`$43xE` — answers the bus's byte. A peek between two `run()` calls leaves the machine exactly as it was, so the run after it lands where it would have.
 
-`peekApuRegister` answers the audio machine's sixteen registers at `$00F0`–`$00FF` the same way: a
-timer's output is answered and not cleared, and the DSP register under `DSPADDR` is answered with the
-address left where it stands ([apu-machine.md](apu-machine.md#the-register-overlay)). Any other address
-answers `std::nullopt`.
+`peekApuRegister` answers the audio machine's sixteen registers at `$00F0`–`$00FF` the same way: a timer's output is answered and not cleared, and the DSP register under `DSPADDR` is answered with the address left where it stands ([apu-machine.md](apu-machine.md#the-register-overlay)). Any other address answers `std::nullopt`.
 
 ```cpp
 std::optional<std::uint8_t> input = machine.peekApuRegister(0x00F4);  // the byte the program sent through $2140
@@ -1417,9 +838,7 @@ std::optional<std::uint8_t> input = machine.peekApuRegister(0x00F4);  // the byt
 
 ## Answering an access
 
-Beside the observer, which reports every settled access and cannot change it, a host answers accesses
-before they take effect. It sets an `AccessWatcher` and arms the places it cares about; each access to
-an armed place asks the watcher what happens — let it through, prevent it, or stand a byte in its place.
+Beside the observer, which reports every settled access and cannot change it, a host answers accesses before they take effect. It sets an `AccessWatcher` and arms the places it cares about; each access to an armed place asks the watcher what happens — let it through, prevent it, or stand a byte in its place.
 
 ```cpp
 struct Guard final : AccessWatcher {
@@ -1438,40 +857,17 @@ machine.setAccessWatcher(&guard);
 machine.watchAccess(0x7E0100, 16, /*onRead=*/true, /*onWrite=*/true);  // 16 bytes, both directions
 ```
 
-An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write,
-and leaves a read as it stands, since nothing can stop the chip receiving a byte; `instead(byte)` puts
-`byte` in the access's place — the read delivers it, the write stores it. `AccessAnswer` is one class
-for both machines, declared in `apu/apu.h`; the console's watcher is `AccessWatcher` and the audio
-machine's `ApuAccessWatcher` ([apu-machine.md §Answering an access](apu-machine.md#answering-an-access)).
+An answer is one of three: `proceed()` lets the access happen as it would; `veto()` prevents a write, and leaves a read as it stands, since nothing can stop the chip receiving a byte; `instead(byte)` puts `byte` in the access's place — the read delivers it, the write stores it. `AccessAnswer` is one class for both machines, declared in `apu/apu.h`; the console's watcher is `AccessWatcher` and the audio machine's `ApuAccessWatcher` ([apu-machine.md §Answering an access](apu-machine.md#answering-an-access)).
 
-`watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms
-them. The two directions are independent, arming a place already armed does nothing, and a machine that
-has never armed a place holds no table at all — so a watch nobody arms costs nothing. A watch sees every
-access to an armed place — the CPU's, either transfer engine's, and the work-RAM port's — and `source`
-tells the watcher which made it.
+`watchAccess` arms `bytes` bytes from an address, for reads, writes, or both; `unwatchAccess` disarms them. The two directions are independent, arming a place already armed does nothing, and a machine that has never armed a place holds no table at all — so a watch nobody arms costs nothing. A watch sees every access to an armed place — the CPU's, either transfer engine's, and the work-RAM port's — and `source` tells the watcher which made it.
 
-The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()`
-leaves it in place. With nothing armed — no place for a watch and no instruction for a
-[stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test. With something
-armed, an access pays one load more: the armed set holds, for each page of the bus and each direction,
-the run of armed bits that page reaches, or nothing, so an access to a page holding nothing armed
-costs the bus and two tests, and one to a page that does finds its bit with an add, through whichever
-alias it drove. A page the machine cannot read as one run — an image found through `romOffset`, a save
-that folds inside the page, a system page with an open-bus byte armed between its registers — is
-classified per access instead.
+The watcher is the host's object, not part of the state: a snapshot does not carry it and `restore()` leaves it in place. With nothing armed — no place for a watch and no instruction for a [stand-in](#standing-in-for-a-routine) — an access is the bus alone and pays one test. With something armed, an access pays one load more: the armed set holds, for each page of the bus and each direction, the run of armed bits that page reaches, or nothing, so an access to a page holding nothing armed costs the bus and two tests, and one to a page that does finds its bit with an add, through whichever alias it drove. A page the machine cannot read as one run — an image found through `romOffset`, a save that folds inside the page, a system page with an open-bus byte armed between its registers — is classified per access instead.
 
 ### A watch is on the byte
 
-A place is a byte, not a bus address. The console reaches most bytes through several addresses: the
-low 8 KB of work RAM answers at `$7E:0000`–`$1FFF` and at `$0000`–`$1FFF` of every system bank (129
-addresses for one byte), every register answers at its offset in all 128 system banks, the image
-repeats across the banks the map gives it, and a save smaller than its window repeats across the
-window. Arming any one of a byte's addresses arms the byte, so the watcher hears every access to it
-through every alias, and disarming through another alias disarms it. The watcher is told the 24-bit
-address the access drove, whichever alias that was.
+A place is a byte, not a bus address. The console reaches most bytes through several addresses: the low 8 KB of work RAM answers at `$7E:0000`–`$1FFF` and at `$0000`–`$1FFF` of every system bank (129 addresses for one byte), every register answers at its offset in all 128 system banks, the image repeats across the banks the map gives it, and a save smaller than its window repeats across the window. Arming any one of a byte's addresses arms the byte, so the watcher hears every access to it through every alias, and disarming through another alias disarms it. The watcher is told the 24-bit address the access drove, whichever alias that was.
 
-`physical` answers which byte an address reaches, as the machine reads it — the space and the index
-within it — and is what the watch keys on:
+`physical` answers which byte an address reaches, as the machine reads it — the space and the index within it — and is what the watch keys on:
 
 ```cpp
 Snes::Physical p = machine.physical(0x000010);   // {Space::WorkRam, 0x10}
@@ -1480,25 +876,15 @@ Snes::Physical r = machine.physical(0x808100);   // {Space::CartridgeRom, image 
 Snes::Physical s = machine.physical(0x802140);   // {Space::Register, 0x2140}
 ```
 
-`WorkRam`'s index is the offset into the 128 KB; `Register`'s the 16-bit offset; `SaveRam`'s the
-offset into the save, reduced to its size; `CartridgeRom`'s the offset into the image after the map's
-mirroring; `OpenBus` — an address that reaches no byte — is a place of its own, keyed by the address
-itself. `physical` spends no cycle and touches no register.
+`WorkRam`'s index is the offset into the 128 KB; `Register`'s the 16-bit offset; `SaveRam`'s the offset into the save, reduced to its size; `CartridgeRom`'s the offset into the image after the map's mirroring; `OpenBus` — an address that reaches no byte — is a place of its own, keyed by the address itself. `physical` spends no cycle and touches no register.
 
 ### What the watcher is told
 
-`source` is which part of the machine made the access: the CPU, either transfer engine, or the
-work-RAM port reaching work RAM on its own behalf through `$2180`.
+`source` is which part of the machine made the access: the CPU, either transfer engine, or the work-RAM port reaching work RAM on its own behalf through `$2180`.
 
-`kind` is what the cycle was for, as the CPU core drives it (`CycleKind`, `cpu/cpu65816.h`): an
-opcode fetch, an operand fetch, a data read or write, the read half or the write half of a
-read-modify-write, an interrupt's vector read. So a host tells a program reading a byte from the
-core fetching an instruction at the same address, and a load from the read that begins an `INC`. A
-transfer engine's and the port's accesses are plain data reads and writes.
+`kind` is what the cycle was for, as the CPU core drives it (`CycleKind`, `cpu/cpu65816.h`): an opcode fetch, an operand fetch, a data read or write, the read half or the write half of a read-modify-write, an interrupt's vector read. So a host tells a program reading a byte from the core fetching an instruction at the same address, and a load from the read that begins an `INC`. A transfer engine's and the port's accesses are plain data reads and writes.
 
-`cycle` is which cycle of the instruction the access is, counted as the chip spends them: 0 is the
-opcode fetch, and every cycle counts whether or not it reaches the bus — an internal cycle moves the
-count on. The order is the chip's own:
+`cycle` is which cycle of the instruction the access is, counted as the chip spends them: 0 is the opcode fetch, and every cycle counts whether or not it reaches the bus — an internal cycle moves the count on. The order is the chip's own:
 
 | Access | Cycles |
 |---|---|
@@ -1508,30 +894,15 @@ count on. The order is the chip's own:
 | An emulation-mode read-modify-write (`INC !abs`) | reads at 3, writes the byte it read at 4 (`RmwModifyWrite`), then the new byte at 5 (`RmwWrite`) |
 | A hardware interrupt's vector, emulation mode | low byte at 5, high byte at 6 (one later each in native mode) |
 
-Width is not told: the chip does not know it at the bus. A host answering one byte of a two-byte
-access is answering that byte alone, and a veto on the high byte of a 16-bit store tears it — the low
-byte lands, the high byte stands as it was. A host that needs the width decodes the instruction at
-`cpuState().pc` through `peek`, or runs the [intermediate representation](ir.md) beside the machine.
+Width is not told: the chip does not know it at the bus. A host answering one byte of a two-byte access is answering that byte alone, and a veto on the high byte of a 16-bit store tears it — the low byte lands, the high byte stands as it was. A host that needs the width decodes the instruction at `cpuState().pc` through `peek`, or runs the [intermediate representation](ir.md) beside the machine.
 
-For a transfer engine, `cycle` is the byte's position in the channel's transfer pattern, 0 to 3, the
-read and the write of one byte carrying the same one — so the second byte of a two-register pattern
-is told as 1 on both sides. A table read carries 0 for a line count or a pointer's low byte and 1 for
-its high byte. The work-RAM port's own access carries the cycle of the access to `$2180` that drove
-it: 3 for a `LDA !$2180`.
+For a transfer engine, `cycle` is the byte's position in the channel's transfer pattern, 0 to 3, the read and the write of one byte carrying the same one — so the second byte of a two-register pattern is told as 1 on both sides. A table read carries 0 for a line count or a pointer's low byte and 1 for its high byte. The work-RAM port's own access carries the cycle of the access to `$2180` that drove it: 3 for a `LDA !$2180`.
 
-A register with a read side effect has already had it when its read is told. A read of `$4210` has
-cleared the NMI flag, a read of `$2140`–`$2143` has taken the port's byte, a read of `$4211` has
-acknowledged the timer. The answer changes only what the program receives — `instead` hands it
-another byte — and a veto cannot undo the effect, because a read cannot be prevented. A host that
-wants a program not to acknowledge an interrupt cannot do it here. A host that wants a register's byte
-without its effect reads it with [`peekRegister`](#a-registers-value), which leaves the register as it
-stands.
+A register with a read side effect has already had it when its read is told. A read of `$4210` has cleared the NMI flag, a read of `$2140`–`$2143` has taken the port's byte, a read of `$4211` has acknowledged the timer. The answer changes only what the program receives — `instead` hands it another byte — and a veto cannot undo the effect, because a read cannot be prevented. A host that wants a program not to acknowledge an interrupt cannot do it here. A host that wants a register's byte without its effect reads it with [`peekRegister`](#a-registers-value), which leaves the register as it stands.
 
 ## Standing in for a routine
 
-A host is told before the instruction at a watched address runs, and can have a return stand at that
-address so the routine there never runs. It sets an `InstructionWatcher` and arms the addresses it
-cares about, each with what stands there while it is armed:
+A host is told before the instruction at a watched address runs, and can have a return stand at that address so the routine there never runs. It sets an `InstructionWatcher` and arms the addresses it cares about, each with what stands there while it is armed:
 
 ```cpp
 struct Hook final : InstructionWatcher {
@@ -1550,34 +921,15 @@ machine.watchInstruction(0x008100, Standin::Near);   // JSR $8100: told, then RT
 machine.watchInstruction(0x009000, Standin::None);   // told, and the instruction runs
 ```
 
-`Standin` names what stands at the address: `None` tells the watcher and lets the instruction run;
-`Near` answers the fetch with `RTS`, for a routine a `JSR` entered; `Long` answers it with `RTL`, for
-one a `JSL` entered. A host that does not say takes `Near`. With a return standing in, the one
-instruction that runs at the address is the return: the caller resumes as it would after the routine
-returned, with the stack pointer where it was before the call, and the return spends exactly the
-cycles a real one spends — a stand-in and a cartridge holding a real `RTS` at that byte land on
-byte-identical states. A stand-in stands whether or not a watcher is set.
+`Standin` names what stands at the address: `None` tells the watcher and lets the instruction run; `Near` answers the fetch with `RTS`, for a routine a `JSR` entered; `Long` answers it with `RTL`, for one a `JSL` entered. A host that does not say takes `Near`. With a return standing in, the one instruction that runs at the address is the return: the caller resumes as it would after the routine returned, with the stack pointer where it was before the call, and the return spends exactly the cycles a real one spends — a stand-in and a cartridge holding a real `RTS` at that byte land on byte-identical states. A stand-in stands whether or not a watcher is set.
 
-The cartridge is never written. Only the fetch that begins the instruction the watcher was told
-about answers the return: `peek` of the byte, a data read of it (`LDA !$8100`), a transfer engine's
-read and the read an interrupt sequence discards all answer the cartridge, and disarming has nothing
-to put back. An access watch armed on the same byte is told the return's opcode as the value of that
-fetch, since that is the byte the machine answers.
+The cartridge is never written. Only the fetch that begins the instruction the watcher was told about answers the return: `peek` of the byte, a data read of it (`LDA !$8100`), a transfer engine's read and the read an interrupt sequence discards all answer the cartridge, and disarming has nothing to put back. An access watch armed on the same byte is told the return's opcode as the value of that fetch, since that is the byte the machine answers.
 
-`watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces
-what stands there, disarming one not armed does nothing, and a machine that has never armed an
-instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle, and
-with one armed, an instruction on a page holding no armed instruction costs one load more.
-A watched place is a byte, as an access watch's is
-([physical](#a-watch-is-on-the-byte)): a routine in the low 8 KB of work RAM armed through `$7E:0100`
-is heard entered by a `JSR $0100` in bank `$00`, and a routine in the image armed through bank `$00`
-is heard entered through bank `$80`. The watcher is told the 24-bit address the fetch drives,
-whichever alias that is.
+`watchInstruction` arms one address; `unwatchInstruction` disarms it. Arming an armed address replaces what stands there, disarming one not armed does nothing, and a machine that has never armed an instruction holds no table at all — so a watch nobody arms costs nothing but one test a CPU cycle, and with one armed, an instruction on a page holding no armed instruction costs one load more. A watched place is a byte, as an access watch's is ([physical](#a-watch-is-on-the-byte)): a routine in the low 8 KB of work RAM armed through `$7E:0100` is heard entered by a `JSR $0100` in bank `$00`, and a routine in the image armed through bank `$00` is heard entered through bank `$80`. The watcher is told the 24-bit address the fetch drives, whichever alias that is.
 
 ### Where the watch fires
 
-The watcher is told once per instruction the chip begins, at an instruction boundary the CPU takes
-as one — never per cycle. Concretely:
+The watcher is told once per instruction the chip begins, at an instruction boundary the CPU takes as one — never per cycle. Concretely:
 
 | Situation | Told? |
 |---|---|
@@ -1587,29 +939,17 @@ as one — never per cycle. Concretely:
 | The core is halted (`WAI`, `STP`) | No: a halted core sits on a boundary and begins nothing |
 | A hardware interrupt is due at the boundary | No: the interrupt sequence takes the boundary, and the interrupted instruction is told when the handler returns to it |
 
-So a `STA $420B` that arms a transfer is followed by one more CPU cycle before the transfer engages —
-the next instruction's opcode fetch — and that instruction is told before the transfer, the one after
-it once the transfer has run. A `WAI` woken by an interrupt is followed by the interrupt sequence, not
-by the instruction after the `WAI`; that instruction is told after the handler's `RTI`.
+So a `STA $420B` that arms a transfer is followed by one more CPU cycle before the transfer engages — the next instruction's opcode fetch — and that instruction is told before the transfer, the one after it once the transfer has run. A `WAI` woken by an interrupt is followed by the interrupt sequence, not by the instruction after the `WAI`; that instruction is told after the handler's `RTI`.
 
 ### Inside the call
 
-The machine's clock has not moved for the call: being told advances no counter — not the master
-counter, not the beam, not the audio machine, not a timer — and a watched run lands on the same state
-and the same audio as a plain one. The host runs on its own time.
+The machine's clock has not moved for the call: being told advances no counter — not the master counter, not the beam, not the audio machine, not a timer — and a watched run lands on the same state and the same audio as a plain one. The host runs on its own time.
 
-`cpuState()` is live inside the call, at the instruction, and a register file written with
-`setCpuState()` there is what the instruction runs under — which is how a host answers for a routine:
-told at its entry, it writes the registers the routine would have left and lets the return stand in.
-Writing the register file touches the CPU alone; queued audio frames and the rest of the machine
-stand. A host that moves the program counter inside the call sends the CPU elsewhere, and the return
-queued for the watched address is not applied to the fetch there: the instruction at the new address
-runs as it stands. A host that disarms the address inside the call lets the routine run.
+`cpuState()` is live inside the call, at the instruction, and a register file written with `setCpuState()` there is what the instruction runs under — which is how a host answers for a routine: told at its entry, it writes the registers the routine would have left and lets the return stand in. Writing the register file touches the CPU alone; queued audio frames and the rest of the machine stand. A host that moves the program counter inside the call sends the CPU elsewhere, and the return queued for the watched address is not applied to the fetch there: the instruction at the new address runs as it stands. A host that disarms the address inside the call lets the routine run.
 
 ## Calling into the guest
 
-A host runs a routine the machine already holds and gets control back when it returns. There are two
-forms, one verb each:
+A host runs a routine the machine already holds and gets control back when it returns. There are two forms, one verb each:
 
 ```cpp
 // In the guest's own context: its registers and its stack, put back afterwards.
@@ -1623,31 +963,15 @@ bool ok = machine.callOnStack(0x008300, 0x01F0, Standin::Near, 10000);
 std::uint16_t result = machine.cpuState().a;   // what the routine left
 ```
 
-Both return whether the routine returned; `false` means the guard tripped or the call was refused.
-`Standin::Near` names a routine that ends in `RTS` and `Standin::Long` one that ends in `RTL`; the
-call pushes the landing the way `JSR` or `JSL` would push theirs — two bytes within page one for a
-near return in emulation mode, three that may leave it for a long one — through `poke`, spending no
-cycle, and points the CPU at the entry. The landing is the program counter as it stands, in the entry's
-bank for a near return and the current bank for a long one, and nothing there is executed.
+Both return whether the routine returned; `false` means the guard tripped or the call was refused. `Standin::Near` names a routine that ends in `RTS` and `Standin::Long` one that ends in `RTL`; the call pushes the landing the way `JSR` or `JSL` would push theirs — two bytes within page one for a near return in emulation mode, three that may leave it for a long one — through `poke`, spending no cycle, and points the CPU at the entry. The landing is the program counter as it stands, in the entry's bank for a near return and the current bank for a long one, and nothing there is executed.
 
-The routine is the machine running. Its cycles are real and priced by region, the beam moves, the
-audio machine is paced, a transfer it arms runs, and a hardware interrupt due is taken inside it and is
-not pending again afterwards. `state().master` moves by what the routine spent, and those cycles come
-out of the budget the host runs next: a call between two `run()` calls shortens the second by the
-routine's cycles, and a call made inside a watcher's call during `run()` ends that `run()` that much
-sooner. A refresh pause or a transfer the routine crosses is spent as it always is.
+The routine is the machine running. Its cycles are real and priced by region, the beam moves, the audio machine is paced, a transfer it arms runs, and a hardware interrupt due is taken inside it and is not pending again afterwards. `state().master` moves by what the routine spent, and those cycles come out of the budget the host runs next: a call between two `run()` calls shortens the second by the routine's cycles, and a call made inside a watcher's call during `run()` ends that `run()` that much sooner. A refresh pause or a transfer the routine crosses is spent as it always is.
 
-The call ends at the first instruction boundary where the stack pointer is back at its value before
-the push **and** the program counter is at the landing. Both are required: a routine that branches
-through the landing without returning does not end the call, nor does one that pops its own frame
-while still inside itself, and an interrupt taken inside the routine returns into it, not out of it.
+The call ends at the first instruction boundary where the stack pointer is back at its value before the push **and** the program counter is at the landing. Both are required: a routine that branches through the landing without returning does not end the call, nor does one that pops its own frame while still inside itself, and an interrupt taken inside the routine returns into it, not out of it.
 
 ### In the guest's own context
 
-`callInContext` saves the register file, runs the routine on the guest's own stack, and puts the whole
-file back — the program counter, the stack pointer, the halt state, all of it — so the interrupted
-program carries on unaware. What the routine changed in memory stands. A host that wants the routine's
-registers reads them live inside an instruction watch on the routine's return:
+`callInContext` saves the register file, runs the routine on the guest's own stack, and puts the whole file back — the program counter, the stack pointer, the halt state, all of it — so the interrupted program carries on unaware. What the routine changed in memory stands. A host that wants the routine's registers reads them live inside an instruction watch on the routine's return:
 
 ```cpp
 struct Result final : InstructionWatcher {
@@ -1663,205 +987,97 @@ machine.watchInstruction(0x008102, Standin::None);  // the routine's RTS
 machine.callInContext(0x008100, Standin::Near, 10000);
 ```
 
-A waiting or stopped core is called like any other: the routine runs, and the file put back leaves the
-core waiting or stopped as it was.
+A waiting or stopped core is called like any other: the routine runs, and the file put back leaves the core waiting or stopped as it was.
 
 ### In a frame of the host's own
 
-`callOnStack` runs the routine under the register file as the host wrote it with `setCpuState`, with
-the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file
-the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at
-the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the
-machine from its own code reads what it wants there; a host that interrupted a program and wants its
-file back saves it with `cpuState()` before the call and restores it with `setCpuState` after.
+`callOnStack` runs the routine under the register file as the host wrote it with `setCpuState`, with the stack pointer starting at `stackTop`, and puts nothing back: `cpuState()` afterwards is the file the routine left — its result registers, the stack pointer back at `stackTop`, the program counter at the landing — or, when the guard tripped, the file where the routine was abandoned. A host driving the machine from its own code reads what it wants there; a host that interrupted a program and wants its file back saves it with `cpuState()` before the call and restores it with `setCpuState` after.
 
 ### The guard, and what is refused
 
-`guard` is the number of instructions the routine may run, the return among them; an idle cycle of a
-halted core counts as one, so a routine that waits for an interrupt that never comes trips it too. On
-overrun the routine is abandoned at its boundary and the call returns `false` — the file put back for
-`callInContext`, left where it stopped for `callOnStack`. A guard of zero runs nothing.
+`guard` is the number of instructions the routine may run, the return among them; an idle cycle of a halted core counts as one, so a routine that waits for an interrupt that never comes trips it too. On overrun the routine is abandoned at its boundary and the call returns `false` — the file put back for `callInContext`, left where it stopped for `callOnStack`. A guard of zero runs nothing.
 
-A `run()` budget usually stops the machine inside an instruction — or inside a refresh pause, a
-transfer or an interrupt sequence. A call made there first runs the machine to the next instruction
-boundary, exactly as `step()` would, and then calls. Those cycles are the guest's own: `state().master`
-moves by them as it does by the routine's, and they come out of the budget the host runs next.
-`callInContext` puts back the file at that boundary, so the guest resumes at the instruction after the
-one the budget stopped inside:
+A `run()` budget usually stops the machine inside an instruction — or inside a refresh pause, a transfer or an interrupt sequence. A call made there first runs the machine to the next instruction boundary, exactly as `step()` would, and then calls. Those cycles are the guest's own: `state().master` moves by them as it does by the routine's, and they come out of the budget the host runs next. `callInContext` puts back the file at that boundary, so the guest resumes at the instruction after the one the budget stopped inside:
 
 ```cpp
 machine.run(budget);                                   // may stop mid-instruction
 machine.callInContext(0x008100, Standin::Near, 10000); // finishes it, then calls
 ```
 
-A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register
-touched — when:
+A call is refused, returning `false` with nothing done — no byte pushed, no cycle run, no register touched — when:
 
 - `returns` is `Standin::None`: a call needs a return to end it.
-- The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's
-  own act, and the call never does it on the guest's behalf.
-- It is made from inside a host's call that the machine makes during a cycle: an access watcher's —
-  an opcode fetch included — the bus observer's, or the observer set with `setApuObserver`, which on a
-  machine built with [the audio thread](#the-audio-thread) is told on that thread and refused by the
-  thread it comes on. The machine is part-way through the chip's work there, and a call cannot run until
-  the cycle ends.
+- The entry's own bank does not map it (`addressable(entry, 1)`). Selecting a mapping is the guest's own act, and the call never does it on the guest's behalf.
+- It is made from inside a host's call that the machine makes during a cycle: an access watcher's — an opcode fetch included — the bus observer's, or the observer set with `setApuObserver`, which on a machine built with [the audio thread](#the-audio-thread) is told on that thread and refused by the thread it comes on. The machine is part-way through the chip's work there, and a call cannot run until the cycle ends.
 
-A call whose landing would land where the memory face does not reach — a stack pointer in the register
-file, for instance — is refused too, after any finishing cycles, with those cycles spent and nothing
-pushed.
+A call whose landing would land where the memory face does not reach — a stack pointer in the register file, for instance — is refused too, after any finishing cycles, with those cycles spent and nothing pushed.
 
-An instruction watcher is told between instructions, so a call made from inside its call is the same
-call, at any depth: a watcher told inside one call may make another.
+An instruction watcher is told between instructions, so a call made from inside its call is the same call, at any depth: a watcher told inside one call may make another.
 
-The frame, timeline and save observers are told at the end of a cycle, after it has closed, so a call from
-inside their reports proceeds: it runs the machine to the next instruction boundary first, as a call
-after a `run()` does, and then calls. A frame the routine finishes is reported inside the call.
+The frame, timeline and save observers are told at the end of a cycle, after it has closed, so a call from inside their reports proceeds: it runs the machine to the next instruction boundary first, as a call after a `run()` does, and then calls. A frame the routine finishes is reported inside the call.
 
-A snapshot does not carry the marker that refuses a call made during a cycle, and `restore()` and
-`reset()` clear it: a host that restores after a throw from a watcher or the bus observer gets a
-machine that calls.
+A snapshot does not carry the marker that refuses a call made during a cycle, and `restore()` and `reset()` clear it: a host that restores after a throw from a watcher or the bus observer gets a machine that calls.
 
 ## Gotchas
 
-- The reset vector is read from the cartridge at construction. An image with a zero vector starts the
-  CPU at `$0000`, which is work RAM.
+- The reset vector is read from the cartridge at construction. An image with a zero vector starts the CPU at `$0000`, which is work RAM.
 - `run()`'s budget is in *master* cycles, not CPU cycles; a single CPU cycle is 6, 8, or 12 of them.
 - MEMSEL is slow at power-on. Code that wants the fast second region sets `$420D` bit 0 itself.
 - Frames are output, not state: a snapshot does not carry pending frames, and `restore()` discards any.
-- A `SnesState` is a quarter of a megabyte. Decode one where it is meant to live, in a member or a
-  `std::unique_ptr`, rather than on the stack of a deep call; `fromBytes(bytes, into)` fills a state
-  the host already holds in place.
-- `restore()` answers `false` and changes nothing for a state whose save is another size than the
-  machine's. A host restoring bytes from elsewhere checks the answer.
-- A multiply or divide result is not there immediately; read it after the documented cycles. Reading
-  early returns the old value, not a partial one.
-- The first VRAM read after setting the address returns the same word twice — the documented prefetch
-  glitch. Issue a dummy read, or account for it.
-- An IRQ handler must acknowledge the timer (read `$4211` or disable the IRQ); an NMI handler need not,
-  but reading `$4210` before re-enabling NMIs avoids taking a stale one.
-- A pad set during a frame is read on that frame's vertical blank, not the one before it: set the pad,
-  then run the frame. An empty port and a pad with nothing pressed differ past the sixteenth serial
-  bit, which is how a program tells a controller from no controller.
+- A `SnesState` is a quarter of a megabyte. Decode one where it is meant to live, in a member or a `std::unique_ptr`, rather than on the stack of a deep call; `fromBytes(bytes, into)` fills a state the host already holds in place.
+- `restore()` answers `false` and changes nothing for a state whose save is another size than the machine's. A host restoring bytes from elsewhere checks the answer.
+- A multiply or divide result is not there immediately; read it after the documented cycles. Reading early returns the old value, not a partial one.
+- The first VRAM read after setting the address returns the same word twice — the documented prefetch glitch. Issue a dummy read, or account for it.
+- An IRQ handler must acknowledge the timer (read `$4211` or disable the IRQ); an NMI handler need not, but reading `$4210` before re-enabling NMIs avoids taking a stale one.
+- A pad set during a frame is read on that frame's vertical blank, not the one before it: set the pad, then run the frame. An empty port and a pad with nothing pressed differ past the sixteenth serial bit, which is how a program tells a controller from no controller.
 - A DMA byte count of zero (`das`) transfers the whole 65536 bytes, not none.
-- A DMA from work RAM into `$2180` moves nothing, and one from `$2180` into work RAM fills its target
-  with the last byte on the bus. Work RAM is copied to work RAM by the CPU.
-- A DMA on a channel HDMA is using stops at the next HDMA event with bytes left in `das`. Keep the two
-  on different channels.
+- A DMA from work RAM into `$2180` moves nothing, and one from `$2180` into work RAM fills its target with the last byte on the bus. Work RAM is copied to work RAM by the CPU.
+- A DMA on a channel HDMA is using stops at the next HDMA event with bytes left in `das`. Keep the two on different channels.
 - A transfer's A-bus bank is fixed: the address wraps within its bank and never crosses into the next.
-- HDMA re-initialises every frame and delivers only on the visible lines; arm `$420C` and set the table
-  before line 0, and it stops on its own at vblank.
-- An observer sees fetches too: to count only the data an instruction touched, drop `OpcodeFetch` and
-  `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle
-  the CPU spent, count its accesses and the internal cycles together.
-- An opcode fetch is a read like any other: arming a code address for reads has the watcher answer the
-  CPU's fetches of it, so `instead(byte)` there feeds the core a different opcode. `kind` says which
-  accesses are fetches; a host that wants the program's reads alone answers `OpcodeFetch` and
-  `OperandFetch` with `proceed()`.
-- A watch is on the byte, not the address: arming `$7E0010` hears a `LDA $10` in bank `$00`, a
-  `LDA >$BF0010`, and the work-RAM port reading `$7E:0010` — and the watcher is told the address each
-  one drove. Arming a register at `$2140` hears it from every system bank. Counting accesses to "the
-  bank-$7E address" counts every alias.
-- The high byte of a 16-bit access is its own access, told one cycle after the low byte. A host that
-  substitutes or vetoes one of the two tears the pair; answer both, on their two cycles, to answer the
-  word.
-- A read of `$4210`, `$4211`, `$2140`–`$2143` or any other register with a read side effect is told
-  after the effect: the watcher sees the byte the register answered, `instead` changes what the program
-  receives, and neither `veto` nor anything else puts the flag back.
-- The access watch and the bus observer are separate mechanisms. A read the watch substitutes is what
-  the observer reports, because the machine answered that byte; a write the watch vetoes or substitutes
-  the observer still reports as the source drove it — the watch changed the effect, not the drive.
-- An instruction watch counts instructions the chip begins, not opcodes in the program: a block move
-  is told once per byte, and an instruction a hardware interrupt lands on is told after the handler
-  returns to it, not at the boundary the interrupt took.
-- A stand-in is a return and nothing more. `Near` for a routine a `JSR` entered, `Long` for one a
-  `JSL` entered; the wrong one leaves the stack a byte off, exactly as the wrong return instruction
-  would. What the routine would have left in the registers is the host's to write with `setCpuState`
-  inside the call; nothing writes it for you.
-- The stand-in answers one fetch: the opcode fetch of the instruction the watcher was told about. A
-  host reading the byte through `peek`, an `LDA` of it, the bus observer's report of a data read and
-  an access watch on any read but that fetch all see the cartridge's own byte.
-- `peekRegister` answers at the position the machine stands at. A read ticks the beam through its own
-  cycle before it answers and a peek spends no cycle, so `$4212`'s blank flags, `$213F`'s field bit
-  and the multiplier's ports while a Mode 7 picture is drawn are answered as they stand, and an `LDA`
-  of the same address an instruction later can read them otherwise.
-- `watchInstruction` with one argument arms `Standin::Near`. A host that wants to be told and nothing
-  more says `Standin::None`.
-- A call's `returns` must match the routine's return instruction. `Near` for one that ends in `RTS`,
-  `Long` for one that ends in `RTL`; the wrong one leaves the stack pointer a byte off, the call never
-  ends, and the guard trips. A routine that ends in `RTI` returns through neither and is not callable.
-- A call spends the machine's time. `state().master` moves by the routine's cycles, and the next
-  `run()` runs that much less of its budget — a long routine called between two `run()` calls can leave
-  the next one with nothing to run. `step()` is unaffected: it runs its instruction regardless.
-- `callInContext` puts the register file back, so `cpuState()` after it is the guest's file, not the
-  routine's. Read a routine's registers inside an instruction watch on its return, or call with
-  `callOnStack`, which leaves them.
-- The instruction observer's report is not the place to copy the whole state on a machine built with a
-  thread: the report comes at every boundary, the threads are not waited for, and `state().apu` and the
-  picture's two fields are not coherent there. Copy the register file the call hands over, and read
-  `state()` whole at a frame report or between calls.
-- A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own.
-  Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what
-  the console spends.
-- A WAI whose interrupt lands inside a pause returns from `step()` after the pause, not before it. A
-  program that wakes once a line and writes a PPU register straight away lands that write up to 40
-  cycles further along the line than the interrupt itself arrived.
-- The frame parity a machine runs its first frame at is 1, not 0: the console leaves reset with the flag
-  clear and the toggle at H = 1 of line 0 is four cycles away. A program reading `$213F` bit 7 to pick a
-  field sees the pair's second frame first.
-- `hpos` is master cycles, not dots, and past dot 322 the two stop being a factor of four apart. Read
-  the dot through `$213C` or the PPU's own input rather than dividing.
-- `reset()` starts `SnesState::master` again at zero. A host timing a run across one adds what ran
-  before it, and calls it between two `run()` calls — an observer is called from inside one.
-- A LoROM program that reads below `$8000` in a cartridge bank is reading the image, not open bus.
-  Whether `$70-$7D` and `$F0-$FF` answer with the save or the image there depends on whether the
-  cartridge has a save, which `SnesConfig::saveRamBytes` decides when it is set.
+- HDMA re-initializes every frame and delivers only on the visible lines; arm `$420C` and set the table before line 0, and it stops on its own at vblank.
+- An observer sees fetches too: to count only the data an instruction touched, drop `OpcodeFetch` and `OperandFetch`. To count only what the program did, drop the engines' sources; to see every cycle the CPU spent, count its accesses and the internal cycles together.
+- An opcode fetch is a read like any other: arming a code address for reads has the watcher answer the CPU's fetches of it, so `instead(byte)` there feeds the core a different opcode. `kind` says which accesses are fetches; a host that wants the program's reads alone answers `OpcodeFetch` and `OperandFetch` with `proceed()`.
+- A watch is on the byte, not the address: arming `$7E0010` hears a `LDA $10` in bank `$00`, a `LDA >$BF0010`, and the work-RAM port reading `$7E:0010` — and the watcher is told the address each one drove. Arming a register at `$2140` hears it from every system bank. Counting accesses to "the bank-$7E address" counts every alias.
+- The high byte of a 16-bit access is its own access, told one cycle after the low byte. A host that substitutes or vetoes one of the two tears the pair; answer both, on their two cycles, to answer the word.
+- A read of `$4210`, `$4211`, `$2140`–`$2143` or any other register with a read side effect is told after the effect: the watcher sees the byte the register answered, `instead` changes what the program receives, and neither `veto` nor anything else puts the flag back.
+- The access watch and the bus observer are separate mechanisms. A read the watch substitutes is what the observer reports, because the machine answered that byte; a write the watch vetoes or substitutes the observer still reports as the source drove it — the watch changed the effect, not the drive.
+- An instruction watch counts instructions the chip begins, not opcodes in the program: a block move is told once per byte, and an instruction a hardware interrupt lands on is told after the handler returns to it, not at the boundary the interrupt took.
+- A stand-in is a return and nothing more. `Near` for a routine a `JSR` entered, `Long` for one a `JSL` entered; the wrong one leaves the stack a byte off, exactly as the wrong return instruction would. What the routine would have left in the registers is the host's to write with `setCpuState` inside the call; nothing writes it for you.
+- The stand-in answers one fetch: the opcode fetch of the instruction the watcher was told about. A host reading the byte through `peek`, an `LDA` of it, the bus observer's report of a data read and an access watch on any read but that fetch all see the cartridge's own byte.
+- `peekRegister` answers at the position the machine stands at. A read ticks the beam through its own cycle before it answers and a peek spends no cycle, so `$4212`'s blank flags, `$213F`'s field bit and the multiplier's ports while a Mode 7 picture is drawn are answered as they stand, and an `LDA` of the same address an instruction later can read them otherwise.
+- `watchInstruction` with one argument arms `Standin::Near`. A host that wants to be told and nothing more says `Standin::None`.
+- A call's `returns` must match the routine's return instruction. `Near` for one that ends in `RTS`, `Long` for one that ends in `RTL`; the wrong one leaves the stack pointer a byte off, the call never ends, and the guard trips. A routine that ends in `RTI` returns through neither and is not callable.
+- A call spends the machine's time. `state().master` moves by the routine's cycles, and the next `run()` runs that much less of its budget — a long routine called between two `run()` calls can leave the next one with nothing to run. `step()` is unaffected: it runs its instruction regardless.
+- `callInContext` puts the register file back, so `cpuState()` after it is the guest's file, not the routine's. Read a routine's registers inside an instruction watch on its return, or call with `callOnStack`, which leaves them.
+- The instruction observer's report is not the place to copy the whole state on a machine built with a thread: the report comes at every boundary, the threads are not waited for, and `state().apu` and the picture's two fields are not coherent there. Copy the register file the call hands over, and read `state()` whole at a frame report or between calls.
+- A `step()` that crosses the line's refresh returns 40 master cycles more than the instruction's own. Timing a routine by summing `step()` over a frame includes about 260 of those pauses, which is what the console spends.
+- A WAI whose interrupt lands inside a pause returns from `step()` after the pause, not before it. A program that wakes once a line and writes a PPU register straight away lands that write up to 40 cycles further along the line than the interrupt itself arrived.
+- The frame parity a machine runs its first frame at is 1, not 0: the console leaves reset with the flag clear and the toggle at H = 1 of line 0 is four cycles away. A program reading `$213F` bit 7 to pick a field sees the pair's second frame first.
+- `hpos` is master cycles, not dots, and past dot 322 the two stop being a factor of four apart. Read the dot through `$213C` or the PPU's own input rather than dividing.
+- `reset()` starts `SnesState::master` again at zero. A host timing a run across one adds what ran before it, and calls it between two `run()` calls — an observer is called from inside one.
+- A LoROM program that reads below `$8000` in a cartridge bank is reading the image, not open bus. Whether `$70-$7D` and `$F0-$FF` answer with the save or the image there depends on whether the cartridge has a save, which `SnesConfig::saveRamBytes` decides when it is set.
 
 ## What remains open
 
 Questions the documentation leaves about the beam, recorded rather than decided by invention:
 
-- **Whether a cycle in progress when the pause begins is stretched by it or completes first.** Here it
-  completes; fullsnes's latch histogram reads either way.
-- **Whether the refresh grid and a transfer's alignment grid are one.** A transfer aligns to a multiple
-  of eight master cycles since power-on and the refresh's grid is offset two from it. A cartridge of ours
-  asks it.
-- **Whether a transfer in flight is cut by the refresh.** Here a DMA byte or an HDMA event completes and
-  the pause follows it. A cartridge of ours asks it.
-- **What `$4212` bit 7 shows** when the taller picture is asked for after vertical blank has begun. The
-  memories shut; the flag here stays the latched fact. A cartridge of ours asks it.
-- **Asking for the taller picture at the very start of line 225.** anomie measures the NMI one line
-  later, at 226, with the last HDMA still on line 224 — the two effects skewed against each other — and
-  reports that asking for it at any later line does nothing at all. No mechanism is given for either,
-  and the machine here holds vertical blank to line 240 instead. Clearing the bit in that window is
-  measured and modelled: the blank begins at the start of the line that follows. A cartridge of ours
-  asks it.
-- **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length
-  is decided by the state as its own line runs. A cartridge of ours asks it.
-- **Where inside the auto-read's window each bit lands.** The documents give the window's length and the
-  256-cycle grid its start keeps, not the point at which each of the sixteen bits is clocked. Here the
-  strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears. A
-  cartridge of ours asks it.
-- **How long the timer's condition holds for a read of `$4211` to catch it.** fullsnes gives four to
-  eight master cycles. Here it is the one CPU cycle the flag rises in, whatever that cycle's length. A
-  cartridge of ours asks it, and whether a write clears the flag with it.
-- **Whether the frame's HDMA initialisation reads an indirect pointer after a `$00` first count.**
-  anomie's register document ends the channel "immediately" and hedges it. Here no pointer is read.
-  A cartridge of ours asks it.
-- **The arithmetic unit's result ports during the countdown.** The ports here hold the previous value
-  until the whole result lands. A cartridge of ours asks it.
-- **Reading or writing `$4016` inside the auto-read's window.** One clock line is shared, so a read there
-  takes a clock the auto-read then never sees. A cartridge of ours asks it.
-- **`$4201` across a reset.** fullsnes's I/O map gives `$FF`; anomie's register document says
-  "unchanged on reset" with a question mark. Here it is `$FF`. A cartridge of ours asks it.
-- **`SETINI` across a reset.** fullsnes gives "00h?" and no other document gives anything. Here the
-  register keeps what it held, as every PPU register but `INIDISP`'s top bit does. A cartridge of
-  ours asks it.
-- **An arithmetic job in progress at a reset.** No document says. Here it is abandoned and the result
-  registers keep what they held. A cartridge of ours asks it.
+- **Whether a cycle in progress when the pause begins is stretched by it or completes first.** Here it completes; fullsnes's latch histogram reads either way.
+- **Whether the refresh grid and a transfer's alignment grid are one.** A transfer aligns to a multiple of eight master cycles since power-on and the refresh's grid is offset two from it. A cartridge of ours asks it.
+- **Whether a transfer in flight is cut by the refresh.** Here a DMA byte or an HDMA event completes and the pause follows it. A cartridge of ours asks it.
+- **What `$4212` bit 7 shows** when the taller picture is asked for after vertical blank has begun. The memories shut; the flag here stays the latched fact. A cartridge of ours asks it.
+- **Asking for the taller picture at the very start of line 225.** anomie measures the NMI one line later, at 226, with the last HDMA still on line 224 — the two effects skewed against each other — and reports that asking for it at any later line does nothing at all. No mechanism is given for either, and the machine here holds vertical blank to line 240 instead. Clearing the bit in that window is measured and modeled: the blank begins at the start of the line that follows. A cartridge of ours asks it.
+- **When a mid-frame change to the interlace bit reaches the extra, short and long lines.** Each length is decided by the state as its own line runs. A cartridge of ours asks it.
+- **Where inside the auto-read's window each bit lands.** The documents give the window's length and the 256-cycle grid its start keeps, not the point at which each of the sixteen bits is clocked. Here the strobe pulse takes 128 cycles and each bit 256, so the sixteenth lands as the busy flag clears. A cartridge of ours asks it.
+- **How long the timer's condition holds for a read of `$4211` to catch it.** fullsnes gives four to eight master cycles. Here it is the one CPU cycle the flag rises in, whatever that cycle's length. A cartridge of ours asks it, and whether a write clears the flag with it.
+- **Whether the frame's HDMA initialization reads an indirect pointer after a `$00` first count.** anomie's register document ends the channel "immediately" and hedges it. Here no pointer is read. A cartridge of ours asks it.
+- **The arithmetic unit's result ports during the countdown.** The ports here hold the previous value until the whole result lands. A cartridge of ours asks it.
+- **Reading or writing `$4016` inside the auto-read's window.** One clock line is shared, so a read there takes a clock the auto-read then never sees. A cartridge of ours asks it.
+- **`$4201` across a reset.** fullsnes's I/O map gives `$FF`; anomie's register document says "unchanged on reset" with a question mark. Here it is `$FF`. A cartridge of ours asks it.
+- **`SETINI` across a reset.** fullsnes gives "00h?" and no other document gives anything. Here the register keeps what it held, as every PPU register but `INIDISP`'s top bit does. A cartridge of ours asks it.
+- **An arithmetic job in progress at a reset.** No document says. Here it is abandoned and the result registers keep what they held. A cartridge of ours asks it.
 
 ## See also
 
 - [The cartridge](snes-cartridge.md) — the header, the three maps, and where every address lands.
 - [The 65816 CPU core](65816-cpu.md) — the instruction set the machine runs.
-- [The APU machine](apu-machine.md) — the audio machine on the other side of the ports, and its
-  own observer, which `setApuObserver` reaches.
+- [The APU machine](apu-machine.md) — the audio machine on the other side of the ports, and its own observer, which `setApuObserver` reaches.

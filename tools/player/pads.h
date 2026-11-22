@@ -55,7 +55,7 @@ enum class PadAxis : std::uint8_t {
 };
 inline constexpr std::size_t kPadAxisCount = 6;
 
-// How far a stick leaves its centre before it counts as pointing somewhere. A stick
+// How far a stick leaves its center before it counts as pointing somewhere. A stick
 // is an analog control answering a question with two answers, so the line is drawn
 // once here rather than per button.
 inline constexpr float kStickThreshold = 0.5f;

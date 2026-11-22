@@ -1,14 +1,8 @@
 # The PPU
 
-The picture processor is the part of the [machine](snes-machine.md) a program reaches at
-`$2100`–`$213F`. This page describes what is built of it: the whole register file, exactly as the
-console keeps it — every write with the latches it passes through, every read with the value it
-answers and the side effects it has, the windows in which the three video memories can be reached,
-and the picture the chip draws from them, which a host watches through a frame observer.
+The picture processor is the part of the [machine](snes-machine.md) a program reaches at `$2100`–`$213F`. This page describes what is built of it: the whole register file, exactly as the console keeps it — every write with the latches it passes through, every read with the value it answers and the side effects it has, the windows in which the three video memories can be reached, and the picture the chip draws from them, which a host watches through a frame observer.
 
-Where the published documentation is incomplete, ambiguous or wrong, [ppu-behavior.md](ppu-behavior.md)
-records what the sources say, how they disagree and what settles each case — the tilemap and character
-bases, the picture's edges, the brightness law and the latch flag among them.
+Where the published documentation is incomplete, ambiguous or wrong, [ppu-behavior.md](ppu-behavior.md) records what the sources say, how they disagree and what settles each case — the tilemap and character bases, the picture's edges, the brightness law and the latch flag among them.
 
 ## Contents
 
@@ -20,7 +14,7 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 - [The sprites](#the-sprites)
 - [The masking windows](#the-masking-windows)
 - [Writes and their latches](#writes-and-their-latches)
-- [The sub screen and colour math](#the-sub-screen-and-colour-math)
+- [The sub screen and color math](#the-sub-screen-and-color-math)
 - [The memories and their windows](#the-memories-and-their-windows)
 - [The multiplier](#the-multiplier)
 - [The counter latch](#the-counter-latch)
@@ -30,13 +24,7 @@ bases, the picture's edges, the brightness law and the latch flag among them.
 
 ## The surface
 
-The PPU's state is one value, `PpuState`, held inside the machine's state as `SnesState::ppu`
-(`include/snaggletooth/snes/ppu.h`). A snapshot of the machine carries it whole and a restore puts
-it back, mid-latch included. It also travels as its 70672 bytes, the same on every platform, through
-`asBytes()` and `fromBytes()`, on the terms in
-[snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes). Every register that is stored as written keeps the name the hardware
-gives it (`objsel`, `bgmode`, `w12sel`, `cgadsub`, …); the three memories are `vram`, `cgram` and
-`oam`, and the machine's `vram()`, `cgram()` and `oam()` faces read them.
+The PPU's state is one value, `PpuState`, held inside the machine's state as `SnesState::ppu` (`include/snaggletooth/snes/ppu.h`). A snapshot of the machine carries it whole and a restore puts it back, mid-latch included. It also travels as its 70672 bytes, the same on every platform, through `asBytes()` and `fromBytes()`, on the terms in [snes-machine.md §The state as bytes](snes-machine.md#the-state-as-bytes). Every register that is stored as written keeps the name the hardware gives it (`objsel`, `bgmode`, `w12sel`, `cgadsub`, …); the three memories are `vram`, `cgram` and `oam`, and the machine's `vram()`, `cgram()` and `oam()` faces read them.
 
 ```cpp
 Snes m(SnesConfig{.rom = rom});
@@ -48,29 +36,13 @@ p.multiplyResult();  // the signed 24-bit product at $2134-$2136
 m.vram()[0x20];      // the low byte of VRAM word $0010
 ```
 
-`Ppu` is the chip's behaviour over that state: `read`, `write`, `latchCounters`, and the verbs the
-machine calls as the beam reaches a line or a frame. The machine builds one over its own state for
-each access and never keeps it — and, drawing on its picture thread, one over the thread's own copy
-of the state for each dot; a host that runs the machine never needs to touch it. The machine and
-`PpuTimeline` are its two friends: `PpuTimeline::draw()` builds one over a state of its own to draw a
-frame from [its timeline](#the-picture-as-a-timeline).
-`Ppu::registerValue` is `read`'s byte without its effects, computed from a `PpuState` and the inputs
-alone; the machine's `peekRegister` answers the PPU's registers through it.
+`Ppu` is the chip's behavior over that state: `read`, `write`, `latchCounters`, and the verbs the machine calls as the beam reaches a line or a frame. The machine builds one over its own state for each access and never keeps it — and, drawing on its picture thread, one over the thread's own copy of the state for each dot; a host that runs the machine never needs to touch it. The machine and `PpuTimeline` are its two friends: `PpuTimeline::draw()` builds one over a state of its own to draw a frame from [its timeline](#the-picture-as-a-timeline). `Ppu::registerValue` is `read`'s byte without its effects, computed from a `PpuState` and the inputs alone; the machine's `peekRegister` answers the PPU's registers through it.
 
 ## What the chip is told
 
-At every access the machine hands the PPU its input pins as `PpuInputs`: the beam's dot and line,
-which half of the dot the access falls in, the frame parity, the vertical- and horizontal-blank
-signals as `$4212` reports them, the clock rate, and the level of the counter-latch line, which is
-bit 7 of the I/O port written at `$4201`. The chip learns nothing else about the machine; every rule
-below is stated in those terms. The dot's second half is the last two master cycles of a four-cycle
-dot and the last three of a six-cycle one; only [the multiplier](#the-multiplier) reads it.
+At every access the machine hands the PPU its input pins as `PpuInputs`: the beam's dot and line, which half of the dot the access falls in, the frame parity, the vertical- and horizontal-blank signals as `$4212` reports them, the clock rate, and the level of the counter-latch line, which is bit 7 of the I/O port written at `$4201`. The chip learns nothing else about the machine; every rule below is stated in those terms. The dot's second half is the last two master cycles of a four-cycle dot and the last three of a six-cycle one; only [the multiplier](#the-multiplier) reads it.
 
-The dot is not a quarter of the line's master cycle throughout. A line carries 340 dots and most are
-four master cycles, but **dots 323 and 327 are six** — which is what the counter latch answers, and why
-the last dot of an ordinary line is 339 rather than 340. Dot 340 exists on one line only: PAL's line 311
-on an odd interlaced field, which runs 1368 cycles. The short line, NTSC's 240 on an odd field with
-interlace off, is 340 four-cycle dots and has no long ones.
+The dot is not a quarter of the line's master cycle throughout. A line carries 340 dots and most are four master cycles, but **dots 323 and 327 are six** — which is what the counter latch answers, and why the last dot of an ordinary line is 339 rather than 340. Dot 340 exists on one line only: PAL's line 311 on an odd interlaced field, which runs 1368 cycles. The short line, NTSC's 240 on an odd field with interlace off, is 340 four-cycle dots and has no long ones.
 
 | Master cycles into the line | Dot |
 |---|---|
@@ -83,43 +55,21 @@ interlace off, is 340 four-cycle dots and has no long ones.
 
 ## The frame
 
-The chip is told the frame's shape through `$2133`, and two of its bits change what the beam does. The
-machine's own account of the line and frame lengths, the frame parity and every event's master offset is
-under [the video counters](snes-machine.md#the-video-counters-and-interrupts); what the chip does with
-them is here.
+The chip is told the frame's shape through `$2133`, and two of its bits change what the beam does. The machine's own account of the line and frame lengths, the frame parity and every event's master offset is under [the video counters](snes-machine.md#the-video-counters-and-interrupts); what the chip does with them is here.
 
-**Bit 2 — the taller picture.** Vertical blank begins at line 240 instead of 225, so the picture is 239
-lines rather than 224. The chip reads the bit from its own register, so a change reaches the beam at the
-start of the next line that asks.
+**Bit 2 — the taller picture.** Vertical blank begins at line 240 instead of 225, so the picture is 239 lines rather than 224. The chip reads the bit from its own register, so a change reaches the beam at the start of the next line that asks.
 
-**Bit 0 — interlace.** The frame of even parity runs one line longer, and PAL's line 311 of an odd field
-runs four cycles long. The parity is `$213F` bit 7, which the chip answers from its field pin. Each
-frame is handed to a host as a picture of its own, carrying its parity: modes 5 and 6 draw each one
-from alternate half-lines, and every other mode draws both alike — see
-[the interlaced picture](#the-interlaced-picture).
+**Bit 0 — interlace.** The frame of even parity runs one line longer, and PAL's line 311 of an odd field runs four cycles long. The parity is `$213F` bit 7, which the chip answers from its field pin. Each frame is handed to a host as a picture of its own, carrying its parity: modes 5 and 6 draw each one from alternate half-lines, and every other mode draws both alike — see [the interlaced picture](#the-interlaced-picture).
 
 Three events belong to the chip rather than the machine:
 
-- **The sprite table's address returns to its reload value at dot 10 of vertical blank's first line** —
-  which line that is, the chip takes from its own bit 2 — unless the screen is in forced blank, when it
-  was not drawing and the address stands. Releasing forced blank during that line reloads it there and
-  then.
-- **The two sprite overflow flags in `$213E` clear as the frame's first line begins**, unless the screen
-  is in forced blank: they belong to the picture just finished, and a frame the chip spent blank leaves
-  whatever they hold.
-- **The counter latch** captures the dot above and the line, on a read of `$2137` or the latch line
-  falling.
+- **The sprite table's address returns to its reload value at dot 10 of vertical blank's first line** — which line that is, the chip takes from its own bit 2 — unless the screen is in forced blank, when it was not drawing and the address stands. Releasing forced blank during that line reloads it there and then.
+- **The two sprite overflow flags in `$213E` clear as the frame's first line begins**, unless the screen is in forced blank: they belong to the picture just finished, and a frame the chip spent blank leaves whatever they hold.
+- **The counter latch** captures the dot above and the line, on a read of `$2137` or the latch line falling.
 
 ## The picture
 
-A host that wants to see what a program draws sets a frame observer on the machine
-(`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, at the end of
-the cycle in which the frame's vertical blank begins, on the thread the machine is stepped on; a machine
-built with `SnesConfig::ppuThread` on draws the dots on a thread of its own and hands over the same frame
-([the picture thread](snes-machine.md#the-picture-thread)). No dot is drawn in vertical blank, so the
-picture is complete there, and the report comes before the frame's NMI handler runs and before its
-controller auto-read begins: a pad a host sets inside the report is what that frame's auto-read
-latches ([vertical blank](snes-machine.md#vertical-blank)):
+A host that wants to see what a program draws sets a frame observer on the machine (`include/snaggletooth/snes/video_frame.h`). It is told every frame the chip finishes, at the end of the cycle in which the frame's vertical blank begins, on the thread the machine is stepped on; a machine built with `SnesConfig::ppuThread` on draws the dots on a thread of its own and hands over the same frame ([the picture thread](snes-machine.md#the-picture-thread)). No dot is drawn in vertical blank, so the picture is complete there, and the report comes before the frame's NMI handler runs and before its controller auto-read begins: a pad a host sets inside the report is what that frame's auto-read latches ([vertical blank](snes-machine.md#vertical-blank)):
 
 ```cpp
 struct Watcher final : FrameObserver {
@@ -137,76 +87,36 @@ m.setFrameObserver(&watcher);
 m.run(cycles);
 ```
 
-The span is the machine's own buffer and is valid for the call; a host that keeps a picture copies
-it. The observer is not part of the state — a snapshot does not carry it and `restore()` leaves it
-in place — and the chip draws pixels only while one is set. A machine nobody is watching still
-carries the one thing the chip takes from a position to the next
-([the main pixel's decision](#the-half-pixel-line)), decided at the last visible dot each cycle covers,
-so its state at the end of every cycle is exactly a watched machine's and a program cannot tell the
-difference.
+The span is the machine's own buffer and is valid for the call; a host that keeps a picture copies it. The observer is not part of the state — a snapshot does not carry it and `restore()` leaves it in place — and the chip draws pixels only while one is set. A machine nobody is watching still carries the one thing the chip takes from a position to the next ([the main pixel's decision](#the-half-pixel-line)), decided at the last visible dot each cycle covers, so its state at the end of every cycle is exactly a watched machine's and a program cannot tell the difference.
 
-**One position per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical
-blank leaves below it — 256 positions, each one pixel, or two half-pixels on a line drawn
-[in half-pixels](#the-half-pixel-line); the frame's first line draws nothing, which is why a background offset of
-−1 is what puts a tilemap's first row on the picture's first line. Each background reads its tiles
-ahead of the beam, a column at a time, and each pixel is drawn from those reads and from the registers
-as they stand at its own dot — [the tile reads](#the-tile-reads) give the dots, and with them what a
-write that lands mid-line reaches. The machine draws a line again only when something it reads has
-changed since the frame before, and takes it from that frame otherwise; the picture is the same either
-way ([A line drawn again only when it changes](snes-machine.md#a-line-drawn-again-only-when-it-changes)).
+**One position per visible dot.** The picture is dots 22 to 277 of every line the frame's own vertical blank leaves below it — 256 positions, each one pixel, or two half-pixels on a line drawn [in half-pixels](#the-half-pixel-line); the frame's first line draws nothing, which is why a background offset of −1 is what puts a tilemap's first row on the picture's first line. Each background reads its tiles ahead of the beam, a column at a time, and each pixel is drawn from those reads and from the registers as they stand at its own dot — [the tile reads](#the-tile-reads) give the dots, and with them what a write that lands mid-line reaches. The machine draws a line again only when something it reads has changed since the frame before, and takes it from that frame otherwise; the picture is the same either way ([A line drawn again only when it changes](snes-machine.md#a-line-drawn-again-only-when-it-changes)).
 
-**Every mode is drawn**, each background on the screen its own bit of `$212C` or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there
-are and how deep each one is:
+**Every mode is drawn**, each background on the screen its own bit of `$212C` or `$212D` enables. `$2105` bits 2-0 name the mode, and the mode names how many backgrounds there are and how deep each one is:
 
 | mode | BG1 | BG2 | BG3 | BG4 |
 |---|---|---|---|---|
-| 0 | 4 colours | 4 colours | 4 colours | 4 colours |
-| 1 | 16 colours | 16 colours | 4 colours | — |
-| 2 | 16 colours | 16 colours | the offset table | — |
-| 3 | 256 colours | 16 colours | — | — |
-| 4 | 256 colours | 4 colours | the offset table | — |
-| 5 | 16 colours, tiles two characters wide | 4 colours, tiles two characters wide | — | — |
-| 6 | 16 colours, tiles two characters wide | — | the offset table | — |
-| 7 | 256 colours, the field | with `$2133` bit 6: the same field at 128 colours | — | — |
+| 0 | 4 colors | 4 colors | 4 colors | 4 colors |
+| 1 | 16 colors | 16 colors | 4 colors | — |
+| 2 | 16 colors | 16 colors | the offset table | — |
+| 3 | 256 colors | 16 colors | — | — |
+| 4 | 256 colors | 4 colors | the offset table | — |
+| 5 | 16 colors, tiles two characters wide | 4 colors, tiles two characters wide | — | — |
+| 6 | 16 colors, tiles two characters wide | — | the offset table | — |
+| 7 | 256 colors, the field | with `$2133` bit 6: the same field at 128 colors | — | — |
 
-Modes 0 to 6 read tilemaps of characters, described next — in modes 2, 4 and 6 through BG3's
-tilemap, which is [a table of offsets](#offset-per-tile) rather than a layer; modes 5 and 6 draw
-every line [in half-pixels](#the-half-pixel-line); Mode 7 reads a field of packed pixels through its
-matrix, described [after them](#mode-7-the-field). [Mosaic](#mosaic) applies to all of them.
+Modes 0 to 6 read tilemaps of characters, described next — in modes 2, 4 and 6 through BG3's tilemap, which is [a table of offsets](#offset-per-tile) rather than a layer; modes 5 and 6 draw every line [in half-pixels](#the-half-pixel-line); Mode 7 reads a field of packed pixels through its matrix, described [after them](#mode-7-the-field). [Mosaic](#mosaic) applies to all of them.
 
-BG4 exists in Mode 0 alone, and reads registers of its own throughout: `$210A` for its map, the
-high nibble of `$210C` for its characters, `$2113`/`$2114` for its offsets, `$2105` bit 7 for its
-tile size, and bit 3 of both `$212C`/`$212D` and `$212E`/`$212F` to be shown and to be masked.
+BG4 exists in Mode 0 alone, and reads registers of its own throughout: `$210A` for its map, the high nibble of `$210C` for its characters, `$2113`/`$2114` for its offsets, `$2105` bit 7 for its tile size, and bit 3 of both `$212C`/`$212D` and `$212E`/`$212F` to be shown and to be masked.
 
-- The tilemap entry for a position is `(Base << 10) + ((Y & 0x1F) << 5) + (X & 0x1F)` words, plus
-  the terms a wide or tall map adds — `Base` being bits 2–7 of the background's own screen
-  register (`$2107`, `$2108`, `$2109`, `$210A`), which count whole 32×32 screens of `$400` words,
-  and the map's own size wrapping the position.
+- The tilemap entry for a position is `(Base << 10) + ((Y & 0x1F) << 5) + (X & 0x1F)` words, plus the terms a wide or tall map adds — `Base` being bits 2–7 of the background's own screen register (`$2107`, `$2108`, `$2109`, `$210A`), which count whole 32×32 screens of `$400` words, and the map's own size wrapping the position.
 - The entry is `vhopppcc cccccccc`: both flips, the tile's priority, its palette, its number.
-- The character is `(Base << 13) + Tile × 8 × planes` bytes, `Base` being the background's nibble
-  of `$210B` (BG1 low, BG2 high) or `$210C` (BG3 low, BG4 high). Planes 0 and 1 are the low and
-  high bytes of eight words and each further pair is sixteen bytes on, so a four-colour character
-  is sixteen bytes, a sixteen-colour one thirty-two and a 256-colour one sixty-four. The leftmost
-  pixel of a row is bit 7.
-- The palette a tile shows in begins `ppp` × its colours into CGRAM, and where that palette begins
-  is the mode's. Modes 1 to 6 begin every background at word 0, so BG3's palette 1 and BG1's
-  palette 0 name the same words; **Mode 0 gives each of its four backgrounds thirty-two words of
-  its own** — BG1 words 0-31, BG2 32-63, BG3 64-95, BG4 96-127 — so no two of them can name the
-  same colour. A 256-colour background has no palette field at all: its eight-bit pixel is the
-  CGRAM word, and the entry's `ppp` is ignored. Colour 0 of any palette is transparent.
-- `$2105` bits 4, 5, 6 and 7 make each entry of BG1, BG2, BG3 or BG4 a 16×16 block of `Tile`,
-  `Tile+1`, `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a
-  flip reverses the block whole.
-- In modes 5 and 6 every tile is **two characters wide**, `Tile` and `Tile+1`, sixteen pixels across
-  eight positions, whatever the size bit says; the size bit chooses the height alone, so a tile is
-  16×8 pixels or the 16×16 block of four. BG3's tiles in mode 6, which make the offset table, have the
-  same width.
-- Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1,
-  `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3, `$2113`/`$2114` for BG4.
+- The character is `(Base << 13) + Tile × 8 × planes` bytes, `Base` being the background's nibble of `$210B` (BG1 low, BG2 high) or `$210C` (BG3 low, BG4 high). Planes 0 and 1 are the low and high bytes of eight words and each further pair is sixteen bytes on, so a four-color character is sixteen bytes, a sixteen-color one thirty-two and a 256-color one sixty-four. The leftmost pixel of a row is bit 7.
+- The palette a tile shows in begins `ppp` × its colors into CGRAM, and where that palette begins is the mode's. Modes 1 to 6 begin every background at word 0, so BG3's palette 1 and BG1's palette 0 name the same words; **Mode 0 gives each of its four backgrounds thirty-two words of its own** — BG1 words 0-31, BG2 32-63, BG3 64-95, BG4 96-127 — so no two of them can name the same color. A 256-color background has no palette field at all: its eight-bit pixel is the CGRAM word, and the entry's `ppp` is ignored. Color 0 of any palette is transparent.
+- `$2105` bits 4, 5, 6 and 7 make each entry of BG1, BG2, BG3 or BG4 a 16×16 block of `Tile`, `Tile+1`, `Tile+16`, `Tile+17`. The numbers run on rather than wrapping inside the block, and a flip reverses the block whole.
+- In modes 5 and 6 every tile is **two characters wide**, `Tile` and `Tile+1`, sixteen pixels across eight positions, whatever the size bit says; the size bit chooses the height alone, so a tile is 16×8 pixels or the 16×16 block of four. BG3's tiles in mode 6, which make the offset table, have the same width.
+- Each background scrolls by its own pair of offset registers: `$210D`/`$210E` for BG1, `$210F`/`$2110` for BG2, `$2111`/`$2112` for BG3, `$2113`/`$2114` for BG4.
 
-**The order the layers are drawn in**, front to back, is the mode's own. Writing `A` and `a` for
-BG1's tiles at priority 1 and 0, `B`/`b`, `C`/`c`, `D`/`d` for the others, and a digit for a sprite
-at that sprite priority:
+**The order the layers are drawn in**, front to back, is the mode's own. Writing `A` and `a` for BG1's tiles at priority 1 and 0, `B`/`b`, `C`/`c`, `D`/`d` for the others, and a digit for a sprite at that sprite priority:
 
 ```
 mode 0   3 A B 2 a b 1 C D 0 c d
@@ -219,19 +129,11 @@ mode 6   3 A 2 1 a 0
 mode 7   3 2 1 A 0                  and with $2133 bit 6 set:   3 2 B 1 A 0 b
 ```
 
-`$2105` bit 3 is **Mode 1's**: it lifts BG3's high-priority tiles from behind a sprite at priority 1
-to in front of everything, leaves its low-priority tiles where they are, and names no place in any
-other mode's order. The first layer in the order with a non-transparent pixel is the one shown;
-where none has one, the backdrop — palette word 0 — shows. Sprites are drawn in every mode, and
-the four places they take are the mode's as much as a background's are. Mode 7's field has one
-place and no priority bit; the second layer `$2133` bit 6 makes of it takes its priority from the
-pixel itself.
+`$2105` bit 3 is **Mode 1's**: it lifts BG3's high-priority tiles from behind a sprite at priority 1 to in front of everything, leaves its low-priority tiles where they are, and names no place in any other mode's order. The first layer in the order with a non-transparent pixel is the one shown; where none has one, the backdrop — palette word 0 — shows. Sprites are drawn in every mode, and the four places they take are the mode's as much as a background's are. Mode 7's field has one place and no priority bit; the second layer `$2133` bit 6 makes of it takes its priority from the pixel itself.
 
 ### The tile reads
 
-Each background a mode draws from a tilemap reads the line in tile columns: column `E` covers
-positions `8E` to `8E + 7`, and a thirty-third column, `E = 32`, is read for the last positions a fine
-scroll reaches. Each column is read in three steps, at fixed dots of the line:
+Each background a mode draws from a tilemap reads the line in tile columns: column `E` covers positions `8E` to `8E + 7`, and a thirty-third column, `E = 32`, is read for the last positions a fine scroll reaches. Each column is read in three steps, at fixed dots of the line:
 
 | read | dot | what it reads |
 |---|---|---|
@@ -239,17 +141,9 @@ scroll reaches. Each column is read in three steps, at fixed dots of the line:
 | the character | `8E + 7` | the character's row, at the character base as it stands — both characters of a two-character tile |
 | the fine scroll | `8E + 22` | the horizontal scroll's low three bits, at the dot position `8E` is drawn on (`E` = 0 to 31) |
 
-Position `8E + k` is drawn from pixel `k + f` of column `E`, `f` being the fine scroll column `E`
-read, or pixel `k + f − 8` of column `E + 1` where that passes the column's eighth. Everything else
-about a pixel is read at its own dot: the screens, the windows, the priority chart, the palette terms
-the mode gives a background, `$2130`'s direct-color bit, color math, the brightness and mosaic's
-block width.
+Position `8E + k` is drawn from pixel `k + f` of column `E`, `f` being the fine scroll column `E` read, or pixel `k + f − 8` of column `E + 1` where that passes the column's eighth. Everything else about a pixel is read at its own dot: the screens, the windows, the priority chart, the palette terms the mode gives a background, `$2130`'s direct-color bit, color math, the brightness and mosaic's block width.
 
-**A write mid-line** reaches every column whose read of the written register comes after it, and no
-column whose read came before it, however many of that column's positions are drawn after the write.
-A dot's reads are made before its pixel, so a write landing after dot `D` reaches a read at a dot
-later than `D` and misses one at `D` or before. A write to `INIDISP` reaches the chip
-[a dot early](#the-picture), reads included.
+**A write mid-line** reaches every column whose read of the written register comes after it, and no column whose read came before it, however many of that column's positions are drawn after the write. A dot's reads are made before its pixel, so a write landing after dot `D` reaches a read at a dot later than `D` and misses one at `D` or before. A write to `INIDISP` reaches the chip [a dot early](#the-picture), reads included.
 
 ```
 BG1HOFS written mid-line, landing after dot 254:
@@ -260,27 +154,15 @@ BG1HOFS written mid-line, landing after dot 170:
   fine scroll, read at 174, is the first to take the new fine one.
 ```
 
-**Forced blank.** The CPU has the video memory while the screen is forced blank, and the chip reads
-no tile then: a column whose entry or character read falls under the blank holds nothing, and once
-the blank lifts mid-line its positions show the backdrop until the first column read after the lift.
-In Mode 7 the field is read through the matrix at every pixel and no column is read.
+**Forced blank.** The CPU has the video memory while the screen is forced blank, and the chip reads no tile then: a column whose entry or character read falls under the blank holds nothing, and once the blank lifts mid-line its positions show the backdrop until the first column read after the lift. In Mode 7 the field is read through the matrix at every pixel and no column is read.
 
-**The state.** The reads are part of `PpuState` (`tiles`, one `TileRead` per background per column),
-made whether or not a frame observer is set, so a machine nobody watches holds the reads a watched
-one does, and a snapshot taken between a column's reads draws the rest of the line as the unbroken
-line would.
+**The state.** The reads are part of `PpuState` (`tiles`, one `TileRead` per background per column), made whether or not a frame observer is set, so a machine nobody watches holds the reads a watched one does, and a snapshot taken between a column's reads draws the rest of the line as the unbroken line would.
 
-This is the schedule of PPU1 version 1 and PPU2 version 1, measured on
-[the project's SNES](ppu-behavior.md#sources), an SNS-001 with every chip at version 1 —
-[the evidence](ppu-behavior.md#the-chip-reads-each-tile-ahead-of-the-beam).
+This is the schedule of PPU1 version 1 and PPU2 version 1, measured on [the project's SNES](ppu-behavior.md#sources), an SNS-001 with every chip at version 1 — [the evidence](ppu-behavior.md#the-chip-reads-each-tile-ahead-of-the-beam).
 
 ### Offset-per-tile
 
-In modes 2, 4 and 6 BG3's tilemap is not drawn, whatever `$212C` and `$212D` bit 2 hold: it is a
-table the chip reads the mode's backgrounds through, a tile column at a time — BG1 and BG2 in modes 2
-and 4, BG1 alone in mode 6. `$2109` places the table and sizes it,
-`$2111`/`$2112` scroll it and `$2105` bit 6 sets its tile size, exactly as they would a layer's;
-`$210C`'s low nibble is not read, since no character of BG3's is drawn.
+In modes 2, 4 and 6 BG3's tilemap is not drawn, whatever `$212C` and `$212D` bit 2 hold: it is a table the chip reads the mode's backgrounds through, a tile column at a time — BG1 and BG2 in modes 2 and 4, BG1 alone in mode 6. `$2109` places the table and sizes it, `$2111`/`$2112` scroll it and `$2105` bit 6 sets its tile size, exactly as they would a layer's; `$210C`'s low nibble is not read, since no character of BG3's is drawn.
 
 An entry of the table is:
 
@@ -294,32 +176,15 @@ An entry of the table is:
 
 For each picture column, a background with a table reads its offsets like this:
 
-- **The first tile column is left alone.** The pixels for which `x + (HOFS & 7) < 8` — the
-  background's first tile on the line, however little of it is showing — read the background's own
-  two offset registers.
-- **Tile `T` after it reads BG3's tile `T − 1`.** Tiles are counted in the background's own 8-pixel
-  columns, starting from its first: the entry is BG3's at horizontal position
-  `(T − 1) × 8 + (BG3HOFS & ~7)`. BG3's own low three bits of scroll are not read, and a 16×16 BG1
-  or BG2 still takes a new entry every eight pixels.
-- **The two rows are fixed.** The horizontal entry is BG3's at vertical position `BG3VOFS` and the
-  vertical entry at `BG3VOFS + 8`, on every line. In mode 4 only the first is read, and bit 15 says
-  which axis it is.
-- **A 16×16 table** covers sixteen positions with each entry, so two 8-pixel columns share one entry,
-  and where `BG3VOFS + 8` falls inside the same 16-row block as `BG3VOFS` one word is both offsets.
-- **An entry applies** to a background whose bit is set, and to that axis alone. A horizontal entry
-  replaces the coarse scroll and keeps the register's own low three bits: the column read is
-  `x + ((entry & $3F8) | (HOFS & 7))`. A vertical entry replaces the register whole: the row read is
-  `line + (entry & $3FF)`. An axis whose entry does not apply keeps its register.
+- **The first tile column is left alone.** The pixels for which `x + (HOFS & 7) < 8` — the background's first tile on the line, however little of it is showing — read the background's own two offset registers.
+- **Tile `T` after it reads BG3's tile `T − 1`.** Tiles are counted in the background's own 8-pixel columns, starting from its first: the entry is BG3's at horizontal position `(T − 1) × 8 + (BG3HOFS & ~7)`. BG3's own low three bits of scroll are not read, and a 16×16 BG1 or BG2 still takes a new entry every eight pixels.
+- **The two rows are fixed.** The horizontal entry is BG3's at vertical position `BG3VOFS` and the vertical entry at `BG3VOFS + 8`, on every line. In mode 4 only the first is read, and bit 15 says which axis it is.
+- **A 16×16 table** covers sixteen positions with each entry, so two 8-pixel columns share one entry, and where `BG3VOFS + 8` falls inside the same 16-row block as `BG3VOFS` one word is both offsets.
+- **An entry applies** to a background whose bit is set, and to that axis alone. A horizontal entry replaces the coarse scroll and keeps the register's own low three bits: the column read is `x + ((entry & $3F8) | (HOFS & 7))`. A vertical entry replaces the register whole: the row read is `line + (entry & $3FF)`. An axis whose entry does not apply keeps its register.
 
-The position then wraps at the background's map size as any other does. The table and the coarse
-scroll are read with the tile's entry, the fine scroll at its first pixel
-([the tile reads](#the-tile-reads)), so a write to any of them mid-line changes the columns read after
-it.
+The position then wraps at the background's map size as any other does. The table and the coarse scroll are read with the tile's entry, the fine scroll at its first pixel ([the tile reads](#the-tile-reads)), so a write to any of them mid-line changes the columns read after it.
 
-**Mode 6** reads its table exactly as mode 2 does, BG1 under bit 13, in columns of eight positions —
-which is a mode 6 tile's width. BG3's tile there is eight positions wide too, so its size bit changes
-only how tall a table entry is: a 16×16 table gives every column an entry of its own, and where
-`BG3VOFS + 8` falls inside the same sixteen lines one word is both offsets.
+**Mode 6** reads its table exactly as mode 2 does, BG1 under bit 13, in columns of eight positions — which is a mode 6 tile's width. BG3's tile there is eight positions wide too, so its size bit changes only how tall a table entry is: a 16×16 table gives every column an entry of its own, and where `BG3VOFS + 8` falls inside the same sixteen lines one word is both offsets.
 
 ```
 mode 2, BG1HOFS 3, every entry of BG3's row 0 = $2010 (+16 to BG1), BG3VOFS 0:
@@ -330,52 +195,27 @@ mode 2, BG1HOFS 3, every entry of BG3's row 0 = $2010 (+16 to BG1), BG3VOFS 0:
 
 ### Mode 7: the field
 
-Mode 7's BG1 is one 1024×1024-pixel field rather than a tilemap of characters, and the chip reads it
-through a matrix. `$2105` bits 4–7 and `$2107`–`$210C` are not read: the map is always at the start
-of VRAM and 128×128 entries, and the characters are always 8×8.
+Mode 7's BG1 is one 1024×1024-pixel field rather than a tilemap of characters, and the chip reads it through a matrix. `$2105` bits 4–7 and `$2107`–`$210C` are not read: the map is always at the start of VRAM and 128×128 entries, and the characters are always 8×8.
 
-- **The layout.** The map and the characters are interleaved: the map is the LOW byte of each of the
-  first 16384 words and the characters are the HIGH bytes. The entry for field pixel `(X, Y)` is
-  byte `((Y >> 3) << 7 | (X >> 3)) << 1`, one byte naming one of 256 characters. Character `n`'s pixel
-  at `(X & 7, Y & 7)` is byte `((n << 6) | ((Y & 7) << 3) | (X & 7)) << 1 | 1` — one pixel per byte,
-  not bitplanes. The pixel byte is the CGRAM word, all 256 of them; zero is transparent.
-- **The transform.** With `x` the picture column, `line` the line (1 for the first drawn), `a`–`d`
-  the four matrix registers `$211B`–`$211E` as signed 8.8 values, the centre `$211F`/`$2120` and the
-  scroll `$210D`/`$210E` (through the Mode 7 latch) as 13-bit signed pixels:
+- **The layout.** The map and the characters are interleaved: the map is the LOW byte of each of the first 16384 words and the characters are the HIGH bytes. The entry for field pixel `(X, Y)` is byte `((Y >> 3) << 7 | (X >> 3)) << 1`, one byte naming one of 256 characters. Character `n`'s pixel at `(X & 7, Y & 7)` is byte `((n << 6) | ((Y & 7) << 3) | (X & 7)) << 1 | 1` — one pixel per byte, not bitplanes. The pixel byte is the CGRAM word, all 256 of them; zero is transparent.
+- **The transform.** With `x` the picture column, `line` the line (1 for the first drawn), `a`–`d` the four matrix registers `$211B`–`$211E` as signed 8.8 values, the center `$211F`/`$2120` and the scroll `$210D`/`$210E` (through the Mode 7 latch) as 13-bit signed pixels:
 
   ```
   sx = x    XOR $FF if $211A bit 0        sy = line XOR $FF if $211A bit 1
-  ox = clip(scroll.x − centre.x)          oy = clip(scroll.y − centre.y)
-  X  = (a·ox & ~63) + (b·oy & ~63) + centre.x·256 + (b·sy & ~63) + a·sx
-  Y  = (c·ox & ~63) + (d·oy & ~63) + centre.y·256 + (d·sy & ~63) + c·sx
+  ox = clip(scroll.x − center.x)          oy = clip(scroll.y − center.y)
+  X  = (a·ox & ~63) + (b·oy & ~63) + center.x·256 + (b·sy & ~63) + a·sx
+  Y  = (c·ox & ~63) + (d·oy & ~63) + center.y·256 + (d·sy & ~63) + c·sx
   ```
 
-  `clip` keeps the difference's low ten bits under the difference's own sign, so 1024 clips to 0
-  and −1025 to −1. Each product with the offset or the line drops its low six bits before the sum;
-  the product with the column is added whole. `X` and `Y` are in 1/256 pixel: bits 8–10 are the
-  pixel within its character, bits 11–17 the map entry, and anything above them is a position
-  outside the field. Everything is read from the registers as they stand at the dot, so a matrix
-  written between lines changes the lines after it and one written mid-line changes the rest of
-  that line. Mode 7 scrolls by `$210D`/`$210E` as the Mode 7 latch assembled them, not by BG1's own
-  offsets.
-- **Outside the field**, `$211A` bits 7–6 decide: `0x` wraps the position into the field at 1024;
-  `10` shows nothing; `11` shows character 0's pixel at the position's low three bits, transformed
-  like any other.
-- **The flips.** `$211A` bit 0 mirrors the columns and bit 1 the lines: a flipped line `L` reads field
-  row `L XOR 255`, so the first line drawn reads row 254 and row 255 is never shown.
-- **Direct colour** (`$2130` bit 0) reads the field's pixel as `BBGGGRRR` like any 256-colour
-  background's, with every tile bit zero, since this map has no palette field: `$FF` is red 28,
-  green 28, blue 24.
-- **EXTBG.** `$2133` bit 6 gives Mode 7 a BG2 that is the same field, read through the same matrix
-  and scrolled by the same registers: the pixel's bit 7 is its priority and its low seven bits are
-  its CGRAM word, so it has 128 colours, a pixel whose low seven bits are zero is transparent
-  whatever bit 7 holds, and it is never read as a colour. `$212C`/`$212D` bit 1 show it, the windows
-  and `$212E`/`$212F` mask it and `$2131` names it as they do any BG2. Outside Mode 7 the bit changes
-  nothing that is drawn.
+  `clip` keeps the difference's low ten bits under the difference's own sign, so 1024 clips to 0 and −1025 to −1. Each product with the offset or the line drops its low six bits before the sum; the product with the column is added whole. `X` and `Y` are in 1/256 pixel: bits 8–10 are the pixel within its character, bits 11–17 the map entry, and anything above them is a position outside the field. Everything is read from the registers as they stand at the dot, so a matrix written between lines changes the lines after it and one written mid-line changes the rest of that line. Mode 7 scrolls by `$210D`/`$210E` as the Mode 7 latch assembled them, not by BG1's own offsets.
+- **Outside the field**, `$211A` bits 7–6 decide: `0x` wraps the position into the field at 1024; `10` shows nothing; `11` shows character 0's pixel at the position's low three bits, transformed like any other.
+- **The flips.** `$211A` bit 0 mirrors the columns and bit 1 the lines: a flipped line `L` reads field row `L XOR 255`, so the first line drawn reads row 254 and row 255 is never shown.
+- **Direct color** (`$2130` bit 0) reads the field's pixel as `BBGGGRRR` like any 256-color background's, with every tile bit zero, since this map has no palette field: `$FF` is red 28, green 28, blue 24.
+- **EXTBG.** `$2133` bit 6 gives Mode 7 a BG2 that is the same field, read through the same matrix and scrolled by the same registers: the pixel's bit 7 is its priority and its low seven bits are its CGRAM word, so it has 128 colors, a pixel whose low seven bits are zero is transparent whatever bit 7 holds, and it is never read as a color. `$212C`/`$212D` bit 1 show it, the windows and `$212E`/`$212F` mask it and `$2131` names it as they do any BG2. Outside Mode 7 the bit changes nothing that is drawn.
 
 ### Mosaic
 
-`$2106` shows a background in blocks, each the colour of the pixel at its top-left corner:
+`$2106` shows a background in blocks, each the color of the pixel at its top-left corner:
 
 | bits | meaning |
 |---|---|
@@ -384,34 +224,15 @@ of VRAM and 128×128 entries, and the characters are always 8×8.
 
 Sprites have no bit and are never mosaiced.
 
-- **Across**, the blocks start at the picture's left edge on every line: column `x` shows what the
-  background shows at column `x − x mod (N + 1)`. A scroll moves the picture under the blocks and
-  never the blocks.
-- **Down**, the blocks come in rows. A row begins on the picture's first line with the size `$2106`
-  holds there, and runs for that many lines — `N + 1` — before the next begins, which reads the size
-  again. Every line of a row shows what the background shows on the row's first line. So a size
-  written part-way down a row takes effect when that row ends, and writing the size the register
-  already holds changes nothing.
-- **What the block shows** is the corner as the background resolves it: its tile's priority, its
-  palette word or its direct colour, its offset-per-tile lookup, or its transparency — a transparent
-  corner is a transparent block, and whatever is behind shows through all of it.
-- **Before the windows and colour math.** The windows, `$212E`/`$212F`, `$2130`'s two regions and
-  colour math are all taken at the dot itself, so a window can cut a block in two and a mosaiced layer
-  takes colour math like any other.
-- **Mode 7.** BG1's blocks stand in the picture, not in the field: the matrix reads each block's
-  corner. EXTBG's BG2 reads `$2106` bit 0 as mosaic down and bit 1 as mosaic across, so `$F1` makes it
-  1×16 blocks, `$F2` 16×1 and `$F3` 16×16, while BG1 reads bit 0 for both.
-- **Modes 5 and 6** count a block across in half-pixels: it is `2(N + 1)` half-pixels wide from each
-  line's first, so its corner is always a left half, and every half-pixel of the block shows the
-  tile's pixel there — even a size of 0 makes the right half of a position show the left half's
-  pixel. Interlaced, a block is `2(N + 1)` half-lines tall and both fields read its corner's half-line,
-  which is the even field's.
-- **Under `$2133` bit 3** in any other mode, each screen's layers are mosaiced in positions exactly
-  as on a line that is not split, and the split comes after.
+- **Across**, the blocks start at the picture's left edge on every line: column `x` shows what the background shows at column `x − x mod (N + 1)`. A scroll moves the picture under the blocks and never the blocks.
+- **Down**, the blocks come in rows. A row begins on the picture's first line with the size `$2106` holds there, and runs for that many lines — `N + 1` — before the next begins, which reads the size again. Every line of a row shows what the background shows on the row's first line. So a size written part-way down a row takes effect when that row ends, and writing the size the register already holds changes nothing.
+- **What the block shows** is the corner as the background resolves it: its tile's priority, its palette word or its direct color, its offset-per-tile lookup, or its transparency — a transparent corner is a transparent block, and whatever is behind shows through all of it.
+- **Before the windows and color math.** The windows, `$212E`/`$212F`, `$2130`'s two regions and color math are all taken at the dot itself, so a window can cut a block in two and a mosaiced layer takes color math like any other.
+- **Mode 7.** BG1's blocks stand in the picture, not in the field: the matrix reads each block's corner. EXTBG's BG2 reads `$2106` bit 0 as mosaic down and bit 1 as mosaic across, so `$F1` makes it 1×16 blocks, `$F2` 16×1 and `$F3` 16×16, while BG1 reads bit 0 for both.
+- **Modes 5 and 6** count a block across in half-pixels: it is `2(N + 1)` half-pixels wide from each line's first, so its corner is always a left half, and every half-pixel of the block shows the tile's pixel there — even a size of 0 makes the right half of a position show the left half's pixel. Interlaced, a block is `2(N + 1)` half-lines tall and both fields read its corner's half-line, which is the even field's.
+- **Under `$2133` bit 3** in any other mode, each screen's layers are mosaiced in positions exactly as on a line that is not split, and the split comes after.
 
-The size is read at the dot for the width, so a size written part-way along a line changes the block
-width for the rest of that line; the rows keep the size each began with. The row state is part of
-`PpuState` (`mosaicBlockLine`, `mosaicBlockSize`), so a snapshot taken part-way down a row resumes it.
+The size is read at the dot for the width, so a size written part-way along a line changes the block width for the rest of that line; the rows keep the size each began with. The row state is part of `PpuState` (`mosaicBlockLine`, `mosaicBlockSize`), so a snapshot taken part-way down a row resumes it.
 
 ```
 $2106 = $31 (4x4 blocks on BG1) from the top of the frame:
@@ -422,68 +243,29 @@ $11 written on line 6:
   lines 9-10   show line 9       columns 0-1 show column 0, ...
 ```
 
-**Direct colour** reads a 256-colour background's pixel as a colour rather than as a palette index,
-and `$2130` bit 0 turns it on. The eight-bit pixel is `BBGGGRRR` and the tile's three palette
-bits — which such a background otherwise ignores — are `bgr`, and each channel takes its own field
-shifted up with the tile's own bit under it:
+**Direct color** reads a 256-color background's pixel as a color rather than as a palette index, and `$2130` bit 0 turns it on. The eight-bit pixel is `BBGGGRRR` and the tile's three palette bits — which such a background otherwise ignores — are `bgr`, and each channel takes its own field shifted up with the tile's own bit under it:
 
 ```
 red   = RRR r 0          green = GGG g 0          blue = BB b 0 0
 ```
 
-So the three `bgr` bits are per tile rather than per pixel, and every channel value direct colour
-can make is even. A pixel of zero is transparent as it is at any other depth — **there is no black
-in direct colour** — and the colour is built the same way on either screen, so a background read
-this way is the same colour whether it is shown or is colour math's addend. Nothing else in `$2130`
-decides whether a pixel is read this way — but a composed colour is a main-screen pixel like any
-other once it is made, so the two regions and colour math reach it exactly as they reach a colour
-the palette named.
+So the three `bgr` bits are per tile rather than per pixel, and every channel value direct color can make is even. A pixel of zero is transparent as it is at any other depth — **there is no black in direct color** — and the color is built the same way on either screen, so a background read this way is the same color whether it is shown or is color math's addend. Nothing else in `$2130` decides whether a pixel is read this way — but a composed color is a main-screen pixel like any other once it is made, so the two regions and color math reach it exactly as they reach a color the palette named.
 
-**The converter drives eight bits a channel.** A palette word is five bits a channel, and `INIDISP`
-brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 255 / (31 × 16))` in
-integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black
-frame rather than no frame.
+**The converter drives eight bits a channel.** A palette word is five bits a channel, and `INIDISP` brightness N scales each by `(N + 1) / 16`, computed as `round(c × (N + 1) × 255 / (31 × 16))` in integers. Brightness 0 is the screen off, and forced blank is black; both give a completed black frame rather than no frame.
 
-**A write to `INIDISP` outside vertical blank is read a dot early.** The chip reads the register
-before the value reaches the data bus, so the last dot the write's own cycle covers is drawn under
-the byte the bus held before it — the whole byte, forced blank and brightness both — and every dot
-after it under the written value. For a store that byte is the instruction's last, which is why a
-write through long addressing (`STA $8F2100`) draws the odd dot under `$8F`, and why putting the
-value on the bus first (`STA $0F2100` for a value of `$0F`) draws no odd dot at all; for a transfer
-it is the byte on the bus before the transfer's own read. One dot is drawn this way; how many the
-early value lasts is a measurement no reading yet gives. Inside vertical blank the write changes
-nothing on the picture.
+**A write to `INIDISP` outside vertical blank is read a dot early.** The chip reads the register before the value reaches the data bus, so the last dot the write's own cycle covers is drawn under the byte the bus held before it — the whole byte, forced blank and brightness both — and every dot after it under the written value. For a store that byte is the instruction's last, which is why a write through long addressing (`STA $8F2100`) draws the odd dot under `$8F`, and why putting the value on the bus first (`STA $0F2100` for a value of `$0F`) draws no odd dot at all; for a transfer it is the byte on the bus before the transfer's own read. One dot is drawn this way; how many the early value lasts is a measurement no reading yet gives. Inside vertical blank the write changes nothing on the picture.
 
 ### The half-pixel line
 
-In modes 5 and 6 every line is 512 half-pixels, two to each position, and in any other mode —
-Mode 7 included — a line is drawn the same way while `$2133` bit 3 is set. The bit is read at the
-dot, so a write part-way along a line splits the rest of it. In modes 5 and 6 the bit changes
-nothing.
+In modes 5 and 6 every line is 512 half-pixels, two to each position, and in any other mode — Mode 7 included — a line is drawn the same way while `$2133` bit 3 is set. The bit is read at the dot, so a write part-way along a line splits the rest of it. In modes 5 and 6 the bit changes nothing.
 
-- **The left half is the sub screen's, the right half the main screen's.** Each is that screen's
-  front-most pixel by the mode's order. A two-character tile gives its even pixels to the left half
-  and its odd pixels to the right, so a background on both screens shows all sixteen, and one on a
-  single screen shows half of them.
-- **Where the sub screen shows nothing, its half is colour 0** — palette word 0, as the main screen's
-  backdrop is — not the fixed colour.
-- **Scrolling and sprites count positions.** A horizontal offset of 1 moves the picture two
-  half-pixels; a sprite covers both halves of every position it claims, on whichever screen shows it;
-  a window masks both halves of a position.
-- **Colour math reaches both halves.** The right half is the main screen's pixel under colour math
-  exactly as on any line, its addend where the sub screen is empty being the fixed colour, unhalved.
-  The left half is drawn under what the **main pixel one position to its left** decided: black where
-  `$2130` blacked that pixel, then its operation — nothing, the fixed colour added or subtracted, or
-  that pixel's own colour before its math where its addend was the sub screen — halved where it was
-  halved. The left half at position 0 has nothing to its left and takes neither black nor math.
-  Subtracting a magenta sub screen from a cyan main one makes green right halves and red left halves.
-- **The main pixel's decision is part of `PpuState`** (`lastMain`), made at every visible dot whether
-  or not the picture is drawn, so a snapshot taken part-way along a line resumes it.
+- **The left half is the sub screen's, the right half the main screen's.** Each is that screen's front-most pixel by the mode's order. A two-character tile gives its even pixels to the left half and its odd pixels to the right, so a background on both screens shows all sixteen, and one on a single screen shows half of them.
+- **Where the sub screen shows nothing, its half is color 0** — palette word 0, as the main screen's backdrop is — not the fixed color.
+- **Scrolling and sprites count positions.** A horizontal offset of 1 moves the picture two half-pixels; a sprite covers both halves of every position it claims, on whichever screen shows it; a window masks both halves of a position.
+- **Color math reaches both halves.** The right half is the main screen's pixel under color math exactly as on any line, its addend where the sub screen is empty being the fixed color, unhalved. The left half is drawn under what the **main pixel one position to its left** decided: black where `$2130` blacked that pixel, then its operation — nothing, the fixed color added or subtracted, or that pixel's own color before its math where its addend was the sub screen — halved where it was halved. The left half at position 0 has nothing to its left and takes neither black nor math. Subtracting a magenta sub screen from a cyan main one makes green right halves and red left halves.
+- **The main pixel's decision is part of `PpuState`** (`lastMain`), made at every visible dot whether or not the picture is drawn, so a snapshot taken part-way along a line resumes it.
 
-**The frame's width.** A frame is 256 wide until its first position drawn in half-pixels and 512 from
-then on, every position drawn before it doubled into both halves, so the width a host is handed is 512
-whenever any line of the frame was split. A frame that never splits is 256 wide, pixel for pixel what
-it would be with none of this built.
+**The frame's width.** A frame is 256 wide until its first position drawn in half-pixels and 512 from then on, every position drawn before it doubled into both halves, so the width a host is handed is 512 whenever any line of the frame was split. A frame that never splits is 256 wide, pixel for pixel what it would be with none of this built.
 
 ```
 mode 5, BG1 on both screens, tile pixels p0 p1 ... p15, no offset:
@@ -494,36 +276,17 @@ BG1 on the main screen alone:
 
 ### The interlaced picture
 
-With `$2133` bit 0 set, the frame's parity toggles every frame and each frame is handed over as a
-picture of its own, with its parity in `field`. A host that weaves two of them may; one that does not
-shows each as it comes.
+With `$2133` bit 0 set, the frame's parity toggles every frame and each frame is handed over as a picture of its own, with its parity in `field`. A host that weaves two of them may; one that does not shows each as it comes.
 
-- **Modes 5 and 6 read their tilemaps in half-lines.** Line `L` of the frame of parity `F` reads
-  half-line `2L + F + BGnVOFS`, so a tile's eight rows are four lines of each field, the even field
-  showing the even rows and the odd field the odd ones, and a vertical offset of `−2` puts row 0 on
-  the even field's first line where a picture that is not interlaced wants `−1`. A 32-row map of
-  16×8 tiles is 256 half-lines, so it repeats after 128 lines of a field.
-- **Every other mode reads the same lines in both fields**, the bit changing nothing drawn —
-  `$2133` bit 3 included.
-- **`$2133` bit 1 draws every sprite at half height**, in any mode and whether or not bit 0 is set.
-  A line `n` lines into a sprite shows its row `2n + F`, `n` being the eight-bit count that finds a
-  sprite's rows; a 16-row sprite stands on eight lines, and Range and Time count it on those lines
-  alone. A vertical flip reverses the row a field picks.
+- **Modes 5 and 6 read their tilemaps in half-lines.** Line `L` of the frame of parity `F` reads half-line `2L + F + BGnVOFS`, so a tile's eight rows are four lines of each field, the even field showing the even rows and the odd field the odd ones, and a vertical offset of `−2` puts row 0 on the even field's first line where a picture that is not interlaced wants `−1`. A 32-row map of 16×8 tiles is 256 half-lines, so it repeats after 128 lines of a field.
+- **Every other mode reads the same lines in both fields**, the bit changing nothing drawn — `$2133` bit 3 included.
+- **`$2133` bit 1 draws every sprite at half height**, in any mode and whether or not bit 0 is set. A line `n` lines into a sprite shows its row `2n + F`, `n` being the eight-bit count that finds a sprite's rows; a 16-row sprite stands on eight lines, and Range and Time count it on those lines alone. A vertical flip reverses the row a field picks.
 
 The taller picture is 239 lines a field under interlace as it is without.
 
 ## The picture as a timeline
 
-A host that draws the picture itself — on a GPU, one thread a pixel — sets a timeline observer on the
-machine instead of, or beside, a frame observer (`include/snaggletooth/snes/ppu_timeline.h`). Each
-frame is handed over as a `PpuTimeline`: everything its pixels are made of, and nothing else. For
-every picture line it holds the registers the picture reads as they stood at the line's first read
-dot, dot 3, and the inputs [Time](#the-sprites) read as the line began; every write to a register a
-line's dots read, placed at the first dot it reaches; the palette and the sprite table as each line
-read them; and VRAM as it stood before the frame's first write inside its picture lines, with every
-such write at its position. The frame drawn from the timeline alone is the frame the chip drew, and
-`PpuTimeline::draw()` draws it that way, through the chip's own dot code, as the reference a host's
-drawing is held to:
+A host that draws the picture itself — on a GPU, one thread a pixel — sets a timeline observer on the machine instead of, or beside, a frame observer (`include/snaggletooth/snes/ppu_timeline.h`). Each frame is handed over as a `PpuTimeline`: everything its pixels are made of, and nothing else. For every picture line it holds the registers the picture reads as they stood at the line's first read dot, dot 3, and the inputs [Time](#the-sprites) read as the line began; every write to a register a line's dots read, placed at the first dot it reaches; the palette and the sprite table as each line read them; and VRAM as it stood before the frame's first write inside its picture lines, with every such write at its position. The frame drawn from the timeline alone is the frame the chip drew, and `PpuTimeline::draw()` draws it that way, through the chip's own dot code, as the reference a host's drawing is held to:
 
 ```cpp
 struct Timelines final : PpuTimelineObserver {
@@ -542,18 +305,9 @@ m.setPpuTimelineObserver(&timelines);
 m.run(cycles);
 ```
 
-The report is made on the calling thread at the end of the cycle in which the frame's vertical blank
-begins, after the frame report where a frame observer is set too, on the terms of
-[the timeline observer](snes-machine.md#the-timeline-observer). The spans are the machine's own
-storage and are valid for the call. Every record is a whole number of 32-bit words with no padding,
-so a host uploads each span's bytes as they stand and a shader reads them as 32-bit words.
+The report is made on the calling thread at the end of the cycle in which the frame's vertical blank begins, after the frame report where a frame observer is set too, on the terms of [the timeline observer](snes-machine.md#the-timeline-observer). The spans are the machine's own storage and are valid for the call. Every record is a whole number of 32-bit words with no padding, so a host uploads each span's bytes as they stand and a shader reads them as 32-bit words.
 
-**The frame.** `height` and `field` are the frame's, as a `VideoFrame` carries them. `width` is 512
-when a picture dot of a recorded line is drawn in half-pixels — modes 5 and 6, or `$2133` bit 3, at
-that dot — and 256 otherwise. `firstLine` is 1 for a frame recorded whole. A restore, a reset or the
-observer being set drops the frame in progress, and the timeline begins at the first line whose first
-read dot the beam then reaches: a state restored at line 100, dot 40 gives a frame whose first line is
-101.
+**The frame.** `height` and `field` are the frame's, as a `VideoFrame` carries them. `width` is 512 when a picture dot of a recorded line is drawn in half-pixels — modes 5 and 6, or `$2133` bit 3, at that dot — and 256 otherwise. `firstLine` is 1 for a frame recorded whole. A restore, a reset or the observer being set drops the frame in progress, and the timeline begins at the first line whose first read dot the beam then reaches: a state restored at line 100, dot 40 gives a frame whose first line is 101.
 
 **A line**, `PpuTimeline::Line`, is 32 words:
 
@@ -582,68 +336,29 @@ read dot the beam then reaches: a state restored at line 100, dot 40 gives a fra
 | 23 | the line's entry in `spriteBuffers` for a Carried line, 0 otherwise |
 | 24–31 | the sprites Range kept, four to a word, the first in word 24's low byte |
 
-Words 0 to 15 hold each register exactly as `PpuState` holds it — a scroll or Mode 7 word as its two
-writes assembled it — since the chip masks what it reads. `Line::value(Field)` reads one back, and
-the accessors name the rest. `$2101`, `$2133`, the count, the first sprite and the kept sprites in
-words 16, 17 and 24 to 31 are what Time read as the line began, which a write between the line's
-start and its first read dot leaves apart from words 0 to 15.
+Words 0 to 15 hold each register exactly as `PpuState` holds it — a scroll or Mode 7 word as its two writes assembled it — since the chip masks what it reads. `Line::value(Field)` reads one back, and the accessors name the rest. `$2101`, `$2133`, the count, the first sprite and the kept sprites in words 16, 17 and 24 to 31 are what Time read as the line began, which a write between the line's start and its first read dot leaves apart from words 0 to 15.
 
 **A line's sprites** come from one of three places, word 22:
 
-- `Gathered` — Time gathered them as the line began, from the line's own inputs: the sprite table
-  version, `$2101`, `$2133` bit 1, the parity and the sprites Range kept. A reader runs Time over
-  those.
-- `None` — the screen was forced blank as the line began, so Time gathered nothing, and the buffer it
-  left is another line's: the line shows no sprite, even where the screen is lit later in the line.
-- `Carried` — the line is drawn with a buffer no Time of the recording gathered: an earlier frame's
-  for this line, or the one a restore put in place. It is in `spriteBuffers`, 512 bytes — the palette
-  word at each of the 256 positions, then the priority at each, `kNoSprite` where no sprite claims it.
+- `Gathered` — Time gathered them as the line began, from the line's own inputs: the sprite table version, `$2101`, `$2133` bit 1, the parity and the sprites Range kept. A reader runs Time over those.
+- `None` — the screen was forced blank as the line began, so Time gathered nothing, and the buffer it left is another line's: the line shows no sprite, even where the screen is lit later in the line.
+- `Carried` — the line is drawn with a buffer no Time of the recording gathered: an earlier frame's for this line, or the one a restore put in place. It is in `spriteBuffers`, 512 bytes — the palette word at each of the 256 positions, then the priority at each, `kNoSprite` where no sprite claims it.
 
-**An event**, `PpuTimeline::Event`, is two words. `at` is the picture line in its low half and the
-first dot the write reaches in its high half: the dot after the dot its cycle ends on. `change` is
-the `Field` in the low byte and the value the register holds after the write in the high half. A
-write to `$210D` or `$210E` is two events at one dot, BG1's offset then Mode 7's, and a write to
-`$2132` one event for each channel it names. A write by the CPU to `$2100` is two events at
-successive dots, since the chip reads the register a dot early off the data bus: the byte the bus
-held before the write, then the written value. A `PaletteWord` event is a palette write that landed
-inside the line's dots — under forced blank, or at dots 3 to 21 — and holds the word's index in bits
-8 to 15 and its color in the high half. Only writes reaching dots 3 to 277 are events. One that
-reaches earlier is in the line's words, and one that reaches later is in the next line's.
+**An event**, `PpuTimeline::Event`, is two words. `at` is the picture line in its low half and the first dot the write reaches in its high half: the dot after the dot its cycle ends on. `change` is the `Field` in the low byte and the value the register holds after the write in the high half. A write to `$210D` or `$210E` is two events at one dot, BG1's offset then Mode 7's, and a write to `$2132` one event for each channel it names. A write by the CPU to `$2100` is two events at successive dots, since the chip reads the register a dot early off the data bus: the byte the bus held before the write, then the written value. A `PaletteWord` event is a palette write that landed inside the line's dots — under forced blank, or at dots 3 to 21 — and holds the word's index in bits 8 to 15 and its color in the high half. Only writes reaching dots 3 to 277 are events. One that reaches earlier is in the line's words, and one that reaches later is in the next line's.
 
-**The palette and the sprite table** are versions a line names, 512 and 544 bytes each. Version 0 is
-the palette as the first recorded line's first read dot found it, and the table as Time read it for
-that line. A new version is made only when a line finds a byte changed, so a frame whose HDMA writes
-the backdrop on every line holds a version a line, and a still frame holds one of each.
+**The palette and the sprite table** are versions a line names, 512 and 544 bytes each. Version 0 is the palette as the first recorded line's first read dot found it, and the table as Time read it for that line. A new version is made only when a line finds a byte changed, so a frame whose HDMA writes the backdrop on every line holds a version a line, and a still frame holds one of each.
 
-**VRAM** changes inside the picture only under forced blank. `vram` is the 64 KB as the frame's first
-write inside its picture lines found it, or as the picture lines left it where none landed there.
-`vramWrites` holds every such write, horizontal blanks included, at its position: the byte's address
-in the low half of `change` and the byte in the high half.
+**VRAM** changes inside the picture only under forced blank. `vram` is the 64 KB as the frame's first write inside its picture lines found it, or as the picture lines left it where none landed there. `vramWrites` holds every such write, horizontal blanks included, at its position: the byte's address in the low half of `change` and the byte in the high half.
 
-**`draw()`** fills `kDrawBytes` — 512 half-pixels across, 239 rows, four bytes each — and leaves the
-rows before `firstLine - 1` and from `height` on as they were. Position `x`'s left half is column
-`2x` and its right half `2x + 1`, a position drawn whole filling both with its one pixel. A frame 512
-wide is these rows column for column; one 256 wide is them with each pixel taken once from its
-position's two equal halves.
+**`draw()`** fills `kDrawBytes` — 512 half-pixels across, 239 rows, four bytes each — and leaves the rows before `firstLine - 1` and from `height` on as they were. Position `x`'s left half is column `2x` and its right half `2x + 1`, a position drawn whole filling both with its one pixel. A frame 512 wide is these rows column for column; one 256 wide is them with each pixel taken once from its position's two equal halves.
 
-**The core draws the frame on a GPU itself** with its own compute shader, from this timeline, when a
-host hands the machine a device through `SnesConfig::gpuPpu`: `pack()` lays the timeline out as one
-buffer the shader reads, and the texture the shader leaves is `draw()`'s rows. [gpu-ppu.md](gpu-ppu.md)
-is the whole of it — the device a host implements, the three passes, the packed frame's layout and
-the texture.
+**The core draws the frame on a GPU itself** with its own compute shader, from this timeline, when a host hands the machine a device through `SnesConfig::gpuPpu`: `pack()` lays the timeline out as one buffer the shader reads, and the texture the shader leaves is `draw()`'s rows. [gpu-ppu.md](gpu-ppu.md) is the whole of it — the device a host implements, the three passes, the packed frame's layout and the texture.
 
 ## The sprites
 
-A sprite is a record in the sprite table, and 128 of them describe the whole of what the chip can
-put in front of the backgrounds. The **low table** is 128 records of four bytes — X's low eight bits,
-Y, the first character's low eight bits, then `vhoopppN` — and the **high table** is 32 bytes of two
-bits a sprite, four sprites to a byte from the low pair up: the ninth bit of X, then the flag that
-chooses between the two sizes.
+A sprite is a record in the sprite table, and 128 of them describe the whole of what the chip can put in front of the backgrounds. The **low table** is 128 records of four bytes — X's low eight bits, Y, the first character's low eight bits, then `vhoopppN` — and the **high table** is 32 bytes of two bits a sprite, four sprites to a byte from the low pair up: the ninth bit of X, then the flag that chooses between the two sizes.
 
-- **X is nine bits read as signed**, so a sprite can stand off the left edge with only its right-hand
-  columns on the picture. **Y is eight**, and the subtraction that finds which of the sprite's rows a
-  line crosses is eight bits wide — which is what brings a tall sprite hung above the picture back in
-  at the top. A sprite whose Y is N has its top row on picture line N + 1.
+- **X is nine bits read as signed**, so a sprite can stand off the left edge with only its right-hand columns on the picture. **Y is eight**, and the subtraction that finds which of the sprite's rows a line crosses is eight bits wide — which is what brings a tall sprite hung above the picture back in at the top. A sprite whose Y is N has its top row on picture line N + 1.
 - **`$2101` bits 7–5 name a pair of sizes** and the record's own flag chooses between them:
 
   | `sss` | small | large |  | `sss` | small | large |
@@ -653,194 +368,88 @@ chooses between the two sizes.
   | 2 | 8×8 | 64×64 | | 6 | 16×32 | 32×64 |
   | 3 | 16×16 | 32×32 | | 7 | 16×32 | 32×32 |
 
-- **A sprite's characters live in one of two 16×16 tables**, `N` choosing between them. The word
-  address of its first is `((Base << 13) + (Tile << 4) + (N ? ((Name + 1) << 12) : 0)) & 0x7FFF`,
-  `Base` being `$2101` bits 2–0 and `Name` its bits 4–3 — so a `Name` of 0 puts the second table
-  immediately after the first. A sprite's character is always sixteen colours: four bitplanes,
-  thirty-two bytes, laid out as a background's are.
-- **A sprite's numbers wrap inside the 16×16 table**, the low nibble across and the high nibble down,
-  each on its own: a 16×16 sprite whose first character is `$FF` is made of `$FF`, `$F0`, `$0F` and
-  `$00`. **This is the opposite of a background's 16×16 block**, whose numbers run on — `$2FF` gives
-  `$2FF`, `$300`, `$30F`, `$310`.
-- **A flip reverses the whole sprite**, not its characters — except that a rectangular sprite flips
-  vertically as though it were two square sprites stacked, so its rows `01234567` become `32107654`
-  and not `76543210`.
-- **A sprite's palette is `128 + ppp × 16`**, sixteen colours from CGRAM word 128 up, and its colour 0
-  is transparent like every other. `$212C` bit 4 puts the sprites on the main screen.
-- **Among themselves sprites are ordered by index** from the sprite the walk begins at: that one is in
-  front of the next, and so on around the table. Only the topmost sprite at a position reaches the
-  picture, so **only its priority answers the backgrounds** — two overlapping sprites, the front one at
-  priority 0 and the one behind at priority 3, are both hidden by a background that shows above
-  priority 0.
-- **`$2103` bit 7 moves where the walk begins.** Clear, it is sprite 0. Set, it is the sprite the
-  sprite-table port's own address stands in — the address counts bytes and a record is four of them,
-  so the sprite is that address divided by four, held to seven bits. **Where the address is standing
-  on the last byte of a record**, the line the pass is matching is added to it as well, which is what
-  makes a table of sprites at one Y hand a different one the front on each successive line. The port's
-  address returns to `$2102/$2103`'s reload value at the start of vertical blank, so a program that
-  writes the pair and then steps the address moves the front sprite for one frame and gets the reload
-  value's sprite on the next.
+- **A sprite's characters live in one of two 16×16 tables**, `N` choosing between them. The word address of its first is `((Base << 13) + (Tile << 4) + (N ? ((Name + 1) << 12) : 0)) & 0x7FFF`, `Base` being `$2101` bits 2–0 and `Name` its bits 4–3 — so a `Name` of 0 puts the second table immediately after the first. A sprite's character is always sixteen colors: four bitplanes, thirty-two bytes, laid out as a background's are.
+- **A sprite's numbers wrap inside the 16×16 table**, the low nibble across and the high nibble down, each on its own: a 16×16 sprite whose first character is `$FF` is made of `$FF`, `$F0`, `$0F` and `$00`. **This is the opposite of a background's 16×16 block**, whose numbers run on — `$2FF` gives `$2FF`, `$300`, `$30F`, `$310`.
+- **A flip reverses the whole sprite**, not its characters — except that a rectangular sprite flips vertically as though it were two square sprites stacked, so its rows `01234567` become `32107654` and not `76543210`.
+- **A sprite's palette is `128 + ppp × 16`**, sixteen colors from CGRAM word 128 up, and its color 0 is transparent like every other. `$212C` bit 4 puts the sprites on the main screen.
+- **Among themselves sprites are ordered by index** from the sprite the walk begins at: that one is in front of the next, and so on around the table. Only the topmost sprite at a position reaches the picture, so **only its priority answers the backgrounds** — two overlapping sprites, the front one at priority 0 and the one behind at priority 3, are both hidden by a background that shows above priority 0.
+- **`$2103` bit 7 moves where the walk begins.** Clear, it is sprite 0. Set, it is the sprite the sprite-table port's own address stands in — the address counts bytes and a record is four of them, so the sprite is that address divided by four, held to seven bits. **Where the address is standing on the last byte of a record**, the line the pass is matching is added to it as well, which is what makes a table of sprites at one Y hand a different one the front on each successive line. The port's address returns to `$2102/$2103`'s reload value at the start of vertical blank, so a program that writes the pair and then steps the address moves the front sprite for one frame and gets the reload value's sprite on the next.
 
-**The two passes.** Sprites are gathered a whole line ahead of the dots that show them, where a
-background's tiles are read [a column ahead](#the-tile-reads). **Range** walks the sprite table across the visible dots of the line *before* the one it is gathering
-for, two dots a sprite from the picture's first, keeping the sprites that line crosses and that have
-at least one column at or right of the left edge. **Time** then runs in the horizontal blank that
-follows and draws those sprites into a line buffer, back to front, so the sprite nearest the front
-keeps every position it claims.
+**The two passes.** Sprites are gathered a whole line ahead of the dots that show them, where a background's tiles are read [a column ahead](#the-tile-reads). **Range** walks the sprite table across the visible dots of the line *before* the one it is gathering for, two dots a sprite from the picture's first, keeping the sprites that line crosses and that have at least one column at or right of the left edge. **Time** then runs in the horizontal blank that follows and draws those sprites into a line buffer, back to front, so the sprite nearest the front keeps every position it claims.
 
-The pass reads `$2101` **as it stands at each sprite's own dot**, so a write landing mid-line reaches
-the sprites whose dots have not gone by and no others. Both passes belong to the machine and run
-whether or not a frame observer is set, because the two overflow flags they set are readable through
-`$213E`; what the passes leave is part of `PpuState`, so a snapshot carries a half-walked pass and a
-restore resumes it. A chip in forced blank is rendering nothing, so it walks nowhere and gathers
-nothing.
+The pass reads `$2101` **as it stands at each sprite's own dot**, so a write landing mid-line reaches the sprites whose dots have not gone by and no others. Both passes belong to the machine and run whether or not a frame observer is set, because the two overflow flags they set are readable through `$213E`; what the passes leave is part of `PpuState`, so a snapshot carries a half-walked pass and a restore resumes it. A chip in forced blank is rendering nothing, so it walks nowhere and gathers nothing.
 
-**What the chip can afford.** Each pass has a count, and the two run in opposite directions along the
-sprites Range kept:
+**What the chip can afford.** Each pass has a count, and the two run in opposite directions along the sprites Range kept:
 
-- **Range keeps 32 sprites.** It walks from the sprite the order begins at towards higher indices,
-  wrapping past the last, and keeps the first 32 the line crosses with any part of them at or right of
-  the left edge. The sprite that would be one too many is dropped and **raises `$213E` bit 6 at its own
-  dot** — the walk carries on so later sprites still take their dots, but nothing more is kept.
-- **Time loads 34 8×8 tiles.** It walks **from the last sprite Range kept back towards the first**,
-  taking each sprite's tiles left to right, and counts only the tiles standing on the picture: a tile
-  is counted where `−8 < X < 256`. The tile that would be one too many is not loaded and **raises
-  `$213E` bit 7**, and neither is anything behind it in the walk — which is why a crowded line loses
-  the sprites nearest the front rather than the ones behind.
+- **Range keeps 32 sprites.** It walks from the sprite the order begins at towards higher indices, wrapping past the last, and keeps the first 32 the line crosses with any part of them at or right of the left edge. The sprite that would be one too many is dropped and **raises `$213E` bit 6 at its own dot** — the walk carries on so later sprites still take their dots, but nothing more is kept.
+- **Time loads 34 8×8 tiles.** It walks **from the last sprite Range kept back towards the first**, taking each sprite's tiles left to right, and counts only the tiles standing on the picture: a tile is counted where `−8 < X < 256`. The tile that would be one too many is not loaded and **raises `$213E` bit 7**, and neither is anything behind it in the walk — which is why a crowded line loses the sprites nearest the front rather than the ones behind.
 
-Because Time spends its count from the back, the sprites it drops are the ones the walk began at; and
-because Range keeps only the first 32 it meets, the sprites *it* drops are the ones furthest along the
-walk. Moving where the walk begins therefore moves which sprites survive a crowded line, which is what
-`$2103` bit 7 is for.
+Because Time spends its count from the back, the sprites it drops are the ones the walk began at; and because Range keeps only the first 32 it meets, the sprites *it* drops are the ones furthest along the walk. Moving where the walk begins therefore moves which sprites survive a crowded line, which is what `$2103` bit 7 is for.
 
-**A sprite at the far side of nine bits.** X is nine bits read as signed, and the one position it
-reaches that is a whole screen from the left edge — `X = −256`, the same place as `X = 256` — is
-**counted by both passes as though it stood at 0**, filling a slot in Range and taking its tiles from
-Time's count, while it draws where its own X puts it, which is nowhere on the picture.
+**A sprite at the far side of nine bits.** X is nine bits read as signed, and the one position it reaches that is a whole screen from the left edge — `X = −256`, the same place as `X = 256` — is **counted by both passes as though it stood at 0**, filling a slot in Range and taking its tiles from Time's count, while it draws where its own X puts it, which is nowhere on the picture.
 
-**Both flags are raised whether or not `$212C` bit 4 shows the sprites at all**, and they are cleared
-as the next picture begins — except after a frame the chip spent in forced blank, where it drew
-nothing and they stand.
+**Both flags are raised whether or not `$212C` bit 4 shows the sprites at all**, and they are cleared as the next picture begins — except after a frame the chip spent in forced blank, where it drew nothing and they stand.
 
-**At half height** (`$2133` bit 1) a sprite stands on half as many lines and each line shows one of
-its rows, picked by the frame's parity — see [the interlaced picture](#the-interlaced-picture).
+**At half height** (`$2133` bit 1) a sprite stands on half as many lines and each line shows one of its rows, picked by the frame's parity — see [the interlaced picture](#the-interlaced-picture).
 
 ## The masking windows
 
-Two horizontal windows take layers away. Each is a span of picture positions, and where a layer's
-own settings say the two windows cover a position, that layer shows nothing there and the priority
-order falls through to whatever stands behind it — down to the backdrop, which no window reaches.
+Two horizontal windows take layers away. Each is a span of picture positions, and where a layer's own settings say the two windows cover a position, that layer shows nothing there and the priority order falls through to whatever stands behind it — down to the backdrop, which no window reaches.
 
-**A window is a span between two edges, both ends inside it.** Window 1 runs from `$2126` to
-`$2127` and window 2 from `$2128` to `$2129`, in picture positions 0 to 255. Edges that meet make a
-window one pixel wide, and a left edge standing past its right makes one with no range at all, false
-everywhere. The windows have **no vertical extent**: a program shapes one down the picture by moving
-its edges line by line, which is what HDMA into these four registers is for.
+**A window is a span between two edges, both ends inside it.** Window 1 runs from `$2126` to `$2127` and window 2 from `$2128` to `$2129`, in picture positions 0 to 255. Edges that meet make a window one pixel wide, and a left edge standing past its right makes one with no range at all, false everywhere. The windows have **no vertical extent**: a program shapes one down the picture by moving its edges line by line, which is what HDMA into these four registers is for.
 
-**Every layer keeps four bits of its own**, in the nibble `$2123`, `$2124` or `$2125` holds for it —
-BG1, BG3 and OBJ in the low nibble of their register, BG2, BG4 and the colour window in the high:
+**Every layer keeps four bits of its own**, in the nibble `$2123`, `$2124` or `$2125` holds for it — BG1, BG3 and OBJ in the low nibble of their register, BG2, BG4 and the color window in the high:
 
 | bit of the nibble | 3 | 2 | 1 | 0 |
 |---|---|---|---|---|
 | | enable window 2 | invert window 2 | enable window 1 | invert window 1 |
 
-An inversion bit replaces its window with the inverse of it, so the span becomes everything outside
-the span.
+An inversion bit replaces its window with the inverse of it, so the span becomes everything outside the span.
 
-**The two combine by the logic the layer names** in its own pair of bits — `$212A` holds the four
-backgrounds, two bits each from BG1 in the low pair, and `$212B` holds OBJ in its low pair and the
-colour window in the pair above:
+**The two combine by the logic the layer names** in its own pair of bits — `$212A` holds the four backgrounds, two bits each from BG1 in the low pair, and `$212B` holds OBJ in its low pair and the color window in the pair above:
 
 | bits | 0 | 1 | 2 | 3 |
 |---|---|---|---|---|
 | | OR | AND | XOR | XNOR |
 
-The logic applies only where the layer enables both windows. With one enabled, that window is the
-answer on its own; with neither, nothing is covered.
+The logic applies only where the layer enables both windows. With one enabled, that window is the answer on its own; with neither, nothing is covered.
 
-**`$212E` decides which layers the result takes away** on the main screen, one bit a layer in the
-order BG1, BG2, BG3, BG4, OBJ — and it gates the mask rather than the window, so a layer whose
-windows are enabled but whose bit is clear is masked nowhere. A masked sprite is masked whole: the
-line buffer's entry at that position is not consulted, and the sprite's priority answers nothing.
-`$212F` is the same register for the sub screen.
+**`$212E` decides which layers the result takes away** on the main screen, one bit a layer in the order BG1, BG2, BG3, BG4, OBJ — and it gates the mask rather than the window, so a layer whose windows are enabled but whose bit is clear is masked nowhere. A masked sprite is masked whole: the line buffer's entry at that position is not consulted, and the sprite's priority answers nothing. `$212F` is the same register for the sub screen.
 
-**Every one of these registers is read at the position it shapes**, and nothing about them is
-carried from one position to the next. So an edge a program moves part-way along a line changes the
-rest of that line and leaves what is already drawn alone, and an edge a transfer delivers in the
-blank between two lines is the one the whole of the next line is drawn under.
+**Every one of these registers is read at the position it shapes**, and nothing about them is carried from one position to the next. So an edge a program moves part-way along a line changes the rest of that line and leaves what is already drawn alone, and an edge a transfer delivers in the blank between two lines is the one the whole of the next line is drawn under.
 
 ## Writes and their latches
 
 Most registers store the byte written and nothing more. Three groups do not.
 
-**The scroll registers** (`$210D`–`$2114`) are written twice, low byte then high, through one
-latch all eight share. A vertical offset takes `(value << 8) | latch`. A horizontal offset takes
-`(value << 8) | (latch & ~7) | (its own previous value >> 8 & 7)`: the low three bits come from
-the register's own high byte. anomie reads them there; the register page reads them from a second
-latch every horizontal-offset write loads. The two agree unless another background's horizontal
-offset is written between a register's two bytes, and no reading yet settles that case — anomie's
-form is built. After either, the latch is the byte just written. The
-value is kept as the two writes assembled it; the offset the renderer uses is its low ten bits.
-Because the latch is shared, writing the registers in a mixed order gives a mixed result — the
-register page's own caution.
+**The scroll registers** (`$210D`–`$2114`) are written twice, low byte then high, through one latch all eight share. A vertical offset takes `(value << 8) | latch`. A horizontal offset takes `(value << 8) | (latch & ~7) | (its own previous value >> 8 & 7)`: the low three bits come from the register's own high byte. anomie reads them there; the register page reads them from a second latch every horizontal-offset write loads. The two agree unless another background's horizontal offset is written between a register's two bytes, and no reading yet settles that case — anomie's form is built. After either, the latch is the byte just written. The value is kept as the two writes assembled it; the offset the renderer uses is its low ten bits. Because the latch is shared, writing the registers in a mixed order gives a mixed result — the register page's own caution.
 
-**The Mode 7 registers** (`$211A`–`$2120`, and `$210D`/`$210E` again as `M7HOFS`/`M7VOFS`) are
-written twice through a second latch of their own: `(value << 8) | latch`, then the latch is the
-byte. A write to `$210D` or `$210E` updates BG1's offset through the scroll latch *and* Mode 7's
-through this one; the two are separate registers with separate histories. Every write to `$211C`
-is also the multiplier's 8-bit operand.
+**The Mode 7 registers** (`$211A`–`$2120`, and `$210D`/`$210E` again as `M7HOFS`/`M7VOFS`) are written twice through a second latch of their own: `(value << 8) | latch`, then the latch is the byte. A write to `$210D` or `$210E` updates BG1's offset through the scroll latch *and* Mode 7's through this one; the two are separate registers with separate histories. Every write to `$211C` is also the multiplier's 8-bit operand.
 
-**The fixed colour** (`$2132`) is three 5-bit channels, `fixedRed`, `fixedGreen` and `fixedBlue`;
-a write stores its low five bits into each channel whose select bit (5, 6, 7) is set.
+**The fixed color** (`$2132`) is three 5-bit channels, `fixedRed`, `fixedGreen` and `fixedBlue`; a write stores its low five bits into each channel whose select bit (5, 6, 7) is set.
 
-The OAM address (`$2102`/`$2103`), the VRAM port control and address (`$2115`–`$2117`) and the
-palette address (`$2121`) behave as described under the machine's
-[video memory ports](snes-machine.md#the-ppu-register-file).
+The OAM address (`$2102`/`$2103`), the VRAM port control and address (`$2115`–`$2117`) and the palette address (`$2121`) behave as described under the machine's [video memory ports](snes-machine.md#the-ppu-register-file).
 
-## The sub screen and colour math
+## The sub screen and color math
 
-`$212D` puts layers on the **sub screen** exactly as `$212C` puts them on the main one, and `$212F`
-masks them with the windows exactly as `$212E` does. **The sub screen is never shown by itself.** A
-layer enabled only there draws nowhere; it exists so that colour math has something to reach for.
-Its front-most pixel is found by the same order the main screen uses, sprites included — and where
-it shows nothing, **its backdrop as an addend is the fixed colour `$2132` holds**, not palette word 0.
-On a line drawn in half-pixels the sub screen is shown, in the left halves, and what it shows there is
-described under [the half-pixel line](#the-half-pixel-line).
+`$212D` puts layers on the **sub screen** exactly as `$212C` puts them on the main one, and `$212F` masks them with the windows exactly as `$212E` does. **The sub screen is never shown by itself.** A layer enabled only there draws nowhere; it exists so that color math has something to reach for. Its front-most pixel is found by the same order the main screen uses, sprites included — and where it shows nothing, **its backdrop as an addend is the fixed color `$2132` holds**, not palette word 0. On a line drawn in half-pixels the sub screen is shown, in the left halves, and what it shows there is described under [the half-pixel line](#the-half-pixel-line).
 
-Colour math takes the main screen's pixel and one addend, a channel at a time, five bits each.
+Color math takes the main screen's pixel and one addend, a channel at a time, five bits each.
 
-**`$2131` decides the arithmetic.** Bit 7 subtracts rather than adds. Bits 5-0 name which of the six
-things the main screen can show the math reaches — BG1, BG2, BG3, BG4, the sprites, the backdrop — by
-the layer the front-most main pixel came from. **A sprite takes math only from palettes 4 to 7**;
-one drawn from a lower palette never does, whatever bit 4 says. Bit 6 halves the result, and the
-halving happens **before** the channel is held to 0–31, which is observable: two full channels added
-and halved are full, not half.
+**`$2131` decides the arithmetic.** Bit 7 subtracts rather than adds. Bits 5-0 name which of the six things the main screen can show the math reaches — BG1, BG2, BG3, BG4, the sprites, the backdrop — by the layer the front-most main pixel came from. **A sprite takes math only from palettes 4 to 7**; one drawn from a lower palette never does, whatever bit 4 says. Bit 6 halves the result, and the halving happens **before** the channel is held to 0–31, which is observable: two full channels added and halved are full, not half.
 
-**`$2130` decides where, and with what.** Bit 1 selects the addend: clear, the fixed colour; set, the
-sub screen's front-most pixel. Bits 7-6 replace the main colour with black before the arithmetic, and
-bits 5-4 prevent the arithmetic entirely; each is a two-bit region named against the **colour
-window** — 0 nowhere, 1 outside it, 2 inside it, 3 everywhere. The two are independent: a pixel can
-be blacked and still mathed, which lands the addend on black.
+**`$2130` decides where, and with what.** Bit 1 selects the addend: clear, the fixed color; set, the sub screen's front-most pixel. Bits 7-6 replace the main color with black before the arithmetic, and bits 5-4 prevent the arithmetic entirely; each is a two-bit region named against the **color window** — 0 nowhere, 1 outside it, 2 inside it, 3 everywhere. The two are independent: a pixel can be blacked and still mathed, which lands the addend on black.
 
-The colour window is the sixth thing a window can be enabled for, in the high nibble of `$2125` with
-its logic in bits 3-2 of `$212B`. It is not gated by `$212E` or `$212F` — it feeds these two regions
-and nothing else. With neither of its windows enabled nothing is inside it, so a region of "outside"
-covers the whole line and one of "inside" covers none of it.
+The color window is the sixth thing a window can be enabled for, in the high nibble of `$2125` with its logic in bits 3-2 of `$212B`. It is not gated by `$212E` or `$212F` — it feeds these two regions and nothing else. With neither of its windows enabled nothing is inside it, so a region of "outside" covers the whole line and one of "inside" covers none of it.
 
-**Two things escape the halving**, both of them worth knowing before a picture comes out at the wrong
-brightness:
+**Two things escape the halving**, both of them worth knowing before a picture comes out at the wrong brightness:
 
 - a main pixel that bits 7-6 replaced with black, and
-- the addend where bit 1 asks for the sub screen and the sub screen shows nothing there, so its
-  backdrop is the fixed colour. Asking for the fixed colour directly, with bit 1 clear, halves
-  normally — the two paths reach the same colour by different arithmetic.
+- the addend where bit 1 asks for the sub screen and the sub screen shows nothing there, so its backdrop is the fixed color. Asking for the fixed color directly, with bit 1 clear, halves normally — the two paths reach the same color by different arithmetic.
 
-Everything above is read at the dot it shapes, so a program that drives these registers once a line
-gets a picture that changes down the screen, and nothing is carried from one position to the next.
+Everything above is read at the dot it shapes, so a program that drives these registers once a line gets a picture that changes down the screen, and nothing is carried from one position to the next.
 
-Brightness is applied last, to the result. The evidence behind the two exemptions, and the one place
-the published documents and a reference emulator disagree, is in
-[`ppu-behavior.md`](ppu-behavior.md#colour-math).
+Brightness is applied last, to the result. The evidence behind the two exemptions, and the one place the published documents and a reference emulator disagree, is in [`ppu-behavior.md`](ppu-behavior.md#color-math).
 
 ## The memories and their windows
 
@@ -852,24 +461,11 @@ A program can reach the three memories only when the chip is not using them:
 | OAM (`$2104` written, `$2138` read) | vertical blank or forced blank |
 | CGRAM (`$2122` written, `$213B` read) | every dot but the picture's own — dots 22 to 277 of lines 1 to the last before vertical blank — and every dot of forced blank |
 
-Outside its window a write is ignored: the byte does not land, and the access reported to the
-[bus observer](snes-machine.md#the-bus-observer) carries no landing. The address steps all the
-same — VRAM's by the step `$2115` selects, OAM's by one, CGRAM's flip-flop and word address as they
-would have. A read outside the window answers with the chip's open bus for that port (below) and
-steps the same way; a VRAM read does not refill the prefetch register, and setting the VRAM address
-does not load it.
+Outside its window a write is ignored: the byte does not land, and the access reported to the [bus observer](snes-machine.md#the-bus-observer) carries no landing. The address steps all the same — VRAM's by the step `$2115` selects, OAM's by one, CGRAM's flip-flop and word address as they would have. A read outside the window answers with the chip's open bus for that port (below) and steps the same way; a VRAM read does not refill the prefetch register, and setting the VRAM address does not load it.
 
-Vertical blank here is the machine's latched fact, not a comparison of the line: it runs from the line
-`$2133` bit 2 chooses — 225 or 240 — to the end of the frame, and line 0 is not part of it. One state
-parts the windows from that fact. **Asking for the taller picture after the blank has already begun shuts
-the memories again until line 240**: it resumes neither the picture nor anything the blank stopped, but
-the chip holds VRAM, the sprite table and the palette's picture dots as though it were still drawing.
-Forced blank opens them regardless.
+Vertical blank here is the machine's latched fact, not a comparison of the line: it runs from the line `$2133` bit 2 chooses — 225 or 240 — to the end of the frame, and line 0 is not part of it. One state parts the windows from that fact. **Asking for the taller picture after the blank has already begun shuts the memories again until line 240**: it resumes neither the picture nor anything the blank stopped, but the chip holds VRAM, the sprite table and the palette's picture dots as though it were still drawing. Forced blank opens them regardless.
 
-The palette's window is the picture's dots, not the horizontal-blank flag. `$4212` bit 6 falls at dot
-1 and the first dot drawn is 22, so a palette write between them lands, and the line that begins shows
-it from its first pixel. A program that sends a few colours a line by DMA from late in the line before
-relies on those dots: its transfer runs on past the line's start.
+The palette's window is the picture's dots, not the horizontal-blank flag. `$4212` bit 6 falls at dot 1 and the first dot drawn is 22, so a palette write between them lands, and the line that begins shows it from its first pixel. A program that sends a few colors a line by DMA from late in the line before relies on those dots: its transfer runs on past the line's start.
 
 ```cpp
 // The screen on, the beam inside the picture: nothing lands, the address moves.
@@ -882,17 +478,9 @@ relies on those dots: its transfer runs on past the line's start.
 
 ## The multiplier
 
-`$2134`–`$2136` hold the signed 24-bit product of the signed 16-bit matrix A (`$211B`) and the
-signed byte last written to `$211C`. It is available as soon as either is written, with no delay,
-and `PpuState::multiplyResult()` computes the same value. A transfer engine can read the three
-bytes onto the A bus like any B-bus register, which is how a program fills memory from it. At
-power-on both operands are `-1`, so the product reads `$000001`.
+`$2134`–`$2136` hold the signed 24-bit product of the signed 16-bit matrix A (`$211B`) and the signed byte last written to `$211C`. It is available as soon as either is written, with no delay, and `PpuState::multiplyResult()` computes the same value. A transfer engine can read the three bytes onto the A bus like any B-bus register, which is how a program fills memory from it. At power-on both operands are `-1`, so the product reads `$000001`.
 
-**While a Mode 7 picture is being drawn the ports hold the chip's own multiplier instead** — in
-mode 7 with forced blank off, on every dot of every line before vertical blank begins, horizontal
-blank included. Two products a dot, each with its low three bits dropped and held to 24 bits, from
-the registers as they stand at the read, `ox`, `oy` and `sy` being [the transform's](#mode-7-the-field)
-terms and the column `(dot − 3) & $FF`, XORed with `$FF` under the horizontal flip:
+**While a Mode 7 picture is being drawn the ports hold the chip's own multiplier instead** — in mode 7 with forced blank off, on every dot of every line before vertical blank begins, horizontal blank included. Two products a dot, each with its low three bits dropped and held to 24 bits, from the registers as they stand at the read, `ox`, `oy` and `sy` being [the transform's](#mode-7-the-field) terms and the column `(dot − 3) & $FF`, XORed with `$FF` under the horizontal flip:
 
 | dot | first half | second half |
 |---|---|---|
@@ -901,20 +489,13 @@ terms and the column `(dot − 3) & $FF`, XORed with `$FF` under the horizontal 
 | 2 | B × sy | D × sy |
 | 3 onward | A × column | C × column |
 
-Where BG1 is mosaiced, the line in `sy` is the line its current [row of blocks](#mosaic) began on, and
-the vertical flip is applied to that line.
+Where BG1 is mosaiced, the line in `sy` is the line its current [row of blocks](#mosaic) began on, and the vertical flip is applied to that line.
 
 In vertical blank, in forced blank and in every other mode the ports hold the plain product above.
 
 ## The counter latch
 
-Reading `$2137`, or the I/O port's bit 7 falling from 1 to 0 (a write to `$4201`), latches the
-beam's dot into `OPHCT` (`$213C`) and its line into `OPVCT` (`$213D`) and raises the latch flag,
-bit 6 of `$213F`. Reading `$2137` latches only while bit 7 of the port is high; the value the read
-returns is the CPU's open bus. Each counter reads out in two halves through its own flip-flop:
-first the low byte, then the ninth bit in bit 0 under the second half's open bus in bits 7–1.
-Reading `$213F` clears the flag and resets both flip-flops; latching does not reset them. The port
-reads back at `$4213` as it was written — nothing on the console drives any of its lines.
+Reading `$2137`, or the I/O port's bit 7 falling from 1 to 0 (a write to `$4201`), latches the beam's dot into `OPHCT` (`$213C`) and its line into `OPVCT` (`$213D`) and raises the latch flag, bit 6 of `$213F`. Reading `$2137` latches only while bit 7 of the port is high; the value the read returns is the CPU's open bus. Each counter reads out in two halves through its own flip-flop: first the low byte, then the ninth bit in bit 0 under the second half's open bus in bits 7–1. Reading `$213F` clears the flag and resets both flip-flops; latching does not reset them. The port reads back at `$4213` as it was written — nothing on the console drives any of its lines.
 
 ```cpp
 // LDA $2137                 latch (the port powers on with bit 7 high)
@@ -927,113 +508,59 @@ reads back at `$4213` as it was written — nothing on the console drives any of
 
 ## The status registers and the three open buses
 
-`$213E` (`STAT77`): bit 7 the sprite time-over flag, bit 6 the range-over flag, bit 5 zero (master),
-bit 4 the first half's open bus, bits 3–0 the version, 1.
+`$213E` (`STAT77`): bit 7 the sprite time-over flag, bit 6 the range-over flag, bit 5 zero (master), bit 4 the first half's open bus, bits 3–0 the version, 1.
 
-`$213F` (`STAT78`): bit 7 the frame parity, bit 6 the latch flag, bit 5 the second half's open bus,
-bit 4 the clock rate (set for a machine built with `Region::Pal`), bits 3–0 the version, 3.
+`$213F` (`STAT78`): bit 7 the frame parity, bit 6 the latch flag, bit 5 the second half's open bus, bit 4 the clock rate (set for a machine built with `Region::Pal`), bits 3–0 the version, 3.
 
-The chip is two halves, and each remembers the last byte read through its own ports and answers
-with it where a read has nothing to say:
+The chip is two halves, and each remembers the last byte read through its own ports and answers with it where a read has nothing to say:
 
 | | Remembers the last read of | Answers |
 |---|---|---|
 | First half | `$2134`–`$2136`, `$2138`–`$213A`, `$213E` | a read of `$2104`–`$2106`, `$2108`–`$210A`, `$2114`–`$2116`, `$2118`–`$211A`, `$2124`–`$2126`, `$2128`–`$212A`, in every bit; bit 4 of `$213E` |
 | Second half | `$213B`–`$213D`, `$213F` | bit 7 of `$213B`'s second half; bits 7–1 of `$213C`'s and `$213D`'s second halves; bit 5 of `$213F` |
 
-A read of any other write-only register, and of `$2137`, returns the CPU's own open bus — the
-last byte the data bus carried, which for an absolute read is the instruction's own operand byte.
-So a palette read whose low half returned a byte with bit 7 set reads that bit back in its high
-half, and `LDA $2104` after `LDA $2134` returns what the multiplier's low byte was.
+A read of any other write-only register, and of `$2137`, returns the CPU's own open bus — the last byte the data bus carried, which for an absolute read is the instruction's own operand byte. So a palette read whose low half returned a byte with bit 7 set reads that bit back in its high half, and `LDA $2104` after `LDA $2134` returns what the multiplier's low byte was.
 
 ## Power-on values
 
-Where the hardware's power-on value is documented the state starts there: `INIDISP` `$80` (forced
-blank), `BGMODE` `$0F`, `VMAIN` `$0F`, `M7A` `$FFFF`, `M7B` `$FFFF`, `SETINI` `$00`, both counters
-`$01FF` with the flag clear, the I/O port `$FF`, and the mosaic rows as a row begun on line 1 at
-size 0. Everything else starts at zero. A program that
-sends to VRAM without first writing `$2115` inherits a step of 128 words through the 8-bit
-translation, which is what the console does with it.
+Where the hardware's power-on value is documented the state starts there: `INIDISP` `$80` (forced blank), `BGMODE` `$0F`, `VMAIN` `$0F`, `M7A` `$FFFF`, `M7B` `$FFFF`, `SETINI` `$00`, both counters `$01FF` with the flag clear, the I/O port `$FF`, and the mosaic rows as a row begun on line 1 at size 0. Everything else starts at zero. A program that sends to VRAM without first writing `$2115` inherits a step of 128 words through the 8-bit translation, which is what the console does with it.
 
 ## What remains open
 
 Each of these is a question the documentation leaves, recorded rather than decided by invention:
 
-- Whether line 0 counts as vertical blank for the memory windows. The blank flag is clear on it;
-  the chip is fetching the first line's sprites. It is treated as not blank.
-- What the VRAM prefetch register holds after a read outside its window. The documentation says
-  invalid data; here the register keeps what it had.
-- Where a CGRAM write inside the picture lands. The register page says only that it goes to the
-  wrong CGRAM address and names none; until a reading gives one, the write does not land.
+- Whether line 0 counts as vertical blank for the memory windows. The blank flag is clear on it; the chip is fetching the first line's sprites. It is treated as not blank.
+- What the VRAM prefetch register holds after a read outside its window. The documentation says invalid data; here the register keeps what it had.
+- Where a CGRAM write inside the picture lands. The register page says only that it goes to the wrong CGRAM address and names none; until a reading gives one, the write does not land.
 - Whether reading `$213F` clears the latch flag while a condition that sets it is still active.
 - Whether the software latch works when the port's bit 7 was high and has since fallen.
 - Bit 7 of `VMAIN` at power-on, which the documentation marks unknown and this state leaves clear.
-- How to count the line's long dots. The register page states the dot clock as four five-cycle dots and
-  its own measured latch quantities as two six-cycle ones; the latch is what a program can read, so the
-  two six-cycle dots are what the chip answers.
-- What `$4212` bit 7 reports while the taller picture is asked for after vertical blank has begun. The
-  memories shut; the flag stays the blank's latched fact.
-- When a mid-frame change to the interlace bit reaches the frame's irregular lines. Each length is
-  decided by the state as its own line runs.
-- Whether the sprite table reloads on *any* fall of `INIDISP` bit 7, as anomie has it, or only during
-  vertical blank's first line, as the register page has it. The register page is followed.
-- Exactly where in the frame's first line the overflow flags clear. The register page marks the dot
-  itself uncertain; they clear as the line begins.
-- Whether the overflow flags clear in a frame the chip spent in forced blank. anomie has them reset at
-  vertical blank's end with no exception; the register page excepts forced blank, which is followed.
-- Whether the two overflow flags can be raised on the same line by different sprites, and which dot the
-  chip reports if a program latches the counters between them.
-- What a sprite whose Y puts part of it above the picture contributes to Time's count. Its tiles are
-  counted by their X alone, which is what both sources describe; whether the chip charges for the rows
-  above the picture is not stated.
-- Whether the sprite-table port's address has to be standing on a record's *last* byte for the line to
-  be added to the front sprite, or on some other one. anomie's own arithmetic and his worked example
-  disagree by two bytes; the example and the sentence beside it agree on the last byte, and that is
-  what is built — see [`ppu-behavior.md`](ppu-behavior.md#the-front-sprite-oddity-is-stated-three-ways-and-two-of-them-agree).
-- What the sprite line holds on the first line after forced blank lifts part-way through a frame. The
-  passes do not run under the blank, so the line the blank interrupted was never gathered; the buffer
-  is read only for the line it was gathered for, so that line shows no sprites at all.
-- Where the picture's last dot is. The event list gives the visible span as dots 22–277 and marks it
-  with its own question mark; the span is taken as written rather than rounded to something tidier.
-- The dot the vertical scroll is read at. It is read with the tile's entry, at `8E + 3`; it could as
-  well be read with the character, at `8E + 7`.
-- What a column whose reads fell under forced blank shows when the blank lifts mid-line. It holds
-  nothing and shows the backdrop; it could as well show what the column held on the line before.
-- The dot the mode's depth and tile size are read at. They are read with the entry; they could as well
-  be read with the character.
-- The dot the mode's palette terms are applied at. They are applied at the pixel, so a mode written
-  mid-line draws the columns read before it at their old depth through the new mode's palette terms;
-  they could as well travel with the column's reads.
-- Whether a two-character tile's second character is read with its first, at `8E + 7`, as built, or at
-  a later dot.
+- How to count the line's long dots. The register page states the dot clock as four five-cycle dots and its own measured latch quantities as two six-cycle ones; the latch is what a program can read, so the two six-cycle dots are what the chip answers.
+- What `$4212` bit 7 reports while the taller picture is asked for after vertical blank has begun. The memories shut; the flag stays the blank's latched fact.
+- When a mid-frame change to the interlace bit reaches the frame's irregular lines. Each length is decided by the state as its own line runs.
+- Whether the sprite table reloads on *any* fall of `INIDISP` bit 7, as anomie has it, or only during vertical blank's first line, as the register page has it. The register page is followed.
+- Exactly where in the frame's first line the overflow flags clear. The register page marks the dot itself uncertain; they clear as the line begins.
+- Whether the overflow flags clear in a frame the chip spent in forced blank. anomie has them reset at vertical blank's end with no exception; the register page excepts forced blank, which is followed.
+- Whether the two overflow flags can be raised on the same line by different sprites, and which dot the chip reports if a program latches the counters between them.
+- What a sprite whose Y puts part of it above the picture contributes to Time's count. Its tiles are counted by their X alone, which is what both sources describe; whether the chip charges for the rows above the picture is not stated.
+- Whether the sprite-table port's address has to be standing on a record's *last* byte for the line to be added to the front sprite, or on some other one. anomie's own arithmetic and his worked example disagree by two bytes; the example and the sentence beside it agree on the last byte, and that is what is built — see [`ppu-behavior.md`](ppu-behavior.md#the-front-sprite-oddity-is-stated-three-ways-and-two-of-them-agree).
+- What the sprite line holds on the first line after forced blank lifts part-way through a frame. The passes do not run under the blank, so the line the blank interrupted was never gathered; the buffer is read only for the line it was gathered for, so that line shows no sprites at all.
+- Where the picture's last dot is. The event list gives the visible span as dots 22–277 and marks it with its own question mark; the span is taken as written rather than rounded to something tidier.
+- The dot the vertical scroll is read at. It is read with the tile's entry, at `8E + 3`; it could as well be read with the character, at `8E + 7`.
+- What a column whose reads fell under forced blank shows when the blank lifts mid-line. It holds nothing and shows the backdrop; it could as well show what the column held on the line before.
+- The dot the mode's depth and tile size are read at. They are read with the entry; they could as well be read with the character.
+- The dot the mode's palette terms are applied at. They are applied at the pixel, so a mode written mid-line draws the columns read before it at their old depth through the new mode's palette terms; they could as well travel with the column's reads.
+- Whether a two-character tile's second character is read with its first, at `8E + 7`, as built, or at a later dot.
 - Whether a 16×16 block's entry is read once a column of eight positions, as built, or once a block.
-- The dot the offset table's own entries are read at. They are read with the tile's entry; they could
-  as well be read before it.
-- What the four positions after a fine-scroll write that lands on a column's own read show on the
-  console. The build takes the write as after the read. The console's picture there, through its NTSC
-  encoder over S-Video, is dim with red and blue fringes, which is what a four-pixel black run between
-  two whites looks like through that encoder; whether the chip draws those four pixels black is not yet
-  read.
-- Whether Mode 7's field is read ahead of the beam like a tilemap. It is read through the matrix at
-  every pixel.
-- Which palette entry a write at a picture dot reaches. The register page says the wrong one and names
-  none; such a write reaches no entry here — see
-  [`ppu-behavior.md`](ppu-behavior.md#where-a-write-at-a-picture-dot-goes-is-not-stated).
+- The dot the offset table's own entries are read at. They are read with the tile's entry; they could as well be read before it.
+- What the four positions after a fine-scroll write that lands on a column's own read show on the console. The build takes the write as after the read. The console's picture there, through its NTSC encoder over S-Video, is dim with red and blue fringes, which is what a four-pixel black run between two whites looks like through that encoder; whether the chip draws those four pixels black is unmeasured.
+- Whether Mode 7's field is read ahead of the beam like a tilemap. It is read through the matrix at every pixel.
+- Which palette entry a write at a picture dot reaches. The register page says the wrong one and names none; such a write reaches no entry here — see [`ppu-behavior.md`](ppu-behavior.md#where-a-write-at-a-picture-dot-goes-is-not-stated).
 - What the memory refresh's pause does to a counter latched inside it.
-- Whether a Mode 7 register written mid-line reaches that line's offset and line terms or only the
-  per-pixel ones. The multiplier's schedule computes the offset and line products in the line's first
-  three dots; whether the drawing unit re-reads them is not stated. Every term is read at the dot.
-- What a size written to `$2106` part-way along a line does to the rest of that line. The width is
-  read at the dot, so the rest of the line takes the new width.
-- Whether a mosaiced block's corner is read once, at the corner's own dot, or re-read at each dot of
-  the block. Each dot of the block takes the corner position's pixel from the tile reads of the
-  corner's column, and the width as the register stands at that dot.
-- What `$2133` bit 6 shows outside Mode 7. fullsnes describes an external input shorted to half the
-  data bus and a program "will just see garbage"; no source gives a picture. Nothing drawn changes.
-- What the left half at position 0 takes on a line drawn in half-pixels. No main pixel stands to its
-  left, and no source says; it takes neither black nor math.
-- Whether a main pixel's math, on a line drawn in half-pixels, takes the fixed colour or colour 0 as
-  its addend where the sub screen is empty. The fixed colour, unhalved, is what any other line takes,
-  and it is built.
-- Whether a left half's layer masks are its own position's, as built, or the position to its left's,
-  as its colour-window effects are.
+- Whether a Mode 7 register written mid-line reaches that line's offset and line terms or only the per-pixel ones. The multiplier's schedule computes the offset and line products in the line's first three dots; whether the drawing unit re-reads them is not stated. Every term is read at the dot.
+- What a size written to `$2106` part-way along a line does to the rest of that line. The width is read at the dot, so the rest of the line takes the new width.
+- Whether a mosaiced block's corner is read once, at the corner's own dot, or re-read at each dot of the block. Each dot of the block takes the corner position's pixel from the tile reads of the corner's column, and the width as the register stands at that dot.
+- What `$2133` bit 6 shows outside Mode 7. fullsnes describes an external input shorted to half the data bus and a program "will just see garbage"; no source gives a picture. Nothing drawn changes.
+- What the left half at position 0 takes on a line drawn in half-pixels. No main pixel stands to its left, and no source says; it takes neither black nor math.
+- Whether a main pixel's math, on a line drawn in half-pixels, takes the fixed color or color 0 as its addend where the sub screen is empty. The fixed color, unhalved, is what any other line takes, and it is built.
+- Whether a left half's layer masks are its own position's, as built, or the position to its left's, as its color-window effects are.

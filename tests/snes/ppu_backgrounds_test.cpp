@@ -1,7 +1,7 @@
 // The picture the PPU draws, and the seam it hands it over: the frame observer's
 // terms, the raster's shape, the converter's bytes, and Mode 1 complete — the
 // tilemap formula at its four sizes, the character address, the bitplanes and their
-// order at both depths, both flips, 16x16 blocks, the palette bits, colour 0's
+// order at both depths, both flips, 16x16 blocks, the palette bits, color 0's
 // transparency, scrolling, the backdrop, the registers each of the three
 // backgrounds reads, the priority chart across them and the register that exchanges
 // it for the other, the layers the main screen does not show, the dots each
@@ -47,7 +47,7 @@ constexpr std::uint8_t kCharBase3 = 0x06u;   // $210C: BG3 at $C000
 
 // Where a background keeps its pieces and how deep its characters are: the byte
 // address its screen base names, the byte address its character base names, and
-// its bitplanes in Mode 1 — four for the two sixteen-colour backgrounds, two for
+// its bitplanes in Mode 1 — four for the two sixteen-color backgrounds, two for
 // BG3's four.
 struct Layout {
   std::uint32_t map;
@@ -247,7 +247,7 @@ void putEntry(PpuState& ppu, const Layout& bg, unsigned index, std::uint16_t ent
 using TileRows = std::array<std::array<std::uint8_t, 8>, 8>;
 
 // A character at a byte address, at as many bitplanes as the caller names: eight
-// rows of eight colour indices, planes 0 and 1 in the low and high bytes of eight
+// rows of eight color indices, planes 0 and 1 in the low and high bytes of eight
 // words and planes 2 and 3 in the same form sixteen bytes on, with the leftmost
 // pixel of a row in bit 7.
 void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
@@ -270,7 +270,7 @@ void putTile(PpuState& ppu, const Layout& bg, unsigned tile, const TileRows& row
   putTileAt(ppu, bg.characters + tile * 8u * bg.planes, bg.planes, rows);
 }
 
-// A character every pixel of which is one colour index.
+// A character every pixel of which is one color index.
 void putSolidTile(PpuState& ppu, const Layout& bg, unsigned tile, std::uint8_t index) {
   TileRows rows{};
   for (auto& row : rows) row.fill(index);
@@ -278,7 +278,7 @@ void putSolidTile(PpuState& ppu, const Layout& bg, unsigned tile, std::uint8_t i
 }
 
 // A PPU placed to draw: Mode 1 with 8x8 tiles, BG1 alone on the main screen at full
-// brightness, the bases above, the backdrop in palette word 0, and the four colour
+// brightness, the bases above, the backdrop in palette word 0, and the four color
 // indices these cases name.
 //
 // The vertical offset is the $3FF games write, which is -1 in the ten bits the
@@ -297,9 +297,9 @@ PpuState screen() {
   putColour(ppu, 2u, kGreen);
   putColour(ppu, 4u, kBlue);
   putColour(ppu, 8u, kWhite);
-  putColour(ppu, 5u, kCyan);     // BG3's palette 1 colour 1, and BG1's palette 0 colour 5
-  putColour(ppu, 9u, kMagenta);  // BG3's palette 2 colour 1
-  putColour(ppu, 49u, kYellow);  // palette 3's colour 1
+  putColour(ppu, 5u, kCyan);     // BG3's palette 1 color 1, and BG1's palette 0 color 5
+  putColour(ppu, 9u, kMagenta);  // BG3's palette 2 color 1
+  putColour(ppu, 49u, kYellow);  // palette 3's color 1
   return ppu;
 }
 
@@ -328,12 +328,12 @@ PpuState oneCharacterEverywhere() {
   return ppu;
 }
 
-// The four colour indices a cycling picture steps through: red, green, blue and
+// The four color indices a cycling picture steps through: red, green, blue and
 // white, which screen() puts in palette words 1, 2, 4 and 8.
 constexpr std::array<std::uint8_t, 4> kCycle{1u, 2u, 4u, 8u};
 
 // A picture whose tile columns cycle through four solid characters, so a horizontal
-// offset of one tile lands a different colour at every position. The characters run
+// offset of one tile lands a different color at every position. The characters run
 // past the four the cycle names, so a 16x16 block — which reads the character after
 // its own and the one sixteen on — finds one wherever it looks.
 PpuState columnCyclingPicture() {
@@ -347,7 +347,7 @@ PpuState columnCyclingPicture() {
   return ppu;
 }
 
-// A picture of one character whose eight rows cycle through the same four colours,
+// A picture of one character whose eight rows cycle through the same four colors,
 // so a vertical offset that moves the row the line reads changes what it shows
 // without moving the position's tilemap entry.
 PpuState rowCyclingPicture() {
@@ -360,11 +360,11 @@ PpuState rowCyclingPicture() {
 }
 
 // The row of character 1 that beam line 50 reads, and the word the video port
-// reaches it at. BG1's characters begin at kCharByte and a sixteen-colour character
+// reaches it at. BG1's characters begin at kCharByte and a sixteen-color character
 // is thirty-two bytes, so character 1 begins at kCharByte + $20; the -1 vertical
 // offset screen() carries puts line 50 on the character's second row, two bytes
 // further on. A solid character holds plane 0 all ones and the rest clear, which is
-// colour index 1 across; clearing plane 0 and setting plane 1 makes the row index 2.
+// color index 1 across; clearing plane 0 and setting plane 1 makes the row index 2.
 constexpr std::uint32_t kTileOneRowAtLineFifty = kCharByte + 0x20u + 2u;
 constexpr std::uint16_t kTileOneRowWord = kTileOneRowAtLineFifty / 2u;
 
@@ -552,7 +552,7 @@ TEST(SnesPpuPicture, BrightnessScalesEveryChannel) {
   // an exact half, which is rounded up — and the backdrop's 1, 2 and 3 give 4, 8
   // and 12.
   PpuState ppu = screen();
-  putEntry(ppu, kBg1, 0u, 0x0008u);  // a tile in colour index 8, which is white
+  putEntry(ppu, kBg1, 0u, 0x0008u);  // a tile in color index 8, which is white
   putSolidTile(ppu, kBg1, 8u, 8u);
   ppu.inidisp = 0x07u;
   const Picture picture = draw(ppu);
@@ -583,11 +583,11 @@ TEST(SnesPpuPicture, TheLeftmostPixelOfARowIsBitSevenAndThePlanesAreTwoWordsApar
 }
 
 TEST(SnesPpuPicture, ColourZeroOfATileIsTransparentAndTheBackdropShowsThrough) {
-  // The tile is in palette 3, whose own colour 0 is word 48 — a colour of its own,
-  // and not the backdrop. So the hole shows the backdrop because colour 0 is
-  // transparent, not because the two words happen to hold the same colour.
+  // The tile is in palette 3, whose own color 0 is word 48 — a color of its own,
+  // and not the backdrop. So the hole shows the backdrop because color 0 is
+  // transparent, not because the two words happen to hold the same color.
   PpuState ppu = screen();
-  putColour(ppu, 48u, kWhite);  // palette 3's colour 0, which nothing may ever show
+  putColour(ppu, 48u, kWhite);  // palette 3's color 0, which nothing may ever show
   putEntry(ppu, kBg1, 0u, static_cast<std::uint16_t>((3u << 10) | 1u));
   TileRows rows{};
   for (auto& row : rows) row.fill(1u);
@@ -600,7 +600,7 @@ TEST(SnesPpuPicture, ColourZeroOfATileIsTransparentAndTheBackdropShowsThrough) {
 }
 
 TEST(SnesPpuPicture, ThePaletteBitsChooseSixteenColoursApart) {
-  // Palette 3 of a 16-colour background begins at word 3 * 16 = 48, so its colour 1
+  // Palette 3 of a 16-color background begins at word 3 * 16 = 48, so its color 1
   // is word 49.
   PpuState ppu = screen();
   putEntry(ppu, kBg1, 0u, static_cast<std::uint16_t>((3u << 10) | 1u));
@@ -835,7 +835,7 @@ TEST(SnesPpuPicture, ThePictureBeginsOnTheSecondRowOfTheTileWithNoVerticalScroll
   EXPECT_EQ(picture.at(0u, 0u), kRedOut);
 }
 
-// ---- BG2, the second sixteen-colour background --------------------------------
+// ---- BG2, the second sixteen-color background --------------------------------
 
 TEST(SnesPpuPicture, Bg2ReadsItsMapFromItsOwnScreenRegister) {
   // $2108 names BG2's map where $2107 names BG1's, so a tile placed in one does not
@@ -910,10 +910,10 @@ TEST(SnesPpuPicture, Bg2IsShownByItsOwnMainScreenBit) {
   EXPECT_EQ(shown.at(0u, 0u), kRedOut);
 }
 
-// ---- BG3, the four-colour background ------------------------------------------
+// ---- BG3, the four-color background ------------------------------------------
 
 TEST(SnesPpuPicture, Bg3IsTwoBitplanesAndReadsNothingAboveThem) {
-  // Four colours means planes 0 and 1 alone. The sixteen bytes a sixteen-colour
+  // Four colors means planes 0 and 1 alone. The sixteen bytes a sixteen-color
   // character would keep planes 2 and 3 in belong to the next characters here, and
   // filling them changes no pixel.
   PpuState ppu = threeBackgrounds();
@@ -925,11 +925,11 @@ TEST(SnesPpuPicture, Bg3IsTwoBitplanesAndReadsNothingAboveThem) {
   }
   const Picture picture = draw(ppu);
   ASSERT_EQ(picture.frames, 1u);
-  EXPECT_EQ(picture.at(0u, 0u), kRedOut);  // colour 1, not the 13 four planes would give
+  EXPECT_EQ(picture.at(0u, 0u), kRedOut);  // color 1, not the 13 four planes would give
 }
 
 TEST(SnesPpuPicture, Bg3CharactersAreSixteenBytesApart) {
-  // Eight bytes a bitplane, so a four-colour character is half a sixteen-colour one.
+  // Eight bytes a bitplane, so a four-color character is half a sixteen-color one.
   PpuState ppu = threeBackgrounds();
   ppu.tm = 0x04u;
   putEntry(ppu, kBg3, 0u, 0x0003u);
@@ -940,8 +940,8 @@ TEST(SnesPpuPicture, Bg3CharactersAreSixteenBytesApart) {
 }
 
 TEST(SnesPpuPicture, Bg3PalettesAreFourColoursApart) {
-  // A four-colour background's palette begins ppp * 4 words in, so palette 1's
-  // colour 1 is word 5 and palette 2's is word 9.
+  // A four-color background's palette begins ppp * 4 words in, so palette 1's
+  // color 1 is word 5 and palette 2's is word 9.
   PpuState ppu = threeBackgrounds();
   ppu.tm = 0x04u;
   putEntry(ppu, kBg3, 0u, static_cast<std::uint16_t>((1u << 10) | 1u));
@@ -980,7 +980,7 @@ TEST(SnesPpuPicture, Bg3ScrollsByItsOwnRegisters) {
 }
 
 TEST(SnesPpuPicture, Bg3TakesItsTileSizeFromItsOwnBit) {
-  // $2105 bit 6 is BG3's, and a block of four-colour characters runs on by one and
+  // $2105 bit 6 is BG3's, and a block of four-color characters runs on by one and
   // sixteen as any other does.
   PpuState ppu = threeBackgrounds();
   ppu.tm = 0x04u;
@@ -1012,7 +1012,7 @@ TEST(SnesPpuPicture, Bg3IsShownByItsOwnMainScreenBit) {
 
 TEST(SnesPpuPicture, Mode1GivesNoBackgroundPalettesOfItsOwn) {
   // Where Mode 0 starts each background's palettes 32 words apart, Mode 1 starts
-  // all three at word 0: BG3's palette 1 colour 1 and BG1's palette 0 colour 5 are
+  // all three at word 0: BG3's palette 1 color 1 and BG1's palette 0 color 5 are
   // one and the same word.
   PpuState third = threeBackgrounds();
   third.tm = 0x04u;
@@ -1133,7 +1133,7 @@ TEST(SnesPpuPicture, Bg3sLowPriorityTilesStayLastUnderEitherChart) {
 }
 
 TEST(SnesPpuPicture, ATransparentPixelFallsThroughToWhatIsBehindIt) {
-  // Colour 0 is transparent on every background, so BG2 shows through BG1's hole
+  // Color 0 is transparent on every background, so BG2 shows through BG1's hole
   // and the backdrop through both.
   PpuState ppu = threeBackgrounds();
   TileRows front{};
@@ -1169,8 +1169,8 @@ TEST(SnesPpuPicture, ALayerEnabledOnlyOnTheSubScreenDrawsNothing) {
 
 TEST(SnesPpuPicture, ACartridgeThatWritesTheVideoMemoriesShowsItsPicture) {
   // The program runs in forced blank, which is when the memories are reachable: it
-  // fills one character with colour index 1, points the map's first entry at it,
-  // writes the backdrop and that colour, sets the bases and the mode, and then
+  // fills one character with color index 1, points the map's first entry at it,
+  // writes the backdrop and that color, sets the bases and the mode, and then
   // turns the screen on.
   std::vector<std::uint8_t> program;
   const auto store = [&program](std::uint8_t value, std::uint16_t port) {
@@ -1481,9 +1481,9 @@ TEST(SnesPpuPicture, ASnapshotRestoredInsideATileDrawsFromTheRestoredMemories) {
 // 91) are the first reads after it, and compares positions against the frame the
 // write was never made in and the frame carrying the written value throughout.
 
-// A picture of one character in palette 1 whose pixels hold colour index 5. Four
+// A picture of one character in palette 1 whose pixels hold color index 5. Four
 // bitplanes read that as index 5 and two read the low pair alone, which is index 1;
-// Mode 1 gives BG1 sixteen colours at a palette stride of sixteen, so palette 1's
+// Mode 1 gives BG1 sixteen colors at a palette stride of sixteen, so palette 1's
 // index 5 is word 21, and Mode 0 gives it four at a stride of four, so the same
 // pixel is word 5.
 PpuState fiveInPaletteOne() {
@@ -1497,7 +1497,7 @@ PpuState fiveInPaletteOne() {
 }
 
 TEST(SnesPpuPicture, TheModeWrittenPartWayAlongALineChangesTheDepthOfTheColumnsReadAfterIt) {
-  // $2105 <- 0: Mode 0, where BG1 is a four-colour background at a palette stride of
+  // $2105 <- 0: Mode 0, where BG1 is a four-color background at a palette stride of
   // four. Column 11, whose entry is read at dot 91, is the first read at two
   // bitplanes, index 1, word 4 + 1 = 5. The columns read before keep the four
   // bitplanes they read, index 5, and the positions of theirs drawn after the write
@@ -1553,7 +1553,7 @@ TEST(SnesPpuPicture, TheSecondBackgroundsScreenBaseWrittenPartWayAlongALineMoves
 TEST(SnesPpuPicture,
      TheThirdBackgroundsCharacterBaseWrittenPartWayAlongALineMovesItToTheOtherCharacters) {
   // $210C <- 7: BG3's characters move from $C000 to $E000, where a second character 1
-  // stands in another colour. BG3 is the only layer on the main screen, and every
+  // stands in another color. BG3 is the only layer on the main screen, and every
   // position keeps its entry and its tile number; column 10, whose rows are read at
   // dot 87, is the first read at the new base.
   PpuState before = threeBackgrounds();
@@ -1561,10 +1561,10 @@ TEST(SnesPpuPicture,
   for (unsigned index = 0u; index < kScreenEntries; ++index) {
     putEntry(before, kBg3, index, 0x0401u);  // palette 1, character 1
   }
-  putSolidTile(before, kBg3, 1u, 1u);  // BG3's palette 1 colour 1 is word 5
+  putSolidTile(before, kBg3, 1u, 1u);  // BG3's palette 1 color 1 is word 5
   putTileAt(before, 0xE000u + 1u * 8u * kBg3.planes, kBg3.planes, [] {
     TileRows rows{};
-    for (auto& row : rows) row.fill(2u);  // and its colour 2 is word 6
+    for (auto& row : rows) row.fill(2u);  // and its color 2 is word 6
     return rows;
   }());
   putColour(before, 6u, kYellow);

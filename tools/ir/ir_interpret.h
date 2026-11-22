@@ -13,7 +13,7 @@
 //
 // There is one per chip. `Interpreter` runs the main CPU's nodes over its
 // 24-bit space; `Spc700Interpreter` runs the sound program's over the audio
-// unit's 16-bit space. Each honours the vocabulary with its own chip's rules
+// unit's 16-bit space. Each honors the vocabulary with its own chip's rules
 // and refuses a word that has no meaning on it.
 //
 // A host drives an interpreter one node at a time: it looks the node up for

@@ -21,7 +21,7 @@ The [project README](../README.md) carries the status table — what is live, wh
 | Hear a cartridge or a dump | [spc-rendering.md](spc-rendering.md) |
 | Run a whole SNES machine | [snes-machine.md](snes-machine.md) |
 | See what a program put into the PPU — its registers, their latches, the memories and when they can be reached | [ppu.md](ppu.md) |
-| Add the sub screen or the fixed color to the picture, and shape where that happens | [ppu.md §The sub screen and colour math](ppu.md#the-sub-screen-and-colour-math), [ppu-behavior.md §Colour math](ppu-behavior.md#colour-math) |
+| Add the sub screen or the fixed color to the picture, and shape where that happens | [ppu.md §The sub screen and color math](ppu.md#the-sub-screen-and-color-math), [ppu-behavior.md §Color math](ppu-behavior.md#color-math) |
 | Watch a cartridge run, play it with a controller, and record the run | [tools/player/README.md](../tools/player/README.md) |
 | Disassemble a cartridge by playing it | [tools/player/README.md §Disassembling as you play](../tools/player/README.md#disassembling-as-you-play) |
 | Plug in a controller and play a cartridge, or write an input mapping of your own | [pad-config.md](pad-config.md) |
@@ -125,4 +125,4 @@ The tools themselves, and the libraries behind them, are described beside their 
 
 Each page opens with what its subject is and what it is for, then the surface, then worked examples, then the gotchas worth knowing before they cost an afternoon. Every page carries a Contents list under its opening.
 
-A page describes what the code does now. Where a subject is modelled but incomplete, the page says so in place rather than leaving the reader to infer it, and each page's "What remains open" lists what the documentation leaves undecided.
+A page describes what the code does now. Where a subject is modeled but incomplete, the page says so in place rather than leaving the reader to infer it, and each page's "What remains open" lists what the documentation leaves undecided.

@@ -213,7 +213,7 @@ constexpr bool kDebugBuild = true;
       elsewhere != nullptr && *elsewhere != '\0') {
     return std::filesystem::path(elsewhere);
   }
-  // An empty organisation puts the directory at the top of the platform's per-user
+  // An empty organization puts the directory at the top of the platform's per-user
   // data location rather than under a company of ours, which is what was asked for.
   char* const answered = SDL_GetPrefPath("", "Snaggletooth");
   if (answered == nullptr) {
@@ -1039,7 +1039,7 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
   }
 
   void show(const player::Shown& picture) {
-    // The window is this frame's own pixels times the scale, so a nearest-neighbour present
+    // The window is this frame's own pixels times the scale, so a nearest-neighbor present
     // makes each source pixel a scale-by-scale block. A frame of a new shape — interlace
     // turned on, hi-res entered — resizes the window to fit before it is shown.
     const player::WindowSize want = player::windowSize(picture.width, picture.height, scale_);

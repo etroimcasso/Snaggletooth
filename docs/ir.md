@@ -8,7 +8,7 @@ Three properties shape everything below.
 
 **It models the CPU and nothing else.** A memory access is a load or a store at an address the effects before it computed, with every wrap the chip has written into the address arithmetic. Whether that address is a hardware register is the memory map's answer, and the memory map belongs to whatever runs the program. A register name is attached to a node only where the instruction's own bytes name the bank — or, on the sound CPU, name one of the audio unit's own sixteen registers.
 
-**One vocabulary, two chips.** The 65816 and the SPC700 share a lineage, and the effect layer is written so that a word means the same thing on both wherever both chips do the same thing: a load, a store, a compare, a shift. Where a chip's rule differs — the flags an add sets, the page a direct operand lives in — the rule is stated per chip below, and each chip's interpreter honours its own. A sound-CPU node carries no mode, addresses the audio unit's 16-bit space, and lives in the program's second node list.
+**One vocabulary, two chips.** The 65816 and the SPC700 share a lineage, and the effect layer is written so that a word means the same thing on both wherever both chips do the same thing: a load, a store, a compare, a shift. Where a chip's rule differs — the flags an add sets, the page a direct operand lives in — the rule is stated per chip below, and each chip's interpreter honors its own. A sound-CPU node carries no mode, addresses the audio unit's 16-bit space, and lives in the program's second node list.
 
 **A width is a type where the trace settled it, and a selection by the live flag where it did not.** After `PLP` or `RTI` in native mode the flags are whatever came off the stack; the node says its loads and stores are as wide as the flag makes them, and the interpreter reads the flag when it runs.
 
@@ -150,7 +150,7 @@ Each effect is `dst ← f(a, b)` where it has a destination. A register written 
 
 ## The rules
 
-What the lift writes for each construct, and what the interpreter honours. Each is the chip's own behaviour, and the [core](65816-cpu.md) over a flat bus is what the lift is held to.
+What the lift writes for each construct, and what the interpreter honors. Each is the chip's own behavior, and the [core](65816-cpu.md) over a flat bus is what the lift is held to.
 
 - **Register widths.** A load, store, transfer or arithmetic effect carries a width; an eight-bit accumulator effect leaves B alone, an eight-bit index load clears the index's high byte. `REP` and `SEP` are `And` or `Or` on a copy of P followed by `WriteP`, which is the one write that re-establishes the invariants; under emulation the mask's M and X bits are inert. `PLP` and `RTI` end in the same `WriteP`. `XCE` entering emulation forces both widths, pins S to page one and clears the index high bytes.
 - **The flags.** N, Z, V, C, D and I are places, and each operation writes exactly the flags the chip does: `Cmp` moves N Z C and not V; `BitImm` moves Z alone while `Bit` takes N and V from the operand's top bits; `Tsb` and `Trb` move Z only; `Inc` and `Dec` move N Z only; `Xba` sets N Z from the new low byte; the `SetNZ` of `PLB` and `PLD` sets them on what was loaded.
@@ -173,7 +173,7 @@ What the lift writes for each construct, and what the interpreter honours. Each 
 
 ### The sound CPU
 
-What the SPC700 lift writes, and what its interpreter honours. Each is the chip's own behaviour, and the [core](spc700-cpu.md) over a flat bus is what the lift is held to.
+What the SPC700 lift writes, and what its interpreter honors. Each is the chip's own behavior, and the [core](spc700-cpu.md) over a flat bus is what the lift is held to.
 
 - **The direct page.** `PageAddress` is the page the P flag selects — `$0000` or `$0100` — plus the offset and any index, within the page: `dp+X` at `$F5` with X at `$10` is `$05` of the page, not the page after. A direct-page word's second byte and a pointer's second byte step by `Page`, inside the page.
 - **Pointers.** `[dp+X]` reads its pointer at the indexed offset and the byte after it, inside the page, and the address is the pointer as read; `[dp]+Y` adds Y to the pointer as a 16-bit sum, so `$FFFF + 2` is `$0001`. `(X)` and `(X)+` address the page at X; the incrementing form steps X after its access. `JMP [!abs+X]` reads its two pointer bytes at consecutive 16-bit addresses, the one address in the chip that leaves a page.
@@ -294,7 +294,7 @@ const snaggletooth::ir::Node* node = program.findSpc700(sound.registers.pc);
 const std::uint32_t cycles = sound.execute(*node, bus);
 ```
 
-It honours the vocabulary with the sound CPU's rules and refuses, by throwing, a word that has no meaning there — a bank address, a width by a flag, an emulation-mode condition. Its sources, too, include no decoder and no listing.
+It honors the vocabulary with the sound CPU's rules and refuses, by throwing, a word that has no meaning there — a bank address, a width by a flag, an emulation-mode condition. Its sources, too, include no decoder and no listing.
 
 ## The shadow
 
@@ -626,7 +626,7 @@ The library target is `snaggletooth_ir`; `tools/` is on its public include path,
 
 ## Stability
 
-The vocabulary is a published surface. An operation, place, width, step, access or condition is never renamed or given a different meaning; a new one may be added, and a node lifted before the addition still runs. The effect sequence the lift writes for a construct may change where the core's behaviour is found to differ from it, and such a change is reported with the case that found it.
+The vocabulary is a published surface. An operation, place, width, step, access or condition is never renamed or given a different meaning; a new one may be added, and a node lifted before the addition still runs. The effect sequence the lift writes for a construct may change where the core's behavior is found to differ from it, and such a change is reported with the case that found it.
 
 ## Status
 

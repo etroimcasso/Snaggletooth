@@ -222,7 +222,7 @@ enum class CartridgeRegion : std::uint8_t {
 // lower halves are `Rom` on a plain board and the chip's on a coprocessor's;
 // HiROM's and ExHiROM's sit in the expansion area and are `System`, which reads
 // open bus. A coprocessor on a HiROM or ExHiROM board changes nothing here: the
-// chips' own maps on those boards are not modelled.
+// chips' own maps on those boards are not modeled.
 [[nodiscard]] CartridgeRegion cartridgeRegion(const CartridgeBoard& board,
                                               std::uint32_t address) noexcept;
 

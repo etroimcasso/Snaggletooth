@@ -534,7 +534,7 @@ TEST(SnesDma, AnHdmaEndingOneChannelsDmaLeavesTheOtherSelectedChannelsToRun) {
 }
 
 TEST(SnesDma, TheFramesHdmaInitialisationEndsADmaOnAChannelItInitialises) {
-  // The initialisation comes due 24 master cycles into line 0, which is where a DMA
+  // The initialization comes due 24 master cycles into line 0, which is where a DMA
   // begun at the frame's origin has opened the engine and its channel and moved nothing.
   Snes m = haltedMachine();
   SnesState s = m.state();
@@ -1027,7 +1027,7 @@ void armIndirect(SnesState& s, std::uint8_t channel, std::uint8_t bbad, std::uin
 }
 
 // The master cycles line 0's delivery takes: the machine is run past the frame's
-// initialisation, then to the cycle the delivery is owed in, and that cycle is timed.
+// initialization, then to the cycle the delivery is owed in, and that cycle is timed.
 std::uint32_t deliveryCost(Snes& m) {
   m.run(600u);
   while (!m.state().hdmaRunPending) m.step();
@@ -1051,7 +1051,7 @@ TEST(SnesDma, AnIndirectChannelWhoseTableEndsStillReadsThePointerAfterTheEnd) {
 }
 
 TEST(SnesDma, AnIndirectChannelEndedByItsFirstCountReadsNoPointer) {
-  // The frame's initialisation is the other place a count is read, and there a $00
+  // The frame's initialization is the other place a count is read, and there a $00
   // ends the channel with the cursor one byte on and the indirect address untouched.
   Snes m = haltedMachine();
   SnesState s = m.state();

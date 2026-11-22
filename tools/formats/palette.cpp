@@ -45,7 +45,7 @@ Bytes decodePalette(const std::string& text) {
       out.bytes.clear();
       return out;
     }
-    if (token.size() == 5) {  // $XXXX — a colour word, little-endian
+    if (token.size() == 5) {  // $XXXX — a color word, little-endian
       out.bytes.push_back(static_cast<std::uint8_t>(*value & 0xFFu));
       out.bytes.push_back(static_cast<std::uint8_t>((*value >> 8) & 0xFFu));
     } else if (token.size() == 3) {  // $XX — a lone trailing byte

@@ -350,7 +350,7 @@ void Snes::hdmaCycle() {
         }
         // A direct table's value is read from the table itself; an indirect
         // entry's is read from where its pointer says. A -> B is HDMA's usual
-        // direction, and the other is honoured.
+        // direction, and the other is honored.
         engineByte(aAddr, bAddr, /*toA=*/(ch.dmap & 0x80u) != 0u, AccessSource::Hdma, c, i,
                    /*table=*/!indirect);
         cost += kDmaByte;

@@ -483,7 +483,7 @@ TEST(Cpu65816ControlFlow, TheIndexedCallStaysInPageOneDespiteTheDocumentedList) 
   // Section 7.1 lists JSR (a,x) among the instructions that step outside the
   // emulation stack range, and both cross-check references classify it the same way
   // — but every recorded case that reaches the page-one edge wraps inside the page,
-  // as JSR absolute does. The traces are what the core follows, so the behaviour is
+  // as JSR absolute does. The traces are what the core follows, so the behavior is
   // pinned here rather than left to look like an oversight.
   auto bus = busWith({{0x001000, 0xFC},
                       {0x001001, 0x00},

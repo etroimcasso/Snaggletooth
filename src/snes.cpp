@@ -457,7 +457,7 @@ void Snes::reset() {
   // The CPU: the registers its reset leaves, at the cartridge's vector.
   state_.cpu = afterReset(state_.cpu, resetVector());
 
-  // The 5A22's registers a reset initialises. The operands of the arithmetic unit,
+  // The 5A22's registers a reset initializes. The operands of the arithmetic unit,
   // its results, HTIME, VTIME and the eight channels' register files are not among
   // them and keep what they held.
   state_.nmitimen = 0u;
@@ -2199,10 +2199,10 @@ void Snes::advanceLine(std::uint64_t lineStart) noexcept {
   if (state_.vpos == 0u) {
     state_.inVblank = false;     // the frame begins in the picture
     state_.vblankNmi = false;    // and the NMI flag clears with it
-    // The new frame re-initialises HDMA at line 0, and everything the last frame's
+    // The new frame re-initializes HDMA at line 0, and everything the last frame's
     // channels stood on is the last frame's. The clearing happens here rather than in
-    // the initialisation itself because a frame that begins with $420C empty holds no
-    // initialisation at all, and a channel the program brings in later must still find
+    // the initialization itself because a frame that begins with $420C empty holds no
+    // initialization at all, and a channel the program brings in later must still find
     // a clean slate.
     state_.hdmaInited = false;
     state_.hdmaActive = 0u;
@@ -2307,7 +2307,7 @@ void Snes::tickVideo(std::uint32_t cost) {
   // begun inside it included.
   clockAutoJoypad(end);
 
-  // HDMA triggers, each latched so it fires once: the frame's initialisation as the
+  // HDMA triggers, each latched so it fires once: the frame's initialization as the
   // beam passes dot 6 of line 0, and a delivery as it passes dot 278 of every line the
   // picture still owns. Triggering only marks the event pending; it runs on the next
   // machine cycle, so it preempts a general-purpose DMA at a whole byte.

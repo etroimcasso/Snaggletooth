@@ -1,8 +1,8 @@
-// The two modes this block adds and the colour they can be read in: Mode 0's four
-// four-colour backgrounds with a palette subset each, Mode 3's 256-colour BG1 over
-// a sixteen-colour BG2, the priority order each mode keeps, the register that
+// The two modes this block adds and the color they can be read in: Mode 0's four
+// four-color backgrounds with a palette subset each, Mode 3's 256-color BG1 over
+// a sixteen-color BG2, the priority order each mode keeps, the register that
 // exchanges one of Mode 1's places and does nothing in either of these, and direct
-// colour — a 256-colour background's pixel read as a colour rather than as an index.
+// color — a 256-color background's pixel read as a color rather than as an index.
 //
 // Every expectation is computed by hand from the register page and the priority
 // chart; the pictures are placed as a program would have left them. The last group
@@ -47,7 +47,7 @@ constexpr std::uint32_t kBg3Chars = 0x6000u;
 constexpr std::uint32_t kBg4Chars = 0x4000u;
 constexpr std::uint32_t kSpriteChars = 0xC000u;
 
-// A sprite's character is always sixteen colours, and its eight palettes begin at
+// A sprite's character is always sixteen colors, and its eight palettes begin at
 // CGRAM word 128.
 constexpr unsigned kSpritePlanes = 4u;
 constexpr unsigned kSpritePaletteBase = 128u;
@@ -215,7 +215,7 @@ void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
   }
 }
 
-// A character every pixel of which is one colour index.
+// A character every pixel of which is one color index.
 void putSolid(PpuState& ppu, std::uint32_t characters, unsigned planes, unsigned tile,
               std::uint8_t index) {
   TileRows rows{};
@@ -282,7 +282,7 @@ PpuState placed() {
 }
 
 // Mode 0 with its four backgrounds shown, each carrying one solid character and
-// each reading colour 1 of its own subset's first palette.
+// each reading color 1 of its own subset's first palette.
 PpuState modeZero() {
   PpuState ppu = placed();
   ppu.bgmode = 0x00u;
@@ -291,7 +291,7 @@ PpuState modeZero() {
   putSolid(ppu, kBg2Chars, 2u, 1u, 1u);
   putSolid(ppu, kBg3Chars, 2u, 1u, 1u);
   putSolid(ppu, kBg4Chars, 2u, 1u, 1u);
-  putColour(ppu, 1u, kRed);                           // BG1's palette 0, colour 1
+  putColour(ppu, 1u, kRed);                           // BG1's palette 0, color 1
   putColour(ppu, kModeZeroSubset + 1u, kGreen);       // BG2's
   putColour(ppu, kModeZeroSubset * 2u + 1u, kBlue);   // BG3's
   putColour(ppu, kModeZeroSubset * 3u + 1u, kWhite);  // BG4's
@@ -306,7 +306,7 @@ PpuState modeThree() {
   putSolid(ppu, kBg1Chars, 8u, 1u, 1u);
   putSolid(ppu, kBg2Chars, 4u, 1u, 1u);
   putColour(ppu, 1u, kRed);
-  putColour(ppu, 17u, kGreen);  // BG2's palette 1, colour 1
+  putColour(ppu, 17u, kGreen);  // BG2's palette 1, color 1
   return ppu;
 }
 
@@ -351,7 +351,7 @@ TEST(SnesPpuModes, TheFourthBackgroundReadsItsOwnCharacterBase) {
   ppu.tm = 0x08u;
   putEntry(ppu, kBg4Map, 0u, 0u, entry(1u, 0u, false));
   // BG3's block holds a different character 1, so a background reading the wrong
-  // nibble of $210C shows a different colour rather than the same one.
+  // nibble of $210C shows a different color rather than the same one.
   putSolid(ppu, kBg3Chars, 2u, 1u, 3u);
   putColour(ppu, kModeZeroSubset * 3u + 3u, kYellow);
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), out(kWhite));
@@ -379,7 +379,7 @@ TEST(SnesPpuModes, TheFourthBackgroundTakesItsTileSizeFromBitSeven) {
   putSolid(ppu, kBg4Chars, 2u, 2u, 1u);  // a block is Tile, Tile + 1, Tile + 16, Tile + 17
   const Picture picture = draw(ppu);
   // The block's right half is the character one on, which is solid too, so the
-  // sixteen pixels across are one colour where an 8x8 tile would give eight.
+  // sixteen pixels across are one color where an 8x8 tile would give eight.
   EXPECT_EQ(picture.at(0u, lineOf(0u)), out(kWhite));
   EXPECT_EQ(picture.at(8u, lineOf(0u)), out(kWhite));
   EXPECT_EQ(picture.at(16u, lineOf(0u)), out(kBackdrop));
@@ -399,8 +399,8 @@ TEST(SnesPpuModes, TheFourthBackgroundShowsOnlyWhereTheMainScreenEnablesIt) {
 
 TEST(SnesPpuModes, ModeZeroGivesEachBackgroundItsOwnThirtyTwoWords) {
   PpuState ppu = modeZero();
-  // Each background's colour 1 is a different word, and the four words hold four
-  // different colours: words 1, 33, 65 and 97.
+  // Each background's color 1 is a different word, and the four words hold four
+  // different colors: words 1, 33, 65 and 97.
   putEntry(ppu, kBg1Map, 0u, 0u, entry(1u, 0u, false));
   putEntry(ppu, kBg2Map, 1u, 0u, entry(1u, 0u, false));
   putEntry(ppu, kBg3Map, 2u, 0u, entry(1u, 0u, false));
@@ -414,7 +414,7 @@ TEST(SnesPpuModes, ModeZeroGivesEachBackgroundItsOwnThirtyTwoWords) {
 
 TEST(SnesPpuModes, ModeZerosPaletteFieldStepsFourWords) {
   PpuState ppu = modeZero();
-  putColour(ppu, 5u, kCyan);  // BG1's palette 1, colour 1
+  putColour(ppu, 5u, kCyan);  // BG1's palette 1, color 1
   putEntry(ppu, kBg1Map, 0u, 0u, entry(1u, 1u, false));
   ppu.tm = 0x01u;
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), out(kCyan));
@@ -423,7 +423,7 @@ TEST(SnesPpuModes, ModeZerosPaletteFieldStepsFourWords) {
 TEST(SnesPpuModes, TheLastWordOfASubsetIsTheLastPalettesLastColour) {
   PpuState ppu = modeZero();
   ppu.tm = 0x01u;
-  putColour(ppu, 31u, kMagenta);  // BG1's palette 7, colour 3 — the subset's last word
+  putColour(ppu, 31u, kMagenta);  // BG1's palette 7, color 3 — the subset's last word
   putSolid(ppu, kBg1Chars, 2u, 2u, 3u);
   putEntry(ppu, kBg1Map, 0u, 0u, entry(2u, 7u, false));
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), out(kMagenta));
@@ -432,20 +432,20 @@ TEST(SnesPpuModes, TheLastWordOfASubsetIsTheLastPalettesLastColour) {
 TEST(SnesPpuModes, TheSecondBackgroundsSubsetBeginsWhereTheFirstsEnds) {
   PpuState ppu = modeZero();
   ppu.tm = 0x02u;  // BG2 alone
-  putColour(ppu, 32u, kYellow);  // its palette 0 colour 0, which is transparent
-  putColour(ppu, 35u, kCyan);    // its palette 0 colour 3
+  putColour(ppu, 32u, kYellow);  // its palette 0 color 0, which is transparent
+  putColour(ppu, 35u, kCyan);    // its palette 0 color 3
   putSolid(ppu, kBg2Chars, 2u, 2u, 3u);
   putEntry(ppu, kBg2Map, 0u, 0u, entry(2u, 0u, false));
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), out(kCyan));
 
-  putSolid(ppu, kBg2Chars, 2u, 2u, 0u);  // colour 0 is transparent, whatever word 32 holds
+  putSolid(ppu, kBg2Chars, 2u, 2u, 0u);  // color 0 is transparent, whatever word 32 holds
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), out(kBackdrop));
 }
 
 TEST(SnesPpuModes, ModeOneGivesNoBackgroundAPaletteOffsetOfItsOwn) {
   PpuState ppu = placed();
   ppu.bgmode = 0x01u;
-  ppu.tm = 0x02u;  // Mode 1's BG2, which is sixteen colours
+  ppu.tm = 0x02u;  // Mode 1's BG2, which is sixteen colors
   putColour(ppu, 1u, kRed);
   putSolid(ppu, kBg2Chars, 4u, 1u, 1u);
   putEntry(ppu, kBg2Map, 0u, 0u, entry(1u, 0u, false));
@@ -455,7 +455,7 @@ TEST(SnesPpuModes, ModeOneGivesNoBackgroundAPaletteOffsetOfItsOwn) {
 // ---- Mode 0's order ----------------------------------------------------------
 //
 // Front to back: S3 1H 2H S2 1L 2L S1 3H 4H S0 3L 4L. Each case puts two
-// neighbours in the chart at the same place and reads which one the picture shows.
+// neighbors in the chart at the same place and reads which one the picture shows.
 
 // All four backgrounds and a sprite over one tile, each at the priority the caller
 // names, so the chart decides the pixel.
@@ -546,7 +546,7 @@ TEST(SnesPpuModes, ModeOnesThirdBackgroundStillAnswersTheBit) {
   ppu.bgmode = 0x01u;
   ppu.tm = 0x05u;  // BG1 and BG3
   putColour(ppu, 1u, kRed);
-  putColour(ppu, 5u, kCyan);  // BG3's palette 1 colour 1, which Mode 1 does not offset
+  putColour(ppu, 5u, kCyan);  // BG3's palette 1 color 1, which Mode 1 does not offset
   putSolid(ppu, kBg1Chars, 4u, 1u, 1u);
   putSolid(ppu, kBg3Chars, 2u, 1u, 1u);
   putEntry(ppu, kBg1Map, 0u, 5u, entry(1u, 0u, true));
@@ -584,7 +584,7 @@ TEST(SnesPpuModes, TheEightBitplanesAreFourPairsSixteenBytesApart) {
 TEST(SnesPpuModes, ModeThreesSecondBackgroundIsSixteenColours) {
   PpuState ppu = modeThree();
   ppu.tm = 0x02u;
-  putColour(ppu, 17u, kGreen);  // palette 1, colour 1 — sixteen words a palette
+  putColour(ppu, 17u, kGreen);  // palette 1, color 1 — sixteen words a palette
   putEntry(ppu, kBg2Map, 0u, 0u, entry(1u, 1u, false));
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), out(kGreen));
 }
@@ -595,7 +595,7 @@ TEST(SnesPpuModes, ModeThreesFirstBackgroundIgnoresItsTilesPaletteField) {
   putEntry(ppu, kBg1Map, 0u, 0u, entry(1u, 0u, false));
   putEntry(ppu, kBg1Map, 1u, 0u, entry(1u, 7u, false));
   const Picture picture = draw(ppu);
-  // The same pixel under two palette fields is the same colour: a 256-colour
+  // The same pixel under two palette fields is the same color: a 256-color
   // background's pixel IS its word.
   EXPECT_EQ(picture.at(0u, lineOf(0u)), out(kRed));
   EXPECT_EQ(picture.at(8u, lineOf(0u)), out(kRed));
@@ -638,12 +638,12 @@ TEST(SnesPpuModes, ModeThreesLastPlaceIsItsSecondBackgroundsLowTiles) {
   EXPECT_EQ(draw(ppu).at(0u, lineOf(5u)), out(kYellow));
 }
 
-// ---- direct colour -----------------------------------------------------------
+// ---- direct color -----------------------------------------------------------
 //
-// CGWSEL bit 0 reads a 256-colour background's pixel as BBGGGRRR and its tile's
+// CGWSEL bit 0 reads a 256-color background's pixel as BBGGGRRR and its tile's
 // three palette bits as bgr: red = RRRr0, green = GGGg0, blue = BBb00.
 
-// Mode 3 in direct colour, BG1 alone, with one character of the pixel value given
+// Mode 3 in direct color, BG1 alone, with one character of the pixel value given
 // under the palette field given.
 PpuState direct(std::uint8_t pixel, unsigned bgr) {
   PpuState ppu = modeThree();
@@ -684,12 +684,12 @@ TEST(SnesPpuModes, TheChannelsAreNotTransposed) {
 
 TEST(SnesPpuModes, APixelOfZeroIsStillTransparentInDirectColour) {
   // Even under a palette field that would compose to something, and even though
-  // there is no black in direct colour.
+  // there is no black in direct color.
   EXPECT_EQ(draw(direct(0x00u, 7u)).at(0u, lineOf(0u)), out(kBackdrop));
 }
 
 TEST(SnesPpuModes, TheBitReachesOnlyATwoHundredAndFiftySixColourBackground) {
-  // Mode 3's BG2 is sixteen colours, and a four-bit pixel has no BBGGGRRR in it:
+  // Mode 3's BG2 is sixteen colors, and a four-bit pixel has no BBGGGRRR in it:
   // the bit leaves it reading its palette, beside a BG1 the same bit composes.
   PpuState ppu = modeThree();
   ppu.cgwsel = 0x01u;
@@ -710,14 +710,14 @@ TEST(SnesPpuModes, WithTheBitClearTheSamePixelReadsThroughThePalette) {
 }
 
 TEST(SnesPpuModes, ADirectColourPixelReachesTheSubScreensAddend) {
-  // BG2 on the main screen taking math, BG1 in direct colour on the sub screen as
-  // the addend: green 16 plus the composed red 28 is a colour neither alone is.
+  // BG2 on the main screen taking math, BG1 in direct color on the sub screen as
+  // the addend: green 16 plus the composed red 28 is a color neither alone is.
   PpuState ppu = modeThree();
-  ppu.cgwsel = 0x03u;  // direct colour, and the sub screen is the addend
+  ppu.cgwsel = 0x03u;  // direct color, and the sub screen is the addend
   ppu.cgadsub = 0x02u; // BG2 takes math, add, no half
   ppu.tm = 0x02u;
   ppu.ts = 0x01u;
-  putColour(ppu, 17u, 0x0200u);  // BG2's colour: green 16
+  putColour(ppu, 17u, 0x0200u);  // BG2's color: green 16
   putSolid(ppu, kBg1Chars, 8u, 2u, 0x07u);
   putEntry(ppu, kBg2Map, 0u, 0u, entry(1u, 1u, false));
   putEntry(ppu, kBg1Map, 0u, 0u, entry(2u, 0u, false));
@@ -731,10 +731,10 @@ TEST(SnesPpuModes, DirectColourIsNotColourMath) {
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), rgb(26u, 24u, 20u));
 }
 
-// ---- direct colour under $2130 -----------------------------------------------
+// ---- direct color under $2130 -----------------------------------------------
 //
 // The four strips of the sweep cartridge: what the two regions and the fixed
-// colour do to a composed pixel, which no source states either way.
+// color do to a composed pixel, which no source states either way.
 
 TEST(SnesPpuModes, TheBlackRegionBlackensADirectColourPixel) {
   PpuState ppu = direct(0xB6u, 5u);
@@ -768,7 +768,7 @@ TEST(SnesPpuModes, TheFixedColourHalvesAgainstADirectColourPixel) {
   EXPECT_EQ(draw(ppu).at(0u, lineOf(0u)), rgb(17u, 16u, 14u));
 }
 
-// Mode 3 with BG1 alone and one 256-colour character under palette field 5 at every
+// Mode 3 with BG1 alone and one 256-color character under palette field 5 at every
 // position, so a whole line is the same pixel value: with CGWSEL bit 0 clear it
 // reads the palette word that value names, and with the bit set it is composed.
 PpuState directAcrossTheLine() {
@@ -823,8 +823,8 @@ constexpr Rgba composed(unsigned bgr, std::uint8_t value) {
 
 TEST(SnesPpuModes, TheSweepCartridgesGridComesOutCellByCell) {
   // The cartridge's picture: eight rows, one per value of the tile's palette field,
-  // and thirteen cells across each. Its backdrop is a grey odd in all three
-  // channels, which direct colour cannot make, and its other palette words are
+  // and thirteen cells across each. Its backdrop is a gray odd in all three
+  // channels, which direct color cannot make, and its other palette words are
   // white for the same reason — so a cell holding either is CGRAM answering.
   PpuState ppu = placed();
   ppu.bgmode = 0x03u;
@@ -958,7 +958,7 @@ void load(const std::string& name, std::vector<std::uint8_t>& rom, bool& ran) {
 }
 
 // What a second of a cartridge's own run leaves: the last frame it drew, the
-// machine as it stood, and the digest and colour count of that picture.
+// machine as it stood, and the digest and color count of that picture.
 struct Played {
   SnesState state;
   Picture picture;
@@ -1016,7 +1016,7 @@ void modeZeroCartridge(const std::string& name, std::uint8_t expected) {
   EXPECT_EQ(played.state.ppu.bgmode & 0x07u, 0x00u);
   EXPECT_EQ(played.state.ppu.tm, expected);
   EXPECT_GT(played.lit, 1000u) << name << " drew nothing";
-  // Four colours a palette and eight palettes: a picture with more than one
+  // Four colors a palette and eight palettes: a picture with more than one
   // palette's worth in it is the subsets being reached.
   EXPECT_GT(played.colours, 4u);
 }
@@ -1064,7 +1064,7 @@ TEST(PpuBackgroundCartridges, AModeThreeCartridgeDrawsTwoHundredAndFiftySixColou
   EXPECT_EQ(played.state.ppu.bgmode & 0x07u, 0x03u);
   EXPECT_EQ(played.state.ppu.tm, 0x01u);
   EXPECT_GT(played.lit, 1000u);
-  // More colours at once than any sixteen-colour palette holds.
+  // More colors at once than any sixteen-color palette holds.
   EXPECT_GT(played.colours, 16u);
 }
 
@@ -1096,7 +1096,7 @@ TEST(PpuBackgroundCartridges, AModeThreeCartridgeDrawsItsSecondBackground) {
   if (!ran) return;
   const Played played = play(rom);
   EXPECT_EQ(played.state.ppu.bgmode & 0x07u, 0x03u);
-  EXPECT_EQ(played.state.ppu.tm, 0x02u);  // BG2 alone, which Mode 3 keeps at sixteen colours
+  EXPECT_EQ(played.state.ppu.tm, 0x02u);  // BG2 alone, which Mode 3 keeps at sixteen colors
   EXPECT_GT(played.lit, 1000u);
   EXPECT_GT(played.colours, 16u);         // eight palettes of it
 }

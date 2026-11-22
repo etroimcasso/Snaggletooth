@@ -7,7 +7,7 @@
 // console's own read schedule — with the tile column's entry; the pictures are
 // placed as a program would have left them. The offset pictures read one BG1 through a table: its tile column C is
 // drawn in hue C mod 8, bright on an even tile row and dark on an odd one, so a
-// pixel's colour names the background position it was read from.
+// pixel's color names the background position it was read from.
 
 #include <array>
 #include <cstdint>
@@ -249,7 +249,7 @@ constexpr std::uint16_t entry(unsigned tile, unsigned palette, bool priority) {
   return static_cast<std::uint16_t>(tile | (palette << 10) | (priority ? 0x2000u : 0u));
 }
 
-// A character every pixel of which is one colour index, at as many bitplanes as
+// A character every pixel of which is one color index, at as many bitplanes as
 // the caller names: planes 0 and 1 in the low and high bytes of eight words, every
 // further pair sixteen bytes on.
 void putSolid(PpuState& ppu, std::uint32_t characters, unsigned planes, unsigned tile,
@@ -280,7 +280,7 @@ void parkSprites(PpuState& ppu) {
   for (unsigned index = 0u; index < kSprites; ++index) putSprite(ppu, index, -64, 0u, 0u, 0u);
 }
 
-// A solid sprite in the colour at word 129, covering the eight pixels from x on line
+// A solid sprite in the color at word 129, covering the eight pixels from x on line
 // 41: a sprite whose Y is N first draws on line N + 1.
 constexpr unsigned kSpriteLine = 41u;
 void spriteAt(PpuState& ppu, unsigned index, int x, unsigned priority) {
@@ -311,8 +311,8 @@ PpuState placed(std::uint8_t mode) {
 }
 
 // BG1 as the offset pictures read it, alone on the main screen: tile column C in
-// hue C mod 8, and tile row R bright or dark by its parity. A sixteen-colour BG1
-// takes the hue from its character and the shade from its palette; a 256-colour one
+// hue C mod 8, and tile row R bright or dark by its parity. A sixteen-color BG1
+// takes the hue from its character and the shade from its palette; a 256-color one
 // has a character for each of the sixteen words.
 PpuState offsetPicture(std::uint8_t mode) {
   PpuState ppu = placed(mode);
@@ -355,8 +355,8 @@ Rgba straight(unsigned x, unsigned line) { return bg1At(x, line - 1u); }
 // ---- the two modes -------------------------------------------------------------
 
 TEST(SnesPpuOffsetModes, ModeTwoDrawsBg1AndBg2AtSixteenColoursEach) {
-  // BG1's tile at (0, 0) is colour 15 in palette 2: word 2 x 16 + 15 = 47. BG2's at
-  // (1, 0) is colour 9 in palette 3: word 3 x 16 + 9 = 57.
+  // BG1's tile at (0, 0) is color 15 in palette 2: word 2 x 16 + 15 = 47. BG2's at
+  // (1, 0) is color 9 in palette 3: word 3 x 16 + 9 = 57.
   PpuState ppu = placed(0x02u);
   ppu.tm = 0x03u;
   putSolid(ppu, kBg1Chars, 4u, 1u, 15u);
@@ -398,7 +398,7 @@ TEST(SnesPpuOffsetModes, ModeFourDrawsBg1AtTwoHundredAndFiftySixColours) {
 }
 
 TEST(SnesPpuOffsetModes, ModeFourDrawsBg2AtFourColours) {
-  // Colour 3 of a four-colour character, sixteen bytes a character: palette 1 is
+  // Color 3 of a four-color character, sixteen bytes a character: palette 1 is
   // word 1 x 4 + 3 = 7 and palette 5 is word 23.
   PpuState ppu = placed(0x04u);
   ppu.tm = 0x02u;
@@ -879,7 +879,7 @@ TEST(SnesPpuOffsetModes, AnEntryWrittenInVerticalBlankReachesTheNextPicture) {
 // ---- mosaic --------------------------------------------------------------------
 //
 // The mosaic pictures read one pattern: a pixel at background column X and row Y is
-// hue (Y mod 4) + 4 (X mod 2) of the bright eight, so its colour names the row
+// hue (Y mod 4) + 4 (X mod 2) of the bright eight, so its color names the row
 // (mod 4) and the column (mod 2) its block's corner was read from.
 
 constexpr std::uint64_t kLineMaster = 1364u;
@@ -889,7 +889,7 @@ constexpr unsigned patternIndex(unsigned column, unsigned row) {
 }
 Rgba patternAt(unsigned bgX, unsigned bgY) { return out(kBright[patternIndex(bgX, bgY) - 1u]); }
 
-// A sixteen-colour character drawing the pattern: its pixel at (column, row) is
+// A sixteen-color character drawing the pattern: its pixel at (column, row) is
 // patternIndex(column, row).
 void putPatternCharacter(PpuState& ppu, std::uint32_t characters, unsigned tile) {
   const std::uint32_t base = characters + tile * 32u;
@@ -963,7 +963,7 @@ TEST(SnesPpuMosaic, BitOneMosaicsBg2AndLeavesBg1Sharp) {
 }
 
 TEST(SnesPpuMosaic, BitThreeMosaicsBg4) {
-  // Mode 0's BG4 at four colours: its character is colour 1 in even columns and 3
+  // Mode 0's BG4 at four colors: its character is color 1 in even columns and 3
   // in odd ones, and its subset begins at word 96, so words 97 and 99.
   PpuState ppu = placed(0x00u);
   constexpr std::uint32_t kBg4Chars = 0xE000u;
@@ -1024,7 +1024,7 @@ TEST(SnesPpuMosaic, TheCornersPriorityBitDecidesTheWholeBlock) {
 }
 
 TEST(SnesPpuMosaic, TheCornersDirectColourFillsTheBlock) {
-  // Mode 3, direct colour: the character's top-left pixel is $FF, $639C composed,
+  // Mode 3, direct color: the character's top-left pixel is $FF, $639C composed,
   // and every other pixel $01, red 4. Under $F1 all of block 0-15 x 1-16 is $639C.
   PpuState ppu = placed(0x03u);
   ppu.tm = 0x01u;
@@ -1048,7 +1048,7 @@ TEST(SnesPpuMosaic, TheCornersDirectColourFillsTheBlock) {
 }
 
 TEST(SnesPpuMosaic, ASpriteOverAMosaicedBackgroundKeepsItsOwnPixels) {
-  // A sprite whose columns alternate colours 1 and 2, in front of BG1 under $F1.
+  // A sprite whose columns alternate colors 1 and 2, in front of BG1 under $F1.
   PpuState ppu = mosaicPicture(0xF1u);
   ppu.tm = 0x11u;
   putSprite(ppu, 0u, 64, 40u, 0u, 0x30u);
@@ -1180,7 +1180,7 @@ TEST(SnesPpuMosaic, ASnapshotTakenPartWayDownARowDrawsTheRestOfIt) {
   EXPECT_EQ(restored.at(1u, 8u), sharp(0u, 5u));
 }
 
-// ---- before the windows and colour math ----------------------------------------
+// ---- before the windows and color math ----------------------------------------
 
 TEST(SnesPpuMosaic, AWindowClipsPartOfABlock) {
   // Window 1 from column 3 masks BG1 on the main screen. Under $31 the block at
@@ -1197,7 +1197,7 @@ TEST(SnesPpuMosaic, AWindowClipsPartOfABlock) {
 }
 
 TEST(SnesPpuMosaic, AMosaicedLayerTakesColourMathLikeASharpOne) {
-  // BG1's corner at (0, 1) is red 31, and the sub screen's BG2 is grey 1 there:
+  // BG1's corner at (0, 1) is red 31, and the sub screen's BG2 is gray 1 there:
   // added, red 31, green 1, blue 1.
   PpuState ppu = mosaicPicture(0x31u);
   ppu.ts = 0x02u;
@@ -1210,7 +1210,7 @@ TEST(SnesPpuMosaic, AMosaicedLayerTakesColourMathLikeASharpOne) {
 }
 
 TEST(SnesPpuMosaic, TheBlackRegionBlackensPartOfABlock) {
-  // $2130's upper region set to inside the colour window, which runs from column 3.
+  // $2130's upper region set to inside the color window, which runs from column 3.
   PpuState ppu = mosaicPicture(0x31u);
   ppu.wobjsel = 0x20u;
   ppu.wh0 = 3u;
@@ -1469,7 +1469,7 @@ TEST(PpuMosaicCartridges, AMosaicCartridgeDrawsBlocksAlignedToThePicture) {
   // BG1 shown and mosaic enabled on it at size 0, and R steps the size up every
   // eight frames. A second of R leaves a size above 0, and in the brightest frame
   // of the second after it every whole block, counted from the picture's left edge
-  // and first line at the size its rows were drawn with, is one colour.
+  // and first line at the size its rows were drawn with, is one color.
   std::vector<std::uint8_t> rom;
   bool ran = false;
   loadRom("MosaicMode3.sfc", rom, ran);
@@ -1521,7 +1521,7 @@ TEST(PpuMosaicCartridges, AMosaicCartridgeDrawsBlocksAlignedToThePicture) {
   }
   EXPECT_GT(blocks, 0u);
   EXPECT_EQ(uneven, 0u) << "of " << blocks << " blocks of " << side;
-  EXPECT_GT(colours.size(), 1u) << "the frame is one flat colour";
+  EXPECT_GT(colours.size(), 1u) << "the frame is one flat color";
 }
 
 }  // namespace

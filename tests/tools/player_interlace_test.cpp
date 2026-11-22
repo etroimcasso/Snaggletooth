@@ -15,7 +15,7 @@ using snaggletooth::player::Interlace;
 using snaggletooth::player::parseInterlace;
 using snaggletooth::player::Shown;
 
-// A solid field of one grey level, `w` by `h`, RGBA with alpha 255.
+// A solid field of one gray level, `w` by `h`, RGBA with alpha 255.
 std::vector<std::uint8_t> solid(unsigned w, unsigned h, std::uint8_t value) {
   std::vector<std::uint8_t> f(static_cast<std::size_t>(w) * h * 4u);
   for (std::size_t i = 0; i < f.size(); i += 4u) {

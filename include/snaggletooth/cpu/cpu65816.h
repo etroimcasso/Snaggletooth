@@ -159,7 +159,7 @@ struct Cpu65816State {
 // and Y to zero and the stack pointer's high byte to $01, enters emulation mode with
 // the decimal flag clear and interrupts disabled, and ends a wait or a stop. The
 // accumulator, the low bytes of X, Y and the stack pointer, and the N, V, Z and C
-// flags are not initialised and keep what they held. Reset then runs the hardware
+// flags are not initialized and keep what they held. Reset then runs the hardware
 // interrupt sequence with the write line held high: its three stack cycles read
 // where an interrupt would push, the stack pointer ends three lower within page
 // one, and the program counter is loaded from the vector. No instruction is in

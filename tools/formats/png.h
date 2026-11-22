@@ -1,9 +1,9 @@
 #pragma once
 
 // The toolkit's PNG face: an indexed-only reader and writer over lodepng. A tile
-// sheet is a palette (indexed) image whose pixel values are colour numbers, so
-// the face keeps those numbers exactly — it never converts colour. Decoding a
-// truecolour, greyscale, alpha or 16-bit PNG is refused, naming the colour type;
+// sheet is a palette (indexed) image whose pixel values are color numbers, so
+// the face keeps those numbers exactly — it never converts color. Decoding a
+// truecolour, grayscale, alpha or 16-bit PNG is refused, naming the color type;
 // interlacing and filtering are the PNG's own encoding and are read.
 
 #include <cstdint>
@@ -17,7 +17,7 @@ namespace snaggletooth::formats {
 
 // An indexed image: one palette index per pixel in `indices` (row major, width
 // entries a row), the palette those indexes name in `palette` (RGBA quadruples,
-// `palette.size() / 4` colours), and `bitDepth` — 1, 2, 4 or 8 — the PNG's own
+// `palette.size() / 4` colors), and `bitDepth` — 1, 2, 4 or 8 — the PNG's own
 // depth, which bounds the index values.
 struct IndexedImage {
   unsigned width = 0;
@@ -37,7 +37,7 @@ struct PngImage {
 
 // Decodes an indexed PNG to its own indexes and palette, at the file's own bit
 // depth. A non-indexed or 16-bit image is refused with a message naming the
-// colour type and depth.
+// color type and depth.
 [[nodiscard]] PngImage decodePng(std::span<const std::uint8_t> file);
 
 // Encodes `image` as an indexed PNG at `image.bitDepth` (1, 2, 4 or 8) carrying

@@ -1,26 +1,6 @@
 # The intermediate representation
 
-`ir.h` is a program as its meaning: one node per instruction, carrying what
-source says about the instruction and the typed effects the chip performs for it,
-with no bytes in it — the main CPU's program in the 65816's terms and the sound
-program in the SPC700's, one vocabulary over each chip's own places.
-`cpu65816_lift.h` builds the first from a listing the 65816 disassembler traced
-and `spc700_lift.h` the second from the SPC700 disassembler's — the two places
-in the toolkit where bytes become meaning —
-`ir_interpret.h` runs a program's effects and nothing else, `ir_provenance.h`
-is the shadow that follows where every value came from, `ir_render.h` writes
-SNES assembly from its instruction layer, `ir_lockstep.h` holds the interpreter
-to one step of the machine, with the `Tape` that keeps a step's shadow calls for
-a shadow on another thread to play, `ir_differential.h` runs a program beside the
-machine through a recorded run and reports every disagreement, `ir_dataflow.h`
-runs the effects over every path at once and says what each instruction can
-rely on — the direct register, the data bank, the stack pointer, a stored
-value, the slots of a jump table — and `ir_text.h` writes a program file and
-reads it back, the main CPU's `program.snagir` or the sound program's
-`apu.snagir`. Two commands sit over the library, both readers of those files;
-the cartridge disassembler in [`../rom/`](../rom/README.md) writes them, and
-`snes_render` writes the bank files and the sound file from them through the
-renderer.
+`ir.h` is a program as its meaning: one node per instruction, carrying what source says about the instruction and the typed effects the chip performs for it, with no bytes in it — the main CPU's program in the 65816's terms and the sound program in the SPC700's, one vocabulary over each chip's own places. `cpu65816_lift.h` builds the first from a listing the 65816 disassembler traced and `spc700_lift.h` the second from the SPC700 disassembler's — the two places in the toolkit where bytes become meaning — `ir_interpret.h` runs a program's effects and nothing else, `ir_provenance.h` is the shadow that follows where every value came from, `ir_render.h` writes SNES assembly from its instruction layer, `ir_lockstep.h` holds the interpreter to one step of the machine, with the `Tape` that keeps a step's shadow calls for a shadow on another thread to play, `ir_differential.h` runs a program beside the machine through a recorded run and reports every disagreement, `ir_dataflow.h` runs the effects over every path at once and says what each instruction can rely on — the direct register, the data bank, the stack pointer, a stored value, the slots of a jump table — and `ir_text.h` writes a program file and reads it back, the main CPU's `program.snagir` or the sound program's `apu.snagir`. Two commands sit over the library, both readers of those files; the cartridge disassembler in [`../rom/`](../rom/README.md) writes them, and `snes_render` writes the bank files and the sound file from them through the renderer.
 
 ## Contents
 
@@ -64,15 +44,7 @@ Everything lives in `snaggletooth::ir`.
 snes_lift <directory> [--apu] [-o <file.snagir>] [--file <name>]
 ```
 
-Reads the directory's `program.snagir` — or, with `--apu`, its `apu.snagir`,
-the sound program's ([docs/snagir.md](../../docs/snagir.md)) — and writes the
-summary — the regions, the code lines, the nodes, and how many select a width
-by the live flag, name a hardware register or were lifted from patched bytes,
-and the effects — then the program file written again from what it read:
-every region with its labels, its data runs and its nodes in address order,
-and, for the main CPU's file, the interrupt sequences. `--file` limits both
-to the regions written to one source file; `-o` writes the file there. It
-reads no image and runs nothing.
+Reads the directory's `program.snagir` — or, with `--apu`, its `apu.snagir`, the sound program's ([docs/snagir.md](../../docs/snagir.md)) — and writes the summary — the regions, the code lines, the nodes, and how many select a width by the live flag, name a hardware register or were lifted from patched bytes, and the effects — then the program file written again from what it read: every region with its labels, its data runs and its nodes in address order, and, for the main CPU's file, the interrupt sequences. `--file` limits both to the regions written to one source file; `-o` writes the file there. It reads no image and runs nothing.
 
 ```
 snes_lift mixed
@@ -93,20 +65,7 @@ nodes 34
 snes_differential <directory> <image> -o <report> [--seconds N] [--input <script> | --input-dir <directory>] [--quiet]
 ```
 
-Reads the directory's `program.snagir` the same way, and its `apu.snagir`
-where the tree has one, refuses an image of
-another size than the file's own `image` line, runs the machine for
-`--seconds` of the master clock (sixty by default) with the recorded run
-`--input` replayed into the controller ports — or the run named for the image
-under `--input-dir`, or that directory's `default.snaginput` — and holds each interpreter to every access, every
-register and every cycle its CPU made. The report — `summary.txt`, `divergences.txt`,
-`forms.txt`, `constructs.txt`, `unlifted.txt`, `patched.txt` — lands under `-o`, the sound CPU's
-lines after the main CPU's and marked `apu`; one line sums
-it up, and the exit status is 0 only when the run diverged nowhere. While it
-replays, standard error says how far it has come, `replaying the run: 23.5 of
-60.0 s`, refreshed in place on a terminal and one line per ten seconds in a
-log; `--quiet` turns it off. The library reports through `Replay::progress`
-(`rom/progress.h`) and prints nothing itself.
+Reads the directory's `program.snagir` the same way, and its `apu.snagir` where the tree has one, refuses an image of another size than the file's own `image` line, runs the machine for `--seconds` of the master clock (sixty by default) with the recorded run `--input` replayed into the controller ports — or the run named for the image under `--input-dir`, or that directory's `default.snaginput` — and holds each interpreter to every access, every register and every cycle its CPU made. The report — `summary.txt`, `divergences.txt`, `forms.txt`, `constructs.txt`, `unlifted.txt`, `patched.txt` — lands under `-o`, the sound CPU's lines after the main CPU's and marked `apu`; one line sums it up, and the exit status is 0 only when the run diverged nowhere. While it replays, standard error says how far it has come, `replaying the run: 23.5 of 60.0 s`, refreshed in place on a terminal and one line per ten seconds in a log; `--quiet` turns it off. The library reports through `Replay::progress` (`rom/progress.h`) and prints nothing itself.
 
 ```
 snes_differential mixed mixed.smc -o mixed/differential --seconds 0.1
@@ -129,39 +88,13 @@ const snaggletooth::ir::Node* node =
 interpreter.execute(*node, bus);
 ```
 
-The library target is `snaggletooth_ir`; `tools/` is on its public include path.
-It links `snaggletooth_cpu65816` for the 65816 lift, which reads a listing and the
-measured cycle tables, and for the renderer, which reads the opcode table and
-follows the widths through the same function the assembler does; and
-`snaggletooth_spc700` for the SPC700 lift, which reads a listing, the measured
-cycle table and the mnemonic and form of each opcode, and for the sound
-program's renderer and file, which resolve a node's mnemonic and form against
-the same table. The two interpreters' own translation units include none of
-them. `snes_lift` links this
-target alone, so it reads a program file and cannot trace a cartridge. The lockstep is its own
-target, `snaggletooth_ir_lockstep`, which links the representation and the
-machine for the two observers it reads, and two things link it: the differential, its own target
-`snaggletooth_ir_differential`, which links `snaggletooth_rom` as well for the
-recorded run it replays; and `snaggletooth_rom` itself, whose run on the
-machine lifts every executed instruction, on either CPU, and holds it to the
-same check — and which links the representation for the bank files it renders.
-The shadow is its own target too, `snaggletooth_ir_provenance`, which links the
-representation and the cartridge board and nothing else; `snaggletooth_rom` links
-it for the run.
+The library target is `snaggletooth_ir`; `tools/` is on its public include path. It links `snaggletooth_cpu65816` for the 65816 lift, which reads a listing and the measured cycle tables, and for the renderer, which reads the opcode table and follows the widths through the same function the assembler does; and `snaggletooth_spc700` for the SPC700 lift, which reads a listing, the measured cycle table and the mnemonic and form of each opcode, and for the sound program's renderer and file, which resolve a node's mnemonic and form against the same table. The two interpreters' own translation units include none of them. `snes_lift` links this target alone, so it reads a program file and cannot trace a cartridge. The lockstep is its own target, `snaggletooth_ir_lockstep`, which links the representation and the machine for the two observers it reads, and two things link it: the differential, its own target `snaggletooth_ir_differential`, which links `snaggletooth_rom` as well for the recorded run it replays; and `snaggletooth_rom` itself, whose run on the machine lifts every executed instruction, on either CPU, and holds it to the same check — and which links the representation for the bank files it renders. The shadow is its own target too, `snaggletooth_ir_provenance`, which links the representation and the cartridge board and nothing else; `snaggletooth_rom` links it for the run.
 
 ## See also
 
-- [docs/ir.md](../../docs/ir.md) — the full page: the two layers, the
-  vocabulary, every rule the effects follow, the cost, reading a program,
-  rendering source, running beside the machine, and how the lift is held to
-  the core.
-- [`../rom/`](../rom/README.md) — the cartridge disassembler, whose bank files
-  and sound file the renderer writes and whose run on the machine drives the
-  lockstep.
-- [`../examples/`](../examples/README.md) — the cartridges the examples above
-  are run on.
-- [`../cpu65816/`](../cpu65816/README.md) — the disassembler whose listing the
-  65816 lift reads.
-- [`../spc700/`](../spc700/README.md) — the disassembler whose listing the
-  SPC700 lift reads, and whose table names each opcode by mnemonic and form.
+- [docs/ir.md](../../docs/ir.md) — the full page: the two layers, the vocabulary, every rule the effects follow, the cost, reading a program, rendering source, running beside the machine, and how the lift is held to the core.
+- [`../rom/`](../rom/README.md) — the cartridge disassembler, whose bank files and sound file the renderer writes and whose run on the machine drives the lockstep.
+- [`../examples/`](../examples/README.md) — the cartridges the examples above are run on.
+- [`../cpu65816/`](../cpu65816/README.md) — the disassembler whose listing the 65816 lift reads.
+- [`../spc700/`](../spc700/README.md) — the disassembler whose listing the SPC700 lift reads, and whose table names each opcode by mnemonic and form.
 - [`../disasm/`](../disasm/README.md) — the framework that shapes the listing.

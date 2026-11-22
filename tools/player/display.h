@@ -174,7 +174,7 @@ struct Pacing {
 // lines, a woven interlaced one 448; a normal frame is 256 pixels across, a hi-res one 512.
 // `windowSize` gives the window that shows a frame of a given shape at an integer `scale`:
 // the frame's own pixels times the scale. A present that copies the frame to that window
-// with nearest-neighbour then makes each source pixel exactly `scale` output pixels square —
+// with nearest-neighbor then makes each source pixel exactly `scale` output pixels square —
 // a whole-number factor in both axes, so the picture holds its grid whatever the shape. A
 // taller or wider frame takes a larger window at the same scale: an interlaced window is
 // twice a progressive one's height, a hi-res one twice its width, the size the console's

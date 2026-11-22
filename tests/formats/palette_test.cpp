@@ -1,5 +1,5 @@
 // The palette codec: CGRAM words round-trip through text, an odd trailing byte is
-// kept, the comment carries the eight-bit colour, and comments are ignored when
+// kept, the comment carries the eight-bit color, and comments are ignored when
 // reading.
 
 #include <cstdint>

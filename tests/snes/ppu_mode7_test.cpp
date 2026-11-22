@@ -49,7 +49,7 @@ constexpr std::uint16_t kWhite = 0x7FFFu;
 constexpr std::uint16_t kOrange = 0x01FFu;
 
 // The ruler: a field whose every pixel is 1 + its column within the character,
-// so a picture pixel's colour names the field column it was read from, mod 8.
+// so a picture pixel's color names the field column it was read from, mod 8.
 constexpr std::array<std::uint16_t, 8> kRuler{kRed, kGreen, kBlue, kYellow,
                                              kCyan, kMagenta, kWhite, kOrange};
 constexpr Rgba rulerAt(unsigned fieldColumn) { return out(kRuler[fieldColumn & 7u]); }
@@ -176,18 +176,18 @@ void parkSprites(PpuState& ppu) {
   for (unsigned index = 0u; index < kSprites; ++index) putSprite(ppu, index, -64, 0u, 0u, 0u);
 }
 
-// A sprite of sixteen-colour pixels, all colour 1, covering the eight pixels from
+// A sprite of sixteen-color pixels, all color 1, covering the eight pixels from
 // x on line 41: a sprite whose Y is N first draws on line N + 1.
 void spriteAt(PpuState& ppu, unsigned index, int x, unsigned priority) {
   putSprite(ppu, index, x, 40u, 0u, static_cast<std::uint8_t>(priority << 4));
   for (unsigned row = 0u; row < 8u; ++row) {
-    ppu.vram[(kSpriteChars + row * 2u) & 0xFFFFu] = 0xFFu;  // plane 0 set: colour 1 everywhere
+    ppu.vram[(kSpriteChars + row * 2u) & 0xFFFFu] = 0xFFu;  // plane 0 set: color 1 everywhere
   }
   putColour(ppu, kSpritePaletteBase + 1u, kSpriteColour);
 }
 constexpr unsigned kSpriteLine = 41u;
 
-// Mode 7 at full brightness, the identity matrix, no scroll, the centre at the
+// Mode 7 at full brightness, the identity matrix, no scroll, the center at the
 // origin, the field wrapping, BG1 alone on the main screen, and the ruler as
 // character 1 in every tile of the map.
 PpuState modeSeven() {
@@ -346,8 +346,8 @@ TEST(SnesPpuMode7, TheCentreWithNoRotationIsTheSameAsTheScroll) {
   putColour(scrolled, 20u, kOrange);
 
   PpuState centred = scrolled;
-  centred.m7hofs = 100u;  // the scroll and the centre cancel in the offset term...
-  centred.m7x = 100u;     // ...and the centre is added back whole
+  centred.m7hofs = 100u;  // the scroll and the center cancel in the offset term...
+  centred.m7x = 100u;     // ...and the center is added back whole
   EXPECT_EQ(draw(scrolled).at(10u, 1u), out(kOrange));
   EXPECT_EQ(digest(draw(centred)), digest(draw(scrolled)));
 }
@@ -369,7 +369,7 @@ TEST(SnesPpuMode7, AQuarterTurnAboutTheCentre) {
   putColour(ppu, 20u, kOrange);
   const Picture picture = draw(ppu);
   EXPECT_EQ(picture.at(8u, 2u), out(kOrange));
-  // Columns of the field run down the picture now: the ruler's colour at x depends
+  // Columns of the field run down the picture now: the ruler's color at x depends
   // on the line rather than on x.
   EXPECT_EQ(picture.at(0u, 3u), rulerAt(131u));
   EXPECT_EQ(picture.at(50u, 3u), rulerAt(131u));
@@ -463,7 +463,7 @@ TEST(SnesPpuMode7, AnOffsetOfMinusAThousandAndTwentyFiveClipsToMinusOne) {
 }
 
 TEST(SnesPpuMode7, ANegativeDifferenceKeepsItsSignAboveTenBits) {
-  // Scroll 0 and centre 2048: the difference is -2048, whose low ten bits are
+  // Scroll 0 and center 2048: the difference is -2048, whose low ten bits are
   // zero and whose sign fills the rest, so it clips to -1024 and the position is
   // 1024 + x — outside the field. Unclipped it would be -2048 and the field would
   // sit exactly where the identity puts it.
@@ -567,7 +567,7 @@ TEST(SnesPpuMode7, AZeroPixelInTheFillIsTransparent) {
   EXPECT_EQ(picture.at(10u, 2u), out(kBackdrop));  // row 2, which is zero
 }
 
-// ---- the colour -----------------------------------------------------------------
+// ---- the color -----------------------------------------------------------------
 
 TEST(SnesPpuMode7, ThePixelByteIsThePaletteWord) {
   PpuState ppu = modeSeven();
@@ -578,9 +578,9 @@ TEST(SnesPpuMode7, ThePixelByteIsThePaletteWord) {
 }
 
 TEST(SnesPpuMode7, AZeroPixelIsTransparent) {
-  // Word 0 is the backdrop's own colour, so the backdrop is made to take colour
+  // Word 0 is the backdrop's own color, so the backdrop is made to take color
   // math and the field not to: a transparent pixel shows the backdrop plus the
-  // fixed colour, where a pixel drawn as word 0 would show the plain colour.
+  // fixed color, where a pixel drawn as word 0 would show the plain color.
   PpuState ppu = modeSeven();
   ppu.cgadsub = 0x20u;
   ppu.fixedRed = 8u;
@@ -613,11 +613,11 @@ TEST(SnesPpuMode7, WithTheBitClearTheSamePixelReadsThePalette) {
 
 TEST(SnesPpuMode7, TheFieldOnTheSubScreenIsTheAddend) {
   // Nothing on the main screen but the backdrop, which takes math; the field on
-  // the sub screen, read as a colour: red 28 added to the backdrop's 1, 2, 3.
+  // the sub screen, read as a color: red 28 added to the backdrop's 1, 2, 3.
   PpuState ppu = modeSeven();
   ppu.tm = 0x00u;
   ppu.ts = 0x01u;
-  ppu.cgwsel = 0x03u;   // direct colour, and the sub screen is the addend
+  ppu.cgwsel = 0x03u;   // direct color, and the sub screen is the addend
   ppu.cgadsub = 0x20u;  // the backdrop takes math, add, no half
   Marked field{&ppu};
   field.mark(10u, 1u, 0x07u);
@@ -736,7 +736,7 @@ TEST(SnesPpuMode7, ExtbgLowPixelsSitBehindTheSpriteAtPriorityOne) {
 
 TEST(SnesPpuMode7, TheFirstLayerStandsInFrontOfExtbgsLowPixels) {
   // Both layers show word 5 for a low pixel, so which one is in front is told by
-  // colour math: BG1 alone takes it, with red 8 as the addend.
+  // color math: BG1 alone takes it, with red 8 as the addend.
   PpuState ppu = extended();
   ppu.tm = 0x03u;
   ppu.cgadsub = 0x01u;
@@ -788,7 +788,7 @@ TEST(SnesPpuMode7, ExtbgIsMaskedLikeAnySecondLayer) {
 }
 
 TEST(SnesPpuMode7, ExtbgInModeOneDrawsModeOneUnchanged) {
-  // A Mode 1 picture with a sixteen-colour BG2: a solid character at tile (0, 0)
+  // A Mode 1 picture with a sixteen-color BG2: a solid character at tile (0, 0)
   // of a map at screen 2, drawn with the bit clear and then set.
   PpuState ppu;
   ppu.inidisp = 0x0Fu;
@@ -864,7 +864,7 @@ std::uint32_t readProduct(const PpuState& ppu, std::uint16_t line, std::uint16_t
 }
 
 // Mode 7 drawing with A = 1.0, B = 2.0 (so the plain product is $0100 x $02),
-// C = -1.0, D = 1.0, the scroll at 5 and the centre at the origin.
+// C = -1.0, D = 1.0, the scroll at 5 and the center at the origin.
 PpuState multiplying() {
   PpuState ppu = modeSeven();
   ppu.m7b = 0x0200u;
@@ -919,7 +919,7 @@ TEST(SnesPpuMode7Multiplier, TheHorizontalFlipInvertsTheColumn) {
 
 TEST(SnesPpuMode7Multiplier, TheLinesFirstDotsHoldTheOffsetAndLineProducts) {
   // Placed on the line before so the read resolves as the next line begins: dot 0's
-  // first half is A x (scroll - centre) = $0100 x 5 >> 3 = 160; dot 2's second half
+  // first half is A x (scroll - center) = $0100 x 5 >> 3 = 160; dot 2's second half
   // is D x the line = $0100 x 100 >> 3 = 3200 = $000C80.
   EXPECT_EQ(readProduct(multiplying(), 99u, static_cast<std::uint16_t>(kLineMaster - 30u)),
             0x0000A0u);
@@ -980,7 +980,7 @@ void loadRom(const std::string& name, std::vector<std::uint8_t>& rom, bool& ran)
 }
 
 // What three seconds of a cartridge's own run leave: the machine as it stood, the
-// last frame, how many distinct colours it held, whether the matrix moved between
+// last frame, how many distinct colors it held, whether the matrix moved between
 // frames, and whether a transfer channel delivered to the matrix.
 struct Played {
   SnesState state;
@@ -1047,7 +1047,7 @@ void modeSevenCartridge(const std::string& name, bool expectMoving, bool expectT
   EXPECT_NE(played.state.ppu.tm & 0x01u, 0u) << name << " does not show BG1";
   EXPECT_NE(played.state.ppu.m7a, 0xFFFFu) << name << " left the matrix at power-on";
   EXPECT_GT(played.lit, 1000u) << name << " drew nothing";
-  EXPECT_GT(played.colours, 4u) << name;  // a field of several colours, not one flat one
+  EXPECT_GT(played.colours, 4u) << name;  // a field of several colors, not one flat one
   if (expectMoving) {
     EXPECT_TRUE(played.matrixMoved) << name << "'s matrix never changed";
   }

@@ -400,10 +400,10 @@ TEST(SnesObserver, AnHdmaEventIsReportedInTheEnginesName) {
   m.restore(s);
   Recorder r;
   m.setObserver(&r);
-  m.run(2u * 1364u);  // through line 0's initialisation and line 1's delivery
+  m.run(2u * 1364u);  // through line 0's initialization and line 1's delivery
   const std::vector<BusAccess> hdma = r.accessesFrom(AccessSource::Hdma);
   ASSERT_GE(hdma.size(), 3u);
-  EXPECT_EQ(hdma[0].address, 0x7E0100u) << "the line count, read at initialisation";
+  EXPECT_EQ(hdma[0].address, 0x7E0100u) << "the line count, read at initialization";
   EXPECT_FALSE(hdma[0].write);
   EXPECT_EQ(int{hdma[0].value}, 0x01);
   EXPECT_EQ(hdma[1].address, 0x7E0101u) << "the value, read at the delivery";

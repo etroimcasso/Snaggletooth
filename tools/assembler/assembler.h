@@ -115,7 +115,7 @@ class Dialect {
 
 // How an assembly reads a file an `INCBIN` names: the file's bytes, or nothing
 // when it cannot be read. The path it is given is the directive's, joined with
-// the directory of the file the directive is in and normalised — so a reader
+// the directory of the file the directive is in and normalized — so a reader
 // keyed by paths relative to a tree's root is asked for exactly those. The
 // verifier passes the reader it reads the tree's sources through; the
 // command-line assemblers read beside the source.

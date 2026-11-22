@@ -56,7 +56,7 @@ constexpr std::uint8_t kSpriteBase = 0x03u;
 constexpr std::uint32_t kSpriteCharByte = 0xC000u;
 constexpr std::uint32_t kSpriteCharByte2 = 0xE000u;
 
-// A sprite's character is always sixteen colours: four bitplanes, thirty-two bytes.
+// A sprite's character is always sixteen colors: four bitplanes, thirty-two bytes.
 constexpr unsigned kSpritePlanes = 4u;
 constexpr std::uint32_t kSpriteCharBytes = 32u;
 
@@ -87,7 +87,7 @@ constexpr Rgba kMagentaOut{255u, 0u, 255u, 255u};
 constexpr Rgba kBlackOut{0u, 0u, 0u, 255u};
 
 // The first palette a sprite can name, and the words its eight palettes occupy:
-// sixteen colours each from CGRAM word 128 up.
+// sixteen colors each from CGRAM word 128 up.
 constexpr unsigned kSpritePaletteBase = 128u;
 constexpr unsigned kSpritePaletteColours = 16u;
 
@@ -154,7 +154,7 @@ void putColour(PpuState& ppu, unsigned word, std::uint16_t colour) {
   ppu.cgram[word * 2u + 1u] = static_cast<std::uint8_t>(colour >> 8);
 }
 
-// A colour into one of a sprite palette's sixteen words.
+// A color into one of a sprite palette's sixteen words.
 void putSpriteColour(PpuState& ppu, unsigned palette, unsigned index, std::uint16_t colour) {
   putColour(ppu, kSpritePaletteBase + palette * kSpritePaletteColours + index, colour);
 }
@@ -162,7 +162,7 @@ void putSpriteColour(PpuState& ppu, unsigned palette, unsigned index, std::uint1
 using TileRows = std::array<std::array<std::uint8_t, 8>, 8>;
 
 // A character at a byte address, at as many bitplanes as the caller names: eight
-// rows of eight colour indices, planes 0 and 1 in the low and high bytes of eight
+// rows of eight color indices, planes 0 and 1 in the low and high bytes of eight
 // words and planes 2 and 3 in the same form sixteen bytes on, with the leftmost
 // pixel of a row in bit 7.
 void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
@@ -180,7 +180,7 @@ void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
   }
 }
 
-// A character every pixel of which is one colour index.
+// A character every pixel of which is one color index.
 TileRows solid(std::uint8_t index) {
   TileRows rows{};
   for (auto& row : rows) row.fill(index);
@@ -198,7 +198,7 @@ void putSpriteTile2(PpuState& ppu, unsigned number, const TileRows& rows) {
 }
 
 // Every character a sprite as big as `width` by `height` reads when its first is
-// `tile`, filled with one colour index — the numbers wrapping in each nibble the
+// `tile`, filled with one color index — the numbers wrapping in each nibble the
 // way the character table does.
 void putSpriteBlock(PpuState& ppu, unsigned tile, unsigned width, unsigned height,
                     std::uint8_t index) {
@@ -288,14 +288,14 @@ PpuState screenWithBackgrounds() {
   ppu.bg2vofs = 0x3FFu;
   ppu.bg3vofs = 0x3FFu;
   ppu.tm = 0x17u;  // BG1, BG2, BG3 and the sprites
-  putColour(ppu, 1u, kYellow);   // BG1 and BG2 palette 0 colour 1
-  putColour(ppu, 2u, kCyan);     // BG1 and BG2 palette 0 colour 2
-  putColour(ppu, 5u, kMagenta);  // BG3 palette 1 colour 1
-  putColour(ppu, 9u, kBlue);     // BG3 palette 2 colour 1
+  putColour(ppu, 1u, kYellow);   // BG1 and BG2 palette 0 color 1
+  putColour(ppu, 2u, kCyan);     // BG1 and BG2 palette 0 color 2
+  putColour(ppu, 5u, kMagenta);  // BG3 palette 1 color 1
+  putColour(ppu, 9u, kBlue);     // BG3 palette 2 color 1
   return ppu;
 }
 
-// A background covered edge to edge by one character in one colour, at the tile
+// A background covered edge to edge by one character in one color, at the tile
 // priority named. The map is one 32x32 screen, so 32 entries across and 32 down
 // reach every position of the picture.
 void coverBackground(PpuState& ppu, std::uint32_t mapByte, std::uint32_t charByte,
@@ -352,7 +352,7 @@ TEST(Sprites, ASpriteRunningOffTheRightEdgeIsCutThere) {
 
 TEST(Sprites, ASpriteHungAboveThePictureComesInAtTheTop) {
   PpuState ppu = screen();
-  // Sixteen rows, each its own colour index, so which rows show can be read off.
+  // Sixteen rows, each its own color index, so which rows show can be read off.
   TileRows top{};
   TileRows bottom{};
   for (unsigned row = 0u; row < 8u; ++row) {
@@ -468,13 +468,13 @@ TEST(Sprites, ASpritesCharactersWrapInsideTheTableWhereABackgroundsBlockRunsOn) 
   putEntry(ppu, kBg1MapByte, 0u, 0x02FFu);  // the block at the picture's top left
 
   const Picture picture = draw(ppu);
-  // The sprite's four quarters, in the colours its wrapped numbers name.
+  // The sprite's four quarters, in the colors its wrapped numbers name.
   EXPECT_EQ(picture.at(100u, 100u), kRedOut);    // $FF
   EXPECT_EQ(picture.at(108u, 100u), kGreenOut);  // $F0, the column wrapped
   EXPECT_EQ(picture.at(100u, 108u), kWhiteOut);  // $0F, the row wrapped
   EXPECT_EQ(picture.at(108u, 108u), kRedOut);    // $00, both
 
-  // The background's four, in the colours its running-on numbers name.
+  // The background's four, in the colors its running-on numbers name.
   EXPECT_EQ(picture.at(0u, 0u), kYellowOut);  // $2FF, index 1 of BG1's palette 0
   EXPECT_EQ(picture.at(8u, 0u), kCyanOut);    // $300
   EXPECT_EQ(picture.at(0u, 8u), kYellowOut);  // $30F
@@ -594,7 +594,7 @@ TEST(Sprites, ARectangularSpriteFlipsVerticallyAsTwoSquaresStacked) {
   PpuState ppu = screen();
   ppu.objsel = static_cast<std::uint8_t>(kSpriteBase | (6u << 5));  // 16x32 and 32x64
 
-  // The four rows of characters, each its own colour index, so the order they end
+  // The four rows of characters, each its own color index, so the order they end
   // up in can be read straight off the picture.
   putSpriteColour(ppu, 0u, 3u, kBlue);
   constexpr std::array<std::uint8_t, 4> kBands{1u, 2u, 15u, 3u};
@@ -637,7 +637,7 @@ TEST(Sprites, ObjectInterlaceMakesA16By32SpriteA16By16One) {
 
 TEST(Sprites, SpritePalettesBeginAtCgramWordOneHundredAndTwentyEight) {
   PpuState ppu = screen();
-  // Palette 5 colour 1 is word 128 + 5 * 16 + 1.
+  // Palette 5 color 1 is word 128 + 5 * 16 + 1.
   putSpriteColour(ppu, 5u, 1u, kMagenta);
   putSpriteTile(ppu, 0u, solid(1u));
   putSprite(ppu, 0u, 70, 70u, 0u, attributes(false, false, 3u, 5u, false), false);
@@ -647,7 +647,7 @@ TEST(Sprites, SpritePalettesBeginAtCgramWordOneHundredAndTwentyEight) {
 
 TEST(Sprites, ColourZeroOfASpritePaletteIsTransparent) {
   PpuState ppu = screen();
-  // A character whose left half is colour 0 and right half colour 1.
+  // A character whose left half is color 0 and right half color 1.
   TileRows rows{};
   for (auto& row : rows) {
     for (unsigned column = 0u; column < 8u; ++column) row[column] = column < 4u ? 0u : 1u;
@@ -707,7 +707,7 @@ TEST(SpriteChart, Bg2sLowTilesAreInFrontOfASpriteAtPriorityOne) {
 }
 
 TEST(SpriteChart, ASpriteAtPriorityOneIsInFrontOfBg3sHighTiles) {
-  // BG3 is four colours, so two bitplanes, and its palette 1 colour 1 is word 5.
+  // BG3 is four colors, so two bitplanes, and its palette 1 color 1 is word 5.
   const Picture picture = chart(0x04u, kBg3MapByte, kBg3CharByte, 2u, 1u, true, 1u, 1u, false);
   EXPECT_EQ(picture.at(100u, 100u), kRedOut);
   EXPECT_EQ(picture.at(100u, 120u), kMagentaOut);  // BG3 elsewhere
@@ -1049,7 +1049,7 @@ TEST(SpriteLimits, ASpriteAtTheFarSideOfNineBitsDrawsNowhereAndStillFillsARangeS
   EXPECT_EQ(state.ppu.sprites.inRange[0], 0u);
 
   // Sprite 0 is in front of sprite 1, so drawing it at the position Range counted
-  // it at would put its colour here instead.
+  // it at would put its color here instead.
   const Picture picture = draw(ppu);
   EXPECT_EQ(picture.at(0u, 20u), kRedOut);
   EXPECT_EQ(picture.at(15u, 20u), kRedOut);

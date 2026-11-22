@@ -1,11 +1,11 @@
 #pragma once
 
 // Tiles as an indexed PNG. An 8x8 tile occupies 16, 32 or 64 bytes for 2, 4 or 8
-// bits per pixel, the colour number of each pixel spread across the bit-planes
+// bits per pixel, the color number of each pixel spread across the bit-planes
 // the way the PPU reads them. The sheet is as wide as its tiles up to sixteen —
 // a one-tile file is 8x8, a longer one wraps at sixteen — in file order left to
 // right and down; the PNG's bit depth is the tile depth, so the file says its
-// own depth and a person's editor shows the right number of colours.
+// own depth and a person's editor shows the right number of colors.
 //
 // A file that is not a whole number of tiles — most are not — has its last tile
 // padded with zero pixels, and the bank file's `INCBIN` carries the byte length,

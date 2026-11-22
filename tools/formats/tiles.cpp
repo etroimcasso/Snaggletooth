@@ -25,7 +25,7 @@ constexpr unsigned planeRowByte(unsigned plane, unsigned row) {
 }
 
 // One tile's bytes to its 8x8 indices. In each plane byte bit 7 is the left-most
-// pixel; plane p carries bit p of the colour number.
+// pixel; plane p carries bit p of the color number.
 void tileToIndices(std::span<const std::uint8_t> tile, unsigned depth,
                    std::vector<std::uint8_t>& out, std::size_t base, unsigned stride) {
   for (unsigned row = 0; row < kTileHeight; ++row) {

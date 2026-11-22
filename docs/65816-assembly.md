@@ -1,10 +1,6 @@
 # 65816 assembly language
 
-The dialect [`cpu65816_disasm`](65816-disassembler.md) emits. Everything that does
-not depend on the instruction set — source format, numbers, symbols, expressions,
-the placement and data directives, the round-trip guarantee, diagnostics and
-stability — is the [common layer](assembly-lexicon.md); this page describes what
-the 65816 adds to it.
+The dialect [`cpu65816_disasm`](65816-disassembler.md) emits. Everything that does not depend on the instruction set — source format, numbers, symbols, expressions, the placement and data directives, the round-trip guarantee, diagnostics and stability — is the [common layer](assembly-lexicon.md); this page describes what the 65816 adds to it.
 
 > **Status.** `cpu65816_asm` assembles this dialect and `cpu65816_disasm` emits
 > it — [assemblers.md](assemblers.md). Every opcode round-trips through its own
@@ -30,20 +26,15 @@ the 65816 adds to it.
 
 ## 1. Scope
 
-The dialect covers the 65816's 256 opcodes over the common layer. Addresses are
-24 bits wide: a bank in the top byte and an offset below it. A label, an `ORG` and
-a long operand are 24-bit values, and expression arithmetic wraps at 24 bits.
+The dialect covers the 65816's 256 opcodes over the common layer. Addresses are 24 bits wide: a bank in the top byte and an offset below it. A label, an `ORG` and a long operand are 24-bit values, and expression arithmetic wraps at 24 bits.
 
-The mnemonics are the datasheet's. `JML` and `JSL` name the long jump and the long
-call; `INC A` and `DEC A` name the accumulator forms.
+The mnemonics are the datasheet's. `JML` and `JSL` name the long jump and the long call; `INC A` and `DEC A` name the accumulator forms.
 
 ---
 
 ## 2. Addressing modes
 
-The operand syntax, one row per mode. `dp` is a direct-page offset, `abs` a
-16-bit address, `long` a 24-bit address, `sr` a stack offset, `imm` an
-immediate, `bank` a bank byte.
+The operand syntax, one row per mode. `dp` is a direct-page offset, `abs` a 16-bit address, `long` a 24-bit address, `sr` a stack offset, `imm` an immediate, `bank` a bank byte.
 
 | Syntax | Mode | Bytes | Example |
 |---|---|---|---|
@@ -74,65 +65,31 @@ immediate, `bank` a bank byte.
 
 ### 2.1 Absolute, direct and long
 
-Three modes can name the same byte and differ in length, in cycle cost, and in
-which bank they reach, so each is marked in the operand and none is chosen by the
-size of a number.
+Three modes can name the same byte and differ in length, in cycle cost, and in which bank they reach, so each is marked in the operand and none is chosen by the size of a number.
 
-- A **direct-page** operand is unmarked: `LDA $12`. It is one byte, an offset from
-  the direct register.
-- An **absolute** operand carries `!`: `LDA !$0012`. It is two bytes, an offset in
-  the data bank. The `!` is required.
-- A **long** operand names its bank. A literal does so with the bank separator,
-  `LDA $7E:1234`; a symbol or an expression does so behind `>`, `LDA >table`.
-  It is three bytes.
+- A **direct-page** operand is unmarked: `LDA $12`. It is one byte, an offset from the direct register.
+- An **absolute** operand carries `!`: `LDA !$0012`. It is two bytes, an offset in the data bank. The `!` is required.
+- A **long** operand names its bank. A literal does so with the bank separator, `LDA $7E:1234`; a symbol or an expression does so behind `>`, `LDA >table`. It is three bytes.
 
 `!$7E:1234` is an error: the bank separator already says the operand is long.
 
-An absolute operand takes a 16-bit value, or a 24-bit value in the instruction's
-own bank, which is taken as its offset — the value a label in the same file
-has, so `JMP !loop` and `JSR !sub_0180E8` write the offset of a line the file
-defines. A 24-bit value in any other bank does not fit and is reported, never
-truncated to its low half.
+An absolute operand takes a 16-bit value, or a 24-bit value in the instruction's own bank, which is taken as its offset — the value a label in the same file has, so `JMP !loop` and `JSR !sub_0180E8` write the offset of a line the file defines. A 24-bit value in any other bank does not fit and is reported, never truncated to its low half.
 
 ### 2.2 Immediates and the register widths
 
-An immediate operand is as wide as the register it loads. The accumulator's
-width sizes `ADC`, `AND`, `BIT`, `CMP`, `EOR`, `LDA`, `ORA` and `SBC`; the index
-registers' width sizes `CPX`, `CPY`, `LDX` and `LDY`. `REP`, `SEP`, `WDM` and the
-signature byte of `BRK` and `COP` are always one byte.
+An immediate operand is as wide as the register it loads. The accumulator's width sizes `ADC`, `AND`, `BIT`, `CMP`, `EOR`, `LDA`, `ORA` and `SBC`; the index registers' width sizes `CPX`, `CPY`, `LDX` and `LDY`. `REP`, `SEP`, `WDM` and the signature byte of `BRK` and `COP` are always one byte.
 
-The width comes from the mode the code runs under, never from the number's
-digits: `LDA #$12` is two bytes under an 8-bit accumulator and three under a
-16-bit one, and `LDA #$0012` is the same instruction either way.
+The width comes from the mode the code runs under, never from the number's digits: `LDA #$12` is two bytes under an 8-bit accumulator and three under a 16-bit one, and `LDA #$0012` is the same instruction either way.
 
-The assembler follows the widths the way the hardware does, and the way the
-disassembler does. `REP` and `SEP` move them by the bits in their mask; `XCE`
-enters emulation mode, which forces both widths to eight, when the instruction
-before it is `SEC`, and leaves it when that instruction is `CLC`; an `XCE` with
-any other instruction before it keeps the mode. `PLP` and `RTI` load the status
-byte from the stack, after which the widths are unknown until something says them.
-An immediate assembled under an unknown width is an error naming the width it
-needs.
+The assembler follows the widths the way the hardware does, and the way the disassembler does. `REP` and `SEP` move them by the bits in their mask; `XCE` enters emulation mode, which forces both widths to eight, when the instruction before it is `SEC`, and leaves it when that instruction is `CLC`; an `XCE` with any other instruction before it keeps the mode. `PLP` and `RTI` load the status byte from the stack, after which the widths are unknown until something says them. An immediate assembled under an unknown width is an error naming the width it needs.
 
-The mask of a `REP` or `SEP` decides the width of everything after it, so it
-must be resolvable when the line is read: a name defined later in the file is
-an error there.
+The mask of a `REP` or `SEP` decides the width of everything after it, so it must be resolvable when the line is read: a name defined later in the file is an error there.
 
-A **region** begins at the start of a file, at every `ORG`, and after every
-data directive (`DB`, `DW`, `DL`, `DS`). A region begins in native mode with
-both widths unknown and nothing remembered about the carry, until a directive
-(§3) or a `REP`/`SEP` settles a width. Emulation mode has to be said, because
-the instructions cannot say it and it decides whether `REP` and `SEP` move a
-width at all: in emulation mode they move nothing.
+A **region** begins at the start of a file, at every `ORG`, and after every data directive (`DB`, `DW`, `DL`, `DS`). A region begins in native mode with both widths unknown and nothing remembered about the carry, until a directive (§3) or a `REP`/`SEP` settles a width. Emulation mode has to be said, because the instructions cannot say it and it decides whether `REP` and `SEP` move a width at all: in emulation mode they move nothing.
 
 ### 2.3 Branch targets are addresses, not displacements
 
-A relative branch takes the address it goes to. The assembler computes the
-displacement from the end of the instruction and reports a target out of reach —
-further than −128 or +127 for the eight conditional branches and `BRA`, further
-than −32768 or +32767 for `BRL` — rather than silently truncating it. A branch
-stays within its bank: the target is the same bank as the branch, and the
-displacement wraps the offset within it.
+A relative branch takes the address it goes to. The assembler computes the displacement from the end of the instruction and reports a target out of reach — further than −128 or +127 for the eight conditional branches and `BRA`, further than −32768 or +32767 for `BRL` — rather than silently truncating it. A branch stays within its bank: the target is the same bank as the branch, and the displacement wraps the offset within it.
 
 ```
 loop:   LDA !$2140
@@ -155,10 +112,7 @@ loop:   LDA !$2140
 
 ### 2.5 Block moves
 
-`MVN $00,$7E` moves from bank `$00` to bank `$7E` — source first, then
-destination. The encoding stores the **destination** first: the bytes are
-`54 7E 00`. `MVP` is the same shape. Text order and byte order differ, and the
-assembler and disassembler agree on both.
+`MVN $00,$7E` moves from bank `$00` to bank `$7E` — source first, then destination. The encoding stores the **destination** first: the bytes are `54 7E 00`. `MVP` is the same shape. Text order and byte order differ, and the assembler and disassembler agree on both.
 
 ### 2.6 The stack forms and the signatures
 
@@ -171,10 +125,7 @@ assembler and disassembler agree on both.
         WDM #$12        ; the reserved opcode's operand byte
 ```
 
-`PEA` takes a 16-bit value with no marker, since it has one form. `PER` takes the
-address it names, like a branch, and the assembler computes the displacement.
-`BRK` and `COP` are two-byte instructions; the byte after the opcode is written as
-an immediate so that it is never lost.
+`PEA` takes a 16-bit value with no marker, since it has one form. `PER` takes the address it names, like a branch, and the assembler computes the displacement. `BRK` and `COP` are two-byte instructions; the byte after the opcode is written as an immediate so that it is never lost.
 
 ---
 
@@ -187,16 +138,9 @@ an immediate so that it is never lost.
         X16             ; the index registers are sixteen
 ```
 
-Each sets what the assembler knows about a register width from that line on, and
-is what settles a width the instructions cannot: at the start of a region, and
-after a `PLP` or `RTI`. A `REP` or `SEP` after it moves the width as the hardware
-would, so a directive is not repeated after them. `A16` or `X16` in emulation
-mode is an error, since both widths are eight there until `XCE` leaves it. A
-directive takes no operand.
+Each sets what the assembler knows about a register width from that line on, and is what settles a width the instructions cannot: at the start of a region, and after a `PLP` or `RTI`. A `REP` or `SEP` after it moves the width as the hardware would, so a directive is not repeated after them. `A16` or `X16` in emulation mode is an error, since both widths are eight there until `XCE` leaves it. A directive takes no operand.
 
-The disassembler emits these at the start of every region and wherever the trace
-read an instruction under a width the instruction above did not leave — nowhere
-else, because a `REP` or `SEP` already says its own change.
+The disassembler emits these at the start of every region and wherever the trace read an instruction under a width the instruction above did not leave — nowhere else, because a `REP` or `SEP` already says its own change.
 
 ### 3.2 `EMULATION`, `NATIVE`
 
@@ -205,29 +149,16 @@ else, because a `REP` or `SEP` already says its own change.
         NATIVE          ; native mode from here, the widths as they were
 ```
 
-`EMULATION` says the code from that line on runs in emulation mode: both widths
-are eight and known, `REP` and `SEP` move neither, and an `XCE` after `CLC`
-leaves it. `NATIVE` returns to native mode and keeps the widths where emulation
-held them. A region begins native, so `NATIVE` is only ever needed after an
-`EMULATION` in the same region.
+`EMULATION` says the code from that line on runs in emulation mode: both widths are eight and known, `REP` and `SEP` move neither, and an `XCE` after `CLC` leaves it. `NATIVE` returns to native mode and keeps the widths where emulation held them. A region begins native, so `NATIVE` is only ever needed after an `EMULATION` in the same region.
 
-The disassembler emits `EMULATION` at the start of every region the trace read
-in emulation mode, with no width directive under it, and wherever the
-instruction above left the chip native and this one reads in emulation mode;
-`NATIVE` where the instruction above left emulation mode and this one reads
-native. A reset handler's file therefore begins `EMULATION`, and its `CLC` /
-`XCE` says the rest.
+The disassembler emits `EMULATION` at the start of every region the trace read in emulation mode, with no width directive under it, and wherever the instruction above left the chip native and this one reads in emulation mode; `NATIVE` where the instruction above left emulation mode and this one reads native. A reset handler's file therefore begins `EMULATION`, and its `CLC` / `XCE` says the rest.
 
 ---
 
 ## See also
 
-- [Assembly language: the common layer](assembly-lexicon.md) — source format,
-  numbers, symbols, directives, round-trip, diagnostics and stability.
-- [The assemblers](assemblers.md) — `cpu65816_asm`, the tool that reads this
-  language.
+- [Assembly language: the common layer](assembly-lexicon.md) — source format, numbers, symbols, directives, round-trip, diagnostics and stability.
+- [The assemblers](assemblers.md) — `cpu65816_asm`, the tool that reads this language.
 - [65816 disassembler](65816-disassembler.md) — the tool that emits this language.
-- [65816 CPU core](65816-cpu.md) — the instruction set itself: the widths, the
-  modes, and the cycles.
-- [SPC700 assembly language](spc700-assembly.md) — the audio CPU's dialect over
-  the same layer.
+- [65816 CPU core](65816-cpu.md) — the instruction set itself: the widths, the modes, and the cycles.
+- [SPC700 assembly language](spc700-assembly.md) — the audio CPU's dialect over the same layer.

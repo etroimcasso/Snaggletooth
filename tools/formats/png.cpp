@@ -50,7 +50,7 @@ PngImage decodePng(std::span<const std::uint8_t> file) {
   PngImage out;
 
   lodepng::State state;
-  state.decoder.color_convert = 0;  // keep the file's own colour mode and depth
+  state.decoder.color_convert = 0;  // keep the file's own color mode and depth
 
   std::vector<unsigned char> in(file.begin(), file.end());
   std::vector<unsigned char> packed;
@@ -101,9 +101,9 @@ Bytes encodePng(const IndexedImage& image) {
   // The raw buffer is handed over already packed at the file's depth, with the
   // same palette on both sides, so lodepng copies it as it is: a raw mode that
   // differs from the file's would be converted pixel by pixel through a lookup
-  // of each colour in the palette, and a palette with two entries of one colour
+  // of each color in the palette, and a palette with two entries of one color
   // — a run's palette RAM usually has many — would fold every pixel of the
-  // second onto the first. auto_convert is off so the depth is honoured.
+  // second onto the first. auto_convert is off so the depth is honored.
   lodepng::State state;
   state.info_raw.colortype = LCT_PALETTE;
   state.info_raw.bitdepth = image.bitDepth;

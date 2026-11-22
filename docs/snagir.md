@@ -1,18 +1,6 @@
 # The program file
 
-A `.snagir` file is one chip's whole program in the
-[intermediate representation](ir.md), written as text that stands alone: which
-image it is a program of, every region of source with its labels and the runs
-of bytes execution never reached, every node with its instruction and its
-effects, and, for the main CPU, the two hardware interrupt sequences. A tree
-carries two: `program.snagir`, the main CPU's program, and `apu.snagir`, the
-sound program the cartridge uploads to the audio unit, whose version record
-says `apu` and whose addresses are the audio unit's sixteen bits. `snes_disasm`
-writes both at the root of every tree, `snes_render` writes the tree's source
-files from them — the bank files from the first, the sound program's file from
-the second — `snes_lift` prints either back, `snes_differential` replays the
-cartridge's run beside the first, `tools/ir/ir_text.h` writes and reads one,
-and anything that reads tokens can read it.
+A `.snagir` file is one chip's whole program in the [intermediate representation](ir.md), written as text that stands alone: which image it is a program of, every region of source with its labels and the runs of bytes execution never reached, every node with its instruction and its effects, and, for the main CPU, the two hardware interrupt sequences. A tree carries two: `program.snagir`, the main CPU's program, and `apu.snagir`, the sound program the cartridge uploads to the audio unit, whose version record says `apu` and whose addresses are the audio unit's sixteen bits. `snes_disasm` writes both at the root of every tree, `snes_render` writes the tree's source files from them — the bank files from the first, the sound program's file from the second — `snes_lift` prints either back, `snes_differential` replays the cartridge's run beside the first, `tools/ir/ir_text.h` writes and reads one, and anything that reads tokens can read it.
 
 > **Status.** `renderProgram` writes the file and `parseProgram` reads it;
 > reading what was written gives the program back equivalent on every field
@@ -43,25 +31,11 @@ and anything that reads tokens can read it.
 
 ## 1. Form
 
-A program file is UTF-8 text made of words and three delimiters. Whitespace —
-spaces, tabs, line breaks — separates words and means nothing else: a file on
-one line and the same file spread over a thousand read to the same program.
-`{` opens a group and `}` closes it; `;` ends a record and ends an effect. A
-string is written between double quotes, with `\"` for a quote and `\\` for a
-backslash inside it, and is one word. `//` opens a comment that runs to the
-end of its line. The writer indents the groups two spaces per level for a
-reader's sake; a reader gives the indentation no meaning.
+A program file is UTF-8 text made of words and three delimiters. Whitespace — spaces, tabs, line breaks — separates words and means nothing else: a file on one line and the same file spread over a thousand read to the same program. `{` opens a group and `}` closes it; `;` ends a record and ends an effect. A string is written between double quotes, with `\"` for a quote and `\\` for a backslash inside it, and is one word. `//` opens a comment that runs to the end of its line. The writer indents the groups two spaces per level for a reader's sake; a reader gives the indentation no meaning.
 
-Every number is hexadecimal and begins with `$`, except three that are
-decimal: an instruction's `length`, the costs after `base`, and the byte count
-on the `image` record. An address is written `$BB:XXXX` in the main CPU's file,
-the bank then the offset within it, and `$XXXX` in the sound program's, whose
-space is the audio unit's sixteen bits. A value is written with as many digits
-as it needs and no leading zeros — `$0`, `$2C`, `$1234`, `$7E0200`.
+Every number is hexadecimal and begins with `$`, except three that are decimal: an instruction's `length`, the costs after `base`, and the byte count on the `image` record. An address is written `$BB:XXXX` in the main CPU's file, the bank then the offset within it, and `$XXXX` in the sound program's, whose space is the audio unit's sixteen bits. A value is written with as many digits as it needs and no leading zeros — `$0`, `$2C`, `$1234`, `$7E0200`.
 
-The records come in one order: the version, the image, then each region with
-what it holds in address order, then — in the main CPU's file — `nmi` and
-`irq`. The sound program's file ends with its last region.
+The records come in one order: the version, the image, then each region with what it holds in address order, then — in the main CPU's file — `nmi` and `irq`. The sound program's file ends with its last region.
 
 ## 2. Records
 
@@ -72,12 +46,7 @@ snagir 1;
 snagir 1 apu;
 ```
 
-The first record of every file. The main CPU's file writes the version alone;
-the sound program's writes `apu` after it, and everything that follows is in
-the sound CPU's terms — its addresses, its nodes (§2.6), and no interrupt
-sequence (§2.8). A reader that knows version 1 reads the rest; one given
-another number, or a word after the version it does not know, stops there
-(§4).
+The first record of every file. The main CPU's file writes the version alone; the sound program's writes `apu` after it, and everything that follows is in the sound CPU's terms — its addresses, its nodes (§2.6), and no interrupt sequence (§2.8). A reader that knows version 1 reads the rest; one given another number, or a word after the version it does not know, stops there (§4).
 
 ### 2.2 The image
 
@@ -85,10 +54,7 @@ another number, or a word after the version it does not know, stops there
 image <bytes> <map>;
 ```
 
-What the program is a program of: the image's size in bytes and its map —
-`LoROM`, `HiROM` or `ExHiROM` — as the
-[manifest](project-manifest.md#21-the-image) names them. Written once, after
-the version.
+What the program is a program of: the image's size in bytes and its map — `LoROM`, `HiROM` or `ExHiROM` — as the [manifest](project-manifest.md#21-the-image) names them. Written once, after the version.
 
 ### 2.3 Regions and warnings
 
@@ -99,22 +65,9 @@ region <file> <first>-<last> {
 }
 ```
 
-`region` opens a region of source: the file it is written to and the address
-range it covers, inclusive, within one bank — or, in the sound program's file,
-within the audio unit's space — and then its group. Every record inside the
-group belongs to it. Within a region the labels, data runs and nodes come in
-address order; at one address a label comes first, then a data run, then a
-node — and where two nodes share an address (§2.6) both follow the label. A
-region's records account for every byte of its range: each byte is in a node's
-instruction or in a data run. The sound program's regions are the runs of
-addresses the cartridge's upload wrote, two blocks that landed end to end
-being one run, all written to the sound program's file; the gaps between them
-are what the upload never wrote.
+`region` opens a region of source: the file it is written to and the address range it covers, inclusive, within one bank — or, in the sound program's file, within the audio unit's space — and then its group. Every record inside the group belongs to it. Within a region the labels, data runs and nodes come in address order; at one address a label comes first, then a data run, then a node — and where two nodes share an address (§2.6) both follow the label. A region's records account for every byte of its range: each byte is in a node's instruction or in a data run. The sound program's regions are the runs of addresses the cartridge's upload wrote, two blocks that landed end to end being one run, all written to the sound program's file; the gaps between them are what the upload never wrote.
 
-A `warning` comes first in its region's group and carries what the trace could
-not settle there, as the manifest's [`warning`](project-manifest.md#25-stops-warnings-and-notes)
-line does, its text as a string. A region has as many as the trace gave it,
-and most have none.
+A `warning` comes first in its region's group and carries what the trace could not settle there, as the manifest's [`warning`](project-manifest.md#25-stops-warnings-and-notes) line does, its text as a string. A region has as many as the trace gave it, and most have none.
 
 ### 2.4 Labels
 
@@ -122,9 +75,7 @@ and most have none.
 label <address> <name>;
 ```
 
-A label the trace gave an address in the region: the address, then the name a
-branch, jump or call to it is written with. Every label is at the address of a
-node.
+A label the trace gave an address in the region: the address, then the name a branch, jump or call to it is written with. Every label is at the address of a node.
 
 ### 2.5 Data
 
@@ -132,15 +83,11 @@ node.
 data <address> <bytes>;
 ```
 
-A run of bytes execution never reached: its first address, then every byte of
-the run as two hexadecimal digits, with nothing between them, as one word. A
-run is as long as the trace left it — a table, a graphic, a whole bank — so
-the word may be long.
+A run of bytes execution never reached: its first address, then every byte of the run as two hexadecimal digits, with nothing between them, as one word. A run is as long as the trace left it — a table, a graphic, a whole bank — so the word may be long.
 
 ### 2.6 Nodes
 
-A node is one instruction at one address under one mode: its header, then its
-effects (§2.7) in a group.
+A node is one instruction at one address under one mode: its header, then its effects (§2.7) in a group.
 
 ```
 <address> <mnemonic> [<addressing>] operand <value> [operand2 <value>] length <n> flow <flow> [target <address>] <mode> base <a>/<b>/<c>/<d> [<register>] [patched] {
@@ -152,39 +99,16 @@ effects (§2.7) in a group.
 The fields, in order:
 
 - `<address>` — where the instruction is.
-- `<mnemonic> [<addressing>]` — the instruction as source names it, and how its
-  operand is laid out, as `ir.md` writes the addressing modes: nothing for an
-  implied form, `A`, `#imm(M)`, `#imm(X)`, `#byte`, `dp`, `dp,X`, `dp,Y`,
-  `(dp)`, `(dp,X)`, `(dp),Y`, `[dp]`, `[dp],Y`, `sr,S`, `(sr,S),Y`, `abs`,
-  `abs,X`, `abs,Y`, `long`, `long,X`, `(abs)`, `[abs]`, `(abs,X)`, `rel`,
-  `rel16`, `src,dst`, `#abs`. The two forms that write `rel16` are told apart
-  by the mnemonic, as every pair is: the mnemonic and the addressing together
-  name one opcode.
-- `operand <value>` — the operand's value as the dialect writes it: an
-  immediate, a direct-page offset, an absolute or long address, the target
-  address of a relative form, the value `PEA` pushes, the address `PER` names,
-  or a block move's source bank. `operand2 <value>` follows for a block move
-  alone, and is its destination bank.
+- `<mnemonic> [<addressing>]` — the instruction as source names it, and how its operand is laid out, as `ir.md` writes the addressing modes: nothing for an implied form, `A`, `#imm(M)`, `#imm(X)`, `#byte`, `dp`, `dp,X`, `dp,Y`, `(dp)`, `(dp,X)`, `(dp),Y`, `[dp]`, `[dp],Y`, `sr,S`, `(sr,S),Y`, `abs`, `abs,X`, `abs,Y`, `long`, `long,X`, `(abs)`, `[abs]`, `(abs,X)`, `rel`, `rel16`, `src,dst`, `#abs`. The two forms that write `rel16` are told apart by the mnemonic, as every pair is: the mnemonic and the addressing together name one opcode.
+- `operand <value>` — the operand's value as the dialect writes it: an immediate, a direct-page offset, an absolute or long address, the target address of a relative form, the value `PEA` pushes, the address `PER` names, or a block move's source bank. `operand2 <value>` follows for a block move alone, and is its destination bank.
 - `length <n>` — the instruction's bytes, in decimal.
-- `flow <flow>` — how execution leaves it: `continue`, `branch`, `jump`,
-  `call`, `return` or `halt`. `target <address>` follows where the instruction
-  names a constant successor — a branch, a jump or a call to an address the
-  bytes give.
-- `<mode>` — the mode the instruction reads under: `e=1`, or `e=0 m=<w> x=<w>`
-  with each width `8`, `16`, or `?` where the trace did not know it and the
-  node selects by the live flag.
-- `base <a>/<b>/<c>/<d>` — the measured cost under each setting of the widths,
-  in `costIndex` order: both eight, index sixteen, accumulator sixteen, both
-  sixteen. Decimal.
-- `<register>` — the hardware register a long operand names, when it names
-  one, by the name the [65816 disassembler](65816-disassembler.md#hardware-registers)
-  gives that address. Absent otherwise.
-- `patched` — present on a node lifted from bytes that differ from the image
-  the code started as.
+- `flow <flow>` — how execution leaves it: `continue`, `branch`, `jump`, `call`, `return` or `halt`. `target <address>` follows where the instruction names a constant successor — a branch, a jump or a call to an address the bytes give.
+- `<mode>` — the mode the instruction reads under: `e=1`, or `e=0 m=<w> x=<w>` with each width `8`, `16`, or `?` where the trace did not know it and the node selects by the live flag.
+- `base <a>/<b>/<c>/<d>` — the measured cost under each setting of the widths, in `costIndex` order: both eight, index sixteen, accumulator sixteen, both sixteen. Decimal.
+- `<register>` — the hardware register a long operand names, when it names one, by the name the [65816 disassembler](65816-disassembler.md#hardware-registers) gives that address. Absent otherwise.
+- `patched` — present on a node lifted from bytes that differ from the image the code started as.
 
-An address two paths read two ways is two nodes, each with its own mode, the
-first reading first — the one the listing carries, which is the one a bank
-file is written from.
+An address two paths read two ways is two nodes, each with its own mode, the first reading first — the one the listing carries, which is the one a bank file is written from.
 
 **A sound-CPU node** has the same header with one field fewer and one cost:
 
@@ -195,66 +119,27 @@ file is written from.
 }
 ```
 
-- `<mnemonic> [<form>]` — the instruction as the [SPC700 disassembler](spc700-disassembler.md#library)
-  names it: the mnemonic, then its operand form, which is the table's text
-  after the mnemonic with each operand slot replaced by the word for its kind —
-  `#imm`, `dp`, `abs`, `rel`, `abs.bit`, `upage`, and `dp.n` for one bit of a
-  direct-page byte. So `MOV A,[$12+X]` is `MOV` with `A,[dp+X]`, `BBS $12.3,$0316`
-  is `BBS` with `dp.3,rel`, `OR $34,$12` is `OR` with `dp,dp`, `MOV $34,#$12` is
-  `MOV` with `dp,#imm`, `OR1 C,/!$1234.7` is `OR1` with `C,/abs.bit`,
-  `PCALL $12` is `PCALL` with `upage`, `TCALL 0` is `TCALL` with `0`, `PUSH PSW`
-  is `PUSH` with `PSW`, and `RET` and `NOP` have no form. The pair names one
-  opcode.
-- `operand <value>` — the first operand byte's value as the dialect writes it
-  — an immediate, a direct-page offset, an absolute address, the offset a
-  `PCALL` names — or, for a relative form (`rel`), the target address.
-  `operand2 <value>` follows for the forms with two operand bytes, and is the
-  bit index of an `abs.bit` form, the destination offset of a `dp,dp` form,
-  or the destination offset of a `dp,#imm` form, whose immediate is `operand`.
-- `length`, `flow` and `target` — as any node's. A `dp,rel` form carries its
-  direct-page offset in `operand` and its destination in `target`.
+- `<mnemonic> [<form>]` — the instruction as the [SPC700 disassembler](spc700-disassembler.md#library) names it: the mnemonic, then its operand form, which is the table's text after the mnemonic with each operand slot replaced by the word for its kind — `#imm`, `dp`, `abs`, `rel`, `abs.bit`, `upage`, and `dp.n` for one bit of a direct-page byte. So `MOV A,[$12+X]` is `MOV` with `A,[dp+X]`, `BBS $12.3,$0316` is `BBS` with `dp.3,rel`, `OR $34,$12` is `OR` with `dp,dp`, `MOV $34,#$12` is `MOV` with `dp,#imm`, `OR1 C,/!$1234.7` is `OR1` with `C,/abs.bit`, `PCALL $12` is `PCALL` with `upage`, `TCALL 0` is `TCALL` with `0`, `PUSH PSW` is `PUSH` with `PSW`, and `RET` and `NOP` have no form. The pair names one opcode.
+- `operand <value>` — the first operand byte's value as the dialect writes it — an immediate, a direct-page offset, an absolute address, the offset a `PCALL` names — or, for a relative form (`rel`), the target address. `operand2 <value>` follows for the forms with two operand bytes, and is the bit index of an `abs.bit` form, the destination offset of a `dp,dp` form, or the destination offset of a `dp,#imm` form, whose immediate is `operand`.
+- `length`, `flow` and `target` — as any node's. A `dp,rel` form carries its direct-page offset in `operand` and its destination in `target`.
 - No mode: the sound CPU's instructions always read the same way.
-- `base <n>` — the one measured cost, in decimal. A conditional branch's
-  taken cost is the `Cycles` effect under its condition, as on the main CPU.
-- `<register>` — the audio unit's register the operand's address names, when it
-  names one of the sixteen at `$00F0`–`$00FF`, by the name the
-  [SPC700 disassembler](spc700-disassembler.md#hardware-registers) gives it:
-  the address of a `dp`, `abs`, `abs.bit` or `dp,rel` form, the destination of
-  a `dp,dp` or `dp,#imm` form. Absent otherwise.
+- `base <n>` — the one measured cost, in decimal. A conditional branch's taken cost is the `Cycles` effect under its condition, as on the main CPU.
+- `<register>` — the audio unit's register the operand's address names, when it names one of the sixteen at `$00F0`–`$00FF`, by the name the [SPC700 disassembler](spc700-disassembler.md#hardware-registers) gives it: the address of a `dp`, `abs`, `abs.bit` or `dp,rel` form, the destination of a `dp,dp` or `dp,#imm` form. Absent otherwise.
 - `patched` — as any node's.
 
 ### 2.7 Effects
 
-Each effect is one record inside its node's group, or inside an interrupt
-sequence's:
+Each effect is one record inside its node's group, or inside an interrupt sequence's:
 
 ```
 <op> [<dst> <-] [<a>[, <b>]] [<width>[ <step>[ <access>]][ pinned|unpinned]] [<condition>];
 ```
 
-`<op>` is the operation's name — `Set`, `SetNZ`, `Load`, `Store`, `Adc`,
-`WriteP`, `PageAddress`, `Div`, `Fetch`, `Idle`, every name in
-[ir.md §Operations](ir.md#operations). `<dst> <-` follows where the operation
-has a destination; `<a>` and `<b>` are the operands it has, the first followed
-by a comma when there are two. A place is written by name — `A`, `X`, `Y`,
-`S`, `D`, `PC`, `PBR`, `DBR`, `P`, `E`, `T0` to `T3`, and the sound CPU's pair
-`YA` — and a flag as `P.` and its letter: `P.N`, `P.V`, `P.M`, `P.X`, `P.D`,
-`P.I`, `P.Z`, `P.C`, and the sound CPU's `P.P`, `P.B`, `P.H`. The register `X`
-and the flag `P.X`, the register `D` and the flag `P.D`, the register `P` and
-the flag `P.P`, are two words each. A constant is a value, `$20`.
+`<op>` is the operation's name — `Set`, `SetNZ`, `Load`, `Store`, `Adc`, `WriteP`, `PageAddress`, `Div`, `Fetch`, `Idle`, every name in [ir.md §Operations](ir.md#operations). `<dst> <-` follows where the operation has a destination; `<a>` and `<b>` are the operands it has, the first followed by a comma when there are two. A place is written by name — `A`, `X`, `Y`, `S`, `D`, `PC`, `PBR`, `DBR`, `P`, `E`, `T0` to `T3`, and the sound CPU's pair `YA` — and a flag as `P.` and its letter: `P.N`, `P.V`, `P.M`, `P.X`, `P.D`, `P.I`, `P.Z`, `P.C`, and the sound CPU's `P.P`, `P.B`, `P.H`. The register `X` and the flag `P.X`, the register `D` and the flag `P.D`, the register `P` and the flag `P.P`, are two words each. A constant is a value, `$20`.
 
-The bracket carries the width — `8`, `16`, `24`, `byM` or `byX` — and, for a
-`Load`, `Store` or `StoreRmw`, the step the access's later bytes take (`flat`,
-`bank0`, `bank`, `direct`, `pointer`, `page`) and, where the access is not
-plain data, its kind (`rmw`, `rmw-unmodified`, `vector`); for a `Push` or
-`Pull`, `pinned` or `unpinned`. No other operation carries a step, a kind or a
-pin.
+The bracket carries the width — `8`, `16`, `24`, `byM` or `byX` — and, for a `Load`, `Store` or `StoreRmw`, the step the access's later bytes take (`flat`, `bank0`, `bank`, `direct`, `pointer`, `page`) and, where the access is not plain data, its kind (`rmw`, `rmw-unmodified`, `vector`); for a `Push` or `Pull`, `pinned` or `unpinned`. No other operation carries a step, a kind or a pin.
 
-A condition, where the effect has one, follows the bracket: `if e`, `if !e`,
-`if set <flag>`, `if clear <flag>`, `if is <place> <value>`,
-`if is not <place> <value>`, `if D.lo`, `if crossed`, any of them followed by
-`and e` where the emulation flag must be set as well. An effect with no
-condition always runs. The semicolon ends the effect.
+A condition, where the effect has one, follows the bracket: `if e`, `if !e`, `if set <flag>`, `if clear <flag>`, `if is <place> <value>`, `if is not <place> <value>`, `if D.lo`, `if crossed`, any of them followed by `and e` where the emulation flag must be set as well. An effect with no condition always runs. The semicolon ends the effect.
 
 ```
 Set PC <- $8007 [16];
@@ -282,18 +167,11 @@ irq {
 }
 ```
 
-After the last region of the main CPU's file, once each: the effects of a
-non-maskable interrupt and of a maskable one, taken between two instructions,
-exactly as [ir.md §The rules](ir.md#the-rules) gives them. They are the chip's
-rather than the program's, and every main-CPU file carries them. The sound CPU
-takes no hardware interrupt, so the sound program's file carries neither and
-ends with its last region's `}`.
+After the last region of the main CPU's file, once each: the effects of a non-maskable interrupt and of a maskable one, taken between two instructions, exactly as [ir.md §The rules](ir.md#the-rules) gives them. They are the chip's rather than the program's, and every main-CPU file carries them. The sound CPU takes no hardware interrupt, so the sound program's file carries neither and ends with its last region's `}`.
 
 ## 3. An example
 
-The `mixed` cartridge from [`tools/examples/`](../tools/examples/README.md),
-disassembled with `snes_disasm mixed.smc -o mixed --no-run --no-sound`, has
-this as the start of `mixed/program.snagir`:
+The `mixed` cartridge from [`tools/examples/`](../tools/examples/README.md), disassembled with `snes_disasm mixed.smc -o mixed --no-run --no-sound`, has this as the start of `mixed/program.snagir`:
 
 ```
 snagir 1;
@@ -339,14 +217,7 @@ region bank_00.asm $00:8000-$00:FFFF {
   }
 ```
 
-Every node opens with a `Fetch` of its own bytes; an implied instruction such as
-`CLC` or `XCE` ends with the `Idle` of its internal cycle. One bank, the reset
-handler's label before its first node, and no data before the first instruction.
-The file goes on through every node of the region — the block move at `$00:804B`
-with both its banks, the four labels the trace gave the loop, the routine and the
-two interrupt handlers — with a `data` record for each run of bytes between them,
-closes the region, and ends with the two interrupt sequences, each opening with
-the one `Fetch` of the interrupted opcode:
+Every node opens with a `Fetch` of its own bytes; an implied instruction such as `CLC` or `XCE` ends with the `Idle` of its internal cycle. One bank, the reset handler's label before its first node, and no data before the first instruction. The file goes on through every node of the region — the block move at `$00:804B` with both its banks, the four labels the trace gave the loop, the routine and the two interrupt handlers — with a `data` record for each run of bytes between them, closes the region, and ends with the two interrupt sequences, each opening with the one `Fetch` of the interrupted opcode:
 
 ```
   Set PBR <- $0 [8];
@@ -355,9 +226,7 @@ the one `Fetch` of the interrupted opcode:
 }
 ```
 
-The `uploading` cartridge, whose reset code sends a program to the audio unit,
-disassembled with `snes_disasm uploading.smc -o uploading --no-run`, has this
-as `uploading/apu.snagir`:
+The `uploading` cartridge, whose reset code sends a program to the audio unit, disassembled with `snes_disasm uploading.smc -o uploading --no-run`, has this as `uploading/apu.snagir`:
 
 ```
 snagir 1 apu;
@@ -389,40 +258,21 @@ region apu/driver.asm $0200-$022B {
   }
 ```
 
-The two blocks the boot sent landed end to end, so the file has one region;
-the entry's label heads it, each node opens with the `Fetch` of its own bytes,
-the store reads its destination before writing it as the chip does, and `NOP`
-reads the byte after itself and throws it away.
-The file goes on through the sixteen `NOP`s and the `STOP`, then the table the
-trace never reached as one `data` record, and ends with the region's `}`.
+The two blocks the boot sent landed end to end, so the file has one region; the entry's label heads it, each node opens with the `Fetch` of its own bytes, the store reads its destination before writing it as the chip does, and `NOP` reads the byte after itself and throws it away. The file goes on through the sixteen `NOP`s and the `STOP`, then the table the trace never reached as one `data` record, and ends with the region's `}`.
 
 ## 4. Refusals
 
-A file is read whole before anything is made of it, and a record that cannot
-be read refuses the whole file, naming the line the offending word is on:
+A file is read whole before anything is made of it, and a record that cannot be read refuses the whole file, naming the line the offending word is on:
 
-- a file that does not open with `snagir 1;`, a version this reader does not
-  know, or a word after the version that is not `apu`;
-- a record whose first word this page does not name, or a word where a
-  delimiter belongs and a delimiter where a word belongs;
-- a record with a field missing, a field it does not have, a number that is
-  not one, or a name that is not a mnemonic, an addressing mode, a place, a
-  width, a step, an access kind, a flow or a condition;
-- a mnemonic and an addressing mode that name no opcode together, or a
-  register name that is not the name of the register at the operand's address;
-- an effect without its `;`, or a step, an access kind or a pin on an operation
-  that does not carry one;
+- a file that does not open with `snagir 1;`, a version this reader does not know, or a word after the version that is not `apu`;
+- a record whose first word this page does not name, or a word where a delimiter belongs and a delimiter where a word belongs;
+- a record with a field missing, a field it does not have, a number that is not one, or a name that is not a mnemonic, an addressing mode, a place, a width, a step, an access kind, a flow or a condition;
+- a mnemonic and an addressing mode that name no opcode together, or a register name that is not the name of the register at the operand's address;
+- an effect without its `;`, or a step, an access kind or a pin on an operation that does not carry one;
 - a string that does not close on its line;
-- a label, a data run or a node outside a region's group, a warning after a
-  region's first label, data run or node, or a record after the `irq` sequence;
-- an `nmi` or `irq` missing, or a region, an `image` or an `nmi` inside a
-  region;
-- in the sound program's file: an address written `$BB:XXXX`, a mnemonic that
-  is not the sound CPU's, a mnemonic and a form that name no opcode together, a
-  mode on a node, four costs, an `operand2` on a form with one operand byte or
-  none on a form with two, or an `nmi`, an `irq` or any record after the last
-  region — and, in the main CPU's file, an address written `$XXXX` or a
-  mnemonic that is the sound CPU's alone.
+- a label, a data run or a node outside a region's group, a warning after a region's first label, data run or node, or a record after the `irq` sequence;
+- an `nmi` or `irq` missing, or a region, an `image` or an `nmi` inside a region;
+- in the sound program's file: an address written `$BB:XXXX`, a mnemonic that is not the sound CPU's, a mnemonic and a form that name no opcode together, a mode on a node, four costs, an `operand2` on a form with one operand byte or none on a form with two, or an `nmi`, an `irq` or any record after the last region — and, in the main CPU's file, an address written `$XXXX` or a mnemonic that is the sound CPU's alone.
 
 ```
 line 12: `Sett` is not an operation
@@ -450,62 +300,17 @@ parsed->file == file;                                    // true
 renderProgram(parsed->program, parsed->file) == text;    // true
 ```
 
-`renderProgram` takes the `Program` — its nodes in address order, its `nmi`
-and `irq`, and its `spc700` nodes — and a `ProgramFile`, which carries what
-the program does not: the `processor` the file is written for, the image
-record, and each `ProgramRegion` with its file, its range, its warnings, its
-labels and its data runs, the labels and runs in address order. With the
-processor at its default, the main CPU, it writes the program's `nodes` under
-the regions and the interrupt sequences after; with `Processor::Spc700` it
-writes `snagir 1 apu;`, the `spc700` nodes under the regions at sixteen bits,
-and no sequence. It writes the file as this page describes it and throws
-`std::invalid_argument` for a node no region's range holds, or a sound-CPU
-node whose mnemonic and form name no opcode. `parseProgram` reads text into a
-`Parsed` — the `Program` and the `ProgramFile` back, the nodes in address
-order whatever order the regions came in, the sound program's in `spc700`
-with `nodes` empty — or returns nothing with `error` naming the line; the
-mnemonics, forms and register names in the nodes it returns are the
-instruction tables' and the register tables' own. `renderNode` writes one
-node as it stands inside a region's group, a sound-CPU node's under
-`Processor::Spc700`, and `renderEffect` one effect with its semicolon; both
-are what `renderProgram` calls. `selectFile(parsed, file)` cuts a `Parsed` to
-the regions written to one source file — those regions, the nodes whose
-addresses they hold, and the image line and the interrupt sequences as they
-were — or returns nothing when no region is written to it;
-`countProgram(parsed)` is a `ProgramCounts` over the file's own chip's nodes:
-the regions, the code lines (one per address a node stands at), the nodes, the
-nodes that select a width by the live flag (none in a sound program), the
-nodes naming a hardware register, the nodes lifted from patched bytes, and
-the effects — the summary `snes_lift` prints.
+`renderProgram` takes the `Program` — its nodes in address order, its `nmi` and `irq`, and its `spc700` nodes — and a `ProgramFile`, which carries what the program does not: the `processor` the file is written for, the image record, and each `ProgramRegion` with its file, its range, its warnings, its labels and its data runs, the labels and runs in address order. With the processor at its default, the main CPU, it writes the program's `nodes` under the regions and the interrupt sequences after; with `Processor::Spc700` it writes `snagir 1 apu;`, the `spc700` nodes under the regions at sixteen bits, and no sequence. It writes the file as this page describes it and throws `std::invalid_argument` for a node no region's range holds, or a sound-CPU node whose mnemonic and form name no opcode. `parseProgram` reads text into a `Parsed` — the `Program` and the `ProgramFile` back, the nodes in address order whatever order the regions came in, the sound program's in `spc700` with `nodes` empty — or returns nothing with `error` naming the line; the mnemonics, forms and register names in the nodes it returns are the instruction tables' and the register tables' own. `renderNode` writes one node as it stands inside a region's group, a sound-CPU node's under `Processor::Spc700`, and `renderEffect` one effect with its semicolon; both are what `renderProgram` calls. `selectFile(parsed, file)` cuts a `Parsed` to the regions written to one source file — those regions, the nodes whose addresses they hold, and the image line and the interrupt sequences as they were — or returns nothing when no region is written to it; `countProgram(parsed)` is a `ProgramCounts` over the file's own chip's nodes: the regions, the code lines (one per address a node stands at), the nodes, the nodes that select a width by the live flag (none in a sound program), the nodes naming a hardware register, the nodes lifted from patched bytes, and the effects — the summary `snes_lift` prints.
 
-Every type in `ir/ir.h` compares with `==`, and `equivalent` compares two
-programs as the files carry them: every field of both node lists, except the
-bit behind a width the mode does not know. The file writes `?` for that
-width, the node selects by the live flag, and no reader of the mode looks at
-the bit, so a program read back is equivalent to the one written and the file
-carries nothing that has no meaning. The library target is `snaggletooth_ir`.
+Every type in `ir/ir.h` compares with `==`, and `equivalent` compares two programs as the files carry them: every field of both node lists, except the bit behind a width the mode does not know. The file writes `?` for that width, the node selects by the live flag, and no reader of the mode looks at the bit, so a program read back is equivalent to the one written and the file carries nothing that has no meaning. The library target is `snaggletooth_ir`.
 
 ## 6. Stability
 
-This document defines a published surface, held to the same rule as the
-[assembly language](assembly-lexicon.md#8-stability): once a release writes a
-file, a later release reads it to the same program. The fields of the records
-above do not change, and a name — an operation, a place, a width, a step, an
-access kind, a condition, a flow — is never renamed or given a different
-meaning. A new record, a new field at the end of a record, or a new name may
-be added, and is added to this page before a release writes it; a reader
-treats a record it does not know as an error, never as one to pass over. The
-version number rises only if a record's written form has to change, and a
-reader given a number it does not know stops.
+This document defines a published surface, held to the same rule as the [assembly language](assembly-lexicon.md#8-stability): once a release writes a file, a later release reads it to the same program. The fields of the records above do not change, and a name — an operation, a place, a width, a step, an access kind, a condition, a flow — is never renamed or given a different meaning. A new record, a new field at the end of a record, or a new name may be added, and is added to this page before a release writes it; a reader treats a record it does not know as an error, never as one to pass over. The version number rises only if a record's written form has to change, and a reader given a number it does not know stops.
 
 ## See also
 
-- [The intermediate representation](ir.md) — what a node and an effect mean,
-  every rule the effects follow, and the vocabulary the names here are.
-- [Cartridge disassembler](snes-disassembler.md) — the tree whose programs the
-  two files are, and `snes_render`, which writes the tree from them.
-- [SPC700 disassembler](spc700-disassembler.md) — the mnemonic and form that
-  name a sound-CPU node's opcode, and the registers its operand can name.
-- [Project manifest](project-manifest.md) — the other file at the root of a
-  tree: the facts the trace and the run attach to the programs, the sound
-  program's entry and blocks among them.
+- [The intermediate representation](ir.md) — what a node and an effect mean, every rule the effects follow, and the vocabulary the names here are.
+- [Cartridge disassembler](snes-disassembler.md) — the tree whose programs the two files are, and `snes_render`, which writes the tree from them.
+- [SPC700 disassembler](spc700-disassembler.md) — the mnemonic and form that name a sound-CPU node's opcode, and the registers its operand can name.
+- [Project manifest](project-manifest.md) — the other file at the root of a tree: the facts the trace and the run attach to the programs, the sound program's entry and blocks among them.

@@ -1,15 +1,8 @@
 # The asset codecs
 
-`snaggletooth_formats` turns the bytes a cartridge feeds the hardware — planar
-tiles, 15-bit palettes, packed map and sprite entries, HDMA programs — into
-editable files and back, each exact both ways. The forms are defined in
-[docs/asset-formats.md](../../docs/asset-formats.md): a tile sheet as an indexed
-PNG, and palettes, tilemaps, OAM and HDMA tables as text.
+`snaggletooth_formats` turns the bytes a cartridge feeds the hardware — planar tiles, 15-bit palettes, packed map and sprite entries, HDMA programs — into editable files and back, each exact both ways. The forms are defined in [docs/asset-formats.md](../../docs/asset-formats.md): a tile sheet as an indexed PNG, and palettes, tilemaps, OAM and HDMA tables as text.
 
-Each codec encodes SNES bytes to its form and decodes the form back to the same
-bytes, so a form is a source an assembly can include in place of a raw `.bin`.
-Two encoders go one way only — the Mode 7 previews, and the WAV of a BRR sample
-— and are views, never sources.
+Each codec encodes SNES bytes to its form and decodes the form back to the same bytes, so a form is a source an assembly can include in place of a raw `.bin`. Two encoders go one way only — the Mode 7 previews, and the WAV of a BRR sample — and are views, never sources.
 
 ## Contents
 
@@ -46,20 +39,10 @@ const snaggletooth::formats::Bytes png =
 if (!png.ok()) { /* png.error names what was wrong */ }
 ```
 
-The library target is `snaggletooth_formats`; `tools/` is on its public include
-path. PNG encoding and decoding is [lodepng](../../third_party/lodepng/README.md),
-built as `snaggletooth_lodepng` and linked privately so no lodepng symbol reaches
-a header here; the BRR decoder is the machine's own, and the WAV writer is
-[`../spc/`](../spc/README.md)'s, both linked privately too. The library has no
-command line of its own: the cartridge disassembler writes a lifted file and a
-sample's WAV through it, and `snes_verify` and the two command-line assemblers
-read an included asset back through `encodingReader`.
+The library target is `snaggletooth_formats`; `tools/` is on its public include path. PNG encoding and decoding is [lodepng](../../third_party/lodepng/README.md), built as `snaggletooth_lodepng` and linked privately so no lodepng symbol reaches a header here; the BRR decoder is the machine's own, and the WAV writer is [`../spc/`](../spc/README.md)'s, both linked privately too. The library has no command line of its own: the cartridge disassembler writes a lifted file and a sample's WAV through it, and `snes_verify` and the two command-line assemblers read an included asset back through `encodingReader`.
 
 ## See also
 
-- [docs/asset-formats.md](../../docs/asset-formats.md) — the full page: every
-  grammar, worked examples, and the encoding reader.
-- [`../assembler/`](../assembler/README.md) — the assembler whose `Reader` the
-  encoding reader wraps.
-- [`../rom/`](../rom/README.md) — the disassembler that writes the forms and the
-  verifier that reads them back.
+- [docs/asset-formats.md](../../docs/asset-formats.md) — the full page: every grammar, worked examples, and the encoding reader.
+- [`../assembler/`](../assembler/README.md) — the assembler whose `Reader` the encoding reader wraps.
+- [`../rom/`](../rom/README.md) — the disassembler that writes the forms and the verifier that reads them back.

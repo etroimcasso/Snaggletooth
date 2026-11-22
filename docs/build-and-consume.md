@@ -1,7 +1,6 @@
 # Build & consume
 
-How to build Snaggletooth, what targets it exposes, and how a program of your own links the
-library and drives a machine.
+How to build Snaggletooth, what targets it exposes, and how a program of your own links the library and drives a machine.
 
 ## Contents
 
@@ -23,23 +22,13 @@ library and drives a machine.
 ## Requirements
 
 - CMake 3.24 or later
-- A C++20 compiler. The suite runs on every push on GCC (Linux x64 and ARM64), Apple Clang
-  (macOS ARM64) and MSVC from Visual Studio 2022 (Windows x64 and ARM64), each with warnings as
-  errors on the project's own targets.
-- Git. SDL3 is a submodule, needed by the player alone; clone with `--recurse-submodules` when
-  you want the player, and plainly when you do not.
-- The shader tools for the GPU PPU, which the library compiles into itself at build time
-  ([gpu-ppu.md §Compiling the shader](gpu-ppu.md#compiling-the-shader)): glslang on Linux
-  (`apt install glslang-tools`); glslang, spirv-cross (`brew install glslang spirv-cross`) and
-  the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) on macOS; dxc from the
-  Windows SDK on Windows. The configure stops and names the one it cannot find;
-  `-DSNAGGLETOOTH_GPU_PPU=OFF` builds without the shader, and a machine given a GPU device then
-  throws.
+- A C++20 compiler. The suite runs on every push on GCC (Linux x64 and ARM64), Apple Clang (macOS ARM64) and MSVC from Visual Studio 2022 (Windows x64 and ARM64), each with warnings as errors on the project's own targets.
+- Git. SDL3 is a submodule, needed by the player alone; clone with `--recurse-submodules` when you want the player, and plainly when you do not.
+- The shader tools for the GPU PPU, which the library compiles into itself at build time ([gpu-ppu.md §Compiling the shader](gpu-ppu.md#compiling-the-shader)): glslang on Linux (`apt install glslang-tools`); glslang, spirv-cross (`brew install glslang spirv-cross`) and the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) on macOS; dxc from the Windows SDK on Windows. The configure stops and names the one it cannot find; `-DSNAGGLETOOTH_GPU_PPU=OFF` builds without the shader, and a machine given a GPU device then throws.
 
 ### Building a Release build
 
-These three commands build `Release` on every platform, with every generator — Linux, macOS
-and Windows alike:
+These three commands build `Release` on every platform, with every generator — Linux, macOS and Windows alike:
 
 ```sh
 git clone --recurse-submodules <repo-url>
@@ -49,24 +38,14 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Keep all three flags. Which one takes effect depends on the generator, and the other is
-ignored:
+Keep all three flags. Which one takes effect depends on the generator, and the other is ignored:
 
-- **Makefiles** (the default on Linux and macOS) **and Ninja** build one type per build
-  directory, chosen at configure time by `-DCMAKE_BUILD_TYPE=Release`. The binaries land in
-  `build/`.
-- **Visual Studio** — the default on Windows — builds whichever type `cmake --build` is given,
-  chosen by `--config Release`, and `ctest` runs the one named by `-C Release`. **Leave
-  `--config` out and it builds `Debug`**, whatever the configure step said. The binaries land
-  in `build\Release\`; a player in `build\Debug\` is the Debug build. In the Visual Studio IDE,
-  set the configuration drop-down to `Release` before building.
+- **Makefiles** (the default on Linux and macOS) **and Ninja** build one type per build directory, chosen at configure time by `-DCMAKE_BUILD_TYPE=Release`. The binaries land in `build/`.
+- **Visual Studio** — the default on Windows — builds whichever type `cmake --build` is given, chosen by `--config Release`, and `ctest` runs the one named by `-C Release`. **Leave `--config` out and it builds `Debug`**, whatever the configure step said. The binaries land in `build\Release\`; a player in `build\Debug\` is the Debug build. In the Visual Studio IDE, set the configuration drop-down to `Release` before building.
 
-A Debug build is unoptimized, with the compiler's runtime checks on. It runs the machine
-several times slower, and the player falls well short of the console's rate even on a fast
-desktop processor. A player built that way says so when it starts.
+A Debug build is unoptimized, with the compiler's runtime checks on. It runs the machine several times slower, and the player falls well short of the console's rate even on a fast desktop processor. A player built that way says so when it starts.
 
-A build directory keeps the generator it was first configured with. To change generators,
-configure a new directory rather than reusing the old one.
+A build directory keeps the generator it was first configured with. To change generators, configure a new directory rather than reusing the old one.
 
 ## Targets
 
@@ -80,26 +59,15 @@ configure a new directory rather than reusing the old one.
 | `snaggletooth_tests` | — | The suite, one GoogleTest binary registered with `ctest`. |
 | `snaggletooth_gpu_tests` | — | The GPU PPU's cases, a second GoogleTest binary registered with `ctest`, built wherever the player is; on a machine with no GPU device every case skips with a visible reason. Links SDL. |
 
-The library ships as source. Everything public is in the `snaggletooth` namespace under
-[`include/snaggletooth/`](../include/snaggletooth): the console in `snes/`, the audio unit in
-`apu/`, the main CPU core in `cpu/`, and `version.h`. Nothing under `src/` or `tools/` is a public
-header.
+The library ships as source. Everything public is in the `snaggletooth` namespace under [`include/snaggletooth/`](../include/snaggletooth): the console in `snes/`, the audio unit in `apu/`, the main CPU core in `cpu/`, and `version.h`. Nothing under `src/` or `tools/` is a public header.
 
 ## Build modes
 
 One source tree supports three configurations:
 
-1. **Standalone.** Configure the repository as the top-level project, as above. This builds the
-   library, the tool libraries and command-line tools, the player when SDL is present, and the
-   suite. It is the configuration the suite runs in on every push.
-2. **As a subproject.** A program of your own adds the repository with `add_subdirectory` and
-   links `snaggletooth::snaggletooth`. The suite, the tools and the player are off in this
-   configuration, so a parent's `ctest` shows only the parent's tests, no GoogleTest is fetched,
-   and SDL is not configured. The parent's warning settings are its own: warnings-as-errors is
-   set on Snaggletooth's targets only.
-3. **As a subproject, with the tools.** The subproject above with `SNAGGLETOOTH_BUILD_TOOLS` on:
-   the parent links a tool library — the cartridge disassembler, the assemblers, the codecs —
-   without the suite. The player follows only when `SNAGGLETOOTH_BUILD_PLAYER` is on as well.
+1. **Standalone.** Configure the repository as the top-level project, as above. This builds the library, the tool libraries and command-line tools, the player when SDL is present, and the suite. It is the configuration the suite runs in on every push.
+2. **As a subproject.** A program of your own adds the repository with `add_subdirectory` and links `snaggletooth::snaggletooth`. The suite, the tools and the player are off in this configuration, so a parent's `ctest` shows only the parent's tests, no GoogleTest is fetched, and SDL is not configured. The parent's warning settings are its own: warnings-as-errors is set on Snaggletooth's targets only.
+3. **As a subproject, with the tools.** The subproject above with `SNAGGLETOOTH_BUILD_TOOLS` on: the parent links a tool library — the cartridge disassembler, the assemblers, the codecs — without the suite. The player follows only when `SNAGGLETOOTH_BUILD_PLAYER` is on as well.
 
 ### Build options
 
@@ -115,42 +83,24 @@ One source tree supports three configurations:
 | `SNAGGLETOOTH_PPU_ROMS` | empty | See [The test data](#the-test-data). |
 | `SNAGGLETOOTH_BOOT_ROM` | empty | See [The test data](#the-test-data). |
 
-Set any of them at configure time, e.g. `cmake -B build -DSNAGGLETOOTH_BUILD_PLAYER=OFF`. When
-`ccache` is installed and Snaggletooth is top-level, compilation routes through it.
+Set any of them at configure time, e.g. `cmake -B build -DSNAGGLETOOTH_BUILD_PLAYER=OFF`. When `ccache` is installed and Snaggletooth is top-level, compilation routes through it.
 
 ## Consuming the library
 
-Vendor the repository into your tree — a git submodule at a path of your choosing works — add
-it as a subdirectory, and link the library target:
+Vendor the repository into your tree — a git submodule at a path of your choosing works — add it as a subdirectory, and link the library target:
 
 ```cmake
 add_subdirectory(third_party/snaggletooth)
 target_link_libraries(your_program PRIVATE snaggletooth::snaggletooth)
 ```
 
-That is the whole of the build side. The library's include directory and its C++20 requirement
-travel with the target. No option needs setting: the suite, the tools and the player are off in a
-parent build, and the library itself links nothing but the standard library and the platform's
-thread library — no SDL, no PNG decoder, no test framework. The thread library is
-`Threads::Threads`, which the target carries to every program that links it; a machine starts a
-thread only when it is built with `SnesConfig::apuThread` or `SnesConfig::ppuThread` on
-([snes-machine.md](snes-machine.md#the-audio-thread)).
+That is the whole of the build side. The library's include directory and its C++20 requirement travel with the target. No option needs setting: the suite, the tools and the player are off in a parent build, and the library itself links nothing but the standard library and the platform's thread library — no SDL, no PNG decoder, no test framework. The thread library is `Threads::Threads`, which the target carries to every program that links it; a machine starts a thread only when it is built with `SnesConfig::apuThread` or `SnesConfig::ppuThread` on ([snes-machine.md](snes-machine.md#the-audio-thread)).
 
 ### What the library is
 
-The library is the console and its parts as values a program holds and drives. A machine is
-built from a configuration value, advanced by a cycle budget or one instruction at a time, and
-snapshotted and restored whole. What it produces reaches you through observers you set — stereo
-frames, each finished picture, each frame's timeline, every bus access, each change to the save
-window — and what you
-hand it is a controller state, a snapshot, or a place to write. It opens no window, no audio
-device and no file, and it keeps no clock: the program that links it owns time, I/O and the
-files, and decides what the machine's output becomes. The same machine run twice from the same
-state under the same inputs produces the same bytes, whether or not a host is reaching into it.
+The library is the console and its parts as values a program holds and drives. A machine is built from a configuration value, advanced by a cycle budget or one instruction at a time, and snapshotted and restored whole. What it produces reaches you through observers you set — stereo frames, each finished picture, each frame's timeline, every bus access, each change to the save window — and what you hand it is a controller state, a snapshot, or a place to write. It opens no window, no audio device and no file, and it keeps no clock: the program that links it owns time, I/O and the files, and decides what the machine's output becomes. The same machine run twice from the same state under the same inputs produces the same bytes, whether or not a host is reaching into it.
 
-The pages under [docs/](README.md) describe each surface in full. The two that a program linking
-the library reads first are [snes-machine.md](snes-machine.md) for the console and
-[apu-machine.md](apu-machine.md) for the audio unit on its own.
+The pages under [docs/](README.md) describe each surface in full. The two that a program linking the library reads first are [snes-machine.md](snes-machine.md) for the console and [apu-machine.md](apu-machine.md) for the audio unit on its own.
 
 ### Driving the console
 
@@ -170,23 +120,9 @@ machine.run(357'368);
 std::vector<StereoFrame> sound = machine.takeFrames();
 ```
 
-The image is copied in, so the span it comes from need not outlive the call. Which map the
-cartridge uses is read from its header; `SnesConfig::map` names one outright, and
-`SnesConfig::saveRamBytes` overrides the header's save size. A cartridge dump that carries a
-copier header is not stripped for you: `readCopierHeader` in
-[snes-cartridge.md](snes-cartridge.md) says whether one is there and how long it is.
+The image is copied in, so the span it comes from need not outlive the call. Which map the cartridge uses is read from its header; `SnesConfig::map` names one outright, and `SnesConfig::saveRamBytes` overrides the header's save size. A cartridge dump that carries a copier header is not stripped for you: `readCopierHeader` in [snes-cartridge.md](snes-cartridge.md) says whether one is there and how long it is.
 
-A picture arrives through a `FrameObserver` set with `setFrameObserver`, each finished frame as
-it completes, and a host that draws the picture itself takes each frame as the `PpuTimeline` it
-is drawn from through a `PpuTimelineObserver` set with `setPpuTimelineObserver`
-([ppu.md](ppu.md#the-picture-as-a-timeline)), or hands the machine a GPU device through
-`SnesConfig::gpuPpu` and the core draws every frame on it with its own shader
-([gpu-ppu.md](gpu-ppu.md)); a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given
-whole; a snapshot is `state()`, a reference to the machine's own value, and goes back with
-`restore()`, and travels as bytes with `asBytes()` and `fromBytes()`. [snes-machine.md](snes-machine.md) covers each of these, the
-save observer that tells you when the battery save changed, and the host face — reading and
-writing any place the machine holds, answering an access before it takes effect, and calling a
-routine the cartridge holds.
+A picture arrives through a `FrameObserver` set with `setFrameObserver`, each finished frame as it completes, and a host that draws the picture itself takes each frame as the `PpuTimeline` it is drawn from through a `PpuTimelineObserver` set with `setPpuTimelineObserver` ([ppu.md](ppu.md#the-picture-as-a-timeline)), or hands the machine a GPU device through `SnesConfig::gpuPpu` and the core draws every frame on it with its own shader ([gpu-ppu.md](gpu-ppu.md)); a controller is plugged into a port, or pulled, with `setJoypad`, its buttons given whole; a snapshot is `state()`, a reference to the machine's own value, and goes back with `restore()`, and travels as bytes with `asBytes()` and `fromBytes()`. [snes-machine.md](snes-machine.md) covers each of these, the save observer that tells you when the battery save changed, and the host face — reading and writing any place the machine holds, answering an access before it takes effect, and calling a routine the cartridge holds.
 
 ### Driving the audio unit alone
 
@@ -203,15 +139,11 @@ apu.setPc(0x0200);
 std::uint32_t cycles = apu.step();  // 2
 ```
 
-An `.spc` dump becomes a running machine through the loader in the `snaggletooth_spc` tool
-library ([spc-rendering.md](spc-rendering.md)); the library alone carries the machine, not the
-file format.
+An `.spc` dump becomes a running machine through the loader in the `snaggletooth_spc` tool library ([spc-rendering.md](spc-rendering.md)); the library alone carries the machine, not the file format.
 
 ### Linking a tool library
 
-A program that wants a tool's capability in process — disassembling a cartridge, assembling
-source, reading a tile sheet back into bytes — turns the tools on and links the library the tool
-is a `main` over:
+A program that wants a tool's capability in process — disassembling a cartridge, assembling source, reading a tile sheet back into bytes — turns the tools on and links the library the tool is a `main` over:
 
 ```cmake
 set(SNAGGLETOOTH_BUILD_TOOLS ON CACHE BOOL "" FORCE)
@@ -219,51 +151,24 @@ add_subdirectory(third_party/snaggletooth)
 target_link_libraries(your_program PRIVATE snaggletooth_rom)   # the cartridge disassembler and verifier
 ```
 
-The tool libraries' headers are under [`tools/`](../tools) beside their sources, on the include
-path each target carries. Which library carries which capability, and the page that documents
-it, is the table in [tools/README.md](../tools/README.md). The tool libraries are not held to the
-same stability as the public headers: their surfaces are documented in place and each page's
-"Stability" section says how settled it is.
+The tool libraries' headers are under [`tools/`](../tools) beside their sources, on the include path each target carries. Which library carries which capability, and the page that documents it, is the table in [tools/README.md](../tools/README.md). The tool libraries are not held to the same stability as the public headers: their surfaces are documented in place and each page's "Stability" section says how settled it is.
 
 ## Versioning
 
-`snaggletooth::version()`, declared in `snaggletooth/version.h`, returns the library's version as
-a `std::string_view` in `"major.minor.patch"` form — `"0.9.0"` today. The view refers to static
-storage and is valid for the life of the process. It is an identity a program can log or display
-and carries no behavior. The status of each component sits in the
-[project README](../README.md#what-is-built), which is where "what does this build do" is
-answered.
+`snaggletooth::version()`, declared in `snaggletooth/version.h`, returns the library's version as a `std::string_view` in `"major.minor.patch"` form — `"0.9.0"` today. The view refers to static storage and is valid for the life of the process. It is an identity a program can log or display and carries no behavior. The status of each component sits in the [project README](../README.md#what-is-built), which is where "what does this build do" is answered.
 
 ## Dependencies
 
-- **[SDL3](https://github.com/libsdl-org/SDL)** — the window, the audio device, the
-  controllers and the GPU device of the player, and nothing else. A submodule at `third_party/sdl/`, pinned to
-  release 3.4.16, built statically with `SDL_SHARED` off and the camera, haptic, power and
-  dialog subsystems off. A parent build that already defines `SDL3::SDL3` supplies its own and
-  the submodule is left unconfigured. The library never links it. zlib license.
-- **[lodepng](https://github.com/lvandeve/lodepng)** — the PNG encoder and decoder behind the
-  tile-sheet codec in the tool libraries. Vendored as single-file source at
-  `third_party/lodepng/`, built as its own static target with a system include so its warnings
-  are its own, and linked privately into `snaggletooth_formats`; no lodepng symbol reaches a
-  header of this project. The library never links it. zlib license.
-- **[zstd](https://facebook.github.io/zstd/)** — the compressor and decompressor a tree's run
-  records are written and read through. Vendored as the release 1.5.7 library sources at
-  `third_party/zstd/`, built from them on every platform as its own static C target, single-
-  threaded and without its x86 assembly, with a system include so its warnings are its own, and
-  linked privately into `snaggletooth_rom`; no zstd symbol reaches a header of this project. The
-  library never links it. BSD license: a binary distribution of the tools reproduces its notice
-  ([third_party/zstd/README.md](../third_party/zstd/README.md)).
-- **[GoogleTest](https://github.com/google/googletest)** — fetched at configure time, version
-  1.14.0, only when `SNAGGLETOOTH_BUILD_TESTS` is on. Never part of the library or the tools.
+- **[SDL3](https://github.com/libsdl-org/SDL)** — the window, the audio device, the controllers and the GPU device of the player, and nothing else. A submodule at `third_party/sdl/`, pinned to release 3.4.16, built statically with `SDL_SHARED` off and the camera, haptic, power and dialog subsystems off. A parent build that already defines `SDL3::SDL3` supplies its own and the submodule is left unconfigured. The library never links it. zlib license.
+- **[lodepng](https://github.com/lvandeve/lodepng)** — the PNG encoder and decoder behind the tile-sheet codec in the tool libraries. Vendored as single-file source at `third_party/lodepng/`, built as its own static target with a system include so its warnings are its own, and linked privately into `snaggletooth_formats`; no lodepng symbol reaches a header of this project. The library never links it. zlib license.
+- **[zstd](https://facebook.github.io/zstd/)** — the compressor and decompressor a tree's run records are written and read through. Vendored as the release 1.5.7 library sources at `third_party/zstd/`, built from them on every platform as its own static C target, single- threaded and without its x86 assembly, with a system include so its warnings are its own, and linked privately into `snaggletooth_rom`; no zstd symbol reaches a header of this project. The library never links it. BSD license: a binary distribution of the tools reproduces its notice ([third_party/zstd/README.md](../third_party/zstd/README.md)).
+- **[GoogleTest](https://github.com/google/googletest)** — fetched at configure time, version 1.14.0, only when `SNAGGLETOOTH_BUILD_TESTS` is on. Never part of the library or the tools.
 
-A program that links the library alone ships the library's own objects, the standard library and
-the platform's thread library. There is no runtime dependency to install.
+A program that links the library alone ships the library's own objects, the standard library and the platform's thread library. There is no runtime dependency to install.
 
 ## The test data
 
-Three bodies of third-party reference data and two kinds of third-party image are never
-vendored. The tests that use them register and skip, with a visible reason, until they are pointed
-at a local copy; `ctest` then reports them as skipped rather than passed.
+Three bodies of third-party reference data and two kinds of third-party image are never vendored. The tests that use them register and skip, with a visible reason, until they are pointed at a local copy; `ctest` then reports them as skipped rather than passed.
 
 | Option | Points at |
 |---|---|
@@ -279,13 +184,8 @@ cmake -B build -DSNAGGLETOOTH_65816_VECTORS=/path/to/65816/v1 \
                -DSNAGGLETOOTH_BLARGG_ROMS=/path/to/blargg
 ```
 
-Without a boot ROM the acceptance tests boot on the built-in upload program and assert its
-outcome. Setting `SNAGGLETOOTH_REQUIRE_65816_VECTORS`, `SNAGGLETOOTH_REQUIRE_VECTORS`,
-`SNAGGLETOOTH_REQUIRE_BLARGG_ROMS` or `SNAGGLETOOTH_REQUIRE_PPU_ROMS` in the environment
-`ctest` runs under turns the matching skip into a failure, which is how a build that is meant to
-have the data is kept from passing without it.
+Without a boot ROM the acceptance tests boot on the built-in upload program and assert its outcome. Setting `SNAGGLETOOTH_REQUIRE_65816_VECTORS`, `SNAGGLETOOTH_REQUIRE_VECTORS`, `SNAGGLETOOTH_REQUIRE_BLARGG_ROMS` or `SNAGGLETOOTH_REQUIRE_PPU_ROMS` in the environment `ctest` runs under turns the matching skip into a failure, which is how a build that is meant to have the data is kept from passing without it.
 
 ## License
 
-Snaggletooth is MIT licensed — see [LICENSE](../LICENSE) at the repository root. Vendored
-dependencies retain their own licenses.
+Snaggletooth is MIT licensed — see [LICENSE](../LICENSE) at the repository root. Vendored dependencies retain their own licenses.

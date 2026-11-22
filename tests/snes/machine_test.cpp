@@ -457,7 +457,7 @@ TEST(SnesMachine, ResetStartsAStoppedCpuAgainAtTheVectorAndWorkRamStands) {
 
 TEST(SnesMachine, ResetLeavesTheCpuTheRegistersItsResetGives) {
   // The datasheet's reset table: D, DBR and PBR zero, SH = $01, XH = YH = 0, E = 1,
-  // M = X = 1, the decimal flag 0, I = 1; A, XL, YL, SL and N V Z C not initialised.
+  // M = X = 1, the decimal flag 0, I = 1; A, XL, YL, SL and N V Z C not initialized.
   // The sequence's three stack cycles read, and leave SL three lower inside page 1.
   Snes m = loopMachine();
   std::unique_ptr<SnesState> st = copyOf(m);
@@ -597,7 +597,7 @@ TEST(SnesMachine, ResetAbandonsATransferAndAnArithmeticJobInProgress) {
 
 TEST(SnesMachine, ResetForcesBlankAndKeepsEverythingElseThePpuHolds) {
   // fullsnes gives INIDISP as 8xh on reset — forced blank, the brightness not
-  // initialised — and every other PPU register as unknown or unchanged. The beam
+  // initialized — and every other PPU register as unknown or unchanged. The beam
   // begins its first line again, so the sprite pass and the mosaic's row begin with it.
   Snes m = loopMachine();
   std::unique_ptr<SnesState> st = copyOf(m);

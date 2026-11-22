@@ -1,10 +1,6 @@
 # Input script
 
-An input script is a text file that says which buttons are held on which
-controller port from which frame. The [cartridge disassembler](snes-disassembler.md)
-replays one into the machine while it [runs the cartridge](snes-disassembler.md#running-the-cartridge),
-so the run exercises what a player would — a title screen left behind, a menu
-entered, a level begun — and the trace reaches the code those things run.
+An input script is a text file that says which buttons are held on which controller port from which frame. The [cartridge disassembler](snes-disassembler.md) replays one into the machine while it [runs the cartridge](snes-disassembler.md#running-the-cartridge), so the run exercises what a player would — a title screen left behind, a menu entered, a level begun — and the trace reaches the code those things run.
 
 > **Status.** `snes_disasm --input <script>` replays a script through both of the
 > machine's controller paths, the auto-read and the serial ports. Scripts are
@@ -27,22 +23,15 @@ entered, a level begun — and the trace reaches the code those things run.
 
 ## 1. Form
 
-A script is UTF-8 text in a file whose extension is `.snaginput`, one line per
-change:
+A script is UTF-8 text in a file whose extension is `.snaginput`, one line per change:
 
 ```
 frame <n> <port> <buttons>    ; comment
 ```
 
-`frame` is the keyword every line begins with. `<n>` is the frame the line takes
-effect on, `<port>` is `1` or `2`, and `<buttons>` is the set held from that
-frame on — one or more button names, or `none` for a controller holding nothing, or
-`unplugged` for a port with no controller in it. Fields are separated by spaces or
-tabs. A semicolon begins a comment that runs to the end of the line, and a blank
-line is nothing.
+`frame` is the keyword every line begins with. `<n>` is the frame the line takes effect on, `<port>` is `1` or `2`, and `<buttons>` is the set held from that frame on — one or more button names, or `none` for a controller holding nothing, or `unplugged` for a port with no controller in it. Fields are separated by spaces or tabs. A semicolon begins a comment that runs to the end of the line, and a blank line is nothing.
 
-A script that leaves a title screen with Start, walks a menu, and runs right
-through a level with a jump every so often:
+A script that leaves a title screen with Start, walks a menu, and runs right through a level with a jump every so often:
 
 ```
 ; through the title and one menu
@@ -59,43 +48,21 @@ frame 1080 1 right b
 frame 1090 1 right
 ```
 
-A line replaces what the port held: `frame 1080 1 right b` holds Right and B;
-`frame 1090 1 right` releases B and keeps Right. Nothing is held between lines
-that the last line did not name.
+A line replaces what the port held: `frame 1080 1 right b` holds Right and B; `frame 1090 1 right` releases B and keeps Right. Nothing is held between lines that the last line did not name.
 
 ## 2. Frames
 
-Frames are counted from power-on, the first being frame 0, and a frame begins as
-the beam wraps to the top of the picture. A line's buttons are what that frame's
-auto-read latches, in the vertical blank at the frame's end: a button named on
-frame `n` is what the program reads on frame `n` through the auto-read.
+Frames are counted from power-on, the first being frame 0, and a frame begins as the beam wraps to the top of the picture. A line's buttons are what that frame's auto-read latches, in the vertical blank at the frame's end: a button named on frame `n` is what the program reads on frame `n` through the auto-read.
 
-Where in the frame a line is presented depends on the tool, and only a program
-that reads the serial ports inside the picture sees the difference.
-`snes_disasm` presents a line as its frame begins, so a serial read anywhere in
-frame `n` reads frame `n`'s buttons. `snes_player`, replaying a script or
-recording one, presents a line as the frame's vertical blank begins, the latest
-point ahead of the auto-read, so a serial read in frame `n`'s vertical blank
-reads frame `n`'s buttons and one inside its picture reads frame `n − 1`'s. `snes_gpu_verify`
-presents a line as its frame begins, as `snes_disasm` does.
+Where in the frame a line is presented depends on the tool, and only a program that reads the serial ports inside the picture sees the difference. `snes_disasm` presents a line as its frame begins, so a serial read anywhere in frame `n` reads frame `n`'s buttons. `snes_player`, replaying a script or recording one, presents a line as the frame's vertical blank begins, the latest point ahead of the auto-read, so a serial read in frame `n`'s vertical blank reads frame `n`'s buttons and one inside its picture reads frame `n − 1`'s. `snes_gpu_verify` presents a line as its frame begins, as `snes_disasm` does.
 
 Lines run in frame order. One frame may carry a line for each port.
 
 ## 3. Ports
 
-A port the script names anywhere has a controller plugged in from power-on, with
-nothing pressed until its first line. A port the script never names has no
-controller, and a program reading it sees exactly what the machine reads with an
-empty port: every bit zero. The distinction is the console's — a standard pad
-answers a read past its sixteenth bit with ones, and an empty port with zeros —
-so a program that checks for a controller sees one on a named port and none on an
-unnamed one.
+A port the script names anywhere has a controller plugged in from power-on, with nothing pressed until its first line. A port the script never names has no controller, and a program reading it sees exactly what the machine reads with an empty port: every bit zero. The distinction is the console's — a standard pad answers a read past its sixteenth bit with ones, and an empty port with zeros — so a program that checks for a controller sees one on a named port and none on an unnamed one.
 
-A port whose buttons are `unplugged` has no controller from that line until its
-next one, which is how a run where a pad was plugged in or pulled out part-way
-replays as it happened. A port whose **first** line is `unplugged` has none from
-power-on either, so a program that looks for a second controller before one
-arrived sees on replay what it saw live.
+A port whose buttons are `unplugged` has no controller from that line until its next one, which is how a run where a pad was plugged in or pulled out part-way replays as it happened. A port whose **first** line is `unplugged` has none from power-on either, so a program that looks for a second controller before one arrived sees on replay what it saw live.
 
 ```
 frame 0 2 unplugged      ; port 2 is empty from power-on
@@ -105,28 +72,22 @@ frame 960 2 start
 
 ## 4. Buttons
 
-The twelve buttons of a standard controller, in the order the pad shifts them
-out:
+The twelve buttons of a standard controller, in the order the pad shifts them out:
 
 ```
 b  y  select  start  up  down  left  right  a  x  l  r
 ```
 
-Names are read in any case. `none` stands alone and means a controller with
-nothing pressed; `unplugged` stands alone and means no controller at all. The
-identity bits a pad shifts out after its buttons are the standard pad's, and are
-not scriptable.
+Names are read in any case. `none` stands alone and means a controller with nothing pressed; `unplugged` stands alone and means no controller at all. The identity bits a pad shifts out after its buttons are the standard pad's, and are not scriptable.
 
 ## 5. Refusals
 
-A script is read whole before the run starts, and a line that cannot be read
-refuses the whole script, naming the line:
+A script is read whole before the run starts, and a line that cannot be read refuses the whole script, naming the line:
 
 - a line that does not begin with `frame`, or lacks a frame, a port or a button word;
 - a frame that is not a number, or is lower than the line before it;
 - a port other than `1` or `2`, or a port given twice for one frame;
-- a word that is not a button, a button named twice, or `none` or `unplugged`
-  beside a button or beside each other.
+- a word that is not a button, a button named twice, or `none` or `unplugged` beside a button or beside each other.
 
 ```
 $ snes_disasm cartridge.sfc -o cartridge --input play.snaginput
@@ -146,53 +107,22 @@ if (!script) std::cerr << error << "\n";
 request.input = *script;  // a CartridgeRequest; observeRun replays it
 ```
 
-A directory of scripts, as `--input-dir` takes, holds one file per image named
-`scriptPathFor(directory, image)` — the image's file name without its extension,
-exactly as it is, then `.snaginput` — and may hold a `default.snaginput`. `scriptFor` picks
-the one to play: the image's own when it exists, else `default.snaginput`, else the
-image's own path so a caller finds nothing to replay. A `default.snaginput` that leaves
-a title and a menu behind is what lets every cartridge in a corpus be played
-before any has a run of its own; `tools/inputs/` holds one, so `--input-dir
-tools/inputs` plays a whole library.
+A directory of scripts, as `--input-dir` takes, holds one file per image named `scriptPathFor(directory, image)` — the image's file name without its extension, exactly as it is, then `.snaginput` — and may hold a `default.snaginput`. `scriptFor` picks the one to play: the image's own when it exists, else `default.snaginput`, else the image's own path so a caller finds nothing to replay. A `default.snaginput` that leaves a title and a menu behind is what lets every cartridge in a corpus be played before any has a run of its own; `tools/inputs/` holds one, so `--input-dir tools/inputs` plays a whole library.
 
-`parseInputScript` returns the `InputScript` — its `events` in frame order, each
-an `InputEvent` of `frame`, `port`, whether a controller is in the port, and the
-`Joypad` held — or nothing, with `error` naming the line.
-`InputScript::padAt(port, frame)` is what a port holds at a frame, answering
-nothing where the port is empty, and `names(port)` whether the script says anything
-about the port at all.
-`observeRun(rom, masterCycles, script, notes)` in `rom/rom_observe.h` is the
-replay; `CartridgeRequest::input` carries a script into `disassembleCartridge`.
-The `Joypad` value and the ports are the [machine's](snes-machine.md#the-controller-ports).
+`parseInputScript` returns the `InputScript` — its `events` in frame order, each an `InputEvent` of `frame`, `port`, whether a controller is in the port, and the `Joypad` held — or nothing, with `error` naming the line. `InputScript::padAt(port, frame)` is what a port holds at a frame, answering nothing where the port is empty, and `names(port)` whether the script says anything about the port at all. `observeRun(rom, masterCycles, script, notes)` in `rom/rom_observe.h` is the replay; `CartridgeRequest::input` carries a script into `disassembleCartridge`. The `Joypad` value and the ports are the [machine's](snes-machine.md#the-controller-ports).
 
-`writeInputScript(script)` is the other direction: one `frame <n> <port> <buttons>`
-line per event in event order, buttons in the order the pad shifts them out, `none`
-for a controller with nothing pressed and `unplugged` for a port with none, lower
-case, single spaces, no comments. Two laws hold over it, and the suite pins both:
-parsing what it writes presents the same controller on every port at every frame as
-the script it was given, and writing that parse back is byte for byte the same text.
+`writeInputScript(script)` is the other direction: one `frame <n> <port> <buttons>` line per event in event order, buttons in the order the pad shifts them out, `none` for a controller with nothing pressed and `unplugged` for a port with none, lower case, single spaces, no comments. Two laws hold over it, and the suite pins both: parsing what it writes presents the same controller on every port at every frame as the script it was given, and writing that parse back is byte for byte the same text.
 
 The library target is `snaggletooth_rom`.
 
 ## 7. Stability
 
-This document defines a published surface, held to the same rule as the
-[assembly language](assembly-lexicon.md#8-stability): once a release replays a
-script, a later release replays it to the same effect. New line kinds and new
-words may be added — `unplugged` is one such addition, and every script written
-before it means exactly what it always did — and the meaning of a line this page
-describes does not change, and nothing described here is removed. `writeInputScript`
-is bound by the same rule: a script this release writes replays under every later
-one.
+This document defines a published surface, held to the same rule as the [assembly language](assembly-lexicon.md#8-stability): once a release replays a script, a later release replays it to the same effect. New line kinds and new words may be added — `unplugged` is one such addition, and every script written before it means exactly what it always did — and the meaning of a line this page describes does not change, and nothing described here is removed. `writeInputScript` is bound by the same rule: a script this release writes replays under every later one.
 
 ## See also
 
-- [Cartridge disassembler §Running the cartridge](snes-disassembler.md#running-the-cartridge)
-  — the run a script is replayed into, and what it yields.
-- [The SNES machine §The controller ports](snes-machine.md#the-controller-ports)
-  — how the machine presents a pad to the program.
+- [Cartridge disassembler §Running the cartridge](snes-disassembler.md#running-the-cartridge) — the run a script is replayed into, and what it yields.
+- [The SNES machine §The controller ports](snes-machine.md#the-controller-ports) — how the machine presents a pad to the program.
 - [Project manifest](project-manifest.md) — the `reached` lines a run writes.
-- [tools/inputs/README.md](../tools/inputs/README.md) — the scripts that ship, and
-  the one a cartridge with no run of its own is played through.
-- [Pad configuration](pad-config.md) — the keys and the places on a controller a
-  live run takes its buttons from, which a recorded run replaces.
+- [tools/inputs/README.md](../tools/inputs/README.md) — the scripts that ship, and the one a cartridge with no run of its own is played through.
+- [Pad configuration](pad-config.md) — the keys and the places on a controller a live run takes its buttons from, which a recorded run replaces.

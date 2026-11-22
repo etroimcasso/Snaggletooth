@@ -1,19 +1,10 @@
 # The µPD77C25 core
 
-The NEC µPD77C25 is the signal processor inside the DSP-1, DSP-2, DSP-3 and DSP-4 cartridges: a
-16-bit fixed-point chip with its own instruction ROM, data ROM and data RAM, a hardware multiplier,
-and a two-byte port the SNES reaches it through. This is its instruction-set core. It runs a program
-it is handed, one instruction a chip cycle, and answers the host's reads and writes of its two ports.
+The NEC µPD77C25 is the signal processor inside the DSP-1, DSP-2, DSP-3 and DSP-4 cartridges: a 16-bit fixed-point chip with its own instruction ROM, data ROM and data RAM, a hardware multiplier, and a two-byte port the SNES reaches it through. This is its instruction-set core. It runs a program it is handed, one instruction a chip cycle, and answers the host's reads and writes of its two ports.
 
-The core is the chip alone. It has no clock of its own and no place in the SNES machine: a host
-steps it and drives its ports. The DSP-1's own program is not part of the core; a program is a value
-the host builds and hands over.
+The core is the chip alone. It has no clock of its own and no place in the SNES machine: a host steps it and drives its ports. The DSP-1's own program is not part of the core; a program is a value the host builds and hands over.
 
-The contract is fullsnes, "SNES Cart DSP-n/ST010/ST011 - NEC uPD77C25", the only staged source for
-the chip's instruction set. Where fullsnes leaves a behavior open or states it without a second
-source, the core takes one reading, says so in a comment at the place it is decided, and the reading
-is listed under [Gotchas](#gotchas) and in
-[dsp-1-behavior.md §What is not settled yet](dsp-1-behavior.md#what-is-not-settled-yet).
+The contract is fullsnes, "SNES Cart DSP-n/ST010/ST011 - NEC uPD77C25", the only staged source for the chip's instruction set. Where fullsnes leaves a behavior open or states it without a second source, the core takes one reading, says so in a comment at the place it is decided, and the reading is listed under [Gotchas](#gotchas) and in [dsp-1-behavior.md §What is not settled yet](dsp-1-behavior.md#what-is-not-settled-yet).
 
 ## Contents
 
@@ -49,9 +40,7 @@ struct Upd77c25Program {
 };
 ```
 
-An instruction word is 24 bits held in the low bits of 32; the core ignores the top byte. The core
-keeps a pointer to the program and never copies it, so the program must outlive the core. The
-constructor that would take a temporary is deleted.
+An instruction word is 24 bits held in the low bits of 32; the core ignores the top byte. The core keeps a pointer to the program and never copies it, so the program must outlive the core. The constructor that would take a temporary is deleted.
 
 ## State
 
@@ -79,8 +68,7 @@ struct Upd77c25State {
 };
 ```
 
-The default is all zero, the state a power-on starts from. Every member is a fixed-width integer,
-and the struct has no padding.
+The default is all zero, the state a power-on starts from. Every member is a fixed-width integer, and the struct has no padding.
 
 Each accumulator's flags are one byte. Named masks on the struct read them:
 
@@ -93,9 +81,7 @@ Each accumulator's flags are one byte. Named masks on the struct read them:
 | `kFlagOv1` | `0x02` | an odd number of overflows since the flag was last cleared |
 | `kFlagOv0` | `0x01` | the last operation overflowed |
 
-The status register's bits have masks of their own: `kSrRqm` (bit 15), `kSrUsf1` and `kSrUsf0`
-(14, 13), `kSrDrs` (12), `kSrDma` (11), `kSrDrc` (10), `kSrSoc` (9), `kSrSic` (8), `kSrEi` (7),
-`kSrP1` and `kSrP0` (1, 0).
+The status register's bits have masks of their own: `kSrRqm` (bit 15), `kSrUsf1` and `kSrUsf0` (14, 13), `kSrDrs` (12), `kSrDma` (11), `kSrDrc` (10), `kSrSoc` (9), `kSrSic` (8), `kSrEi` (7), `kSrP1` and `kSrP0` (1, 0).
 
 ## Running instructions
 
@@ -132,10 +118,7 @@ class Upd77c25 {
 };
 ```
 
-Every instruction takes one chip cycle, so `stepCycle()` executes a whole word: it fetches the word
-at `pc`, advances `pc` (wrapping in 11 bits) and executes it. No instruction is ever part-way through
-between two calls, so a snapshot taken between any two calls restores to an exact point. The core
-holds no wall clock; how many cycles to run against the host's own clock is the host's to decide.
+Every instruction takes one chip cycle, so `stepCycle()` executes a whole word: it fetches the word at `pc`, advances `pc` (wrapping in 11 bits) and executes it. No instruction is ever part-way through between two calls, so a snapshot taken between any two calls restores to an exact point. The core holds no wall clock; how many cycles to run against the host's own clock is the host's to decide.
 
 ## The three forms
 
@@ -154,19 +137,15 @@ The top two bits of a word name its form:
   | 1| 1|                    ID                     |  -  |    DST    |  load
 ```
 
-The header declares an enum for each field's values, so a word can be built by name: `Upd77c25AluOp`,
-`Upd77c25Operand` (P), `Upd77c25Source`, `Upd77c25Destination` and `Upd77c25Branch`.
+The header declares an enum for each field's values, so a word can be built by name: `Upd77c25AluOp`, `Upd77c25Operand` (P), `Upd77c25Source`, `Upd77c25Destination` and `Upd77c25Branch`.
 
 ## The ALU word
 
-An ALU word does five things at once: one operation on an accumulator, one move from a source to a
-destination, an adjustment of each pointer, and an optional return from a call. The move's value is
-also the internal bus, which the operation can take as its operand.
+An ALU word does five things at once: one operation on an accumulator, one move from a source to a destination, an adjustment of each pointer, and an optional return from a call. The move's value is also the internal bus, which the operation can take as its operand.
 
 ### The operations and their flags
 
-The A bit picks the accumulator: AccA and FlagA when clear, AccB and FlagB when set. The operation
-reads and writes that accumulator and that flag byte alone.
+The A bit picks the accumulator: AccA and FlagA when clear, AccB and FlagB when set. The operation reads and writes that accumulator and that flag byte alone.
 
 | Code | Operation | Result | S1 | S0 | C | Z | OV1 | OV0 |
 |---|---|---|---|---|---|---|---|---|
@@ -187,13 +166,9 @@ reads and writes that accumulator and that flag byte alone.
 | `E` | `Sll4` | Acc × 16 + 15 | sign | sign | 0 | zero | 0 | 0 |
 | `F` | `Xchg` | the two bytes swapped | sign | sign | 0 | zero | 0 | 0 |
 
-"Other C" is the carry of the accumulator the A bit does not name: `Adc`, `Sbb` and `Rcl1` on AccB
-take FlagA's C. `Dec` and `Inc` ignore the operand.
+"Other C" is the carry of the accumulator the A bit does not name: `Adc`, `Sbb` and `Rcl1` on AccB take FlagA's C. `Dec` and `Inc` ignore the operand.
 
-"ovf" marks the overflow flags. OV0 is set when the signed result leaves −8000h..7FFFh. When it is
-set, S1 takes the result's sign and OV1 flips; when it is clear, S1 and OV1 keep their values. A
-positive overflow wraps to a negative result, so S1 is 1 after it, and the saturation value the
-`Sgn` source reads, `8000h − S1`, is 7FFFh.
+"ovf" marks the overflow flags. OV0 is set when the signed result leaves −8000h..7FFFh. When it is set, S1 takes the result's sign and OV1 flips; when it is clear, S1 and OV1 keep their values. A positive overflow wraps to a negative result, so S1 is 1 after it, and the saturation value the `Sgn` source reads, `8000h − S1`, is 7FFFh.
 
 ```cpp
 // ADD A, TR — 7FFFh + 1 overflows upwards
@@ -236,16 +211,11 @@ The SRC field names what the word moves; the DST field names where it lands.
 | `E` | L | TRB |
 | `F` | MEM: RAM[DP] | MEM: RAM[DP] |
 
-A write to SR reaches every bit but RQM (15) and DRS (12), which are the chip's own, and bits 6 to 2,
-which read zero.
+A write to SR reaches every bit but RQM (15) and DRS (12), which are the chip's own, and bits 6 to 2, which read zero.
 
-A program's own access to DR, as the DR source or the DR destination, sets RQM and starts the host's
-next 16-bit access at the low byte. DRNF reads DR without either.
+A program's own access to DR, as the DR source or the DR destination, sets RQM and starts the host's next 16-bit access at the low byte. DRNF reads DR without either.
 
-fullsnes prohibits three combinations in an ALU word: KLR or KLM as the destination with K or L as
-the source, a source and destination naming the same register, and the RAM operand with the MEM
-destination. The core runs them by the order below; no program written for the chip relies on what
-they do.
+fullsnes prohibits three combinations in an ALU word: KLR or KLM as the destination with K or L as the source, a source and destination naming the same register, and the RAM operand with the MEM destination. The core runs them by the order below; no program written for the chip relies on what they do.
 
 ### The pointers
 
@@ -262,16 +232,13 @@ they do.
 
 ### The order inside one word
 
-fullsnes gives an ALU word's fields and nothing on the order they act in. The core acts in this
-order:
+fullsnes gives an ALU word's fields and nothing on the order they act in. The core acts in this order:
 
 1. The source is read, with its side effect, onto the internal bus.
 2. The operand is formed: RAM[DP], the bus, or the product as it stands.
 3. The operation runs on the accumulator the A bit names and writes it and its flags.
-4. The bus is written to the destination. A destination naming the accumulator the operation wrote
-   holds the moved value.
-5. DP and RP are adjusted. A destination of DP or RP is adjusted after it is written; RAM[DP] and
-   the data ROM word at RP are read at the pointers as they stood.
+4. The bus is written to the destination. A destination naming the accumulator the operation wrote holds the moved value.
+5. DP and RP are adjusted. A destination of DP or RP is adjusted after it is written; RAM[DP] and the data ROM word at RP are read at the pointers as they stood.
 6. With the RT bit set, the word returns.
 7. With K or L written, the product is recomputed.
 
@@ -279,9 +246,7 @@ A source naming the accumulator the operation writes reads its value from before
 
 ## The multiplier
 
-The product is K and L as signed 16-bit numbers, multiplied and doubled, kept 32 bits wide in
-`product`. It is recomputed after a word that wrote K or L, so the word that writes a factor reads
-the product from before it, and the next word reads the new one.
+The product is K and L as signed 16-bit numbers, multiplied and doubled, kept 32 bits wide in `product`. It is recomputed after a word that wrote K or L, so the word that writes a factor reads the product from before it, and the next word reads the new one.
 
 ```cpp
 // LD #FFFFh, K   — K is -1
@@ -289,19 +254,15 @@ the product from before it, and the next word reads the new one.
 // OR A, P=ProductHigh  — AccA FFFFh
 ```
 
-−8000h × −8000h × 2 is 2³¹, one past the largest signed 32-bit value; the core keeps the
-arithmetic's wrap, 80000000h.
+−8000h × −8000h × 2 is 2³¹, one past the largest signed 32-bit value; the core keeps the arithmetic's wrap, 80000000h.
 
 ## The load word
 
-A load word writes its 16-bit immediate to its destination, with the destination's side effects:
-the DR destination sets RQM, KLR and KLM fill the second factor, and a written factor recomputes the
-product. A load adjusts no pointer and never returns.
+A load word writes its 16-bit immediate to its destination, with the destination's side effects: the DR destination sets RQM, KLR and KLM fill the second factor, and a written factor recomputes the product. A load adjusts no pointer and never returns.
 
 ## The jump word
 
-A jump word's BRCH field names the jump and NA, bits 12 to 2, the 11-bit address it goes to. A jump
-whose condition holds sets `pc` to NA; one whose condition fails leaves `pc` on the word after it.
+A jump word's BRCH field names the jump and NA, bits 12 to 2, the 11-bit address it goes to. A jump whose condition holds sets `pc` to NA; one whose condition fails leaves `pc` on the word after it.
 
 ### The conditions
 
@@ -327,8 +288,7 @@ whose condition holds sets `pc` to NA; one whose condition fails leaves `pc` on 
 | `0B8h` `Jnsoak` · `0BAh` `Jsoak` | the serial output's acknowledge is 0 (always) · 1 (never) |
 | `0BCh` `Jnrqm` · `0BEh` `Jrqm` | RQM is 0 · 1 |
 
-Any other BRCH value is a jump that is never taken. That covers the three only the ST010 and ST011
-define, `000h`, `101h` and `141h`.
+Any other BRCH value is a jump that is never taken. That covers the three only the ST010 and ST011 define, `000h`, `101h` and `141h`.
 
 A program waits on the host with a jump to itself on RQM:
 
@@ -340,27 +300,20 @@ A program waits on the host with a jump to itself on RQM:
 
 ### Calls and returns
 
-`Call` writes the address of the word after it to `stack[sp]` and steps `sp`; a word with the RT bit
-set steps `sp` back and takes `pc` from that entry. `sp` is two bits and wraps, so the stack holds
-four return addresses and a fifth call writes over the first.
+`Call` writes the address of the word after it to `stack[sp]` and steps `sp`; a word with the RT bit set steps `sp` back and takes `pc` from that entry. `sp` is two bits and wraps, so the stack holds four return addresses and a fifth call writes over the first.
 
 ## Reset
 
-`reset()` is the RST line: `pc` 0, FlagA and FlagB 0, SR 0 (DR 16 bits wide, RQM and DRS clear), RP
-3FFh. Every other register, the stack pointer among them, and the data RAM keep their values.
+`reset()` is the RST line: `pc` 0, FlagA and FlagB 0, SR 0 (DR 16 bits wide, RQM and DRS clear), RP 3FFh. Every other register, the stack pointer among them, and the data RAM keep their values.
 
 ## The host's ports
 
-A SNES cartridge reaches the chip through its A0 line: one address range reads and writes DR, the
-other reads SR. `hostRead(true)` is the status read: SR's high byte, RQM in bit 7 and DRS in bit 4,
-and it changes nothing. A cartridge waits for RQM with `BPL` on that byte.
+A SNES cartridge reaches the chip through its A0 line: one address range reads and writes DR, the other reads SR. `hostRead(true)` is the status read: SR's high byte, RQM in bit 7 and DRS in bit 4, and it changes nothing. A cartridge waits for RQM with `BPL` on that byte.
 
 `hostRead(false)` and `hostWrite()` move DR a byte at a time:
 
-- **With SR's DRC bit set, DR is 8 bits wide.** A read takes DR's low byte, a write replaces it and
-  keeps the high byte, and either one completes the access.
-- **With DRC clear, DR is 16 bits wide**, moved low byte first. The first access sets DRS; the second
-  moves the high byte, clears DRS and completes the access.
+- **With SR's DRC bit set, DR is 8 bits wide.** A read takes DR's low byte, a write replaces it and keeps the high byte, and either one completes the access.
+- **With DRC clear, DR is 16 bits wide**, moved low byte first. The first access sets DRS; the second moves the high byte, clears DRS and completes the access.
 
 A completed access clears RQM. The access moves the same way whether or not RQM is set.
 
@@ -376,42 +329,26 @@ A write with A0 set reaches nothing on the chip, so the core has no function for
 
 ## What a SNES board leaves unconnected
 
-The serial port, the interrupt input, the DMA request line and the P0/P1 outputs are wired to
-nothing on any SNES board:
+The serial port, the interrupt input, the DMA request line and the P0/P1 outputs are wired to nothing on any SNES board:
 
 - SIM and SIL read zero; SOL and SOM take a value that goes nowhere.
-- The serial acknowledges stay 0, so `Jnsiak` and `Jnsoak` always jump and `Jsiak` and `Jsoak` never
-  do.
-- No interrupt arrives, so the core never enters address 100h on its own, and SR's EI bit changes
-  nothing.
+- The serial acknowledges stay 0, so `Jnsiak` and `Jnsoak` always jump and `Jsiak` and `Jsoak` never do.
+- No interrupt arrives, so the core never enters address 100h on its own, and SR's EI bit changes nothing.
 - SR's DMA bit and P0/P1 bits hold what the program writes and drive nothing.
 
 ## Gotchas
 
-- **The program outlives the core.** The core keeps a pointer, and a temporary program does not
-  compile.
+- **The program outlives the core.** The core keeps a pointer, and a temporary program does not compile.
 - **`Sgn` reads AccA's S1 alone.** fullsnes gives it as `8000h − SA1`; the A bit does not change it.
-- **The logical operations set S1.** fullsnes gives S1 as officially undefined after `Or`, `And`,
-  `Xor`, `Not`, the shifts and `Xchg`, and as the result's sign in practice. The core takes the
-  sign.
+- **The logical operations set S1.** fullsnes gives S1 as officially undefined after `Or`, `And`, `Xor`, `Not`, the shifts and `Xchg`, and as the result's sign in practice. The core takes the sign.
 - **The word that writes K or L reads the old product.** The product is recomputed after the word.
 - **DPL wraps inside the nibble.** 3Fh plus one is 30h, not 40h.
-- **A destination of DP or RP is adjusted after it is written.** A move to DP with DPINC leaves the
-  moved value plus one in the low nibble.
-- **Readings fullsnes alone carries.** These are the core's, from one source, and unverified on the
-  chip: the order inside an ALU word; the product's update point and its value at −8000h × −8000h ×
-  2; the stack's wrap past four; a BRCH value fullsnes gives for no µPD77C25 jump; S1 after a
-  logical operation; bits 6 to 2 of SR reading zero; a program's DR access restarting the host's
-  fragments; an 8-bit host write keeping DR's high byte; and a host access moving DR with RQM
-  clear. [dsp-1-behavior.md §What is not settled yet](dsp-1-behavior.md#what-is-not-settled-yet)
-  carries each.
+- **A destination of DP or RP is adjusted after it is written.** A move to DP with DPINC leaves the moved value plus one in the low nibble.
+- **Readings fullsnes alone carries.** These are the core's, from one source, and unverified on the chip: the order inside an ALU word; the product's update point and its value at −8000h × −8000h × 2; the stack's wrap past four; a BRCH value fullsnes gives for no µPD77C25 jump; S1 after a logical operation; bits 6 to 2 of SR reading zero; a program's DR access restarting the host's fragments; an 8-bit host write keeping DR's high byte; and a host access moving DR with RQM clear. [dsp-1-behavior.md §What is not settled yet](dsp-1-behavior.md#what-is-not-settled-yet) carries each.
 
 ## Where to look
 
-- `include/snaggletooth/upd77c25/upd77c25.h` — the program, the state, the field enums and the
-  `Upd77c25` class.
-- `src/upd77c25.cpp` — the decode, the ALU, the sources and destinations, the jumps, the stack, the
-  multiplier and the host's ports.
-- `tests/upd77c25/core_test.cpp` — every form, operation, source, destination, condition and port
-  rule on hand-encoded words.
+- `include/snaggletooth/upd77c25/upd77c25.h` — the program, the state, the field enums and the `Upd77c25` class.
+- `src/upd77c25.cpp` — the decode, the ALU, the sources and destinations, the jumps, the stack, the multiplier and the host's ports.
+- `tests/upd77c25/core_test.cpp` — every form, operation, source, destination, condition and port rule on hand-encoded words.
 - [dsp-1-behavior.md](dsp-1-behavior.md) — the DSP-1's own behavior and what is not settled.

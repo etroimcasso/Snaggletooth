@@ -38,7 +38,7 @@
 // snapshot of the machine carries the PPU whole and a restore puts it back
 // mid-latch. A machine drawing the picture on its picture thread holds a second
 // one the thread draws from, kept equal to the first in everything a pixel reads
-// by the same accesses. Ppu is the chip's behaviour applied to a value: the
+// by the same accesses. Ppu is the chip's behavior applied to a value: the
 // machine builds one over its state for the length of a call and never keeps it.
 //
 // What the chip is told about the machine at an access is PpuInputs — its
@@ -194,7 +194,7 @@ struct PpuState {
   std::uint8_t bgLatch = 0;   // the byte the last scroll write left for the next
 
   // ---- Mode 7 -----------------------------------------------------------------
-  // The matrix, the centre and the Mode 7 scroll are written twice through a
+  // The matrix, the center and the Mode 7 scroll are written twice through a
   // second shared latch, low byte then high, and kept as the two writes assembled
   // them. A write to $210D or $210E updates both BG1's offset (through the scroll
   // latch) and Mode 7's (through this one).
@@ -203,8 +203,8 @@ struct PpuState {
   std::uint16_t m7b = 0xFFFF;  // $211C: matrix B
   std::uint16_t m7c = 0;       // $211D: matrix C
   std::uint16_t m7d = 0;       // $211E: matrix D
-  std::uint16_t m7x = 0;       // $211F: the centre's X, signed in its low 13 bits
-  std::uint16_t m7y = 0;       // $2120: the centre's Y, the same
+  std::uint16_t m7x = 0;       // $211F: the center's X, signed in its low 13 bits
+  std::uint16_t m7y = 0;       // $2120: the center's Y, the same
   std::uint16_t m7hofs = 0;    // $210D: Mode 7 horizontal scroll, the same
   std::uint16_t m7vofs = 0;    // $210E: Mode 7 vertical scroll, the same
   std::uint8_t m7Latch = 0;    // the byte the last Mode 7 write left for the next
@@ -228,22 +228,22 @@ struct PpuState {
   // ---- windows ----------------------------------------------------------------
   std::uint8_t w12sel = 0;   // $2123: window enables and inversions for BG1 and BG2
   std::uint8_t w34sel = 0;   // $2124: the same for BG3 and BG4
-  std::uint8_t wobjsel = 0;  // $2125: the same for sprites and the colour window
+  std::uint8_t wobjsel = 0;  // $2125: the same for sprites and the color window
   std::uint8_t wh0 = 0;      // $2126: window 1's left edge
   std::uint8_t wh1 = 0;      // $2127: window 1's right edge
   std::uint8_t wh2 = 0;      // $2128: window 2's left edge
   std::uint8_t wh3 = 0;      // $2129: window 2's right edge
   std::uint8_t wbglog = 0;   // $212A: how the two windows combine, per background
-  std::uint8_t wobjlog = 0;  // $212B: the same for sprites and the colour window
+  std::uint8_t wobjlog = 0;  // $212B: the same for sprites and the color window
   std::uint8_t tm = 0;       // $212C: main-screen layer enables
   std::uint8_t ts = 0;       // $212D: sub-screen layer enables
   std::uint8_t tmw = 0;      // $212E: which main-screen layers the windows mask
   std::uint8_t tsw = 0;      // $212F: which sub-screen layers the windows mask
 
-  // ---- colour math ------------------------------------------------------------
-  std::uint8_t cgwsel = 0;     // $2130: the colour window's regions, the addend, direct colour
+  // ---- color math ------------------------------------------------------------
+  std::uint8_t cgwsel = 0;     // $2130: the color window's regions, the addend, direct color
   std::uint8_t cgadsub = 0;    // $2131: add or subtract, half, and the layers it applies to
-  std::uint8_t fixedRed = 0;   // $2132: the fixed colour's red, five bits
+  std::uint8_t fixedRed = 0;   // $2132: the fixed color's red, five bits
   std::uint8_t fixedGreen = 0; // $2132: its green
   std::uint8_t fixedBlue = 0;  // $2132: its blue
 
@@ -269,15 +269,15 @@ struct PpuState {
   // What the last main-screen pixel of the line decided, which the sub screen's
   // half-pixel one position to its right is drawn under: whether $2130 blacked it,
   // whether it took math, which way and with which addend, whether the result was
-  // halved, and its colour before the math. Carried a position at a time along
+  // halved, and its color before the math. Carried a position at a time along
   // every line and read by the left half of a line drawn in half-pixels alone.
   struct MainDecision {
     bool present = false;       // a main pixel has been drawn on this line
     bool clipped = false;       // $2130 bits 7-6 replaced it with black
-    std::uint8_t addend = 0;    // 0 no math, 1 the fixed colour, 2 the sub screen's pixel
+    std::uint8_t addend = 0;    // 0 no math, 1 the fixed color, 2 the sub screen's pixel
     bool subtract = false;      // the math subtracted
     bool halved = false;        // the result was halved
-    std::uint16_t colour = 0;   // its colour before the math, five bits a channel
+    std::uint16_t colour = 0;   // its color before the math, five bits a channel
     [[nodiscard]] bool operator==(const MainDecision&) const noexcept = default;
   };
   MainDecision lastMain{};
@@ -346,7 +346,7 @@ struct PpuState {
   [[nodiscard]] bool operator==(const PpuState&) const noexcept = default;
 };
 
-// The chip's behaviour over one PpuState. Built by the machine over its own
+// The chip's behavior over one PpuState. Built by the machine over its own
 // state for one call; it holds a reference and is never kept.
 class Ppu {
   // What the picture path works out from the registers and then reads at every dot
@@ -464,13 +464,13 @@ class Ppu {
   //
   // A position is drawn in half-pixels in modes 5 and 6, and in any other mode
   // while $2133 bit 3 is set, read at the dot. Its right half
-  // is the main screen's pixel under colour math. Its left half is the sub screen's
-  // front-most pixel, or colour 0 where the sub screen shows nothing, drawn under
+  // is the main screen's pixel under color math. Its left half is the sub screen's
+  // front-most pixel, or color 0 where the sub screen shows nothing, drawn under
   // what the main pixel one position to its left decided: black where $2130 blacked
-  // that pixel, then the same math — none, the fixed colour, or that pixel's own
-  // colour before its math where its addend was the sub screen — halved where it
+  // that pixel, then the same math — none, the fixed color, or that pixel's own
+  // color before its math where its addend was the sub screen — halved where it
   // was halved. The left half at position 0 has no main pixel to its left and takes
-  // neither. Any other position shows one pixel, the main screen's under colour
+  // neither. Any other position shows one pixel, the main screen's under color
   // math, in both halves. Every position records its main pixel's decision in the
   // state, so a line resumed from a snapshot draws on as the unbroken line would. The main screen's
   // pixel is the one its enabled backgrounds and the line's sprites name at that
@@ -498,11 +498,11 @@ class Ppu {
   // The six things a window can be enabled for. Each keeps four bits of a window
   // selector — two enables and two inversions — and two bits of a logic register,
   // and the first five have a bit of this value in the two mask registers. The
-  // colour window has none: it feeds colour math and no layer's visibility.
+  // color window has none: it feeds color math and no layer's visibility.
   enum class Layer : unsigned { Bg1 = 0u, Bg2 = 1u, Bg3 = 2u, Bg4 = 3u, Object = 4u, Colour = 5u };
 
   // One background as its own registers describe it, with what the mode makes of
-  // it: its depth, and where in the palette its colours are read. A character
+  // it: its depth, and where in the palette its colors are read. A character
   // takes eight bytes for each of its bitplanes. Its two offsets are not here:
   // each tile column's reads take them from the registers at the read's own dot.
   struct Background {
@@ -513,10 +513,10 @@ class Ppu {
     bool hires;                  // its mode's tiles are two characters wide and cover eight
                                  // positions, whatever `large` says of their width — modes 5
                                  // and 6; `large` then chooses the height alone
-    unsigned planes;             // its bitplanes, and so its colours: 1 << planes
+    unsigned planes;             // its bitplanes, and so its colors: 1 << planes
     unsigned paletteStride;      // the words one step of its tile's palette field moves,
                                  // or none where the mode gives it no palette field
-    unsigned wordBase;           // the first palette word its own colours begin at
+    unsigned wordBase;           // the first palette word its own colors begin at
     std::uint16_t offsetBit;     // the bit of a BG3 entry that applies its offset to this
                                  // background — $2000 for BG1, $4000 for BG2 — or 0 where the
                                  // mode gives it no offset table
@@ -560,8 +560,8 @@ class Ppu {
 
   // What a background shows at a picture position: the palette word its tile's
   // pixel names, the tile's own priority bit, which decides where the pixel sits
-  // in the mode's order, and — where the pixel was read as a colour rather than
-  // as an index — that colour, which no palette word names.
+  // in the mode's order, and — where the pixel was read as a color rather than
+  // as an index — that color, which no palette word names.
   struct Shown {
     std::uint8_t word;
     bool priority;
@@ -675,9 +675,9 @@ class Ppu {
   enum class Screen : unsigned { Main, Sub };
 
   // What a screen shows at a picture position — the palette word and the layer it
-  // came from, which is what decides whether colour math reaches it. Nothing at
+  // came from, which is what decides whether color math reaches it. Nothing at
   // all is that screen's backdrop: palette word 0 on the main screen; on the sub
-  // screen, the fixed colour as colour math's addend and palette word 0 as the left
+  // screen, the fixed color as color math's addend and palette word 0 as the left
   // half of a line drawn in half-pixels.
   struct Resolved {
     std::uint8_t word;
@@ -773,7 +773,7 @@ class Ppu {
 
   // The field position the matrix maps a picture position to, from the
   // registers as they stand: the two flips applied to the picture position, the
-  // scroll less the centre clipped to ten bits with its sign, each product of a
+  // scroll less the center clipped to ten bits with its sign, each product of a
   // matrix term with that clipped offset or with the line truncated to a
   // multiple of sixty-four, and the per-pixel products whole.
   [[nodiscard]] FieldPoint fieldPoint(std::uint16_t x, std::uint16_t line) const noexcept;
@@ -786,7 +786,7 @@ class Ppu {
 
   // What Mode 7 shows at a picture position for BG1, or for the BG2 SETINI bit 6
   // makes of the same pixel — its bit 7 the priority, its low seven bits the word,
-  // and never read as a colour. Nothing where the pixel is zero or the position
+  // and never read as a color. Nothing where the pixel is zero or the position
   // is outside a field that shows nothing there. Whether BG2 exists at all is the
   // chart's to say: without the bit, Mode 7's order has no place for it.
   [[nodiscard]] std::optional<Shown> sampleField(Layer layer, std::uint16_t x,
@@ -856,7 +856,7 @@ class Ppu {
   [[nodiscard]] std::optional<Resolved> resolve(Screen screen, std::uint16_t x,
                                                 const PpuInputs& in, bool half) const noexcept;
 
-  // The main screen's pixel at a picture position under colour math, the colour
+  // The main screen's pixel at a picture position under color math, the color
   // it had before the math, and what it decided: `half` as resolve takes it, the
   // sub screen's addend being read for the left half. `subScreen` is the sub
   // screen's front-most pixel at the position, read for the left half, where the
@@ -869,7 +869,7 @@ class Ppu {
   [[nodiscard]] MainPixel mainPixel(std::uint16_t x, const PpuInputs& in, bool half,
                                     const std::optional<Resolved>* subScreen) const noexcept;
 
-  // A colour taken through colour math: added to or subtracted from `addend` five
+  // A color taken through color math: added to or subtracted from `addend` five
   // bits a channel, halved first where asked, and held to the range a channel has.
   [[nodiscard]] static std::uint16_t combine(std::uint16_t colour, std::uint16_t addend,
                                              bool subtract, bool halve) noexcept;
@@ -879,11 +879,11 @@ class Ppu {
   [[nodiscard]] bool hiresAt() const noexcept;
 
   // Whether one of $2130's two-bit regions covers a picture position: 0 nowhere,
-  // 1 outside the colour window, 2 inside it, 3 everywhere. The colour window is
+  // 1 outside the color window, 2 inside it, 3 everywhere. The color window is
   // the sixth thing a window can be enabled for and feeds these two fields alone.
   [[nodiscard]] bool regionCovers(unsigned region, std::uint16_t x) const noexcept;
 
-  // The 15-bit colour a palette word names, and the one $2132 holds.
+  // The 15-bit color a palette word names, and the one $2132 holds.
   [[nodiscard]] std::uint16_t paletteColour(std::uint8_t word) const noexcept;
   [[nodiscard]] std::uint16_t fixedColour() const noexcept;
 

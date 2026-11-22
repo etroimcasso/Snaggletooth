@@ -274,7 +274,7 @@ std::string bootWindowHex(std::span<const std::uint8_t, kIplWindowBytes> image) 
 // spc_smp.sfc booted on the stub. Its last sub-test reads the boot-ROM window back
 // and checksums it against the console's own boot code, which only that code
 // satisfies — so the machine runs every sub-test, passes the seven that measure
-// behaviour, and stops at the one that measures identity. Supply the console's boot
+// behavior, and stops at the one that measures identity. Supply the console's boot
 // ROM through SNAGGLETOOTH_BOOT_ROM and the same ROM reports a pass instead.
 //
 // Asserting the whole shape keeps the seven behavioural sub-tests covered: a

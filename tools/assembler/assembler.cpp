@@ -328,7 +328,7 @@ std::optional<std::string> readString(std::string_view item, std::string& error)
 }
 
 // The path an `INCBIN` in `file` asks its reader for: the directive's path joined
-// with the file's directory and normalised, in the generic form.
+// with the file's directory and normalized, in the generic form.
 std::string includedPath(std::string_view file, const std::string& path) {
   const std::filesystem::path directory = std::filesystem::path(std::string(file)).parent_path();
   return (directory / std::filesystem::path(path)).lexically_normal().generic_string();

@@ -96,8 +96,8 @@ TEST(Tiles, PlaneAndBitLayoutIsThePpu) {
   ASSERT_TRUE(png.ok());
   const PngImage image = decodePng(png.bytes);
   ASSERT_TRUE(image.ok());
-  EXPECT_EQ(image.image.indices[0], 1u);  // plane 0 bit set -> colour 1
-  EXPECT_EQ(image.image.indices[1], 2u);  // plane 1 bit set -> colour 2
+  EXPECT_EQ(image.image.indices[0], 1u);  // plane 0 bit set -> color 1
+  EXPECT_EQ(image.image.indices[1], 2u);  // plane 1 bit set -> color 2
   EXPECT_EQ(image.image.indices[2], 0u);
 }
 

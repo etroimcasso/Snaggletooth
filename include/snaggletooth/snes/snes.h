@@ -279,7 +279,7 @@ struct BusAccess {
 
 // What a machine tells about every access it makes, and every CPU cycle that
 // drives an address without one. A host derives the machine's whole observable
-// behaviour from it: which addresses were read and written in what order, and
+// behavior from it: which addresses were read and written in what order, and
 // how many cycles the CPU spent between two instruction boundaries — every CPU
 // access plus every internal cycle. A halted cycle drives nothing and is not
 // reported, and neither are a transfer engine's overhead cycles; the transfer's
@@ -690,7 +690,7 @@ struct SnesState {
   std::uint8_t hdmaActive = 0;   // channels that have taken part in HDMA this frame and whose tables are still running; a line delivers on the channels this and hdmaen both name
   std::uint8_t hdmaEnded = 0;    // channels whose tables terminated this frame, which $420C cannot restart before the next one
   std::uint8_t hdmaDoWrite = 0;  // per channel: whether this scanline delivers a value (rather than waiting)
-  bool hdmaInited = false;       // the start-of-frame initialisation has run this frame
+  bool hdmaInited = false;       // the start-of-frame initialization has run this frame
   bool hdmaLineFired = false;    // this scanline's delivery has been triggered
   bool hdmaRunPending = false;   // an HDMA event is due on the next machine cycle
   bool hdmaIniting = false;      // that pending event is the start-of-frame init (rather than a delivery)
@@ -766,7 +766,7 @@ class Snes {
   // does. The machine starts again where construction starts it in time — the CPU
   // about to fetch the first opcode at the cartridge's reset vector, the beam at
   // H = 0, V = 0 with the frame parity clear, the master counter at zero — and
-  // keeps everything a reset does not initialise.
+  // keeps everything a reset does not initialize.
   //
   // The CPU takes the registers `afterReset` gives (`cpu/cpu65816.h`). $4200,
   // $420B, $420C and $420D go to $00 and $4201 to $FF; the NMI and IRQ flags, the
@@ -1655,7 +1655,7 @@ class Snes {
   // machine resumes on a whole CPU-clock boundary since the pause.
   [[nodiscard]] std::uint32_t resumePad(std::uint32_t cpuCycle) const noexcept;
 
-  // The HDMA engine: one whole event — the start-of-frame initialisation, or a
+  // The HDMA engine: one whole event — the start-of-frame initialization, or a
   // single visible scanline's delivery for every active channel — and the $420C
   // write, which takes a channel out of the picture's remaining lines or brings one
   // into them.

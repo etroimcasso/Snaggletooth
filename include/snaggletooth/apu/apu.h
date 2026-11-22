@@ -105,7 +105,7 @@ struct ApuState {
 
 // What the audio machine tells about the sound CPU: every access it makes and
 // every instruction boundary it crosses. A host derives the CPU's whole
-// observable behaviour from it — which addresses were read and written in what
+// observable behavior from it — which addresses were read and written in what
 // order with what values, and how many cycles each instruction took. The DSP's
 // own reads of RAM, the sample and echo fetches, are not the CPU's and are not
 // reported.

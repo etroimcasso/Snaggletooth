@@ -45,10 +45,10 @@ constexpr std::uint32_t kBg3CharByte = 0x6000u;
 constexpr std::uint8_t kSpriteBase = 0x03u;
 constexpr std::uint32_t kSpriteCharByte = 0xC000u;
 
-// A sprite's character is always sixteen colours: four bitplanes.
+// A sprite's character is always sixteen colors: four bitplanes.
 constexpr unsigned kSpritePlanes = 4u;
 
-// The first palette word a sprite can name: its eight palettes are sixteen colours
+// The first palette word a sprite can name: its eight palettes are sixteen colors
 // each from CGRAM word 128 up.
 constexpr unsigned kSpritePaletteBase = 128u;
 
@@ -188,7 +188,7 @@ void putColour(PpuState& ppu, unsigned word, std::uint16_t colour) {
 using TileRows = std::array<std::array<std::uint8_t, 8>, 8>;
 
 // A character at a byte address, at as many bitplanes as the caller names: eight
-// rows of eight colour indices, planes 0 and 1 in the low and high bytes of eight
+// rows of eight color indices, planes 0 and 1 in the low and high bytes of eight
 // words and planes 2 and 3 in the same form sixteen bytes on, with the leftmost
 // pixel of a row in bit 7.
 void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
@@ -206,7 +206,7 @@ void putTileAt(PpuState& ppu, std::uint32_t byteAddress, unsigned planes,
   }
 }
 
-// A character every pixel of which is one colour index.
+// A character every pixel of which is one color index.
 TileRows solid(std::uint8_t index) {
   TileRows rows{};
   for (auto& row : rows) row.fill(index);
@@ -219,7 +219,7 @@ void putEntry(PpuState& ppu, std::uint32_t mapByte, unsigned index, std::uint16_
   ppu.vram[(mapByte + index * 2u + 1u) & 0xFFFFu] = static_cast<std::uint8_t>(entry >> 8);
 }
 
-// A background covered edge to edge by one character in one colour, at tile
+// A background covered edge to edge by one character in one color, at tile
 // priority 0. The map is one 32x32 screen, so 32 entries across and 32 down reach
 // every position of the picture.
 void coverBackground(PpuState& ppu, std::uint32_t mapByte, std::uint32_t charByte,
@@ -264,7 +264,7 @@ constexpr std::uint8_t attributes(bool flipVertical, bool flipHorizontal, unsign
 }
 
 // A PPU showing Mode 1's three backgrounds at full brightness, each covered edge to
-// edge in one colour and all three at tile priority 0 — so BG1 is in front, BG2
+// edge in one color and all three at tile priority 0 — so BG1 is in front, BG2
 // under it, BG3 under that and the backdrop under them all. A window that masks a
 // layer uncovers the next.
 PpuState screen() {
@@ -281,9 +281,9 @@ PpuState screen() {
   parkSprites(ppu);
 
   putColour(ppu, 0u, kBackdrop);
-  putColour(ppu, 1u, kRed);    // BG1 and BG2 palette 0, colour 1
-  putColour(ppu, 2u, kGreen);  // and colour 2
-  putColour(ppu, 5u, kBlue);   // BG3 palette 1, colour 1
+  putColour(ppu, 1u, kRed);    // BG1 and BG2 palette 0, color 1
+  putColour(ppu, 2u, kGreen);  // and color 2
+  putColour(ppu, 5u, kBlue);   // BG3 palette 1, color 1
   coverBackground(ppu, kBg1MapByte, kBg1CharByte, 4u, 0u, 1u);
   coverBackground(ppu, kBg2MapByte, kBg2CharByte, 4u, 0u, 2u);
   coverBackground(ppu, kBg3MapByte, kBg3CharByte, 2u, 1u, 1u);
@@ -295,7 +295,7 @@ PpuState screen() {
 PpuState screenWithSprite() {
   PpuState ppu = screen();
   ppu.tm = 0x17u;
-  putColour(ppu, kSpritePaletteBase + 1u, kWhite);  // sprite palette 0, colour 1
+  putColour(ppu, kSpritePaletteBase + 1u, kWhite);  // sprite palette 0, color 1
   putTileAt(ppu, kSpriteCharByte, kSpritePlanes, solid(1u));
   // Sixteen 8x8 sprites side by side cover x = 0..127 of every line they are on; a
   // sprite whose Y is N has its top row on the picture's row N.
@@ -313,7 +313,7 @@ constexpr std::uint8_t selector(bool enable1, bool invert1, bool enable2, bool i
                                    (invert2 ? 0x04u : 0u) | (enable2 ? 0x08u : 0u));
 }
 
-// The same four bits for the high layer of a selector — BG2, BG4 or the colour
+// The same four bits for the high layer of a selector — BG2, BG4 or the color
 // window.
 constexpr std::uint8_t highLayer(std::uint8_t bits) {
   return static_cast<std::uint8_t>(bits << 4);
@@ -714,14 +714,14 @@ TEST(Windows, TheLogicWrittenPartWayAlongALineRecombinesTheRestOfThatLine) {
 }
 
 TEST(Windows, TheColourWindowsLogicWrittenPartWayAlongALineMovesTheBlackRegion) {
-  // $2130's top field names the colour window as where the main screen's pixel
-  // stands as black, both of the colour window's own windows are enabled the same
+  // $2130's top field names the color window as where the main screen's pixel
+  // stands as black, both of the color window's own windows are enabled the same
   // way, and $212B is written from OR to AND — which leaves black only where both
   // windows hold, so the positions after the landing show BG1.
   PpuState before = screen();
-  before.cgwsel = 0x80u;  // black inside the colour window
+  before.cgwsel = 0x80u;  // black inside the color window
   before.wobjsel = highLayer(selector(true, false, true, false));
-  before.wobjlog = static_cast<std::uint8_t>(kOr << 2);  // the colour window's pair
+  before.wobjlog = static_cast<std::uint8_t>(kOr << 2);  // the color window's pair
   before.wh0 = 0u;
   before.wh1 = 255u;
   before.wh2 = 200u;
@@ -898,7 +898,7 @@ TEST(Windows, AnEdgeDeliveredBetweenTwoLinesShapesTheWholeOfTheNext) {
 }
 
 
-// ---- colour math: the vocabulary these cases are written in ------------------
+// ---- color math: the vocabulary these cases are written in ------------------
 
 // The byte the converter drives for a five-bit channel at brightness 15, from the
 // law the brightness scale states — value * (N + 1) * 255 / (31 * 16), rounded
@@ -908,7 +908,7 @@ constexpr std::uint8_t out(unsigned channel) {
   return static_cast<std::uint8_t>((channel * 16u * 255u + 248u) / 496u);
 }
 
-// What the picture drives for a colour given as three five-bit channels.
+// What the picture drives for a color given as three five-bit channels.
 constexpr Rgba rgb(unsigned red, unsigned green, unsigned blue) {
   return Rgba{out(red), out(green), out(blue), 255u};
 }
@@ -931,27 +931,27 @@ constexpr std::uint8_t cgadsub(bool subtract, bool half, std::uint8_t layers) {
   return static_cast<std::uint8_t>((subtract ? 0x80u : 0u) | (half ? 0x40u : 0u) | layers);
 }
 
-// Each of $2130's two regions is named against the colour window.
+// Each of $2130's two regions is named against the color window.
 constexpr std::uint8_t kNowhere = 0u;
 constexpr std::uint8_t kOutside = 1u;
 constexpr std::uint8_t kInside = 2u;
 constexpr std::uint8_t kEverywhere = 3u;
 
-// $2130: where the main colour is forced black, where math is prevented, and
-// whether the addend is the sub screen rather than the fixed colour.
+// $2130: where the main color is forced black, where math is prevented, and
+// whether the addend is the sub screen rather than the fixed color.
 constexpr std::uint8_t cgwsel(std::uint8_t black, std::uint8_t prevent, bool subScreen) {
   return static_cast<std::uint8_t>((black << 6) | (prevent << 4) | (subScreen ? 0x02u : 0u));
 }
 
-// The fixed colour $2132 holds, three five-bit channels.
+// The fixed color $2132 holds, three five-bit channels.
 void putFixed(PpuState& ppu, unsigned red, unsigned green, unsigned blue) {
   ppu.fixedRed = static_cast<std::uint8_t>(red);
   ppu.fixedGreen = static_cast<std::uint8_t>(green);
   ppu.fixedBlue = static_cast<std::uint8_t>(blue);
 }
 
-// BG1 alone on the main screen in one colour, nothing on the sub screen, and
-// colour math off until a case turns it on.
+// BG1 alone on the main screen in one color, nothing on the sub screen, and
+// color math off until a case turns it on.
 PpuState mathScreen(std::uint16_t mainColour) {
   PpuState ppu = screen();
   ppu.tm = 0x01u;
@@ -960,7 +960,7 @@ PpuState mathScreen(std::uint16_t mainColour) {
   return ppu;
 }
 
-// The colour window over the picture's left half, and nothing else windowed. Its
+// The color window over the picture's left half, and nothing else windowed. Its
 // four bits live in the high nibble of $2125 and its logic in bits 3-2 of $212B.
 void putColourWindow(PpuState& ppu, std::uint8_t left, std::uint8_t right) {
   ppu.wh0 = left;
@@ -968,7 +968,7 @@ void putColourWindow(PpuState& ppu, std::uint8_t left, std::uint8_t right) {
   ppu.wobjsel = highLayer(selector(true, false, false, false));
 }
 
-// ---- what the converter does with a mathed colour ----------------------------
+// ---- what the converter does with a mathed color ----------------------------
 
 TEST(ColourMathVocabulary, TheChannelTableAgreesWithTheHandDerivedColours) {
   // The helper above is the brightness law written out; these four are the values
@@ -1046,7 +1046,7 @@ TEST(ColourMath, TheHalvingAppliesToASubtractionToo) {
 TEST(ColourMath, TheFixedColourAddendIsHalvedLikeAnyOther) {
   PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
   putFixed(ppu, 16u, 0u, 0u);
-  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);  // bit 1 clear: the fixed colour
+  ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);  // bit 1 clear: the fixed color
   ppu.cgadsub = cgadsub(false, true, kMathBg1);
   EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(23u, 0u, 0u));  // (31 + 16) / 2
 }
@@ -1056,13 +1056,13 @@ TEST(ColourMath, TheSubScreensBackdropIsNotHalved) {
   putFixed(ppu, 16u, 0u, 0u);
   ppu.cgwsel = cgwsel(kNowhere, kNowhere, true);  // the sub screen, which is empty
   ppu.cgadsub = cgadsub(false, true, kMathBg1);
-  // The same two colours as the case above, reached by the other path: the sub
-  // screen shows nothing, so its backdrop is the fixed colour and the halving does
+  // The same two colors as the case above, reached by the other path: the sub
+  // screen shows nothing, so its backdrop is the fixed color and the halving does
   // not apply — 31 + 16 held at the top rather than (31 + 16) / 2.
   EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(31u, 0u, 0u));
 }
 
-// ---- forcing the main colour black -------------------------------------------
+// ---- forcing the main color black -------------------------------------------
 
 TEST(ColourMath, AForcedBlackPixelStillTakesTheAddendWhole) {
   PpuState ppu = mathScreen(colourOf(31u, 31u, 31u));
@@ -1089,7 +1089,7 @@ TEST(ColourMath, SubtractingFromAForcedBlackPixelLeavesItBlack) {
   EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(0u, 0u, 0u));
 }
 
-// ---- the two regions, and the colour window they are named against -----------
+// ---- the two regions, and the color window they are named against -----------
 
 TEST(ColourMath, TheBlackRegionAppliesInsideTheColourWindowAlone) {
   PpuState ppu = mathScreen(colourOf(31u, 0u, 0u));
@@ -1100,7 +1100,7 @@ TEST(ColourMath, TheBlackRegionAppliesInsideTheColourWindowAlone) {
   const Picture picture = draw(ppu);
   EXPECT_EQ(picture.at(0u, kRow), rgb(0u, 16u, 0u));    // forced black, then the addend
   EXPECT_EQ(picture.at(127u, kRow), rgb(0u, 16u, 0u));
-  EXPECT_EQ(picture.at(128u, kRow), rgb(31u, 16u, 0u));  // outside it, the colour stands
+  EXPECT_EQ(picture.at(128u, kRow), rgb(31u, 16u, 0u));  // outside it, the color stands
   EXPECT_EQ(picture.at(255u, kRow), rgb(31u, 16u, 0u));
 }
 
@@ -1139,7 +1139,7 @@ TEST(ColourMath, ThePreventRegionStopsMathWhereItNames) {
   ppu.cgwsel = cgwsel(kNowhere, kInside, false);
   ppu.cgadsub = cgadsub(false, false, kMathBg1);
   const Picture picture = draw(ppu);
-  EXPECT_EQ(picture.at(0u, kRow), rgb(16u, 0u, 0u));    // prevented: the raw colour
+  EXPECT_EQ(picture.at(0u, kRow), rgb(16u, 0u, 0u));    // prevented: the raw color
   EXPECT_EQ(picture.at(128u, kRow), rgb(16u, 16u, 0u));  // and mathed outside it
 }
 
@@ -1162,7 +1162,7 @@ TEST(ColourMath, WithNoColourWindowEnabledEveryPositionIsOutside) {
   putFixed(ppu, 0u, 16u, 0u);
   ppu.wh0 = 0u;
   ppu.wh1 = 127u;
-  ppu.wobjsel = 0u;  // the colour window enables neither of its windows
+  ppu.wobjsel = 0u;  // the color window enables neither of its windows
   ppu.cgwsel = cgwsel(kOutside, kNowhere, false);
   ppu.cgadsub = cgadsub(false, false, kMathBg1);
   const Picture picture = draw(ppu);
@@ -1176,7 +1176,7 @@ TEST(ColourMath, TheColourWindowReadsItsOwnBitsAndNotTheSprites) {
   putFixed(ppu, 0u, 16u, 0u);
   ppu.wh0 = 0u;
   ppu.wh1 = 127u;
-  // The sprites' nibble of $2125, which is the low one, must not reach the colour
+  // The sprites' nibble of $2125, which is the low one, must not reach the color
   // window in the high one.
   ppu.wobjsel = selector(true, false, false, false);
   ppu.cgwsel = cgwsel(kInside, kNowhere, false);
@@ -1207,7 +1207,7 @@ TEST(ColourMath, Bg3IsReachedByItsOwnBitToo) {
   PpuState ppu = screen();
   ppu.tm = 0x04u;  // BG3 alone on the main screen
   ppu.ts = 0x00u;
-  putColour(ppu, 5u, colourOf(8u, 0u, 0u));  // BG3 draws palette 1, colour 1
+  putColour(ppu, 5u, colourOf(8u, 0u, 0u));  // BG3 draws palette 1, color 1
   putFixed(ppu, 0u, 16u, 0u);
   ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
 
@@ -1239,7 +1239,7 @@ TEST(ColourMath, Bg4sBitReachesNothingInModeOne) {
   ppu.cgwsel = cgwsel(kNowhere, kNowhere, false);
   ppu.cgadsub = cgadsub(false, false, kMathBg4);
   // Mode 1 draws three backgrounds, so the fourth's bit names a layer that is not
-  // there and the pixel keeps its colour.
+  // there and the pixel keeps its color.
   EXPECT_EQ(draw(ppu).at(100u, kRow), rgb(16u, 0u, 0u));
 }
 
@@ -1381,7 +1381,7 @@ TEST(ColourMath, AMachineWithAnObserverAndOneWithoutAgreeInEveryField) {
   Snes unwatched = machineWith(ppu);
   unwatched.run(kOneFrame);
 
-  // Colour math adds no state, so a frame of it leaves the two machines identical —
+  // Color math adds no state, so a frame of it leaves the two machines identical —
   // the pin the picture unit set, re-asserted by the first block since it to touch
   // the dot path.
   EXPECT_EQ(watched.state().ppu.cgwsel, unwatched.state().ppu.cgwsel);

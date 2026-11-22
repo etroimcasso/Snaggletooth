@@ -64,15 +64,11 @@ A copier's header ahead of the image — the 512 bytes a Super Wild Card, a Pro 
 dropped a Super Wild Card header: 512 KB, HiROM, 8 KB of save RAM mapped HiROM, a program; the image is 3584 bytes longer than declared
 ```
 
-[The cartridge](snes-cartridge.md#a-copiers-header) says how each copier's header is recognised and read.
+[The cartridge](snes-cartridge.md#a-copiers-header) says how each copier's header is recognized and read.
 
 `--no-sound` skips the boot, so no sound program is looked for and the banks keep every byte. `--boot-seconds N` bounds the boot at N seconds of the master clock; the default is fifteen, more than a cartridge that clears its memory, unpacks its program and streams tens of kilobytes of samples takes to start it. A cartridge that has not started its sound program in that time is reported as a `note` in the manifest and its banks keep every byte.
 
-`--no-run` skips [running the cartridge](#running-the-cartridge); `--run-seconds N` bounds the run at N seconds of the master clock, sixty by default. `--input
-<script>` replays an [input script](input-script.md) into the controller ports
-while the cartridge runs, so the run plays the game rather than watching it; a script that cannot be read is refused with its line named, and `--input` under `--no-run` is refused as well, having nothing to replay into. `--input-dir
-<directory>` names a directory of recorded runs instead: the one named for the
-image — its file name without the extension, exactly as it is, then `.snaginput` — is replayed when it is there; the directory's `default.snaginput` is replayed when it is not, so every image in a corpus is played; and the ports stay empty only when the directory holds neither. The two forms are not given together.
+`--no-run` skips [running the cartridge](#running-the-cartridge); `--run-seconds N` bounds the run at N seconds of the master clock, sixty by default. `--input <script>` replays an [input script](input-script.md) into the controller ports while the cartridge runs, so the run plays the game rather than watching it; a script that cannot be read is refused with its line named, and `--input` under `--no-run` is refused as well, having nothing to replay into. `--input-dir <directory>` names a directory of recorded runs instead: the one named for the image — its file name without the extension, exactly as it is, then `.snaginput` — is replayed when it is there; the directory's `default.snaginput` is replayed when it is not, so every image in a corpus is played; and the ports stay empty only when the directory holds neither. The two forms are not given together.
 
 When the directory already holds a `project.snagifest`, its `entry`, `reached`, `ran`, `derived`, `moved`, `asset` and `file` lines are read first, and the manifest must name the image it was written for: a manifest written for another image is refused rather than applied. See [Stops, and getting past them](#stops-and-getting-past-them). Every record of an earlier run under the directory's `runs/` is read as well, manifest or none, and the tree is made from them and this run together ([Running the cartridge](#running-the-cartridge)); a record written for another image is refused the same way.
 
@@ -318,7 +314,7 @@ stop     $00:800B `JMP (!$8100,X)`: the target is computed at run time; add an e
 stop     $00:8245 `JMP (!$8100)`: the target is computed at run time; add an entry for each destination
 ```
 
-Both stops stand, since the bytes still do not name the targets; both targets are now code in the tree, labelled by the form that took them:
+Both stops stand, since the bytes still do not name the targets; both targets are now code in the tree, labeled by the form that took them:
 
 ```
         JMP (!$8100,X)                  ; $00:800B  7C 00 81  6
@@ -761,7 +757,7 @@ tiles/00_8F00.png
 
 A listing says which registers an instruction names. The manifest says what that adds up to: for every instruction the trace decoded that reaches a hardware register, an `access` line with the register, the part of the machine it belongs to, whether the instruction reads or writes it, and the value it wrote where the bytes say what that was; and for every transfer a routine set a channel up for and started, a `dma` line with the transfer those accesses describe — the channel's registers as they stood when the start was written. Both are [manifest lines](project-manifest.md#26-what-the-code-reaches), worked out again from the trace by every disassembly.
 
-The destination of a transfer is the register the channel's `BBAD` names — the value written there, not `BBAD` itself — so its class is what the transfer is for. A transfer to `OAMDATA` is a sprite table, one to `VMDATAL` a tileset or a tilemap, one to `CGDATA` a palette, one to `APUIO0` a sound driver or its samples — each named by where it is sent, rather than by anything a person has labelled yet. The source is where the bytes come from and how the address steps, as `DMAP` says; the count is what `DAS` was written with, which for a general-purpose transfer is how many bytes move, a zero standing for 65536; and the start is the write to `MDMAEN` or `HDMAEN` that set the channel going. A stretch of straight-line code that starts one channel four times has four lines, each with the registers as they stood — a start that rewrote only the source and the count sends to the destination the last one left — and a channel written and never started has a line whose start is `none`:
+The destination of a transfer is the register the channel's `BBAD` names — the value written there, not `BBAD` itself — so its class is what the transfer is for. A transfer to `OAMDATA` is a sprite table, one to `VMDATAL` a tileset or a tilemap, one to `CGDATA` a palette, one to `APUIO0` a sound driver or its samples — each named by where it is sent, rather than by anything a person has labeled yet. The source is where the bytes come from and how the address steps, as `DMAP` says; the count is what `DAS` was written with, which for a general-purpose transfer is how many bytes move, a zero standing for 65536; and the start is the write to `MDMAEN` or `HDMAEN` that set the channel going. A stretch of straight-line code that starts one channel four times has four lines, each with the registers as they stood — a start that rewrote only the source and the count sends to the destination the last one left — and a channel written and never started has a line whose start is `none`:
 
 ```
 dma      $00:8007 channel 0 to-register $00:2118 VMDATAL Vram source $00:9000 increment bytes 32 start $01 from $00:8025
@@ -833,9 +829,115 @@ std::size_t rendered = 0;
 snaggletooth::disasm::renderTree("cartridge", rendered, error);  // the bank files, from the two files on disk
 ```
 
-`disassembleCartridge` returns the header, the entries traced from, one `RegionListing` per region — its `SourceRegion` and its `Listing`, whole — the `SoundProgram` when one was captured, the `assets` lifted out of the banks, the `previews` written beside them, the `samples` the run's key-ons named, the `TraceStop`s, and `notes` for what the run could not do. Each `AssetFile` is its path — whose extension names its form — the `classes` of the registers its bytes went to — one, or two for a `staged/` file — and the `registerAddress` of the one that named it, its `kind` (a `MovedKind`), the address of its `first` byte, its `romOffset`, its `bytes` as the image holds them, and what the form needs and the file is written as: a sheet's `depth` and `palette` (RGBA quadruples), a table's `unit` and `indirect`, and `written`, the bytes that go to disk — the form's encoding, or the bytes themselves. Each `PreviewFile` is its path, the lifted file it is `of`, its `form` as the `preview` line names it, how many distinct `contents` a source's preview holds, and its `written` bytes. Each `SampleFile` is the WAV's path, the sample's `start` and `loop` addresses in the audio memory, its `bytes` as the audio memory held them, the `in` file and `romOffset` where the image holds them whole — absent when it does not — how many `times` a key-on named it, and the WAV's `written` bytes. `CartridgeRequest::assets` is the `ManifestAsset`s read back from the manifest — a path with the first address, length and classes it names — which give a file lifted again its path, and `CartridgeRequest::readFile` is a `FileReader` over the tree's files, which a disassembly without a run takes a sheet's depth and palette and a table's unit from. `bankRegions(map, imageBytes)` is the default split. `captureUpload(rom, masterCycles, reason)` is the boot alone: the entry and the blocks, each with its `romOffset` when the image holds it. `placeBytes` builds the image the tree describes and counts what is unplaced or placed twice.
+### The request
 
-`reached` carries [what the run reached](#running-the-cartridge): one `ReachedTarget` per destination — `target`, the `mode` it arrived in, the `site` that took it, whether it was a `call`, and the `name` the tree gives it. `ran` carries [where the CPU arrived](#where-the-cpu-arrived-and-what-it-saw): one `Landing` per place — `target`, `mode`, `site` and `name`, as a reached target's — and `seen` one `SeenState` per site the run executed in the image, its `address` and the values of `d` and `dbr` seen there; `sameLanding` says whether two landings are one. `moved` carries [what the run moved](#what-a-run-moved): one `MovedRange` per range — `site`, `channel`, `toRegister`, `registerAddress` with `registerName` and `registerClass` where the address has one, `memory`, `step` (a `MovedStep`), `bytes`, `kind` (a `MovedKind`) and `times`; `movedStepName` and `movedKindName` are their names as text, `sameRange` says whether two are one range, and `rangeBefore` is the order they are written in. `landed` carries [where those ranges landed](#what-a-run-moved): one `LandedRange` per distinct landing — the `site`, `channel`, `memory`, `bytes` and `kind` of its `moved` line, the `landing` and `times`. A `PortLanding` is the `memory` the port reaches (a `PortMemory`: `Vram`, `Cgram`, `Oam`), the `lowest` and `highest` address the port put a byte at, whether the landing was `shown` — read at the first frame drawn after it — and the `areas` it lies in, one bit each of `kAreaTilemap1`–`kAreaTilemap4`, `kAreaTiles1`–`kAreaTiles4`, `kAreaSprites`, `kAreaMode7`, `kAreaPalette` and `kAreaOam`, the `depths` its tile areas were read at, one bit each of `kDepth2`, `kDepth4` and `kDepth8`, and the `palette` — an index among the palettes the run kept — as it stood at the first drawn frame that read a VRAM landing; `areaText` is the areas as the manifest writes them, `none` and `unshown` included, `landingDepth` the one depth the tile areas share and `depthText` it as the manifest writes it, `portAddressText` an address in the memory's width, and `landedBefore` the order the lines are written in. `walked` carries one `WalkedRange` per distinct walk of a table or an indirect block — the fields of its `moved` line, the `unit`, whether it is `indirect`, and `times` — `hdmaUnitOf` is the unit a `DMAP` transfer pattern gives, and `walkedBefore` the order the lines are written in; `palettes` is the palette RAM at each drawn frame a landing was read at, each distinct copy once. `rom/rom_observe.h` is the run itself: `observeRun(rom, masterCycles, input, notes)` boots the machine, replays `input` — an [`InputScript`](input-script.md#6-library), empty for the boot alone — into the controller ports, and returns a `RunObservation` holding the `reached` sightings in site order, the `moved` ranges and their `landed` landings, the `ran` landings, the `seen` values, the `staged` extents — one `StagedRange` per extent of work RAM carried to a register, by an engine or by the CPU a store at a time: `memory`, `bytes`, the `origin` of every byte together (an `ir::OriginSet`), the `writers`, each a `StagedWriter` with the `writer` site or engine, whether the bytes were `unwritten`, how many `bytes` it wrote, their `origin` and their `sources`, and the `contents` the extent was carried out with, each a `CarriedContent` with its `bytes`, their `origin`, the `cls` and `kind` of the carry, its `landing`, and a table's `unit` and `indirect`; `sameExtent` says whether two are one and `sameContent` whether two contents are — the `streamed` runs, one `StreamedRange` per stream: `site`, `registerAddress` with `registerName` and `registerClass`, `bytes` and `times`, either the `memory` of the buffer carried or the `romOffset` carried with the `source` run it is lifted as, and its `landing` where the register is a video data port, `sameStream` likewise — the `samples` the key-ons named, one `KeyedSample` per distinct sample: its `start` and `loop` addresses, its `bytes` and how many `times` a key-on named it, `sameSample` saying whether two are one — and what the run beside the interpreter checked — the `instructions` and `interrupts` it ran a node or a sequence for, the distinct `nodes` it lifted from the fetches, the `divergences` on which a node disagreed with the machine, each site once in the notes, and the `originSets` the shadow interned under its `originCap`. `extentStart` is the lowest address a `MovedRange` covered.
+`disassembleCartridge(request)` takes a `CartridgeRequest`. Only `rom` is required; everything else has a default that disassembles the image alone.
+
+| Field | What it is | Default |
+|---|---|---|
+| `rom` | the image, without a copier's header | — |
+| `entries` | `TraceEntry`s beyond the vectors, which are always traced: an `address`, the `mode` execution arrives in, and the `name` the address takes | empty |
+| `regions` | the file split, as `SourceRegion`s — a `file` and the `first` and `last` address it covers, inclusive, within one bank | empty: one file per bank, as `bankRegions(map, imageBytes)` gives |
+| `reached`, `ran`, `moved`, `derived` | what earlier runs found, read back from the manifest; the disassembly merges them with its own run's | empty |
+| `assets` | the `ManifestAsset`s read back from the manifest — a `file` with the `first` address, the `bytes`, the `classes`, the `also` classes and the `kind` it names — which give a file lifted again its path | empty |
+| `readFile` | a `FileReader` over the tree's files: a tile sheet no landing describes takes its depth and palette, and a table no walk describes its unit, from the file on disk | none: such files are written as bytes |
+| `captureSound` | boot the machine to find the sound program | `true` |
+| `bootMasterCycles` | the bound on each boot, in master cycles | fifteen seconds of the master clock |
+| `observeRun` | [run the cartridge](#running-the-cartridge) and trace from what the run saw | `false`; `snes_disasm` sets it unless `--no-run` |
+| `runMasterCycles` | the bound on the run, in master cycles | sixty seconds of the master clock |
+| `input` | the [`InputScript`](input-script.md#6-library) replayed into the controller ports during the run | empty: the ports stay empty |
+| `observed`, `observedNotes` | a host's run (`ObservedRun` or `BufferedRun`) and its notes, in place of a run of the disassembly's own; set, the cartridge is not booted for a run and `observeRun`, `runMasterCycles` and `input` are not read | none |
+| `records` | the [run records](run-record.md) the tree holds, which `treeRequest` reads; the tree is made from them and this run together | none |
+| `recordRun` | keep this disassembly's own run as `CartridgeDisassembly::record` | `true` |
+| `progress` | a `ProgressSink` (`rom/progress.h`) told each stage as it begins: `running the cartridge` with the master cycles spent against `runMasterCycles` every tenth of a second, `tracing`, `proving what every path reaches` once a turn, `booting the sound program` against `bootMasterCycles` for each boot, where a routine is planned `running the cartridge again` and `enumerating` once a value, then `lifting the files` and `drawing the previews` | none: nothing is reported |
+| `stop` | asked as `tracing`, each turn of the proof, `lifting the files` and each range and file of the previews begin, and once the boots are done; `true` ends the disassembly there, and the result has `stopped` set | none |
+
+The library prints nothing; `ProgressPrinter` in `rom/progress.h` is what `snes_disasm` prints with.
+
+### The disassembly
+
+`disassembleCartridge` answers a `CartridgeDisassembly`:
+
+| Field | What it holds |
+|---|---|
+| `header`, `board` | the cartridge header, and the board it declares, which every reading of an address goes through |
+| `imageBytes` | the image's length |
+| `entries` | every entry the trace started from, the vectors first |
+| `regions` | one `RegionListing` per region: its `SourceRegion` and its `Listing`, whole |
+| `program` | every region's code lifted once into the [intermediate representation](ir.md), which `program.snagir` is written from; its `spc700` nodes are the sound program's, which `apu.snagir` is written from |
+| `sound` | the `SoundProgram` when one was captured: its `file`, the `UploadCapture` — the `entry` the audio CPU started at and the `UploadBlock`s, each an `apuAddress`, its `bytes` and the `romOffset` where the image holds them — and the `listing` |
+| `stops` | the `TraceStop`s: an `address` and the `reason` the trace stopped there |
+| `notes` | what the disassembly could not do, in words |
+| `accesses`, `dmas`, `routines`, `states` | [what the code reaches](#what-the-code-reaches) and what every path proves, below |
+| `reached`, `ran`, `seen`, `moved`, `landed`, `walked`, `palettes`, `staged`, `streamed` | what this run and every record found, as [the run's observation](#the-runs-observation) holds them; `reached` and `ran` carry the `name` the tree gives each target |
+| `derived` | the destinations the bytes prove the indirect jumps take, below |
+| `assets`, `previews`, `samples` | the lifted files, the previews beside them and the samples' listening copies, below |
+| `enumerated`, `enumeration`, `enumeratedLifts` | the outcomes of the toolkit's runs of planned routines, this disassembly's second run's and every record's; the `EnumerationCount` of values `planned`, `run`, `returned` and `confined`, and the master `cycles` they took; and one `EnumeratedLift` per piece lifted from them |
+| `stopped` | `request.stop` ended the disassembly; what it holds is no tree to write |
+| `record` | this disassembly's own run as `writeProject` writes it under `runs/`, when the request asked for it to be kept and the disassembly was not stopped |
+
+`captureUpload(rom, masterCycles, reason)` is the boot alone, answering the `UploadCapture` or nothing with `reason` set. `placeBytes(disassembly)` builds the image the tree describes as a `Placement`: the `image`, and how many of its bytes are `unplaced` and `placedTwice`, both zero for a complete tree. `routineByLine(disassembly)` maps every line's address to the label of the routine it belongs to, a line two routines hold taking the later one's.
+
+### Lifted files, previews and samples
+
+Each lifted file is an `AssetFile`:
+
+| Field | What it is |
+|---|---|
+| `file` | its path, relative to the manifest; the extension names its form ([the assets](#the-assets)) |
+| `classes` | the classes of the registers the runs saw its bytes go to, ascending: one, or two for a `staged/` file |
+| `also` | the classes a routine the toolkit ran built the bytes into that the runs' own transfers never reached |
+| `kind` | the `MovedKind` of the range it was lifted from |
+| `registerAddress` | the register that named it, for the comment beside its `INCBIN` |
+| `first`, `romOffset` | the address the tree places its first byte at, and the image offset |
+| `bytes` | the bytes as the image holds them |
+| `depth`, `palette` | a tile sheet's bits a pixel — 2, 4 or 8, 0 for any other form — and its palette as RGBA quadruples |
+| `unit`, `indirect` | an HDMA table's bytes a line, and whether its entries carry pointers |
+| `written` | the file as it goes to disk: the form's encoding of the bytes, or the bytes themselves |
+
+A `PreviewFile` is a `file` written beside the lifted file it is `of`, its `form` as the manifest's `preview` line names it, how many distinct `contents` a source's preview combines, and its `written` bytes. A `SampleFile` is a WAV's `file`, the sample's `start` and `loop` addresses in the audio memory, its `bytes` as the audio memory held them, the file the bytes are `in` and their `romOffset` where the image holds them whole — both absent when it does not — how many `times` a key-on named it, and the WAV's `written` bytes.
+
+### The run's observation
+
+`rom/rom_observe.h` is the run itself. `observeRun(rom, masterCycles, input, notes)` boots the machine, replays `input` into the controller ports, and answers a `RunObservation`; `notes` gains what the run could not do. `ObservedRun` and `BufferedRun`, below, make the same observation over a machine the host runs.
+
+| Field | What it holds, and its order |
+|---|---|
+| `reached` | one `ReachedTarget` per destination an indirect jump or call took, in site order, then target |
+| `moved` | one `MovedRange` per range a transfer engine moved, in `rangeBefore` order |
+| `landed` | one `LandedRange` per place those ranges landed past the port, in `landedBefore` order |
+| `walked` | one `WalkedRange` per walk of an HDMA table or indirect block, in `walkedBefore` order |
+| `palettes` | the palette RAM, 512 bytes, at each drawn frame a landing was read at, each distinct copy once; a landing names one by index |
+| `ran` | one `Landing` per place the CPU arrived that the instruction before did not name, in site order, then target |
+| `seen` | one `SeenState` per site executed in the image, in address order |
+| `staged` | one `StagedRange` per extent of work RAM carried to a register, in address order, then count |
+| `streamed` | one `StreamedRange` per stream the CPU carried a store at a time |
+| `samples` | one `KeyedSample` per distinct sample a key-on named, in start order |
+| `instructions`, `interrupts`, `nodes`, `divergences` | the steps the interpreter ran a node for and checked, the hardware sequences run and checked, the distinct nodes lifted from the fetches, and the steps a node disagreed with the machine on, each site once in the notes |
+| `spc700Instructions`, `spc700Nodes`, `spc700Divergences` | the same three for the sound CPU |
+| `originSets`, `originCap` | how many distinct origins the shadow interned, and the cap above which one is widened |
+| `enumerated`, `variantsPlanned`, `variantsRun`, `variantsReturned`, `variantsConfined`, `enumerationCycles` | a run given a plan: the outcomes it kept, and the counts of its values and the master cycles they took |
+
+The records it is made of:
+
+| Type | Fields | Helpers |
+|---|---|---|
+| `ReachedTarget` | `target`, the `mode` it arrived in, the `site` that took it, whether it was a `call`, and the `name` the tree gives it — empty as the run reports it | `sameSighting` |
+| `Landing` | `target`, `mode`, `site` and `name`, as a reached target's | `sameLanding` |
+| `SeenState` | the `address`, and every `d` and `dbr` seen there, ascending | |
+| `MovedRange` | `site`, `channel`, `toRegister`, `registerAddress` with `registerName` and `registerClass` where the address has one, `memory`, `step` (a `MovedStep`), `bytes`, `kind` (a `MovedKind`) and `times` | `sameRange`, `rangeBefore`, `extentStart`, `movedStepName`, `movedKindName` |
+| `LandedRange` | the `site`, `channel`, `memory`, `bytes` and `kind` of its range, the `landing` and `times` | `landedBefore` |
+| `PortLanding` | the `memory` (a `PortMemory`: `Vram`, `Cgram`, `Oam`), the `lowest` and `highest` address the port put a byte at, whether it was `shown` at a drawn frame, its `areas` (`kAreaTilemap1`–`kAreaTilemap4`, `kAreaTiles1`–`kAreaTiles4`, `kAreaSprites`, `kAreaMode7`, `kAreaPalette`, `kAreaOam`), its `depths` (`kDepth2`, `kDepth4`, `kDepth8`) and the `palette` index of the first drawn frame that read a VRAM landing | `areaText`, `landingDepth`, `depthText`, `portAddressText` |
+| `WalkedRange` | the fields of its range, the `unit`, whether it is `indirect`, and `times` | `walkedBefore`, `hdmaUnitOf` |
+| `StagedRange` | `memory`, `bytes`, the `origin` of every byte together (an `ir::OriginSet`), the `writers` and the `contents` | `sameExtent` |
+| `StagedWriter` | the `writer` site or engine, whether its bytes were `unwritten`, how many `bytes` it wrote, their `origin` and their `sources` | |
+| `CarriedContent` | the `bytes`, their `origin`, the `cls` and `kind` of the carry, its `landing`, a table's `unit` and `indirect`, the `byteOrigins` — runs of consecutive bytes with one origin, each a `ContentOrigin` — and its `order` among the run's carries | `sameContent` |
+| `StreamedRange` | `site`, `registerAddress` with `registerName` and `registerClass`, `romOffset`, `bytes`, `times`, the `source` run it is lifted as, the `memory` of a buffer carried from work RAM, and its `landing` where the register is a video data port | `sameStream` |
+| `KeyedSample` | the `start` and `loop` addresses, the `bytes`, and `times` | `sameSample` |
+
+The second overload, `observeRun(rom, masterCycles, input, notes, progress, plan, firstInstructions, firstDivergences)`, is the same run again carrying out an `EnumerationPlan`: each planned routine run once for every value its inputs take. It runs nothing when its instruction and divergence counts differ from the first run's.
+
+### A run over a machine the host runs
 
 `ObservedRun` in the same header is the run over a machine the host runs ([Running the cartridge](#running-the-cartridge)). Its constructor, `ObservedRun(machine, rom)`, takes a `Snes` at power-on, built from `rom` with no `map` or `saveRamBytes` of its own, and sets the machine's bus, audio and instruction observers; it throws `std::logic_error` when the machine has run a master cycle, already has one of the three observers, or `rom` holds no cartridge header. From then on the host runs the machine as it likes, makes no call into the guest, and resets it only through `reset()`, which pulls the console's reset line and takes the run through it. `frame()` is how many times the beam has wrapped to line 0 since power-on, the frame an input script's pads are presented for. `observation(notes)` answers what has closed so far and leaves the run going: a range, a stream or a landing still open is not in it. `finish(notes)` closes everything as `observeRun` does at its end, clears the three observers and answers the whole observation; the destructor clears them when `finish` was not called. Both append the run's notes, the main CPU's in the order made and then the sound CPU's.
 
@@ -912,13 +1014,30 @@ The thread that plays the main CPU's blocks in order works at `Normal`, the clas
 - RAM takes the host's blocks up to its ceiling. One block past it, the files' threads move the newest blocks to files until RAM stands at the level — `memoryLevelPercent` of the ceiling — and they read blocks back only while RAM stays at or under it, so the room between the level and the ceiling takes what the host writes next. At 100 the level is the ceiling: RAM stays full of the oldest blocks, and while the files hold any, each block the host hands over goes through a file. The files never pass their ceiling. `memoryOver()` says RAM stands past its ceiling by more than the blocks being written and one block more while the files have room, and a host that stops there until `memoryAtLevel()` holds RAM to its ceiling, as `snes_player --disasm` does. The run's threads hold blocks of their own — the ones being checked, the one each stream is writing, the free ones kept for the writer — and a level under what they hold is reached only when the buffer holds nothing.
 - The record and the stream the buffer is made of are in `rom/rom_buffer.h`, for the run's own use.
 
-`CartridgeRequest::observeRun` asks for the run — off unless asked, since it costs about as long as it emulates; `snes_disasm` asks unless told `--no-run` — `runMasterCycles` bounds it, and `CartridgeRequest::input` is the script it replays. `CartridgeRequest::observed` is a host's run in place of that one: set, the cartridge is not booted for a run, `observeRun`, `runMasterCycles` and `input` are not read, `CartridgeRequest::observedNotes` join the notes where the run's own would, and the plan of routines to run again is made and its notes said, but no routine is run again. `CartridgeRequest::reached`, `CartridgeRequest::ran` and `CartridgeRequest::moved` are what earlier runs found, read back from the manifest, which the disassembly merges with this run's. `CartridgeRequest::progress` is a `ProgressSink` (`rom/progress.h`), told what the disassembly is doing as it goes when set — `running the cartridge` with the master cycles spent against `runMasterCycles` every tenth of a second, then `tracing`, `proving what every path reaches`, and `booting the sound program` against `bootMasterCycles` for each boot; the library prints nothing, and `ProgressPrinter` in the same header is what the command line prints with.
+With `CartridgeRequest::observed` set, the plan of routines to run again is made and its notes said, but no routine is run again: the tree's `enumerated` lines are those its records hold.
 
-`accesses` and `dmas` carry [what the code reaches](#what-the-code-reaches). `rom/rom_facts.h` is the producer, over a finished `CartridgeDisassembly`: `hardwareAccesses(disassembly, proven)` gives one `HardwareAccess` per register an instruction reaches — its `site`, `registerAddress`, `name`, `cls`, `kind`, the `value` where the bytes prove it, and the `run` of straight-line code it sits in — and `dmaTransfers(accesses)` gives one `DmaTransfer` per channel a run set up. `proven` is a `ProvenProgram` from `proveProgram(disassembly, rom)`: the [dataflow](ir.md#what-every-path-proves) run over the disassembly's `program` — every region lifted once, in address order, an address two paths read two ways as two nodes — which the dataflow refers to; without one, a value is the instruction before's alone and a direct-page operand produces nothing. `derivedTargets(disassembly, proven)` gives one `DerivedTarget` per destination the analysis derived — `target`, `mode`, `site`, `pointer`, `call`, `name` — which `disassembleCartridge` traces from and carries as `derived`; `stateFacts(disassembly, proven)` gives one `StateFact` per label at which any of `d`, `dbr` or `s` is known, each the values the register can hold, carried as `states`. `accessKindName` and `dmaDirectionName` are their names as text. `routines` carries one `Routine` per routine — its `address` and `label`, the `lines` it holds and their `bytes`, the routines it `calls`, and its role as `reaches` and `through` — from `routines(disassembly)`, which reads the finished listings, the accesses and the transfers.
+### What the code reaches and what every path proves
+
+`rom/rom_facts.h` produces `accesses`, `dmas`, `routines`, `states` and `derived` over a finished `CartridgeDisassembly` ([what the code reaches](#what-the-code-reaches), [what every path proves](#what-every-path-proves)). The sound program is another chip's and has none of them.
+
+| Function | Answers |
+|---|---|
+| `proveProgram(disassembly, rom)` | a `ProvenProgram`: the [dataflow](ir.md#what-every-path-proves) run over the disassembly's `program` from every entry, the reset vector with the direct register and the data bank zero; it refers to that program and is kept no longer than the disassembly |
+| `hardwareAccesses(disassembly, proven)` | one `HardwareAccess` per instruction reaching a hardware register, in address order: its `site`, `registerAddress`, `name`, `cls`, `kind` (an `AccessKind`: `Read`, `Write`, `ReadWrite`), the `value` it wrote where the bytes say it, and the `run` of straight-line code it sits in. `proven` is a pointer, null by default: without it a direct-page operand produces nothing and a value is the instruction before's alone |
+| `dmaTransfers(accesses)` | one `DmaTransfer` per start of a channel within a run, and one per channel whose direction or destination the run wrote after its last start, in site order then channel: `site`, `channel`, `direction` (a `DmaDirection`), the `destination` register with its `destinationName` and `destinationClass`, `source`, `step`, `bytes`, `startMask`, `startSite`, whether it is `hdma`, and its `run`; a field the bytes do not say is absent |
+| `routines(disassembly)` | one `Routine` per routine, in address order: its `address` and `label`, the `lines` it holds and their `bytes`, the routines it `calls`, and its role as `reaches` and `through` |
+| `stateFacts(disassembly, proven)` | one `StateFact` per label at which any of `d`, `dbr` or `s` is known, each the values the register can hold, in address order |
+| `derivedTargets(disassembly, proven)` | one `DerivedTarget` per destination the analysis derived, in site order then target: `target`, `mode`, `site`, `pointer`, `call`, and the `name` the tree gives it; `disassembleCartridge` traces from them |
+
+`accessKindName` and `dmaDirectionName` are the names the manifest writes, and `sameDerivation` says whether two derivations are one.
+
+### Writing, reading and rendering the tree
 
 The disassembler's files are text from `renderProgramFile`, `renderSoundProgramFile` and `renderManifest`; `writeProject` writes them under a directory — the program file first, then the sound program's file where one was captured, the manifest, the run's record under `runs/` where `CartridgeDisassembly::record` holds one, the lifted files in their forms under theirs, the previews and the samples' WAVs — and no bank file and no sound file, and removes nothing already there. The sound program's nodes are `CartridgeDisassembly::program.spc700`, lifted from the captured listing through `ir/spc700_lift.h`. `parseManifest` reads a manifest's entries, reached and derived targets, landings, moved ranges, assets, file split, map, sound program and image identity back, and the accesses, routines, seen registers and transfers the renderer reads, and `manifestMismatch` says whether that manifest can direct a run over a given image. `treeRequest(rom, directory, found, error)` is the request a tree's directory gives, which `snes_disasm` disassembles from: a `CartridgeRequest` over `rom` whose `readFile` reads the directory's files and, where the directory holds a `project.snagifest` — `found` says whether it does — whose `entries`, `regions`, `reached`, `ran`, `moved`, `assets` and `derived` are the manifest's, whose `records` are the records under `runs/` (`rom/rom_record.h`), read whether or not there is a manifest — or, with `TreeRecords::Checked`, each only checked as far as the image it names, `records` left empty for a caller that reads them later — each told to the progress sink as it is decompressed, every other field its default; nothing, with `error` the manifest's or the record's path, `: ` and what is wrong, when either does not parse or was written for another image. `disassembleCartridge` makes the tree from `records` and its own run together, and keeps its own run as `CartridgeDisassembly::record` unless `CartridgeRequest::recordRun` is cleared — a host that makes several trees from one run clears it for all but the last.
 
 The bank files and the sound file are `rom/rom_render.h`'s, a library that links nothing able to trace, run or lift: `readRenderInput(directory, program, error)` builds a `RenderInput` from `program.snagir`, `project.snagifest` and, where the manifest names a sound program, `apu.snagir` — each region's listing from the file's nodes, labels and data runs; the register an operand reaches from the `access` lines; the direct registers a run saw from `seen`; the routines from `routine`; the lifted files from `asset`, with the register their bytes went to found in the `moved` and `dma` lines; the sound program's entry and blocks from `sound` and `block`, and its nodes and regions from its own file — and `renderRegion(region, input, program)` writes each instruction from its node in that program, the first at the line's address, through `ir/ir_render.h`, with the labels, the register names and the routine comments attached; the data runs and the sound-program cut are the listing's. `renderSoundFile(input, program)` writes the sound program's file the same way from the `spc700` nodes: the header from the `sound` and `block` lines, each region under its own `ORG` with the gap comment between two, the labels, the data runs, and every instruction through `renderSpc700Line`, a target with a label anywhere in the file written as the label. `renderTree(directory, rendered, error)` does it for every region and for the sound file, and `snes_render` is that call. `renderInputOf(disassembly)`, `renderRegion(region, disassembly)` and `renderSoundFile(disassembly)` in `rom_disasm.h` render the same from the disassembly in memory, which is how a tree rendered from disk is held equal to the disassembly that wrote it.
+
+### Verifying
 
 Verification is `rom/rom_verify.h`:
 

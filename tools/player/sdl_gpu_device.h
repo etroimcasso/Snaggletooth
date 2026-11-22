@@ -61,7 +61,7 @@ class SdlGpuDevice final : public gpu::Device {
   [[nodiscard]] gpu::RowMap lastRows() const noexcept { return rows_; }
 
   // The texture's top-left `width` by `rows` texels blitted to the whole of the
-  // claimed window, nearest-neighbour. A window with no swapchain texture to give,
+  // claimed window, nearest-neighbor. A window with no swapchain texture to give,
   // minimized say, is a present skipped and answered true.
   [[nodiscard]] bool present(unsigned width, unsigned rows);
   // The texture's top-left `width` by `rows` texels as RGBA bytes, row by row,
