@@ -1217,6 +1217,35 @@ TEST_F(PlayerLiveDisassembly, ADirectoryWrittenForAnotherImageIsRefused) {
   EXPECT_FALSE(found) << "a directory with no manifest takes any image";
 }
 
+// The check the player makes before its window opens reads a record only as far
+// as its head; the whole of it is read on the tree's thread, said as it goes.
+TEST_F(PlayerLiveDisassembly, TheCheckBeforeTheWindowReadsNoMoreOfARecordThanItsHead) {
+  const std::vector<std::uint8_t> rom = examples::movingImage();
+  Lines lines;
+  Plan plan;
+  plan.cycles = kFrame;
+  const Played played = play(rom, root_ / "live", quiet(), hooksInto(lines), plan);
+  ASSERT_TRUE(played.closing.has_value()) << played.error;
+  const std::filesystem::path record = root_ / "live" / "runs" / "0001.snagrun.zst";
+  ASSERT_TRUE(std::filesystem::exists(record));
+  // Bytes past the record's frame: a whole read refuses them, and a read of the
+  // head never reaches them.
+  {
+    std::ofstream out(record, std::ios::binary | std::ios::app);
+    out << "not a frame";
+  }
+  bool found = false;
+  std::size_t entries = 0;
+  std::size_t files = 0;
+  std::string error;
+  EXPECT_TRUE(LiveDisassembly::readable(rom, root_ / "live", found, entries, files, error)) << error;
+  EXPECT_TRUE(found);
+  bool wholeFound = false;
+  std::string wholeError;
+  EXPECT_FALSE(disasm::treeRequest(rom, root_ / "live", wholeFound, wholeError).has_value())
+      << "a whole read refuses the record";
+}
+
 TEST_F(PlayerLiveDisassembly, TheTwoCommandsRunAfterEachTreeLoweredWhileTheGamePlays) {
   const std::vector<std::uint8_t> rom = examples::movingImage();
   struct Asked {

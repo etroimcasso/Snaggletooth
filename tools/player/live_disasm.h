@@ -267,10 +267,13 @@ class LiveTitle {
 
 class LiveDisassembly {
  public:
-  // Whether `directory` can take a tree of `rom`: `disasm::treeRequest` made and
-  // let go. False with `error` set for a manifest that does not read or was
-  // written for another image; `found` says whether a manifest is there, and
-  // `entries` and `files` what it holds.
+  // Whether `directory` can take a tree of `rom`: `disasm::treeRequest` made with
+  // the records only checked (`disasm::TreeRecords::Checked`) and let go, so it
+  // decompresses no more of a record than its head; the tree's thread reads the
+  // records whole once `start` is called. False with `error` set for a manifest
+  // that does not read, or a manifest or record written for another image;
+  // `found` says whether a manifest is there, and `entries` and `files` what it
+  // holds.
   [[nodiscard]] static bool readable(std::span<const std::uint8_t> rom, const std::filesystem::path& directory,
                                      bool& found, std::size_t& entries, std::size_t& files, std::string& error);
 

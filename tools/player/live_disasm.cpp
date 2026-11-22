@@ -882,7 +882,10 @@ bool LiveDisassembly::readable(std::span<const std::uint8_t> rom, const std::fil
   found = false;
   entries = 0;
   files = 0;
-  const std::optional<disasm::CartridgeRequest> request = disasm::treeRequest(rom, directory, found, error);
+  // The records are only checked: the tree's thread reads them once the window is
+  // open, saying each as it is decompressed.
+  const std::optional<disasm::CartridgeRequest> request =
+      disasm::treeRequest(rom, directory, found, error, {}, disasm::TreeRecords::Checked);
   if (!request) return false;
   entries = request->entries.size();
   files = request->regions.size();
