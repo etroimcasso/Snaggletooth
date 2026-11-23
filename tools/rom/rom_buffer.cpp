@@ -169,6 +169,17 @@ struct Stream::Impl {
     std::uint64_t serial = 0;
     std::size_t used = 0;
     bool moving = false;  // the stream's thread is writing or reading its file
+    std::uint64_t file = 0;    // while the block is in a file
+    std::uint64_t offset = 0;  // while the block is in a file
+  };
+
+  // A file of the stream's: what has been appended to it, and how many of its
+  // blocks have not been read back.
+  struct File {
+    std::uint64_t number = 0;
+    std::uint64_t bytes = 0;  // appended so far
+    std::size_t blocks = 0;   // appended so far
+    std::size_t unread = 0;   // of those, not read back
   };
 
   // Free blocks kept for the writer to reuse, at most, while RAM stands at or
@@ -178,6 +189,7 @@ struct Stream::Impl {
   std::filesystem::path directory;
   std::unique_ptr<StreamBudget> own;  // the stream's budget when it has one of its own
   StreamBudget& budget;
+  std::size_t fileBlocks;
 
   // The writer's own.
   Block* current = nullptr;
@@ -211,6 +223,12 @@ struct Stream::Impl {
   bool stopping = false;
   std::string failure;        // a file the stream's thread could not write or read
 
+  // The stream's thread's own, and the destructor's once that thread is joined.
+  std::deque<File> files;  // every file on disk, in the order they were begun
+  std::ofstream out;       // the newest of them, while it takes blocks
+  bool taking = false;     // whether `files.back()` takes another block
+  std::uint64_t nextFile = 0;
+
   std::thread thread;
 
   static std::size_t ringCapacity(std::uint64_t bytes) {
@@ -219,17 +237,18 @@ struct Stream::Impl {
   }
 
   Impl(std::filesystem::path where, std::unique_ptr<StreamBudget> ownBudget, StreamBudget& shared,
-       std::size_t ringBlocks)
+       std::size_t ringBlocks, std::size_t blocksAFile)
       : directory(std::move(where)),
         own(std::move(ownBudget)),
         budget(shared),
+        fileBlocks(blocksAFile),
         handedRing(ringBlocks != 0u ? ringBlocks : ringCapacity(shared.memoryBytes() + shared.diskBytes())),
         spareRing(kSpareBlocks) {}
 
   [[nodiscard]] bool keeps() const noexcept { return budget.atLimit_ == AtLimit::Keep; }
 
-  std::filesystem::path fileOf(std::uint64_t serial) const {
-    return directory / (std::to_string(serial) + std::string(kExtension));
+  std::filesystem::path fileOf(std::uint64_t number) const {
+    return directory / (std::to_string(number) + std::string(kExtension));
   }
 
   // The RAM every stream on the budget holds.
@@ -348,7 +367,8 @@ struct Stream::Impl {
       bool moved = false;
       while (Block* block = handedRing.pop()) {
         lock.lock();
-        queue.push_back(Entry{.block = block, .serial = block->serial, .used = block->used, .moving = false});
+        queue.push_back(Entry{
+            .block = block, .serial = block->serial, .used = block->used, .moving = false, .file = 0, .offset = 0});
         lock.unlock();
         moved = true;
       }
@@ -378,17 +398,22 @@ struct Stream::Impl {
       entry.moving = true;
       Block* const block = entry.block;
       const std::uint64_t serial = entry.serial;
+      const std::uint64_t target = taking ? files.back().number : nextFile;
       lock.unlock();
-      const bool written = writeFile(serial, *block);
+      std::uint64_t file = 0;
+      std::uint64_t offset = 0;
+      const bool written = writeFile(*block, file, offset);
       lock.lock();
       Entry* const now = find(serial);
       now->moving = false;
       if (!written) {
-        failure = "the buffer could not write " + fileOf(serial).string();
+        failure = "the buffer could not write " + fileOf(target).string();
         readable.notify_all();
         return false;
       }
       now->block = nullptr;
+      now->file = file;
+      now->offset = offset;
       onDisk.fetch_add(block->used, std::memory_order_relaxed);
       budget.onDisk_.fetch_add(block->used, std::memory_order_relaxed);
       diskWrittenTotal.fetch_add(block->used, std::memory_order_relaxed);
@@ -409,23 +434,26 @@ struct Stream::Impl {
       entry.moving = true;
       const std::uint64_t serial = entry.serial;
       const std::size_t used = entry.used;
+      const std::uint64_t file = entry.file;
+      const std::uint64_t offset = entry.offset;
       lock.unlock();
       Block* const block = allocate();
-      const bool read = block != nullptr && readFile(serial, used, *block);
+      std::uint64_t removed = 0;
+      const bool read = block != nullptr && readFile(file, offset, used, *block, removed);
       lock.lock();
       Entry* const now = find(serial);
       now->moving = false;
       if (!read) {
         release(block);
-        failure = "the buffer could not read " + fileOf(serial).string();
+        failure = "the buffer could not read " + fileOf(file).string();
         readable.notify_all();
         return false;
       }
       block->used = used;
       block->serial = serial;
       now->block = block;
-      onDisk.fetch_sub(used, std::memory_order_relaxed);
-      budget.onDisk_.fetch_sub(used, std::memory_order_relaxed);
+      onDisk.fetch_sub(removed, std::memory_order_relaxed);
+      budget.onDisk_.fetch_sub(removed, std::memory_order_relaxed);
       readable.notify_all();
       return true;
     }
@@ -439,26 +467,63 @@ struct Stream::Impl {
     return nullptr;
   }
 
-  bool writeFile(std::uint64_t serial, const Block& block) const {
-    std::ofstream out(fileOf(serial), std::ios::binary | std::ios::trunc);
-    if (!out) return false;
+  // Appends a block to the newest file, beginning one when none takes blocks,
+  // and says where the block lies. A file that holds `fileBlocks` is closed.
+  bool writeFile(const Block& block, std::uint64_t& file, std::uint64_t& offset) {
+    if (!taking) {
+      // A file stream of its own for each file: libc++'s `close()` leaves a
+      // stream unbuffered, and one opened again writes a byte at a time.
+      out = std::ofstream(fileOf(nextFile), std::ios::binary | std::ios::trunc);
+      if (!out) return false;
+      files.push_back(File{.number = nextFile, .bytes = 0, .blocks = 0, .unread = 0});
+      ++nextFile;
+      taking = true;
+    }
+    File& last = files.back();
     out.write(reinterpret_cast<const char*>(block.data), static_cast<std::streamsize>(block.used));
-    out.close();
-    return !out.fail();
+    out.flush();
+    if (out.fail()) return false;
+    file = last.number;
+    offset = last.bytes;
+    last.bytes += block.used;
+    ++last.blocks;
+    ++last.unread;
+    if (last.blocks == fileBlocks) {
+      out.close();
+      taking = false;
+      if (out.fail()) return false;
+    }
+    return true;
   }
 
-  bool readFile(std::uint64_t serial, std::size_t used, Block& block) const {
-    const std::filesystem::path path = fileOf(serial);
+  // Reads a block back from where it lies, through a handle of this read's own
+  // and a seek to the block's offset. A file whose last block this was is
+  // removed, the newest one closed first, and `removed` is the bytes it held.
+  bool readFile(std::uint64_t number, std::uint64_t offset, std::size_t used, Block& block, std::uint64_t& removed) {
+    removed = 0;
+    const std::filesystem::path path = fileOf(number);
     bool whole = false;
     {
       std::ifstream in(path, std::ios::binary);
       if (!in) return false;
+      in.seekg(static_cast<std::streamoff>(offset));
       in.read(reinterpret_cast<char*>(block.data), static_cast<std::streamsize>(used));
       whole = static_cast<std::size_t>(in.gcount()) == used;
     }
+    if (!whole) return false;
+    const auto at = std::find_if(files.begin(), files.end(), [&](const File& f) { return f.number == number; });
+    if (at == files.end()) return false;
+    --at->unread;
+    if (at->unread != 0u) return true;
+    if (taking && &*at == &files.back()) {
+      out.close();
+      taking = false;
+    }
+    removed = at->bytes;
+    files.erase(at);
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
-    return whole;
+    return true;
   }
 
   // The reader's side: the front block, once it is in memory.
@@ -474,22 +539,23 @@ struct Stream::Impl {
 };
 
 Stream::Stream(std::filesystem::path directory, std::uint64_t memoryBytes, std::uint64_t diskBytes, AtLimit atLimit)
-    : Stream(std::move(directory), std::make_unique<StreamBudget>(memoryBytes, diskBytes, atLimit), 0u) {
+    : Stream(std::move(directory), std::make_unique<StreamBudget>(memoryBytes, diskBytes, atLimit), 0u, kFileBlocks) {
   start();
 }
 
 Stream::Stream(std::filesystem::path directory, StreamBudget& budget)
-    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget, 0u)) {
+    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget, 0u, kFileBlocks)) {
   start();
 }
 
-Stream::Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own, std::size_t ringBlocks) {
+Stream::Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own, std::size_t ringBlocks,
+               std::size_t fileBlocks) {
   StreamBudget& shared = *own;
-  impl_ = std::make_unique<Impl>(std::move(directory), std::move(own), shared, ringBlocks);
+  impl_ = std::make_unique<Impl>(std::move(directory), std::move(own), shared, ringBlocks, fileBlocks);
 }
 
-Stream::Stream(std::filesystem::path directory, StreamBudget& budget, std::size_t ringBlocks)
-    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget, ringBlocks)) {}
+Stream::Stream(std::filesystem::path directory, StreamBudget& budget, std::size_t ringBlocks, std::size_t fileBlocks)
+    : impl_(std::make_unique<Impl>(std::move(directory), nullptr, budget, ringBlocks, fileBlocks)) {}
 
 void Stream::start() {
   std::error_code error;
@@ -511,10 +577,9 @@ Stream::~Stream() {
   impl_->work.notify_all();
   if (impl_->thread.joinable()) impl_->thread.join();
   std::error_code ignored;
-  for (const Impl::Entry& entry : impl_->queue) {
-    if (entry.block == nullptr) std::filesystem::remove(impl_->fileOf(entry.serial), ignored);
-    impl_->release(entry.block);
-  }
+  if (impl_->out.is_open()) impl_->out.close();
+  for (const Impl::File& file : impl_->files) std::filesystem::remove(impl_->fileOf(file.number), ignored);
+  for (const Impl::Entry& entry : impl_->queue) impl_->release(entry.block);
   for (Block* block : impl_->taken) impl_->release(block);
   for (Block* block : impl_->freed) impl_->release(block);
   while (Block* block = impl_->handedRing.pop()) impl_->release(block);

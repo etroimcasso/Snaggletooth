@@ -163,7 +163,7 @@ class StreamBudget {
   // New ceilings, from the thread that writes the streams, between two of its
   // writes. A RAM ceiling made smaller moves blocks to files as the files have
   // room; a disk ceiling made smaller than the files hold stops more from being
-  // written, and the files already there stay until they are read back.
+  // written, and the files already there stay until their blocks are read back.
   void setLimits(std::uint64_t memoryBytes, std::uint64_t diskBytes) noexcept {
     memoryBytes_.store(memoryBytes, std::memory_order_relaxed);
     diskBytes_.store(diskBytes, std::memory_order_relaxed);
@@ -200,6 +200,8 @@ class StreamBudget {
   [[nodiscard]] bool writingDown() const noexcept;
   // Bytes of RAM in blocks, every block counted whole.
   [[nodiscard]] std::uint64_t memoryUsed() const noexcept;
+  // Bytes of every file on disk: a block's bytes count from the write that
+  // appended it until its file is removed.
   [[nodiscard]] std::uint64_t diskUsed() const noexcept { return onDisk_.load(std::memory_order_relaxed); }
   // Bytes handed to the readers that they have not returned, in RAM and files.
   [[nodiscard]] std::uint64_t held() const noexcept {
@@ -275,11 +277,15 @@ class ThreadClassKeeper {
 // (`StreamBudget::setMemoryLevel`), which is `memoryBytes` until a host sets a
 // lower one. It reads them back ahead of the reader, oldest first, while RAM
 // stays at or under the level, and the one the reader takes next whatever RAM
-// holds; each file is removed as it is read. A block the writer needs is taken
-// from the free ones or allocated, never waited for, so RAM passes
-// `memoryBytes` by the blocks the writer takes before the stream's thread next
-// runs, and always holds the
-// block being written and the one being read. A block the writer opens is
+// holds.
+// The files are numbered from 0 in the order they are begun. A block is
+// appended to the newest until it holds `kFileBlocks` blocks, and a file is
+// removed once every block in it has been read back, so a file's bytes count
+// against `diskBytes` from each write until its last block is read.
+// A block the writer needs is taken from the free ones or allocated, never
+// waited for, so RAM passes `memoryBytes` by the blocks the writer takes before
+// the stream's thread next runs, and always holds the block being written and
+// the one being read. A block the writer opens is
 // charged whole, and the stream is full when one more would bring what it holds
 // past `memoryBytes` and `diskBytes` together, so what it holds never passes
 // them and is full up to one block before. Both are the ceilings the host set.
@@ -299,6 +305,7 @@ class ThreadClassKeeper {
 class Stream {
  public:
   static constexpr std::size_t kBlockBytes = std::size_t{1} << 20;
+  static constexpr std::size_t kFileBlocks = 64;  // the blocks a file holds
 
   // A stream with a budget of its own.
   Stream(std::filesystem::path directory, std::uint64_t memoryBytes, std::uint64_t diskBytes,
@@ -345,12 +352,13 @@ class Stream {
   [[nodiscard]] std::uint64_t handed() const noexcept;       // blocks handed to the reader so far
 
  private:
-  // The suite's: a stream whose ring of handed blocks holds `ringBlocks`, over a
-  // budget of its own or a shared one, its thread started when the suite calls
-  // `start()`.
+  // The suite's: a stream whose ring of handed blocks holds `ringBlocks` and
+  // whose files hold `fileBlocks` blocks each, over a budget of its own or a
+  // shared one, its thread started when the suite calls `start()`.
   friend struct StreamTesting;
-  Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own, std::size_t ringBlocks);
-  Stream(std::filesystem::path directory, StreamBudget& budget, std::size_t ringBlocks);
+  Stream(std::filesystem::path directory, std::unique_ptr<StreamBudget> own, std::size_t ringBlocks,
+         std::size_t fileBlocks);
+  Stream(std::filesystem::path directory, StreamBudget& budget, std::size_t ringBlocks, std::size_t fileBlocks);
   void start();
   struct Impl;
   std::unique_ptr<Impl> impl_;

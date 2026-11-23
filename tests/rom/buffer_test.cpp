@@ -1,10 +1,12 @@
 // The buffer a run on another thread is fed through: every record kind written
 // and read back as it was, and the stream that holds them — blocks handed over
-// in order, held in files once memory holds its share, RAM written down to the
-// level a host sets and read back only to it, taken back in order, a writer
-// that never waits, ceilings past which it takes nothing or, built to
-// keep, takes the writer's records all the same, ceilings changed while it
-// runs, the classes its threads work at, and a directory left as it was found.
+// in order, held in files once memory holds its share, a set number of blocks
+// to a file and each file removed once every block in it is read back, RAM
+// written down to the level a host sets and read back only to it, taken back
+// in order, a writer that never waits, ceilings past which it takes nothing
+// or, built to keep, takes the writer's records all the same, ceilings changed
+// while it runs, the classes its threads work at, and a directory left as it
+// was found.
 
 #include <algorithm>
 #include <atomic>
@@ -28,16 +30,18 @@
 
 namespace snaggletooth::disasm {
 
-// A stream with a handed ring of the suite's size, its thread started when the
-// case says.
+// A stream with a handed ring and files of the suite's size, its thread
+// started when the case says.
 struct StreamTesting {
   static std::unique_ptr<Stream> unstarted(const std::filesystem::path& directory, std::uint64_t memoryBytes,
-                                           std::uint64_t diskBytes, AtLimit atLimit, std::size_t ringBlocks) {
-    return std::unique_ptr<Stream>(
-        new Stream(directory, std::make_unique<StreamBudget>(memoryBytes, diskBytes, atLimit), ringBlocks));
+                                           std::uint64_t diskBytes, AtLimit atLimit, std::size_t ringBlocks,
+                                           std::size_t fileBlocks = Stream::kFileBlocks) {
+    return std::unique_ptr<Stream>(new Stream(
+        directory, std::make_unique<StreamBudget>(memoryBytes, diskBytes, atLimit), ringBlocks, fileBlocks));
   }
-  static std::unique_ptr<Stream> unstarted(const std::filesystem::path& directory, StreamBudget& budget) {
-    return std::unique_ptr<Stream>(new Stream(directory, budget, 0u));
+  static std::unique_ptr<Stream> unstarted(const std::filesystem::path& directory, StreamBudget& budget,
+                                           std::size_t fileBlocks = Stream::kFileBlocks) {
+    return std::unique_ptr<Stream>(new Stream(directory, budget, 0u, fileBlocks));
   }
   static void start(Stream& stream) { stream.start(); }
 };
@@ -103,6 +107,33 @@ Numbered readNumbered(Stream& stream) {
 }
 
 constexpr std::size_t kRecord = 1u + sizeof(InternalRecord);
+
+// Takes the next block, counts its records into `read` as `readNumbered` does,
+// returns it, and waits 20 ms; answers false once there is none.
+bool takeNumbered(Stream& stream, Numbered& read) {
+  const std::optional<std::span<const std::uint8_t>> block = stream.take();
+  if (!block) return false;
+  for (RecordReader r{*block}; r.more();) {
+    const RecordKind kind = r.kind();
+    if (kind != RecordKind::Internal) {
+      ++read.outOfOrder;
+      r.skip(kind);
+    } else if (r.payload<InternalRecord>().address != read.records) {
+      ++read.outOfOrder;
+    }
+    ++read.records;
+  }
+  stream.returned();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  return true;
+}
+
+// The bytes of a file, or 0 where there is none.
+std::uint64_t bytesOf(const std::filesystem::path& path) {
+  std::error_code ignored;
+  const std::uintmax_t bytes = std::filesystem::file_size(path, ignored);
+  return ignored ? 0u : static_cast<std::uint64_t>(bytes);
+}
 
 // Writes `count` Internal records numbered from `first`; answers how many the
 // stream took.
@@ -320,7 +351,7 @@ TEST_F(RomBuffer, TenMegabytesGoThroughFilesWhenRamHoldsThree) {
     EXPECT_LT(stream.diskWritten(), 10u * kMB) << "the block the reader takes first stays in RAM";
     EXPECT_EQ(stream.diskUsed(), 0u);
     EXPECT_EQ(stream.held(), 0u);
-    EXPECT_EQ(files(), 0u) << "each file is removed as it is read back";
+    EXPECT_EQ(files(), 0u) << "each file is removed once every block in it is read back";
     // The blocks returned are kept for reuse only while the limit has room.
     const auto settled = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (stream.memoryUsed() > 3u * kMB && std::chrono::steady_clock::now() < settled) {
@@ -842,6 +873,100 @@ TEST_F(RomBuffer, AtAHundredTheLevelIsTheCeilingAndRamStaysFull) {
   const Numbered read = readNumbered(*stream);
   EXPECT_EQ(read.records, 12u * perBlock + 1u);
   EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
+}
+
+TEST_F(RomBuffer, BlocksGoFourToAFileNumberedFromNought) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  const std::uint64_t blockBytes = static_cast<std::uint64_t>(perBlock) * kRecord;
+  StreamBudget budget{2u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget, 4u);
+  ASSERT_EQ(writeNumbered(*stream, 11u * perBlock), 11u * perBlock);
+  stream->end();
+  StreamTesting::start(*stream);
+  ASSERT_TRUE(within([&] { return budget.memoryUsed() <= budget.memoryBytes(); })) << "RAM written down to two blocks";
+  EXPECT_EQ(files(), 3u) << "nine blocks in files, four to a file";
+  EXPECT_EQ(bytesOf(dir_ / "0.snagbuf"), 4u * blockBytes);
+  EXPECT_EQ(bytesOf(dir_ / "1.snagbuf"), 4u * blockBytes);
+  EXPECT_EQ(bytesOf(dir_ / "2.snagbuf"), blockBytes) << "the newest file, one block in it";
+  EXPECT_FALSE(std::filesystem::exists(dir_ / "3.snagbuf"));
+  EXPECT_EQ(budget.diskUsed(), 9u * blockBytes);
+  EXPECT_EQ(budget.diskUsed(), stream->diskWritten()) << "every file's bytes, nothing read back yet";
+  const Numbered read = readNumbered(*stream);
+  EXPECT_EQ(read.records, 11u * perBlock);
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
+  EXPECT_EQ(files(), 0u) << "every file removed once its blocks are read back";
+  EXPECT_EQ(budget.diskUsed(), 0u);
+}
+
+TEST_F(RomBuffer, AFileIsRemovedWhenItsLastBlockIsReadBackAndCountsUntilThen) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  const std::uint64_t blockBytes = static_cast<std::uint64_t>(perBlock) * kRecord;
+  StreamBudget budget{2u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  budget.setMemoryLevel(0);
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget, 4u);
+  ASSERT_EQ(writeNumbered(*stream, 10u * perBlock), 10u * perBlock);
+  stream->end();
+  StreamTesting::start(*stream);
+  // Every block but the one the reader takes next goes to files: the newest
+  // four in the first, the next four in the second, and one in the third.
+  ASSERT_TRUE(within([&] { return files() == 3u && budget.diskUsed() == 9u * blockBytes; }));
+  Numbered read;
+  ASSERT_TRUE(takeNumbered(*stream, read));
+  EXPECT_TRUE(within([&] { return files() == 2u && budget.diskUsed() == 8u * blockBytes; }))
+      << "the third file's only block read back, and the file removed";
+  for (int i = 0; i < 3; ++i) ASSERT_TRUE(takeNumbered(*stream, read));
+  EXPECT_EQ(files(), 2u) << "two blocks of the second file taken, a third read back, one in it";
+  EXPECT_EQ(budget.diskUsed(), 8u * blockBytes) << "the second file counts whole until its last block is read";
+  ASSERT_TRUE(takeNumbered(*stream, read));
+  EXPECT_TRUE(within([&] { return files() == 1u && budget.diskUsed() == 4u * blockBytes; }))
+      << "the second file's last block read back, and the file removed";
+  while (takeNumbered(*stream, read)) {
+  }
+  EXPECT_EQ(read.records, 10u * perBlock);
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record in order";
+  EXPECT_EQ(files(), 0u);
+}
+
+TEST_F(RomBuffer, AFileStillTakingBlocksIsRemovedOnceEveryBlockInItIsReadBack) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  StreamBudget budget{1u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  budget.setMemoryLevel(0);
+  const std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget, 4u);
+  StreamTesting::start(*stream);
+  // A full block the reader takes next, which stays in RAM, and a block of one
+  // record, which goes to the first file.
+  ASSERT_EQ(writeNumberedFrom(*stream, 0u, perBlock + 1u), perBlock + 1u);
+  stream->flush();
+  ASSERT_TRUE(within([&] { return files() == 1u && budget.diskUsed() == kRecord; }));
+  EXPECT_EQ(bytesOf(dir_ / "0.snagbuf"), kRecord) << "one record's bytes, the file still taking blocks";
+  Numbered read;
+  ASSERT_TRUE(takeNumbered(*stream, read));
+  ASSERT_TRUE(takeNumbered(*stream, read)) << "read back while the file is open for appending";
+  EXPECT_EQ(read.records, perBlock + 1u);
+  EXPECT_EQ(read.outOfOrder, 0u) << "the block read back holds its record";
+  EXPECT_TRUE(within([&] { return files() == 0u && budget.diskUsed() == 0u; })) << "the file removed";
+  ASSERT_EQ(writeNumberedFrom(*stream, perBlock + 1u, perBlock + 1u), perBlock + 1u);
+  stream->flush();
+  EXPECT_TRUE(within([&] { return files() == 1u; }));
+  EXPECT_TRUE(std::filesystem::exists(dir_ / "1.snagbuf")) << "a new file, the next number";
+  stream->end();
+  while (takeNumbered(*stream, read)) {
+  }
+  EXPECT_EQ(read.records, 2u * (perBlock + 1u));
+  EXPECT_EQ(read.outOfOrder, 0u) << "every record of both rounds in order";
+}
+
+TEST_F(RomBuffer, AStreamLetGoWithBlocksInFilesRemovesThem) {
+  const std::uint32_t perBlock = static_cast<std::uint32_t>(Stream::kBlockBytes / kRecord);
+  StreamBudget budget{2u * Stream::kBlockBytes + 1024u, 64u * kMB, AtLimit::Keep};
+  budget.setMemoryLevel(0);
+  std::unique_ptr<Stream> stream = StreamTesting::unstarted(dir_, budget, 4u);
+  StreamTesting::start(*stream);
+  ASSERT_EQ(writeNumbered(*stream, 6u * perBlock), 6u * perBlock);
+  stream->flush();
+  ASSERT_TRUE(within([&] { return files() >= 1u; }));
+  stream.reset();
+  EXPECT_FALSE(std::filesystem::exists(dir_)) << "every file removed, and the directory";
 }
 
 TEST_F(RomBuffer, ThreadsTakeTheClassTheHostsStopAsksFor) {
