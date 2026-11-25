@@ -21,9 +21,11 @@
 // frame begun and never presented, a present the window skipped, is ended by
 // the next `begin`.
 //
-// Dear ImGui's settings file is off, and its font is its built-in one scaled by
-// the window's pixel density (`SDL_GetWindowPixelDensity`). One host lives at a
-// time, and every call is made on the thread that made the window.
+// Dear ImGui's settings file is off; the context takes the panel's style
+// (`stylePanel`) and the platform's UI font (`usePlatformFont`), scaled by the
+// window's pixel density (`SDL_GetWindowPixelDensity`) and by `scaleText`.
+// One host lives at a time, and every call is made on the thread that made the
+// window.
 
 #include "SDL3/SDL_events.h"
 #include "SDL3/SDL_gpu.h"
@@ -44,6 +46,9 @@ class PanelHost {
   PanelHost(const PanelHost&) = delete;
   PanelHost& operator=(const PanelHost&) = delete;
 
+  // The panel's text and spacing drawn `factor` times Dear ImGui's own size
+  // (`panelTextScale`); called once, before the first frame.
+  void scaleText(float factor);
   void event(const SDL_Event& polled);  // every event the player polls while the panel is up
   void begin();                         // a frame: the caller draws the panel after it
   void end(SDL_Renderer* renderer);     // the renderer's present: the draw data over what was just drawn

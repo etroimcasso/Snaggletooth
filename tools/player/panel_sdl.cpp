@@ -6,6 +6,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlgpu3.h"
 #include "imgui_impl_sdlrenderer3.h"
+#include "player/panel.h"
 
 namespace snaggletooth::player {
 
@@ -17,6 +18,8 @@ PanelHost::PanelHost(SDL_Window* window, SDL_Renderer* renderer, SDL_GPUDevice* 
   ImGuiIO& io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.LogFilename = nullptr;
+  stylePanel();
+  static_cast<void>(usePlatformFont());
   const float density = SDL_GetWindowPixelDensity(window);
   if (density > 0.0f) ImGui::GetStyle().FontScaleDpi = density;
 
@@ -53,6 +56,12 @@ PanelHost::~PanelHost() {
   }
   ImGui_ImplSDL3_Shutdown();
   ImGui::DestroyContext(context_);
+}
+
+void PanelHost::scaleText(float factor) {
+  ImGuiStyle& style = ImGui::GetStyle();
+  style.ScaleAllSizes(factor);
+  style.FontScaleMain = factor;
 }
 
 void PanelHost::event(const SDL_Event& polled) { static_cast<void>(ImGui_ImplSDL3_ProcessEvent(&polled)); }

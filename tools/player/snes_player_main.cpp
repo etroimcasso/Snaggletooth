@@ -760,6 +760,7 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
       error = e.what();
       return false;
     }
+    panelHost_->scaleText(player::panelTextScale(scale_));
     panelLook_ = std::move(look);
     panelAct_ = std::move(act);
     return true;
@@ -1745,13 +1746,20 @@ int main(int argc, char** argv) {
     // and the flags reach: the chord's toggle, the pause settings and the ceilings.
     std::string error;
     const std::string chord = devices.pauseChordText();
-    if (!player.openPanel([&live, chord] { return player::panelOf(live->status(), chord); },
-                          [&live](const player::PanelActions& did) {
-                            if (did.toggle) live->togglePause();
-                            if (did.pause) live->setPauseSettings(*did.pause);
-                            if (did.limits) live->setLimits(did.limits->memoryBytes, did.limits->diskBytes);
-                          },
-                          error)) {
+    // The close's meter counts from the most the buffer held once the close
+    // began, which the panel's closure keeps from one pass to the next.
+    if (!player.openPanel(
+            [&live, chord, closeMost = std::uint64_t{0}]() mutable {
+              const player::LiveStatus status = live->status();
+              if (status.closing) closeMost = std::max(closeMost, status.buffer.held);
+              return player::panelOf(status, chord, closeMost);
+            },
+            [&live](const player::PanelActions& did) {
+              if (did.toggle) live->togglePause();
+              if (did.pause) live->setPauseSettings(*did.pause);
+              if (did.limits) live->setLimits(did.limits->memoryBytes, did.limits->diskBytes);
+            },
+            error)) {
       always("the panel cannot be drawn over the window: " + error + "; the title says what the buffer holds");
     }
   }

@@ -71,20 +71,22 @@ LiveStatus closingAt(Work work) {
   return status;
 }
 
-TEST(PlayerPanel, AStopAtTheCeilingsWithItsRatesSaysEveryLine) {
+TEST(PlayerPanel, AStopAtTheCeilingsWithItsRatesSaysEveryPart) {
   const PanelModel model = panelOf(atTheCeilingsWithRates(), "Cmd+P");
+  EXPECT_EQ(model.kind, PanelKind::AtCeilings);
   EXPECT_EQ(model.heading, "Stopped: the buffer is at its ceilings");
-  const std::vector<std::string> lines{
-      "The buffer holds 6.0 GB of 11.0 GB: 1.0 GB of 1.0 GB in RAM, 5.0 GB of 10.0 GB in files.",
-      "Draining at 610 MB a second.",
-      "The game resumes at 5.5 GB, in about 1 s.",
-      "Empty in about 10 s.",
-      "The last stretch of play filled the buffer at 120 MB a second: from 5.5 GB the game plays about 46 s before "
-      "it stops again.",
+  EXPECT_EQ(model.summary, "The game resumes at 5.5 GB, in about 1 s.");
+  EXPECT_EQ(model.meter, "6.0 GB of 11.0 GB");
+  EXPECT_EQ(model.parts, "RAM 1.0 GB of 1.0 GB · files 5.0 GB of 10.0 GB");
+  const std::vector<std::string> notes{
+      "Draining at 610 MB a second; empty in about 10 s.",
+      "The last stretch of play filled it at 120 MB a second: from 5.5 GB the game plays about 46 s before it "
+      "stops again.",
   };
-  EXPECT_EQ(model.lines, lines);
+  EXPECT_EQ(model.notes, notes);
   EXPECT_FLOAT_EQ(model.fill, 6.0f / 11.0f);
   EXPECT_FLOAT_EQ(model.resumeAt, 0.5f);
+  EXPECT_TRUE(model.mark);
   EXPECT_TRUE(model.controls);
   EXPECT_FALSE(model.canResume);
   EXPECT_EQ(model.chord, "Cmd+P");
@@ -100,11 +102,17 @@ TEST(PlayerPanel, AStopAtTheCeilingsBeforeAnyRateSaysTheLevelAlone) {
   status.fillBytesPerSecond = 0.0;
   status.secondsOfPlayAfter = 10.0;
   const PanelModel model = panelOf(status, "Cmd+P");
-  const std::vector<std::string> lines{
-      "The buffer holds 6.0 GB of 11.0 GB: 1.0 GB of 1.0 GB in RAM, 5.0 GB of 10.0 GB in files.",
-      "The game resumes at 5.5 GB.",
-  };
-  EXPECT_EQ(model.lines, lines);
+  EXPECT_EQ(model.summary, "The game resumes at 5.5 GB.");
+  EXPECT_TRUE(model.notes.empty());
+}
+
+TEST(PlayerPanel, TheDrainIsSaidByWhatTheStatusHasOfIt) {
+  LiveStatus status = atTheCeilings();
+  status.drainBytesPerSecond = 610.0 * kMegabyte;
+  EXPECT_EQ(panelOf(status, "").notes, (std::vector<std::string>{"Draining at 610 MB a second."}));
+  status.drainBytesPerSecond.reset();
+  status.secondsToEmpty = 9.8;
+  EXPECT_EQ(panelOf(status, "").notes, (std::vector<std::string>{"Empty in about 10 s."}));
 }
 
 TEST(PlayerPanel, UnderHoldTheGameResumesWhenThePersonResumesIt) {
@@ -112,8 +120,8 @@ TEST(PlayerPanel, UnderHoldTheGameResumesWhenThePersonResumesIt) {
   status.pause.hold = true;
   status.secondsToResume.reset();
   const PanelModel model = panelOf(status, "Cmd+P");
-  ASSERT_EQ(model.lines.size(), 5u);
-  EXPECT_EQ(model.lines[2], "The game resumes when you resume it.");
+  EXPECT_EQ(model.summary, "The game resumes when you resume it.");
+  EXPECT_EQ(model.notes.size(), 2u);
   EXPECT_TRUE(model.pause.hold);
 }
 
@@ -121,12 +129,11 @@ TEST(PlayerPanel, AStopByHandResumesAtTheButtonWhateverTheBufferHolds) {
   LiveStatus status = atTheCeilings();
   status.stopped = Stopped::ByHand;
   const PanelModel model = panelOf(status, "Ctrl+P");
+  EXPECT_EQ(model.kind, PanelKind::ByHand);
   EXPECT_EQ(model.heading, "Stopped by hand");
-  const std::vector<std::string> lines{
-      "The buffer holds 6.0 GB of 11.0 GB: 1.0 GB of 1.0 GB in RAM, 5.0 GB of 10.0 GB in files.",
-      "The game resumes when you resume it.",
-  };
-  EXPECT_EQ(model.lines, lines);
+  EXPECT_EQ(model.summary, "The game resumes when you resume it.");
+  EXPECT_EQ(model.meter, "6.0 GB of 11.0 GB");
+  EXPECT_TRUE(model.notes.empty());
   EXPECT_TRUE(model.canResume);
 }
 
@@ -138,11 +145,10 @@ TEST(PlayerPanel, AnEmptyBufferHasNoTimeToEmpty) {
   status.buffer.memoryUsed = 0u;
   status.buffer.diskUsed = 0u;
   status.secondsToEmpty = 0.0;
-  const std::vector<std::string> lines{
-      "The buffer holds 0 MB of 11.0 GB: 0 MB of 1.0 GB in RAM, 0 MB of 10.0 GB in files.",
-      "The game resumes when you resume it.",
-  };
-  EXPECT_EQ(panelOf(status, "Cmd+P").lines, lines);
+  const PanelModel model = panelOf(status, "Cmd+P");
+  EXPECT_EQ(model.meter, "0 MB of 11.0 GB");
+  EXPECT_EQ(model.parts, "RAM 0 MB of 1.0 GB · files 0 MB of 10.0 GB");
+  EXPECT_TRUE(model.notes.empty());
 }
 
 TEST(PlayerPanel, ACeilingOfNothingIsFullOnceAnythingIsHeld) {
@@ -162,35 +168,73 @@ TEST(PlayerPanel, AStopWithRamPastItsCeilingSaysRamAgainstItsOwnCeiling) {
   status.fillBytesPerSecond = 120.0 * kMegabyte;
   status.secondsOfPlayAfter = 45.8;
   const PanelModel model = panelOf(status, "Cmd+P");
+  EXPECT_EQ(model.kind, PanelKind::RamPastCeiling);
   EXPECT_EQ(model.heading, "Stopped: the buffer's RAM is past its ceiling");
-  const std::vector<std::string> lines{
-      "The buffer holds 1.2 GB of RAM, past its 1.0 GB ceiling, while its files are written.",
-      "Draining at 300 MB a second.",
-      "The game resumes at 400 MB of RAM.",
-      "Empty in about 5 s.",
-  };
-  EXPECT_EQ(model.lines, lines);
+  EXPECT_EQ(model.summary, "The game resumes at 400 MB of RAM.");
+  EXPECT_EQ(model.meter, "RAM 1.2 GB of 1.0 GB");
+  EXPECT_EQ(model.parts, "Its files are being written: 300 MB of 10.0 GB.");
+  EXPECT_EQ(model.notes, (std::vector<std::string>{"Draining at 300 MB a second; empty in about 5 s."}));
   EXPECT_FLOAT_EQ(model.fill, 1.0f);
   EXPECT_FLOAT_EQ(model.resumeAt, 0.4f);
   EXPECT_FALSE(model.canResume);
 }
 
-TEST(PlayerPanel, TheCloseSaysWhatIsLeftAtEachWorkAndCarriesNoControl) {
-  const std::vector<std::pair<Work, std::string>> said{
-      {Work::Watching, "12.3 GB to play, then the last tree."},
-      {Work::Records, "The run records are being read, then the last tree."},
-      {Work::Tree, "The last tree is being made."},
-      {Work::Render, "snes_render is running."},
-      {Work::Verify, "snes_verify is running."},
-      {Work::Done, "12.3 GB to play, then the last tree."},
-  };
-  for (const auto& [work, left] : said) {
-    const PanelModel model = panelOf(closingAt(work), "Cmd+P");
+TEST(PlayerPanel, WhileTheBufferHoldsAnythingTheCloseMetersWhatItHasPlayed) {
+  // 12.3 GB left of the 16.4 GB the buffer held once the close began: 4.1 GB
+  // played. A tree from the middle of the session running over it is not the
+  // close's stage.
+  for (const Work work : {Work::Watching, Work::Tree, Work::Records}) {
+    const PanelModel model = panelOf(closingAt(work), "Cmd+P", 16'400'000'000u);
+    EXPECT_EQ(model.kind, PanelKind::Closing);
     EXPECT_EQ(model.heading, "Finishing the disassembly");
-    EXPECT_EQ(model.lines, (std::vector<std::string>{left, "It ends by itself when that is done."}));
+    EXPECT_EQ(model.summary, "Playing what the buffer holds, then the last tree.");
+    EXPECT_EQ(model.meter, "4.1 GB of 16.4 GB played");
+    EXPECT_FLOAT_EQ(model.fill, 0.25f);
+    EXPECT_FALSE(model.indeterminate);
+    EXPECT_EQ(model.parts, "Draining at 610 MB a second; empty in about 10 s.");
+    EXPECT_EQ(model.notes, (std::vector<std::string>{"The application will exit when done."}));
+    EXPECT_FALSE(model.mark);
     EXPECT_FALSE(model.controls);
     EXPECT_FALSE(model.canResume);
   }
+  // The most held is never less than what the buffer holds now.
+  EXPECT_EQ(panelOf(closingAt(Work::Watching), "", 0u).meter, "0 MB of 12.3 GB played");
+  LiveStatus empty = closingAt(Work::Watching);
+  empty.buffer.held = 0u;
+  const PanelModel nothing = panelOf(empty, "", 0u);
+  EXPECT_EQ(nothing.meter, "nothing left to play");
+  EXPECT_FLOAT_EQ(nothing.fill, 1.0f);
+}
+
+TEST(PlayerPanel, OnceTheBufferIsEmptyTheCloseNamesItsStageAndItsMeterMoves) {
+  const std::vector<std::pair<Work, std::string>> said{
+      {Work::Records, "Reading the run records: decompressing runs/0009.snagrun.zst (5.5 MB)."},
+      {Work::Tree, "Writing the last tree: proving what every path reaches."},
+      {Work::Render, "Running snes_render over the tree."},
+      {Work::Verify, "Running snes_verify over the tree."},
+      {Work::Done, "Closing the buffer."},
+  };
+  for (const auto& [work, summary] : said) {
+    LiveStatus status = closingAt(work);
+    status.buffer.held = 0u;
+    status.step = work == Work::Records ? "decompressing runs/0009.snagrun.zst (5.5 MB)"
+                                        : "proving what every path reaches";
+    const PanelModel model = panelOf(status, "Cmd+P", 16'400'000'000u);
+    EXPECT_EQ(model.summary, summary);
+    EXPECT_TRUE(model.indeterminate);
+    EXPECT_TRUE(model.meter.empty());
+    EXPECT_TRUE(model.parts.empty());
+    EXPECT_EQ(model.notes, (std::vector<std::string>{"The application will exit when done."}));
+    EXPECT_FALSE(model.controls);
+  }
+  // The last tree's time left, where the session's last tree gives one.
+  LiveStatus tree = closingAt(Work::Tree);
+  tree.buffer.held = 0u;
+  tree.treeSecondsLeft = 39.2;
+  EXPECT_EQ(panelOf(tree, "").meter, "about 40 s left");
+  EXPECT_EQ(panelOf(tree, "").summary, "Writing the last tree.");
+  tree.treeSecondsLeft = 0.0;
+  EXPECT_TRUE(panelOf(tree, "").meter.empty());
 }
 
 TEST(PlayerPanel, ARunningGameHasNoPanel) {
@@ -198,8 +242,13 @@ TEST(PlayerPanel, ARunningGameHasNoPanel) {
   status.stopped = Stopped::No;
   status.atLimit = false;
   const PanelModel model = panelOf(status, "Cmd+P");
+  EXPECT_EQ(model.kind, PanelKind::None);
   EXPECT_TRUE(model.heading.empty());
-  EXPECT_TRUE(model.lines.empty());
+  EXPECT_TRUE(model.summary.empty());
+  EXPECT_TRUE(model.meter.empty());
+  EXPECT_TRUE(model.parts.empty());
+  EXPECT_FLOAT_EQ(model.fill, 0.0f);
+  EXPECT_TRUE(model.notes.empty());
   EXPECT_FALSE(model.controls);
   EXPECT_FALSE(model.canResume);
 }
@@ -241,6 +290,34 @@ TEST(PlayerPanel, ResumeIsOfferedOnlyWhereTheRunGrantsIt) {
   EXPECT_FALSE(panelOf(status, "").canResume);
 }
 
+TEST(PlayerPanel, ARateUnderTenMegabytesASecondIsSaidInTenths) {
+  LiveStatus status = atTheCeilingsWithRates();
+  status.drainBytesPerSecond = 9'990'000.0;
+  status.fillBytesPerSecond = 230'000.0;
+  PanelModel model = panelOf(status, "Cmd+P");
+  ASSERT_EQ(model.notes.size(), 2u);
+  EXPECT_EQ(model.notes[0], "Draining at 9.9 MB a second; empty in about 10 s.");
+  EXPECT_EQ(model.notes[1],
+            "The last stretch of play filled it at 0.2 MB a second: from 5.5 GB the game plays about 46 s before it "
+            "stops again.");
+  status.drainBytesPerSecond = 10'000'000.0;
+  status.fillBytesPerSecond = 99'000.0;
+  model = panelOf(status, "Cmd+P");
+  ASSERT_EQ(model.notes.size(), 2u);
+  EXPECT_EQ(model.notes[0], "Draining at 10 MB a second; empty in about 10 s.");
+  EXPECT_EQ(model.notes[1],
+            "The last stretch of play filled it at under 0.1 MB a second: from 5.5 GB the game plays about 46 s "
+            "before it stops again.");
+}
+
+TEST(PlayerPanel, ThePanelGrowsWithTheWindowPastTheDefaultScale) {
+  EXPECT_FLOAT_EQ(panelTextScale(1u), 1.0f);
+  EXPECT_FLOAT_EQ(panelTextScale(3u), 1.0f);
+  EXPECT_FLOAT_EQ(panelTextScale(4u), 4.0f / 3.0f);
+  EXPECT_FLOAT_EQ(panelTextScale(6u), 2.0f);
+  EXPECT_FLOAT_EQ(panelTextScale(9u), 3.0f);
+}
+
 TEST(PlayerPanel, AFieldsSizeReadsBackToTheSameBytes) {
   EXPECT_EQ(gigabytesText(0u), "0");
   EXPECT_EQ(gigabytesText(kGigabyte), "1");
@@ -253,8 +330,9 @@ TEST(PlayerPanel, AFieldsSizeReadsBackToTheSameBytes) {
   }
 }
 
-// A Dear ImGui context with no backend: an 800 by 600 display and the built-in
-// font's atlas built, which is all the core needs to lay out and draw.
+// A Dear ImGui context with no backend: the panel's style, an 800 by 600
+// display and Dear ImGui's own font's atlas built, which is all the core needs
+// to lay out and draw.
 class Context {
  public:
   Context() : context_(ImGui::CreateContext()) {
@@ -263,6 +341,7 @@ class Context {
     io.LogFilename = nullptr;
     io.DisplaySize = ImVec2(800.0f, 600.0f);
     io.DeltaTime = 1.0f / 60.0f;
+    stylePanel();
     io.Fonts->Build();
   }
   ~Context() { ImGui::DestroyContext(context_); }
@@ -384,15 +463,55 @@ TEST(PlayerPanel, ApplyAnswersTheTwoSizesExactAndNothingForASizeThatDoesNotRead)
   layout = context.layoutOf(model, edits);
   did = context.click(model, edits, layout.apply);
   EXPECT_FALSE(did.limits);
+
+  // The ceilings as they stand: nothing to apply.
+  edits = PanelEdits{.memory = "1", .disk = "10", .seeded = true};
+  layout = context.layoutOf(model, edits);
+  did = context.click(model, edits, layout.apply);
+  EXPECT_FALSE(did.limits);
 }
 
-TEST(PlayerPanel, WhileClosingTheTextIsDrawnAndNoControl) {
+// Every vertex the frame drew, as positions in order.
+std::vector<float> drawnVertices() {
+  std::vector<float> at;
+  const ImDrawData* data = ImGui::GetDrawData();
+  for (const ImDrawList* list : data->CmdLists) {
+    for (const ImDrawVert& vertex : list->VtxBuffer) {
+      at.push_back(vertex.pos.x);
+      at.push_back(vertex.pos.y);
+    }
+  }
+  return at;
+}
+
+TEST(PlayerPanel, AStageOfTheCloseWithNoKnownEndMovesItsMeterWithTheClock) {
+  Context context;
+  PanelEdits edits;
+  LiveStatus status = closingAt(Work::Records);
+  status.buffer.held = 0u;
+  const PanelModel model = panelOf(status, "Cmd+P");
+  ASSERT_TRUE(model.indeterminate);
+  static_cast<void>(context.layoutOf(model, edits));
+  const std::vector<float> before = drawnVertices();
+  ImGui::GetIO().DeltaTime = 0.4f;
+  static_cast<void>(context.frame(model, edits));
+  EXPECT_NE(drawnVertices(), before);
+  // A meter with a fill stands still.
+  const PanelModel steady = panelOf(closingAt(Work::Watching), "Cmd+P", 16'400'000'000u);
+  static_cast<void>(context.layoutOf(steady, edits));
+  const std::vector<float> still = drawnVertices();
+  static_cast<void>(context.frame(steady, edits));
+  EXPECT_EQ(drawnVertices(), still);
+}
+
+TEST(PlayerPanel, WhileClosingTheTextAndTheMeterAreDrawnAndNoControl) {
   Context context;
   PanelEdits edits;
   const PanelModel model = panelOf(closingAt(Work::Tree), "Cmd+P");
   const PanelLayout layout = context.layoutOf(model, edits);
   EXPECT_GT(ImGui::GetDrawData()->TotalVtxCount, 0);
-  for (const PanelRect& rect : {layout.bar, layout.resumeAt, layout.hold, layout.memory, layout.disk, layout.apply,
+  EXPECT_TRUE(layout.bar.drawn());
+  for (const PanelRect& rect : {layout.resumeAt, layout.hold, layout.memory, layout.disk, layout.apply,
                                 layout.resume}) {
     EXPECT_FALSE(rect.drawn());
   }
