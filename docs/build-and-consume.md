@@ -23,7 +23,7 @@ How to build Snaggletooth, what targets it exposes, and how a program of your ow
 
 - CMake 3.24 or later
 - A C++20 compiler. The suite runs on every push on GCC (Linux x64 and ARM64), Apple Clang (macOS ARM64) and MSVC from Visual Studio 2022 (Windows x64 and ARM64), each with warnings as errors on the project's own targets.
-- Git. SDL3 is a submodule, needed by the player alone; clone with `--recurse-submodules` when you want the player, and plainly when you do not.
+- Git. SDL3 and Dear ImGui are submodules, needed by the player alone; clone with `--recurse-submodules` when you want the player, and plainly when you do not. A plain clone fetches the two later with `git submodule update --init third_party/sdl third_party/imgui`; a build without the player needs neither.
 - The shader tools for the GPU PPU, which the library compiles into itself at build time ([gpu-ppu.md §Compiling the shader](gpu-ppu.md#compiling-the-shader)): glslang on Linux (`apt install glslang-tools`); glslang, spirv-cross (`brew install glslang spirv-cross`) and the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) on macOS; dxc from the Windows SDK on Windows. The configure stops and names the one it cannot find; `-DSNAGGLETOOTH_GPU_PPU=OFF` builds without the shader, and a machine given a GPU device then throws.
 
 ### Building a Release build
@@ -54,10 +54,11 @@ A build directory keeps the generator it was first configured with. To change ge
 | `snaggletooth` | `snaggletooth::snaggletooth` | The library: both machines, both CPU cores, the S-DSP, the PPU and the cartridge functions. This is what a program of your own links. |
 | `snaggletooth_spc`, `snaggletooth_video`, `snaggletooth_disasm`, `snaggletooth_assembler`, `snaggletooth_formats`, `snaggletooth_spc700`, `snaggletooth_cpu65816`, `snaggletooth_ir`, `snaggletooth_ir_lockstep`, `snaggletooth_ir_provenance`, `snaggletooth_ir_differential`, `snaggletooth_rom_render`, `snaggletooth_rom`, `snaggletooth_player_pads` | — | The tool libraries. Each command-line tool is a thin `main` over one of them, and a program that wants a tool's capability links the library rather than running the tool. [tools/README.md](../tools/README.md) lists which library carries what. |
 | `snes_disasm`, `snes_render`, `snes_verify`, `snes_lift`, `snes_differential`, `snes_examples`, `cpu65816_disasm`, `cpu65816_asm`, `spc700_disasm`, `spc700_asm`, `rom_render`, `spc_render` | — | The command-line tools. They land in `build/`, or in `build\Release\` under Visual Studio (see [Building a Release build](#building-a-release-build)). |
-| `snes_player` | — | The player: a cartridge in a window, driven by a keyboard, a controller or an input script, recorded as it runs, on the CPU or on the GPU. Links SDL. |
+| `snes_player` | — | The player: a cartridge in a window, driven by a keyboard, a controller or an input script, recorded as it runs, on the CPU or on the GPU, and disassembled as it is played. Links SDL and Dear ImGui. |
 | `snes_gpu_verify` | — | A cartridge run headless on the GPU PPU with the machine's own frames drawn beside it and every frame compared ([tools/player/README.md](../tools/player/README.md#the-picture-on-the-gpu)). Links SDL. |
 | `snaggletooth_tests` | — | The suite, one GoogleTest binary registered with `ctest`. |
 | `snaggletooth_gpu_tests` | — | The GPU PPU's cases, a second GoogleTest binary registered with `ctest`, built wherever the player is; on a machine with no GPU device every case skips with a visible reason. Links SDL. |
+| `snaggletooth_player_tests` | — | The panel the player draws over a stopped game, a third GoogleTest binary registered with `ctest`, built wherever the player is: what it says for each stop and for the close, and its controls clicked in a Dear ImGui context with no window. Links Dear ImGui. |
 
 The library ships as source. Everything public is in the `snaggletooth` namespace under [`include/snaggletooth/`](../include/snaggletooth): the console in `snes/`, the audio unit in `apu/`, the main CPU core in `cpu/`, and `version.h`. Nothing under `src/` or `tools/` is a public header.
 
@@ -65,8 +66,8 @@ The library ships as source. Everything public is in the `snaggletooth` namespac
 
 One source tree supports three configurations:
 
-1. **Standalone.** Configure the repository as the top-level project, as above. This builds the library, the tool libraries and command-line tools, the player when SDL is present, and the suite. It is the configuration the suite runs in on every push.
-2. **As a subproject.** A program of your own adds the repository with `add_subdirectory` and links `snaggletooth::snaggletooth`. The suite, the tools and the player are off in this configuration, so a parent's `ctest` shows only the parent's tests, no GoogleTest is fetched, and SDL is not configured. The parent's warning settings are its own: warnings-as-errors is set on Snaggletooth's targets only.
+1. **Standalone.** Configure the repository as the top-level project, as above. This builds the library, the tool libraries and command-line tools, the player, which needs the two submodules under [Requirements](#requirements), and the suite. It is the configuration the suite runs in on every push.
+2. **As a subproject.** A program of your own adds the repository with `add_subdirectory` and links `snaggletooth::snaggletooth`. The suite, the tools and the player are off in this configuration, so a parent's `ctest` shows only the parent's tests, no GoogleTest is fetched, and neither SDL nor Dear ImGui is configured. The parent's warning settings are its own: warnings-as-errors is set on Snaggletooth's targets only.
 3. **As a subproject, with the tools.** The subproject above with `SNAGGLETOOTH_BUILD_TOOLS` on: the parent links a tool library — the cartridge disassembler, the assemblers, the codecs — without the suite. The player follows only when `SNAGGLETOOTH_BUILD_PLAYER` is on as well.
 
 ### Build options
@@ -75,7 +76,7 @@ One source tree supports three configurations:
 |---|---|---|
 | `SNAGGLETOOTH_BUILD_TESTS` | ON when top-level, OFF as a subproject | Build the suite. Fetches GoogleTest 1.14.0 at configure time. |
 | `SNAGGLETOOTH_BUILD_TOOLS` | ON when top-level, OFF as a subproject | Build the tool libraries and the command-line tools. The suite needs the tool libraries, so it builds them whether or not this is on. |
-| `SNAGGLETOOTH_BUILD_PLAYER` | ON when top-level, OFF as a subproject | Build the player, the GPU verify tool and the GPU suite. Takes effect only when the tools are built too. A build that already defines `SDL3::SDL3` supplies it; otherwise the submodule under `third_party/sdl` is built statically, with the subsystems a window does not need switched off. |
+| `SNAGGLETOOTH_BUILD_PLAYER` | ON when top-level, OFF as a subproject | Build the player, the GPU verify tool, the GPU suite and the panel's suite. Takes effect only when the tools are built too. A build that already defines `SDL3::SDL3` supplies it; otherwise the submodule under `third_party/sdl` is built statically, with the subsystems a window does not need switched off. Dear ImGui is built from the submodule under `third_party/imgui`; a configure without that checkout stops and names the command that fetches it. |
 | `SNAGGLETOOTH_GPU_PPU` | ON | Compile the GPU PPU's three shader passes into the library for this platform's format, which needs the shader tools under [Requirements](#requirements). Off, the library carries no shader and a machine given a GPU device throws. |
 | `SNAGGLETOOTH_SPC700_VECTORS` | empty | See [The test data](#the-test-data). |
 | `SNAGGLETOOTH_65816_VECTORS` | empty | See [The test data](#the-test-data). |
@@ -94,7 +95,7 @@ add_subdirectory(third_party/snaggletooth)
 target_link_libraries(your_program PRIVATE snaggletooth::snaggletooth)
 ```
 
-That is the whole of the build side. The library's include directory and its C++20 requirement travel with the target. No option needs setting: the suite, the tools and the player are off in a parent build, and the library itself links nothing but the standard library and the platform's thread library — no SDL, no PNG decoder, no test framework. The thread library is `Threads::Threads`, which the target carries to every program that links it; a machine starts a thread only when it is built with `SnesConfig::apuThread` or `SnesConfig::ppuThread` on ([snes-machine.md](snes-machine.md#the-audio-thread)).
+That is the whole of the build side. The library's include directory and its C++20 requirement travel with the target. No option needs setting: the suite, the tools and the player are off in a parent build, and the library itself links nothing but the standard library and the platform's thread library — no SDL, no Dear ImGui, no PNG decoder, no test framework. The thread library is `Threads::Threads`, which the target carries to every program that links it; a machine starts a thread only when it is built with `SnesConfig::apuThread` or `SnesConfig::ppuThread` on ([snes-machine.md](snes-machine.md#the-audio-thread)).
 
 ### What the library is
 
@@ -160,6 +161,7 @@ The tool libraries' headers are under [`tools/`](../tools) beside their sources,
 ## Dependencies
 
 - **[SDL3](https://github.com/libsdl-org/SDL)** — the window, the audio device, the controllers and the GPU device of the player, and nothing else. A submodule at `third_party/sdl/`, pinned to release 3.4.16, built statically with `SDL_SHARED` off and the camera, haptic, power and dialog subsystems off. A parent build that already defines `SDL3::SDL3` supplies its own and the submodule is left unconfigured. The library never links it. zlib license.
+- **[Dear ImGui](https://github.com/ocornut/imgui)** — the panel the player draws over the picture while the game is stopped or the disassembly closes, and nothing else. A submodule at `third_party/imgui/`, pinned to release v1.93.0; its core and its three SDL backends — the events, SDL's renderer and SDL's GPU API — are built statically into the player as two targets with system includes, so their warnings are their own, and its demo and its other backends are not compiled. Only the player's block of the build looks for it: a configure of the player without the checkout stops and names the command that fetches it, and a build with the player or the tools off never looks. The library never links it. MIT license.
 - **[lodepng](https://github.com/lvandeve/lodepng)** — the PNG encoder and decoder behind the tile-sheet codec in the tool libraries. Vendored as single-file source at `third_party/lodepng/`, built as its own static target with a system include so its warnings are its own, and linked privately into `snaggletooth_formats`; no lodepng symbol reaches a header of this project. The library never links it. zlib license.
 - **[zstd](https://facebook.github.io/zstd/)** — the compressor and decompressor a tree's run records are written and read through. Vendored as the release 1.5.7 library sources at `third_party/zstd/`, built from them on every platform as its own static C target, single- threaded and without its x86 assembly, with a system include so its warnings are its own, and linked privately into `snaggletooth_rom`; no zstd symbol reaches a header of this project. The library never links it. BSD license: a binary distribution of the tools reproduces its notice ([third_party/zstd/README.md](../third_party/zstd/README.md)).
 - **[GoogleTest](https://github.com/google/googletest)** — fetched at configure time, version 1.14.0, only when `SNAGGLETOOTH_BUILD_TESTS` is on. Never part of the library or the tools.

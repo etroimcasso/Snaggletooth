@@ -28,9 +28,9 @@ option(SNAGGLETOOTH_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(SNAGGLETOOTH_BUILD_TOOLS "Build the tool libraries and command-line tools" ${PROJECT_IS_TOP_LEVEL})
 
 # The player shows a running cartridge in a window, which is the one thing here that needs
-# SDL. It follows the tools, and switching it off leaves everything else — and the library,
-# which never links SDL at all — exactly as it was.
-option(SNAGGLETOOTH_BUILD_PLAYER "Build the player, which needs SDL3" ${PROJECT_IS_TOP_LEVEL})
+# SDL and Dear ImGui. It follows the tools, and switching it off leaves everything else — and
+# the library, which links neither — exactly as it was.
+option(SNAGGLETOOTH_BUILD_PLAYER "Build the player, which needs SDL3 and Dear ImGui" ${PROJECT_IS_TOP_LEVEL})
 
 # The GPU PPU's compute shader (shaders/ppu_*.comp.hlsl, three passes) is compiled at build time for this
 # platform's shader format and carried in the library, so a host that hands the machine a
@@ -567,8 +567,9 @@ inline constexpr const char* kDefaultPadConfig = R\"SNAGPAD(${SNAGGLETOOTH_DEFAU
   endif()
 endif()
 
-# The player — a window showing a cartridge as it runs, recording the same run. It is the
-# only target that touches SDL, and it needs the tool libraries as well, so it follows both
+# The player — a window showing a cartridge as it runs, recording the same run — and the
+# GPU PPU's verify tool. With the GPU suite and the panel's suite, they are the only targets
+# that touch SDL or Dear ImGui, and they need the tool libraries as well, so they follow both
 # switches.
 if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
   # A parent build that already has SDL supplies it; otherwise the pinned submodule is
@@ -587,6 +588,30 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
     add_subdirectory(third_party/sdl EXCLUDE_FROM_ALL SYSTEM)
   endif()
 
+  # The panel the player draws over the picture is Dear ImGui's, built from the pinned
+  # submodule. Only this block looks for it, so a build without the player needs no checkout
+  # of it; a build of the player without one stops here and says how to fetch it.
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui/imgui.h")
+    message(FATAL_ERROR
+      "The player draws its panel with Dear ImGui, and third_party/imgui is empty. Fetch it with\n"
+      "  git submodule update --init third_party/imgui\n"
+      "or configure without the player: -DSNAGGLETOOTH_BUILD_PLAYER=OFF")
+  endif()
+  # Dear ImGui's core, which draws with no backend, and its three backends over SDL: the
+  # events, SDL's renderer and SDL's GPU API. Its demo and its other backends are not
+  # compiled, and neither library is held to this project's warning bar.
+  add_library(snaggletooth_imgui STATIC
+    third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp)
+  target_include_directories(snaggletooth_imgui SYSTEM PUBLIC third_party/imgui)
+  target_compile_features(snaggletooth_imgui PUBLIC cxx_std_20)
+  add_library(snaggletooth_imgui_sdl STATIC
+    third_party/imgui/backends/imgui_impl_sdl3.cpp
+    third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
+    third_party/imgui/backends/imgui_impl_sdlgpu3.cpp)
+  target_include_directories(snaggletooth_imgui_sdl SYSTEM PUBLIC third_party/imgui/backends)
+  target_link_libraries(snaggletooth_imgui_sdl PUBLIC snaggletooth_imgui SDL3::SDL3)
+
   # The store the player keeps a person's files in is the player's own code rather
   # than a library of its own: one tool uses it, and the suite compiles the same
   # source directly so it is tested without a window or a device anywhere near it.
@@ -594,15 +619,16 @@ if(SNAGGLETOOTH_BUILD_PLAYER AND SNAGGLETOOTH_BUILD_TOOLS)
   # player hands it to the machine, and the verify tool and the GPU suite compile the same
   # source. So are the disassembly the player runs as you play, its pause control and the
   # requests to close it counts: none of the three calls into SDL, and the suite compiles
-  # them too.
+  # them too. The panel over a stopped game is two files: its model and drawing over Dear
+  # ImGui's core, which the panel's suite compiles, and the context over SDL's backends.
   add_executable(snes_player tools/player/snes_player_main.cpp tools/player/user_files.cpp
     tools/player/sdl_gpu_device.cpp tools/player/pause.cpp tools/player/close_requests.cpp
-    tools/player/live_disasm.cpp)
+    tools/player/live_disasm.cpp tools/player/panel.cpp tools/player/panel_sdl.cpp)
   # The pad library reaches the cartridge tools publicly, which reach the .spc tooling
   # and so the WAV writer; the player takes all of it through that one link. Naming any
   # of them again is a duplicate the Apple linker reports.
   target_link_libraries(snes_player PRIVATE
-    snaggletooth_player_pads snaggletooth_video SDL3::SDL3)
+    snaggletooth_player_pads snaggletooth_video snaggletooth_imgui_sdl SDL3::SDL3)
   # SDL_MAIN_HANDLED stops SDL's headers redefining main; the tool calls SDL_SetMainReady
   # before SDL_Init, so it keeps a plain main() of its own.
   target_compile_definitions(snes_player PRIVATE SDL_MAIN_HANDLED)
@@ -877,5 +903,26 @@ if(SNAGGLETOOTH_BUILD_TESTS)
       target_compile_options(snaggletooth_gpu_tests PRIVATE -Wall -Wextra -Werror)
     endif()
     gtest_discover_tests(snaggletooth_gpu_tests DISCOVERY_TIMEOUT 60)
+
+    # The panel the player draws over a stopped game, read and clicked in a Dear ImGui
+    # context with no backend: a third executable, because it needs Dear ImGui, which only
+    # the player's block builds. It is registered under the GPU suite's switches, which
+    # every CI platform builds, so its count is the same on each.
+    add_executable(snaggletooth_player_tests
+      tests/tools/panel_test.cpp
+      tools/player/panel.cpp
+      tools/player/pause.cpp
+    )
+    target_link_libraries(snaggletooth_player_tests PRIVATE
+      snaggletooth_player_pads
+      snaggletooth_imgui
+      GTest::gtest_main
+    )
+    if(MSVC)
+      target_compile_options(snaggletooth_player_tests PRIVATE /W4 /WX)
+    else()
+      target_compile_options(snaggletooth_player_tests PRIVATE -Wall -Wextra -Werror)
+    endif()
+    gtest_discover_tests(snaggletooth_player_tests DISCOVERY_TIMEOUT 60)
   endif()
 endif()

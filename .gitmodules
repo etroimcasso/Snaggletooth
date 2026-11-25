@@ -6,3 +6,11 @@
 [submodule "third_party/sdl"]
 	path = third_party/sdl
 	url = https://github.com/libsdl-org/SDL.git
+# Dear ImGui — pinned to release v1.93.0 (commit c1aaac65). The gitlink commit
+# object is the authoritative pin; this note records which release it
+# corresponds to. Built statically from source into the player, which is the
+# only target that reaches it, for the panel it draws over the picture. A build
+# with the player or the tools off never looks for it.
+[submodule "third_party/imgui"]
+	path = third_party/imgui
+	url = https://github.com/ocornut/imgui.git

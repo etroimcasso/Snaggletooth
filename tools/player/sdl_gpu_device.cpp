@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 #include "SDL3/SDL_timer.h"
 
@@ -355,7 +356,39 @@ bool SdlGpuDevice::present(unsigned width, unsigned rows) {
       .padding3 = 0u,
   };
   SDL_BlitGPUTexture(command, &blit);
+  if (overlayPrepare_) overlayPrepare_(command);
+  if (overlayDraw_) {
+    const SDL_GPUColorTargetInfo target{
+        .texture = swapchain,
+        .mip_level = 0u,
+        .layer_or_depth_plane = 0u,
+        .clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f},
+        .load_op = SDL_GPU_LOADOP_LOAD,
+        .store_op = SDL_GPU_STOREOP_STORE,
+        .resolve_texture = nullptr,
+        .resolve_mip_level = 0u,
+        .resolve_layer = 0u,
+        .cycle = false,
+        .cycle_resolve_texture = false,
+        .padding1 = 0u,
+        .padding2 = 0u,
+    };
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(command, &target, 1u, nullptr);
+    overlayDraw_(command, pass);
+    SDL_EndGPURenderPass(pass);
+  }
   return SDL_SubmitGPUCommandBuffer(command);
+}
+
+void SdlGpuDevice::setOverlay(std::function<void(SDL_GPUCommandBuffer*)> prepare,
+                              std::function<void(SDL_GPUCommandBuffer*, SDL_GPURenderPass*)> draw) {
+  overlayPrepare_ = std::move(prepare);
+  overlayDraw_ = std::move(draw);
+}
+
+SDL_GPUTextureFormat SdlGpuDevice::swapchainFormat() const noexcept {
+  if (window_ == nullptr) return SDL_GPU_TEXTUREFORMAT_INVALID;
+  return SDL_GetGPUSwapchainTextureFormat(device_, window_);
 }
 
 bool SdlGpuDevice::readBack(unsigned width, unsigned rows, std::vector<std::uint8_t>& rgba) {

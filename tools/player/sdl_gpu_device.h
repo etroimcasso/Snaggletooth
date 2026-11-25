@@ -9,12 +9,14 @@
 // The texture persists between frames. A window claimed for the device is where
 // present() blits the texture; readBack() copies the texture's rows out as RGBA
 // bytes, each channel rounded from the texture's float, for a recording or a
-// comparison with the machine's own frame. Every call the machine
-// makes arrives on the thread the machine is stepped on; present() and readBack()
-// are the player's own calls, made from the same thread.
+// comparison with the machine's own frame. setOverlay() gives present() a drawing
+// to make over the picture, the player's panel. Every call the machine makes
+// arrives on the thread the machine is stepped on; present(), readBack() and
+// setOverlay() are the player's own calls, made from the same thread.
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -61,9 +63,27 @@ class SdlGpuDevice final : public gpu::Device {
   [[nodiscard]] gpu::RowMap lastRows() const noexcept { return rows_; }
 
   // The texture's top-left `width` by `rows` texels blitted to the whole of the
-  // claimed window, nearest-neighbor. A window with no swapchain texture to give,
-  // minimized say, is a present skipped and answered true.
+  // claimed window, nearest-neighbor, then the overlay over it where one is set. A
+  // window with no swapchain texture to give, minimized say, is a present skipped
+  // and answered true.
   [[nodiscard]] bool present(unsigned width, unsigned rows);
+  // A drawing over the picture at each present: `prepare` is called with the
+  // present's command buffer after the blit, outside any pass, and `draw` inside
+  // one render pass on the window's swapchain texture that keeps what the blit put
+  // there. Either may be empty; with both empty a present records the blit alone.
+  //
+  //   gpu.setOverlay([&](SDL_GPUCommandBuffer* command) { panel.prepare(command); },
+  //                  [&](SDL_GPUCommandBuffer* command, SDL_GPURenderPass* pass) { panel.draw(command, pass); });
+  //   static_cast<void>(gpu.present(width, rows));  // the picture, the panel over it
+  //   gpu.setOverlay({}, {});                        // before the panel is gone
+  void setOverlay(std::function<void(SDL_GPUCommandBuffer*)> prepare,
+                  std::function<void(SDL_GPUCommandBuffer*, SDL_GPURenderPass*)> draw);
+  // The device, for a library that draws through it; null before open().
+  [[nodiscard]] SDL_GPUDevice* device() const noexcept { return device_; }
+  // The claimed window's swapchain texture format, which a pipeline drawing into
+  // the overlay's pass is made for; `SDL_GPU_TEXTUREFORMAT_INVALID` with no window
+  // claimed.
+  [[nodiscard]] SDL_GPUTextureFormat swapchainFormat() const noexcept;
   // The texture's top-left `width` by `rows` texels as RGBA bytes, row by row,
   // waited for.
   [[nodiscard]] bool readBack(unsigned width, unsigned rows, std::vector<std::uint8_t>& rgba);
@@ -146,6 +166,8 @@ class SdlGpuDevice final : public gpu::Device {
   bool timesPasses_ = false;
   std::uint64_t uploadNanos_ = 0;
   std::uint64_t passNanos_[3] = {0, 0, 0};  // one a pass, in Pass's order
+  std::function<void(SDL_GPUCommandBuffer*)> overlayPrepare_;
+  std::function<void(SDL_GPUCommandBuffer*, SDL_GPURenderPass*)> overlayDraw_;
 };
 
 }  // namespace snaggletooth::player

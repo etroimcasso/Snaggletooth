@@ -121,6 +121,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -147,6 +148,8 @@
 #include "player/live_disasm.h"
 #include "player/pad_config.h"
 #include "player/pads.h"
+#include "player/panel.h"
+#include "player/panel_sdl.h"
 #include "player/pause.h"
 #include "player/sdl_gpu_device.h"
 #include "player/user_files.h"
@@ -447,6 +450,20 @@ class Devices {
   [[nodiscard]] bool isPause(player::KeyId key, SDL_Keymod held) const {
     return player::pressed(hotkeys_.pause, key, modifiersOf(held));
   }
+  // The pause chord as the person presses it, for the panel: the first one the
+  // configuration gives, its modifiers and its key as the keyboard names them —
+  // `Cmd+P` on a Mac, `Ctrl+P` elsewhere by default. Empty where none is given.
+  [[nodiscard]] std::string pauseChordText() const {
+    if (hotkeys_.pause.empty()) return {};
+    const player::Chord& chord = hotkeys_.pause.front();
+    const bool mac = player::thisKeyboard() == player::KeyboardKind::Mac;
+    std::string text;
+    if ((chord.modifiers & player::kModifierCmd) != 0u) text += mac ? "Cmd+" : "Super+";
+    if ((chord.modifiers & player::kModifierCtrl) != 0u) text += "Ctrl+";
+    if ((chord.modifiers & player::kModifierAlt) != 0u) text += mac ? "Option+" : "Alt+";
+    if ((chord.modifiers & player::kModifierShift) != 0u) text += "Shift+";
+    return text + SDL_GetScancodeName(static_cast<SDL_Scancode>(chord.key));
+  }
 
   void opened(SDL_JoystickID id) {
     SDL_Gamepad* handle = SDL_OpenGamepad(id);
@@ -613,6 +630,8 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
         title_(title) {}
 
   ~Player() override {
+    // The panel first: it draws through the renderer or the device's window.
+    panelHost_.reset();
     if (texture_ != nullptr) SDL_DestroyTexture(texture_);
     if (renderer_ != nullptr) SDL_DestroyRenderer(renderer_);
     if (gpu_ != nullptr) gpu_->releaseWindow();
@@ -727,20 +746,42 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
     titleExtra_ = std::move(extra);
   }
 
-  // One pass of a stop or of the close, while the machine runs nothing: the events,
-  // the last picture presented again where the window was exposed, and the title
-  // set to `status` beside the game's name when it changed and half a second has
-  // passed since it was last set. The first pass after `held` sets it at once.
+  // Under --disasm: the panel each stop and the close draw over the picture
+  // (`panel.h`), made over the open window. `look` gives the panel at each pass
+  // and `act` takes what the person did in it. False with `error` set where Dear
+  // ImGui's backends do not start over the window.
+  [[nodiscard]] bool openPanel(std::function<player::PanelModel()> look,
+                               std::function<void(const player::PanelActions&)> act, std::string& error) {
+    try {
+      panelHost_ = std::make_unique<player::PanelHost>(
+          window_, renderer_, gpu_ != nullptr ? gpu_->device() : nullptr,
+          gpu_ != nullptr ? gpu_->swapchainFormat() : SDL_GPU_TEXTUREFORMAT_INVALID);
+    } catch (const std::runtime_error& e) {
+      error = e.what();
+      return false;
+    }
+    panelLook_ = std::move(look);
+    panelAct_ = std::move(act);
+    return true;
+  }
+
+  // One pass of a stop or of the close, while the machine runs nothing: the events;
+  // where a panel is open, the panel drawn over the last picture, presented every
+  // pass, and what the person did in it handed on; with none, the last picture
+  // presented again where the window was exposed; and the title set to `status`
+  // beside the game's name when it changed and half a second has passed since it
+  // was last set. The first pass after `held` sets it at once.
   void stoppedPass(const std::string& status) {
+    panelUp_ = panelHost_ != nullptr;
     pump();
-    if (std::exchange(exposed_, false)) {
-      if (gpu_ != nullptr) {
-        if (lastShownWidth_ != 0u) static_cast<void>(gpu_->present(lastShownWidth_, lastShownRows_));
-      } else {
-        SDL_RenderClear(renderer_);
-        SDL_RenderTexture(renderer_, texture_, &lastSource_, nullptr);
-        SDL_RenderPresent(renderer_);
-      }
+    const bool exposed = std::exchange(exposed_, false);
+    if (panelUp_) {
+      panelHost_->begin();
+      const player::PanelActions did = player::drawPanel(panelLook_(), panelEdits_);
+      presentAgain();
+      panelAct_(did);
+    } else if (exposed) {
+      presentAgain();
     }
     const std::uint64_t now = SDL_GetTicksNS();
     if (now - stoppedTitleAt_ >= player::kNanosPerSecond / 2u) {
@@ -767,6 +808,14 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
     if (frames_ >= 1u) heldNanos_ += nanos;
     stoppedTitle_.clear();
     stoppedTitleAt_ = 0;
+    if (panelUp_) {
+      // The panel is gone while the game runs: its fields take the ceilings again at
+      // the next stop, and the window's text input and cursor are the game's again.
+      panelUp_ = false;
+      panelEdits_.seeded = false;
+      SDL_StopTextInput(window_);
+      SDL_SetCursor(SDL_GetDefaultCursor());
+    }
   }
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
   // The picture lines over the run, as the machine counted them in each frame
@@ -1114,9 +1163,30 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
     if (!scriptAt_.empty()) recorder_.frame(at, one, two);
   }
 
+  // The last picture presented again, with the panel over it while it is up. Over
+  // the GPU device the panel is the present's overlay for this one present only, so
+  // every present of a running game is the device's own.
+  void presentAgain() {
+    if (gpu_ != nullptr) {
+      if (lastShownWidth_ == 0u) return;
+      if (panelUp_) {
+        gpu_->setOverlay([this](SDL_GPUCommandBuffer* command) { panelHost_->prepare(command); },
+                         [this](SDL_GPUCommandBuffer* command, SDL_GPURenderPass* pass) { panelHost_->draw(command, pass); });
+      }
+      static_cast<void>(gpu_->present(lastShownWidth_, lastShownRows_));
+      gpu_->setOverlay({}, {});
+      return;
+    }
+    SDL_RenderClear(renderer_);
+    SDL_RenderTexture(renderer_, texture_, &lastSource_, nullptr);
+    if (panelUp_) panelHost_->end(renderer_);
+    SDL_RenderPresent(renderer_);
+  }
+
   void pump() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+      if (panelUp_) panelHost_->event(event);
       if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
         closed_ = true;
         ++closeAsks_;
@@ -1204,6 +1274,11 @@ class Player final : public snaggletooth::FrameObserver, public snaggletooth::Pp
   bool closed_ = false;
   unsigned closeAsks_ = 0;     // the window system's requests to close, since the close's loop last took them
   bool exposed_ = false;       // the window was exposed since a stop's pass last presented the picture again
+  std::unique_ptr<player::PanelHost> panelHost_;                // under --disasm, the panel's context
+  std::function<player::PanelModel()> panelLook_;               // the panel at each pass
+  std::function<void(const player::PanelActions&)> panelAct_;  // what the person did in it, handed on
+  player::PanelEdits panelEdits_;                               // the size fields' text between passes
+  bool panelUp_ = false;       // the panel is drawn: a stop's or the close's passes are running
   SDL_FRect lastSource_{};     // the texture's part the window last showed
   unsigned lastShownWidth_ = 0;  // under --gpu-ppu, what the device last presented
   unsigned lastShownRows_ = 0;
@@ -1666,6 +1741,19 @@ int main(int argc, char** argv) {
         [&live, title = player::LiveTitle{}](const std::string& lead, std::uint64_t now, std::size_t room) mutable {
           return title.text(lead, live->status(), now, room);
         });
+    // The panel over a stopped game and the close, which calls what the pause chord
+    // and the flags reach: the chord's toggle, the pause settings and the ceilings.
+    std::string error;
+    const std::string chord = devices.pauseChordText();
+    if (!player.openPanel([&live, chord] { return player::panelOf(live->status(), chord); },
+                          [&live](const player::PanelActions& did) {
+                            if (did.toggle) live->togglePause();
+                            if (did.pause) live->setPauseSettings(*did.pause);
+                            if (did.limits) live->setLimits(did.limits->memoryBytes, did.limits->diskBytes);
+                          },
+                          error)) {
+      always("the panel cannot be drawn over the window: " + error + "; the title says what the buffer holds");
+    }
   }
   // Which of the two arrangements the run took, before anything else it does: a run
   // that feels wrong is asked this first, and nobody should have to guess at it.

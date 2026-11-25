@@ -210,6 +210,8 @@ stopped: the disassembly's buffer holds 1.9 GB of 2.0 GB (2.0 GB of RAM, 0 MB of
 resumed after 1 s
 ```
 
+While the game is stopped a panel over the picture says the same, with the rate the buffer is draining at, the time to the resume level and to empty, and how long the game then plays before it stops again at the rate the last stretch of play filled the buffer; a stop with RAM past its ceiling shows RAM against its own ceiling and the RAM level it resumes at. Its controls change what the flags set, for the rest of the session: `Resume at` moves the resume level, `Stay stopped until I resume` holds the game until you resume it, `RAM (GB)` and `Files (GB)` with `Apply` raise or lower the buffer's two ceilings, and `Resume`, with the pause chord named beside it, resumes the game. It is offered where the run grants a resume: from a stop at the ceilings once the buffer has drained to the resume level or stands under its ceilings again, from a stop for RAM once RAM is down at its level, and from a stop by hand always — there, with the buffer at its ceilings, it turns the stop into one at the ceilings, as the pause chord does. A ceiling lowered under what the buffer holds stops the game until it has drained. The panel is not drawn while the game runs.
+
 A stop that lasts past two seconds also says, once, how fast the buffer is draining and about how long it has to the resume level: `draining at <n> MB a second: about <time> to <level>`.
 
 While the game runs, one of the disassembly's threads works at the game's own scheduling class — the one that plays the main CPU's records in order, which the rest wait on — and the others work under it. While the game is stopped they all work at the game's class, so a stop drains faster than play does. The game resumes when the buffer has drained to `--disasm-resume-at` percent of its ceilings: a lower level is a longer stop and a longer stretch of play after it, and `0` waits for the buffer to empty.
@@ -220,7 +222,7 @@ The ceilings are where the game stops. The call into the machine that reaches th
 
 ### Closing
 
-A run with `--disasm` closes when its work is done. Every request to close — the window's close button, Command-Q, Ctrl-C, a `kill` — stops the game and starts the close: the buffer is worked through to its end, the last tree written, and the two commands run. The window stays up and its title says what is left ([The window's title](#the-windows-title)). A save and an `--out` recording are written before the close begins. A second request ends nothing and is answered —
+A run with `--disasm` closes when its work is done. Every request to close — the window's close button, Command-Q, Ctrl-C, a `kill` — stops the game and starts the close: the buffer is worked through to its end, the last tree written, and the two commands run. The window stays up and its title says what is left ([The window's title](#the-windows-title)). The panel stays over the picture through the close and says what is left. A save and an `--out` recording are written before the close begins. A second request ends nothing and is answered —
 
 ```
 still finishing the disassembly: 462 MB to play, then the last tree. It ends by itself when that is done; kill -9 47432 ends it without the last tree
@@ -275,6 +277,8 @@ The library draws on the CPU only while a frame observer is set (`snaggletooth/s
 The mapping is `snaggletooth_player_pads`, which holds no reference to any windowing library and opens no device: it turns a controller's reported state into the `Joypad` the machine takes. The rate arithmetic in `display.h` is the same kind of thing — it is handed what a panel reports and answers with the rate to pace by, when each frame of that pacing is owed, and the rate to open a device at, so all of it is checked by the suite. Every call that touches a real device is in this tool.
 
 The player, `snes_gpu_verify` and the GPU suite are the targets that link SDL. They are built when `SNAGGLETOOTH_BUILD_PLAYER` and `SNAGGLETOOTH_BUILD_TOOLS` are both on — the default for a top-level build — and takes SDL from a parent build that already defines `SDL3::SDL3`, or from the pinned submodule at `third_party/sdl`, built statically with the subsystems a window, a speaker and a gamepad do not need switched off. The library itself never links SDL.
+
+The panel over a stopped game is drawn with [Dear ImGui](https://github.com/ocornut/imgui), built from the pinned submodule at `third_party/imgui` into the player alone, through SDL's renderer or, under `--gpu-ppu`, in a pass the GPU device's present opens for it (`SdlGpuDevice::setOverlay`), set for the panel's own presents alone, so a present of a running game is the device's as it is without the panel. A build with the player off needs no checkout of it, and a configure of the player without one stops and names the command that fetches it. The panel's suite, `snaggletooth_player_tests`, draws and clicks it in a Dear ImGui context with no window and no backend.
 
 **Run a `Release` build.** A `Debug` build of the machine is several times slower, and the player built that way falls well short of the console's rate, so the rate in the window's title reads as a slow emulator when it is only the build. A Debug player says so before anything else when it starts. These commands build the player as `Release` on every platform:
 
